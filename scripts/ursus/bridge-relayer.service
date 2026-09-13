@@ -16,7 +16,7 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/b
 #   leg 2: withdrawByProof — pay out ready proof_event_*.json (gated on *.result.json)
 # `--state` is a global flag and must precede the subcommand.
 # BK-rotation sentry (`--an-node-url`) needs an AN node serving the REST
-# `/v2/bk_set{,_update}` endpoints (e.g. http://94.156.178.19:8600).
+# `/v2/bk_set{,_update}` endpoints (e.g. http://<an-node-host>:8600).
 # shellnet.ackinacki.org only exposes GraphQL, so the sentry is left off here.
 ExecStart=/home/ubuntu/bridge-e2e/bin/relayer --state ${RELAYER_STATE} daemon-bridge \
   --proofs-dir ${PROVER_PROOFS_DIR} \

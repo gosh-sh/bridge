@@ -3,7 +3,7 @@
 //! This crate is **not** the real Circuit 4 verifier yet — it is the
 //! standalone "does the snark-verifier-sdk → Yul EVM verifier pipeline work
 //! in our build environment?" experiment. When the partner's Circuit 4 lands
-//! (M4 in `docs/r15_snark_verifier_roadmap.md`) the trivial multiplication
+//! (milestone M4; see this crate's README) the trivial multiplication
 //! circuit exercised here is swapped for the real one (M5), the Yul output
 //! becomes `BridgeWithdrawalAggregatorVerifier.sol`, and the Foundry harness
 //! moves out of `contracts/ethereum/test/spike/` into the real test suite

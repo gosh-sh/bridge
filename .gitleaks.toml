@@ -1,0 +1,53 @@
+title = "Gitleaks config for the bridge"
+
+# The upstream ruleset (~150 rules for cloud, CI and SaaS credentials) is kept
+# and extended, rather than replaced by a hand-written list: the point of the
+# scan is to catch the credential nobody thought to write a rule for.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "evm-private-key"
+description = "EVM private key assigned to a variable"
+regex = '''(?i)(private[_-]?key|priv[_-]?key)[^\n]{0,24}?(0x)?[0-9a-f]{64}'''
+keywords = ["private_key", "privatekey", "priv_key", "privatekey="]
+tags = ["evm", "key"]
+
+[[rules]]
+id = "discord-bot-token"
+description = "Discord bot token"
+regex = '''[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}'''
+tags = ["discord", "token"]
+
+[[rules]]
+id = "jwt"
+description = "JWT — Woodpecker API tokens and forge hook tokens are JWTs"
+regex = '''eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
+tags = ["jwt", "token"]
+
+[allowlist]
+description = "Shellnet development fixtures and documentation placeholders"
+
+# Deliberately narrowed to specific paths rather than to the shape of a key:
+# allowlisting "any 64-hex next to PRIVATE_KEY" would switch the rule off for
+# the whole repository, which is the one thing this scan exists to prevent.
+# Everything listed here is shellnet-only and must stay that way — the moment a
+# key from these files touches a real network, it has to be rotated out of here
+# and out of the history.
+# Both spellings of the prover crate: the directory was renamed from
+# `an-bridge-prover` to `bridge-prover-libraries`, and the history keeps the old
+# path forever. Scoped to the fixture files themselves, never to `*.keys.json`
+# as a pattern — that would hide the next keypair nobody meant to commit.
+paths = [
+  '''crates/(an-bridge-prover|bridge-prover-libraries)/shellnet\.common''',
+  '''crates/(an-bridge-prover|bridge-prover-libraries)/python/contracts/[A-Za-z0-9.]+\.keys\.json''',
+  '''.*\.env\.example$''',
+  '''docs/archive/.*''',
+]
+
+regexes = [
+  # Documentation placeholders: 0x0123456789abcdef… repeated, YOUR_KEY, XXXX…
+  '''0x(0123456789abcdef){4}''',
+  '''(?i)(your|example|placeholder|changeme|dummy|test)[_-]?(api[_-]?)?(key|token|secret)''',
+  '''X{16,}''',
+]

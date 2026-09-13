@@ -1,25 +1,107 @@
 # Acki Nacki Bridge — Agent Context
 
+## ⚠️ Documentation status (changed 2026-08-18) — read before citing any document
+
+**Everything outside `docs/archive/` is current. `docs/archive/` is not.**
+
+That is the whole rule. Documentation, READMEs and code comments elsewhere in the tree describe the
+system as it is; the archive describes what someone believed on a given date and is contradicted by
+the code in places. Detail:
+
+* **`docs/EVM-contracts-spec.md` is the only verified document.** Derived by reading the Solidity
+  sources at commit `a69ba36`, with a `file:line` citation for every behavioural claim. Its bare
+  `src/`, `test/`, `script/`, `verifiers/` paths are relative to `contracts/ethereum/`.
+* **`docs/archive/` (66 files) is everything else, and it is not authoritative.** Unmaintained, and
+  contradicted by the code in several places. Read it as history — what someone believed on a given
+  date — never as a description of the system. Do not cite it in new work, do not follow its
+  procedures, and do not repeat its claims without re-checking them against the source. Every file
+  in it carries an `ARCHIVED` banner, except the one review PDF, which cannot hold one. The folder
+  is scheduled for deletion.
+
+**Paths inside *this* file were deliberately not rewritten during the move.** Wherever this document
+says `docs/<name>.md`, the file now lives at `docs/archive/<name>.md` — including the "canonical
+entry point" list further down, which points entirely into the archive and is therefore historical.
+The root `README.md` was rewritten against the spec on 2026-08-18 and is current.
+
+When code and prose disagree, the code wins. [`DOCS.md`](DOCS.md) at the repository root holds the
+rewrite plan, the target document set, and a list of claims the archived docs get wrong that have
+already been verified against the source — check it before re-deriving any of them.
+
 ## Project Overview
 
 Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/) (TVM-based, multi-threaded blockchain). The bridge enables deposits on Ethereum to be proven on Acki Nacki, and Acki Nacki state (layer hashes) to be verified on Ethereum — both via ZK proofs.
+
+## Changelog policy
+
+Every branch that is opened as a pull request into `main` must describe its diff
+against `main` in [`CHANGELOG.md`](CHANGELOG.md). No PR is complete without it.
+
+### Write for the reader, not for the author
+
+The reader is a devops engineer or a developer who deploys the bridge, runs the
+relayers and integrates with the contracts. They did not write the code and will
+not read it. Describe the surface they can observe, in plain language:
+
+- contract surface: external and public functions, events, errors, storage
+  layout changes, upgrade steps, deployed addresses — for both
+  `contracts/ethereum/` (Solidity/Foundry) and `contracts/an/` (TVM)
+- proof surface: circuit public inputs, bincode layout, verification keys.
+  **A rotated verification key is always a breaking change** — proofs produced
+  for the previous circuit stop verifying, and that has to be spelled out.
+- relayer and prover surface: CLI subcommands and flags, systemd units, config
+  files, environment variables, the JSON artifacts they read and write
+  (`proof_<N>.json`, `proof_event_*.json`), retry and idempotency behaviour
+- operational surface: `scripts/`, `Makefile` targets, `build.sh` / `setup.sh` /
+  `test.sh`, `docker-compose.yml`, `.gitlab-ci.yml` jobs
+- chain and network assumptions: supported L1 chain ids, RPC requirements,
+  key-block spacing, anchoring cadence
+
+Say what changed and what the reader has to do about it — redeploy a contract,
+rotate a key, regenerate proofs, carry a setting over by hand, upgrade in a
+particular order. Name functions, flags, files and options exactly as they
+appear in the product.
+
+Leave out internal refactors, private renames, test-only changes and
+implementation detail. If nothing observable changed, there is nothing to write.
+
+Sections, most disruptive first: `Breaking Changes`, `Added`, `Changed`,
+`Fixed`, `Removed`.
+
+### Versions are assigned late
+
+Release numbers are fixed only when a release is actually cut and tagged. While
+work is landing on `main`, nobody knows which release it will ship in.
+
+While working on a branch:
+
+- add entries under `## [Unreleased]` at the top of `CHANGELOG.md`, directly
+  above the newest released version; create that section if it is missing
+- do not invent a version heading, and do not bump `version` in any
+  `Cargo.toml` — neither `workspace.package.version` nor the excluded
+  sub-workspaces (`deposit-prover`, `crates/bridge-prover-libraries`,
+  `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`,
+  `crates/bridge-snark-utils`, `frontend`)
+- add to the existing groups under `## [Unreleased]` rather than starting a
+  second copy of them
+
+At release time a human — not an agent — picks the real version number, bumps it
+in every affected manifest, renames `## [Unreleased]` to
+`## [<version>] – <YYYY-MM-DD>`, and tags the commit.
+
+Sections of already released versions are history. Do not rewrite them, do not
+move entries out of them, and do not append new entries to them.
 
 ## Git remotes
 
 | Remote | URL | Role |
 |--------|-----|------|
-| `origin` | `git@vcs.modus-ponens.com:ton/acki-nacki-bridge.git` | **Canonical** — CI, merge target `main` |
-| `github` | `git@github.com:gosh-sh/bridge-EVM.git` | GitHub mirror — open PRs here |
+| `origin` | `https://github.com/gosh-sh/bridge.git` | **Canonical** — pull requests, merge target `main`, the pipelines under `.woodpecker/` |
 
-```bash
-# one-time local setup (if `github` is missing or wrong)
-git remote add github git@github.com:gosh-sh/bridge-EVM.git
-# or fix an existing remote:
-git remote set-url github git@github.com:gosh-sh/bridge-EVM.git
-
-git push origin main
-git push github main
-```
+A fresh clone has this one remote and needs nothing else. Older checkouts may
+still carry `origin` pointing at `vcs.modus-ponens.com` with GitHub as a second
+remote named `github` — that was the arrangement while GitLab was canonical, and
+`.gitlab-ci.yml` is what remains of it. If you have such a checkout, the GitHub
+URL above is the one that matters now.
 
 ## Repository Layout
 
@@ -33,6 +115,7 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── crates/bridge-prover-orchestrator/  ← Wraps the partner's 4-circuit pipeline (Halo2 1A/1B/2[/3]) for prover/relayer use
 │   └── gnark-wrappers/     ← Go modules per circuit (circuit-1a, circuit-2[, circuit-3, circuit-4]) producing 256-byte Groth16 proofs (legacy/test path; circuit-1b retired 2026-06-22 when Circuit 1B moved to the R15 SHPLONK aggregator at inner K=21)
 ├── crates/bridge-relayer-daemon/       ← Phase 5.1 relayer skeleton (AN→ETH direction): Relayer::tick() / run_loop() + BlockSource/BridgeClient traits + abigen!-generated AckiNackiBridge bindings + state.json persistence + CLI
+├── crates/ackinacki-bridge/            ← End-user withdrawal CLI (AN multisig → EVM recipient): the six-stage per-withdrawal pipeline, counterpart to the relayer's bundle proving. Reads no local prover_state.json — the on-chain contract is its only view of prover state. Shipped as a release download (scripts/install.sh); QUICKSTART.md is the operator's entry point
 ├── crates/deposit-relayer-daemon/      ← EVM→AN deposit relayer (mirror of bridge-relayer-daemon): listen for `Deposit` events (EthLogSource over alloy) → generate the AN-consumable Halo2 proof triple (SubprocessProofGenerator over deposit-prover) → submit to `TokenBridge.finalizeDeposit` (AnSubmitter). `AnConfig` drives the live `BkSetClient` (read-side endpoints wired; `finalizeDeposit` write gated on the upstream `IAckiNacki`/tvm-sdk client). `deposit-relayer` CLI: watch / prove-one / an-preflight / daemon
 ├── crates/bridge-evm-aggregator/       ← R15 / M2 spike (standalone cargo workspace): snark-verifier-sdk → AggregationCircuit → Yul EVM verifier. ~13 KB bytecode @ K=21, well under EIP-170. Trivial inner circuit (`a*b==c`) until partner ships Circuit 4 (M4)
 │
@@ -47,7 +130,8 @@ acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── Makefile                ← Entry point: make setup/build/test/deploy
 ├── setup.sh                ← One-time dependency install (Foundry, Go, Rust)
 ├── test.sh / test_e2e.sh   ← Test runners
-└── .gitlab-ci.yml          ← CI pipeline
+├── .woodpecker/            ← CI pipelines that actually run (Woodpecker, builder.gosh.sh)
+└── .gitlab-ci.yml          ← build/test/lint jobs, GitLab remote only — nothing runs them from GitHub
 ```
 
 ## Sibling Repositories (under ../  relative to this repo)
@@ -87,12 +171,14 @@ Output: `circuit_test_data_L{layers}_H{height}_prevH{prev}_S{steps}.json` — th
 
 **Requirements**: `--height` must be a layer-N key block (H % W^N == 0 for N≥1). For `small-window` (W=2): heights 2, 4, 8, 16, 32, …
 
-### Acki Nacki Testnet
+### Acki Nacki Devnet (Shellnet)
 
-- **Node API**: `http://94.156.178.19:8600` (port 8600; HTTPS/443 is firewalled)
-- **Working endpoints**: `/v2/bk_set`, `/v2/bk_set_update` (no auth required)
-- **GraphQL**: NOT publicly exposed (gql-server is a separate binary; would need local setup)
-- **Testnet status**: Not ready for E2E testing (as of Apr 2026)
+- **GraphQL**: `https://shellnet.ackinacki.org/graphql` — the public endpoint, and what
+  every daemon and runbook in this repository points at by default
+- **REST `/v2/bk_set`, `/v2/bk_set_update`**: served by an AN node directly, on port 8600
+  and without auth — *not* by `shellnet.ackinacki.org`, which answers 404 for them. The
+  BK-rotation sentry needs such a node; pass its address as `AN_NODE_URL`
+- **Devnet status**: Not ready for E2E testing (as of Apr 2026)
 - **Local 5-node cluster**: `cd ../acki-nacki/nock && docker-compose build && docker-compose up -d`
   - Node0 API: `http://127.0.0.1:11000`
   - Requires building with `history_proofs` feature for layer hash data
@@ -155,7 +241,7 @@ Test: `cd contracts/ethereum && forge test`
 **Workspace members** (in `Cargo.toml`): `crates/eth-frontend`, `crates/acki-nacki-interface`
 **Excluded** (separate dependency trees): `deposit-prover`, `frontend`, `poseidon-proof`, `layer-hashes-prover`, `crates/bridge-prover-orchestrator`, `crates/bridge-relayer-daemon`, `crates/deposit-relayer-daemon`
 
-- `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://94.156.178.19:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
+- `acki-nacki-interface`: Async traits (`IAckiNacki`, `TransactionSender`) + mock implementations, plus a **live REST client** `BkSetClient` against the AN node's `/v2/bk_set` and `/v2/bk_set_update` endpoints (probed working against `http://<an-node-host>:8600` on 2026-05-18). Returns typed `BkSetResponse` / `BkSetUpdateResponse` and a `signer_index → 48-byte BLS pubkey` map ready for `bridge-prover-orchestrator::generate_fallback_proof`. The crate also ships a stateful `BkSetTracker` that polls `/v2/bk_set_update`, caches the last snapshot, and surfaces structured `BkSetChange` events (`FirstObservation` / `Unchanged` / `MembershipChanged { added, removed, pubkey_mutations }`) — the primitive the relayer will use in Phase 5.2 to decide when a Circuit 3 rotation proof is needed. Live tests are `#[ignore]`-gated (`cargo test -p acki-nacki-interface --test live_bk_set -- --ignored`).
 - `eth-frontend`: Ethereum client using alloy-rs (migrated 2026-05-17 from ethers-rs). Interacts with bridge contracts.
 - `bridge-prover-orchestrator`: Phase 1.A/1.B prover wiring — wraps the partner's halo2 Circuit 1A/1B/2 with `KeyManager`/`generate_*_proof`/`verify_*_proof` helpers, plus `bound_test_data` for cross-circuit-bound test scenarios and `export-bound-block-proofs` binary used by Phase 4 fixtures. Since R15/M3 (2026-05-27) also exports `poseidon_transcript::{PoseidonRead, PoseidonWrite}` and `generate_fallback_proof_with_transcript(.., TranscriptKind::{Blake2b, Poseidon})` — Blake2b stays the AN-side default for `ZKHALO2VERIFYWITHVK`; Poseidon is the ETH-side inner-SNARK flavour the `crates/bridge-evm-aggregator/` aggregator consumes.
 - `bridge-relayer-daemon`: Phase 5.1 relayer skeleton — `Relayer::tick()`/`run_loop()` with `BlockSource` + `BridgeClient` traits (`EthBridgeClient` over `abigen!`-bindings; `MockBridgeClient`/`InMemoryBlockSource`/`FixturesBlockSource` for tests), atomic `state.json` persistence, `relayer` CLI binary. 13 unit tests cover the loop, state machine, restart-from-anchor recovery.
@@ -326,16 +412,18 @@ cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHas
 
 # Relayer skeleton (Phase 5.1, standalone)
 # NOT standalone: bridge-relayer-daemon reaches bridge-prover-lib / bridge-gql-fetcher
-# through the crates/an-bridge-prover workspace (symlink members), so a bare
+# through the crates/bridge-prover-libraries workspace (symlink members), so a bare
 # `cd crates/bridge-relayer-daemon && cargo test` fails to resolve them. Same as CI:
-cd crates/an-bridge-prover && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
+cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --ticks 5     # poll AN testnet, print BK-set events
 # AN→ETH is fully daemonized. Since 2026-07-04 BOTH ETH legs run in ONE systemd service
 # (bridge-relayer.service = `relayer daemon-bridge`) on a SINGLE relayer EOA, interleaved
 # sequentially so there is never more than one in-flight tx (nonces can't race). This unified
 # `daemon-bridge` replaces the earlier two-service split (bridge-relayer=daemon-prover +
-# bridge-withdraw=daemon-withdraw); the two standalone subcommands remain for manual/one-off use.
+# bridge-withdraw=daemon-withdraw); the `daemon-withdraw` standalone subcommand remains for
+# manual/one-off use. `daemon-prover` was removed on 2026-08-28 — its verifyBlock leg is
+# covered either by `daemon-bridge` (file-based) or `daemon-live` (in-process).
 #  • leg 1 (was daemon-prover)   → verifyBlock (anchor registration). The block source FALLS
 #    FORWARD to the next available proof_<N>.json (N >= last_seen+1), so it advances a fresh bridge
 #    across the 512-spaced AN key-block stream on its own (each proof bakes the previous key block
@@ -348,13 +436,11 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --tic
 #   See docs/an_eth_daemon_withdraw_e2e_2026-07-03.md.
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # unified AN→ETH (verifyBlock + withdrawByProof)
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-prover \
-    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # standalone verifyBlock leg (fall-forward)
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \
     --fixtures-dir ./fixtures --rpc-url ... --bridge-address ... \
-    --an-node-url http://94.156.178.19:8600                                              # smoke run wrapped in SentryGuardedRelayer
+    --an-node-url http://<an-node-host>:8600                                              # smoke run wrapped in SentryGuardedRelayer
 cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
     --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
     --rpc-url ... --bridge-address ...                                                   # read-only pre-flight (no key, exits non-zero on mismatch)
@@ -395,7 +481,25 @@ cd gnark-wrappers/circuit-1a && ./circuit-1a prove ../../proofs/bound/primary/ha
 cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-hashes/halo2_proof.json
 ```
 
-## CI Pipeline (`.gitlab-ci.yml`)
+## CI
+
+Two systems, and only one of them runs from GitHub.
+
+### Woodpecker (`.woodpecker/`, builder.gosh.sh) — what actually runs
+
+| Pipeline | Trigger | What it does |
+|---|---|---|
+| `secrets_scan.yaml` | every PR, and pushes to `main` | `gitleaks detect` over the branch's whole history — not the diff, because a key added and removed before merge still has to be rotated. A finding fails the pipeline. Rules and the shellnet-fixture allowlist live in `.gitleaks.toml`; reviewed historical findings are pinned in `.gitleaksignore`. Takes no secrets by design — the one job that stays safe on a fork's PR. |
+| `request_review.yaml` | every PR | Re-requests review from everyone holding a verdict the new commits made stale, and pings them in Discord. Skips drafts, and skips merges of the base branch into the PR (detected structurally, by a merged-in parent already contained in the base). |
+| `notify_review_submitted.yaml` | cron job `review-submitted` | Tells the PR author in Discord that someone reviewed. Woodpecker has no trigger for a submitted review, so it polls; the window is (start of the last successful cron run, start of this one], read back from Woodpecker's own API, which is why consecutive runs neither repeat a ping nor drop one. |
+
+Secrets are configured per repository in Woodpecker and handed only to the events ticked on them — one
+without the right event arrives as an empty string rather than an error, which is worth remembering
+when a step fails with an unexplained 401. **No build, test or lint job runs here.** Those are the
+GitLab jobs below, so `make check` and `make pre-push` are what stands between a branch and a
+regression today.
+
+### GitLab (`.gitlab-ci.yml`) — build, test and lint, on the GitLab remote only
 
 | Stage | Jobs |
 |------|------|
@@ -406,27 +510,6 @@ cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-has
 | `deploy` | `docs:rust`, `docs:solidity`, manual `deploy:testnet`/`deploy:mainnet` placeholders |
 
 `bridge-prover-orchestrator` and `deposit-prover` are **not** yet in CI (they pull halo2 deps that take minutes to build); their `cargo test` happens only locally. Tracking as future A2.
-
-### Shipping docs / code snapshots to partners (off-tree zip / tar.gz)
-
-For one-off bundles to partners who don't have GitLab access (Alina, Serhii et al.):
-
-```bash
-# Define what goes in the pack:
-$EDITOR scripts/partner_packs/<topic>_for_<recipient>.manifest
-
-# Build (zip + tar.gz + per-archive .sha256, all auto-gitignored):
-scripts/build_partner_pack.sh <topic>_for_<recipient>
-```
-
-The script reads the manifest (one repo-relative path per line; supports `src => dest` renames; everything below a `---` line becomes the README footer), assembles `<topic>_for_<recipient>_<today>/` with a provenance-stamped `README.md` (repo URL + commit SHA + auto-generated TOC), a `MANIFEST.sha256` (per-file hashes inside the pack), and drops `<...>.zip` + `<...>.tar.gz` + matching `.sha256` files at the repo root. All filenames match `/*_for_*.{zip,tar.gz,sha256}` in `.gitignore` so the artefacts never accidentally get committed.
-
-Two manifests already live under `scripts/partner_packs/`:
-
-- `circuit4_for_alina.manifest` — the Q-C4-1..6 + decoded layout + integration plan §3 Phase 8/9 bundle.
-- `halo2_tvm_for_serhii.manifest` — `ZKHALO2VERIFYWITHVK` wire-format pack (design memo + `Halo2TvmBundle` reference impl + green round-trip test).
-
-`scripts/partner_packs/_template.manifest` is the starter template.
 
 ### Reproducing CI locally before pushing
 
@@ -670,7 +753,7 @@ ssh ubuntu@ursus-tools.dev '
 
 Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `scripts/ursus/bridge-relayer.{service,env.example}`. Set `BRIDGE_DEPLOY_BLOCK` in deposit-relayer env (not genesis). AN→ETH wiring: `docs/shellnet_an_eth_relayer_wiring.md`.
 
-**GitHub (bridge-EVM):** active docs/integration PR [#5](https://github.com/gosh-sh/bridge-EVM/pull/5) (`pruvendo/shellnet-e2e-landing` → `main`).
+**GitHub (bridge-EVM, the predecessor repository — private):** active docs/integration PR PR #5 in `gosh-sh/bridge-EVM` (private) (`pruvendo/shellnet-e2e-landing` → `main`).
 
 **Key config (deposit, non-secret)**
 

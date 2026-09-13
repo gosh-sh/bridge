@@ -1,0 +1,869 @@
+//! Bridge state — full mirror of the on-chain `GlobalHistoryData`.
+//!
+//! Both prover and verifier daemons hold this exact same shape so that the
+//! verifier's view is a byte-for-byte mirror of what the Ethereum contract
+//! would store.
+//!
+//! Per-layer rolling window of width `W = HISTORY_PROOF_WINDOW_SIZE`:
+//!   * `data[W]`       — most recent layer-root hashes (circular buffer)
+//!   * `heights[W]`    — block heights matching each slot (parallel to `data`)
+//!   * `data_len`      — number of valid entries (saturates at W)
+//!   * `write_cursor`  — next slot to overwrite (always `mod W`)
+//!   * `last_height`   — height of the most recently appended hash
+//!
+//! `data_len` and `write_cursor` are both kept (rather than just one counter
+//! mod W) so callers can tell a half-full window from a full one without
+//! scanning, and so `flatten_layer_hashes` can stream slots in chronological
+//! order even before the window fills.
+
+use std::collections::VecDeque;
+use std::path::Path;
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+
+/// Layers are 1-indexed (1..=MAX_LAYERS); slot 0 of `layer_windows` is layer 1.
+pub const MAX_LAYERS: usize = 10;
+
+/// Cap on the `BridgeState::recent_bundles` ring.
+pub const RECENT_BUNDLES_CAP: usize = 16;
+
+/// Per-bundle self-verification outcome recorded by `bridge-prover-daemon`
+/// after it generates and locally verifies its own Circuit 1a + Circuit 2 proofs. 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BundleResult {
+    /// key block seq_no this result is for.
+    pub key_block_seq_no: u64,
+    /// Circuit 1a self-verify passed.
+    pub primary_ok: bool,
+    /// Circuit 2 self-verify passed.
+    pub layer_ok: bool,
+    /// Convenience: `primary_ok && layer_ok`.
+    pub verify_ok: bool,
+    /// Unix epoch seconds when the result was recorded.
+    pub ts_unix: u64,
+}
+
+/// Per-layer rolling window. `data.len() == heights.len() == window_size`.
+/// Doubles as the wire-input shape consumed by [`BridgeState::from_contract`]
+/// — the daemon's alloy adapter reads `getLayerWindow(uint8)` and widens
+/// the on-chain `uint16` cursor/data-len to this `usize` shape (see
+/// `bridge-relayer-daemon::bridge::read_full_state`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HistoryWindow {
+    /// Slot buffer of length `W`. Unused slots are zero.
+    pub data: Vec<[u8; 32]>,
+    /// Parallel slot buffer for the block heights that produced each hash.
+    pub heights: Vec<u64>,
+    /// Number of valid entries currently in the window (saturates at `W`).
+    pub data_len: usize,
+    /// Next slot index to overwrite (always `mod W`).
+    pub write_cursor: usize,
+    /// Height of the last appended hash. Zero when the window is empty.
+    pub last_height: u64,
+}
+
+impl HistoryWindow {
+  
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            data: vec![[0u8; 32]; window_size],
+            heights: vec![0u64; window_size],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        }
+    }
+
+    /// Append `(hash, height)` to the window. Overwrites the oldest slot once
+    /// the window is full. Mirrors the Solidity `appendLayer` semantics.
+    pub fn append(&mut self, hash: [u8; 32], height: u64) {
+        let w = self.data.len();
+        self.data[self.write_cursor] = hash;
+        self.heights[self.write_cursor] = height;
+        self.write_cursor = (self.write_cursor + 1) % w;
+        if self.data_len < w {
+            self.data_len += 1;
+        }
+        self.last_height = height;
+    }
+
+    pub fn window_size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Most recent hash (the one just appended), if any.
+    pub fn latest(&self) -> Option<[u8; 32]> {
+        if self.data_len == 0 {
+            return None;
+        }
+        let w = self.data.len();
+        let last_idx = (self.write_cursor + w - 1) % w;
+        Some(self.data[last_idx])
+    }
+
+    /// Yield slots in chronological order (oldest first → newest last).
+    /// Only valid entries are returned; length equals `data_len`.
+    pub fn iter_chronological(&self) -> impl Iterator<Item = ([u8; 32], u64)> + '_ {
+        let w = self.data.len();
+        let len = self.data_len;
+        let start = if len < w { 0 } else { self.write_cursor };
+        (0..len).map(move |i| {
+            let slot = (start + i) % w;
+            (self.data[slot], self.heights[slot])
+        })
+    }
+
+    /// Lookup the slot for a given block height (linear scan; O(W)).
+    /// Returns the chronological position [0..data_len) if found.
+    pub fn slot_for_height(&self, height: u64) -> Option<usize> {
+        self.iter_chronological()
+            .position(|(_, h)| h == height)
+    }
+}
+
+/// Shared bridge state — full mirror of the contract's `GlobalHistoryData`.
+/// This struct mirrors what the future Ethereum bridge contract will store.
+/// In particular it holds the BK-set **commitment only** (32 bytes), not the
+/// pubkey list — the contract would never store the full set, and the
+/// verifier daemon (which models the contract) must not either. The
+/// prover's pubkey table lives separately in `ProverBkSet`
+/// (`prover_bk_set.rs`) and is loaded only by the prover daemon.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BridgeState {
+    /// `W` — width of every per-layer window. Once set, immutable for the run.
+    pub window_size: usize,
+    /// Per-layer rolling windows. Index 0 == layer 1.
+    pub layer_windows: Vec<HistoryWindow>,
+    /// BK set Poseidon commitment (from the node, not self-computed).
+    pub stored_bk_set_commitment: [u8; 32],
+    /// Highest seq_no whose history was applied via `append_bundle`.
+    pub stored_last_seen_block_seq_no: u64,
+    /// Block height of that same key block.
+    pub stored_last_seen_block_height: u64,
+    /// True once the first key block has been applied.
+    pub initialized: bool,
+    /// Ring of the most recent `RECENT_BUNDLES_CAP` self-verification outcomes
+    /// (oldest at front, newest at back). Written by `bridge-prover-daemon`
+    /// after each Circuit 1a + Circuit 2 generation cycle. 
+    #[serde(default)]
+    pub recent_bundles: VecDeque<BundleResult>,
+
+    /// seq_no of the last bk-set-update block whose transition has
+    /// been applied to `stored_bk_set_commitment`. Mirrors what the ETH
+    /// contract will store. Zero on first bootstrap.
+    #[serde(default)]
+    pub stored_last_bk_set_update_seq_no: u64,
+
+    /// Anchor level the state was bootstrapped at.
+    ///
+    /// * `1` — L1 (bundle stride `W·P`).
+    /// * `2` — L2 (bundle stride `W²`).
+    /// * `0` — "unset" sentinel written by [`BridgeState::new`] before any
+    ///   [`BootstrapSeed::apply`] call. [`BootstrapSeed::apply`] overwrites
+    ///   it with the seed's own level on the first cold-start.
+    ///
+    /// The startup drift check in `bridge-relayer-daemon` /
+    /// `bridge-prover-daemon` interprets the trio
+    /// `(state.anchor_level, cfg.anchor_mode, state.initialized)` — a `0`
+    /// level is legal only when `initialized == false`.
+    #[serde(default)]
+    pub anchor_level: u8,
+}
+
+/// Full contract state readable by chain-resurrect: on-chain scalars plus
+/// all `MAX_LAYERS` windows. Consumed by [`BridgeState::from_contract`]
+/// and by the relayer's `startup_decide`.
+#[derive(Clone, Debug)]
+pub struct EthBridgeContractState {
+    pub last_seen_block_seq_no: u64,
+    pub bk_set_commitment: [u8; 32],
+    pub last_bk_set_update_seq_no: u64,
+    /// LE mirror of the contract's `immutable storedPrevMaxLevelLayerHash`
+    /// (constructor-set from `genesisPrevMaxLevelLayerHash`, never mutated).
+    /// Used by `startup_decide` as a bridge-identity check. Not read by
+    /// `from_contract`.
+    pub genesis_prev_max_level_layer_hash: [u8; 32],
+    /// Index `L-1` corresponds to layer `L` (1..=MAX_LAYERS).
+    pub layer_windows: [HistoryWindow; MAX_LAYERS],
+}
+
+impl EthBridgeContractState {
+    /// Highest layer `L >= 2` whose on-chain window has any populated slots,
+    /// or `None` when no layer above 1 has ever been anchored.
+    ///
+    /// Client-side sanity check on resurrect. If this returns `Some(_)`, the
+    /// contract has been fed key blocks with `numLayers >= 2`, so a daemon
+    /// configured for L1-only mode is starting against chain state produced
+    /// by a higher-stride mode. The `last_seen % stride` alignment check
+    /// cannot catch this (every W²-aligned cursor is also W·P-aligned), and
+    /// the contract itself is mode-agnostic — so the check belongs on the client.
+    pub fn highest_populated_layer(&self) -> Option<u8> {
+        // Layers are 1-indexed on the wire; index i corresponds to layer i+1.
+        // We only care about layers >= 2 (L1 is expected populated).
+        for i in (1..MAX_LAYERS).rev() {
+            if self.layer_windows[i].data_len > 0 {
+                return Some((i + 1) as u8);
+            }
+        }
+        None
+    }
+}
+
+impl BridgeState {
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            window_size,
+            layer_windows: (0..MAX_LAYERS).map(|_| HistoryWindow::new(window_size)).collect(),
+            stored_bk_set_commitment: [0u8; 32],
+            stored_last_seen_block_seq_no: 0,
+            stored_last_seen_block_height: 0,
+            initialized: false,
+            recent_bundles: VecDeque::new(),
+            stored_last_bk_set_update_seq_no: 0,
+            // 0 == "unset". `BootstrapSeed::apply` overwrites this from the
+            // seed's own `anchor_level`; the daemon startup drift check
+            // interprets the trio (state.anchor_level, cfg.anchor_mode,
+            // state.initialized) — see relayer.rs.
+            anchor_level: 0,
+        }
+    }
+
+    /// Apply a verified bk-set transition to the contract-mirror state.
+    ///
+    /// This is the off-chain analogue of the  Solidity
+    /// `applyBkSetUpdate` entry point: same inputs, same checks. 
+    pub fn apply_bk_set_update(
+        &mut self,
+        old_commitment: [u8; 32],
+        new_commitment: [u8; 32],
+        update_block_seq_no: u64,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            old_commitment == self.stored_bk_set_commitment,
+            "bk-update old commitment {} does not match stored {}",
+            hex::encode(old_commitment),
+            hex::encode(self.stored_bk_set_commitment),
+        );
+        anyhow::ensure!(
+            update_block_seq_no > self.stored_last_bk_set_update_seq_no,
+            "bk-update seq_no {} is not strictly greater than last applied {}",
+            update_block_seq_no,
+            self.stored_last_bk_set_update_seq_no,
+        );
+        // Monotonicity, prevents replays / out-of-order applies.
+        self.stored_bk_set_commitment = new_commitment;
+        self.stored_last_bk_set_update_seq_no = update_block_seq_no;
+        Ok(())
+    }
+
+    /// Push a `BundleResult` onto the recent-bundles ring, evicting the
+    /// oldest entry once the cap is exceeded.
+    pub fn push_bundle_result(&mut self, r: BundleResult) {
+        if self.recent_bundles.len() >= RECENT_BUNDLES_CAP {
+            self.recent_bundles.pop_front();
+        }
+        self.recent_bundles.push_back(r);
+    }
+
+    /// Borrow the window for layer `L` (1-indexed).
+    pub fn window(&self, layer: u8) -> &HistoryWindow {
+        debug_assert!((1..=MAX_LAYERS as u8).contains(&layer));
+        &self.layer_windows[(layer - 1) as usize]
+    }
+
+    /// Mutably borrow the window for layer `L` (1-indexed).
+    pub fn window_mut(&mut self, layer: u8) -> &mut HistoryWindow {
+        debug_assert!((1..=MAX_LAYERS as u8).contains(&layer));
+        &mut self.layer_windows[(layer - 1) as usize]
+    }
+
+    /// Append one (hash, height) pair to a single layer. Used by tests and
+    /// fine-grained callers; production code should usually use
+    /// `append_bundle`.
+    pub fn append_layer(&mut self, layer: u8, hash: [u8; 32], height: u64) {
+        self.window_mut(layer).append(hash, height);
+    }
+
+    /// Genesis-only stamp of the initial BK-set commitment.
+    /// Off-chain analogue of the Solidity constructor line
+    /// Runs exactly once, before any bundle is
+    /// applied; 
+    pub fn initialize_bk_set_commitment(
+        &mut self,
+        commitment: [u8; 32],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.initialized,
+            "initialize_bk_set_commitment called on already-initialized state",
+        );
+        self.stored_bk_set_commitment = commitment;
+        Ok(())
+    }
+
+    /// Apply the per-layer hashes extracted from a single key block.
+    /// * `per_layer` — pairs of `(root_hash, layer_number)` from the block's
+    ///   `history_proofs` map. Order does not matter; each layer is appended
+    ///   into its own window.
+    /// * `block_height` / `block_seq_no` — coordinates of the key block that
+    ///   produced these hashes.
+    /// Preconditions (any failure → unchanged state, error returned):
+    /// * `block_seq_no > self.stored_last_seen_block_seq_no` — monotonicity,
+    ///   mirrors Solidity `verifyBlock` (AckiNackiBridge.sol:677-679). 
+    pub fn append_bundle(
+        &mut self,
+        per_layer: &[([u8; 32], u8)],
+        block_height: u64,
+        block_seq_no: u64,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            block_seq_no > self.stored_last_seen_block_seq_no,
+            "append_bundle: block_seq_no {} is not strictly greater than \
+             stored_last_seen {}",
+            block_seq_no,
+            self.stored_last_seen_block_seq_no,
+        );
+        for (hash, layer) in per_layer {
+            if (1..=MAX_LAYERS as u8).contains(layer) {
+                self.window_mut(*layer).append(*hash, block_height);
+            }
+        }
+        self.stored_last_seen_block_seq_no = block_seq_no;
+        self.stored_last_seen_block_height = block_height;
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// Number of layers that currently have at least one entry. Used by Circuit 2.
+    pub fn num_active_layers(&self) -> usize {
+        self.layer_windows.iter().filter(|w| w.data_len > 0).count()
+    }
+
+    /// Flatten all layer windows chronologically into a single
+    /// `MAX_LAYERS × W` vector. Empty slots are zero. 
+    pub fn flatten_layer_hashes(&self) -> Vec<[u8; 32]> {
+        let mut out = Vec::with_capacity(MAX_LAYERS * self.window_size);
+        for win in &self.layer_windows {
+            let mut count = 0;
+            for (hash, _h) in win.iter_chronological() {
+                out.push(hash);
+                count += 1;
+            }
+            for _ in count..self.window_size {
+                out.push([0u8; 32]);
+            }
+        }
+        out
+    }
+
+    /// Given an event observed at `event_height` and layer `L`, return the
+    /// chronological slot index within layer L whose `heights[slot]` matches.
+    /// Returns `None` if not found (slot rolled out of the window).
+    pub fn slot_for_event_height(&self, layer: u8, event_height: u64) -> Option<usize> {
+        self.window(layer).slot_for_height(event_height)
+    }
+
+    pub fn highest_layer_latest_hash(&self) -> Option<[u8; 32]> {
+        for win in self.layer_windows.iter().rev() {
+            if win.data_len > 0 {
+                return win.latest();
+            }
+        }
+        None
+    }
+
+    /// Pick `prev_max_level_layer_hash` for Circuit 2 given that the new key
+    /// block carries `new_num_layers` non-empty layers.
+    ///
+    /// Matches the semantics:
+    ///   * if `new_num_layers >= t`: latest of the highest currently-active layer
+    ///   * if `new_num_layers <  t`: latest of layer `new_num_layers`
+    /// where `t = num_active_layers()`.
+    pub fn prev_max_level_layer_hash_for(&self, new_num_layers: usize) -> [u8; 32] {
+        let t = self.num_active_layers();
+        if t == 0 {
+            return [0u8; 32];
+        }
+        let pick = if new_num_layers >= t { t } else { new_num_layers };
+        if pick == 0 {
+            return [0u8; 32];
+        }
+        // pick is 1-indexed.
+        self.window(pick as u8).latest().unwrap_or([0u8; 32])
+    }
+
+    /// Rebuild a `BridgeState` byte-for-byte from a snapshot of the on-chain
+    /// contract (chain-resurrect path).
+    ///
+    /// This is the seed used when the daemon starts against a contract that
+    /// some other party has already advanced (e.g. a shared test bridge that
+    /// a co-tester has been driving). The four scalar fields plus the
+    /// `MAX_LAYERS` per-layer `HistoryWindow`s are copied verbatim; on-chain
+    /// `heights[i]` slots carry the **block seq_no** used at
+    /// `_appendLayerHashes(..., blockSeqNo)` (Solidity keeps only seq_no,
+    /// not height), so the reconstructed `HistoryWindow.heights[]` and
+    /// `HistoryWindow.last_height` are seq_no values — matching the on-chain
+    /// mirror. The returned state has `initialized = true` iff the contract
+    /// has recorded at least one block (`last_seen_block_seq_no > 0`).
+    ///
+    /// `stored_last_seen_block_height` cannot be recovered from the contract
+    /// — Solidity's `_layerWindows[L].heights[]` mirrors `seq_no`, not the
+    /// AN chain-side per-block `height` — so it is set to zero here.
+    pub fn from_contract(
+        cfs: EthBridgeContractState,
+        window_size: usize,
+        anchor_level: u8,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(window_size > 0, "from_contract: window_size must be > 0");
+        for (idx, cw) in cfs.layer_windows.iter().enumerate() {
+            let layer_num = idx + 1;
+            anyhow::ensure!(
+                cw.data.len() == window_size,
+                "from_contract: layer {} data.len={} != window_size={}",
+                layer_num, cw.data.len(), window_size,
+            );
+            anyhow::ensure!(
+                cw.heights.len() == window_size,
+                "from_contract: layer {} heights.len={} != window_size={}",
+                layer_num, cw.heights.len(), window_size,
+            );
+            anyhow::ensure!(
+                cw.data_len <= window_size,
+                "from_contract: layer {} data_len={} exceeds window_size={}",
+                layer_num, cw.data_len, window_size,
+            );
+            anyhow::ensure!(
+                cw.write_cursor < window_size,
+                "from_contract: layer {} write_cursor={} not < window_size={}",
+                layer_num, cw.write_cursor, window_size,
+            );
+        }
+        let layer_windows: Vec<HistoryWindow> = cfs.layer_windows.into_iter().collect();
+
+        Ok(Self {
+            window_size,
+            anchor_level,
+            layer_windows,
+            stored_bk_set_commitment: cfs.bk_set_commitment,
+            stored_last_seen_block_seq_no: cfs.last_seen_block_seq_no,
+            stored_last_seen_block_height: 0,
+            initialized: cfs.last_seen_block_seq_no > 0,
+            recent_bundles: VecDeque::new(),
+            stored_last_bk_set_update_seq_no: cfs.last_bk_set_update_seq_no,
+        })
+    }
+
+    pub fn load(path: &str, window_size: usize) -> anyhow::Result<Self> {
+        if !Path::new(path).exists() {
+            return Ok(Self::new(window_size));
+        }
+        let data = std::fs::read_to_string(path).context("failed to read state file")?;
+        let st: BridgeState = serde_json::from_str(&data).context("failed to parse state file")?;
+        if st.window_size != window_size {
+            anyhow::bail!(
+                "state file has window_size={} but daemon configured for W={}; \
+                 delete the state file or rebuild with matching W",
+                st.window_size,
+                window_size
+            );
+        }
+        Ok(st)
+    }
+
+    /// Writes to `path.tmp` first, then `rename`s into place. POSIX `rename`
+    /// is atomic on the same filesystem, so any concurrent reader sees either
+    /// the previous fully-written file or the new fully-written file — never
+    /// a half-written one. This is what lets the client daemon `load()` the
+    /// state file directly without any locking or IPC handshake.
+    pub fn save(&self, path: &str) -> anyhow::Result<()> {
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, json).with_context(|| format!("failed to write {}", tmp))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("failed to rename {} -> {}", tmp, path))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `EthBridgeContractState` with an empty window at every layer,
+    /// then let the test poke `data_len` on selected layers.
+    fn empty_chain_state() -> EthBridgeContractState {
+        let empty_win = HistoryWindow {
+            data: vec![],
+            heights: vec![],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        };
+        EthBridgeContractState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
+            layer_windows: std::array::from_fn(|_| empty_win.clone()),
+        }
+    }
+
+    #[test]
+    fn highest_populated_layer_ignores_l1_only() {
+        // Layer 1 populated, everything above empty → None.
+        // PR #35 follow-up should-fix #1 regression: helper must not report
+        // L1 anchoring as "higher" — L1 is the default and its window will
+        // always be populated on any live bridge.
+        let mut s = empty_chain_state();
+        s.layer_windows[0].data_len = 5;
+        assert_eq!(s.highest_populated_layer(), None);
+    }
+
+    #[test]
+    fn highest_populated_layer_returns_l2() {
+        // Layer 2 populated → Some(2). This is the case that must refuse
+        // Resurrect when the operator asserts cfg=L1.
+        let mut s = empty_chain_state();
+        s.layer_windows[0].data_len = 5;
+        s.layer_windows[1].data_len = 1;
+        assert_eq!(s.highest_populated_layer(), Some(2));
+    }
+
+    #[test]
+    fn highest_populated_layer_prefers_top() {
+        // If both L2 and L3 have data, report L3 (the highest anchored level
+        // — the operator error is worse the further above cfg they are).
+        let mut s = empty_chain_state();
+        s.layer_windows[1].data_len = 4;
+        s.layer_windows[2].data_len = 1;
+        assert_eq!(s.highest_populated_layer(), Some(3));
+    }
+
+    #[test]
+    fn window_append_wraps() {
+        let mut w = HistoryWindow::new(4);
+        for i in 1..=6u64 {
+            let mut h = [0u8; 32];
+            h[0] = i as u8;
+            w.append(h, i);
+        }
+        // After 6 appends into a width-4 window: data_len=4, last_height=6,
+        // chronological order = heights 3,4,5,6.
+        assert_eq!(w.data_len, 4);
+        assert_eq!(w.last_height, 6);
+        let chron: Vec<u64> = w.iter_chronological().map(|(_, h)| h).collect();
+        assert_eq!(chron, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn flatten_pads_with_zeros() {
+        let mut s = BridgeState::new(4);
+        s.append_layer(1, [1u8; 32], 8);
+        s.append_layer(1, [2u8; 32], 16);
+        s.append_layer(2, [9u8; 32], 64);
+        let flat = s.flatten_layer_hashes();
+        assert_eq!(flat.len(), MAX_LAYERS * 4);
+        assert_eq!(flat[0], [1u8; 32]);
+        assert_eq!(flat[1], [2u8; 32]);
+        assert_eq!(flat[2], [0u8; 32]);
+        assert_eq!(flat[3], [0u8; 32]);
+        assert_eq!(flat[4], [9u8; 32]); // layer 2 slot 0
+    }
+
+    #[test]
+    fn slot_for_event_height_lookup() {
+        let mut s = BridgeState::new(8);
+        s.append_layer(1, [1u8; 32], 8);
+        s.append_layer(1, [2u8; 32], 16);
+        s.append_layer(1, [3u8; 32], 24);
+        assert_eq!(s.slot_for_event_height(1, 16), Some(1));
+        assert_eq!(s.slot_for_event_height(1, 99), None);
+    }
+
+    #[test]
+    fn initialize_bk_set_commitment_stamps_once() {
+        let mut s = BridgeState::new(8);
+        s.initialize_bk_set_commitment([9u8; 32]).unwrap();
+        assert_eq!(s.stored_bk_set_commitment, [9u8; 32]);
+        // Not yet marked initialized — that flip is `append_bundle`'s job.
+        assert!(!s.initialized);
+    }
+
+    #[test]
+    fn initialize_bk_set_commitment_rejects_reinit() {
+        let mut s = BridgeState::new(8);
+        // Simulate a state that has already been through a bundle apply.
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        assert!(s.initialized);
+        let err = s.initialize_bk_set_commitment([9u8; 32]).unwrap_err();
+        assert!(format!("{err}").contains("already-initialized"));
+    }
+
+    #[test]
+    fn append_bundle_does_not_write_bk_set_commitment() {
+        let mut s = BridgeState::new(8);
+        s.initialize_bk_set_commitment([9u8; 32]).unwrap();
+        // Any subsequent append must leave the commitment untouched — that
+        // field has exactly one post-init writer (`apply_bk_set_update`).
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        assert_eq!(s.stored_bk_set_commitment, [9u8; 32]);
+        assert_eq!(s.stored_last_seen_block_seq_no, 8);
+    }
+
+    #[test]
+    fn append_bundle_rejects_non_monotone() {
+        let mut s = BridgeState::new(8);
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        // Replay at same seq_no.
+        let err = s.append_bundle(&[([2u8; 32], 1)], 16, 8).unwrap_err();
+        assert!(format!("{err}").contains("not strictly greater"));
+        // Out-of-order older seq_no.
+        let err = s.append_bundle(&[([2u8; 32], 1)], 16, 4).unwrap_err();
+        assert!(format!("{err}").contains("not strictly greater"));
+        // State must be unchanged (cursors still at 8, layer 1 still holds
+        // the first hash).
+        assert_eq!(s.stored_last_seen_block_seq_no, 8);
+        assert_eq!(s.window(1).data_len, 1);
+        assert_eq!(s.window(1).latest(), Some([1u8; 32]));
+    }
+
+    #[test]
+    fn append_bundle_happy_path_advances_cursors() {
+        let mut s = BridgeState::new(8);
+        s.append_bundle(&[([1u8; 32], 1)], 8, 8).unwrap();
+        s.append_bundle(&[([2u8; 32], 1), ([3u8; 32], 2)], 16, 16).unwrap();
+        assert_eq!(s.stored_last_seen_block_seq_no, 16);
+        assert_eq!(s.stored_last_seen_block_height, 16);
+        assert_eq!(s.window(1).data_len, 2);
+        assert_eq!(s.window(1).latest(), Some([2u8; 32]));
+        assert_eq!(s.window(2).data_len, 1);
+        assert_eq!(s.window(2).latest(), Some([3u8; 32]));
+    }
+
+    #[test]
+    fn apply_bk_set_update_happy_path() {
+        let mut s = BridgeState::new(8);
+        s.stored_bk_set_commitment = [7u8; 32];
+        let new_c = [9u8; 32];
+        s.apply_bk_set_update([7u8; 32], new_c, 1024).unwrap();
+        assert_eq!(s.stored_bk_set_commitment, new_c);
+        assert_eq!(s.stored_last_bk_set_update_seq_no, 1024);
+    }
+
+    #[test]
+    fn apply_bk_set_update_rejects_stale_old() {
+        let mut s = BridgeState::new(8);
+        s.stored_bk_set_commitment = [7u8; 32];
+        let err = s.apply_bk_set_update([1u8; 32], [9u8; 32], 1024).unwrap_err();
+        assert!(format!("{err}").contains("does not match stored"));
+        // State must be unchanged.
+        assert_eq!(s.stored_bk_set_commitment, [7u8; 32]);
+        assert_eq!(s.stored_last_bk_set_update_seq_no, 0);
+    }
+
+    #[test]
+    fn apply_bk_set_update_rejects_replay() {
+        let mut s = BridgeState::new(8);
+        s.stored_bk_set_commitment = [7u8; 32];
+        s.apply_bk_set_update([7u8; 32], [9u8; 32], 1024).unwrap();
+        // Same seq_no — replay.
+        let err = s.apply_bk_set_update([9u8; 32], [10u8; 32], 1024).unwrap_err();
+        assert!(format!("{err}").contains("not strictly greater"));
+        // Out-of-order older seq_no.
+        let err = s.apply_bk_set_update([9u8; 32], [10u8; 32], 500).unwrap_err();
+        assert!(format!("{err}").contains("not strictly greater"));
+    }
+
+    #[test]
+    fn legacy_state_file_deserializes_with_defaults() {
+        // Legacy state JSON (without `stored_last_bk_set_update_seq_no` /
+        // `recent_bundles`, and with a now-removed `schema_version` field)
+        // must still load cleanly: the missing fields default to 0/empty
+        // and the unknown `schema_version` is silently dropped.
+        let legacy_json = r#"{
+            "window_size": 4,
+            "layer_windows": [],
+            "stored_bk_set_commitment": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "stored_last_seen_block_seq_no": 42,
+            "stored_last_seen_block_height": 42,
+            "initialized": true,
+            "schema_version": 3
+        }"#;
+        let st: BridgeState = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(st.stored_last_bk_set_update_seq_no, 0);
+        assert!(st.recent_bundles.is_empty());
+        // `anchor_level` missing from JSON must default to the `0`
+        // sentinel — the serde-default contract we rely on when adding
+        // fields to `BridgeState`.
+        assert_eq!(st.anchor_level, 0);
+    }
+
+    #[test]
+    fn prev_max_level_layer_hash_for_matches_old_semantics() {
+        let mut s = BridgeState::new(4);
+        s.append_layer(1, [1u8; 32], 8);
+        s.append_layer(2, [2u8; 32], 16);
+        // t = 2 (layers 1 and 2 active)
+        // new_num_layers >= 2  ->  latest of layer 2
+        assert_eq!(s.prev_max_level_layer_hash_for(3), [2u8; 32]);
+        assert_eq!(s.prev_max_level_layer_hash_for(2), [2u8; 32]);
+        // new_num_layers == 1  ->  latest of layer 1
+        assert_eq!(s.prev_max_level_layer_hash_for(1), [1u8; 32]);
+        // new_num_layers == 0  ->  zero
+        assert_eq!(s.prev_max_level_layer_hash_for(0), [0u8; 32]);
+    }
+
+    /// Snapshot a `BridgeState` into a `EthBridgeContractState` shape as the
+    /// on-chain contract would expose it (heights carry seq_no, not L2
+    /// height — see `_appendLayerHashes` in AckiNackiBridge.sol). Test-only
+    /// helper: exercises the exact wire format the daemon consumes when
+    /// re-hydrating from the chain.
+    fn snapshot_as_contract(s: &BridgeState) -> EthBridgeContractState {
+        // The contract stores seq_no in the `heights` slot; the local
+        // mirror stores height there. For a byte-for-byte round-trip test
+        // we mirror whatever this side has (the contract-vs-local semantic
+        // drift is documented on `from_contract`, which zeroes
+        // `stored_last_seen_block_height`).
+        let layer_windows: [HistoryWindow; MAX_LAYERS] =
+            std::array::from_fn(|i| s.layer_windows[i].clone());
+        EthBridgeContractState {
+            last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
+            bk_set_commitment: s.stored_bk_set_commitment,
+            last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
+            layer_windows,
+        }
+    }
+
+    #[test]
+    fn from_contract_roundtrips_windows_byte_for_byte() {
+        // Build a source state via three bundle applies across layers 1..3.
+        // Seq_no == height in this synthetic replay so the round-trip test
+        // does not need to care about the seq_no-vs-height documented drift.
+        let mut src = BridgeState::new(4);
+        src.initialize_bk_set_commitment([7u8; 32]).unwrap();
+        src.append_bundle(&[([0x11; 32], 1)], 10, 10).unwrap();
+        src.append_bundle(&[([0x22; 32], 1), ([0x33; 32], 2)], 20, 20).unwrap();
+        src.append_bundle(
+            &[([0x44; 32], 1), ([0x55; 32], 2), ([0x66; 32], 3)],
+            30, 30,
+        ).unwrap();
+        src.apply_bk_set_update([7u8; 32], [8u8; 32], 25).unwrap();
+
+        let cfs = snapshot_as_contract(&src);
+        let dst = BridgeState::from_contract(cfs, 4, 1).unwrap();
+
+        assert_eq!(dst.window_size, src.window_size);
+        assert_eq!(dst.stored_bk_set_commitment, src.stored_bk_set_commitment);
+        assert_eq!(
+            dst.stored_last_seen_block_seq_no,
+            src.stored_last_seen_block_seq_no
+        );
+        assert_eq!(
+            dst.stored_last_bk_set_update_seq_no,
+            src.stored_last_bk_set_update_seq_no
+        );
+        // Contract does not persist AN per-block `height` — see docstring.
+        assert_eq!(dst.stored_last_seen_block_height, 0);
+        assert!(dst.initialized);
+        // Byte-for-byte parity on every window slot.
+        for i in 0..MAX_LAYERS {
+            let sw = &src.layer_windows[i];
+            let dw = &dst.layer_windows[i];
+            assert_eq!(dw.data, sw.data, "layer {} data mismatch", i + 1);
+            assert_eq!(dw.heights, sw.heights, "layer {} heights mismatch", i + 1);
+            assert_eq!(dw.data_len, sw.data_len, "layer {} data_len mismatch", i + 1);
+            assert_eq!(
+                dw.write_cursor, sw.write_cursor,
+                "layer {} write_cursor mismatch", i + 1
+            );
+            assert_eq!(
+                dw.last_height, sw.last_height,
+                "layer {} last_height mismatch", i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn from_contract_empty_contract_yields_uninitialized_state() {
+        // Zeroed EthBridgeContractState: models a freshly-deployed contract.
+        let empty_layer = || HistoryWindow {
+            data: vec![[0u8; 32]; 4],
+            heights: vec![0u64; 4],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        };
+        let arr: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| empty_layer());
+        let cfs = EthBridgeContractState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
+            layer_windows: arr,
+        };
+        let s = BridgeState::from_contract(cfs, 4, 1).unwrap();
+        // Genesis-like: no bundles applied on-chain ⇒ initialized == false.
+        assert!(!s.initialized);
+        assert_eq!(s.num_active_layers(), 0);
+    }
+
+    #[test]
+    fn from_contract_rejects_window_size_mismatch() {
+        // Contract data has W=4 but the daemon is configured for W=8 →
+        // silently rebuilding the ring under a different width would corrupt
+        // slot math, so it must be rejected.
+        let short_layer = || HistoryWindow {
+            data: vec![[0u8; 32]; 4],
+            heights: vec![0u64; 4],
+            data_len: 0,
+            write_cursor: 0,
+            last_height: 0,
+        };
+        let arr: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| short_layer());
+        let cfs = EthBridgeContractState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
+            layer_windows: arr,
+        };
+        let err = BridgeState::from_contract(cfs, 8, 1).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("data.len=4"), "unexpected error: {msg}");
+        assert!(msg.contains("window_size=8"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn from_contract_rejects_out_of_range_write_cursor() {
+        let bad_layer = HistoryWindow {
+            data: vec![[0u8; 32]; 4],
+            heights: vec![0u64; 4],
+            data_len: 0,
+            write_cursor: 4, // == window_size, must be strictly less
+            last_height: 0,
+        };
+        let mut arr: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| {
+            HistoryWindow {
+                data: vec![[0u8; 32]; 4],
+                heights: vec![0u64; 4],
+                data_len: 0,
+                write_cursor: 0,
+                last_height: 0,
+            }
+        });
+        arr[2] = bad_layer;
+        let cfs = EthBridgeContractState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: [0u8; 32],
+            last_bk_set_update_seq_no: 0,
+            genesis_prev_max_level_layer_hash: [0u8; 32],
+            layer_windows: arr,
+        };
+        let err = BridgeState::from_contract(cfs, 4, 1).unwrap_err();
+        assert!(format!("{err}").contains("write_cursor=4"));
+    }
+}

@@ -1,9 +1,14 @@
-# `bridge-evm-aggregator` — R15 / M2 feasibility spike
+# `bridge-evm-aggregator` — SHPLONK aggregator pipeline (started as the R15 / M2 spike)
 
-This is the **M2** milestone of the R15 roadmap
-(`docs/r15_snark_verifier_roadmap.md`). It stands up the
-snark-verifier-sdk → Yul EVM verifier pipeline in our build environment
-and confirms it produces an EIP-170-fitting Solidity verifier.
+*Reviewed against the sources at commit `a69ba36`, 2026-08-18.*
+
+This crate began as the **M2** feasibility spike: stand up the snark-verifier-sdk → Yul EVM verifier
+pipeline in our build environment and confirm it produces an EIP-170-fitting verifier.
+
+**It is no longer only a spike.** Its `export-inner-aggregator` bin (`Cargo.toml:57`) is what
+produces all four production verifier artefacts under `contracts/ethereum/verifiers/` — see that
+directory's README for the exact invocations. The spike parts described below (the multiply gate,
+`export-spike-artifacts`) still exist alongside it.
 
 ## Status (M2 closed 2026-05-27; M5 instance-exposure de-risked 2026-05-29)
 
@@ -18,19 +23,21 @@ and confirms it produces an EIP-170-fitting Solidity verifier.
 | Solidity source compiles with `solc 0.8.19` (exact pragma pin emitted by snark-verifier) | ✅ | `compile_solidity` (`solc --bin -`) succeeds; validated 2026-05-29 |
 | Foundry on-chain harness (deploy bytecode, call fallback with `instances ‖ proof`) | ⏸ M6/M7 | Needs Foundry + a persisted EVM proof/instances vector. Deploy from `AggregatorVerifierSpike.bin` via `vm.readFileBinary` (same workaround the legacy `Halo2Verifier.sol` uses to dodge the solc-optimizer inline-assembly stub). |
 
-## What this crate *is not*
+## What the spike part *is not*
 
-It is **not** the real on-chain Circuit 4 verifier yet. The inner circuit is
-a one-line multiplication gate (`crate::multiply`) — it exists purely to
-produce a SHPLONK proof of any shape so the aggregator pipeline can be
-exercised end-to-end.
+The **spike** inner circuit is a one-line multiplication gate (`crate::multiply`) — it exists purely
+to produce a SHPLONK proof of some shape so the aggregator pipeline can be exercised end to end. Its
+output, `target/spike/AggregatorVerifierSpike.{sol,bin}`, is **not** a production verifier; the
+Foundry fixtures derived from it live under `contracts/ethereum/test/fixtures/r15_spike/` and are
+test-only.
 
-When the partner's Circuit 4 lands (M4 in
-`docs/r15_snark_verifier_roadmap.md`), the trivial multiply gate is replaced
-with the real Circuit 4 prover, the aggregator's K may bump (M5 sizing),
-and the Yul output becomes the production
-`BridgeWithdrawalAggregatorVerifier.sol` (M6) that the bridge contract
-calls (M7).
+**That future has since arrived.** Circuit 4 landed: the inner event snark is produced by
+`export-c4-poseidon-snark` in `bridge-snark-utils`, aggregated by this crate's
+`export-inner-aggregator`, and the result is committed as
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (20 990 B, inner `K=19`), which
+`AckiNackiBridge.withdrawByProof` calls through its adapter. The same pipeline produces the 1A, 1B
+and Circuit-2 verifiers. So the milestone text below (M4 → M7) is a historical record of a plan that
+has since been executed, not a description of pending work.
 
 ## Layout
 

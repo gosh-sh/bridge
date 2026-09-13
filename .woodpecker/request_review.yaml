@@ -1,0 +1,234 @@
+# Re-request review when a new commit lands in an open pull request, then ping
+# the reviewers in Discord.
+#
+# Only reviewers who have already submitted a verdict (APPROVED /
+# CHANGES_REQUESTED) are re-requested — new commits make that verdict stale.
+# Reviewers whose request is still pending are left alone so that every push
+# does not spam them. Drafts are skipped; a PR taken out of draft is picked up
+# on its next commit. Updating the branch from its base branch is skipped too.
+#
+# Everything on the GitHub side goes through GraphQL. REST and GraphQL have
+# separate hourly budgets, and the REST one is already shared with Woodpecker
+# itself — it reads this config with the token of whoever connected the repo,
+# and reports "pipeline definition not found" once that budget runs out.
+#
+# Secrets used (create them on builder.gosh.sh for this repo, and tick the
+# `pull_request` event on each one, otherwise they arrive empty):
+#   REVIEW_GH_TOKEN        — classic PAT, scope `repo` (this repository is
+#                            private, `public_repo` is not enough); its account
+#                            needs Write access to gosh-sh/bridge
+#   DISCORD_BOT_TOKEN      — bot must be in the guild and able to post
+#   DISCORD_CHANNEL_ID     — target channel
+#   DISCORD_REVIEWERS_MAP  — one line: "github-login=discord-id,other=123456789"
+#                            reviewers missing from the map are simply not pinged
+
+when:
+  - event: pull_request
+
+skip_clone: true
+
+steps:
+  request_review:
+    image: maniator/gh
+    environment:
+      GH_TOKEN:
+        from_secret: REVIEW_GH_TOKEN
+      DISCORD_REVIEWERS_MAP:
+        from_secret: DISCORD_REVIEWERS_MAP
+    commands:
+      - |
+        PR="$CI_COMMIT_PULL_REQUEST"
+        REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
+
+        # One query for every input the decision needs, flattened to one value per
+        # line so that no jq binary is required to take it apart afterwards.
+        gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -F pr="$PR" -f query='
+          query($owner: String!, $name: String!, $pr: Int!) {
+            viewer { login }
+            repository(owner: $owner, name: $name) {
+              viewerPermission
+              pullRequest(number: $pr) {
+                id
+                isDraft
+                baseRefName
+                commits(last: 1) { nodes { commit { parents(first: 10) { nodes { oid } } } } }
+                latestOpinionatedReviews(first: 50) { nodes { state author { ... on User { login id } } } }
+                reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { login } } } }
+              }
+            }
+          }' --jq '
+          .data as $d | $d.repository.pullRequest as $pr |
+          [ $d.viewer.login,
+            $d.repository.viewerPermission,
+            ($pr.isDraft | tostring),
+            $pr.id,
+            $pr.baseRefName,
+            ([$pr.commits.nodes[0].commit.parents.nodes[].oid] | join(" ")),
+            ([$pr.latestOpinionatedReviews.nodes[]
+                | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                | select(.author.id != null)
+                | "\(.author.login)=\(.author.id)"] | join(" ")),
+            ([$pr.reviewRequests.nodes[].requestedReviewer.login] | join(" "))
+          ] | .[]' >/tmp/pr.txt
+
+        TOKEN_USER=$(sed -n 1p /tmp/pr.txt)
+        PERMISSION=$(sed -n 2p /tmp/pr.txt)
+        IS_DRAFT=$(sed -n 3p /tmp/pr.txt)
+        PR_ID=$(sed -n 4p /tmp/pr.txt)
+        BASE=$(sed -n 5p /tmp/pr.txt)
+        PARENTS=$(sed -n 6p /tmp/pr.txt)
+        VERDICTS=$(sed -n 7p /tmp/pr.txt)
+        PENDING=$(sed -n 8p /tmp/pr.txt)
+
+        # A token without write access only fails at the mutation, by which point
+        # the log already looks healthy — so state whose token this is up front.
+        echo "PR:    #$PR in $REPO"
+        echo "Token: $TOKEN_USER ($PERMISSION on this repository)"
+
+        if [ "$IS_DRAFT" = "true" ]; then
+          echo "PR #$PR is a draft — nothing to do."
+          exit 0
+        fi
+
+        # Merging the base branch into the PR adds no work to review, so it must
+        # not disturb the reviewers. Detected structurally rather than by commit
+        # message: a merge commit one of whose merged-in parents is already
+        # contained in the base branch, i.e. the base is AHEAD of it.
+        set -- $PARENTS
+        if [ "$#" -gt 1 ]; then
+          shift
+          for OID in "$@"; do
+            STATUS=$(gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" \
+              -F base="refs/heads/$BASE" -F oid="$OID" -f query='
+              query($owner: String!, $name: String!, $base: String!, $oid: String!) {
+                repository(owner: $owner, name: $name) {
+                  ref(qualifiedName: $base) { compare(headRef: $oid) { status } }
+                }
+              }' --jq '.data.repository.ref.compare.status')
+            if [ "$STATUS" = "BEHIND" ] || [ "$STATUS" = "IDENTICAL" ]; then
+              echo "Head commit merges $BASE into the PR branch — reviewers left alone."
+              exit 0
+            fi
+          done
+        fi
+
+        TARGETS=""
+        TARGET_IDS=""
+        for ENTRY in $VERDICTS; do
+          LOGIN=$(echo "$ENTRY" | cut -d '=' -f 1)
+          # -f 2- and not -f 2: node ids are base64 and end in "=" padding.
+          NODE_ID=$(echo "$ENTRY" | cut -d '=' -f 2-)
+          if echo " $PENDING " | grep -q " $LOGIN "; then
+            echo "$LOGIN — request already pending, skipped"
+          else
+            TARGETS="$TARGETS $LOGIN"
+            TARGET_IDS="$TARGET_IDS $NODE_ID"
+          fi
+        done
+
+        if [ -z "$TARGETS" ]; then
+          echo "Nobody to re-request on PR #$PR."
+          exit 0
+        fi
+
+        # union: true adds to the existing requests instead of replacing the set,
+        # so a reviewer someone added by hand is never dropped on the way.
+        USER_IDS=$(printf '"%s",' $TARGET_IDS | sed 's/,$//')
+        echo "Re-requesting review from:$TARGETS"
+        gh api graphql --silent -f query="
+          mutation {
+            requestReviews(input: {pullRequestId: \"$PR_ID\", userIds: [$USER_IDS], union: true}) {
+              clientMutationId
+            }
+          }"
+
+        # GitHub login -> Discord mention, via the CSV map secret. Spaces and a
+        # leading "@" are tolerated in the map: neither can occur in a GitHub
+        # login or a Discord snowflake, and a typo there fails silently.
+        MENTIONS=""
+        for LOGIN in $TARGETS; do
+          ID=$(echo "$DISCORD_REVIEWERS_MAP" | tr ',' '\n' | tr -d ' @' | grep "^$LOGIN=" | head -n 1 | cut -d '=' -f 2)
+          if [ -n "$ID" ]; then
+            MENTIONS="$MENTIONS <@$ID>"
+          else
+            echo "$LOGIN — no entry in DISCORD_REVIEWERS_MAP, not pinged"
+          fi
+        done
+        MENTIONS=$(echo $MENTIONS)
+
+        # Let jq build the payload so that titles and branch names are escaped
+        # properly. The next step only has to POST the file.
+        export MENTIONS
+        export PR
+        gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -F pr="$PR" -f query='
+          query($owner: String!, $name: String!, $pr: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $pr) { url }
+            }
+          }' --jq '.data.repository.pullRequest |
+          {content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end)
+            + "🔁 **Review re-requested** — new commits in PR #" + env.PR + "\n"
+            + .url),
+           allowed_mentions: {parse: ["users"]}}' >discord-payload.json
+
+        cat discord-payload.json
+
+  notify_discord:
+    image: curlimages/curl
+    environment:
+      DISCORD_BOT_TOKEN:
+        from_secret: DISCORD_BOT_TOKEN
+      DISCORD_CHANNEL_ID:
+        from_secret: DISCORD_CHANNEL_ID
+    commands:
+      - |
+        # Before anything else, and on every run: a secret that is not enabled for
+        # the `pull_request` event arrives empty, which otherwise shows up much
+        # later as an unexplained 401. Lengths only — never the values.
+        echo "Channel id: $(printf '%s' "$DISCORD_CHANNEL_ID" | wc -c) chars, bot token: $(printf '%s' "$DISCORD_BOT_TOKEN" | wc -c) chars"
+        case "$DISCORD_CHANNEL_ID" in
+          "") echo "WARNING: DISCORD_CHANNEL_ID is empty — is the pull_request event ticked on the secret?" ;;
+          *[!0-9]*) echo "WARNING: DISCORD_CHANNEL_ID is not a plain number — a channel id looks like 1122334455667788990" ;;
+        esac
+        case "$DISCORD_BOT_TOKEN" in
+          "") echo "WARNING: DISCORD_BOT_TOKEN is empty — is the pull_request event ticked on the secret?" ;;
+          "Bot "*) echo "WARNING: DISCORD_BOT_TOKEN starts with 'Bot ' — the prefix is added by this step, drop it from the secret" ;;
+        esac
+
+        if [ ! -s discord-payload.json ]; then
+          echo "No review was requested — no Discord notification."
+          exit 0
+        fi
+
+        CODE=$(curl -sS -X POST \
+          -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data @discord-payload.json \
+          -o /tmp/discord-response.json -w '%{http_code}' \
+          "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID/messages")
+
+        # Discord explains itself in the body ("Missing Access", "401: Unauthorized",
+        # …), so it must not be discarded — the review has already been re-requested
+        # by the time we get here, and a bare exit code says nothing about why.
+        if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
+          echo "Discord notified (HTTP $CODE)."
+        else
+          echo "Discord refused the message: HTTP $CODE"
+          cat /tmp/discord-response.json
+          echo
+
+          # 403 "Missing Access" (50001) has two indistinguishable causes: the bot
+          # is not in the guild that owns the channel, or it is but cannot see the
+          # channel. Asking Discord who the bot is and where it lives separates them.
+          echo "--- bot identity ---"
+          curl -sS -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -w '\nHTTP %{http_code}\n' https://discord.com/api/v10/users/@me
+          echo "--- guilds the bot is in ---"
+          curl -sS -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -w '\nHTTP %{http_code}\n' https://discord.com/api/v10/users/@me/guilds
+          echo "--- the target channel ---"
+          curl -sS -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -w '\nHTTP %{http_code}\n' "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_ID"
+
+          exit 1
+        fi

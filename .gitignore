@@ -15,7 +15,6 @@ target/
 # deterministic function of the full dependency closure, so the lock must be
 # pinned for the VK to be reproducible. An untracked lock here is exactly what
 # made the original on-chain VK (147efe14…) unbuildable after transitive drift.
-# See docs/deposit_vk_reproducibility.md.
 poseidon-proof/Cargo.lock
 crates/bridge-snark-utils/Cargo.lock
 crates/bridge-relayer-daemon/Cargo.lock
@@ -31,9 +30,14 @@ contracts/ethereum/lib/
 .env.local
 .env.production
 .env.*.local
-.env.shellnet
 .env.sepolia
 .secrets
+
+# Personal editor backups of shellnet env files
+# (.env.shellnet.<name>.bak, .env.shellnet.*.bak.*) are ignored. The tracked
+# shellnet config is a development fixture; production secrets stay external.
+.env.shellnet.*.bak
+.env.shellnet.*.bak.*
 
 # IDE
 .vscode/
@@ -174,12 +178,11 @@ out/
 # Review packs for partners (produced by build_pack.sh; not for git)
 dist/
 
-# Doc / code bundles for partners (zip / tar archives produced on
-# demand by `scripts/build_partner_pack.sh` to ship selected docs +
-# reference sources via messenger; the canonical source lives under
-# docs/ and crates/). Patterns are anchored to the repo root so any
-# future top-level `<topic>_for_<recipient>_*.{zip,tar.gz,sha256}` is
-# auto-ignored.
+# Doc / code bundles for partners (ad-hoc zip / tar archives produced
+# out-of-band to ship selected docs + reference sources via messenger;
+# the canonical source always lives under docs/ and crates/). Patterns
+# are anchored to the repo root so any top-level
+# `<topic>_for_<recipient>_*.{zip,tar.gz,sha256}` is auto-ignored.
 /*_for_*.zip
 /*_for_*.tar.gz
 /*_for_*.sha256
@@ -195,11 +198,9 @@ deployment_addresses.json
 contracts/ethereum/deployment_real.json
 deposit-prover/deposit_proof_output.json
 
-# R15 / M2 bridge-evm-aggregator spike (standalone workspace: target +
-# regenerated KZG SRS + generated Yul/.bin artefacts are local-only).
-# Cargo.lock IS committed — the build:rust:aggregator / test:rust:aggregator
-# CI jobs run `--locked`, which requires a checked-in lockfile (same as the
-# tracked crates/an-bridge-prover/Cargo.lock).
+# R15 / M2 bridge-evm-aggregator standalone workspace. Its Cargo.lock is
+# committed because `aggregate-proof` is a deployed binary; only generated
+# target/SRS/output artefacts remain local.
 crates/bridge-evm-aggregator/target/
 crates/bridge-evm-aggregator/params/
 crates/bridge-evm-aggregator/out/
@@ -215,21 +216,14 @@ deposit-prover/Cargo.toml.pse-backup
 deposit-prover/deposit_public_inputs.bin
 deposit-prover/deposit_eth_circuit_params.json
 deposit-prover/src/bin/an_rlc_verify.rs
-docs/user/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
-docs/user/USER_GUIDE.pdf
-docs/user/USER_GUIDE.md.bak.*
+docs/**/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
+docs/**/USER_GUIDE.pdf
+docs/**/USER_GUIDE.md.bak.*
 
 # Partner handoff / outreach messages — local-only drafts, not for commit.
 docs/partner_handoff_*.md
 
 .temp/*
-
-# Serena MCP tool project metadata (local tooling state, regenerated).
-.serena/
-
-# Local one-off circuit/review analysis notes (not repo content; the fixes they
-# drove are landed in deposit-prover). Keep on disk, out of git.
-chain_id_deposit_circuit_v2_analysis.md
 
 # Runtime state + debug artefacts emitted by the relayer / prover binaries.
 # Never commit — the .stale_* variants are ad-hoc backups from crash-recovery
@@ -238,8 +232,58 @@ chain_id_deposit_circuit_v2_analysis.md
 # `proofs/` dir is halo2 proof output. Mirrors the existing
 # `crates/bridge-snark-utils/proofs/` rule.
 /proofs/
-crates/an-bridge-prover/relayer-state.json
-crates/an-bridge-prover/relayer-state.json.stale_*
-crates/an-bridge-prover/state.stale_*/
-crates/an-bridge-prover/submissions/
-crates/an-bridge-prover/diag/
+crates/bridge-prover-libraries/relayer-state.json
+crates/bridge-prover-libraries/relayer-state.json.stale_*
+crates/bridge-prover-libraries/state.stale_*/
+crates/bridge-prover-libraries/submissions/
+crates/bridge-prover-libraries/diag/
+
+# Prover SRS / vk / pk artefacts — ~40 GB total, regenerated on demand
+# by keygen (~7 min per circuit). Shared between the bundle daemon and
+# the withdraw-e2e CLI (`BRIDGE_PARAMS_DIR` / `--params-dir`). Mirrors
+# `crates/bridge-snark-utils/params/*.srs` and
+# `crates/bridge-evm-aggregator/params/`.
+crates/bridge-prover-libraries/params/
+
+# Per-mode config dirs (L1_config/, L2_config/) — the runtime subdirs
+# hold live prover state, proofs, and scratch witnesses, never commit.
+# The `env` files and `shellnet.common` are tracked development fixtures.
+# Production runtime envs and keys live outside the repository.
+crates/bridge-prover-libraries/L1_config/relayer-state.json*
+crates/bridge-prover-libraries/L1_config/state/
+crates/bridge-prover-libraries/L1_config/state.pre_deploy_*/
+crates/bridge-prover-libraries/L1_config/proofs/
+crates/bridge-prover-libraries/L1_config/work_dir/
+crates/bridge-prover-libraries/L2_config/relayer-state.json*
+crates/bridge-prover-libraries/L2_config/state/
+crates/bridge-prover-libraries/L2_config/state.pre_deploy_*/
+crates/bridge-prover-libraries/L2_config/proofs/
+crates/bridge-prover-libraries/L2_config/work_dir/
+
+# CLI smoke-test runtime dirs (created by scripts/local_smoke.sh,
+# scripts/live_smoke.sh, scripts/deploy_msig_and_mint.{sh,py} when
+# invoked from the CLI crate root). Contain multisig keys.json,
+# per-withdrawal idempotency state, aggregate-proof scratch, and logs.
+crates/ackinacki-bridge/work_dir/
+crates/ackinacki-bridge/withdraw-state/
+
+# Per-user output artifacts from scripts/deploy_msig_and_mint.{sh,py}
+# — the eval-able env line + stdout/stderr captures. Contain absolute
+# local paths and per-run multisig addresses; not source-of-truth.
+crates/ackinacki-bridge/deploy_msig*.env
+crates/ackinacki-bridge/deploy_msig*.log
+
+# Aggregator scratch dir if a user runs the CLI without setting
+# BRIDGE_SNARK_DIR (falls back to args.rs default `./shplonk-snark`).
+# The profile files point at ./work_dir/shplonk-snark instead, but this
+# catches the direct-invocation case.
+crates/ackinacki-bridge/shplonk-snark/
+
+# tvm-cli is platform-specific; each operator supplies their own on PATH
+# or via CLI_NAME. A committed binary silently shadows the working one,
+# because deploy_msig_and_mint.py prepends this directory to PATH.
+crates/bridge-prover-libraries/python/bin/tvm-cli
+
+# tvm-cli rewrites this file with a machine-local absolute path on every
+# run, so a committed copy makes every operator's tree dirty.
+crates/ackinacki-bridge/tvm-cli.conf.json

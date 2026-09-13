@@ -1,0 +1,57 @@
+[package]
+name = "bridge-prover-lib"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+halo2-base = { workspace = true }
+halo2-ecc = { workspace = true }
+attestation-bls-checker-circuit = { workspace = true }
+historical-layer-hashes-movement-checker-circuit = { workspace = true }
+bridge-poseidon = { workspace = true }
+bridge-test-data-gen = { workspace = true }
+bridge-event-prove-circuit = { workspace = true }
+gosh-bls-verification = { workspace = true }
+gosh-dense-balanced-tree = { workspace = true }
+gosh-sha256-chip = { workspace = true }
+gosh-zk-snark-halo2-utils = { workspace = true }
+halo2_kzg_srs = { workspace = true }
+halo2_curves = { workspace = true }
+pse-poseidon = { workspace = true }
+num-bigint = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+bridge-gql-fetcher = { workspace = true }
+
+# Atomic key writes. A partial event_pk.bin reads as a cache hit and then
+# fails at load time, on every run, forever — the predicate that would
+# trigger regeneration is the one being fooled.
+#
+# `3.10`, not `3`: `write_atomic` needs `Builder::permissions` to keep
+# today's file modes, and that arrived in 3.10.0, not 3.9 —
+# `tempfile-3.27.0/CHANGELOG.md:134` lists it under `## 3.10.0`, and 3.9.0
+# above it carries only the windows-sys and rustix bumps. A `"3.9"` floor
+# would admit 3.9.0, where the API does not exist, which is precisely the
+# `cargo update -p tempfile --precise` this line is here to stop. The lock
+# already resolves 3.27, so it changes nothing today.
+tempfile = "3.10"
+
+# `flock` for the cross-process keygen lock. One syscall, so binding it
+# beats hand-declaring the constants — `LOCK_EX`/`LOCK_NB` and the errno
+# for "already held" are platform values, not numbers to copy. Already in
+# this workspace's lock file (the CLI depends on it directly for
+# `statvfs`), so this costs nothing in the graph.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

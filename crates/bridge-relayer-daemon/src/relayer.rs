@@ -157,7 +157,9 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
 
         // Check B — chain monotonicity vs last observed snapshot.
         if let Some(remembered) = &self.state.last_observed_on_chain {
-            if let Err(drift) = check_chain_monotonicity(remembered, &on_chain, MAX_FORWARD_GAP) {
+            if let Err(drift) =
+                check_chain_monotonicity(remembered, &on_chain, MAX_FORWARD_GAP)
+            {
                 error!(?drift, "chain monotonicity drift — halting");
                 return Err(RelayerError::other(format!("chain drift: {drift}")));
             }
@@ -210,10 +212,8 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         new_state,
                         tx_hash,
                     });
-                },
-                BkSetUpdateSubmitOutcome::Reverted {
-                    reason,
-                } => {
+                }
+                BkSetUpdateSubmitOutcome::Reverted { reason } => {
                     // Keep pending so next tick retries the same update.
                     self.state.record_bk_update_attempt(upd.block_seq_no);
                     self.persist_state()?;
@@ -235,7 +235,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         seq_no: upd.block_seq_no,
                         reason,
                     });
-                },
+                }
             }
         }
 
@@ -258,7 +258,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                 return Ok(TickOutcome::NotYetAvailable {
                     target_seq_no: target,
                 });
-            },
+            }
         };
 
         // The source may fall forward to the next available key-block proof
@@ -285,8 +285,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             return Ok(TickOutcome::BridgeReverted {
                 target_seq_no: target,
                 reason: format!(
-                    "off-chain prev_max_level_layer_hash {:#x} != on-chain \
-                     expectedPrevAnchor({})={:#x}",
+                    "off-chain prev_max_level_layer_hash {:#x} != on-chain expectedPrevAnchor({})={:#x}",
                     block.prev_max_level_layer_hash, block.num_layers, chain_anchor
                 ),
             });
@@ -326,10 +325,8 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                     new_state,
                     tx_hash,
                 })
-            },
-            SubmitOutcome::Reverted {
-                reason,
-            } => {
+            }
+            SubmitOutcome::Reverted { reason } => {
                 self.state.record_attempt(target);
                 self.persist_state()?;
                 warn!(
@@ -349,7 +346,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                     target_seq_no: target,
                     reason,
                 })
-            },
+            }
         }
     }
 
@@ -362,11 +359,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             return Ok(());
         };
         if let Err(drift) = check_history_consistency(&expected, actual) {
-            error!(
-                seq_no,
-                ?drift,
-                "contract/driver global-history-data drift — halting"
-            );
+            error!(seq_no, ?drift, "contract/driver global-history-data drift — halting");
             return Err(RelayerError::other(format!("drift: {drift}")));
         }
         Ok(())
@@ -482,7 +475,7 @@ mod tests {
                 } => {
                     assert_eq!(seq_no, seq);
                     assert_eq!(new_state.last_seen_block_seq_no, seq);
-                },
+                }
                 other => panic!("expected Verified at seq {seq}, got {other:?}"),
             }
         }
@@ -507,9 +500,7 @@ mod tests {
         );
 
         match relayer.tick().await.unwrap() {
-            TickOutcome::NotYetAvailable {
-                target_seq_no,
-            } => assert_eq!(target_seq_no, 1),
+            TickOutcome::NotYetAvailable { target_seq_no } => assert_eq!(target_seq_no, 1),
             other => panic!("expected NotYetAvailable, got {other:?}"),
         }
         assert_eq!(bridge.accepted_count(), 0);
@@ -519,9 +510,7 @@ mod tests {
 
         source.insert(block(1, U256::ZERO));
         match relayer.tick().await.unwrap() {
-            TickOutcome::Verified {
-                seq_no, ..
-            } => assert_eq!(seq_no, 1),
+            TickOutcome::Verified { seq_no, .. } => assert_eq!(seq_no, 1),
             other => panic!("expected Verified, got {other:?}"),
         }
         assert_eq!(relayer.state().attempts_since_progress, 0);
@@ -553,10 +542,7 @@ mod tests {
 
         assert!(matches!(
             relayer.tick().await.unwrap(),
-            TickOutcome::Verified {
-                seq_no: 1,
-                ..
-            }
+            TickOutcome::Verified { seq_no: 1, .. }
         ));
         match relayer.tick().await.unwrap() {
             TickOutcome::BridgeReverted {
@@ -568,7 +554,7 @@ mod tests {
                     reason.contains("AttestationProofRejected")
                         || reason.contains("LayerHashesProofRejected")
                 );
-            },
+            }
             other => panic!("expected revert, got {other:?}"),
         }
         assert_eq!(relayer.state().last_processed_seqno, Some(1));
@@ -597,27 +583,27 @@ mod tests {
 
         {
             let mut r = make_relayer(source.clone(), bridge.clone(), state_path.clone());
-            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
-                seq_no: 1,
-                ..
-            }));
-            assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
-                seq_no: 2,
-                ..
-            }));
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::Verified { seq_no: 1, .. }
+            ));
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::Verified { seq_no: 2, .. }
+            ));
         }
 
         let mut r2 = make_relayer(source, bridge.clone(), state_path);
         assert_eq!(r2.state().last_processed_seqno, Some(2));
 
-        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Verified {
-            seq_no: 3,
-            ..
-        }));
-        assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Verified {
-            seq_no: 4,
-            ..
-        }));
+        assert!(matches!(
+            r2.tick().await.unwrap(),
+            TickOutcome::Verified { seq_no: 3, .. }
+        ));
+        assert!(matches!(
+            r2.tick().await.unwrap(),
+            TickOutcome::Verified { seq_no: 4, .. }
+        ));
 
         assert_eq!(bridge.accepted_count(), 4);
         assert_eq!(r2.state().last_processed_seqno, Some(4));
@@ -642,10 +628,10 @@ mod tests {
 
         let history = r
             .run_loop(10, |outcome| {
-                matches!(outcome, TickOutcome::Verified {
-                    seq_no: 3,
-                    ..
-                })
+                matches!(
+                    outcome,
+                    TickOutcome::Verified { seq_no: 3, .. }
+                )
             })
             .await
             .unwrap();

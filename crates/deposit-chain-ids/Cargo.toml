@@ -1,6 +1,6 @@
 [package]
 name = "deposit-chain-ids"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Single source of truth for the EVM chains the deposit bridge accepts"
 license = "Apache-2.0"

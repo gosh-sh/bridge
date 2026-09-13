@@ -33,7 +33,7 @@ use halo2_base::halo2_proofs::poly::commitment::Params;
 #[derive(Parser, Debug)]
 #[command(name = "export-synthetic-primary-snark")]
 struct Args {
-    #[arg(long, default_value = "../an-bridge-prover/params")]
+    #[arg(long, default_value = "../bridge-prover-libraries/params")]
     params_dir: String,
     #[arg(long, default_value = "/tmp/hermez_audit")]
     snark_dir: String,

@@ -7,19 +7,20 @@
 //!   contract binding. Reads `storedLastSeenBlockSeqNo` /
 //!   `storedBkSetCommitment` (mutable) and `expectedPrevAnchor(numLayers)`
 //!   (per-layer anchor pick) from chain, plus the immutable
-//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits `verifyBlock(...)`
-//!   transactions. `storedPrevMaxLevelLayerHash` is the storage v2.0 immutable
-//!   genesis seed (2026-08-04) — never mutated post-deploy; use
-//!   `expectedPrevAnchor` for the actual chain anchor going forward.
+//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits
+//!   `verifyBlock(...)` transactions. `storedPrevMaxLevelLayerHash` is
+//!   the storage v2.0 immutable genesis seed (2026-08-04) — never
+//!   mutated post-deploy; use `expectedPrevAnchor` for the actual chain
+//!   anchor going forward.
 //! - [`MockBridgeClient`] — a deterministic in-memory mirror of the contract's
 //!   state machine, exposed to unit tests so we can drive the relayer through
 //!   5+ blocks in microseconds without spawning Anvil. The mock reproduces
 //!   *exactly* the cheap pre-flight checks the real contract performs
 //!   (numLayers range, tail zero, BK-set match, monotonic seqNo, anchor match)
 //!   — so any consumer that passes the mock will also pass the real bridge
-//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock tracks
-//!   per-layer window heads and implements `expectedPrevAnchor` with the same
-//!   `min(numLayers, highestActiveLayer)` pick used on-chain.
+//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock
+//!   tracks per-layer window heads and implements `expectedPrevAnchor` with
+//!   the same `min(numLayers, highestActiveLayer)` pick used on-chain.
 //!
 //! ZK verification itself is *not* mocked here in the way the Solidity
 //! `MockPrimaryVerifier` etc. mocks do; the [`MockBridgeClient`] takes
@@ -49,6 +50,11 @@ use alloy::{
     providers::Provider,
 };
 use async_trait::async_trait;
+// `EthBridgeContractState` and `HistoryWindow` are the alloy-neutral shape shared
+// with `bridge_prover_lib::bridge_state::BridgeState::from_contract` — the
+// relayer's `read_full_state` populates them (with BE→LE reversal on all
+// `uint256` scalars) so consumers see a single unified byte order.
+use bridge_prover_lib::bridge_state::{EthBridgeContractState, HistoryWindow};
 
 use crate::{
     error::RelayerError,
@@ -79,6 +85,16 @@ pub struct BridgeOnChainState {
     #[serde(default)]
     pub last_bk_set_update_seq_no: u64,
 }
+
+/// Width of the on-chain per-layer rolling window
+/// (`HISTORY_PROOF_WINDOW` in `AckiNackiBridge.sol`).
+/// Kept as a const here so the resurrect path fails loudly at compile
+/// time if the contract-side constant is ever changed.
+pub const HISTORY_PROOF_WINDOW: usize = 128;
+
+// `MAX_LAYER_HASHES` (layer count = 10) is defined in `crate::types` and
+// used here via the `use` at the top of the file — kept there as the
+// single source of truth.
 
 /// Outcome of `submit_block`. The relayer interprets this to decide
 /// whether to advance state, retry, or skip.
@@ -406,6 +422,25 @@ mod sol_bindings {
             /// array. Empty windows return zero.
             function getLatestPerLayer() external view returns (uint256[10] memory);
 
+            /// Full contents of `_layerWindows[L]` — data + heights +
+            /// dataLen + writeCursor + lastHeight. Off-chain-only reader
+            /// used by the relayer daemon to reconstruct its BridgeState
+            /// mirror during Case 6 chain-resurrect (see runbook).
+            /// Added 2026-08.
+            ///
+            /// `HISTORY_PROOF_WINDOW` is fixed at 128 in `AckiNackiBridge.sol`;
+            /// the array widths below are compile-time constants of the
+            /// binding.
+            struct HistoryWindow {
+                uint256[128] data;
+                uint64[128] heights;
+                uint16 dataLen;
+                uint16 writeCursor;
+                uint64 lastHeight;
+            }
+
+            function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory);
+
             struct WithdrawalPublicInputs {
                 uint256 tokenId;
                 uint256 amount;
@@ -426,6 +461,14 @@ mod sol_bindings {
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
 
+            /// Read-only getters the end-user CLI preflights the deploy
+            /// with, before the irreversible Acki Nacki burn. All four are
+            /// plain public state / immutables on `AckiNackiBridge`.
+            function treasuryBalance() external view returns (uint256);
+            function bridgeWithdrawalVerifier() external view returns (address);
+            function bridgeWithdrawalDappFr() external view returns (uint256);
+            function bridgeWithdrawalAccFr() external view returns (uint256);
+
             /// Post-submit verification: is `anchor` present in layer `L`'s
             /// rolling `_layerWindows[L]` buffer? Called after `verifyBlock`
             /// to confirm the layer-hash append side-effect actually landed.
@@ -437,6 +480,23 @@ mod sol_bindings {
                 uint8 finType,
                 uint8 numLayers
             );
+        }
+
+        /// The two links between `bridgeWithdrawalVerifier` and the
+        /// deployed Yul verifier. Declared here so the CLI can walk
+        /// `adapter → shplonkVerifier() → yulVerifier()` the same way
+        /// `deploy/shellnet-l2/scripts/preflight.sh:28` does: a non-zero
+        /// adapter address proves nothing on its own.
+        #[sol(rpc)]
+        #[allow(missing_docs)]
+        contract ShplonkAdapter {
+            function shplonkVerifier() external view returns (address);
+        }
+
+        #[sol(rpc)]
+        #[allow(missing_docs)]
+        contract ShplonkWrapper {
+            function yulVerifier() external view returns (address);
         }
     }
 }
@@ -613,7 +673,7 @@ where
                         },
                         tx_hash: Some(receipt.transaction_hash()),
                     })
-                },
+                }
                 Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
                     reason: format!("tx confirmation error: {e}"),
                 }),
@@ -630,6 +690,59 @@ where
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    /// `uint256 public treasuryBalance` (`AckiNackiBridge.sol:98`).
+    pub async fn treasury_balance(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .treasuryBalance()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`
+    /// (`AckiNackiBridge.sol:208`). Zero disables withdrawals entirely —
+    /// `withdrawByProof` reverts `WithdrawByProofDisabled` (`:1160`).
+    pub async fn withdrawal_verifier(&self) -> Result<Address, RelayerError> {
+        self.contract
+            .bridgeWithdrawalVerifier()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// The `(dappFr, accFr)` pair the deploy was pinned to
+    /// (`AckiNackiBridge.sol:216-219`). A proof whose public inputs [6] and
+    /// [7] differ reverts `WithdrawIdentityMismatch` before verification
+    /// (`:1164`).
+    pub async fn withdrawal_identity(&self) -> Result<(U256, U256), RelayerError> {
+        let dapp = self
+            .contract
+            .bridgeWithdrawalDappFr()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let acc = self
+            .contract
+            .bridgeWithdrawalAccFr()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok((dapp, acc))
+    }
+
+    /// Walk `adapter → shplonkVerifier() → yulVerifier()`, returning both
+    /// links. The provider is reused, so this costs two `eth_call`s.
+    pub async fn shplonk_stack(
+        &self,
+        adapter: Address,
+    ) -> Result<(Address, Address), RelayerError> {
+        let a = sol_bindings::ShplonkAdapter::new(adapter, self.contract.provider());
+        let wrapper = a.shplonkVerifier().call().await.map_err(map_contract_err)?;
+        let w = sol_bindings::ShplonkWrapper::new(wrapper, self.contract.provider());
+        let yul = w.yulVerifier().call().await.map_err(map_contract_err)?;
+        Ok((wrapper, yul))
     }
 
     /// Read the four top-level anchor slots pinned to a specific block.
@@ -676,6 +789,100 @@ where
             last_bk_set_update_seq_no: last_bk,
         })
     }
+
+    /// Read every field the daemon needs to reconstruct `BridgeState`
+    /// from an already-advanced contract (Case 6 chain-resurrect).
+    ///
+    /// Issues 4 scalar view calls + 10 `getLayerWindow` calls. Each
+    /// window returns ~5 KB, so the total off-chain cost is ~50 KB of
+    /// RPC response — well under any provider's per-call cap, but the
+    /// full read is worth pinning to a single block via a follow-up
+    /// `read_full_state_at(BlockId)` if two consecutive `verifyBlock`
+    /// receipts could interleave (not the case at daemon startup, hence
+    /// the "latest block" call here).
+    ///
+    /// Consistency: no lock across calls, so a `verifyBlock` landing
+    /// mid-read could cause the layer windows to be one block ahead of
+    /// the scalar seq_no. That's fine for resurrect because we exit
+    /// this call and let the normal startup drift routing re-observe on
+    /// the next cycle — a one-block skew triggers an immediate re-read,
+    /// not a mis-seed.
+    pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
+        let last = self
+            .contract
+            .storedLastSeenBlockSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let bk = self
+            .contract
+            .storedBkSetCommitment()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let last_bk = self
+            .contract
+            .storedLastBkSetUpdateSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let anchor = self
+            .contract
+            .storedPrevMaxLevelLayerHash()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+
+        // Read all 10 layer windows.
+        // `HistoryWindow` on the sol! side has fixed-size arrays that
+        // alloy exposes as `FixedBytes<32>[128]` / `u64[128]`.
+        //
+        // Endianness: on-chain `uint256` slots come out BE via
+        // `U256::to_be_bytes`; `BridgeState.layer_windows` stores LE
+        // (`Fr::to_repr()`). We reverse each slot here so the returned
+        // `EthBridgeContractState` is byte-for-byte comparable to a local
+        // `BridgeState` snapshot. Same convention applies to the two scalar
+        // `uint256` fields (`bk_set_commitment`, `prev_max_level_layer_hash`).
+        let mut windows: Vec<HistoryWindow> = Vec::with_capacity(MAX_LAYER_HASHES);
+        for layer in 1..=MAX_LAYER_HASHES as u8 {
+            let w = self
+                .contract
+                .getLayerWindow(layer)
+                .call()
+                .await
+                .map_err(map_contract_err)?;
+            let data: Vec<[u8; 32]> = w
+                .data
+                .iter()
+                .map(|u| {
+                    let mut le = u.to_be_bytes::<32>();
+                    le.reverse();
+                    le
+                })
+                .collect();
+            let heights: Vec<u64> = w.heights.to_vec();
+            // Widen on-chain `uint16` cursors to `usize` for the shared
+            // `HistoryWindow` shape. `from_contract` validates bounds.
+            windows.push(HistoryWindow {
+                data,
+                heights,
+                data_len: w.dataLen as usize,
+                write_cursor: w.writeCursor as usize,
+                last_height: w.lastHeight,
+            });
+        }
+        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] = windows
+            .try_into()
+            .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
+
+        Ok(EthBridgeContractState {
+            last_seen_block_seq_no: last,
+            bk_set_commitment: bk.to_le_bytes::<32>(),
+            last_bk_set_update_seq_no: last_bk,
+            genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
+            layer_windows,
+        })
+    }
 }
 
 /// Outcome of [`EthBridgeClient::submit_withdraw`].
@@ -692,9 +899,7 @@ pub enum BkSetUpdateSubmitOutcome {
         new_state: BridgeOnChainState,
         tx_hash: Option<B256>,
     },
-    Reverted {
-        reason: String,
-    },
+    Reverted { reason: String },
 }
 
 fn to_sol_withdrawal_pub(
@@ -804,9 +1009,7 @@ where
                         "dumped verifyBlock submission to {}",
                         path.display()
                     ),
-                    Err(e) => {
-                        tracing::warn!("dump-submissions: write {} failed: {e}", path.display())
-                    },
+                    Err(e) => tracing::warn!("dump-submissions: write {} failed: {e}", path.display()),
                 }
             }
         }
@@ -896,8 +1099,7 @@ where
         if post_anchor != expected_top {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted \
-                     block={}",
+                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted block={}",
                     block.num_layers, post_anchor, expected_top
                 ),
             });
@@ -1036,7 +1238,10 @@ mod tests {
             MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
         bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
         let anchor = bridge.expected_prev_anchor(1).await.unwrap();
-        let outcome = bridge.submit_block(&block(1, anchor)).await.unwrap();
+        let outcome = bridge
+            .submit_block(&block(1, anchor))
+            .await
+            .unwrap();
         match outcome {
             SubmitOutcome::Reverted {
                 reason,

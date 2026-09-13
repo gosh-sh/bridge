@@ -1,0 +1,61 @@
+# bridge_config.local — local devnet profile for `ackinacki-bridge`.
+#
+# WHAT IT IS
+# ----------
+# Per-network profile file. See `bridge_config.shellnet` for the schema
+# doc-comment. This file targets a local devnet brought up by
+# `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+# (or the docker-compose stack under acki-nacki/).
+#
+# HOW TO CONSUME
+# --------------
+#   cd crates/ackinacki-bridge
+#   export BURNER_PRIVATE_KEY=0x…
+#   export BRIDGE_CONFIG=./config/bridge_config.local
+#   # after your local `deploy_bridge_bundle.sh` writes L1_config/env,
+#   # copy the BRIDGE_ADDRESS from that file into this one — or point
+#   # BRIDGE_CONFIG at the relayer-style env directly.
+#   ../bridge-prover-libraries/target/release/ackinacki-bridge withdraw …
+
+# --- Ethereum side (local Anvil / Hardhat) ------------------------------------
+RPC_URL=http://127.0.0.1:8545
+
+# --- Acki Nacki side (local docker-compose devnet) ----------------------------
+NETWORK=http://127.0.0.1:80
+BRIDGE_GQL_ENDPOINT=http://localhost/graphql
+
+# On-chain USDCBridge account id — same palindromic `1a1a…1a1a` used by
+# the local generate_zerostate config. Override if your devnet uses a
+# different USDCBridge account.
+USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
+
+# Bridge-owner key for `USDCBridge.mintAndSend`. Local devnet: the
+# script materializes this from the running node's config on first
+# invocation, so the bundled placeholder is fine.
+USDC_BRIDGE_KEY_PATH=../bridge-prover-libraries/python/contracts/USDCBridge.keys.json
+
+# --- Anchor selection ---------------------------------------------------------
+# Local devnet defaults to L1 (fast-lane, ~5.7 min stride) unless you
+# specifically want to test the L2 path. --i-know-the-wait not required
+# for L1.
+BRIDGE_ANCHOR_LAYER=1
+BRIDGE_I_KNOW_THE_WAIT=false
+
+# --- local dirs (shared install layout with shellnet profile) -----------------
+BRIDGE_PARAMS_DIR=../bridge-prover-libraries/params
+BRIDGE_PK_CACHE_DIR=../bridge-prover-libraries/params/pk_cache
+BRIDGE_WORK_DIR=./work_dir
+BRIDGE_SNARK_DIR=./work_dir/shplonk-snark
+BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state
+
+# --- SHPLONK aggregation (mandatory) ------------------------------------------
+BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
+
+# --- Deploy target ------------------------------------------------------------
+# NO DEFAULT — a local devnet redeploys the bridge on every run. Fill
+# this in from `crates/bridge-prover-libraries/L1_config/env` (or
+# L2_config/env) after `deploy_bridge_bundle.sh` completes. Leaving it
+# commented forces a clean "missing required argument BRIDGE_ADDRESS"
+# refusal instead of a silent submit against the wrong bridge.
+# BRIDGE_ADDRESS=0x…

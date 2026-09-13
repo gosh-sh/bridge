@@ -63,7 +63,7 @@ pub struct ReceiptProof {
 ///
 /// Wire format is the typed-tx blob as stored in the transactions trie
 /// (`0x02 || RLP(eip1559_fields)` for EIP-1559). Used by Track 2 of
-/// `docs/bridge_deposit_chain_binding_fix_proposal_2026_07_20.md`.
+/// the proven `chainId` public input.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransactionProof {
     /// Typed-tx wire bytes (MPT leaf value)

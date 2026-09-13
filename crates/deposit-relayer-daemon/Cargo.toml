@@ -1,6 +1,6 @@
 [package]
 name = "deposit-relayer-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Relayer for the EVM→Acki Nacki deposit bridge: listens for `Deposit` events on Ethereum, generates the AN-consumable Halo2 proof triple, and submits it to the AN `TokenBridge.finalizeDeposit` entry point."
 
@@ -34,7 +34,7 @@ fs2 = "0.4"
 acki-nacki-interface = { path = "../acki-nacki-interface", features = ["tvm-sdk"] }
 # Deposit-source allowlist, shared verbatim with `deposit-prover`.
 deposit-chain-ids = { path = "../deposit-chain-ids" }
-tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.0.an", default-features = false, features = [
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",
 ] }

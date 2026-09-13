@@ -1,0 +1,47 @@
+# Link checker configuration. Run by the `links` step of
+# `.woodpecker/secrets_scan.yaml`.
+#
+# The point is a public repository whose documentation does not send readers
+# into 404s. It is not a style gate: a link that resolves is a fact about the
+# world, and the check either finds one or does not.
+
+# GET, not HEAD: object storage and several APIs answer HEAD with 403 or 405
+# while serving the file perfectly well, and a checker that believes them
+# reports noise.
+method = "get"
+
+# 429 is rate limiting, not a dead link. 403 is deliberately NOT accepted —
+# that is exactly how a bucket that has closed public access answers, which is
+# how the ceremony download in this repository came to be broken without
+# anyone noticing.
+accept = ["200..=204", "206", "429"]
+
+max_concurrency = 8
+timeout = 20
+max_retries = 2
+retry_wait_time = 2
+
+# Anything not maintained, not reachable, or not a real address.
+exclude_path = [
+  "docs/archive",      # staged for deletion, deliberately not maintained
+  # Workspace member symlinks: crates/bridge-prover-libraries/{ackinacki-bridge,
+  # bridge-relayer-daemon} point back at ../. Walking them shows every document
+  # a second time one directory deeper, where its relative links resolve to
+  # paths that do not exist — twelve phantom errors about files that are fine.
+  "crates/bridge-prover-libraries/ackinacki-bridge",
+  "crates/bridge-prover-libraries/bridge-relayer-daemon",
+  "target",
+  "params",
+]
+
+exclude = [
+  # Loopback and placeholder hosts from examples and env templates.
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+  "^https?://0\\.0\\.0\\.0",
+  "^https?://bm\\d+:",
+  "^https?://<",
+  "^https?://\\$",
+  # GraphQL endpoints answer a bare GET with 400/500 by design.
+  "/graphql$",
+]

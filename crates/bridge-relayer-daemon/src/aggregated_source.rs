@@ -22,18 +22,18 @@
 //! graph resolves halo2-base to axiom's crate, which cannot coexist in one
 //! build unit with the gosh fork the daemon links).
 //!
-//! Wiring. [`AggregatedBlockSource`] wraps an existing
-//! [`Arc<LiveBlockSource>`]:
+//! Wiring. [`AggregatedBlockSource`] wraps an existing [`Arc<LiveBlockSource>`]:
 //!
 //! - `fetch(target)` — delegate to the inner [`BlockSource::fetch`]. If a
-//!   bundle came back, [`peek_pending_bundle`] the raw [`BundleProofArtifacts`]
-//!   (source of the Poseidon proof bytes + the public-input fields the
-//!   shape-preserving [`AnBlockData::from`] conversion drops); run the
-//!   wrap+aggregate pipeline for the attestation proof and again for the layer
-//!   proof; splice the resulting calldata into `AnBlockData.attestation_proof`
-//!   / `AnBlockData.layer_hashes_proof`. Ack semantics are unchanged — the
-//!   inner [`LiveBlockSource`] retains the pending [`BundleProofArtifacts`] and
-//!   clears it only when [`ack_last_bundle`] fires after the ETH tx.
+//!   bundle came back, [`peek_pending_bundle`] the raw
+//!   [`BundleProofArtifacts`] (source of the Poseidon proof bytes + the
+//!   public-input fields the shape-preserving [`AnBlockData::from`]
+//!   conversion drops); run the wrap+aggregate pipeline for the attestation
+//!   proof and again for the layer proof; splice the resulting calldata
+//!   into `AnBlockData.attestation_proof` / `AnBlockData.layer_hashes_proof`.
+//!   Ack semantics are unchanged — the inner [`LiveBlockSource`] retains
+//!   the pending [`BundleProofArtifacts`] and clears it only when
+//!   [`ack_last_bundle`] fires after the ETH tx.
 //!
 //! - `fetch_bk_update(target)` — same shape, minus C2: BK-set rotations only
 //!   consume an attestation proof (Solidity `applyBkSetUpdate`).
@@ -197,7 +197,9 @@ where
         self.inner.ack_last_bundle(seq_no).await
     }
 
-    async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+    async fn driver_snapshot(
+        &self,
+    ) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
         self.inner.driver_snapshot().await
     }
 }
@@ -209,7 +211,10 @@ where
     W: SnarkWrapper + 'static,
     A: ProofAggregator + 'static,
 {
-    async fn fetch_bk_update(&self, target: u64) -> Result<Option<BkSetUpdateData>, RelayerError> {
+    async fn fetch_bk_update(
+        &self,
+        target: u64,
+    ) -> Result<Option<BkSetUpdateData>, RelayerError> {
         let Some(mut upd) = self.inner.fetch_bk_update(target).await? else {
             return Ok(None);
         };
@@ -272,24 +277,20 @@ mod tests {
     //! itself, the `LiveBlockSource` GQL/driver plumbing (covered by
     //! prover-lib integration tests), and end-to-end Solidity calldata
     //! acceptance (covered by anvil harness).
-    use std::{
-        collections::HashMap,
-        path::{Path, PathBuf},
-        sync::Mutex,
-    };
-
+    use super::*;
+    use crate::aggregator::{MockAggregator, MockSnarkWrapper, ProofAggregator};
+    use crate::types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES};
     use alloy::primitives::{Bytes, U256};
     use bridge_prover_lib::{
         bridge_state::BridgeState,
-        live_driver::{BkUpdateProofArtifacts, BundleFinalizationType, BundleProofArtifacts},
+        live_driver::{
+            BkUpdateProofArtifacts, BundleFinalizationType, BundleProofArtifacts,
+        },
         transcript::TranscriptKind,
     };
-
-    use super::*;
-    use crate::{
-        aggregator::{MockAggregator, MockSnarkWrapper, ProofAggregator},
-        types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES},
-    };
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     /// Records `aggregate` invocations so tests can assert the pipeline
     /// received the expected `(verifier_name, snark_path)` after passing
@@ -426,7 +427,7 @@ mod tests {
             transcript_kind: TranscriptKind::Blake2b,
             attestation_proof: vec![],
             layer_hashes_proof: vec![],
-            primary_proof_gen_ms: 0,
+            attestation_proof_gen_ms: 0,
             layer_proof_gen_ms: 0,
             state_layer_hashes: vec![],
         }
@@ -465,7 +466,7 @@ mod tests {
             transcript_kind: TranscriptKind::Blake2b,
             attestation_proof: vec![],
             new_pubkeys: HashMap::new(),
-            primary_proof_gen_ms: 0,
+            attestation_proof_gen_ms: 0,
         }
     }
 
@@ -511,11 +512,7 @@ mod tests {
         );
         let src = make_aggregated(Arc::clone(&stub));
 
-        let out = src
-            .fetch(100)
-            .await
-            .unwrap()
-            .expect("fetch must return Some");
+        let out = src.fetch(100).await.unwrap().expect("fetch must return Some");
 
         // MockAggregator returns 3616 bytes; sentinel proofs were 8 bytes.
         assert_eq!(out.attestation_proof.len(), 3616);

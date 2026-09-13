@@ -9,8 +9,10 @@ contract ShplonkSpikeOnChainTest is Test {
     address public verifier;
     bytes public calldata_;
 
-    string internal constant BIN = "test/fixtures/r15_spike/MultiplierSpikeVerifier.bin";
-    string internal constant CALLDATA = "test/fixtures/r15_spike/multiplier_spike_calldata.bin";
+    string internal constant BIN =
+        "test/fixtures/r15_spike/MultiplierSpikeVerifier.bin";
+    string internal constant CALLDATA =
+        "test/fixtures/r15_spike/multiplier_spike_calldata.bin";
 
     function setUp() public {
         try vm.readFileBinary(BIN) returns (bytes memory bytecode) {

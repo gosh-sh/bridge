@@ -7,7 +7,7 @@
 #   1. fixtures/rotate_vkblob/rotate_vk_blob.bin  — magic/v1/Blake2b/Base, byte 11 == 12
 #   2. fixtures/step_vkblob/step_vk_blob.bin      — byte 11 == 0 (non-aggregation)
 #   3. rotate fixture sha256 matches its sidecar
-#   4. EthBeaconLightClient_rotate_decider.patch ROTATE_VK_BLOB hex == fixture
+#   4. contracts/an/EthBeaconLightClient.sol ROTATE_VK_BLOB hex == fixture
 #      (and therefore also has byte 11 == 12)
 #   5. Negative: a byte-11-cleared copy of the rotate blob must NOT pass (1)
 #
@@ -19,7 +19,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ROTATE_BLOB="${ROOT}/eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin"
 ROTATE_PIN="${ROOT}/eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256"
 STEP_BLOB="${ROOT}/eth-light-client-prover/fixtures/step_vkblob/step_vk_blob.bin"
-PATCH="${ROOT}/EthBeaconLightClient_rotate_decider.patch"
+# The contract source, not a patch of it: the whole-file acki-nacki patch was
+# removed (it recreated the deployed light client from this repo's variant and
+# would have unwired the sink). The literal it used to carry lives here.
+SOURCE="${ROOT}/contracts/an/EthBeaconLightClient.sol"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'EOF'
@@ -32,7 +35,7 @@ EOF
   exit 0
 fi
 
-python3 - "$ROTATE_BLOB" "$ROTATE_PIN" "$STEP_BLOB" "$PATCH" <<'PY'
+python3 - "$ROTATE_BLOB" "$ROTATE_PIN" "$STEP_BLOB" "$SOURCE" <<'PY'
 import hashlib, re, sys, tempfile
 from pathlib import Path
 
@@ -40,7 +43,7 @@ MAGIC = b"VKBLOB\x00\x00"
 ROTATE_ACC = 12
 STEP_ACC = 0
 
-rotate_path, pin_path, step_path, patch_path = map(Path, sys.argv[1:5])
+rotate_path, pin_path, step_path, source_path = map(Path, sys.argv[1:5])
 
 
 def fail(msg: str) -> None:
@@ -84,8 +87,8 @@ if not step_path.is_file():
     fail(f"missing {step_path}")
 if not pin_path.is_file():
     fail(f"missing {pin_path}")
-if not patch_path.is_file():
-    fail(f"missing {patch_path}")
+if not source_path.is_file():
+    fail(f"missing {source_path}")
 
 rotate = rotate_path.read_bytes()
 step = step_path.read_bytes()
@@ -98,30 +101,30 @@ actual_hash = hashlib.sha256(rotate).hexdigest()
 if pinned_hash != actual_hash:
     fail(f"rotate sha256 sidecar mismatch: pin {pinned_hash} actual {actual_hash}")
 
-# Patch must embed the exact fixture (catches a re-emit that updated the
-# fixture but not EthBeaconLightClient_rotate_decider.patch).
-patch_text = patch_path.read_text()
+# The contract must embed the exact fixture (catches a re-emit that updated the
+# fixture but not contracts/an/EthBeaconLightClient.sol).
+source_text = source_path.read_text()
 # The rotate literal sits after the ROTATE_VK_BLOB declaration; collect hex"
 # chunks until the semicolon that closes it. The file is a unified diff, so
 # lines are prefixed with '+'.
-idx = patch_text.find("bytes constant ROTATE_VK_BLOB")
+idx = source_text.find("bytes constant ROTATE_VK_BLOB")
 if idx < 0:
-    fail("patch has no `bytes constant ROTATE_VK_BLOB`")
-tail = patch_text[idx:]
+    fail("contract has no `bytes constant ROTATE_VK_BLOB`")
+tail = source_text[idx:]
 end = tail.find(";")
 if end < 0:
-    fail("patch ROTATE_VK_BLOB literal is not semicolon-terminated")
+    fail("ROTATE_VK_BLOB literal is not semicolon-terminated")
 hexes = re.findall(r'hex"([0-9a-f]*)"', tail[:end])
 if not hexes:
-    fail("patch ROTATE_VK_BLOB has no hex\"...\" chunks")
+    fail("ROTATE_VK_BLOB has no hex\"...\" chunks")
 embedded = bytes.fromhex("".join(hexes))
 if embedded != rotate:
     fail(
-        "patch ROTATE_VK_BLOB hex != fixtures/rotate_vkblob/rotate_vk_blob.bin "
-        f"(patch {len(embedded)} B sha256 {hashlib.sha256(embedded).hexdigest()[:16]}…, "
+        "contract ROTATE_VK_BLOB hex != fixtures/rotate_vkblob/rotate_vk_blob.bin "
+        f"(contract {len(embedded)} B sha256 {hashlib.sha256(embedded).hexdigest()[:16]}…, "
         f"fixture {len(rotate)} B sha256 {actual_hash[:16]}…)"
     )
-check_header(embedded, want_acc=ROTATE_ACC, label="patch ROTATE_VK_BLOB")
+check_header(embedded, want_acc=ROTATE_ACC, label="contract ROTATE_VK_BLOB")
 
 # Negative: clearing byte 11 must be rejected. This is the failure mode the
 # reviewer flagged — a re-emit that forgets the flag.
@@ -132,7 +135,7 @@ if header_ok(bytes(tampered), want_acc=ROTATE_ACC):
 
 print(
     f"OK: rotate accumulator_limbs=12 ({len(rotate)} B, sha256={actual_hash[:16]}…); "
-    f"step accumulator_limbs=0 ({len(step)} B); patch hex matches fixture; "
+    f"step accumulator_limbs=0 ({len(step)} B); contract hex matches fixture; "
     "byte-11-cleared probe rejected"
 )
 PY

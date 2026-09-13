@@ -72,9 +72,9 @@ assigns it when the release is tagged.
   calls `rePushAnchor` so a bounce before `setLightClient` is retried. Operator
   one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
   0x…`. Contracts: `contracts/an/EthKeccak.sol`,
-  `contracts/an/EthBeaconLightClient.sol` (`EthBeaconLightClient_rotate_decider.patch`
-  for the acki-nacki tree; `scripts/check_eth_beacon_lc_sources.sh` keeps them
-  in lockstep). `updateCode` / `onCodeUpgrade` persist the committee, head,
+  `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
+  the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
+  between them is fixes and comments — see Removed). `updateCode` / `onCodeUpgrade` persist the committee, head,
   proven-hash set and `reAnchorsApplied` across a VkBlob rotation.
   `reAnchorCommittee` is the logged weak-subjectivity hatch after
   `disableOwnerRotation` (does not write exec hashes; `getCommitteeState`
@@ -203,6 +203,42 @@ assigns it when the release is tagged.
   `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
   witness (real sync committee). Unset committee path still emits a synthetic
   committee for VkBlob-only keygen.
+
+### Removed
+
+- `EthBeaconLightClient_rotate_decider.patch`, and with it the claim that the
+  two light-client copies are kept identical. The patch created
+  `contracts/exchange/EthBeaconLightClient.sol` wholesale from this repo's copy,
+  which stopped being an upgrade once acki-nacki began maintaining its own:
+  applying it would have replaced the deployed constant sink and its constructor
+  sender check with an unset `_usdcBridge` — anchors silently stop reaching the
+  bridge — and added a field to the `updateCode` migration cell that the live
+  `onCodeUpgrade` cannot decode. `scripts/check_eth_beacon_lc_sources.sh`
+  asserted that this patch reproduced our copy verbatim, i.e. it enforced the
+  hazard rather than catching it.
+
+  What actually differs between the two trees is small and deliberate: the sink
+  (constant plus sender check there, settable `_usdcBridge` and the extra
+  migration field here), the version string and the pragma floor. Both carry
+  `_piForm`, `provenQueue` and the rotate decider. So the delivery is now two
+  narrow patches instead of a file — `EthKeccak_sold_fixes.patch` (behaviour)
+  and `EthBeaconLightClient_encoding_and_gas_notes.patch` (comments only, code
+  hash verified unchanged at `78905cf7…9ed532`) — and the gate was rewritten to
+  assert scope: patches stay inside `contracts/exchange/`, carry no sink wiring
+  in either direction, the keccak patch only moves their library toward
+  `contracts/an/EthKeccak.sol`, and the notes patch adds nothing but comments.
+  Verified that the rewritten gate rejects the removed patch. The rotate VkBlob
+  gate now reads the `ROTATE_VK_BLOB` literal from
+  `contracts/an/EthBeaconLightClient.sol` rather than from the patch.
+
+  Correcting myself: I described the drift as "221 lines, dominated by a
+  `provenQueue` that exists in `contracts/exchange` and not in `contracts/an`"
+  ([#36](https://github.com/gosh-sh/bridge/pull/36#issuecomment-5655184319)).
+  That was a diff against the wrong commit — `github/eth-light-client-prover-m6`
+  resolves against the remote named `github` unless spelled
+  `github/github/eth-light-client-prover-m6`, so I had compared an ancestor from
+  before `provenQueue` landed. The real diff is 206 lines and `provenQueue` is in
+  both.
 
 ## [0.2.0] – 2026-09-11
 

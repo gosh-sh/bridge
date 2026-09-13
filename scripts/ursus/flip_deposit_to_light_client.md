@@ -7,7 +7,10 @@ hashes into that map (`acceptBlockHashFromLightClient`).
 The **relayer** issues the one-way owner calls. Relayer keys (`AN_KEYS_PATH`)
 must be the contract owner pubkey. tvm-sdk#284 co-deploys with this contract.
 
-1. Deploy `EthBeaconLightClient` (`EthBeaconLightClient_rotate_decider.patch`).
+1. Deploy `EthBeaconLightClient`, compiled from `contracts/an/EthBeaconLightClient.sol`
+   with `sold --tvm-version gosh`. This unit wants the standalone variant — the
+   settable `_usdcBridge` — which is what that file is; shellnet runs the
+   constant-sink variant from `acki-nacki` `contracts/exchange`.
 2. Apply `USDCBridge_disable_owner_allows_light_client.patch` so
    `disableOwnerAnchors` accepts a configured light client (not only an attester
    quorum).

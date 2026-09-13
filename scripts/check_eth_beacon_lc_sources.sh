@@ -1,116 +1,132 @@
 #!/usr/bin/env bash
-# Gate: EthBeaconLightClient_rotate_decider.patch must match
-# contracts/an/{EthBeaconLightClient,EthKeccak}.sol (pragma lines ignored).
-# The patch is what lands in acki-nacki under contracts/exchange/; the
-# contracts/an/ copies are the source of truth in this repo.
+# Gate: the patches this repo hands to acki-nacki must be safe to apply to the
+# deployed light client.
 #
-# Usage:
-#   ./scripts/check_eth_beacon_lc_sources.sh          # compare
-#   ./scripts/check_eth_beacon_lc_sources.sh --write  # regenerate the patch
+# It used to assert something else — that
+# EthBeaconLightClient_rotate_decider.patch reproduced
+# contracts/an/{EthBeaconLightClient,EthKeccak}.sol verbatim. That patch created
+# contracts/exchange/EthBeaconLightClient.sol wholesale from this repo's copy,
+# which stopped being an upgrade the moment acki-nacki began maintaining its own
+# (shellnet runs the constant-sink variant with the constructor sender check;
+# this repo's has a settable `_usdcBridge` and an extra field in the
+# `updateCode` migration cell). Applying it would have unwired the sink and
+# broken `onCodeUpgrade` decoding, and the gate would have called that correct.
+#
+# So the invariant is now about scope rather than equality:
+#
+#   1. every patch touches only contracts/exchange/ paths;
+#   2. no patch carries this repo's local sink wiring into that tree, in either
+#      direction (added or removed);
+#   3. the EthKeccak patch moves their copy toward contracts/an/EthKeccak.sol —
+#      every line it adds is in our file, every line it removes is not;
+#   4. the notes patch adds comments and nothing else, which is what makes it
+#      applicable without a redeploy (verified: the code hash does not move).
+#
+# Usage: ./scripts/check_eth_beacon_lc_sources.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-AN="${ROOT}/contracts/an"
-PATCH="${ROOT}/EthBeaconLightClient_rotate_decider.patch"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  cat <<'EOF'
-Assert EthBeaconLightClient_rotate_decider.patch matches
-contracts/an/{EthBeaconLightClient,EthKeccak}.sol (pragma ignored).
-
-  --write   overwrite the patch from contracts/an/
-EOF
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 
-python3 - "$AN" "$PATCH" "${1:-}" <<'PY'
-import hashlib, sys
+python3 - "$ROOT" <<'PY'
+import sys
 from pathlib import Path
 
-an_dir, patch_path, mode = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-FILES = [
-    ("EthBeaconLightClient.sol", "contracts/exchange/EthBeaconLightClient.sol"),
-    ("EthKeccak.sol", "contracts/exchange/EthKeccak.sol"),
-]
+root = Path(sys.argv[1])
+KECCAK_PATCH = root / "EthKeccak_sold_fixes.patch"
+NOTES_PATCH = root / "EthBeaconLightClient_encoding_and_gas_notes.patch"
+AN_KECCAK = root / "contracts/an/EthKeccak.sol"
+
+# Names that exist only because this repo can run the light client standalone.
+# In the acki-nacki tree the sink is a constant and the constructor checks the
+# sender, so a patch that mentions either side of that split is rewriting
+# deployed wiring rather than delivering a fix.
+LOCAL_ONLY = ("IAcceptedBlockHashSink", "_usdcBridge", "setUsdcBridge", '"0.1.0"')
+THEIRS_ONLY = ("USDC_BRIDGE_ADDRESS", "eccUSDCBridge")
+
+failures: list[str] = []
 
 
 def fail(msg: str) -> None:
-    print(f"FAIL: {msg}", file=sys.stderr)
+    failures.append(msg)
+
+
+def hunks(patch_text: str):
+    """(path, added, removed) per file in a unified diff."""
+    path, added, removed = None, [], []
+    for line in patch_text.splitlines():
+        if line.startswith("+++ b/"):
+            if path is not None:
+                yield path, added, removed
+                added, removed = [], []
+            path = line[len("+++ b/") :]
+        elif path is None or line.startswith(("--- ", "diff --git ", "index ", "@@", "\\")):
+            continue
+        elif line.startswith("+"):
+            added.append(line[1:])
+        elif line.startswith("-"):
+            removed.append(line[1:])
+    if path is not None:
+        yield path, added, removed
+
+
+for patch in (KECCAK_PATCH, NOTES_PATCH):
+    if not patch.is_file():
+        fail(f"missing {patch.name}")
+
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}", file=sys.stderr)
     sys.exit(1)
 
+# 1 + 2: scope, and no wiring in either direction.
+for patch in (KECCAK_PATCH, NOTES_PATCH):
+    for path, added, removed in hunks(patch.read_text()):
+        if not path.startswith("contracts/exchange/"):
+            fail(f"{patch.name}: touches {path}, outside contracts/exchange/")
+        for line in added + removed:
+            for token in LOCAL_ONLY + THEIRS_ONLY:
+                if token in line:
+                    fail(f"{patch.name}: carries sink wiring ({token}): {line.strip()[:70]}")
 
-def strip_pragma(text: str) -> str:
-    return "\n".join(
-        line for line in text.splitlines() if not line.strip().startswith("pragma ")
-    )
+# 3: the keccak patch moves their library toward ours.
+ours = AN_KECCAK.read_text().splitlines()
+ours_set = {ln.strip() for ln in ours if ln.strip()}
+for path, added, removed in hunks(KECCAK_PATCH.read_text()):
+    if path != "contracts/exchange/EthKeccak.sol":
+        fail(f"EthKeccak_sold_fixes.patch: unexpected target {path}")
+        continue
+    for line in added:
+        s = line.strip()
+        # The pragma is theirs to keep; the two trees pin different floors.
+        if s and not s.startswith("pragma ") and s not in ours_set:
+            fail(f"adds a line contracts/an/EthKeccak.sol does not have: {s[:70]}")
+    for line in removed:
+        s = line.strip()
+        if s and not s.startswith("pragma ") and s in ours_set:
+            fail(f"removes a line contracts/an/EthKeccak.sol still has: {s[:70]}")
 
+# 4: the notes patch is comments only.
+for path, added, removed in hunks(NOTES_PATCH.read_text()):
+    if removed:
+        fail(f"notes patch deletes {len(removed)} line(s); it must only add comments")
+    for line in added:
+        s = line.strip()
+        if s and not s.startswith("///") and not s.startswith("//"):
+            fail(f"notes patch adds a non-comment line: {s[:70]}")
 
-def extract_from_patch(patch: str) -> dict[str, str]:
-    out: dict[str, list[str]] = {}
-    current = None
-    for line in patch.splitlines():
-        if line.startswith("diff --git "):
-            current = None
-            continue
-        if line.startswith("+++ b/"):
-            current = line[len("+++ b/") :]
-            out[current] = []
-            continue
-        if current is None:
-            continue
-        if line.startswith("+") and not line.startswith("+++"):
-            out[current].append(line[1:])
-        elif line.startswith("\\"):
-            continue
-    return {k: "\n".join(v) + ("\n" if v else "") for k, v in out.items()}
-
-
-def new_file_diff(src: Path, dest: str) -> str:
-    text = src.read_text()
-    lines = text.splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
-        text += "\n"
-    n = len(lines)
-    body = "".join("+" + ln for ln in lines)
-    digest = hashlib.sha1(text.encode()).hexdigest()[:9]
-    return (
-        f"diff --git a/{dest} b/{dest}\n"
-        f"new file mode 100644\n"
-        f"index 000000000..{digest}\n"
-        f"--- /dev/null\n"
-        f"+++ b/{dest}\n"
-        f"@@ -0,0 +1,{n} @@\n"
-        f"{body}"
-    )
-
-
-if mode == "--write":
-    parts = [new_file_diff(an_dir / name, dest) for name, dest in FILES]
-    patch_path.write_text("".join(parts))
-    print(f"OK: wrote {patch_path.name} from contracts/an/")
-    sys.exit(0)
-
-if not patch_path.is_file():
-    fail(f"missing {patch_path}")
-
-extracted = extract_from_patch(patch_path.read_text())
-for name, dest in FILES:
-    src = an_dir / name
-    if not src.is_file():
-        fail(f"missing {src}")
-    want = src.read_text()
-    got = extracted.get(dest)
-    if got is None:
-        fail(f"patch has no {dest}")
-    if strip_pragma(want) != strip_pragma(got):
-        fail(
-            f"{dest} drifted from contracts/an/{name} "
-            f"(beyond pragma). Re-run: ./scripts/check_eth_beacon_lc_sources.sh --write"
-        )
+if failures:
+    for f in failures:
+        print(f"FAIL: {f}", file=sys.stderr)
+    sys.exit(1)
 
 print(
-    "OK: patch matches contracts/an/{EthBeaconLightClient,EthKeccak}.sol "
-    "(pragma ignored)"
+    "OK: both acki-nacki patches stay inside contracts/exchange/, carry no sink "
+    "wiring, the keccak patch tracks contracts/an/EthKeccak.sol, and the notes "
+    "patch is comments only."
 )
 PY

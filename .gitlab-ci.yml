@@ -207,7 +207,8 @@ test:light-client:vkblob-header:
         - scripts/check_eth_beacon_lc_sources.sh
         - scripts/embed_rotate_vk_blob.py
         - scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh
-        - EthBeaconLightClient_rotate_decider.patch
+        - EthKeccak_sold_fixes.patch
+        - EthBeaconLightClient_encoding_and_gas_notes.patch
         - contracts/an/EthBeaconLightClient.sol
         - contracts/an/EthKeccak.sol
         - eth-light-client-prover/examples/rotate_tree_n8.rs

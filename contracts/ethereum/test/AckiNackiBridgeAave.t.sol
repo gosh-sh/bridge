@@ -29,6 +29,9 @@ contract AckiNackiBridgeAaveTest is Test {
     event YieldHarvested(address indexed recipient, uint256 amount);
     event EmergencyWithdrawAll(uint256 amount);
     event AaveEnabledSet(bool enabled);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event YieldRecipientSet(address indexed recipient);
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
@@ -254,6 +257,36 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(usdc.balanceOf(address(bridge)), 10_700_000, "all USDC home");
     }
 
+    /// @dev ETH-7: a pool that leaves aUSDC after withdraw(max) must not let
+    ///      emergency zero `suppliedPrincipal` — leftover shares would then
+    ///      count as `accruedYield` and `harvestYield` would pay them out.
+    function test_eth7_emergencyLeftoverAToken_reverts_andDoesNotOpenHarvest() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        uint256 principal = bridge.suppliedPrincipal();
+        uint256 leftover = 1 * UsdcTestLib.UNIT;
+        pool.setLeftoverOnMaxWithdraw(leftover);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.EmergencyLeftoverAToken.selector, leftover)
+        );
+        bridge.emergencyWithdrawAll();
+
+        assertEq(bridge.suppliedPrincipal(), principal, "principal book unchanged");
+        assertTrue(bridge.aaveEnabled(), "aave stays enabled on revert");
+        assertEq(bridge.aUsdcBalance(), principal, "aUSDC still held (tx reverted)");
+        // Honest yield path still only the delta above principal, not leftover principal.
+        assertEq(bridge.accruedYield(), 0);
+    }
+
+    function test_eth9_approveFalse_reverts() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        usdc.setApproveReturnsFalse(true);
+        vm.expectRevert(AckiNackiBridge.ApproveFailed.selector);
+        bridge.supplyToAave(type(uint256).max);
+        assertEq(bridge.suppliedPrincipal(), 0, "no principal booked on failed approve");
+    }
+
     // -----------------------------------------------------------------
     // Admin setters
     // -----------------------------------------------------------------
@@ -266,13 +299,65 @@ contract AckiNackiBridgeAaveTest is Test {
     }
 
     function test_transferOwnership_flowsAllAuthorities() public {
+        vm.expectEmit(true, true, false, true);
+        emit OwnershipTransferStarted(address(this), user2);
         bridge.transferOwnership(user2);
+        assertEq(bridge.owner(), address(this), "ETH-8: still old owner until accept");
+        assertEq(bridge.pendingOwner(), user2);
+
+        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
+        vm.prank(user2);
+        bridge.setAaveEnabled(false);
+
+        vm.expectRevert(AckiNackiBridge.OwnershipNotPending.selector);
+        bridge.acceptOwnership();
+
+        vm.expectEmit(true, true, false, true);
+        emit OwnershipTransferred(address(this), user2);
+        vm.expectEmit(true, false, false, true);
+        emit YieldRecipientSet(user2);
+        vm.prank(user2);
+        bridge.acceptOwnership();
         assertEq(bridge.owner(), user2);
+        assertEq(bridge.pendingOwner(), address(0));
+        assertEq(bridge.yieldRecipient(), user2, "ETH-14: default recipient follows owner");
 
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
         bridge.setAaveEnabled(false);
         vm.prank(user2);
         bridge.setAaveEnabled(false);
+    }
+
+    function test_acceptOwnership_movesDefaultYieldRecipient_harvestPaysNewOwner() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        aUSDC.accrueYield(address(bridge), 300_000);
+
+        address compromised = address(this);
+        bridge.transferOwnership(user2);
+        vm.prank(user2);
+        bridge.acceptOwnership();
+        assertEq(bridge.yieldRecipient(), user2);
+
+        uint256 newOwnerBefore = usdc.balanceOf(user2);
+        uint256 oldOwnerBefore = usdc.balanceOf(compromised);
+        vm.prank(user2);
+        bridge.harvestYield(300_000);
+        assertEq(
+            usdc.balanceOf(user2), newOwnerBefore + 300_000, "ETH-14: harvest follows new owner"
+        );
+        assertEq(
+            usdc.balanceOf(compromised), oldOwnerBefore, "ETH-14: old owner must not receive yield"
+        );
+    }
+
+    function test_acceptOwnership_keepsExplicitYieldRecipient() public {
+        bridge.setYieldRecipient(yieldSink);
+        bridge.transferOwnership(user2);
+        vm.prank(user2);
+        bridge.acceptOwnership();
+        assertEq(bridge.owner(), user2);
+        assertEq(bridge.yieldRecipient(), yieldSink, "ETH-14: explicit recipient stays");
     }
 
     // -----------------------------------------------------------------

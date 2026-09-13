@@ -708,8 +708,13 @@ lint:rust:relayer:fmt:
   extends: [.rust_base, .private_dep_gate]
   stage: test
   script:
-    - cd crates/bridge-relayer-daemon
-    - cargo fmt --all -- --check
+    # bridge-relayer-daemon is a symlink member of the crates/bridge-prover-libraries
+    # workspace and inherits halo2-base etc. from that root, so a standalone
+    # `cd crates/bridge-relayer-daemon && cargo fmt` cannot work: cargo exits 1
+    # with "failed to find a workspace root" before it formats anything. Run it
+    # from the workspace, the way build:rust:relayer does.
+    - cd crates/bridge-prover-libraries
+    - cargo fmt -p bridge-relayer-daemon -- --check
   allow_failure: false
 
 lint:rust:relayer:clippy:

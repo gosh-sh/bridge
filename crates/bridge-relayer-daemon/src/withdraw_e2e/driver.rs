@@ -14,27 +14,24 @@
 //! non-CLI callers (tests, higher-level loops) that don't have or want
 //! a signing key.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
-use tracing::info;
-
 use bridge_event_witness::{
     enrich_witness, export_from_event_boc_base64, AnchorLayerMode, BlockContextInput,
     EnrichSummary, EnrichedWitness,
 };
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::bridge_state::BridgeState;
+use tracing::info;
 
-use crate::aggregator::{
-    Circuit4ShplonkPipeline, InProcessCircuit4SnarkProver, SubprocessAggregator,
-    SubprocessAggregatorConfig,
-};
-use crate::withdrawal::PartnerWithdrawalProof;
-
-use super::capture::{
-    capture_next_withdrawal_event, snapshot_baseline_msg_ids, CapturedEvent,
+use super::capture::{capture_next_withdrawal_event, snapshot_baseline_msg_ids, CapturedEvent};
+use crate::{
+    aggregator::{
+        Circuit4ShplonkPipeline, InProcessCircuit4SnarkProver, SubprocessAggregator,
+        SubprocessAggregatorConfig,
+    },
+    withdrawal::PartnerWithdrawalProof,
 };
 
 /// One `run_once` invocation's inputs.
@@ -207,7 +204,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
                     "enricher: not ready yet, will retry",
                 );
                 tokio::time::sleep(ENRICH_POLL_INTERVAL).await;
-            }
+            },
         }
     };
     log_enriched_summary(&enriched);
@@ -220,10 +217,10 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
 /// for callers that already:
 ///   1. captured the `WithdrawalInitiated` event via
 ///      [`capture::capture_next_withdrawal_event`], and
-///   2. ensured `bridge_state` covers the captured burn's key block
-///      (typically via the third-party
-///      `ackinacki-bridge` CLI's `resurrect::wait_for_coverage`, which
-///      polls `AckiNackiBridge.storedLastSeenBlockSeqNo` and calls
+///   2. ensured `bridge_state` covers the captured burn's key block (typically
+///      via the third-party `ackinacki-bridge` CLI's
+///      `resurrect::wait_for_coverage`, which polls
+///      `AckiNackiBridge.storedLastSeenBlockSeqNo` and calls
 ///      [`BridgeState::from_contract`] once the covering bundle lands).
 ///
 /// `cfg.prover_state_path`, `cfg.window_size`, `cfg.event_wait`,
@@ -270,7 +267,9 @@ pub async fn run_once_with_state(
 
 async fn capture_stage(gql: &GqlClient, cfg: &WithdrawE2EConfig) -> Result<CapturedEvent> {
     let baseline = if cfg.replay_latest {
-        info!("replay_latest: skipping baseline snapshot — capture will pick youngest matching event");
+        info!(
+            "replay_latest: skipping baseline snapshot — capture will pick youngest matching event"
+        );
         std::collections::HashSet::new()
     } else {
         snapshot_baseline_msg_ids(
@@ -337,25 +336,22 @@ async fn prove_and_finalize(
 
     // Compose the SHPLONK pipeline the on-chain
     // `BridgeWithdrawalAggregatorVerifier` accepts:
-    //   1. `InProcessCircuit4SnarkProver` re-proves the witness with a
-    //      Poseidon transcript at K=19, writing `circuit4.snark` +
-    //      `circuit4.instances.bin` into `snark_dir`.
-    //   2. `SubprocessAggregator` shells out to `aggregate-proof
-    //      --name BridgeWithdrawalAggregatorVerifier`, producing the
-    //      22-instance SHPLONK calldata (`instances ‖ proof`) that
-    //      matches the deployed Yul verifier byte-for-byte.
+    //   1. `InProcessCircuit4SnarkProver` re-proves the witness with a Poseidon
+    //      transcript at K=19, writing `circuit4.snark` + `circuit4.instances.bin`
+    //      into `snark_dir`.
+    //   2. `SubprocessAggregator` shells out to `aggregate-proof --name
+    //      BridgeWithdrawalAggregatorVerifier`, producing the 22-instance SHPLONK
+    //      calldata (`instances ‖ proof`) that matches the deployed Yul verifier
+    //      byte-for-byte.
     std::fs::create_dir_all(&cfg.snark_dir)
         .with_context(|| format!("mkdir snark_dir {}", cfg.snark_dir.display()))?;
     let pk_cache_dir = cfg
         .pk_cache_dir
         .clone()
         .unwrap_or_else(|| cfg.params_dir.join("pk_cache"));
-    let mut agg_cfg = SubprocessAggregatorConfig::new(
-        &cfg.aggregator_dir,
-        &cfg.verifiers_dir,
-        &cfg.params_dir,
-    )
-    .with_pk_cache_dir(&pk_cache_dir);
+    let mut agg_cfg =
+        SubprocessAggregatorConfig::new(&cfg.aggregator_dir, &cfg.verifiers_dir, &cfg.params_dir)
+            .with_pk_cache_dir(&pk_cache_dir);
     agg_cfg.timeout = cfg.prover_timeout;
     let snark_prover = InProcessCircuit4SnarkProver::new(&cfg.params_dir);
     let aggregator = SubprocessAggregator::new(agg_cfg);
@@ -409,8 +405,7 @@ async fn prove_and_finalize(
 fn parse_hex32(s: &str) -> Result<[u8; 32]> {
     let trimmed = s.trim();
     let no_prefix = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    let bytes =
-        hex::decode(no_prefix).with_context(|| format!("hex-decode {no_prefix:?}"))?;
+    let bytes = hex::decode(no_prefix).with_context(|| format!("hex-decode {no_prefix:?}"))?;
     if bytes.len() != 32 {
         anyhow::bail!("expected 32 bytes, got {}", bytes.len());
     }

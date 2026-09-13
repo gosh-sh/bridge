@@ -395,16 +395,19 @@ contract EthBeaconLightClient {
     ///         `parentHash` is written in — and re-packed by `_piForm` only
     ///         where they meet the store.
     ///
-    ///         **Cannot execute on Acki Nacki today.** `EthKeccak` is software
-    ///         keccak and one permutation measured 12.91M gas against a 10M
-    ///         per-transaction limit (p20/p21), so a single 642-byte header
-    ///         already exceeds the budget and a 32-header walk is ~2e9 gas.
-    ///         `EthKeccak` also needs two sold fixes before it computes at all
-    ///         (`uint64[5] bc` is zero-length, `_rotl` overflows on `uint64`).
+    ///         **Cannot execute on Acki Nacki today, and gas is the only
+    ///         reason left.** `EthKeccak` now computes correctly — the three
+    ///         sold defects that made it throw exit 50 for any input are
+    ///         fixed — but it is software keccak: measured in tvm-debugger
+    ///         3.0.6, one permutation costs 12.93M gas and the real 642-byte
+    ///         Sepolia header at block 11683168 costs 64.68M, against a 10M
+    ///         per-transaction limit (p20/p21). Even the empty string is over
+    ///         it, so no input size makes this callable, and a 32-header walk
+    ///         is ~2e9. `rlpParentHash` is cheap by contrast, 17.2k.
     ///         Ancestry needs a keccak-256 builtin in the node, or the parent
     ///         chain proven in-circuit. Until then only the epoch checkpoint is
-    ///         anchored, 1 block of 32. Measured on shellnet 2026-09-11,
-    ///         gosh-sh/bridge#36.
+    ///         anchored, 1 block of 32. Defects found on shellnet 2026-09-11,
+    ///         gas re-measured offline 2026-09-13; gosh-sh/bridge#36.
     function submitAncestry(bytes[] headerRlps) public {
         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);

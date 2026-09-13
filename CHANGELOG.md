@@ -84,6 +84,27 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `EthKeccak` never computed a hash in the TVM. Three `sold` behaviours, each
+  fatal on the first input: `uint64[5] bc;` declares a **zero-length** array, so
+  the first write of the theta step threw exit 50 (this is what aborted every
+  `submitAncestry` after the encoding fix); `x << n` on a `uint64` is
+  range-checked, so `_rotl` threw exit 4 as soon as a rotation dropped a set bit;
+  and `~` on a `uint64`, plus narrowing a shifted lane with `uint8()`, are
+  refused for the same reason. The array is now allocated explicitly (once, not
+  per round), rotation is done in `uint256` and masked back, `~x` is `x ^
+  MASK64`, and `_squeeze32` masks before narrowing. Nothing about the algorithm
+  changed. Verified by execution rather than inspection, in tvm-debugger 3.0.6
+  against a wrapper contract: keccak256("") and keccak256("abc") match their
+  vectors, a 136-byte input matches `cast keccak` (the multi-block absorb path),
+  and the real 642-byte Sepolia header of block 11683168 hashes to its own block
+  hash `6b83c33d…122f83`. Defects reported by @Skydev0h from shellnet
+  (gosh-sh/bridge#36); `acki-nacki` `contracts/exchange/EthKeccak.sol` is
+  byte-identical to this file modulo its pragma, so `EthKeccak_sold_fixes.patch`
+  carries the same change there — it applies cleanly to the head of
+  gosh-sh/acki-nacki#2618 and moves the light client's code hash from
+  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry still cannot run: see Known
+  issues.
+
 - `submitAncestry` and `rePushAnchor` were rejected by the light client
   (compute phase, exit 252) because two byte orders were in play. The step
   circuit splits a hash with `node_hi_lo` — each 16-byte half read
@@ -109,17 +130,16 @@ assigns it when the release is tagged.
 
 - **Epoch ancestry cannot run on Acki Nacki**, so the light client anchors only
   the epoch checkpoint — 1 execution block of 32 — and a deposit in any other
-  block still needs the owner's `setAcceptedBlockHash`. The encoding fix above
-  was necessary but not sufficient: `EthKeccak` is software keccak and one
-  permutation measured 12.91M gas against the 10M per-transaction limit
-  (p20/p21), so even a single 642-byte header exceeds the budget and a 32-header
-  walk is ~2e9 gas. Two `sold` defects sit underneath it — `uint64[5] bc` is a
-  zero-length array (exit 50) and `_rotl` range-overflows on `uint64` (exit 4) —
-  the library had never executed in the TVM, its doc-comment vectors were
-  checked by tiny-keccak in Rust. Fixing those two only moves the failure to
-  gas. Closing this needs a keccak-256 builtin in the node, the way
+  block still needs the owner's `setAcceptedBlockHash`. Gas is now the only
+  reason: with the `sold` defects fixed (see below) `EthKeccak` computes the
+  right hashes, but it is software keccak — one permutation is 12.93M gas and
+  the real 642-byte Sepolia header of block 11683168 is 64.68M, against a 10M
+  per-transaction limit (p20/p21). Hashing the empty string is already over the
+  limit, so no input size makes `submitAncestry` callable, and a 32-header walk
+  is ~2e9 gas. Closing this needs a keccak-256 builtin in the node, the way
   `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
-  Measured on shellnet 2026-09-11, gosh-sh/bridge#36. `submitUpdate`,
+  Defects found on shellnet 2026-09-11; gas re-measured offline in
+  tvm-debugger 3.0.6 on 2026-09-13, gosh-sh/bridge#36. `submitUpdate`,
   `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`

@@ -2322,10 +2322,28 @@ mod tests {
         };
         if !premise {
             restore(&parent);
-            panic!(
-                "this test's premise did not hold: an unreadable directory still opened. Running \
-                 as root ignores the mode, and then nothing here is being tested."
+            // The mode was ignored, so this process bypasses DAC — root, or
+            // CAP_DAC_OVERRIDE. The lever does not exist here and there is
+            // nothing left to assert.
+            //
+            // This used to panic, on the reasoning that a test which cannot set
+            // up its premise must not report success. That reasoning is right
+            // about silence and wrong about failure: GitLab runners execute as
+            // root, so the panic made `test:rust:ackinacki-bridge` unable to go
+            // green no matter what the code did — and a job that cannot pass
+            // gets muted, which costs the other 264 tests too. Nobody saw it
+            // until 2026-09-13 because the pipeline's config was invalid and
+            // this job had never run.
+            //
+            // So: skip, and say out loud what is not covered, which keeps the
+            // original point intact. Run the suite as a normal user to get this
+            // assertion back.
+            eprintln!(
+                "SKIP a_stage_transition_does_not_depend_on_the_parent_directory: 0o311 did not \
+                 make the parent unopenable, so this process bypasses DAC (root or \
+                 CAP_DAC_OVERRIDE). The parent-fsync regression is UNGUARDED in this run."
             );
+            return;
         }
 
         let mut burned = r.clone();

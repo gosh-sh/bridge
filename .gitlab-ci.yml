@@ -283,7 +283,12 @@ test:rust:ackinacki-bridge:
     # The fourteen fixture-dependent probe tests are `#[ignore]`d at their
     # definitions and run in the scheduled job below; this catches the
     # seven that need no ceremony.
-    - cargo test --locked -p bridge-prover-lib keys::state::probe_tests::
+    # Quoted: a bare scalar ending in `::` is a mapping key to YAML, so this
+    # entry parsed as {"… keys::state::probe_tests:": null} rather than a
+    # string, and GitLab rejected the whole config with "script config should
+    # be a string or a nested array of strings". An invalid config produces a
+    # pipeline with zero jobs, which is why this file has never run here.
+    - 'cargo test --locked -p bridge-prover-lib keys::state::probe_tests::'
     # The ceremony probe's negative tests live in `keys::common::tests`, not
     # in `probe_tests`, so the filter above does not reach them — and they
     # are the ones guarding against a preflight that waves a truncated SRS
@@ -307,7 +312,8 @@ test:rust:ackinacki-bridge:
     # over the first, and `--repair` deleting a live keygen's 2.65 GB temp
     # file, ran only in the nightly job. They need no fixtures and finish
     # in under two seconds.
-    - cargo test --locked -p bridge-prover-lib keys::state::tests::
+    # Quoted for the same reason as `probe_tests::` above.
+    - 'cargo test --locked -p bridge-prover-lib keys::state::tests::'
     - cargo test --locked -p bridge-prover-lib keys::common::tests::leak_sweep
     - cargo test --locked -p bridge-prover-lib keys::common::tests::a_directory_named_like_a_temp
     - cargo test --locked -p bridge-prover-lib keys::common::tests::an_unreadable_directory

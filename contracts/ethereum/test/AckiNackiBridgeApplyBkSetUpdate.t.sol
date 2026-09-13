@@ -280,9 +280,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             _genesisFixture(R, 0);
         AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
 
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R)
-        );
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R));
         new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
     }
 

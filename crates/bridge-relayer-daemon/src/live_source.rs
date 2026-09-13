@@ -75,10 +75,11 @@ impl LiveBlockSource {
     }
 
     /// Read-only clone of the pending bundle artifact, if any. Used by the
-    /// aggregation wrapper ([`crate::aggregated_source::AggregatedBlockSource`])
-    /// to obtain the raw `BundleProofArtifacts` — including
-    /// `last_seen_block_seq_no` and the Blake2b proof bytes — that the shape-
-    /// preserving `AnBlockData::from` conversion drops. This is a peek: it does
+    /// aggregation wrapper
+    /// ([`crate::aggregated_source::AggregatedBlockSource`]) to obtain the
+    /// raw `BundleProofArtifacts` — including `last_seen_block_seq_no` and
+    /// the Blake2b proof bytes — that the shape- preserving
+    /// `AnBlockData::from` conversion drops. This is a peek: it does
     /// NOT clear `pending_bundle`; the wrapper's ack path unchanged.
     pub async fn peek_pending_bundle(&self) -> Option<BundleProofArtifacts> {
         self.pending_bundle.lock().await.clone()
@@ -166,15 +167,14 @@ fn map_driver_err(e: DriverError) -> RelayerError {
         } => RelayerError::AckiNacki(format!(
             "bootstrap seed={seed_seqno} head={chain_head_seqno}: {source}"
         )),
-        DriverError::GqlSchema(inner) => {
-            RelayerError::AckiNacki(format!("gql schema: {inner}"))
-        }
-        DriverError::ProofGen { seq_no, source } => {
-            RelayerError::Other(format!("proof-gen failed for {seq_no}: {source}"))
-        }
+        DriverError::GqlSchema(inner) => RelayerError::AckiNacki(format!("gql schema: {inner}")),
+        DriverError::ProofGen {
+            seq_no,
+            source,
+        } => RelayerError::Other(format!("proof-gen failed for {seq_no}: {source}")),
         DriverError::StateInconsistent(inner) => {
             RelayerError::Other(format!("driver state inconsistent: {inner}"))
-        }
+        },
         DriverError::Other(inner) => RelayerError::Other(inner.to_string()),
     }
 }
@@ -199,7 +199,12 @@ impl BlockSource for LiveBlockSource {
 
         let mut d = self.driver.lock().await;
         match d.poll_next_bundle().await.map_err(map_driver_err)? {
-            LiveBundleEvent::Bootstrapping { .. } | LiveBundleEvent::Nothing { .. } => Ok(None),
+            LiveBundleEvent::Bootstrapping {
+                ..
+            }
+            | LiveBundleEvent::Nothing {
+                ..
+            } => Ok(None),
             LiveBundleEvent::Bundle(b) => {
                 if b.block_seq_no < target {
                     warn!(
@@ -213,7 +218,7 @@ impl BlockSource for LiveBlockSource {
                 let data = AnBlockData::from(&b);
                 *self.pending_bundle.lock().await = Some(b);
                 Ok(Some(data))
-            }
+            },
         }
     }
 
@@ -228,10 +233,7 @@ impl BlockSource for LiveBlockSource {
 
 #[async_trait]
 impl BkUpdateSource for LiveBlockSource {
-    async fn fetch_bk_update(
-        &self,
-        target: u64,
-    ) -> Result<Option<BkSetUpdateData>, RelayerError> {
+    async fn fetch_bk_update(&self, target: u64) -> Result<Option<BkSetUpdateData>, RelayerError> {
         {
             let mut pending = self.pending_bk_update.lock().await;
             if let Some(p) = pending.as_ref() {
@@ -248,7 +250,10 @@ impl BkUpdateSource for LiveBlockSource {
 
         let mut d = self.driver.lock().await;
         match d.poll_next_bk_update().await.map_err(map_driver_err)? {
-            LiveBkUpdateEvent::Bootstrapping { .. } | LiveBkUpdateEvent::Nothing => Ok(None),
+            LiveBkUpdateEvent::Bootstrapping {
+                ..
+            }
+            | LiveBkUpdateEvent::Nothing => Ok(None),
             LiveBkUpdateEvent::BkUpdate(u) => {
                 if u.block_seq_no < target {
                     warn!(
@@ -262,7 +267,7 @@ impl BkUpdateSource for LiveBlockSource {
                 let data = BkSetUpdateData::from(&u);
                 *self.pending_bk_update.lock().await = Some(u);
                 Ok(Some(data))
-            }
+            },
         }
     }
 

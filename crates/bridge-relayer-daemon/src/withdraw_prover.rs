@@ -81,7 +81,8 @@ impl MockWithdrawalProver {
                 seq_no: 0,
                 proof_hex: hex::encode(vec![
                     0xAAu8;
-                    crate::withdrawal::SHPLONK_MIN_WITHDRAWAL_INSTANCES + 3200
+                    crate::withdrawal::SHPLONK_MIN_WITHDRAWAL_INSTANCES
+                        + 3200
                 ]),
                 public_instances_hex,
                 self_verified: true,
@@ -126,15 +127,16 @@ impl WithdrawalProver for MockWithdrawalProver {
 /// Configuration for the out-of-process `bridge-event-halo2-prover` invocation.
 #[derive(Clone, Debug)]
 pub struct SubprocessWithdrawalProverConfig {
-    /// Path to the `crates/bridge-prover-libraries` workspace root. The prebuilt
-    /// release binary is expected at
+    /// Path to the `crates/bridge-prover-libraries` workspace root. The
+    /// prebuilt release binary is expected at
     /// `<dir>/target/release/bridge-event-halo2-prover`; if absent we fall back
     /// to `cargo run --release -p bridge-event-halo2-prover`.
     pub bridge_prover_libraries_dir: PathBuf,
     /// Working directory for the prover process. The binary reads the SRS +
     /// Circuit 4 PK/VK from `./params` **relative to this dir**. Defaults to
-    /// `bridge_prover_libraries_dir`. (Only honoured for the prebuilt-binary path;
-    /// the `cargo run` fallback always runs from `bridge_prover_libraries_dir`.)
+    /// `bridge_prover_libraries_dir`. (Only honoured for the prebuilt-binary
+    /// path; the `cargo run` fallback always runs from
+    /// `bridge_prover_libraries_dir`.)
     pub work_dir: PathBuf,
     /// Optional dir to also persist `proof_event_{seq:06}.json` (passed as
     /// `--out-dir`). The proof is returned regardless via stdout.

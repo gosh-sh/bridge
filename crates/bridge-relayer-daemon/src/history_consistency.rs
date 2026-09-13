@@ -26,7 +26,11 @@ impl std::fmt::Display for HistoryDrift {
     }
 }
 
-fn drift(field: &'static str, expected: impl Into<String>, actual: impl Into<String>) -> HistoryDrift {
+fn drift(
+    field: &'static str,
+    expected: impl Into<String>,
+    actual: impl Into<String>,
+) -> HistoryDrift {
     HistoryDrift {
         field,
         expected: expected.into(),
@@ -96,7 +100,10 @@ pub fn check_chain_monotonicity(
     if gap > max_forward_gap {
         return Err(drift(
             "last_seen_block_seq_no_jumped",
-            format!("{} (gap≤{max_forward_gap})", remembered.last_seen_block_seq_no),
+            format!(
+                "{} (gap≤{max_forward_gap})",
+                remembered.last_seen_block_seq_no
+            ),
             format!("{} (gap={gap})", actual.last_seen_block_seq_no),
         ));
     }

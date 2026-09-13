@@ -92,8 +92,8 @@ pub trait Circuit4SnarkProver: Send + Sync {
 ///
 /// End-to-end per call:
 ///   1. `KeyManager::ensure_event_keys()` (keygens on first run).
-///   2. Provision `params/kzg_bn254_{event_k}.srs` if missing — downsized
-///      from the fallback K=21 ceremony SRS so g2/s_g2 stay Hermez-anchored.
+///   2. Provision `params/kzg_bn254_{event_k}.srs` if missing — downsized from
+///      the fallback K=21 ceremony SRS so g2/s_g2 stay Hermez-anchored.
 ///   3. Load event PK.
 ///   4. `generate_event_proof_with_transcript(&km, &witness, Poseidon)`.
 ///   5. Native `verify_event_proof_with_transcript` self-check.
@@ -113,7 +113,9 @@ impl InProcessCircuit4SnarkProver {
         if let Ok(abs) = params_dir.canonicalize() {
             params_dir = abs;
         }
-        Self { params_dir }
+        Self {
+            params_dir,
+        }
     }
 }
 
@@ -130,6 +132,7 @@ fn ensure_srs_for_event(
     event_k: u32,
 ) -> Result<(), RelayerError> {
     use std::io::Write;
+
     // Trait imports for `.k()` / `.downsize()` / `.write()` on ParamsKZG (same
     // trait scope the source bin `export_c4_poseidon_snark.rs::main` uses).
     use halo2_base::halo2_proofs::poly::commitment::Params;
@@ -169,12 +172,8 @@ fn save_instances_binary_le(
     for fr in instances {
         bytes.extend_from_slice(fr.to_bytes().as_ref());
     }
-    std::fs::write(output_path, bytes).map_err(|e| {
-        RelayerError::other(format!(
-            "write instances {}: {e}",
-            output_path.display()
-        ))
-    })
+    std::fs::write(output_path, bytes)
+        .map_err(|e| RelayerError::other(format!("write instances {}: {e}", output_path.display())))
 }
 
 #[async_trait]
@@ -199,78 +198,82 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
         let snark_dir = snark_dir.to_path_buf();
         let name = name.to_string();
 
-        let artefacts = tokio::task::spawn_blocking(move || -> Result<SnarkArtefacts, RelayerError> {
-            // KeyManager owns four per-circuit sub-managers; the event sub-manager
-            // keygens at K=19 with its own degree-matched SRS.
-            let mut km = KeyManager::new(&params_dir);
-            km.ensure_event_keys()
-                .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e}")))?;
+        let artefacts =
+            tokio::task::spawn_blocking(move || -> Result<SnarkArtefacts, RelayerError> {
+                // KeyManager owns four per-circuit sub-managers; the event sub-manager
+                // keygens at K=19 with its own degree-matched SRS.
+                let mut km = KeyManager::new(&params_dir);
+                km.ensure_event_keys()
+                    .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e}")))?;
 
-            let event_k = km.event_config().k as u32;
-            ensure_srs_for_event(&km, &params_dir, event_k)?;
+                let event_k = km.event_config().k as u32;
+                ensure_srs_for_event(&km, &params_dir, event_k)?;
 
-            km.load_event_pk()
-                .map_err(|e| RelayerError::other(format!("load_event_pk: {e}")))?;
+                km.load_event_pk()
+                    .map_err(|e| RelayerError::other(format!("load_event_pk: {e}")))?;
 
-            let raw = std::fs::read_to_string(&witness_path).map_err(|e| {
-                RelayerError::other(format!("read witness {}: {e}", witness_path.display()))
-            })?;
-            let witness: PrivateWitness = serde_json::from_str(&raw).map_err(|e| {
-                RelayerError::other(format!("parse witness {}: {e}", witness_path.display()))
-            })?;
+                let raw = std::fs::read_to_string(&witness_path).map_err(|e| {
+                    RelayerError::other(format!("read witness {}: {e}", witness_path.display()))
+                })?;
+                let witness: PrivateWitness = serde_json::from_str(&raw).map_err(|e| {
+                    RelayerError::other(format!("parse witness {}: {e}", witness_path.display()))
+                })?;
 
-            let out = generate_event_proof_with_transcript(
-                &km.event,
-                &witness,
-                TranscriptKind::Poseidon,
-            )
-            .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e}")))?;
+                let out = generate_event_proof_with_transcript(
+                    &km.event,
+                    &witness,
+                    TranscriptKind::Poseidon,
+                )
+                .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e}")))?;
 
-            // Native Poseidon self-verify — refuse to hand the aggregator an
-            // invalid inner snark (stale event keys are the usual culprit).
-            let ok = verify_event_proof_with_transcript(
-                &km.event,
-                &out.proof_bytes,
-                &out.public_instances,
-                TranscriptKind::Poseidon,
-            );
-            km.unload_event_pk();
-            if !ok {
-                return Err(RelayerError::other(
-                    "Circuit 4 Poseidon inner snark failed native self-verification — refusing \
-                     to emit an invalid snark. Regenerate event keys against the current \
-                     circuit shape.",
-                ));
-            }
+                // Native Poseidon self-verify — refuse to hand the aggregator an
+                // invalid inner snark (stale event keys are the usual culprit).
+                let ok = verify_event_proof_with_transcript(
+                    &km.event,
+                    &out.proof_bytes,
+                    &out.public_instances,
+                    TranscriptKind::Poseidon,
+                );
+                km.unload_event_pk();
+                if !ok {
+                    return Err(RelayerError::other(
+                        "Circuit 4 Poseidon inner snark failed native self-verification — \
+                         refusing to emit an invalid snark. Regenerate event keys against the \
+                         current circuit shape.",
+                    ));
+                }
 
-            let instances_path = snark_dir.join(format!("{name}.instances.bin"));
-            save_instances_binary_le(&out.public_instances, &instances_path)?;
+                let instances_path = snark_dir.join(format!("{name}.instances.bin"));
+                save_instances_binary_le(&out.public_instances, &instances_path)?;
 
-            // Wrap into snark-verifier `Snark` bincode via bridge-snark-wrap.
-            // Event circuit VK was keygen'd against K=20 (`EventKeyManager::
-            // KEYGEN_SRS_K`) while `event_config_params.json` records k=19;
-            // pass the explicit SRS override so `snark-verifier`'s `compile`
-            // sees `params.k = 20 == vk.domain.k`.
-            let vk_path = params_dir.join("event_vk.bin");
-            let config_path = params_dir.join("event_config_params.json");
-            let snark_bytes = bridge_snark_wrap::wrap_poseidon_snark_in_memory(
-                &vk_path,
-                &config_path,
-                Some(bridge_prover_lib::keys::EventKeyManager::KEYGEN_SRS_K),
-                &out.proof_bytes,
-                &out.public_instances,
-            )
-            .map_err(|e| RelayerError::other(format!("wrap Poseidon snark: {e}")))?;
+                // Wrap into snark-verifier `Snark` bincode via bridge-snark-wrap.
+                // Event circuit VK was keygen'd against K=20 (`EventKeyManager::
+                // KEYGEN_SRS_K`) while `event_config_params.json` records k=19;
+                // pass the explicit SRS override so `snark-verifier`'s `compile`
+                // sees `params.k = 20 == vk.domain.k`.
+                let vk_path = params_dir.join("event_vk.bin");
+                let config_path = params_dir.join("event_config_params.json");
+                let snark_bytes = bridge_snark_wrap::wrap_poseidon_snark_in_memory(
+                    &vk_path,
+                    &config_path,
+                    Some(bridge_prover_lib::keys::EventKeyManager::KEYGEN_SRS_K),
+                    &out.proof_bytes,
+                    &out.public_instances,
+                )
+                .map_err(|e| RelayerError::other(format!("wrap Poseidon snark: {e}")))?;
 
-            let snark_path = snark_dir.join(format!("{name}.snark"));
-            std::fs::write(&snark_path, &snark_bytes).map_err(|e| {
-                RelayerError::other(format!("write snark {}: {e}", snark_path.display()))
-            })?;
+                let snark_path = snark_dir.join(format!("{name}.snark"));
+                std::fs::write(&snark_path, &snark_bytes).map_err(|e| {
+                    RelayerError::other(format!("write snark {}: {e}", snark_path.display()))
+                })?;
 
-            Ok(SnarkArtefacts { snark_path, instances_path })
-        })
-        .await
-        .map_err(|e| RelayerError::other(format!("Circuit 4 blocking task join: {e}")))??;
+                Ok(SnarkArtefacts {
+                    snark_path,
+                    instances_path,
+                })
+            })
+            .await
+            .map_err(|e| RelayerError::other(format!("Circuit 4 blocking task join: {e}")))??;
 
         Ok(artefacts)
     }
@@ -700,8 +703,8 @@ impl ProofAggregator for MockAggregator {
 //
 //   1. Wrap the daemon's Poseidon proof bytes + partner VK into a
 //      snark-verifier `Snark` (bincode) — done **in-process** via
-//      [`bridge_snark_wrap::wrap_poseidon_snark_in_memory`]. This replaces
-//      the old `export-1a1b2-poseidon-snark` subprocess, which independently
+//      [`bridge_snark_wrap::wrap_poseidon_snark_in_memory`]. This replaces the
+//      old `export-1a1b2-poseidon-snark` subprocess, which independently
 //      re-fetched from GraphQL and re-proved the same witness (a full second
 //      Halo2 prove per bundle).
 //   2. Feed the bincode Snark into `bridge-evm-aggregator`'s `aggregate-proof`
@@ -745,13 +748,13 @@ pub trait SnarkWrapper: Send + Sync {
         block_id_be: &[u8; 32],
         bk_set_commitment_be: &[u8; 32],
         num_layers: u8,
-        layer_hashes_be: &[[u8; 32];
-                 bridge_prover_lib::bridge_state::MAX_LAYERS],
+        layer_hashes_be: &[[u8; 32]; bridge_prover_lib::bridge_state::MAX_LAYERS],
         prev_max_level_layer_hash_be: &[u8; 32],
     ) -> Result<tempfile::NamedTempFile, RelayerError>;
 }
 
-/// Production wrapper backed by [`bridge_snark_wrap::wrap_poseidon_snark_in_memory`].
+/// Production wrapper backed by
+/// [`bridge_snark_wrap::wrap_poseidon_snark_in_memory`].
 ///
 /// Reads partner VKs from `<params_dir>/{primary,fallback,layer}_vk.bin`
 /// and matching `*_config_params.json`. For the layer circuit, forces
@@ -771,7 +774,8 @@ impl PoseidonSnarkWrapper {
 
     /// Reconstruct the 4-element Circuit 1A/1B public-instance vector.
     /// Mirrors the `instances` construction in `prove_primary` /
-    /// `prove_fallback` in `bridge-snark-utils/src/bin/export_1a1b2_poseidon_snark.rs`.
+    /// `prove_fallback` in
+    /// `bridge-snark-utils/src/bin/export_1a1b2_poseidon_snark.rs`.
     fn attestation_instances(
         block_id_be: &[u8; 32],
         bk_set_commitment_be: &[u8; 32],
@@ -783,9 +787,9 @@ impl PoseidonSnarkWrapper {
         // naming — see project_block_id_representation_audit.md. Reuse
         // `bridge_prover_lib::ipc::fr_from_hex` (which internally calls
         // `Fr::from_repr` on 32 LE bytes) so we don't need `PrimeField` in scope.
-        let bk_set_commitment_fr = bridge_prover_lib::ipc::fr_from_hex(
-            &hex::encode(bk_set_commitment_be),
-        )
+        let bk_set_commitment_fr = bridge_prover_lib::ipc::fr_from_hex(&hex::encode(
+            bk_set_commitment_be,
+        ))
         .map_err(|e| {
             RelayerError::other(format!(
                 "bk_set_commitment_be {} is not a canonical Fr repr: {e}",
@@ -806,45 +810,41 @@ impl PoseidonSnarkWrapper {
         block_id_be: &[u8; 32],
         bk_set_commitment_be: &[u8; 32],
         num_layers: u8,
-        layer_hashes_be: &[[u8; 32];
-                 bridge_prover_lib::bridge_state::MAX_LAYERS],
+        layer_hashes_be: &[[u8; 32]; bridge_prover_lib::bridge_state::MAX_LAYERS],
         prev_max_level_layer_hash_be: &[u8; 32],
     ) -> Result<Vec<bridge_prover_lib::Fr>, RelayerError> {
         let block_id_fr = bridge_prover_lib::ipc::fold_hash_be_to_fr(block_id_be);
-        let bk_set_commitment_fr = bridge_prover_lib::ipc::fr_from_hex(
-            &hex::encode(bk_set_commitment_be),
-        )
+        let bk_set_commitment_fr = bridge_prover_lib::ipc::fr_from_hex(&hex::encode(
+            bk_set_commitment_be,
+        ))
         .map_err(|e| {
             RelayerError::other(format!(
                 "bk_set_commitment_be {} is not a canonical Fr repr: {e}",
                 hex::encode(bk_set_commitment_be),
             ))
         })?;
-        let mut instances = Vec::with_capacity(
-            bridge_prover_lib::layer_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS,
-        );
+        let mut instances =
+            Vec::with_capacity(bridge_prover_lib::layer_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS);
         instances.push(block_id_fr);
         instances.push(bk_set_commitment_fr);
         instances.push(bridge_prover_lib::Fr::from(num_layers as u64));
         for (i, h) in layer_hashes_be.iter().enumerate() {
-            let fr = bridge_prover_lib::ipc::fr_from_hex(&hex::encode(h))
-                .map_err(|e| {
-                    RelayerError::other(format!(
-                        "layer_hashes_be[{i}] {} is not a canonical Fr repr: {e}",
-                        hex::encode(h),
-                    ))
-                })?;
+            let fr = bridge_prover_lib::ipc::fr_from_hex(&hex::encode(h)).map_err(|e| {
+                RelayerError::other(format!(
+                    "layer_hashes_be[{i}] {} is not a canonical Fr repr: {e}",
+                    hex::encode(h),
+                ))
+            })?;
             instances.push(fr);
         }
-        let prev_fr = bridge_prover_lib::ipc::fr_from_hex(
-            &hex::encode(prev_max_level_layer_hash_be),
-        )
-        .map_err(|e| {
-            RelayerError::other(format!(
-                "prev_max_level_layer_hash_be {} is not a canonical Fr repr: {e}",
-                hex::encode(prev_max_level_layer_hash_be),
-            ))
-        })?;
+        let prev_fr =
+            bridge_prover_lib::ipc::fr_from_hex(&hex::encode(prev_max_level_layer_hash_be))
+                .map_err(|e| {
+                    RelayerError::other(format!(
+                        "prev_max_level_layer_hash_be {} is not a canonical Fr repr: {e}",
+                        hex::encode(prev_max_level_layer_hash_be),
+                    ))
+                })?;
         instances.push(prev_fr);
         Ok(instances)
     }
@@ -869,7 +869,9 @@ impl PoseidonSnarkWrapper {
             instances,
         )
         .map_err(|e| {
-            RelayerError::other(format!("wrap_poseidon_snark_in_memory({key_prefix}): {e:?}"))
+            RelayerError::other(format!(
+                "wrap_poseidon_snark_in_memory({key_prefix}): {e:?}"
+            ))
         })?;
         let wrap_ms = t_wrap.elapsed().as_millis() as u64;
         info!(
@@ -883,7 +885,10 @@ impl PoseidonSnarkWrapper {
             .tempfile()
             .map_err(|e| RelayerError::other(format!("tempfile: {e}")))?;
         std::fs::write(file.path(), &bytes).map_err(|e| {
-            RelayerError::other(format!("write snark tempfile {}: {e}", file.path().display()))
+            RelayerError::other(format!(
+                "write snark tempfile {}: {e}",
+                file.path().display()
+            ))
         })?;
         Ok(file)
     }
@@ -919,8 +924,7 @@ impl SnarkWrapper for PoseidonSnarkWrapper {
         block_id_be: &[u8; 32],
         bk_set_commitment_be: &[u8; 32],
         num_layers: u8,
-        layer_hashes_be: &[[u8; 32];
-                 bridge_prover_lib::bridge_state::MAX_LAYERS],
+        layer_hashes_be: &[[u8; 32]; bridge_prover_lib::bridge_state::MAX_LAYERS],
         prev_max_level_layer_hash_be: &[u8; 32],
     ) -> Result<tempfile::NamedTempFile, RelayerError> {
         let instances = Self::layer_instances(
@@ -983,7 +987,10 @@ impl<W: SnarkWrapper, A: ProofAggregator> Circuit12ShplonkPipeline<W, A> {
             crate::types::FinalizationType::Primary => PRIMARY_VERIFIER_NAME,
             crate::types::FinalizationType::Fallback => FALLBACK_VERIFIER_NAME,
         };
-        let calldata = self.aggregator.aggregate(snark.path(), verifier_name).await?;
+        let calldata = self
+            .aggregator
+            .aggregate(snark.path(), verifier_name)
+            .await?;
         info!(
             "aggregate_attestation ({verifier_name}) total {} ms, calldata={} bytes",
             t_total.elapsed().as_millis(),
@@ -999,8 +1006,7 @@ impl<W: SnarkWrapper, A: ProofAggregator> Circuit12ShplonkPipeline<W, A> {
         block_id_be: &[u8; 32],
         bk_set_commitment_be: &[u8; 32],
         num_layers: u8,
-        layer_hashes_be: &[[u8; 32];
-                 bridge_prover_lib::bridge_state::MAX_LAYERS],
+        layer_hashes_be: &[[u8; 32]; bridge_prover_lib::bridge_state::MAX_LAYERS],
         prev_max_level_layer_hash_be: &[u8; 32],
     ) -> Result<Vec<u8>, RelayerError> {
         let t_total = Instant::now();
@@ -1067,8 +1073,7 @@ impl SnarkWrapper for MockSnarkWrapper {
         _block_id_be: &[u8; 32],
         _bk_set_commitment_be: &[u8; 32],
         _num_layers: u8,
-        _layer_hashes_be: &[[u8; 32];
-                 bridge_prover_lib::bridge_state::MAX_LAYERS],
+        _layer_hashes_be: &[[u8; 32]; bridge_prover_lib::bridge_state::MAX_LAYERS],
         _prev_max_level_layer_hash_be: &[u8; 32],
     ) -> Result<tempfile::NamedTempFile, RelayerError> {
         if self.fail {
@@ -1228,10 +1233,8 @@ mod tests {
         // ignores the file bytes and synthesizes 3616-byte calldata. Verifies
         // the full wrap → aggregate wiring end-to-end without needing a real
         // params_dir on disk.
-        let pipeline = Circuit12ShplonkPipeline::new(
-            MockSnarkWrapper::default(),
-            MockAggregator::default(),
-        );
+        let pipeline =
+            Circuit12ShplonkPipeline::new(MockSnarkWrapper::default(), MockAggregator::default());
         let cd = pipeline
             .aggregate_attestation(
                 crate::types::FinalizationType::Primary,
@@ -1248,10 +1251,8 @@ mod tests {
 
     #[tokio::test]
     async fn mock_c12_pipeline_layer_returns_aggregated_calldata() {
-        let pipeline = Circuit12ShplonkPipeline::new(
-            MockSnarkWrapper::default(),
-            MockAggregator::default(),
-        );
+        let pipeline =
+            Circuit12ShplonkPipeline::new(MockSnarkWrapper::default(), MockAggregator::default());
         let cd = pipeline
             .aggregate_layer(
                 b"proof",

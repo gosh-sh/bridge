@@ -262,6 +262,105 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         );
     }
 
+    // -----------------------------------------------------------------
+    // ETH-20: the constructor answers to the same invariant as rotation
+    // -----------------------------------------------------------------
+
+    function test_eth20_constructorRejectsZeroGenesisCommitment() public {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(0, 0);
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+
+        vm.expectRevert(AckiNackiBridge.ZeroBkSetCommitment.selector);
+        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+    }
+
+    function test_eth20_constructorRejectsNonCanonicalGenesisCommitment() public {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(R, 0);
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R)
+        );
+        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+    }
+
+    function test_eth20_constructorRejectsNonCanonicalGenesisPrevAnchor() public {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(L2, R + 1);
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R + 1)
+        );
+        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+    }
+
+    /// @dev Zero is a legal prev anchor — a first block may genuinely carry it.
+    ///      Only canonicity is required, so this must still deploy.
+    function test_eth20_constructorAllowsZeroGenesisPrevAnchor() public {
+        AckiNackiBridge deployed = _deployWithGenesis(L2, 0);
+        assertEq(deployed.storedPrevMaxLevelLayerHash(), 0);
+        assertEq(deployed.storedBkSetCommitment(), L2);
+    }
+
+    /// @dev The guard is scoped to a wired `verifyBlock`. With the verifiers
+    ///      absent there is no anchor to be canonical, and the all-zero
+    ///      configuration must keep deploying (ETH-5 wiring is unchanged).
+    function test_eth20_constructorAllowsZeroGenesisWhenVerifyBlockDisabled() public {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+
+        AckiNackiBridge deployed = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledWithdraw()
+        );
+
+        assertEq(deployed.storedBkSetCommitment(), 0);
+    }
+
+    /// @dev Deploys the dependencies and returns the config, so a test can put
+    ///      `vm.expectRevert` immediately before `new AckiNackiBridge` — it
+    ///      applies to the next call, and a mock deployment would absorb it.
+    function _genesisFixture(uint256 commitment, uint256 prevAnchor)
+        internal
+        returns (address, address, AckiNackiBridge.VerifyBlockConfig memory)
+    {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        MockPrimaryVerifier p = new MockPrimaryVerifier();
+        MockFallbackVerifier f = new MockFallbackVerifier();
+        MockLayerHashesMovementVerifier l = new MockLayerHashesMovementVerifier();
+
+        return (
+            address(oracle),
+            address(usdc),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(p)),
+                IFallbackVerifier(address(f)),
+                ILayerHashesMovementVerifier(address(l)),
+                commitment,
+                prevAnchor
+            )
+        );
+    }
+
+    function _deployWithGenesis(uint256 commitment, uint256 prevAnchor)
+        internal
+        returns (AckiNackiBridge)
+    {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(commitment, prevAnchor);
+        return new AckiNackiBridge(
+            oracle, usdc, address(0), address(0), vb, VerifyBlockConfigLib.disabledWithdraw()
+        );
+    }
+
     /// @dev Depth-4 fold of the L2/L3 pair up to the block-id root, mirroring
     ///      `BlockIdMerkleTree::siblings_for_l2_l3` on the prover side, reduced
     ///      into BN254 `Fr` the way the contract and the circuit both see it.

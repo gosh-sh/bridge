@@ -19,6 +19,12 @@ Layer hashes grew because the aggregator was re-keygen'd at `k_outer=21`: at `k_
 outer circuit did not fit the 14 inner public inputs. The margin to EIP-170 is 1 465 B, the
 tightest of the four — regenerate with the size gate in the loop, not after it.
 
+Every size is also pinned in `SIZES`, next to `SHA256SUMS`, and
+`scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (layer hashes
+warns today, at 94%). That is deliberate: past the limit `CREATE` returns the zero address and
+`deployYulFromBin` reverts `YulDeployFailed`, so growth has to be visible in a diff rather than in
+a failed deploy (ETH-21). Regenerating an artefact means updating `SIZES` in the same commit.
+
 Each also ships a `*_calldata.bin` reference fixture (`instances ‖ proof`). The generated
 `Halo2Verifier` Solidity sources are kept for reference for 1A, 1B and 2 only — the `.bin` is what
 deploys.

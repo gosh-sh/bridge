@@ -279,11 +279,12 @@ contract AckiNackiBridge {
     // Events
     // ---------------------------------------------------------------------
 
-    /// @notice Emitted on every deposit. `anWorkchain` + `anAccount` are the
-    ///         Acki Nacki destination (TVM `workchain:account`) chosen by the
-    ///         depositor; they are carried as ZK public inputs and credited on
-    ///         the AN side (the EVM `sender` is kept only for provenance, since
-    ///         a 20-byte EVM address is not a valid AN recipient).
+    /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
+    ///         destination: it is carried as ZK public inputs and credited on the
+    ///         AN side (the EVM `sender` is kept only for provenance, since a
+    ///         20-byte EVM address is not a valid AN recipient). `anWorkchain` is
+    ///         inert — see `deposit` — and is emitted only so the event shape
+    ///         stays stable for indexers.
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
@@ -590,6 +591,19 @@ contract AckiNackiBridge {
                 if (_bw.accFr == 0) revert InvalidBridgeWithdrawalIdentity();
                 if (!(p && f && l)) revert WithdrawRequiresVerifyBlock();
             }
+            // ETH-20: genesis anchors enter the same slots `applyBkSetUpdate`
+            // guards, so they answer to the same invariant. Without this a
+            // non-canonical `genesisPrevMaxLevelLayerHash` is self-contradictory:
+            // `_expectedPrevAnchor` hands it back while no layer has data, but
+            // `verifyBlock` gates the argument through `_requireCanonicalFr`
+            // first, so the very first block can never match it. Zero is legal
+            // for the layer hash — a first block may genuinely carry zero — so
+            // only canonicity is required there.
+            if (p && f && l) {
+                if (_vb.genesisBkSetCommitment == 0) revert ZeroBkSetCommitment();
+                _requireCanonicalFr(_vb.genesisBkSetCommitment);
+                _requireCanonicalFr(_vb.genesisPrevMaxLevelLayerHash);
+            }
         }
         primaryVerifier = _vb.primaryVerifier;
         fallbackVerifier = _vb.fallbackVerifier;
@@ -623,10 +637,15 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
-    /// @param anWorkchain Acki Nacki destination workchain id (TVM, e.g. 0).
-    ///                    Not range-checked (ETH-10). A wrong non-zero
-    ///                    destination is one-way: no refund, timeout, or owner
-    ///                    rescue (owner 2026-09-08).
+    /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
+    ///                    but Acki Nacki ignores it: the workchain concept is
+    ///                    retired there and `dappId` replaced it (2026-06-02),
+    ///                    so the recipient always lives in workchain 0. It is
+    ///                    not a public input of the deposit proof. Not
+    ///                    range-checked, because no supported set exists to
+    ///                    check against — a wrong value changes nothing
+    ///                    (ETH-10, corrected 2026-09-13). The destination that
+    ///                    does matter is `anAccount` below.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -1154,9 +1173,10 @@ contract AckiNackiBridge {
         return _layerWindows[layer].writeCursor;
     }
 
-    /// @notice How many further `_appendLayer` calls `anchor` survives on `layer`
-    ///         before eviction. 0 = not in the window. When the ring is full the
-    ///         oldest hash returns 1 (the next append overwrites it). Idle layers
+    /// @notice On which further `_appendLayer` call `anchor` is evicted from
+    ///         `layer`: a return of N means the Nth append overwrites it, so the
+    ///         anchor survives N-1. 0 = not in the window. When the ring is full
+    ///         the oldest hash returns 1 — the next append takes it. Idle layers
     ///         never evict: remaining stays until that layer appends again
     ///         (ETH-18 / ETH-03). Duplicate copies return the newest remaining.
     function anchorRemainingAppends(uint8 layer, uint256 anchor) external view returns (uint256) {

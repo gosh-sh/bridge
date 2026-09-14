@@ -53,9 +53,10 @@ steps:
       - lychee --config lychee.toml --no-progress '**/*.md' 'Cargo.toml' 'README.md'
 
   # Third question, same reasoning as the second: is every comment and every
-  # document still in English. A Russian sentence in a comment is invisible to
-  # half the people who will read the code next, and it is usually the sentence
-  # that explains *why* — the part that cannot be recovered from the code.
+  # document still in English. A comment written in another language is
+  # invisible to half the people who will read the code next, and it is usually
+  # the sentence that explains *why* — the part that cannot be recovered from
+  # the code.
   #
   # Intentional non-Latin text (fixtures, matching a localised tool's output)
   # is exempted per line with a `non-english-ok` marker; the script's docstring

@@ -2,10 +2,10 @@
 """Fail if a tracked file carries text in a language other than English.
 
 Documentation and comments in this repository are English. The rule is not
-about taste: a Russian sentence in a comment is invisible to half the people
-who will read the code next, it cannot be searched for by the English term it
-describes, and it tends to be the sentence that explains *why* — the one part
-a reader cannot reconstruct from the code.
+about taste: a comment written in another language is invisible to half the
+people who will read the code next, it cannot be searched for by the English
+term it describes, and it tends to be the sentence that explains *why* — the
+one part a reader cannot reconstruct from the code.
 
 What counts as a violation is a *letter outside the Latin script*: Cyrillic,
 Greek prose, Hebrew, Arabic, CJK, Hangul, Devanagari, and so on. Symbols,

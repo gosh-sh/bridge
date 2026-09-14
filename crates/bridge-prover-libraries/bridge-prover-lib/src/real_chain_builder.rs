@@ -1098,7 +1098,10 @@ mod tests {
     //! a mock GqlClient is deferred (would need a trait refactor).
     use super::{l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries};
 
-    // Production values on shellnet: W = 128, P = 4.
+    // W as in production; P = 4 is a scenario, not the deployed setting —
+    // `THINNING_FACTOR_P` is 8. These helpers take `w` and `p` as arguments,
+    // so the smaller stride only makes the boundary arithmetic easier to read
+    // by hand (ETH-23 corrected the claim, not the value).
     const W: u64 = 128;
     const P: u64 = 4;
 

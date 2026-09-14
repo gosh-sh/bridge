@@ -12,6 +12,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use bridge_prover_lib::BUNDLE_STRIDE_L1;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
@@ -24,8 +25,20 @@ use crate::{
 };
 
 /// Max seq_no gap another actor may advance between ticks before we halt
-/// (Check B). Thinned bundles are W·P = 512 apart; allow a few.
-const MAX_FORWARD_GAP: u64 = 2048;
+/// (Check B). Expressed in bundles rather than seq_nos, and derived from the
+/// stride rather than restating it: the literal 2048 was written when `P` was 4
+/// and the stride 512, so it meant "four bundles". `P` is 8 now
+/// (`THINNING_FACTOR_P`), the stride 1024, and the same literal had quietly
+/// become two — a sibling relayer that advanced three bundles between our ticks
+/// would halt this one with `HistoryDrift` for no reason (ETH-23).
+const MAX_FORWARD_GAP_BUNDLES: u64 = 4;
+const MAX_FORWARD_GAP: u64 = MAX_FORWARD_GAP_BUNDLES * BUNDLE_STRIDE_L1;
+
+// The invariant behind the number, checked at build time rather than in a test:
+// tolerate at least the three-bundle advance from the finding. A future `P`
+// bump cannot silently narrow this, and re-hardcoding the literal breaks the
+// build.
+const _: () = assert!(MAX_FORWARD_GAP >= 3 * BUNDLE_STRIDE_L1);
 
 /// Static configuration for one relayer instance.
 #[derive(Clone, Debug, Serialize, Deserialize)]

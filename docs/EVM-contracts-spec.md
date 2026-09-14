@@ -752,13 +752,33 @@ Read off the code, without a formal audit claim.
    `anchorLayer` public input (blocked on a C4 re-keygen).
 2. *Anchor-miss gas* (`:1024-1033`). Up to 1280 cold SLOADs (≈ 2.7 M gas) on a failing call, paid by
    the caller. An `O(1)` membership map would need eviction handling on window rollover.
-3. *Window depth is finite.* An anchor older than 128 appends in its layer is evicted; a proof
-   against it becomes unredeemable on-chain.
+3. *Window depth is finite, per layer.* Each layer keeps 128 anchors, so an anchor older than 128
+   appends in **its own layer** is evicted and a proof against that anchor reverts. This is a
+   deadline, not a loss: the witness builder escalates a layer at a time
+   (`--anchor-layer auto`, the relayer default), and because a layer L(n) anchor is appended only
+   at its own W^n boundary, each step up multiplies the deadline by W = 128 rather than repeating
+   the window below it. At ~3 seq/s on shellnet: L1 covers 131 072 seq, **≈ 12 hours**; L2 covers
+   2 097 152 seq, **≈ 8 days**; L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
+   is `Poseidon(block_id, tokenId, amount, hi, lo, sender)` and takes no root as input.
+
+   So the operational boundary on the pinned shellnet deploy (L1+L2 active) is **≈ 8 days
+   unwithdrawn**, and only past L(max) is a payout stranded — funds stay in `treasuryBalance`,
+   recoverable only by adding a layer. Tests: `test/WithdrawAnchorEviction.t.sol` (eviction at 128,
+   a seq_no jump not mass-evicting, re-proving against a still-in-window anchor) and
+   `AckiNackiBridgeWithdrawByProof.t.sol:593-659` (L2 and L3 anchors accepted, no-window
+   rejected).
 4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
    the AAVE side has an emergency lever.
-5. *Single-step ownership transfer* (`:1347`) — a mistyped owner is unrecoverable.
-6. *`approve` return value ignored* in `supplyToAave` (`:1250`); fine for USDC, not for
-   non-standard tokens. Likewise `deposit` books the requested amount, not the observed delta.
+5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed (ETH-8).**
+   Transfer is two-step: `transferOwnership` records `pendingOwner` (`:143`) and only
+   `acceptOwnership` (`:1551`), called by that address, moves `owner`. A mistyped address can never
+   accept, so the mistake is recoverable by overwriting `pendingOwner`.
+6. ~~*`approve` return value ignored* in `supplyToAave`; `deposit` books the requested amount, not
+   the observed delta.~~ **Closed.** `supplyToAave` reverts `ApproveFailed` on a falsy return
+   (`:1436`, error at `:387`), and the transfer paths measure `balanceOf` before and after and
+   revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1387-1393`,
+   error at `:364`). A fee-on-transfer or rebasing token now fails closed instead of crediting
+   book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
    lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
    first-come-first-served.
@@ -766,9 +786,14 @@ Read off the code, without a formal audit claim.
    is pinned by `accFr` alone.
 9. *`blockHeaderOracle` is dead weight* — a required, non-zero constructor argument that no code path
    reads.
-10. *Genesis parameters are unvalidated on-chain.* A wrong `genesisBkSetCommitment` or
-    `genesisLastSeenBlockSeqNo` bricks `verifyBlock` from block one (only the deploy script guards
-    the non-zero case).
+10. ~~*Genesis parameters are unvalidated on-chain.*~~ **Partly closed (ETH-20).** With the
+    verifiers wired the constructor now rejects a zero `genesisBkSetCommitment`
+    (`ZeroBkSetCommitment`, `:603`) and a non-canonical `genesisBkSetCommitment` or
+    `genesisPrevMaxLevelLayerHash` (`FieldElementOutOfRange`) — the same invariant
+    `applyBkSetUpdate` enforces, so a value that could never match `_expectedPrevAnchor` can no
+    longer be deployed. Zero stays legal for the prev anchor, since a first block may genuinely
+    carry it. `genesisLastSeenBlockSeqNo` remains unvalidated: any value is self-consistent, so
+    only the deploy script can catch a wrong one.
 11. *`GenesisCursorBridge`* (in `script/DeployGenesisCursorBridge.s.sol`) can seed the cursor
     arbitrarily. It is explicitly test-only, but it lives in the same tree as production scripts.
 

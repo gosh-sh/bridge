@@ -20,6 +20,32 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+## [Unreleased]
+
+### Added
+
+- **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
+  `eccUSDCBridge` (v1.3.1) and `DepositVoucher` moved here from acki-nacki with
+  their sources and the compiled `.tvc` / `.abi.json` that go into the
+  zerostate. The artefacts are byte-identical to the previous ones, so code
+  hashes do not change and nothing has to be redeployed. acki-nacki no longer
+  keeps a copy: it pins one commit of this repository and places the files
+  into its own tree when a zerostate is generated, so a contract change made
+  here reaches a network only after that pin is moved.
+  `make -C contracts/an/exchange SOLD=<sold>` rebuilds them; see
+  `contracts/an/README.md` for which compiler reproduces which artefact.
+- **CI pipeline `.woodpecker/an-contracts.yaml`** runs
+  `scripts/check_voucher_abi_consistency.py` and
+  `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
+  `main`.
+
+### Changed
+
+- **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
+  default.** `--compiled DIR` is replaced by `--compiled-bridge FILE` and
+  `--compiled-voucher FILE`, because the two artefacts sit in different
+  folders, and the bridge source it reads is `eccUSDCBridge.sol`.
+
 ## [0.2.0] – 2026-09-11
 
 ### Breaking Changes

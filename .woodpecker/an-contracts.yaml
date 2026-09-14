@@ -1,0 +1,24 @@
+# The Acki Nacki contracts under contracts/an/ carry two invariants the
+# compiler does not check:
+#
+#   * eccUSDCBridge embeds DepositVoucher's code, and the voucher calls back
+#     into confirmDeposit. If the sources or the two compiled ABIs disagree on
+#     that argument list, deposits abort in the voucher constructor.
+#   * The deposit verifying key is a hex literal in eccUSDCBridge.sol and must
+#     match deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin.
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+steps:
+  voucher-abi:
+    image: python:3-alpine
+    commands:
+      - python3 scripts/check_voucher_abi_consistency.py
+  deposit-vk-blob:
+    image: python:3-alpine
+    depends_on: [ ]
+    commands:
+      - python3 scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol

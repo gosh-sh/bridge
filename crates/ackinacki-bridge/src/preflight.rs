@@ -3554,7 +3554,7 @@ pub(crate) mod tests {
 
     #[test]
     fn keypair_with_mismatched_halves_is_refused() {
-        // The whole point of the ticket's "валидная пара" wording. Two
+        // The whole point of the ticket's "a valid pair" wording. Two
         // independently well-formed 64-hex strings are NOT a key pair, and
         // letting them through means the multisig rejects the signature after
         // the message is already on the wire — an ambiguous exit 10 instead of

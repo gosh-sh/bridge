@@ -667,7 +667,8 @@ def _lan_ipv4_windows() -> str:
     )
 
     for line in out.splitlines():
-        if "IPv4 Address" in line or "IPv4-адрес" in line:
+        # The second label is what a Russian-locale ipconfig prints.
+        if "IPv4 Address" in line or "IPv4-адрес" in line:  # non-english-ok
             ip = line.split(":")[-1].strip()
             if RFC1918.match(ip):
                 return ip

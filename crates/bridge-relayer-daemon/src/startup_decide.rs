@@ -7,21 +7,23 @@
 //! [`StartupDecision::Resurrect`], [`StartupDecision::Stop`].
 //!
 //! Design goals:
-//! * "Local state absent" is **not** the only resurrect trigger — a local
-//!   state that is present but lags the contract (typical in shared test
-//!   bridges where a co-tester has advanced the contract) also resurrects.
-//! * Any state that is *ahead* of the contract is a fatal inconsistency
-//!   — we never silently rewind an on-chain contract.
-//! * Cold-start policy selection (`Auto` vs `Explicit(n)`) is kept
-//!   orthogonal to the resurrect vs resume decision — the operator's
-//!   `--bootstrap-seqno` flag still drives it.
+//! * "Local state absent" is **not** the only resurrect trigger — a local state
+//!   that is present but lags the contract (typical in shared test bridges
+//!   where a co-tester has advanced the contract) also resurrects.
+//! * Any state that is *ahead* of the contract is a fatal inconsistency — we
+//!   never silently rewind an on-chain contract.
+//! * Cold-start policy selection (`Auto` vs `Explicit(n)`) is kept orthogonal
+//!   to the resurrect vs resume decision — the operator's `--bootstrap-seqno`
+//!   flag still drives it.
 //! * Unit-testable without an alloy RPC provider: consumes plain
 //!   [`EthBridgeContractState`] shaped by the daemon's `read_full_state`.
 
-use bridge_prover_lib::bridge_state::{BridgeState, EthBridgeContractState, MAX_LAYERS};
 #[cfg(test)]
 use bridge_prover_lib::bridge_state::HistoryWindow;
-use bridge_prover_lib::live_driver::SeedPolicy;
+use bridge_prover_lib::{
+    bridge_state::{BridgeState, EthBridgeContractState, MAX_LAYERS},
+    live_driver::SeedPolicy,
+};
 
 /// The four legs of startup routing.
 #[derive(Debug)]
@@ -80,30 +82,26 @@ pub struct DecideInputs<'a> {
 /// reverses each `uint256` slot at construction time, so this comparator
 /// does not need to reverse anything.
 ///
-/// **Genesis prepend.** Cold-start bootstrap (`bootstrap::BootstrapSeed::apply`,
-/// documented at `bootstrap.rs:17-18` as a Phase 1 fix ensuring verifier
-/// daemon does not lag prover) calls `append_bundle` with every seed
-/// `history_proofs` entry. This prepends one genesis entry to each active
-/// local layer window. The contract does **not** copy those entries into
-/// `_layerWindows`; it exposes only the configured anchor layer's seed root
-/// in immutable `storedPrevMaxLevelLayerHash`. So chronologically:
+/// **Genesis prepend.** Cold-start bootstrap
+/// (`bootstrap::BootstrapSeed::apply`, documented at `bootstrap.rs:17-18` as a
+/// Phase 1 fix ensuring verifier daemon does not lag prover) calls
+/// `append_bundle` with every seed `history_proofs` entry. This prepends one
+/// genesis entry to each active local layer window. The contract does **not**
+/// copy those entries into `_layerWindows`; it exposes only the configured
+/// anchor layer's seed root in immutable `storedPrevMaxLevelLayerHash`. So
+/// chronologically:
 ///
-/// - **Pre-wrap** (local data_len ≤ W): each bootstrapped local layer window
-///   is `[genesis_layer_root, vb_1, vb_2, …, vb_N]`; chain is
-///   `[vb_1, …, vb_N]`. Local has exactly one extra leading entry. On the
-///   configured anchor layer it must equal
-///   `chain.genesis_prev_max_level_layer_hash` (both LE — see comparator
-///   endianness note at the top of this rustdoc). Other active layers have no
-///   immutable on-chain genesis surface, so only their post-genesis suffix can
-///   be compared.
+/// - **Pre-wrap** (local data_len ≤ W): each bootstrapped local layer window is
+///   `[genesis_layer_root, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
+///   Local has exactly one extra leading entry. On the configured anchor layer
+///   it must equal `chain.genesis_prev_max_level_layer_hash` (both LE — see
+///   comparator endianness note at the top of this rustdoc). Other active
+///   layers have no immutable on-chain genesis surface, so only their
+///   post-genesis suffix can be compared.
 /// - **Post-wrap** (both data_len == W, after the (N=W)-th verifyBlock
-///   overwrites local's genesis slot): local and chain chronological
-///   sequences are identical.
-fn windows_match(
-    local: &BridgeState,
-    chain: &EthBridgeContractState,
-    anchor_level: u8,
-) -> bool {
+///   overwrites local's genesis slot): local and chain chronological sequences
+///   are identical.
+fn windows_match(local: &BridgeState, chain: &EthBridgeContractState, anchor_level: u8) -> bool {
     let w = local.window_size;
     let Some(anchor_index) = anchor_level.checked_sub(1).map(usize::from) else {
         return false;
@@ -172,9 +170,7 @@ fn windows_match(
         // deeper layers — startup routing only ensures we do not
         // silently resurrect on a mismatched cursor.
         if local_chrono.len() == chain_chrono.len() + 1 {
-            if i == anchor_index
-                && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash
-            {
+            if i == anchor_index && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash {
                 return false;
             }
             if local_chrono[1..] != chain_chrono[..] {
@@ -205,7 +201,13 @@ fn windows_match(
 /// A `window_size` mismatch between local and any layer of chain is
 /// treated as an unconditional Stop before any of the above arms fire.
 pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
-    let DecideInputs { local, chain, bootstrap_seqno, window_size, anchor_level } = inputs;
+    let DecideInputs {
+        local,
+        chain,
+        bootstrap_seqno,
+        window_size,
+        anchor_level,
+    } = inputs;
 
     // Guard: every chain window must be sized to the launched W. If not,
     // no arm below is meaningful — reject before doing anything else.
@@ -213,8 +215,8 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         if cw.data.len() != window_size {
             return StartupDecision::Stop {
                 reason: format!(
-                    "chain layer {} window width {} != daemon window_size {} — \
-                     contract deployed with a different W or corrupt read",
+                    "chain layer {} window width {} != daemon window_size {} — contract deployed \
+                     with a different W or corrupt read",
                     i + 1,
                     cw.data.len(),
                     window_size,
@@ -225,8 +227,8 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     if local.window_size != window_size {
         return StartupDecision::Stop {
             reason: format!(
-                "local BridgeState.window_size={} != daemon window_size={} — \
-                 delete prover_state.json and rebootstrap",
+                "local BridgeState.window_size={} != daemon window_size={} — delete \
+                 prover_state.json and rebootstrap",
                 local.window_size, window_size,
             ),
         };
@@ -255,21 +257,23 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
             return StartupDecision::Stop {
                 reason: format!(
                     "refuse: daemon configured for L1 but on-chain contract has \
-                     layer_windows[{l}].data_len > 0 (contract is L{l}-advanced). \
-                     Restart with --anchor-level {l} / BRIDGE_ANCHOR_LEVEL={l}."
+                     layer_windows[{l}].data_len > 0 (contract is L{l}-advanced). Restart with \
+                     --anchor-level {l} / BRIDGE_ANCHOR_LEVEL={l}."
                 ),
             };
         }
     }
     if anchor_level >= 2
         && chain.layer_windows[0].data_len > 0
-        && chain.highest_populated_layer().is_none_or(|l| l < anchor_level)
+        && chain
+            .highest_populated_layer()
+            .is_none_or(|l| l < anchor_level)
     {
         return StartupDecision::Stop {
             reason: format!(
-                "refuse: daemon configured for L{anchor_level} but on-chain contract's \
-                 deepest populated layer is 1 (contract has only ever been driven by an \
-                 L1 daemon). Restart with --anchor-level 1 / BRIDGE_ANCHOR_LEVEL=1."
+                "refuse: daemon configured for L{anchor_level} but on-chain contract's deepest \
+                 populated layer is 1 (contract has only ever been driven by an L1 daemon). \
+                 Restart with --anchor-level 1 / BRIDGE_ANCHOR_LEVEL=1."
             ),
         };
     }
@@ -335,8 +339,8 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         return StartupDecision::Stop {
             reason: format!(
                 "local BridgeState is initialized (last_seen={}) but contract is at genesis \
-                 (last_seen=0) — wrong --bridge address or contract redeployed. Nuke local \
-                 state (rm prover_state.json) or point the daemon at the intended contract.",
+                 (last_seen=0) — wrong --bridge address or contract redeployed. Nuke local state \
+                 (rm prover_state.json) or point the daemon at the intended contract.",
                 local.stored_last_seen_block_seq_no,
             ),
         };
@@ -392,17 +396,15 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         return StartupDecision::Stop {
             reason: format!(
                 "cursor match (last_seen={}) but bk-update seq_no diverges: local={} chain={}",
-                local_seq,
-                local.stored_last_bk_set_update_seq_no,
-                chain.last_bk_set_update_seq_no,
+                local_seq, local.stored_last_bk_set_update_seq_no, chain.last_bk_set_update_seq_no,
             ),
         };
     }
     if !windows_match(local, chain, anchor_level) {
         return StartupDecision::Stop {
             reason: format!(
-                "cursor match (last_seen={}) but per-layer windows diverge byte-for-byte — \
-                 local was written by a different verifier or drifted",
+                "cursor match (last_seen={}) but per-layer windows diverge byte-for-byte — local \
+                 was written by a different verifier or drifted",
                 local_seq,
             ),
         };
@@ -428,8 +430,7 @@ mod tests {
     }
 
     fn empty_chain() -> EthBridgeContractState {
-        let layer_windows: [HistoryWindow; MAX_LAYERS] =
-            std::array::from_fn(|_| empty_lw());
+        let layer_windows: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| empty_lw());
         EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
@@ -473,7 +474,9 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Cold { policy } => assert_eq!(policy, SeedPolicy::Auto),
+            StartupDecision::Cold {
+                policy,
+            } => assert_eq!(policy, SeedPolicy::Auto),
             d => panic!("expected Cold, got {d:?}"),
         }
     }
@@ -489,7 +492,9 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Cold { policy } => assert_eq!(policy, SeedPolicy::Explicit(512)),
+            StartupDecision::Cold {
+                policy,
+            } => assert_eq!(policy, SeedPolicy::Explicit(512)),
             d => panic!("expected Cold, got {d:?}"),
         }
     }
@@ -505,7 +510,7 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::WarmResume => {}
+            StartupDecision::WarmResume => {},
             d => panic!("expected WarmResume, got {d:?}"),
         }
     }
@@ -554,7 +559,7 @@ mod tests {
             window_size: W,
             anchor_level: 2,
         }) {
-            StartupDecision::WarmResume => {}
+            StartupDecision::WarmResume => {},
             d => panic!("expected L2 WarmResume, got {d:?}"),
         }
     }
@@ -572,9 +577,14 @@ mod tests {
             window_size: W,
             anchor_level: 2,
         }) {
-            StartupDecision::Stop { reason } => {
-                assert!(reason.contains("per-layer windows diverge"), "reason: {reason}");
-            }
+            StartupDecision::Stop {
+                reason,
+            } => {
+                assert!(
+                    reason.contains("per-layer windows diverge"),
+                    "reason: {reason}"
+                );
+            },
             d => panic!("expected L2 Stop, got {d:?}"),
         }
     }
@@ -603,9 +613,11 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Cold { policy } => {
+            StartupDecision::Cold {
+                policy,
+            } => {
                 assert_eq!(policy, SeedPolicy::Explicit(seed_seqno));
-            }
+            },
             d => panic!("expected Cold(Explicit({seed_seqno})), got {d:?}"),
         }
     }
@@ -622,11 +634,13 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Resurrect { fresh_state } => {
+            StartupDecision::Resurrect {
+                fresh_state,
+            } => {
                 assert!(fresh_state.initialized);
                 assert_eq!(fresh_state.stored_last_seen_block_seq_no, 10);
                 assert_eq!(fresh_state.stored_bk_set_commitment, [7u8; 32]);
-            }
+            },
             d => panic!("expected Resurrect, got {d:?}"),
         }
     }
@@ -652,9 +666,11 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Resurrect { fresh_state } => {
+            StartupDecision::Resurrect {
+                fresh_state,
+            } => {
                 assert_eq!(fresh_state.stored_last_seen_block_seq_no, 20);
-            }
+            },
             d => panic!("expected Resurrect, got {d:?}"),
         }
     }
@@ -670,10 +686,12 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Stop { reason } => {
+            StartupDecision::Stop {
+                reason,
+            } => {
                 assert!(reason.contains("last_seen=20"), "reason: {reason}");
                 assert!(reason.contains("genesis"), "reason: {reason}");
-            }
+            },
             d => panic!("expected Stop, got {d:?}"),
         }
     }
@@ -691,9 +709,14 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Stop { reason } => {
-                assert!(reason.contains("bk-set commitment diverges"), "reason: {reason}");
-            }
+            StartupDecision::Stop {
+                reason,
+            } => {
+                assert!(
+                    reason.contains("bk-set commitment diverges"),
+                    "reason: {reason}"
+                );
+            },
             d => panic!("expected Stop, got {d:?}"),
         }
     }
@@ -711,9 +734,14 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Stop { reason } => {
-                assert!(reason.contains("per-layer windows diverge"), "reason: {reason}");
-            }
+            StartupDecision::Stop {
+                reason,
+            } => {
+                assert!(
+                    reason.contains("per-layer windows diverge"),
+                    "reason: {reason}"
+                );
+            },
             d => panic!("expected Stop, got {d:?}"),
         }
     }
@@ -730,8 +758,7 @@ mod tests {
             write_cursor: 0,
             last_height: 0,
         };
-        let layer_windows: [HistoryWindow; MAX_LAYERS] =
-            std::array::from_fn(|_| wide_lw());
+        let layer_windows: [HistoryWindow; MAX_LAYERS] = std::array::from_fn(|_| wide_lw());
         let chain = EthBridgeContractState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
@@ -746,9 +773,11 @@ mod tests {
             window_size: 4,
             anchor_level: 1,
         }) {
-            StartupDecision::Stop { reason } => {
+            StartupDecision::Stop {
+                reason,
+            } => {
                 assert!(reason.contains("window width"), "reason: {reason}");
-            }
+            },
             d => panic!("expected Stop, got {d:?}"),
         }
     }
@@ -790,10 +819,12 @@ mod tests {
             window_size: W,
             anchor_level: 1,
         }) {
-            StartupDecision::Stop { reason } => {
+            StartupDecision::Stop {
+                reason,
+            } => {
                 assert!(reason.contains("layer_windows[2]"), "reason: {reason}");
                 assert!(reason.contains("--anchor-level 2"), "reason: {reason}");
-            }
+            },
             d => panic!("expected Stop, got {d:?}"),
         }
     }
@@ -815,13 +846,15 @@ mod tests {
             window_size: W,
             anchor_level: 2,
         }) {
-            StartupDecision::Stop { reason } => {
+            StartupDecision::Stop {
+                reason,
+            } => {
                 assert!(
                     reason.contains("only ever been driven by an L1"),
                     "reason: {reason}",
                 );
                 assert!(reason.contains("--anchor-level 1"), "reason: {reason}");
-            }
+            },
             d => panic!("expected Stop, got {d:?}"),
         }
     }
@@ -843,9 +876,11 @@ mod tests {
             window_size: W,
             anchor_level: 2,
         }) {
-            StartupDecision::Cold { policy } => {
+            StartupDecision::Cold {
+                policy,
+            } => {
                 assert_eq!(policy, SeedPolicy::Explicit(seed_seqno));
-            }
+            },
             d => panic!("expected Cold, got {d:?}"),
         }
     }

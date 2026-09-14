@@ -283,8 +283,8 @@ mod tests {
         // Post-NB-Q7: the retired 256-byte back-compat lane is gone, so a
         // legacy-sized blob now fails the same short-blob gate as any other
         // undersized input.
-        let legacy = PartnerWithdrawalProof::from_json_bytes(proof_json_with(256).as_bytes())
-            .unwrap();
+        let legacy =
+            PartnerWithdrawalProof::from_json_bytes(proof_json_with(256).as_bytes()).unwrap();
         assert!(legacy.proof_bytes().is_err());
 
         // A blob shorter than the SHPLONK instance prefix is rejected.

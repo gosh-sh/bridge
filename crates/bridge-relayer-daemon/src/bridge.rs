@@ -7,20 +7,19 @@
 //!   contract binding. Reads `storedLastSeenBlockSeqNo` /
 //!   `storedBkSetCommitment` (mutable) and `expectedPrevAnchor(numLayers)`
 //!   (per-layer anchor pick) from chain, plus the immutable
-//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits
-//!   `verifyBlock(...)` transactions. `storedPrevMaxLevelLayerHash` is
-//!   the storage v2.0 immutable genesis seed (2026-08-04) — never
-//!   mutated post-deploy; use `expectedPrevAnchor` for the actual chain
-//!   anchor going forward.
+//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits `verifyBlock(...)`
+//!   transactions. `storedPrevMaxLevelLayerHash` is the storage v2.0 immutable
+//!   genesis seed (2026-08-04) — never mutated post-deploy; use
+//!   `expectedPrevAnchor` for the actual chain anchor going forward.
 //! - [`MockBridgeClient`] — a deterministic in-memory mirror of the contract's
 //!   state machine, exposed to unit tests so we can drive the relayer through
 //!   5+ blocks in microseconds without spawning Anvil. The mock reproduces
 //!   *exactly* the cheap pre-flight checks the real contract performs
 //!   (numLayers range, tail zero, BK-set match, monotonic seqNo, anchor match)
 //!   — so any consumer that passes the mock will also pass the real bridge
-//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock
-//!   tracks per-layer window heads and implements `expectedPrevAnchor` with
-//!   the same `min(numLayers, highestActiveLayer)` pick used on-chain.
+//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock tracks
+//!   per-layer window heads and implements `expectedPrevAnchor` with the same
+//!   `min(numLayers, highestActiveLayer)` pick used on-chain.
 //!
 //! ZK verification itself is *not* mocked here in the way the Solidity
 //! `MockPrimaryVerifier` etc. mocks do; the [`MockBridgeClient`] takes
@@ -673,7 +672,7 @@ where
                         },
                         tx_hash: Some(receipt.transaction_hash()),
                     })
-                }
+                },
                 Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
                     reason: format!("tx confirmation error: {e}"),
                 }),
@@ -871,9 +870,10 @@ where
                 last_height: w.lastHeight,
             });
         }
-        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] = windows
-            .try_into()
-            .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
+        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] =
+            windows.try_into().map_err(|_| {
+                RelayerError::Other("read_full_state: expected 10 layer windows".into())
+            })?;
 
         Ok(EthBridgeContractState {
             last_seen_block_seq_no: last,
@@ -899,7 +899,9 @@ pub enum BkSetUpdateSubmitOutcome {
         new_state: BridgeOnChainState,
         tx_hash: Option<B256>,
     },
-    Reverted { reason: String },
+    Reverted {
+        reason: String,
+    },
 }
 
 fn to_sol_withdrawal_pub(
@@ -1009,7 +1011,9 @@ where
                         "dumped verifyBlock submission to {}",
                         path.display()
                     ),
-                    Err(e) => tracing::warn!("dump-submissions: write {} failed: {e}", path.display()),
+                    Err(e) => {
+                        tracing::warn!("dump-submissions: write {} failed: {e}", path.display())
+                    },
                 }
             }
         }
@@ -1099,7 +1103,8 @@ where
         if post_anchor != expected_top {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted block={}",
+                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted \
+                     block={}",
                     block.num_layers, post_anchor, expected_top
                 ),
             });
@@ -1238,10 +1243,7 @@ mod tests {
             MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
         bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
         let anchor = bridge.expected_prev_anchor(1).await.unwrap();
-        let outcome = bridge
-            .submit_block(&block(1, anchor))
-            .await
-            .unwrap();
+        let outcome = bridge.submit_block(&block(1, anchor)).await.unwrap();
         match outcome {
             SubmitOutcome::Reverted {
                 reason,

@@ -36,11 +36,21 @@ use tracing::info;
 /// docstring for the Auto-vs-Explicit-2 caveat.
 pub fn stride_for(anchor: AnchorLayerMode) -> u64 {
     match anchor {
+        // A floor, not a claim about the layer the proof will use. Under `Auto`
+        // the layer is chosen per event, after this wait, by
+        // `resolve_anchor_layer` — and bounded there by
+        // `bridge_state.num_active_layers()`, so it never names a layer whose
+        // on-chain window is empty. That bound is the whole difference from an
+        // explicit `3`, which returns before the check (`enrich.rs:388`) and can
+        // stamp a layer nothing publishes; hence the CLI refusal. Waiting on the
+        // shortest stride is the safe side of wrong: the boundary always
+        // arrives, and an escalated anchor is already in place when it does
+        // (T_n ≤ e + W^n, far inside its window).
         AnchorLayerMode::Auto => AnchorMode::L1.stride(),
         AnchorLayerMode::Explicit(1) => AnchorMode::L1.stride(),
         AnchorLayerMode::Explicit(2) => AnchorMode::L2.stride(),
-        // Higher layers are not currently deployed. Fall back to L1 —
-        // the enricher will escalate via Auto internally if it needs to.
+        // Unreachable through either CLI (both refuse > 2). Kept total, and L1
+        // for the reason above.
         AnchorLayerMode::Explicit(_) => AnchorMode::L1.stride(),
     }
 }
@@ -49,6 +59,10 @@ pub fn stride_for(anchor: AnchorLayerMode) -> u64 {
 /// mirror stamps this into `BridgeState.anchor_level`; the contract
 /// does not persist it, so callers pick the level they'll run the
 /// enricher at. `Auto` maps to 1 (the enricher escalates internally).
+///
+/// So on an `Auto` run this field is a floor, and a proof may well be anchored
+/// higher than the 1 recorded here. Nothing reads it back to size a window —
+/// treat it as provenance, not as the layer in force.
 pub fn anchor_level_for(anchor: AnchorLayerMode) -> u8 {
     match anchor {
         AnchorLayerMode::Auto => 1,

@@ -1,0 +1,11 @@
+# Byte size of every committed SHPLONK artefact (ETH-21). EIP-170 limit is
+# 24576 B for the runtime .bin; scripts/check_shplonk_artefacts.sh fails when
+# these figures drift, so a regeneration shows its growth in the diff.
+20990  BridgeWithdrawalAggregatorVerifier.bin
+3616  BridgeWithdrawalAggregatorVerifier_calldata.bin
+21493  FallbackAggregatorVerifier.bin
+3840  FallbackAggregatorVerifier_calldata.bin
+23111  LayerHashesAggregatorVerifier.bin
+4160  LayerHashesAggregatorVerifier_calldata.bin
+21494  PrimaryAggregatorVerifier.bin
+3840  PrimaryAggregatorVerifier_calldata.bin

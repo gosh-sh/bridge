@@ -113,9 +113,7 @@ contract AckiNackiBridgeStorageV2Test is Test {
         a[2] = A3;
         _submit(0xA, 1, 3, _layers(a), GENESIS_PREV_ANCHOR);
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
-            GENESIS_PREV_ANCHOR,
-            "unchanged after block 1"
+            bridge.storedPrevMaxLevelLayerHash(), GENESIS_PREV_ANCHOR, "unchanged after block 1"
         );
 
         // Block 2: 1 layer, anchored at A1 (per-layer pick).
@@ -123,9 +121,7 @@ contract AckiNackiBridgeStorageV2Test is Test {
         b[0] = B1;
         _submit(0xB, 2, 1, _layers(b), A1);
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
-            GENESIS_PREV_ANCHOR,
-            "unchanged after block 2"
+            bridge.storedPrevMaxLevelLayerHash(), GENESIS_PREV_ANCHOR, "unchanged after block 2"
         );
 
         // Block 3: 2 layers, anchored at A2 (per-layer pick).
@@ -134,9 +130,7 @@ contract AckiNackiBridgeStorageV2Test is Test {
         c[1] = C2;
         _submit(0xC, 3, 2, _layers(c), A2);
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
-            GENESIS_PREV_ANCHOR,
-            "unchanged after block 3"
+            bridge.storedPrevMaxLevelLayerHash(), GENESIS_PREV_ANCHOR, "unchanged after block 3"
         );
     }
 
@@ -208,7 +202,10 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
         // Block A (blockId=0xA, seqNo=1) — 4 layers.
         uint256[] memory a = new uint256[](4);
-        a[0] = A1; a[1] = A2; a[2] = A3; a[3] = A4;
+        a[0] = A1;
+        a[1] = A2;
+        a[2] = A3;
+        a[3] = A4;
         _submit(0xA, 1, 4, _layers(a), GENESIS_PREV_ANCHOR);
 
         // Block B (blockId=0xB, seqNo=2) — 1 layer.
@@ -218,7 +215,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
         // Block C (blockId=0xC, seqNo=3) — 2 layers.
         uint256[] memory c = new uint256[](2);
-        c[0] = C1; c[1] = C2;
+        c[0] = C1;
+        c[1] = C2;
         _submit(0xC, 3, 2, _layers(c), A2);
 
         // Expected timeline per layer (heights = seqNo per contract):
@@ -272,9 +270,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
     /// @notice Layer index 0 must revert with `LayerOutOfRange`.
     function test_getLayerWindow_revertsOnLayerZero() public {
-        (bool ok, bytes memory ret) = address(bridge).staticcall(
-            abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(0))
-        );
+        (bool ok, bytes memory ret) = address(bridge)
+            .staticcall(abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(0)));
         assertFalse(ok, "call must revert");
         assertEq(
             bytes4(ret),
@@ -285,9 +282,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
     /// @notice Layer index > MAX_LAYER_HASHES must revert with `LayerOutOfRange`.
     function test_getLayerWindow_revertsOnLayerAboveMax() public {
-        (bool ok, bytes memory ret) = address(bridge).staticcall(
-            abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(11))
-        );
+        (bool ok, bytes memory ret) = address(bridge)
+            .staticcall(abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(11)));
         assertFalse(ok, "call must revert");
         assertEq(
             bytes4(ret),

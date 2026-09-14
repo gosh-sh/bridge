@@ -20,6 +20,103 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **The layer-hashes verification key is rotated. Redeploy that verifier.**
+  `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
+  20 the outer circuit did not fit the 14 inner public inputs. The runtime
+  artefact grows from 19 100 B to 23 111 B, so its address and `extcodehash`
+  change and the pin in `ShplonkDeployLib` moves with it. Proofs produced
+  against the old key do not verify against the new one; a deployment that
+  updates only the bridge will fail every `verifyBlock`. Margin to EIP-170
+  (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
+  warning below.
+
+  The other three keys are **unchanged**: `PrimaryAggregatorVerifier.bin`,
+  `FallbackAggregatorVerifier.bin` and `BridgeWithdrawalAggregatorVerifier.bin`
+  are byte-identical to 0.2.0. Primary's and Fallback's `_calldata.bin` fixtures
+  were re-emitted, which is a test-vector refresh and not a rotation.
+
+- Deployment now requires `LAYER_HASHES_VERIFIER` and `WITHDRAWAL_VERIFIER` in
+  the environment, and on mainnet `USE_AXIOM_ORACLE` and `WIRE_VERIFY_BLOCK`
+  must be set explicitly rather than defaulted. A mainnet deploy that relied on
+  the defaults now stops instead of silently wiring a partial bridge.
+
+- `AckiNackiBridge`'s constructor rejects configurations it used to accept: a
+  zero `genesisBkSetCommitment` (`ZeroBkSetCommitment`) and a non-canonical
+  `genesisBkSetCommitment` or `genesisPrevMaxLevelLayerHash`
+  (`FieldElementOutOfRange`), whenever the verifiers are wired. These are the
+  values that could never have matched `_expectedPrevAnchor`, i.e. deployments
+  that were already broken from block one — but a script that passed zeros to
+  get through construction will now fail at construction (ETH-20).
+
+- Ownership transfer is two-step. `transferOwnership` records `pendingOwner`
+  and ownership moves only when that address calls `acceptOwnership`. Any
+  runbook or script that assumed `transferOwnership` completes the handover
+  needs the second call (ETH-8).
+
+### Added
+
+- `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
+  read-only views of how close an anchor is to eviction from its 128-slot
+  window. A return of N means the Nth further append overwrites it; 0 means it
+  is not in the window. Intended as the monitoring hook for the withdrawal
+  deadline described under ETH-03 below.
+- `VERIFY_GAS_CAP` (1 500 000) bounds the `staticcall` into every Yul verifier,
+  so a malformed proof cannot burn the whole transaction gas.
+- `YulCodehashMismatch` in `ShplonkDeployLib`: deployment asserts the deployed
+  Yul verifier's `extcodehash` against a pinned value, which is what makes an
+  accidentally-substituted verifier a failed deploy rather than a live one.
+- `TransferAmountMismatch` and `ApproveFailed`: token transfers are measured by
+  `balanceOf` delta and `approve` return values are checked, so a
+  fee-on-transfer or non-standard token fails closed instead of crediting book
+  value that never arrived.
+- `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
+  `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
+  size drift, and warns from 90% of EIP-170 (layer hashes warns today at 94%).
+  Growth now shows up in a diff instead of in a reverted deploy (ETH-6, ETH-21).
+- `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
+  appends, a seq_no jump not mass-evicting earlier anchors,
+  `anchorRemainingAppends` at its edges (ETH-18), and the same nullifier paid
+  against a still-in-window anchor after the original evicted (ETH-3).
+
+### Changed
+
+- `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
+  (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
+  unvalidated) are closed by this release, and item 3 now states the real
+  withdrawal boundary instead of calling an evicted anchor "unredeemable".
+- The withdrawal deadline, written down for the first time (ETH-3). Each layer
+  keeps 128 anchors, and the witness builder escalates a layer at a time
+  (`--anchor-layer auto`, the relayer default); because an L(n) anchor is
+  appended only at its own W^n boundary, each step multiplies the deadline by
+  128 rather than repeating the window below. At shellnet's ~3 seq/s: **≈ 12
+  hours at L1, ≈ 8 days at L2** — the pinned deploy — and ≈ 2.8 years at L3.
+  Past the highest active layer a payout is stranded in `treasuryBalance`. No
+  code changed here; the horizon was always this and was documented as 12 hours.
+
+### Fixed
+
+- The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
+  required *at most* 64 hex characters, so a pasted 40-character address was
+  left-padded into a well-formed non-zero `bytes32`, passed the contract's
+  `anAccount != 0`, was bound in-circuit, and credited an account nobody owns —
+  with deposit being one-way, the length check was the last place to catch it.
+  Now exactly 64. The workchain field, which Acki Nacki ignores since `dappId`
+  replaced the concept, is no longer editable and is pinned to 0 (ETH-10).
+- `MAX_FORWARD_GAP` was sized when the thinning factor `P` was 4 and the bundle
+  stride 512, where its literal 2048 meant "four bundles". `P` is 8 and the
+  stride 1024, so the same literal had quietly become two bundles, and a sibling
+  relayer that advanced three between ticks would halt this one with
+  `HistoryDrift` for no reason. Now derived from `BUNDLE_STRIDE_L1`, with a test
+  asserting the three-bundle case. Two stale restatements of the 512 stride
+  corrected in `history_consistency.rs` and `TECHNICAL_README.md`, and a test
+  comment that described `P = 4` as the production value (ETH-23).
+- `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
+  survives N-1 (ETH-18).
+
 ## [0.2.0] – 2026-09-11
 
 ### Breaking Changes

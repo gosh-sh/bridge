@@ -290,8 +290,8 @@ pub async fn compose(
     //     (`crypto/keys.rs:31-38`).
     //
     // So `e.message()` in `reason` and `{e:?}` in `source` both violate the
-    // ticket's unconditional rule — "**никогда не печатает содержимое файла
-    // ключей**" — and `source` is the worse of the two, because it is what
+    // ticket's unconditional rule — "**never prints the contents of the key
+    // file**" — and `source` is the worse of the two, because it is what
     // `--json` serialises and what ends up in logs. Keep the error code,
     // which is a stable classifier and carries nothing, and drop the text.
     let validated = tvm_client::abi::encode_message(context.clone(), encode.clone())

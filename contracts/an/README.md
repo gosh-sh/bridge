@@ -27,6 +27,10 @@ that pin is moved.
 
     make -C contracts/an/exchange SOLD=/path/to/sold
 
+The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
+`eccUSDCBridge.tvc` and 0.81.0 for `DepositVoucher.tvc`, which is why the
+compiled folders carry those names.
+
 `sold` 0.81.0 reproduces `DepositVoucher.tvc` and both ABIs byte for byte;
 `eccUSDCBridge.tvc` comes out different, so a rebuild changes the bridge's code
 hash. `sold` 0.82.0 does not compile these sources. `eccUSDCBridge` embeds the

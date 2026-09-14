@@ -42,7 +42,16 @@ assigns it when the release is tagged.
 ### Changed
 
 - **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
-  default.** `--compiled DIR` is replaced by `--compiled-bridge FILE` and
+  default.** With no arguments it checks the sources in
+  `contracts/an/exchange/` against the compiled ABIs in
+  `contracts/an/0.80.0_compiled/exchange/` and
+  `contracts/an/0.81.0_compiled/exchange/`. It does not check the ABI copies
+  the tooling loads: `crates/bridge-prover-libraries/python/contracts/` was
+  the previous default and is no longer checked, and
+  `crates/ackinacki-bridge/abi/` was never covered. Those copies predate the
+  `chainId` deposit identity and are known to be stale; pass them with
+  `--compiled-bridge` / `--compiled-voucher` to see the drift.
+  `--compiled DIR` is replaced by `--compiled-bridge FILE` and
   `--compiled-voucher FILE`, because the two artefacts sit in different
   folders, and the bridge source it reads is `eccUSDCBridge.sol`.
 

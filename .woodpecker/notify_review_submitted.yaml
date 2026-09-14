@@ -124,8 +124,12 @@ steps:
 
           # Safe to assemble by hand: every value here is a GitHub login, a state
           # enum, a number or a github.com URL — none of them can carry a quote.
+          #
+          # flags 4 is SUPPRESS_EMBEDS: without it Discord unfurls the PR link
+          # into a preview card that is taller than the message itself and
+          # repeats what the line already says. The link stays clickable.
           N=$(expr "$N" + 1)
-          printf '{"content":"<@%s> %s by `%s` on PR #%s — %s","allowed_mentions":{"parse":["users"]}}' \
+          printf '{"content":"<@%s> %s by `%s` on PR #%s — %s","allowed_mentions":{"parse":["users"]},"flags":4}' \
             "$ID" "$HEADLINE" "$REVIEWER" "$NUMBER" "$URL" >"discord-review-$N.json"
           echo "PR #$NUMBER: $REVIEWER -> $AUTHOR ($STATE)"
         done </tmp/reviews.txt

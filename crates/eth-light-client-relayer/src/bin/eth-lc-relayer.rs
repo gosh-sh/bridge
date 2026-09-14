@@ -10,7 +10,10 @@
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` / `--no-flip-owner` opt out of the production defaults.
-//!   `ETH_RPC_URL` walks epoch ancestry after each accepted checkpoint.
+//!   `ETH_RPC_URL` fetches epoch headers after each accepted checkpoint and
+//!   runs `link_headers` locally. On-chain `submitAncestry` stays off unless
+//!   `--submit-ancestry` is set (the call cannot succeed until a keccak-256
+//!   builtin lands).
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -186,10 +189,17 @@ enum Cmd {
         /// Skip the one-way owner flip after the first accepted `submitUpdate`.
         #[arg(long, default_value_t = false)]
         no_flip_owner: bool,
-        /// Execution JSON-RPC. When set, each accepted `submitUpdate` is
-        /// followed by `rePushAnchor` + `submitAncestry` (31/32 coverage).
+        /// Execution JSON-RPC. When set, each accepted `submitUpdate` fetches
+        /// the epoch parent chain and runs `link_headers` locally. Does **not**
+        /// call `submitAncestry` unless `--submit-ancestry` is also set.
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: Option<String>,
+        /// Send `submitAncestry` after each checkpoint. Default **off**: two
+        /// headers already cost ~130 M gas against the 10 M limit, so the call
+        /// cannot succeed until a keccak-256 builtin lands. Needs
+        /// `--eth-rpc-url`.
+        #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
+        submit_ancestry: bool,
         /// With `--no-rotate`: on a period jump, prove a step of the new
         /// period and advance the committee with the owner key
         /// (`setCommitteeCommitment`) instead of waiting for a rotate proof.
@@ -369,6 +379,7 @@ async fn main() -> anyhow::Result<()> {
             no_rotate,
             no_flip_owner,
             eth_rpc_url,
+            submit_ancestry,
             owner_hop,
             an_graphql_url,
             an_keys_path,
@@ -416,6 +427,7 @@ async fn main() -> anyhow::Result<()> {
                 !no_rotate,
                 !no_flip_owner,
                 eth_rpc_url,
+                submit_ancestry,
                 owner_hop,
                 an,
                 allow_insecure_graphql,
@@ -752,6 +764,10 @@ async fn submit_ancestry_cmd(
     let checkpoint: [u8; 32] = raw
         .try_into()
         .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    tracing::warn!(
+        "submit-ancestry is explicit, but on Acki Nacki today two headers cost ~130 M gas against \
+         a 10 M limit; this call will OOG until a keccak-256 builtin lands"
+    );
     let headers = EthExecutionRpc::new(eth_rpc_url)?
         .ancestry_headers(checkpoint, max_headers)
         .await?;
@@ -854,6 +870,7 @@ async fn run_daemon(
     enable_rotate: bool,
     flip_owner: bool,
     eth_rpc_url: Option<String>,
+    submit_ancestry: bool,
     owner_hop: bool,
     an: AnConfig,
     allow_insecure: bool,
@@ -869,6 +886,7 @@ async fn run_daemon(
     cfg.enable_rotate = enable_rotate;
     cfg.flip_owner = flip_owner;
     cfg.owner_hop = owner_hop;
+    cfg.submit_ancestry = submit_ancestry;
 
     if dry_run {
         info!("dry-run: MockAnSubmitter (no AN tx)");
@@ -879,7 +897,11 @@ async fn run_daemon(
                 Arc::new(MockProofGenerator::new()),
                 Arc::new(MockAnSubmitter::accepting()),
             )?;
-            return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
+            return run(
+                attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+                backoff,
+            )
+            .await;
         }
         let prover_dir = prover_dir
             .ok_or_else(|| anyhow::anyhow!("--prover-dir required unless --mock-prove"))?;
@@ -895,7 +917,11 @@ async fn run_daemon(
             Arc::new(gen),
             Arc::new(MockAnSubmitter::accepting()),
         )?;
-        return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
+        return run(
+            attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+            backoff,
+        )
+        .await;
     }
 
     #[cfg(not(feature = "live-submit"))]
@@ -949,7 +975,11 @@ async fn run_daemon(
         if mock_prove {
             let relayer =
                 Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter)?;
-            return run(attach_execution(relayer, eth_rpc_url)?, backoff).await;
+            return run(
+                attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+                backoff,
+            )
+            .await;
         }
         let prover_dir = prover_dir
             .ok_or_else(|| anyhow::anyhow!("--prover-dir required unless --mock-prove"))?;
@@ -960,13 +990,18 @@ async fn run_daemon(
             log_dir: Some(prover_log_dir(&state_path)),
         });
         let relayer = Relayer::new(cfg, source, Arc::new(gen), submitter)?;
-        run(attach_execution(relayer, eth_rpc_url)?, backoff).await
+        run(
+            attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+            backoff,
+        )
+        .await
     }
 }
 
 fn attach_execution<S, P, A>(
     relayer: Relayer<S, P, A>,
     eth_rpc_url: Option<String>,
+    submit_ancestry: bool,
 ) -> anyhow::Result<Relayer<S, P, A>>
 where
     S: BeaconSource + 'static,
@@ -975,14 +1010,28 @@ where
 {
     match eth_rpc_url.filter(|u| !u.is_empty()) {
         Some(url) => {
-            info!(
-                %url,
-                "ETH_RPC_URL set: daemon will rePushAnchor + submitAncestry after each checkpoint"
-            );
+            if submit_ancestry {
+                info!(
+                    %url,
+                    "ETH_RPC_URL set with --submit-ancestry: daemon will send submitAncestry \
+                     after each checkpoint (will OOG on Acki Nacki until a keccak builtin)"
+                );
+            } else {
+                info!(
+                    %url,
+                    "ETH_RPC_URL set: local link_headers after each checkpoint; \
+                     on-chain submitAncestry stays off (--submit-ancestry)"
+                );
+            }
             Ok(relayer.with_execution(Arc::new(EthExecutionRpc::new(url)?)))
         },
         None => {
-            info!("ETH_RPC_URL unset: daemon will not call submitAncestry (checkpoints only)");
+            if submit_ancestry {
+                tracing::warn!(
+                    "--submit-ancestry set without --eth-rpc-url; on-chain ancestry cannot run"
+                );
+            }
+            info!("ETH_RPC_URL unset: checkpoints only (rePushAnchor still runs)");
             Ok(relayer)
         },
     }

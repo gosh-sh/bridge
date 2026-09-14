@@ -34,6 +34,13 @@ pub struct RelayerConfig {
     /// [`TickOutcome::RotateRequired`]. A shadow-only convenience; the
     /// contract refuses it after `disableOwnerRotation`. Default **false**.
     pub owner_hop: bool,
+    /// Call `submitAncestry` after each accepted checkpoint. Default
+    /// **false**. Two headers already cost ~130 M gas against the 10 M
+    /// per-transaction limit, so the call cannot succeed until a keccak-256
+    /// builtin lands; leaving this on burned ~0.7 vmshell every epoch past
+    /// `tvm.accept()`. `ETH_RPC_URL` still attaches an execution source so
+    /// the daemon can run `link_headers` locally without sending the tx.
+    pub submit_ancestry: bool,
 }
 
 impl RelayerConfig {
@@ -44,6 +51,7 @@ impl RelayerConfig {
             enable_rotate: true,
             flip_owner: true,
             owner_hop: false,
+            submit_ancestry: false,
         }
     }
 }
@@ -360,7 +368,9 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     /// After a proven checkpoint: re-push the hash to USDCBridge (the first
     /// push often bounced because `setLightClient` had not run yet), then
-    /// walk the epoch parent chain when an execution RPC is configured.
+    /// optionally walk the epoch parent chain when an execution RPC is
+    /// configured. On-chain `submitAncestry` is a separate flag — the call
+    /// cannot succeed on Acki Nacki today (see `submit_ancestry`).
     async fn maybe_cover_epoch(&mut self, checkpoint: [u8; 32]) {
         match self.submitter.re_push_anchor(checkpoint).await {
             Ok(SubmitOutcome::Accepted {
@@ -390,6 +400,18 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         };
         if headers.len() < 2 {
             warn!(n = headers.len(), "epoch ancestry shorter than 2 headers");
+            return;
+        }
+        if let Err(e) = crate::header_rlp::link_headers(&headers) {
+            warn!(error = %e, "epoch ancestry failed local link_headers");
+            return;
+        }
+        if !self.config.submit_ancestry {
+            info!(
+                n = headers.len(),
+                "epoch ancestry linked locally; on-chain submitAncestry skipped \
+                 (--submit-ancestry, default off: two headers already exceed the 10 M gas limit)"
+            );
             return;
         }
         match self.submitter.submit_ancestry(&headers).await {
@@ -887,6 +909,7 @@ mod tests {
         let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
         cfg.poll_interval = Duration::from_millis(1);
         cfg.enable_rotate = false;
+        cfg.submit_ancestry = true;
         let mock = Arc::new(MockAnSubmitter::accepting());
         let mut r = Relayer::new(
             cfg,
@@ -906,5 +929,32 @@ mod tests {
         assert_eq!(mock.ancestry_count(), 1);
         assert!(mock.is_proven(&ckpt));
         assert!(mock.is_proven(&parent_hash));
+    }
+
+    #[tokio::test]
+    async fn execution_rpc_without_submit_flag_skips_on_chain_ancestry() {
+        let (child, parent) = crate::header_rlp::dummy_linked_headers();
+        let ckpt = crate::header_rlp::keccak256(&child);
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update_with_exec(
+                100, 96, ckpt,
+            )])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap()
+        .with_execution(Arc::new(crate::source::InMemoryExecution::single(
+            ckpt,
+            vec![child, parent],
+        )));
+        r.tick().await.unwrap();
+        assert_eq!(mock.re_push_count(), 1);
+        assert_eq!(mock.ancestry_count(), 0);
     }
 }

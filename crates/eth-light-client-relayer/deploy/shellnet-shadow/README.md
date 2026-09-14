@@ -150,8 +150,9 @@ emitted, `getCommitteeState` shows the new period).
 - `USDCBridge` wiring (`setLightClient`, `acceptBlockHashFromLightClient`,
   `disableOwnerAnchors`): the shellnet `eccUSDCBridge` has no such surface yet.
 - `submitRotate` and `disableOwnerRotation`.
-- `submitAncestry` is available (`eth-lc-relayer submit-ancestry --eth-rpc-url ...`)
-  but only exercises the contract's own map.
+- `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...`)
+  and will OOG on Acki Nacki until a keccak builtin; the daemon does not send it
+  unless `SUBMIT_ANCESTRY=true`.
 
 ## Notes
 

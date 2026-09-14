@@ -9,7 +9,9 @@
 //! `finalizeDeposit` flip: the daemon issues `setLightClient` +
 //! `disableOwnerAnchors` + `disableOwnerRotation` after the first accepted
 //! update (`--no-flip-owner` opts out). With `ETH_RPC_URL` the same tick then
-//! `rePushAnchor`s the checkpoint and `submitAncestry`s the epoch.
+//! `rePushAnchor`s the checkpoint and runs `link_headers` locally. On-chain
+//! `submitAncestry` is `--submit-ancestry` (default off) until a keccak builtin
+//! makes the call executable.
 
 pub mod an_config;
 pub mod ancestry;

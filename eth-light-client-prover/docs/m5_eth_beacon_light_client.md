@@ -76,7 +76,7 @@ deposits whose block the light client has anchored.
 
 `bytes constant VK_BLOB` = `eth-light-client-prover/fixtures/step_vkblob/step_vk_blob.bin`
 (17 573 B, Base **v1** Blake2b, **10 PI** — 2-level committee commitment at [5] +
-attested `state_root` at [8|9], sha256 `bd108c08…7d21bab0`). Rotate with:
+attested `state_root` at [8|9], sha256 `2d66c205…7d320fab`). Rotate with:
 
 ```bash
 cd eth-light-client-prover && cargo run --release --example export_step_vk_blob   # re-emit

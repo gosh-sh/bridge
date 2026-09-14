@@ -67,10 +67,12 @@ assigns it when the release is tagged.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
   proven checkpoint (≤ 31 parents), then pushes those hashes into
-  `USDCBridge._acceptedBlockHash`. The daemon walks that chain after every
-  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`); it also
-  calls `rePushAnchor` so a bounce before `setLightClient` is retried. Operator
-  one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
+  `  USDCBridge._acceptedBlockHash`. The daemon fetches that chain after every
+  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`) and runs
+  `link_headers` locally; on-chain `submitAncestry` is `--submit-ancestry`
+  (default **off**) because two headers already cost ~130 M gas against the
+  10 M limit. It also calls `rePushAnchor` so a bounce before `setLightClient`
+  is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
   0x…`. Contracts: `contracts/an/EthKeccak.sol`,
   `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
   the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
@@ -84,6 +86,18 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- The step VkBlob gate only checked that `step_vk_blob.bin` had
+  `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`
+  embedded in `EthBeaconLightClient.sol`, so a re-emit that updated one and
+  not the other was silent. tvm-sdk#284 shipped a step fixture (`bd108c08…`)
+  that shares this contract's first 11 813 bytes and then diverges — same
+  circuit params, different key material — which is why a real step proof
+  from that PR does not verify here. The current key is `2d66c205…` (this
+  fixture and both light-client copies); the SDK copy is the stale pre-
+  `extra_data` rotation. `scripts/check_rotate_vkblob_accumulator.sh` now
+  requires contract `VK_BLOB` == the step fixture (and the sha256 sidecar),
+  and if a sibling `tvm-sdk` tree is present, that fixture too. Rotate already
+  had the equivalent check.
 - `EthKeccak` never computed a hash in the TVM. Three `sold` behaviours, each
   fatal on the first input: `uint64[5] bc;` declares a **zero-length** array, so
   the first write of the theta step threw exit 50 (this is what aborted every
@@ -139,7 +153,12 @@ assigns it when the release is tagged.
   is ~2e9 gas. Closing this needs a keccak-256 builtin in the node, the way
   `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
   Defects found on shellnet 2026-09-11; gas re-measured offline in
-  tvm-debugger 3.0.6 on 2026-09-13, gosh-sh/bridge#36. `submitUpdate`,
+  tvm-debugger 3.0.6 on 2026-09-13; a full 32-header walk measured on a real
+  VM (tvm-debugger from `v3.0.6.an` and tvm-sdk#284) 2026-09-14: 2 headers
+  129.7 M, slope 64.65 M/header, 32 headers OOG at 1e9, ≈2.07 G extrapolated
+  against 10 M `gas_limit`. The daemon therefore does **not** send
+  `submitAncestry` unless `--submit-ancestry` is set; `ETH_RPC_URL` still
+  fetches the epoch and runs `link_headers` locally. `submitUpdate`,
   `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
@@ -153,6 +172,15 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- On-chain `submitAncestry` is opt-in (`--submit-ancestry` / `SUBMIT_ANCESTRY`,
+  default **off**). The daemon used to fire a 32-header call every epoch whenever
+  `ETH_RPC_URL` was set; two headers already cost 129.7 M gas against a 10 M
+  limit, so every cycle burned ~0.7 vmshell past `tvm.accept()` on a call that
+  cannot succeed. `ETH_RPC_URL` still attaches the execution RPC: the epoch is
+  fetched and `link_headers` runs locally. Dropping the URL is no longer the
+  only lever, and no longer takes the local check with it. The one-shot
+  `submit-ancestry` subcommand stays, and warns. Measured by @SeHor05 on both
+  `v3.0.6.an` and tvm-sdk#284 (gosh-sh/bridge#36).
 - `EthBeaconLightClient` keeps proven execution hashes for **one year** of
   Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
   are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
@@ -173,10 +201,9 @@ assigns it when the release is tagged.
   bound to the signed state by `execution_branch`). Regression test
   `execution_root_shape_is_independent_of_extra_data_len`. Fixture
   `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
-  `contracts/an/EthBeaconLightClient.sol` re-emitted,
-  `EthBeaconLightClient_rotate_decider.patch` regenerated from it; the tvm-sdk
-  opcode fixtures still carry the old blob and need the same rotation
-  (`scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`). Verified on Sepolia: the same blob comes
+  `contracts/an/EthBeaconLightClient.sol` re-emitted. The tvm-sdk
+  opcode fixtures still carry the old blob and need
+  `scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`. Verified on Sepolia: the same blob comes
   out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
   18 B of `extra_data`.
 - `crates/eth-light-client-relayer` builds with `--features live-submit`
@@ -194,7 +221,8 @@ assigns it when the release is tagged.
   are the shadow/laptop opt-outs. Relayer keys must be the owner pubkey.
   `disableOwnerAnchors` succeeds when `_lightClient` is set (not only when an
   attester quorum exists). With `ETH_RPC_URL` the same tick then `rePushAnchor`s
-  the checkpoint and `submitAncestry`s the epoch parent chain. `submitUpdate`
+  the checkpoint and runs `link_headers` locally. On-chain `submitAncestry`
+  is `--submit-ancestry` (default off). `submitUpdate`
   late-registers a skipped checkpoint of the current committee (`CheckpointBackfilled`,
   head not rewound). Sink notify uses `bounce: true`; a drop emits
   `AnchorPushBounced` and is retried via `rePushAnchor`. `encode_header_rlp`

@@ -185,9 +185,11 @@ build:solidity:
       - contracts/ethereum/node_modules/
     policy: pull-push
 
-# Cheap header gate for the recursive rotate VkBlob: byte 11 must be 12.
-# A 0 here is accepted by ZKHALO2VERIFYWITHVK without pairing the KZG
-# accumulator (inner proofs unchecked). No Rust toolchain needed.
+# Cheap header gate: rotate VkBlob byte 11 must be 12, and both blobs must
+# match the literals in EthBeaconLightClient.sol. A rotate 0 is accepted by
+# ZKHALO2VERIFYWITHVK without pairing the KZG accumulator; a step fixture that
+# only shares a header with the contract is a silent miss (tvm-sdk#284).
+# No Rust toolchain needed.
 test:light-client:vkblob-header:
   image: python:3.12-alpine
   stage: test
@@ -206,7 +208,9 @@ test:light-client:vkblob-header:
         - scripts/check_rotate_vkblob_accumulator.sh
         - scripts/check_eth_beacon_lc_sources.sh
         - scripts/embed_rotate_vk_blob.py
+        - scripts/embed_step_vk_blob.py
         - scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh
+        - scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh
         - EthKeccak_sold_fixes.patch
         - EthBeaconLightClient_encoding_and_gas_notes.patch
         - contracts/an/EthBeaconLightClient.sol

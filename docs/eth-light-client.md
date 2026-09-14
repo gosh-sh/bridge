@@ -194,19 +194,20 @@ A step proves one execution block per epoch, the checkpoint. The contract record
 blocks of the epoch are *meant* to be covered by **ancestry**: the daemon fetches the epoch's execution
 headers over JSON-RPC, and `submitAncestry(headerRlps)` (`EthBeaconLightClient.sol:369`)
 keccak-hashes each RLP header in the VM and walks `parentHash` from the proven checkpoint
-backwards, pushing every hash on the way. With `ETH_RPC_URL` set the daemon does this after
-every accepted update (`src/relayer.rs:364`).
+backwards, pushing every hash on the way. With `ETH_RPC_URL` set the daemon fetches this after
+every accepted update and runs `link_headers` locally (`src/relayer.rs`). On-chain
+`submitAncestry` is `--submit-ancestry` (default off).
 
 **Ancestry does not work on Acki Nacki today, and not for a reason a patch fixes.** `EthKeccak`
-is software keccak; one permutation measured **12.91M gas** against the **10M** per-transaction
-limit (p20/p21), so a single 642-byte header (5 permutations) already blows the budget and a
-32-header walk is ~2e9 gas. `EthKeccak` also needs two `sold` fixes before it computes at all:
-`uint64[5] bc` is a zero-length array (exit 50 on the first write) and `_rotl` range-overflows on
-`uint64` (exit 4) — the library had never run in the TVM, its doc-comment vectors were checked by
-tiny-keccak in Rust. Measured on shellnet 2026-09-11 ([PR #36](https://github.com/gosh-sh/bridge/pull/36#issuecomment-5638359306)).
-Closing this needs a keccak-256 builtin in the node, the way `ZKHALO2VERIFYWITHVK` was added, or
-the parent chain proven in-circuit. Until then **only checkpoint blocks are usable for deposits**,
-1 of 32, and a deposit in any other block needs the owner's `setAcceptedBlockHash`.
+now computes correctly (three `sold` defects fixed — see CHANGELOG), but it is software keccak;
+one permutation measured **12.93M gas** against the **10M** per-transaction limit (p20/p21), so
+a single header already blows the budget. Measured on a real VM 2026-09-14: 2 headers
+**129.7 M**, slope 64.65 M/header, a 32-header walk OOG at 1e9 (≈2.07 G extrapolated). The
+daemon therefore does not send the call unless `--submit-ancestry` is set. Closing this needs a
+keccak-256 builtin in the node, the way `ZKHALO2VERIFYWITHVK` was added, or the parent chain
+proven in-circuit. Until then **only checkpoint blocks are usable for deposits**, 1 of 32, and a
+deposit in any other block needs the owner's `setAcceptedBlockHash`. First defects found on
+shellnet 2026-09-11 ([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
 
 `rePushAnchor` (`EthBeaconLightClient.sol:404`) re-sends an already proven hash to the bridge.
 The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) emits
@@ -336,7 +337,8 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `AN_LC_ABI_PATH` | slim ABI `crates/eth-light-client-relayer/abi/EthBeaconLightClient.abi.json` | | |
 | `AN_LIGHT_CLIENT`, `AN_SENDER` | light client address as `dapp_id::account_id` (self-rooted deploy: both halves equal) | | |
 | `AN_USDC_BRIDGE`, `AN_USDC_ABI_PATH` | `USDCBridge` address and slim ABI | set | empty |
-| `ETH_RPC_URL` | execution JSON-RPC for ancestry and `rePushAnchor` | set | optional |
+| `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
+| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain (will OOG until keccak builtin) | unset | unset |
 | daemon flags | | none (rotate on, flip on) | `--no-rotate --no-flip-owner --owner-hop` |
 
 ### 4.5 Procedure
@@ -394,8 +396,8 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   return the same hash.
 - Journal lines to expect: `submitUpdate accepted slot=…` every 7 to 13 minutes;
   `owner hop: setCommitteeCommitment accepted` (shadow) or `submitRotate accepted`
-  (production) once per period; `rePushAnchor accepted`, `submitAncestry accepted` when
-  `ETH_RPC_URL` is set.
+  (production) once per period; `rePushAnchor accepted`; local ancestry `link_headers` when
+  `ETH_RPC_URL` is set; `submitAncestry accepted` only with `--submit-ancestry`.
 - The state file is pinned to the first `genesis_validators_root` it sees
   (`src/relayer.rs:414`); pointing a daemon at another network fails instead of mixing heads.
 

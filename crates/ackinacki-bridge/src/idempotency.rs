@@ -3,7 +3,7 @@
 //!
 //! Purpose: refuse a second broadcast of the same withdrawal if a prior
 //! run got as far as sending. Ekaterina's spec calls this out as a
-//! "решить до реализации" item — the answer we shipped is:
+//! "decide before implementing" item — the answer we shipped is:
 //! - v1: refuse-duplicate + blunt `--allow-retry` override.
 //! - v2: `--resume` picks up mid-pipeline with `replay_latest` semantics
 //!   already present in the relayer driver.
@@ -3544,8 +3544,8 @@ mod tests {
 
     #[test]
     fn reserve_over_failed_with_an_tx_hash_preserves_prior_record() {
-        // Regression (Sergey review 2026-09-01, «Failed всё ещё жжёт ECC
-        // второй раз»): the sole production writer of Status::Failed is
+        // Regression (Sergey review 2026-09-01, "Failed still burns ECC a
+        // second time"): the sole production writer of Status::Failed is
         // the withdrawByProof-revert arm of the orchestrator, which only
         // fires after a successful AN burn. If reserve_rec() wiped the
         // record on Failed, the stored `an_tx_hash` would be dropped and

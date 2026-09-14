@@ -2145,6 +2145,7 @@ mod probe_tests {
         //  - 64 *characters* of non-ASCII, which is 128 bytes and so trips the length
         //    check. Worth keeping precisely because it looks like a hex-check case and
         //    is not.
+        // non-english-ok: non-ASCII fixture
         for bad in ["deadbeef", &"g".repeat(64), &"ю".repeat(64)] {
             let path = d.path().join("event_manifest.json");
             let mut m: serde_json::Value =

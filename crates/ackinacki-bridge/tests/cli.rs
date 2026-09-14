@@ -767,9 +767,9 @@ fn a_malformed_argument_is_a_refusal_and_not_a_panic() {
     // there, which exits 101 with a message no consumer can parse — the
     // one outcome the --json envelope exists to prevent.
     for bad in [
-        "0x742d35Cc6634C0532приветик",
+        "0x742d35Cc6634C0532приветик", // non-english-ok: multibyte fixture
         "0x742d35Cc6634C0532🙂🙂🙂🙂",
-        "0x742d35Cc6634C0532日本語日本語",
+        "0x742d35Cc6634C0532日本語日本語", // non-english-ok: multibyte fixture
     ] {
         let mut args = base_overriding(&[("--to", bad)]);
         args.push("--json".to_string());

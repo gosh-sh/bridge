@@ -324,3 +324,9 @@ crates/bridge-prover-libraries/python/bin/tvm-cli
 # tvm-cli rewrites this file with a machine-local absolute path on every
 # run, so a committed copy makes every operator's tree dirty.
 crates/ackinacki-bridge/tvm-cli.conf.json
+
+# Python bytecode. `make english-check` and the helper scripts under
+# `scripts/` and `crates/bridge-prover-libraries/python/` all leave this
+# behind on a local run.
+__pycache__/
+*.pyc

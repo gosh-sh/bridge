@@ -25,6 +25,13 @@ contracts/ethereum/cache/
 contracts/ethereum/broadcast/
 contracts/ethereum/lib/
 
+# TVM contracts: local build output. The deployed artefacts are tracked under
+# contracts/an/<version>_compiled/.
+contracts/an/exchange/*.tvc
+contracts/an/exchange/*.abi.json
+contracts/an/exchange/*.code
+contracts/an/exchange/*.debug.json
+
 # Environment variables and secrets
 .env
 .env.local

@@ -496,9 +496,9 @@ Two systems, and only one of them runs from GitHub.
 
 Secrets are configured per repository in Woodpecker and handed only to the events ticked on them — one
 without the right event arrives as an empty string rather than an error, which is worth remembering
-when a step fails with an unexplained 401. **No build, test or lint job runs here.** Those are the
-GitLab jobs below, so `make check` and `make pre-push` are what stands between a branch and a
-regression today.
+when a step fails with an unexplained 401. **No Rust or Solidity build, test or lint job runs
+here — the only artefact check is `verifier_sources.yaml`.** Those are the GitLab jobs below, so
+`make check` and `make pre-push` are what stands between a branch and a regression today.
 
 ### GitLab (`.gitlab-ci.yml`) — build, test and lint, on the GitLab remote only
 

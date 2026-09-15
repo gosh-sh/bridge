@@ -6,15 +6,14 @@ target/
 !.cargo/audit.toml
 
 # Cargo lock files: track the workspace-root Cargo.lock (CI's setup:rust runs
-# `cargo fetch --locked` and `Dockerfile` copies it), but ignore lock files
-# inside the workspace-excluded sub-projects, which each have their own
-# independent dep tree.
+# `cargo fetch --locked` and `Dockerfile` copies it).
 #
-# EXCEPTION: deposit-prover/Cargo.lock IS tracked. The deposit circuit's
-# verifying key (and the VkBlob embedded in the on-chain USDCBridge) is a
-# deterministic function of the full dependency closure, so the lock must be
-# pinned for the VK to be reproducible. An untracked lock here is exactly what
-# made the original on-chain VK (147efe14…) unbuildable after transitive drift.
+# Tracked locks in excluded crates (reproducible VK / daemon `--locked` builds):
+#   deposit-prover/Cargo.lock
+#   eth-light-client-prover/Cargo.lock
+#   crates/deposit-relayer-daemon/Cargo.lock
+#   crates/eth-light-client-relayer/Cargo.lock
+# Ignore the rest of the excluded trees' locks (not gated in CI `--locked`):
 poseidon-proof/Cargo.lock
 crates/bridge-snark-utils/Cargo.lock
 crates/bridge-relayer-daemon/Cargo.lock
@@ -31,6 +30,10 @@ contracts/ethereum/lib/
 .env.production
 .env.*.local
 .env.sepolia
+
+# Operator env copies (may contain keys / GraphQL tokens). Keep the examples.
+scripts/ursus/*.env
+!scripts/ursus/*.env.example
 .secrets
 
 # Personal editor backups of shellnet env files
@@ -87,6 +90,11 @@ coverage/
 *.profdata
 lcov.info
 cobertura.xml
+
+# Python bytecode (pytest under audit/spec, scripts/, anywhere else)
+__pycache__/
+*.py[cod]
+*$py.class
 
 # Test artifacts
 test-results/
@@ -232,6 +240,35 @@ docs/partner_handoff_*.md
 # `proofs/` dir is halo2 proof output. Mirrors the existing
 # `crates/bridge-snark-utils/proofs/` rule.
 /proofs/
+crates/an-bridge-prover/relayer-state.json
+crates/an-bridge-prover/relayer-state.json.stale_*
+crates/an-bridge-prover/state.stale_*/
+crates/an-bridge-prover/submissions/
+crates/an-bridge-prover/diag/
+
+# Local agent / venv / sold copies — never commit.
+.serena/
+.tools/
+.venv-an-audit/
+.venv*/
+
+# eth-light-client-relayer runtime (daemon --state default) + prove-one dumps.
+# Cargo.lock for this crate is tracked (see lock-file comment above).
+eth-lc-relayer-state.json
+eth-lc-relayer-state.json.lock
+eth-lc-relayer-state.json.tmp
+**/eth-lc-relayer-state.json*
+crates/eth-light-client-relayer/bundle/
+crates/eth-light-client-relayer/*.bin
+
+# eth-light-client-prover: Hermez SRS downloads + example emit dirs.
+# (repo-root `target/` and `out/` already cover cargo/build output.)
+# Cargo.lock is tracked — same VK-reproducibility reason as deposit-prover.
+eth-light-client-prover/data/
+eth-light-client-prover/out/
+eth-light-client-prover/*.srs
+eth-light-client-prover/shard_snark/
+eth-light-client-prover/rotate_tree/
 crates/bridge-prover-libraries/relayer-state.json
 crates/bridge-prover-libraries/relayer-state.json.stale_*
 crates/bridge-prover-libraries/state.stale_*/

@@ -1,0 +1,30 @@
+[Unit]
+Description=Ethereum beacon light-client relayer (shellnet shadow, Sepolia beacon)
+Documentation=file:///mnt/data/gosh-eth-lc-relayer/src/bridge/crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/data/gosh-eth-lc-relayer
+EnvironmentFile=/mnt/data/gosh-eth-lc-relayer/config/eth-lc-relayer.env
+# `prove-one`/daemon spawn `cargo run --release --example export_step_vk_blob`
+# in LIGHT_CLIENT_PROVER_DIR, so rustup (HOME) and cargo (PATH) must resolve.
+Environment=HOME=/root
+Environment=PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Shadow: step only, no submitRotate (tvm-sdk#284 is not on shellnet nodes),
+# no one-way owner flip, no USDCBridge wiring.
+ExecStart=/mnt/data/gosh-eth-lc-relayer/bin/eth-lc-relayer daemon \
+    --state /mnt/data/gosh-eth-lc-relayer/state/eth-lc-relayer-state.json \
+    --no-rotate --no-flip-owner --owner-hop \
+    --poll-secs 64 --prove-timeout-secs 7200
+Restart=on-failure
+RestartSec=60
+# A tick may be inside a multi-minute prove; let it finish on stop.
+TimeoutStopSec=900
+KillMode=mixed
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

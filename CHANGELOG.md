@@ -22,6 +22,168 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
+  reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
+  against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)
+  and runs it in `tvm-cli debug run --tvc`: no network, no keys. Measured with
+  sold 0.81.0 / tvm-cli 3.0.6: the library as deployed on shellnet
+  (`reference/EthKeccak_1.4.0_as_deployed.sol`, code hash `78905cf7...`) throws
+  exit 50 on every input at the first `bc[i] = ...`; the fixed library returns
+  the right digests at 12.93M gas per keccak-f permutation against the 10M
+  per-transaction limit (`acki-nacki/node/blockchain.conf.json` p20/p21), and the
+  642-byte Sepolia header 11683168 (`fixtures/`) runs out of the debugger's
+  16.7M credit. `fetch_headers.py` rebuilds header RLPs from any JSON-RPC the
+  way `header_rlp.rs` does; `emulate_live.sh` replays `submitAncestry` against
+  the live light-client account with `tvm-cli runx`. Second, independent
+  measurement of the ancestry gas wall (gosh-sh/bridge#36).
+- `docs/eth-light-client.md`: design and deployment reference for the beacon
+  light client (components, step update, period rotation, trust switches,
+  deployment topology with ports and endpoints, configuration, operating
+  numbers), with Mermaid diagrams.
+- `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
+  `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
+  (`/eth/v1/config/spec`), picking the `fork_version` active at the update's
+  `signature_slot`, and hands the pair to the prover as `BEACON_FORK_VERSION` /
+  `BEACON_GENESIS_VALIDATORS_ROOT`. Sepolia (and any other network with the
+  mainnet preset) now proves without code changes; the prover still defaults
+  to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
+  The state file is pinned to the first `genesis_validators_root` it sees and
+  refuses a source on another network.
+- `eth-lc-relayer daemon --no-rotate --owner-hop`: on a period jump the
+  daemon proves a step of the new period, advances the committee with the
+  owner key from that proof's commitment (`setCommitteeCommitment`) and
+  submits the same bundle, instead of stopping at `RotateRequired`. Shadow
+  only (refused after `disableOwnerRotation`).
+- `eth-lc-relayer set-committee --bundle-dir …`: owner
+  `setCommitteeCommitment(commitment, period)` from a proven step bundle
+  (public-input word 5), recording the period in the state file. Bootstraps a
+  fresh `EthBeaconLightClient` (weak-subjectivity anchor) and hops periods
+  while `--no-rotate`.
+- `crates/eth-light-client-relayer/deploy/shellnet-shadow/`: operator kit for
+  a shadow instance on shellnet against Sepolia (build, SRS install, contract
+  compile with the Linux `sold` release, giver funding, deploy, status,
+  systemd unit, README).
+- `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
+  Ethereum beacon light-client oracle. Polls `finality_update` **and**
+  `light_client/updates` (current 512-committee), proves a step via
+  `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
+  not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
+  `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
+  `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
+  default, `--no-rotate` opts out). After the first accepted `submitUpdate` the
+  daemon issues `setLightClient` + `disableOwnerAnchors` +
+  `disableOwnerRotation` (`--no-flip-owner` opts out; one-shot:
+  `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
+  `AN_USDC_BRIDGE` / `AN_USDC_ABI_PATH`. tvm-sdk#284 co-deploys with this contract.
+  Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
+  headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
+  proven checkpoint (≤ 31 parents), then pushes those hashes into
+  `  USDCBridge._acceptedBlockHash`. The daemon fetches that chain after every
+  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`) and runs
+  `link_headers` locally; on-chain `submitAncestry` is `--submit-ancestry`
+  (default **off**) because two headers already cost ~130 M gas against the
+  10 M limit. It also calls `rePushAnchor` so a bounce before `setLightClient`
+  is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
+  0x…`. Contracts: `contracts/an/EthKeccak.sol`,
+  `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
+  the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
+  between them is fixes and comments — see Removed). `updateCode` / `onCodeUpgrade` persist the committee, head,
+  proven-hash set and `reAnchorsApplied` across a VkBlob rotation.
+  `reAnchorCommittee` is the logged weak-subjectivity hatch after
+  `disableOwnerRotation` (does not write exec hashes; `getCommitteeState`
+  exposes `reAnchorsApplied`). Shellnet E2E:
+  `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
+  `eth-light-client-prover/docs/m_audit_scope.md`.
+
+### Fixed
+
+- The step VkBlob gate only checked that `step_vk_blob.bin` had
+  `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`
+  embedded in `EthBeaconLightClient.sol`, so a re-emit that updated one and
+  not the other was silent. tvm-sdk#284 shipped a step fixture (`bd108c08…`)
+  that shares this contract's first 11 813 bytes and then diverges — same
+  circuit params, different key material — which is why a real step proof
+  from that PR does not verify here. The current key is `2d66c205…` (this
+  fixture and both light-client copies); the SDK copy is the stale pre-
+  `extra_data` rotation. `scripts/check_rotate_vkblob_accumulator.sh` now
+  requires contract `VK_BLOB` == the step fixture (and the sha256 sidecar),
+  and if a sibling `tvm-sdk` tree is present, that fixture too. Rotate already
+  had the equivalent check.
+- `EthKeccak` never computed a hash in the TVM. Three `sold` behaviours, each
+  fatal on the first input: `uint64[5] bc;` declares a **zero-length** array, so
+  the first write of the theta step threw exit 50 (this is what aborted every
+  `submitAncestry` after the encoding fix); `x << n` on a `uint64` is
+  range-checked, so `_rotl` threw exit 4 as soon as a rotation dropped a set bit;
+  and `~` on a `uint64`, plus narrowing a shifted lane with `uint8()`, are
+  refused for the same reason. The array is now allocated explicitly (once, not
+  per round), rotation is done in `uint256` and masked back, `~x` is `x ^
+  MASK64`, and `_squeeze32` masks before narrowing. Nothing about the algorithm
+  changed. Verified by execution rather than inspection, in tvm-debugger 3.0.6
+  against a wrapper contract: keccak256("") and keccak256("abc") match their
+  vectors, a 136-byte input matches `cast keccak` (the multi-block absorb path),
+  and the real 642-byte Sepolia header of block 11683168 hashes to its own block
+  hash `6b83c33d…122f83`. Defects reported by @Skydev0h from shellnet
+  (gosh-sh/bridge#36); `acki-nacki` `contracts/exchange/EthKeccak.sol` is
+  byte-identical to this file modulo its pragma, so `EthKeccak_sold_fixes.patch`
+  carries the same change there — it applies cleanly to the head of
+  gosh-sh/acki-nacki#2618 and moves the light client's code hash from
+  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry still cannot run: see Known
+  issues.
+
+- `submitAncestry` and `rePushAnchor` were rejected by the light client
+  (compute phase, exit 252) because two byte orders were in play. The step
+  circuit splits a hash with `node_hi_lo` — each 16-byte half read
+  little-endian — so `submitUpdate` keys an anchor as
+  `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that word is what the bridge
+  holds and what the deposit public inputs carry. Keccak in the VM returns
+  Ethereum byte order, so `submitAncestry` looked up
+  `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
+  `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong
+  order. `submitAncestry` now re-packs through `_piForm` where hashes meet the
+  store (parent links are still compared in Ethereum order), and the daemon
+  converts with `anchor_key_hex`. Observed on shellnet (2026-09-10); ancestry
+  had never been run live before. No migration: every hash already stored came
+  from `submitUpdate` and is already keyed right.
+  `EthBeaconLightClient_rotate_decider.patch` regenerated. Shellnet runs the
+  bridge-deployed variant of the contract, maintained in `acki-nacki`
+  `contracts/bridge`, which landed its own equivalent fix as `181b0c6a` and is
+  live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
+  uses the same `_piForm` name and body, so the two trees differ only
+  structurally.
+
+### Known issues
+
+- **Epoch ancestry cannot run on Acki Nacki**, so the light client anchors only
+  the epoch checkpoint — 1 execution block of 32 — and a deposit in any other
+  block still needs the owner's `setAcceptedBlockHash`. Gas is now the only
+  reason: with the `sold` defects fixed (see below) `EthKeccak` computes the
+  right hashes, but it is software keccak — one permutation is 12.93M gas and
+  the real 642-byte Sepolia header of block 11683168 is 64.68M, against a 10M
+  per-transaction limit (p20/p21). Hashing the empty string is already over the
+  limit, so no input size makes `submitAncestry` callable, and a 32-header walk
+  is ~2e9 gas. Closing this needs a keccak-256 builtin in the node, the way
+  `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
+  Defects found on shellnet 2026-09-11; gas re-measured offline in
+  tvm-debugger 3.0.6 on 2026-09-13; a full 32-header walk measured on a real
+  VM (tvm-debugger from `v3.0.6.an` and tvm-sdk#284) 2026-09-14: 2 headers
+  129.7 M, slope 64.65 M/header, 32 headers OOG at 1e9, ≈2.07 G extrapolated
+  against 10 M `gas_limit`. The daemon therefore does **not** send
+  `submitAncestry` unless `--submit-ancestry` is set; `ETH_RPC_URL` still
+  fetches the epoch and runs `link_headers` locally. `submitUpdate`,
+  `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
+
+- `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
+  message to `addr_none` when no `USDCBridge` was configured: the unset
+  `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
+  action phase aborted with result code 34 and the whole `submitUpdate` was
+  rolled back although the proof had verified. Guard is now
+  `!_usdcBridge.isNone() && _usdcBridge != address(0)` (now in `_notifySink`,
+  so `rePushAnchor` is covered too). Observed on the first shellnet shadow
+  deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
+
 ### Changed
 
 - `scripts/check_english_only.py` treats mathematical letters as notation, like
@@ -31,6 +193,102 @@ assigns it when the release is tagged.
   (`𝔾₂`, `ℤ`, `limbᵢ·(2⁸⁸)ⁱ`). They occur only in formulas, never in another
   language's prose, so the pairing and light-client notes no longer trip the
   hygiene pipeline. Cyrillic, accented Greek, CJK and the rest still fail.
+
+- On-chain `submitAncestry` is opt-in (`--submit-ancestry` / `SUBMIT_ANCESTRY`,
+  default **off**). The daemon used to fire a 32-header call every epoch whenever
+  `ETH_RPC_URL` was set; two headers already cost 129.7 M gas against a 10 M
+  limit, so every cycle burned ~0.7 vmshell past `tvm.accept()` on a call that
+  cannot succeed. `ETH_RPC_URL` still attaches the execution RPC: the epoch is
+  fetched and `link_headers` runs locally. Dropping the URL is no longer the
+  only lever, and no longer takes the local check with it. The one-shot
+  `submit-ancestry` subcommand stays, and warns. Measured by @SeHor05 on both
+  `v3.0.6.an` and tvm-sdk#284 (gosh-sh/bridge#36).
+- `EthBeaconLightClient` keeps proven execution hashes for **one year** of
+  Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
+  are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
+  expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
+  `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
+  cannot outlive the oracle. The bridge method is `USDCBridge_forget_block_hash_from_light_client.patch`
+  (same sender gate as `acceptBlockHashFromLightClient`, idempotent `delete`). `updateCode` encoding of the proven set changed
+  (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
+  old `mapping => bool` across this upgrade — redeploy or re-prove from the
+  checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.
+- **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
+  `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
+  carried `32 - len` extra constant-equality cells and the VK depended on the
+  finalized block's `extra_data` length. The fixture VK was emitted over a
+  27-byte mainnet `extra_data`; a 25-byte Sepolia block produced a different
+  VkBlob and would have been rejected by the deployed contract. The chunk is
+  now a zero-padded 32-byte witness (soundness unchanged: the payload root is
+  bound to the signed state by `execution_branch`). Regression test
+  `execution_root_shape_is_independent_of_extra_data_len`. Fixture
+  `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
+  `contracts/an/EthBeaconLightClient.sol` re-emitted. The tvm-sdk
+  opcode fixtures still carry the old blob and need
+  `scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`. Verified on Sepolia: the same blob comes
+  out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
+  18 B of `extra_data`.
+- `crates/eth-light-client-relayer` builds with `--features live-submit`
+  outside the tvm-sdk workspace: the crate manifest now mirrors tvm-sdk's
+  `[patch]` tables (gosh `halo2-axiom` / `halo2-lib` / `axiom-eth` forks);
+  before, cargo resolved two `halo2_axiom` versions and `tvm_vm` failed to
+  compile.
+- `prove-one` and the daemon keep the prover transcript
+  (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
+  stderr tail on failure instead of a bare exit status.
+- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`)
+  and, after the first accepted `submitUpdate`, issues the one-way owner flip
+  (`USDCBridge.setLightClient` + `disableOwnerAnchors`,
+  `EthBeaconLightClient.disableOwnerRotation`). `--no-rotate` / `--no-flip-owner`
+  are the shadow/laptop opt-outs. Relayer keys must be the owner pubkey.
+  `disableOwnerAnchors` succeeds when `_lightClient` is set (not only when an
+  attester quorum exists). With `ETH_RPC_URL` the same tick then `rePushAnchor`s
+  the checkpoint and runs `link_headers` locally. On-chain `submitAncestry`
+  is `--submit-ancestry` (default off). `submitUpdate`
+  late-registers a skipped checkpoint of the current committee (`CheckpointBackfilled`,
+  head not rewound). Sink notify uses `bounce: true`; a drop emits
+  `AnchorPushBounced` and is retried via `rePushAnchor`. `encode_header_rlp`
+  fails closed when `keccak256(rlp)` does not match the node's `block.hash`.
+- `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
+  `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
+  witness (real sync committee). Unset committee path still emits a synthetic
+  committee for VkBlob-only keygen.
+
+### Removed
+
+- `EthBeaconLightClient_rotate_decider.patch`, and with it the claim that the
+  two light-client copies are kept identical. The patch created
+  `contracts/exchange/EthBeaconLightClient.sol` wholesale from this repo's copy,
+  which stopped being an upgrade once acki-nacki began maintaining its own:
+  applying it would have replaced the deployed constant sink and its constructor
+  sender check with an unset `_usdcBridge` — anchors silently stop reaching the
+  bridge — and added a field to the `updateCode` migration cell that the live
+  `onCodeUpgrade` cannot decode. `scripts/check_eth_beacon_lc_sources.sh`
+  asserted that this patch reproduced our copy verbatim, i.e. it enforced the
+  hazard rather than catching it.
+
+  What actually differs between the two trees is small and deliberate: the sink
+  (constant plus sender check there, settable `_usdcBridge` and the extra
+  migration field here), the version string and the pragma floor. Both carry
+  `_piForm`, `provenQueue` and the rotate decider. So the delivery is now two
+  narrow patches instead of a file — `EthKeccak_sold_fixes.patch` (behaviour)
+  and `EthBeaconLightClient_encoding_and_gas_notes.patch` (comments only, code
+  hash verified unchanged at `78905cf7…9ed532`) — and the gate was rewritten to
+  assert scope: patches stay inside `contracts/exchange/`, carry no sink wiring
+  in either direction, the keccak patch only moves their library toward
+  `contracts/an/EthKeccak.sol`, and the notes patch adds nothing but comments.
+  Verified that the rewritten gate rejects the removed patch. The rotate VkBlob
+  gate now reads the `ROTATE_VK_BLOB` literal from
+  `contracts/an/EthBeaconLightClient.sol` rather than from the patch.
+
+  Correcting myself: I described the drift as "221 lines, dominated by a
+  `provenQueue` that exists in `contracts/exchange` and not in `contracts/an`"
+  ([#36](https://github.com/gosh-sh/bridge/pull/36#issuecomment-5655184319)).
+  That was a diff against the wrong commit — `github/eth-light-client-prover-m6`
+  resolves against the remote named `github` unless spelled
+  `github/github/eth-light-client-prover-m6`, so I had compared an ancestor from
+  before `provenQueue` landed. The real diff is 206 lines and `provenQueue` is in
+  both.
 
 ## [0.2.0] – 2026-09-11
 

@@ -1,4 +1,4 @@
-//! Export a bincode-serialized inner [`Snark`] to a production Yul `.bin` verifier.
+//! Export a bincode-serialized inner [`Snark`] to a production verifier: `<name>.sol` and the `<name>.bin` compiled from it (needs `solc 0.8.19` on `PATH`).
 //!
 //! ```bash
 //! cd crates/bridge-evm-aggregator
@@ -64,12 +64,18 @@ fn main() -> anyhow::Result<()> {
         pk_cache_dir.as_deref(),
     )?;
 
+    let bytecode_len = export
+        .verifier_bytecode
+        .as_ref()
+        .map(Vec::len)
+        .expect("an --out-dir is always passed, so the verifier was compiled");
     println!(
-        "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={}, universality={:?})",
+        "OK: {} -> {}/{}.{{sol,bin}} ({} B bytecode, {} B source, {} instances, K_outer={}, universality={:?})",
         inner_path.display(),
         out_dir.display(),
         name,
-        export.verifier_size,
+        bytecode_len,
+        export.verifier_source.len(),
         export.total_instances,
         export.k_outer,
         config.universality,

@@ -10,6 +10,23 @@ produces all four production verifier artefacts under `contracts/ethereum/verifi
 directory's README for the exact invocations. The spike parts described below (the multiply gate,
 `export-spike-artifacts`) still exist alongside it.
 
+## The runtime self-check needs no compiler
+
+`aggregate-proof` — the per-proof bin the withdrawal CLI and the relayer shell out to — regenerates
+the outer verifier's Solidity source from the aggregator key and refuses to emit calldata unless it
+is byte-identical to the committed `contracts/ethereum/verifiers/<name>.sol`. It compiles nothing,
+so the hosts that run it need no `solc`. `--allow-source-drift` turns the refusal into a warning and
+exists only to bootstrap a verifier whose source is not committed yet.
+
+Bytecode is produced only when a verifier is regenerated: `export-inner-aggregator` writes the
+`.sol` and the `.bin` compiled from it and applies the EIP-170 gate, and that path, like
+`export-spike-artifacts` and the round-trip test, needs `solc 0.8.19` on `PATH`. That each committed
+`.sol` compiles to its `.bin` is checked by `scripts/check_verifier_sources.sh` in CI.
+
+A mismatch reads `aggregator VK drift` and names the first differing line. It means either a
+different key or a `snark-verifier` upgrade that changed the generated text; after an upgrade,
+regenerate both files of every pair.
+
 ## Status (M2 closed 2026-05-27; M5 instance-exposure de-risked 2026-05-29)
 
 | Step | Status | Evidence |

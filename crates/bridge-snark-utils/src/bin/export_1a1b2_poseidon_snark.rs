@@ -29,7 +29,7 @@
 //!   --params-dir ../../params \
 //!   --snark-dir ../../proofs/bound/poseidon-snark
 //!
-//! # then aggregate → EVM calldata (self-checked vs committed verifier .bin)
+//! # then aggregate → EVM calldata (self-checked vs committed verifier .sol)
 //! cd ../bridge-evm-aggregator
 //! cargo run --release --bin aggregate-proof -- \
 //!   --inner-snark ../../proofs/bound/poseidon-snark/circuit1a.snark \

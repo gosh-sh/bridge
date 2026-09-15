@@ -3616,8 +3616,9 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let err = check_verifier_bin(&dir.path().join("ver"), false)
-            .expect_err("aggregate-proof self-checks against this file; its absence is fatal");
+        let err = check_verifier_bin(&dir.path().join("ver"), false).expect_err(
+            "stage 1 compares this file with the deployed chain runtime; its absence is fatal",
+        );
         assert!(
             format!("{err}").contains("BridgeWithdrawalAggregatorVerifier.bin"),
             "got: {err}"

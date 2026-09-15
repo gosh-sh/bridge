@@ -20,6 +20,18 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+## [Unreleased]
+
+### Changed
+
+- `scripts/check_english_only.py` treats mathematical letters as notation, like
+  the unaccented Greek it already accepts: the Mathematical Alphanumeric Symbols
+  block (double-struck, bold, italic, script, fraktur), the letterlike
+  double-struck / script / black-letter capitals and superscript Latin letters
+  (`𝔾₂`, `ℤ`, `limbᵢ·(2⁸⁸)ⁱ`). They occur only in formulas, never in another
+  language's prose, so the pairing and light-client notes no longer trip the
+  hygiene pipeline. Cyrillic, accented Greek, CJK and the rest still fail.
+
 ## [0.2.0] – 2026-09-11
 
 ### Breaking Changes

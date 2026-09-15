@@ -8,20 +8,20 @@
 //! # Two chain topologies, dispatched by layer growth
 //!
 //! The daemon proves one key block every `W · P` blocks (`W = 128`,
-//! `P = 4` → 512-block cadence). Circuit 2 requires the chain to end at the
+//! `P = 8` → 1024-block cadence). Circuit 2 requires the chain to end at the
 //! target block's top-layer root: `chain_result == layer_hash_frs[num_layers-1]`.
 //!
 //! Two cases occur under this cadence:
 //!
 //! * **Same-layer bundle** (`num_layers == prev_num_layers`) — the common case
-//!   (~31 out of every 32 bundles). Chain **exactly `P = 4` layer-1 rungs** via
+//!   (~15 out of every 16 bundles). Chain **exactly `P = 8` layer-1 rungs** via
 //!   [`build_chain_same_layer`], connecting the prev proved block's L1 root to
 //!   the target block's `layer_hashes_preimage[0]` (also an L1 root). Each
 //!   rung proves the L1 evolution over W blocks explicitly.
 //!
 //! * **New-layer bundle** (`num_layers > prev_num_layers`) — fires at every
 //!   `W^L` boundary (with L = 2 that is every W² = 16384 blocks, i.e. every
-//!   32nd bundle; L = 3 every W³ = 2_097_152 blocks; etc.). Chain **G =
+//!   16th bundle at P = 8; L = 3 every W³ = 2_097_152 blocks; etc.). Chain **G =
 //!   num_layers − prev_num_layers rungs vertically** (one rung per new layer)
 //!   via [`build_chain_for_new_layer`]:
 //!     * Rung 1 — target's L(prev_num_layers+1) tree holds prev's
@@ -1098,10 +1098,8 @@ mod tests {
     //! a mock GqlClient is deferred (would need a trait refactor).
     use super::{l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries};
 
-    // W as in production; P = 4 is a scenario, not the deployed setting —
-    // `THINNING_FACTOR_P` is 8. These helpers take `w` and `p` as arguments,
-    // so the smaller stride only makes the boundary arithmetic easier to read
-    // by hand (ETH-23 corrected the claim, not the value).
+    // W as in production; P = 4 is a smaller stride so the boundary
+    // arithmetic is easier to read by hand. `THINNING_FACTOR_P` is 8.
     const W: u64 = 128;
     const P: u64 = 4;
 

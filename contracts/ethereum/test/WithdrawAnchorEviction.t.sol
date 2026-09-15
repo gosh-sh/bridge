@@ -111,7 +111,7 @@ contract WithdrawAnchorEvictionTest is Test {
         _submitBlock(WINDOW + 1);
         assertFalse(bridge.isKnownLayerAnchor(1, evictedL1), "post: oldest L1 evicted");
         assertEq(bridge.layerWindowLen(1), WINDOW, "ring stays full after wrap");
-        assertEq(bridge.anchorRemainingAppends(1, evictedL1), 0, "ETH-18: evicted is 0");
+        assertEq(bridge.anchorRemainingAppends(1, evictedL1), 0, "evicted is 0");
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
@@ -157,7 +157,7 @@ contract WithdrawAnchorEvictionTest is Test {
         assertTrue(bridge.isKnownLayerAnchor(1, jumped[0]), "jumped head recorded");
     }
 
-    /// @dev ETH-18: remaining appends, not occupancy, is the SLA signal.
+    /// @dev Remaining appends, not occupancy, is the SLA signal.
     function test_eth18_anchorRemainingAppends_countsUntilEviction() public {
         uint256 first = _submitBlock(1);
         assertEq(bridge.layerWindowLen(1), 1);
@@ -174,8 +174,8 @@ contract WithdrawAnchorEvictionTest is Test {
         assertEq(bridge.layerWindowLen(1), WINDOW, "occupancy still 128 after wrap");
     }
 
-    /// @dev ETH-3 / WD-Q1: after the original `finalRoot` is evicted, a new
-    ///      Circuit 4 proof bound to a still-in-window descendant must pay.
+    /// @dev After the original `finalRoot` is evicted, a new Circuit 4 proof
+    ///      bound to a still-in-window descendant must pay.
     ///      The mock verifier does not check the event; this pins the
     ///      *contract* re-prove path. Partner circuit: dense chain ≤ 11 rungs.
     function test_reproveAgainstLaterInWindowAnchor_succeeds() public {

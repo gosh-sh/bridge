@@ -36,7 +36,7 @@ covered in [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
 > **Notation.** `seq_no` is the Acki Nacki block sequence number.
 > A **key block** is a block at height `seq_no`, where `seq_no % W == 0` (producer-side,
 > `W = 128` -- historical window size). Key block carries out essential AN historical data that will serve as an anchor in Ethereum bridge contract. A **bundle** is what the daemon actually proves; its
-> stride depends on anchor mode — `W·P = 1024` under L1 (thinning `P = 4`),
+> stride depends on anchor mode — `W·P = 1024` under L1 (thinning `P = 8`),
 > `W² = 16384` under L2 (no thinning).
 
 **Why we do not prove every key block.** A single bundle proof

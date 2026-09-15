@@ -634,7 +634,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle`, else mock. |
 | `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | Deploy + wire the 1A/1B/2 triple. |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:132`, unconditional). On mainnet the value is `envBool` with no default (`:129`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned**. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
@@ -644,6 +644,16 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
+
+When a verification key rotates, deploy the new Yul verifier (and confirm its
+`extcodehash` against `ShplonkDeployLib`) **before** pointing the live bridge at
+it. `DeployRealBridge` does this in one broadcast — Yul, then adapter, then the
+bridge constructor — so a first-time deploy cannot invert the order. A later
+rotation of a live bridge is not scripted: cut the verifier over first, then
+the bridge's immutable verifier address (which means a new bridge, or waiting
+for an upgrade path). Pointing the bridge at a key that is not on-chain first
+makes every `verifyBlock` revert `YulCodehashMismatch` or call the zero
+address.
 
 ### 12.3 Hard-coded addresses
 
@@ -756,20 +766,22 @@ Read off the code, without a formal audit claim.
    appends in **its own layer** is evicted and a proof against that anchor reverts. This is a
    deadline, not a loss: the witness builder escalates a layer at a time
    (`--anchor-layer auto`, the relayer default), and because a layer L(n) anchor is appended only
-   at its own W^n boundary, each step up multiplies the deadline by W = 128 rather than repeating
-   the window below it. At ~3 seq/s on shellnet: L1 covers 131 072 seq, **≈ 12 hours**; L2 covers
-   2 097 152 seq, **≈ 8 days**; L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
+   at its own W^n boundary, the deadline grows with that boundary rather than repeating the
+   window below it. L1 window = 128 × W·P = 131 072 seq (**≈ 12 hours** at ~3 seq/s); L2 =
+   128 × W² = 2 097 152 seq (**≈ 8 days**). The L1→L2 step is ×(W/P) = **16**, not ×128; only
+   L2→L3 and above are ×W. L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
    is `Poseidon(block_id, tokenId, amount, hi, lo, sender)` and takes no root as input.
 
    So the operational boundary on the pinned shellnet deploy (L1+L2 active) is **≈ 8 days
-   unwithdrawn**, and only past L(max) is a payout stranded — funds stay in `treasuryBalance`,
-   recoverable only by adding a layer. Tests: `test/WithdrawAnchorEviction.t.sol` (eviction at 128,
+   unwithdrawn**. Past L(max) a payout is stranded in `treasuryBalance`. Adding a layer
+   rescues only an event whose T_n the chain has not yet passed; a T_n that went by before
+   that layer was relayed is never appended. Tests: `test/WithdrawAnchorEviction.t.sol` (eviction at 128,
    a seq_no jump not mass-evicting, re-proving against a still-in-window anchor) and
    `AckiNackiBridgeWithdrawByProof.t.sol:593-659` (L2 and L3 anchors accepted, no-window
    rejected).
 4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
    the AAVE side has an emergency lever.
-5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed (ETH-8).**
+5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed.**
    Transfer is two-step: `transferOwnership` records `pendingOwner` (`:143`) and only
    `acceptOwnership` (`:1551`), called by that address, moves `owner`. A mistyped address can never
    accept, so the mistake is recoverable by overwriting `pendingOwner`.
@@ -786,7 +798,7 @@ Read off the code, without a formal audit claim.
    is pinned by `accFr` alone.
 9. *`blockHeaderOracle` is dead weight* — a required, non-zero constructor argument that no code path
    reads.
-10. ~~*Genesis parameters are unvalidated on-chain.*~~ **Partly closed (ETH-20).** With the
+10. ~~*Genesis parameters are unvalidated on-chain.*~~ **Partly closed.** With the
     verifiers wired the constructor now rejects a zero `genesisBkSetCommitment`
     (`ZeroBkSetCommitment`, `:603`) and a non-canonical `genesisBkSetCommitment` or
     `genesisPrevMaxLevelLayerHash` (`FieldElementOutOfRange`) — the same invariant

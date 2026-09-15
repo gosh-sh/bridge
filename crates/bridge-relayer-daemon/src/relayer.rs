@@ -30,7 +30,7 @@ use crate::{
 /// and the stride 512, so it meant "four bundles". `P` is 8 now
 /// (`THINNING_FACTOR_P`), the stride 1024, and the same literal had quietly
 /// become two — a sibling relayer that advanced three bundles between our ticks
-/// would halt this one with `HistoryDrift` for no reason (ETH-23).
+/// would halt this one with `HistoryDrift` for no reason.
 const MAX_FORWARD_GAP_BUNDLES: u64 = 4;
 const MAX_FORWARD_GAP: u64 = MAX_FORWARD_GAP_BUNDLES * BUNDLE_STRIDE_L1;
 

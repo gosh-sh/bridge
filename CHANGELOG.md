@@ -39,10 +39,13 @@ assigns it when the release is tagged.
   are byte-identical to 0.2.0. Primary's and Fallback's `_calldata.bin` fixtures
   were re-emitted, which is a test-vector refresh and not a rotation.
 
-- Deployment now requires `LAYER_HASHES_VERIFIER` and `WITHDRAWAL_VERIFIER` in
-  the environment, and on mainnet `USE_AXIOM_ORACLE` and `WIRE_VERIFY_BLOCK`
-  must be set explicitly rather than defaulted. A mainnet deploy that relied on
-  the defaults now stops instead of silently wiring a partial bridge.
+- Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
+  **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and
+  `WIRE_VERIFY_BLOCK` are `envBool` with no default and `USE_AXIOM_ORACLE`
+  must be true; `altTokenId` must be 0. A Sepolia deploy that relied on
+  `WIRE_VERIFY_BLOCK` defaulting to false now stops. `LAYER_HASHES_VERIFIER`
+  and `WITHDRAWAL_VERIFIER` are still only read by `DeployReuseVerifiersBridge`
+  and `DeployGenesisCursorBridge`, which already refused `chainid == 1`.
 
 - `AckiNackiBridge`'s constructor rejects configurations it used to accept: a
   zero `genesisBkSetCommitment` (`ZeroBkSetCommitment`) and a non-canonical
@@ -50,12 +53,12 @@ assigns it when the release is tagged.
   (`FieldElementOutOfRange`), whenever the verifiers are wired. These are the
   values that could never have matched `_expectedPrevAnchor`, i.e. deployments
   that were already broken from block one — but a script that passed zeros to
-  get through construction will now fail at construction (ETH-20).
+  get through construction will now fail at construction.
 
 - Ownership transfer is two-step. `transferOwnership` records `pendingOwner`
   and ownership moves only when that address calls `acceptOwnership`. Any
   runbook or script that assumed `transferOwnership` completes the handover
-  needs the second call (ETH-8).
+  needs the second call.
 
 ### Added
 
@@ -63,7 +66,7 @@ assigns it when the release is tagged.
   read-only views of how close an anchor is to eviction from its 128-slot
   window. A return of N means the Nth further append overwrites it; 0 means it
   is not in the window. Intended as the monitoring hook for the withdrawal
-  deadline described under ETH-03 below.
+  deadline described under the withdrawal-window item below.
 - `VERIFY_GAS_CAP` (1 500 000) bounds the `staticcall` into every Yul verifier,
   so a malformed proof cannot burn the whole transaction gas.
 - `YulCodehashMismatch` in `ShplonkDeployLib`: deployment asserts the deployed
@@ -76,11 +79,11 @@ assigns it when the release is tagged.
 - `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
   `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
   size drift, and warns from 90% of EIP-170 (layer hashes warns today at 94%).
-  Growth now shows up in a diff instead of in a reverted deploy (ETH-6, ETH-21).
+  Growth now shows up in a diff instead of in a reverted deploy.
 - `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
   appends, a seq_no jump not mass-evicting earlier anchors,
-  `anchorRemainingAppends` at its edges (ETH-18), and the same nullifier paid
-  against a still-in-window anchor after the original evicted (ETH-3).
+  `anchorRemainingAppends` at its edges, and the same nullifier paid
+  against a still-in-window anchor after the original evicted.
 
 ### Changed
 
@@ -88,14 +91,16 @@ assigns it when the release is tagged.
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
   unvalidated) are closed by this release, and item 3 now states the real
   withdrawal boundary instead of calling an evicted anchor "unredeemable".
-- The withdrawal deadline, written down for the first time (ETH-3). Each layer
-  keeps 128 anchors, and the witness builder escalates a layer at a time
-  (`--anchor-layer auto`, the relayer default); because an L(n) anchor is
-  appended only at its own W^n boundary, each step multiplies the deadline by
-  128 rather than repeating the window below. At shellnet's ~3 seq/s: **≈ 12
-  hours at L1, ≈ 8 days at L2** — the pinned deploy — and ≈ 2.8 years at L3.
-  Past the highest active layer a payout is stranded in `treasuryBalance`. No
-  code changed here; the horizon was always this and was documented as 12 hours.
+- The withdrawal deadline, written down for the first time. Each layer keeps
+  128 anchors, and the witness builder escalates a layer at a time
+  (`--anchor-layer auto`, the relayer default). Because an L(n) anchor is
+  appended only at its own W^n boundary, the window grows with that boundary
+  rather than repeating the one below: L1 = 128 × W·P = 131 072 seq (**≈ 12
+  hours**); L2 = 128 × W² = 2 097 152 seq (**≈ 8 days**). L1→L2 is ×(W/P) =
+  **16**; only L2→L3 and above are ×128. Past the highest active layer a
+  payout is stranded in `treasuryBalance`. Adding a layer rescues only an
+  event whose T_n the chain has not yet passed. No code changed here; the
+  horizon was always this and was documented as 12 hours.
 
 ### Fixed
 
@@ -105,17 +110,24 @@ assigns it when the release is tagged.
   `anAccount != 0`, was bound in-circuit, and credited an account nobody owns —
   with deposit being one-way, the length check was the last place to catch it.
   Now exactly 64. The workchain field, which Acki Nacki ignores since `dappId`
-  replaced the concept, is no longer editable and is pinned to 0 (ETH-10).
+  replaced the concept, is no longer editable and is pinned to 0.
 - `MAX_FORWARD_GAP` was sized when the thinning factor `P` was 4 and the bundle
   stride 512, where its literal 2048 meant "four bundles". `P` is 8 and the
   stride 1024, so the same literal had quietly become two bundles, and a sibling
   relayer that advanced three between ticks would halt this one with
-  `HistoryDrift` for no reason. Now derived from `BUNDLE_STRIDE_L1`, with a test
-  asserting the three-bundle case. Two stale restatements of the 512 stride
-  corrected in `history_consistency.rs` and `TECHNICAL_README.md`, and a test
-  comment that described `P = 4` as the production value (ETH-23).
+  `HistoryDrift` for no reason. Now derived from `BUNDLE_STRIDE_L1`, with a
+  const assertion that the three-bundle floor holds at build time. Four
+  restatements of `P = 4` / stride 512 as the current setting corrected
+  (module docs, thinning tests, prover-daemon README, verifyBlock runbook).
+- `covering_bundle_seq_no` treated a burn that landed exactly on a stride
+  boundary as already covered by that boundary's bundle. The proof uses the
+  opposite rule (`l1_anchor_boundaries`: for `e = 1024`, `K = 2048`, because
+  the root at 1024 covers the previous batch), so `wait_for_coverage` returned
+  one bundle too early and `resolve_anchor_layer` probed a height the chain
+  may not have produced yet. 1 in 1024 burns; re-running later worked. Now the
+  strictly-next multiple, matching the proof.
 - `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
-  survives N-1 (ETH-18).
+  survives N-1.
 
 ## [0.2.0] – 2026-09-11
 

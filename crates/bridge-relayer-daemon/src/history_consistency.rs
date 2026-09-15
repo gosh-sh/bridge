@@ -85,7 +85,7 @@ pub fn check_chain_monotonicity(
     actual: &BridgeOnChainState,
     // Max gap (in seq_no) another actor may advance between our ticks
     // before we halt. Caller derives it from the bundle stride (W·P = 1024 at
-    // W=128, P=8); see `MAX_FORWARD_GAP` (ETH-23).
+    // W=128, P=8); see `MAX_FORWARD_GAP`.
     max_forward_gap: u64,
 ) -> Result<(), HistoryDrift> {
     if actual.last_seen_block_seq_no < remembered.last_seen_block_seq_no {

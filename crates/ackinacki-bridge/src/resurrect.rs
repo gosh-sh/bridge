@@ -9,13 +9,16 @@
 //!
 //! Two responsibilities:
 //! 1. **[`wait_for_coverage`]** — poll the contract until the covering bundle
-//!    for the just-fired burn lands (i.e. `storedLastSeenBlockSeqNo >=
-//!    ceil(burn_seq_no / stride) * stride`). Returns the resurrected
+//!    for the just-fired burn lands (i.e. `storedLastSeenBlockSeqNo >=` the
+//!    strictly-next multiple of the stride). Returns the resurrected
 //!    `BridgeState` snapshot at the moment coverage was observed. This is the
 //!    state the enricher needs.
-//! 2. **[`covering_bundle_seq_no`]** — the pure math: round the burn seq_no up
-//!    to the next multiple of the anchoring stride. Exposed for tests and for
-//!    the orchestrator to log the target.
+//! 2. **[`covering_bundle_seq_no`]** — the pure math: the strictly-next
+//!    multiple of the anchoring stride. A burn that lands exactly on a boundary
+//!    is covered by the *next* bundle — the root sitting at that boundary
+//!    belongs to the previous batch. Same rule as
+//!    `real_chain_builder::l1_anchor_boundaries`. Exposed for tests and for the
+//!    orchestrator to log the target.
 //!
 //! **Anchoring assumption.** L1 stride is 1024 seq_nos (`W·P`); L2 stride
 //! is 16 384 seq_nos (`W²`). `AnchorLayerMode::Auto` picks L1 here — if
@@ -49,8 +52,10 @@ pub fn stride_for(anchor: AnchorLayerMode) -> u64 {
         AnchorLayerMode::Auto => AnchorMode::L1.stride(),
         AnchorLayerMode::Explicit(1) => AnchorMode::L1.stride(),
         AnchorLayerMode::Explicit(2) => AnchorMode::L2.stride(),
-        // Unreachable through either CLI (both refuse > 2). Kept total, and L1
-        // for the reason above.
+        // `ackinacki-bridge`'s CLI refuses `> 2`; `bridge-relayer-daemon`
+        // accepts any `n ≥ 1`. Safety does not depend on this arm: the daemon
+        // never calls `stride_for`, and an explicit 3 dies in enrich at
+        // `slot_for_event_height`. Kept total, and L1 for the reason above.
         AnchorLayerMode::Explicit(_) => AnchorMode::L1.stride(),
     }
 }
@@ -70,15 +75,18 @@ pub fn anchor_level_for(anchor: AnchorLayerMode) -> u8 {
     }
 }
 
-/// The next multiple of `stride` at or after `burn_seq_no`. A burn that
-/// lands exactly on a stride boundary is already covered by that
-/// boundary's bundle (no need to round up).
+/// The covering bundle is the strictly-next multiple of `stride`.
+/// `l1_anchor_boundaries` uses the same rule: for an event at seq 1024
+/// (`W·P`), `K = 2048`, because the root at key block 1024 covers the
+/// *previous* batch. Rounding "at or after" waits one bundle too early
+/// and `resolve_anchor_layer` then probes a `K` the chain may not have
+/// produced yet.
 pub fn covering_bundle_seq_no(burn_seq_no: u64, stride: u64) -> u64 {
     debug_assert!(stride > 0);
     if burn_seq_no == 0 {
         return 0;
     }
-    burn_seq_no.div_ceil(stride) * stride
+    (burn_seq_no / stride) * stride + stride
 }
 
 /// Poll `AckiNackiBridge` until it has advanced past `target_seq_no`
@@ -162,8 +170,10 @@ mod tests {
         let s = bridge_prover_lib::BUNDLE_STRIDE_L1; // 1024
         assert_eq!(covering_bundle_seq_no(1, s), 1024);
         assert_eq!(covering_bundle_seq_no(1023, s), 1024);
-        assert_eq!(covering_bundle_seq_no(1024, s), 1024);
+        assert_eq!(covering_bundle_seq_no(1024, s), 2048);
         assert_eq!(covering_bundle_seq_no(1025, s), 2048);
+        let (_, k, _) = bridge_prover_lib::real_chain_builder::l1_anchor_boundaries(1024, 128, 8);
+        assert_eq!(covering_bundle_seq_no(1024, s), k);
     }
 
     #[test]

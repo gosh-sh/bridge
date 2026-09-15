@@ -1,4 +1,4 @@
-pragma gosh-solidity >=0.76.1;
+pragma gosh-solidity >=0.80;
 
 abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_ZERO_AMOUNT = 204;
@@ -15,4 +15,8 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_UNSUPPORTED_TOKEN = 221;
     uint16 constant ERR_UNSUPPORTED_SRC_CHAIN = 222;
     uint16 constant ERR_RECIPIENT_EMPTY = 223;
+    uint16 constant ERR_UNKNOWN_BLOCK = 224;
+    uint16 constant ERR_OWNER_ANCHORS_DISABLED = 225;
+    uint16 constant ERR_LIGHT_CLIENT_UNSET = 226;
+    uint16 constant ERR_ZERO_RECIPIENT = 230;
 }

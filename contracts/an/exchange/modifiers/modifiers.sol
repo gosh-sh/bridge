@@ -1,4 +1,4 @@
-pragma gosh-solidity >=0.76.1;
+pragma gosh-solidity >=0.80;
 
 import "./errors.sol";
 

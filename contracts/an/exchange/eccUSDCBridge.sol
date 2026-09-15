@@ -1,9 +1,10 @@
-pragma gosh-solidity >=0.76.1;
+pragma gosh-solidity >=0.80;
 pragma AbiHeader expire;
 pragma AbiHeader pubkey;
 
 import "./modifiers/modifiers.sol";
 import "./DepositVoucher.sol";
+import "./EthBeaconLightClient.sol";
 import "../token/interface/ISubscriber.sol";
 
 interface IShellAccumulator {
@@ -39,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.3.1";
+    string constant version = "1.4.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -101,6 +102,33 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // deliberately NOT carried through `onCodeUpgrade` — after a code upgrade
     // the bridge accepts no deposits until the owner re-seeds it (fail-closed).
     mapping(uint256 => mapping(uint256 => bool)) _trustedL1Bridge;
+
+    // Canonicality anchor: source chain id -> L1 block hash -> admitted. The
+    // deposit proof binds its event to a block, but says nothing about that
+    // block sitting on the canonical chain — a privately mined block carrying a
+    // fabricated deposit event proves just as well. This mapping is that
+    // assertion, made from outside the proof.
+    //
+    // Fail-closed: an unset entry rejects the deposit. Like `_trustedL1Bridge`
+    // this is NOT threaded through the `onCodeUpgrade` migration cell (the
+    // tuple shape stays fixed across code generations), so after a code upgrade
+    // the anchors start empty and have to be re-established.
+    mapping(uint256 => mapping(uint256 => bool)) _acceptedBlockHash;
+
+    // Code of the beacon light client (`EthBeaconLightClient`), the only
+    // non-owner writer of `_acceptedBlockHash`. The bridge is the sole account
+    // that may deploy it, and its address follows from this code, so there is
+    // no address to set and none to spoof. Empty = no light client yet; like
+    // `_trustedL1Bridge` it is not carried through `onCodeUpgrade`.
+    TvmCell _lightClientCode;
+
+    // Derived from `_lightClientCode` when it is installed, never set directly.
+    address _lightClient;
+
+    // Whether the owner may still admit anchors directly. True while
+    // bootstrapping; `disableOwnerAnchors()` clears it permanently, which is
+    // the step that turns "the owner key" into "the light-client proof".
+    bool _ownerAnchorsEnabled = true;
 
     // ZK verifying key (VkBlob) for the FINAL ETH-deposit circuit
     // (receipt-proof of an L1 deposit event, 12 public inputs — chainId added
@@ -342,6 +370,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         ensureBalance();
         require(recipient.length > 0, ERR_RECIPIENT_EMPTY);
         require(recipient.length <= 64, ERR_RECIPIENT_TOO_LONG);
+        require(!_isZeroRecipient(recipient), ERR_ZERO_RECIPIENT);
 
         mapping(uint32 => varuint32) currencies = msg.currencies;
         uint32[] keys = currencies.keys();
@@ -359,6 +388,23 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
         emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
+    }
+
+    /// @dev True when every byte of `recipient` is zero. The destination chain
+    ///      is opaque here, so this cannot compare against one chain's zero
+    ///      address: a 20-byte EVM zero and a 32-byte one both name no one.
+    function _isZeroRecipient(bytes recipient) private pure returns (bool) {
+        TvmSlice s = recipient.toSlice();
+        uint i;
+        for (i = 0; i < recipient.length; i++) {
+            if (s.bits() < 8) {
+                s = s.loadRef().toSlice();
+            }
+            if (s.loadUint(8) != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ========================================================
@@ -392,6 +438,114 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return _trustedL1Bridge[chainId][l1Bridge];
     }
 
+    /// @notice Admits (or retracts) a source-chain block hash as canonical.
+    ///         Whoever holds the owner key MUST:
+    ///           * verify the block against an independent node, not against
+    ///             the relayer that produced the proof, and
+    ///           * wait for enough confirmations, since a reorged-out block
+    ///             loses the funds exactly like a dishonest one.
+    ///
+    ///         Accepts a hash rather than a header so that swapping this writer
+    ///         for the light client later needs no change to `finalizeDeposit`.
+    /// @param chainId   — EIP-155 chain id of the source L1/L2.
+    /// @param blockHash — the block's 256-bit hash, as the circuit binds it into
+    ///                    public inputs #9/#10 (`hi << 128 | lo`).
+    /// @param accepted  — true to admit, false to retract (e.g. on discovering
+    ///                    the block was reorged out before any deposit landed).
+    function setAcceptedBlockHash(uint256 chainId, uint256 blockHash, bool accepted)
+        public onlyOwnerPubkey(_ownerPubkey) accept
+    {
+        require(_ownerAnchorsEnabled, ERR_OWNER_ANCHORS_DISABLED);
+        ensureBalance();
+        if (accepted) {
+            _acceptedBlockHash[chainId][blockHash] = true;
+        } else {
+            delete _acceptedBlockHash[chainId][blockHash];
+        }
+    }
+
+    /// @notice Installs the code the light client is deployed from. Changing it
+    ///         moves the light-client address, so an already deployed one stops
+    ///         being recognized as a writer.
+    function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        _lightClientCode = code;
+        _lightClient = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
+            contr: EthBeaconLightClient,
+            varInit: {},
+            code: code
+        })));
+    }
+
+    /// @notice Deploys the beacon light client. The bridge is the only account
+    ///         allowed to do so: the contract's constructor refuses any other
+    ///         sender, so nothing else can occupy that address.
+    function deployLightClient(
+        uint256 pubkey,
+        uint256 l1ChainId,
+        uint256 bootstrapCommittee,
+        uint64  bootstrapPeriod
+    ) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
+        ensureBalance();
+        new EthBeaconLightClient{
+            stateInit: abi.encodeStateInit({
+                contr: EthBeaconLightClient,
+                varInit: {},
+                code: _lightClientCode
+            }),
+            value: 10 vmshell,
+            flag: 1
+        }(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod);
+    }
+
+    /// @notice Address the light client is deployed at, derived from its code
+    ///         (0 while no code is installed).
+    function getLightClient() external view returns (address) {
+        return _lightClient;
+    }
+
+    /// @notice Permanently gives up the owner's ability to admit anchors
+    ///         directly, leaving the light client as the only writer. This is
+    ///         the call that turns the trust assumption from "the owner key"
+    ///         into "a proof of Ethereum finality".
+    /// @dev One-way, with no re-enable. Requires a light client first, so this
+    ///      cannot brick the only working writer.
+    function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
+        ensureBalance();
+        _ownerAnchorsEnabled = false;
+    }
+
+    /// @notice Admits a block hash the light client proved final on the source
+    ///         chain. Authorized solely by being the light client this bridge
+    ///         — no human asserts canonicality, the proof does.
+    function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
+        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+        _acceptedBlockHash[chainId][blockHash] = true;
+    }
+
+    /// @notice Drops a hash the light client has aged out of its window.
+    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
+        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+        delete _acceptedBlockHash[chainId][blockHash];
+    }
+
+    /// @notice True if `blockHash` is admitted as canonical for `chainId`.
+    function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
+        return _acceptedBlockHash[chainId][blockHash];
+    }
+
+    /// @notice Anchor-path configuration: the light client and whether the
+    ///         owner may still admit anchors.
+    function getAnchorConfig() external view returns (address lightClient, bool ownerAnchorsEnabled) {
+        return (_lightClient, _ownerAnchorsEnabled);
+    }
+
     /// @notice Finalizes an L1 deposit proven by the final ETH-deposit halo2
     ///         circuit (receipt-proof of the L1 deposit event). The relayer
     ///         passes the proof and its public-inputs blob verbatim; we verify
@@ -421,6 +575,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         // zero contract.
         require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
                 ERR_UNSUPPORTED_SRC_CHAIN);
+        require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -431,6 +586,18 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof),
             ERR_INVALID_ZKPROOF
         );
+
+        // Canonical-chain gate: the proof binds the event to a block whose
+        // header hashes to instances #9/#10, but says nothing about that block
+        // being on the canonical chain. The hash must therefore appear in the
+        // anchor set, which is asserted from outside the proof (see
+        // `_acceptedBlockHash`). Parsed here rather than in the pre-accept path
+        // so the external-message gas budget stays untouched.
+        require(
+            _acceptedBlockHash[f.chainId][_parseBlockHash(publicInputs)],
+            ERR_UNKNOWN_BLOCK
+        );
+
         ensureBalance();
 
         // Anti-replay anchor = proof-bound (deposit_id, source contract, source
@@ -474,6 +641,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             code: _depositVoucherCode
         });
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+        require(anAccount != 0, ERR_ZERO_RECIPIENT);
 
         tvm.accept();
         ensureBalance();
@@ -595,6 +763,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
         _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
+        _ownerAnchorsEnabled = true;
     }
 
     // ========================================================
@@ -674,5 +843,27 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         // address — independent of what the L1 side reports.
         f.dappId       = 0;
         f.anAccount    = (fr[7] << 128) | fr[8];
+    }
+
+    /// @dev Read ONLY the block-hash halves (Fr #9 = hi, #10 = lo) out of the
+    ///      same proven blob, and recombine them the way the circuit binds
+    ///      them: `hi << 128 | lo`. Kept separate from `_parsePublicInputs` so
+    ///      the pre-accept path does not pay for the extra two field elements.
+    function _parseBlockHash(bytes publicInputs) private pure returns (uint256) {
+        TvmSlice s = TvmSlice(publicInputs);
+        uint256 hi = 0;
+        uint256 lo = 0;
+        for (uint k = 0; k < 11; k++) {
+            for (uint i = 0; i < 32; i++) {
+                if (s.bits() < 8) { s = s.loadRef().toSlice(); }
+                uint256 b = uint256(uint8(s.loadUint(8)));   // little-endian
+                if (k == 9) {
+                    hi |= b << (8 * i);
+                } else if (k == 10) {
+                    lo |= b << (8 * i);
+                }
+            }
+        }
+        return (hi << 128) | lo;
     }
 }

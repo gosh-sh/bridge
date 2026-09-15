@@ -82,6 +82,87 @@
 			]
 		},
 		{
+			"name": "setAcceptedBlockHash",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"},
+				{"name":"accepted","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setLightClientCode",
+			"inputs": [
+				{"name":"code","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "deployLightClient",
+			"inputs": [
+				{"name":"pubkey","type":"uint256"},
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"bootstrapCommittee","type":"uint256"},
+				{"name":"bootstrapPeriod","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getLightClient",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"address"}
+			]
+		},
+		{
+			"name": "disableOwnerAnchors",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "acceptBlockHashFromLightClient",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "forgetBlockHashFromLightClient",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "isAcceptedBlockHash",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "getAnchorConfig",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"lightClient","type":"address"},
+				{"name":"ownerAnchorsEnabled","type":"bool"}
+			]
+		},
+		{
 			"name": "finalizeDeposit",
 			"inputs": [
 				{"name":"proof","type":"bytes"},
@@ -246,6 +327,10 @@
 		{"init":false,"name":"_totalMintedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_depositVoucherCode","type":"cell"},
-		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"}
+		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},
+		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},
+		{"init":false,"name":"_lightClientCode","type":"cell"},
+		{"init":false,"name":"_lightClient","type":"address"},
+		{"init":false,"name":"_ownerAnchorsEnabled","type":"bool"}
 	]
 }

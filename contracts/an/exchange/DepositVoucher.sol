@@ -1,4 +1,4 @@
-pragma gosh-solidity >=0.76.1;
+pragma gosh-solidity >=0.80;
 pragma AbiHeader expire;
 
 import "./modifiers/modifiers.sol";
@@ -11,7 +11,7 @@ import "./eccUSDCBridge.sol";
 ///         account and the second constructor call is a no-op — natural
 ///         replay protection.
 contract DepositVoucher is eccUSDCBridgeModifiers {
-    string constant version = "1.3.1";
+    string constant version = "1.4.0";
 
     /// @notice Hash of the proof-bound deposit identity (deposit_id,
     ///         contract_addr, dapp_id, chain_id). Forms the deterministic

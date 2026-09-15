@@ -208,9 +208,14 @@ pub fn aggregate_and_prove_cached(
     let verifier_bytecode = match artifacts_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
+            // Compile before writing anything: `compile_solidity` shells out
+            // to `solc` and panics if it is missing, and this path is the
+            // only one that still needs it. Writing `.sol` first would leave
+            // a half pair — a fresh source next to a stale `.bin` — for the
+            // CI check that exists to catch exactly that.
+            let bytecode = compile_solidity(&verifier_source);
             std::fs::write(dir.join(format!("{base_name}.sol")), &verifier_source)?;
             let bin_path = dir.join(format!("{base_name}.bin"));
-            let bytecode = compile_solidity(&verifier_source);
             std::fs::write(&bin_path, &bytecode)?;
             // After the write, as before: an oversized verifier stays on disk
             // for inspection.

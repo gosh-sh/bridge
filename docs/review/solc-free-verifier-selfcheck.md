@@ -1,10 +1,15 @@
 # Dropping `solc` from the withdrawal path — proposal
 
 **Status:** implemented. The withdrawal verifier's reference `.sol` was regenerated from its key
-and compiles to the committed `.bin`. The Primary, Fallback and LayerHashes sources compile to
-their committed `.bin` with `solc 0.8.19` but were not regenerated from their keys, so the first
-relayer aggregation of each kind is where a mismatch would surface. The `.sol → .bin` link is
-checked by `.woodpecker/verifier_sources.yaml`. The text below is the proposal as written.
+and compiles to the committed `.bin`. A compiled `.bin` ends with `solc`'s CBOR metadata, whose
+hash commits to the source's keccak256, so compiling to the identical `.bin` proves a `.sol` is
+exactly the source of that `.bin` — which also holds for the Primary, Fallback and LayerHashes
+sources, even though those three were not regenerated from their keys. What that leaves
+unconfirmed is only whether the generator at the current `snark-verifier` pin still reproduces
+that same source from their keys, which the relayer's former bytecode self-check already
+established on every aggregation it ran before this change; watch the first relayer cycle of
+each kind after upgrading. The `.sol → .bin` link is checked by
+`.woodpecker/verifier_sources.yaml`. The text below is the proposal as written.
 
 Verified against commit `dc3d91e`. Paths are relative to the repository root, except the
 `snark-verifier` sources, which are cited at the pinned tag `v0.1.7-git` (`4b733e0`,

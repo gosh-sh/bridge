@@ -42,13 +42,18 @@ assigns it when the release is tagged.
       `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
       that `export-inner-aggregator` wrote next to its `.bin`.
   `BridgeWithdrawalAggregatorVerifier.sol` was regenerated from the deployed
-  key and compiles to the deployed `.bin`. `PrimaryAggregatorVerifier.sol`,
-  `FallbackAggregatorVerifier.sol` and `LayerHashesAggregatorVerifier.sol`
-  compile to exactly their deployed `.bin` but were not regenerated from
-  their keys, so the first aggregation of each kind on the relayer host is
-  where a mismatch would show. The relayer refuses before submitting and
-  nothing is lost, but watch that first `verifyBlock` cycle after the
-  upgrade.
+  key and compiles to the deployed `.bin`. Because a compiled `.bin` ends
+  with `solc`'s CBOR metadata, whose hash commits to the source's keccak256,
+  compiling to the identical `.bin` proves a `.sol` is exactly the source of
+  that `.bin` — which also holds for `PrimaryAggregatorVerifier.sol`,
+  `FallbackAggregatorVerifier.sol` and `LayerHashesAggregatorVerifier.sol`,
+  even though those three were not regenerated from their keys for this
+  change. What that leaves unconfirmed is only whether the generator at the
+  current `snark-verifier` pin still reproduces that same source from their
+  keys — which the relayer's own former bytecode self-check already
+  established on every aggregation it ran before this change. Watch the
+  first `verifyBlock` cycle of each kind after the upgrade in case a future
+  `snark-verifier` bump changes the generated source.
 - **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
   meaning — a bootstrap escape hatch for a verifier whose source is not
   committed yet — with no alias for the old spelling.

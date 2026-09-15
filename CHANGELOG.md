@@ -24,6 +24,40 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
+  `eccUSDCBridge` (v1.4.0) and `DepositVoucher` (v1.4.0) moved here from
+  acki-nacki with their sources and the compiled `.tvc` / `.abi.json` that go
+  into the zerostate, at the state of the `contracts/bridge` branch: the anchor
+  surface (`setLightClientCode`, `deployLightClient`, the light-client writers,
+  `disableOwnerAnchors`), the `ERR_UNKNOWN_BLOCK` gate on `finalizeDeposit`, and
+  `ERR_ZERO_RECIPIENT` on both directions including `initiateWithdrawal`
+  (audit WD-AN-07). The bridge's code hash is `48d5c0ed…`, which is what
+  shellnet runs. acki-nacki no longer
+  keeps a copy: it pins one commit of this repository and places the files
+  into its own tree when a zerostate is generated, so a contract change made
+  here reaches a network only after that pin is moved.
+  `make -C contracts/an/exchange SOLD=<sold>` rebuilds them; see
+  `contracts/an/README.md` for which compiler reproduces which artefact.
+- **CI pipeline `.woodpecker/an-contracts.yaml`** runs
+  `scripts/check_voucher_abi_consistency.py` and
+  `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
+  `main`.
+
+### Changed
+
+- **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
+  default.** With no arguments it checks the sources in
+  `contracts/an/exchange/` against the compiled ABIs in
+  `contracts/an/0.80.0_compiled/exchange/` and
+  `contracts/an/0.81.0_compiled/exchange/`. It does not check the ABI copies
+  the tooling loads: `crates/bridge-prover-libraries/python/contracts/` was
+  the previous default and is no longer checked, and
+  `crates/ackinacki-bridge/abi/` was never covered. Those copies predate the
+  `chainId` deposit identity and are known to be stale; pass them with
+  `--compiled-bridge` / `--compiled-voucher` to see the drift.
+  `--compiled DIR` is replaced by `--compiled-bridge FILE` and
+  `--compiled-voucher FILE`, because the two artefacts sit in different
+  folders, and the bridge source it reads is `eccUSDCBridge.sol`.
 - `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
   reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
   against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)

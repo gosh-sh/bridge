@@ -1203,7 +1203,30 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
         // Not just "exited 0" — a stub that ignores its arguments does that
         // too. The help text must mention the flag we will actually pass,
         // which only the real binary does.
-        Ok(Ok(out)) if out.status.success() && help_mentions_our_flags(&out) => Ok(()),
+        Ok(Ok(out))
+            if out.status.success()
+                && help_mentions_our_flags(&out)
+                && help_mentions_source_self_check(&out) =>
+        {
+            Ok(())
+        },
+        // `--inner-snark` alone is not enough: the old aggregate-proof prints
+        // that too, and with the solc probe gone this CLI can no longer tell
+        // "old binary" from "new binary" by exit status. `--allow-source-drift`
+        // only exists in the new usage line, so its absence is the tell —
+        // and the fix is not a rebuild flag but a rebuild, because the old
+        // binary would still reach `compile_solidity` at stage 5 and needs
+        // solc there, which this CLI no longer provisions.
+        Ok(Ok(out)) if out.status.success() && help_mentions_our_flags(&out) => {
+            Err(refuse(format!(
+                "--aggregator-dir {}: {} predates the verifier-source self-check — its `--help` \
+                 does not mention `--allow-source-drift` — and would still need solc on PATH at \
+                 stage 5. Rebuild it:\n\x20   cd {} && cargo build --release --bin aggregate-proof",
+                aggregator_dir.display(),
+                release_bin.display(),
+                aggregator_dir.display(),
+            )))
+        },
         Ok(Ok(out)) if out.status.success() => Err(refuse(format!(
             "--aggregator-dir {}: {} answered `--help` but its output does not mention \
              `--inner-snark` — this is not the aggregate-proof this CLI drives. Rebuild it:\n\
@@ -1255,6 +1278,16 @@ fn help_mentions_our_flags(out: &std::process::Output) -> bool {
     let text = String::from_utf8_lossy(&out.stdout);
     let err = String::from_utf8_lossy(&out.stderr);
     text.contains("--inner-snark") || err.contains("--inner-snark")
+}
+
+/// `--help` output must name `--allow-source-drift`, which only the
+/// verifier-source self-check era of `aggregate-proof` has. A binary whose
+/// `--help` mentions `--inner-snark` but not this flag predates the
+/// self-check and still needs `solc` at stage 5 — see the caller.
+fn help_mentions_source_self_check(out: &std::process::Output) -> bool {
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    text.contains("--allow-source-drift") || err.contains("--allow-source-drift")
 }
 
 /// Output paths the prover will write to. Creating them now also means the
@@ -3896,7 +3929,8 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
         write_exec(
             &bin_dir.join("aggregate-proof"),
-            "#!/bin/sh\necho 'aggregate-proof --inner-snark <path> --name <verifier>'\n",
+            "#!/bin/sh\necho 'aggregate-proof --inner-snark <path> --name <verifier> \
+             --allow-source-drift'\n",
         );
 
         let relative = std::path::Path::new(dir.path().file_name().unwrap());
@@ -3916,12 +3950,64 @@ pub(crate) mod tests {
         make_artifact_tree(dir.path());
         write_exec(
             &dir.path().join("agg/target/release/aggregate-proof"),
-            "#!/bin/sh\necho 'usage: aggregate-proof --inner-snark <path> --name <n>'\nexit 0\n",
+            "#!/bin/sh\necho 'usage: aggregate-proof --inner-snark <path> --name <n> \
+             --allow-source-drift'\nexit 0\n",
         );
 
         check_aggregator_runnable(&dir.path().join("agg"))
             .await
             .expect("a binary that answers --help with our flags must pass");
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_refuses_a_binary_that_predates_the_source_self_check() {
+        // The old binary's --help still names --inner-snark, so the plain
+        // flag-name probe alone would wave it through — straight past the
+        // burn and the anchor wait into a stage-5 panic with no `solc` on
+        // PATH. `--allow-source-drift` only exists in the new usage line, so
+        // its absence in an otherwise-recognised --help is what must trip
+        // this refusal, with a message distinct from "not aggregate-proof at
+        // all".
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        write_exec(
+            &dir.path().join("agg/target/release/aggregate-proof"),
+            "#!/bin/sh\ncat <<'USAGE'\naggregate-proof --inner-snark <path> --name <verifier> \
+             --out <path>\n [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n \
+             [--allow-bin-drift] [--pk-cache-dir <dir>]\nUSAGE\n",
+        );
+
+        let err = check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect_err(
+                "a pre-self-check aggregate-proof must be refused, not run into a solc-less stage \
+                 5 after the burn",
+            );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("solc"),
+            "must explain that the old binary still needs solc, got: {msg}"
+        );
+        assert!(
+            msg.contains("cargo build --release --bin aggregate-proof"),
+            "must name the rebuild command, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_accepts_a_binary_whose_help_names_the_source_self_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        write_exec(
+            &dir.path().join("agg/target/release/aggregate-proof"),
+            "#!/bin/sh\ncat <<'USAGE'\naggregate-proof --inner-snark <path> --name <verifier> \
+             --out <path>\n [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n \
+             [--allow-source-drift] [--pk-cache-dir <dir>]\nUSAGE\n",
+        );
+
+        check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect("a --help naming --allow-source-drift must pass");
     }
 
     #[test]

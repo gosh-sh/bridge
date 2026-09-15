@@ -186,6 +186,14 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `scripts/check_english_only.py` treats mathematical letters as notation, like
+  the unaccented Greek it already accepts: the Mathematical Alphanumeric Symbols
+  block (double-struck, bold, italic, script, fraktur), the letterlike
+  double-struck / script / black-letter capitals and superscript Latin letters
+  (`𝔾₂`, `ℤ`, `limbᵢ·(2⁸⁸)ⁱ`). They occur only in formulas, never in another
+  language's prose, so the pairing and light-client notes no longer trip the
+  hygiene pipeline. Cyrillic, accented Greek, CJK and the rest still fail.
+
 - On-chain `submitAncestry` is opt-in (`--submit-ancestry` / `SUBMIT_ANCESTRY`,
   default **off**). The daemon used to fire a 32-header call every epoch whenever
   `ETH_RPC_URL` was set; two headers already cost 129.7 M gas against a 10 M

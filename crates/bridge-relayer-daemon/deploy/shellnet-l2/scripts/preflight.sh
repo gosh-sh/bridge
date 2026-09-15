@@ -144,6 +144,8 @@ fi
 [[ -x "$RELAYER_BINARY" ]] || die "relayer binary is missing"
 aggregator_binary=$BRIDGE_AGGREGATOR_DIR/target/release/aggregate-proof
 [[ -x "$aggregator_binary" ]] || die "aggregate-proof binary is missing"
+"$aggregator_binary" --help | grep -q -- --allow-source-drift ||
+  die "aggregate-proof predates the verifier source self-check; rebuild it"
 "$RELAYER_BINARY" --help >/dev/null || die "relayer cannot execute on this OS"
 actual_relayer_hash=$(sha256sum "$RELAYER_BINARY" | awk '{print $1}')
 actual_aggregator_hash=$(sha256sum "$aggregator_binary" | awk '{print $1}')

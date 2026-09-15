@@ -210,7 +210,12 @@ else
       mkdir -p "$BIN_DIR" "$(dirname "$AGG_BIN")" "$VERIFIERS"
       install -m 0755 "$unpack/ackinacki-bridge" "$CLI_BIN"
       install -m 0755 "$unpack/aggregate-proof" "$AGG_BIN"
-      cp "$unpack"/verifiers/*.bin "$unpack"/verifiers/*.sol "$VERIFIERS/"
+      cp "$unpack"/verifiers/*.bin "$VERIFIERS/"
+      if compgen -G "$unpack/verifiers/*.sol" >/dev/null; then
+        cp "$unpack"/verifiers/*.sol "$VERIFIERS/"
+      else
+        warn "the release bundle has no verifier .sol files — it predates this installer; install a newer release"
+      fi
       cp "$unpack/bridge_config" "$PROFILE.release"
       ok "unpacked into $PREFIX"
       if have_cli && have_agg; then

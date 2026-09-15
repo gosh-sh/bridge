@@ -214,7 +214,8 @@ else
       if compgen -G "$unpack/verifiers/*.sol" >/dev/null; then
         cp "$unpack"/verifiers/*.sol "$VERIFIERS/"
       else
-        warn "the release bundle has no verifier .sol files — it predates this installer; install a newer release"
+        warn "the release bundle has no verifier .sol files — it predates the verifier-source self-check"
+        note "no compatible release may be published yet; point BRIDGE_RELEASE_BASE at a bundle built from a newer revision"
       fi
       cp "$unpack/bridge_config" "$PROFILE.release"
       ok "unpacked into $PREFIX"

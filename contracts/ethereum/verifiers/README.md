@@ -14,9 +14,27 @@ artefacts were regenerated on 2026-08-13 and the table was not.
 | `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 19 100 B | OK |
 | `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 10 | 20 990 B | OK (K=19 inner) |
 
-Each also ships a `*_calldata.bin` reference fixture (`instances ‖ proof`). The generated
-`Halo2Verifier` Solidity sources are kept for reference for 1A, 1B and 2 only — the `.bin` is what
-deploys.
+Each also ships a `*_calldata.bin` reference fixture (`instances ‖ proof`) and its generated Solidity
+source, `<name>.sol`. The two roles are different and both matter:
+
+- the `.bin` is what deploys, and what the CLI's stage 1 and the relayer preflight compare with the
+  runtime code on chain;
+- the `.sol` is what `aggregate-proof` compares every proof's regenerated verifier against. It does
+  not compile anything, so neither the withdrawal CLI nor the relayer needs `solc`.
+
+Nothing at run time checks that a `.sol` compiles to its `.bin`. `scripts/check_verifier_sources.sh`
+does, with `solc 0.8.19`, and `.woodpecker/verifier_sources.yaml` runs it on every pull request that
+touches this directory:
+
+```bash
+SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh contracts/ethereum/verifiers
+```
+
+**Regenerate the pair together.** `export-inner-aggregator` writes both files from one run; never
+replace one of them alone. A `snark-verifier` upgrade can change the generated source without
+changing the key — `aggregate-proof` then refuses with `aggregator VK drift`, and the fix is to
+regenerate both files, not to suspect the key. Regeneration compiles the source, so it needs
+`solc 0.8.19` on `PATH`.
 
 Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
 is keygen'd at `K=19`; the aggregated Yul is 20 987 B (22 outer instances = 12 KZG accumulator
@@ -27,7 +45,7 @@ inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two at
 envelopes, so at `K=20` it needs 44 advice columns and the aggregator Yul exceeds EIP-170
 (~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul drops to 21 493 B. 
 
-## Generate SHPLONK `.bin` (1A + 1B + 2)
+## Generate SHPLONK `.sol` + `.bin` (1A + 1B + 2)
 
 ```bash
 cd crates/bridge-snark-utils
@@ -47,7 +65,7 @@ for c in primary:PrimaryAggregatorVerifier fallback:FallbackAggregatorVerifier l
 done
 ```
 
-## Generate SHPLONK `.bin` (Circuit 4 withdrawal)
+## Generate SHPLONK `.sol` + `.bin` (Circuit 4 withdrawal)
 
 Circuit 4's inner Poseidon snark is produced by a dedicated `bridge-snark-utils` bin (the
 `export-bound-poseidon-snarks` bound-block path only emits 1A/1B/2). It keygens the
@@ -75,6 +93,8 @@ Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c &
 
 ```bash
 ./scripts/check_eip170_verifier_bins.sh contracts/ethereum/verifiers
+# then check the pairs
+SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh contracts/ethereum/verifiers
 ```
 
 Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.

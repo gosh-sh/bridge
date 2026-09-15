@@ -1,0 +1,43 @@
+# Verifier pairs: does every committed `.sol` compile to its committed `.bin`.
+#
+# The bridge deploys `contracts/ethereum/verifiers/<name>.bin`; `aggregate-proof`
+# self-checks every proof against `<name>.sol`. No run-time step compiles one
+# into the other any more — the compiler left the withdrawal and relayer hosts —
+# so a regeneration that replaces only half of a pair would pass both of those
+# checks and ship a self-check that no longer describes the deployed contract.
+# This job is the link between the two. See `scripts/check_verifier_sources.sh`.
+#
+# The compiler is fetched by URL and pinned by SHA-256: another solc version
+# emits different bytecode and would fail every pair.
+#
+# No secrets, so it is safe on a pull request from a fork.
+
+when:
+  - event: pull_request
+    path:
+      include:
+        - 'contracts/ethereum/verifiers/**'
+        - 'scripts/check_verifier_sources.sh'
+        - '.woodpecker/verifier_sources.yaml'
+  - event: push
+    branch: main
+    path:
+      include:
+        - 'contracts/ethereum/verifiers/**'
+        - 'scripts/check_verifier_sources.sh'
+        - '.woodpecker/verifier_sources.yaml'
+
+variables:
+  - &curl_image "alpine/curl"
+
+steps:
+  sources-compile-to-bytecode:
+    image: *curl_image
+    environment:
+      SOLC_URL: https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
+      SOLC_SHA256: 7a5c1d3dc9a8eba62bb2ec37192c9178ae5fe8a54a56e5573fd3c9c17cd9eb48
+    commands:
+      - curl -fsSL "$SOLC_URL" -o /tmp/solc
+      - echo "$SOLC_SHA256  /tmp/solc" | sha256sum -c -
+      - chmod +x /tmp/solc
+      - SOLC=/tmp/solc sh scripts/check_verifier_sources.sh contracts/ethereum/verifiers

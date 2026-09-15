@@ -24,6 +24,20 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
+  reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
+  against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)
+  and runs it in `tvm-cli debug run --tvc`: no network, no keys. Measured with
+  sold 0.81.0 / tvm-cli 3.0.6: the library as deployed on shellnet
+  (`reference/EthKeccak_1.4.0_as_deployed.sol`, code hash `78905cf7...`) throws
+  exit 50 on every input at the first `bc[i] = ...`; the fixed library returns
+  the right digests at 12.93M gas per keccak-f permutation against the 10M
+  per-transaction limit (`acki-nacki/node/blockchain.conf.json` p20/p21), and the
+  642-byte Sepolia header 11683168 (`fixtures/`) runs out of the debugger's
+  16.7M credit. `fetch_headers.py` rebuilds header RLPs from any JSON-RPC the
+  way `header_rlp.rs` does; `emulate_live.sh` replays `submitAncestry` against
+  the live light-client account with `tvm-cli runx`. Second, independent
+  measurement of the ancestry gas wall (gosh-sh/bridge#36).
 - `docs/eth-light-client.md`: design and deployment reference for the beacon
   light client (components, step update, period rotation, trust switches,
   deployment topology with ports and endpoints, configuration, operating

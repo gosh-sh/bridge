@@ -8,7 +8,6 @@ x-relayer-build: &relayer-build
     aggregator_release: ${AGGREGATOR_RELEASE_DIR:-../../../bridge-evm-aggregator/target/release}
     verifier_bins: ${VERIFIER_BINS_DIR:-../../../../contracts/ethereum/verifiers}
     foundry_bin: ${FOUNDRY_BIN_DIR:-/usr/local/bin}
-    solc_bin: ${SOLC_BIN_DIR:-/root/.local/share/svm/0.8.19}
   args:
     SOURCE_COMMIT: ${EXPECTED_BRIDGE_COMMIT:-local}
     RELAYER_UID: ${RELAYER_UID:-998}

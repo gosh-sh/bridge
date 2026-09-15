@@ -46,16 +46,16 @@ cargo build --release --locked --bin aggregate-proof
 The image also requires:
 
 - Foundry `cast`;
-- official Linux `solc 0.8.19+commit.7dd6d404` (the Docker build verifies its
-  published SHA-256);
-- the four generated `contracts/ethereum/verifiers/*AggregatorVerifier.bin`
-  files;
+- the four generated `contracts/ethereum/verifiers/*AggregatorVerifier.bin` files **and** the
+  `*AggregatorVerifier.sol` sources beside them;
 - Hermez SRS files for **K=17,19,20,21,22** and the primary/fallback/layer
   inner PK/VK/config files. K=22 is required by the layer outer aggregator;
   omitting it can fall back to an incompatible locally generated SRS.
 
-`aggregate-proof` invokes `solc` at runtime, so merely having Solidity
-bytecode in the image is not enough.
+`aggregate-proof` self-checks every proof by regenerating the verifier's Solidity source and
+comparing it with the committed `.sol`; it compiles nothing, so the image carries no `solc`. The
+`.bin` files are still needed: `preflight.sh` compares each with the runtime code deployed on chain.
+Both halves of every pair are listed in the image's `IMAGE-SHA256SUMS`.
 
 ## Persistent layout
 

@@ -234,8 +234,8 @@ enum Cmd {
         /// `target/release/aggregate-proof`).
         #[arg(long, env = "AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (the aggregator's
-        /// byte-identity self-check target).
+        /// Directory of committed verifier files (the aggregator self-checks
+        /// against the `.sol` sources).
         #[arg(long, default_value = "../../contracts/ethereum/verifiers")]
         verifiers_dir: PathBuf,
         /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.

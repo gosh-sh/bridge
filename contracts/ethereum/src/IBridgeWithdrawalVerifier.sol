@@ -13,15 +13,18 @@ pragma solidity ^0.8.19;
 ///         anchored off-circuit to one specific `finalRoot` — the verifier
 ///         (this adapter, on-chain) checks that `finalRoot` is in the
 ///         bridge's set of known anchors (populated by `verifyBlock`).
-event WithdrawalInitiated(
-        uint256 dstChainId,
-        bytes recipient,
-        uint128 amount,
-        uint32 tokenId,
-        address sender
-    );
-///      The `WithdrawalPublicInputs` struct mirrors slots [0..9] of the Halo2
-///      circuit's 10-element public-input vector byte-for-byte.
+///
+///         The AN-side `eccUSDCBridge` emits:
+///             event WithdrawalInitiated(
+///                 uint256 dstChainId,
+///                 bytes   recipient,
+///                 uint128 amount,
+///                 uint32  tokenId,
+///                 address sender
+///             );
+///
+///         The `WithdrawalPublicInputs` struct below mirrors slots [0..9] of
+///         the Halo2 circuit's 10-element public-input vector byte-for-byte.
 interface IBridgeWithdrawalVerifier {
     /// @notice Public-input slots [0..9] of the Circuit 4 proof.
     /// @dev Field order matches the Halo2 circuit's public-input layout

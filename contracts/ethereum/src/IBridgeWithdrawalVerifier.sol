@@ -3,9 +3,8 @@ pragma solidity ^0.8.19;
 
 /// @title IBridgeWithdrawalVerifier
 /// @notice Bridge-side interface for verifying Acki Nacki **Bridge Withdrawal**
-///         proofs (Circuit 4 — `bridge-event-prove-circuit`, single-final-root
-///         layout, partner branch `circuit4-single-final-root`). A passing
-///         proof witnesses that the AN-side `TokenBridge` identified by
+///         proofs (Circuit 4 — `bridge-event-prove-circuit`). A passing
+///         proof witnesses that the AN-side `eccUSDCBridge` identified by
 ///         `(dappFr, accFr)` emitted a `WithdrawalInitiated` event with the
 ///         specified `amount` payable to `recipient` (an EVM address), submitted
 ///         by the AN-side actor identified by `senderAccFr`, targeting
@@ -14,16 +13,17 @@ pragma solidity ^0.8.19;
 ///         anchored off-circuit to one specific `finalRoot` — the verifier
 ///         (this adapter, on-chain) checks that `finalRoot` is in the
 ///         bridge's set of known anchors (populated by `verifyBlock`).
-///
-/// @dev v3 ABI break vs the legacy 110-input layout:
-///      - `senderDappFr` removed — `MsgAddrStd` carries no dApp-id field.
-///      - `layerHashes[100]` removed — replaced by a single `finalRoot`
-///        public input and an off-circuit anchor lookup on-chain.
-///
+event WithdrawalInitiated(
+        uint256 dstChainId,
+        bytes recipient,
+        uint128 amount,
+        uint32 tokenId,
+        address sender
+    );
 ///      The `WithdrawalPublicInputs` struct mirrors slots [0..9] of the Halo2
 ///      circuit's 10-element public-input vector byte-for-byte.
 interface IBridgeWithdrawalVerifier {
-    /// @notice Public-input slots [0..9] of the Circuit 4 (single-final-root) proof.
+    /// @notice Public-input slots [0..9] of the Circuit 4 proof.
     /// @dev Field order matches the Halo2 circuit's public-input layout
     ///      byte-for-byte. The on-chain adapter forwards this struct
     ///      verbatim to `verifyProof`.

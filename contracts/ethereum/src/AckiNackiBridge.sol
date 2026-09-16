@@ -69,9 +69,12 @@ contract AckiNackiBridge {
     ///      subsequent appends — this is a count of `verifyBlock` calls, not a
     ///      `blockSeqNo` span. A `withdrawByProof` whose `finalRoot` has been
     ///      evicted reverts `UnknownAnchor`; funds stay in the treasury.
-    ///      Relayer SLA: submit against the original root before eviction, or
-    ///      re-prove Circuit 4 against a still-in-window descendant (dense
-    ///      chain ≤ 11 rungs). Fast-forward of `blockSeqNo` does **not** skip
+    ///      The bridge is a stateless verifier and does not retry on anyone's
+    ///      behalf: the withdrawing user is responsible for re-proving
+    ///      Circuit 4 against a still-in-window descendant (dense chain
+    ///      ≤ 11 rungs) before their anchor is evicted. Any relayer is
+    ///      best-effort convenience infrastructure, not a privileged or
+    ///      obligated actor. Fast-forward of `blockSeqNo` does **not** skip
     ///      extra slots — one call still writes one slot.
     uint256 public constant HISTORY_PROOF_WINDOW = 128;
 

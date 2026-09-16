@@ -186,16 +186,15 @@ contract AckiNackiBridge {
     /// @notice Immutable genesis seed for the layer-hash chain anchor. Set
     ///         once at construction from `VerifyBlockConfig.genesisPrevMaxLevelLayerHash`
     ///         and never mutated post-deploy.
-    /// @dev **Deprecated in storage v2.0**: this is now the immutable genesis
-    ///      seed only — no longer tracks per-block max-layer values. Use
-    ///      `getLatestPerLayer()` for per-block per-layer state, and
-    ///      `expectedPrevAnchor(numLayers)` for the chain anchor that the
-    ///      next `verifyBlock` will require.
-    ///
-    ///      Read only by `_expectedPrevAnchor` as the pre-first-block bootstrap
-    ///      seed (before any layer window is populated). Every subsequent call
-    ///      sources the anchor from the per-layer rolling windows in
-    ///      `_layerWindows` — see AB-Q4 / `_expectedPrevAnchor`.
+    /// @dev **Role narrowed in storage v2.0** (was: per-block max-layer cache
+    ///      updated by every `verifyBlock`; now: immutable genesis seed only).
+    ///      Still load-bearing — `_expectedPrevAnchor` reads it as the
+    ///      pre-first-block bootstrap value, before any layer window is
+    ///      populated. Every subsequent call sources the anchor from the
+    ///      per-layer rolling windows in `_layerWindows` (see AB-Q4 /
+    ///      `_expectedPrevAnchor`). For per-block per-layer state use
+    ///      `getLatestPerLayer()`; for the chain anchor the next
+    ///      `verifyBlock` will require use `expectedPrevAnchor(numLayers)`.
     ///
     ///      Storage v2.0 (2026-08-04): removed the hot-path SSTORE and made
     ///      this immutable; also removed the sibling `storedNumLayers` and
@@ -220,7 +219,7 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` pair via its public inputs — pinning these
     ///         on Ethereum at deploy time prevents a caller from substituting
     ///         an event emitted by a different AN contract (e.g. a malicious
-    ///         lookalike `TokenBridge`).
+    ///         lookalike `eccUSDCBridge`).
     uint256 public immutable bridgeWithdrawalDappFr;
 
     /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeWithdrawalDappFr`).
@@ -237,16 +236,16 @@ contract AckiNackiBridge {
     uint256 public immutable bridgeWithdrawalAltTokenId;
 
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
-    ///         the proof's public input slot [8]. The Circuit 4
-    ///         single-final-root nullifier is
+    ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
-    ///                   recipientLo, senderAccFr)` — uniqueness per event
+    ///         recipientLo, senderAccFr)` — uniqueness per event
     ///         is enforced inside the circuit, but the bridge still needs
     ///         the mapping to reject *re-submission* of an already-paid proof.
     ///         Keys must be canonical Fr (`nullifier < BN254_R`); the SHPLONK
-    ///         Yul verifier reduces instances `mod f_q`, so an unreduced
-    ///         `N + k·R` would otherwise be a second mapping key for the same
-    ///         field element (ETH-1 / BRIDGE-ETH-01).
+    ///         Yul verifier reduces instances `mod BN254_R` (same modulus,
+    ///         spelled `f_q` in the auto-generated Yul), so an unreduced
+    ///         `N + k·BN254_R` would otherwise be a second mapping key for
+    ///         the same field element (ETH-1 / BRIDGE-ETH-01).
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.

@@ -28,12 +28,12 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      `block_seq_no` and chain-anchor invariants on top.
 ///
 ///      AN→ETH event verification + payout (withdraw):
-///      every successful `verifyBlock` also records the new top-of-chain
-///      anchor in a set of `knownAnchors`. `withdrawByProof` consumes that
-///      set plus a Circuit 4 (`bridge-event-prove-circuit`) SHPLONK
-///      aggregator proof whose 10 public inputs include a single
-///      `finalRoot`. The bridge
-///      checks `finalRoot ∈ knownAnchors` off-circuit (this contract) — the
+///      every successful `verifyBlock` appends the new top-of-chain anchor
+///      to the per-layer rolling windows (`_layerWindows`).
+///      `withdrawByProof` consumes those windows plus a Circuit 4
+///      (`bridge-event-prove-circuit`) SHPLONK aggregator proof whose
+///      10 public inputs include a single `finalRoot`. The bridge
+///      calls `_isKnownAnchor(finalRoot)` off-circuit (this contract) — the
 ///      circuit only proves that the event's hash chain extends *into*
 ///      `finalRoot` via a dense-chain extension. The proof binds the
 ///      payout's `amount` and `recipient` (split-α 10/10 bytes) along
@@ -258,8 +258,6 @@ contract AckiNackiBridge {
     ///         PI slot `anchorLayer` + range-checked scan of the specific
     ///         window) remains the ultimate target once the Circuit 4
     ///         re-keygen lands.
-    ///
-    /// @dev Replaces the legacy flat `_knownAnchors` bag (Q3 / spec §8.3).
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
         uint64[HISTORY_PROOF_WINDOW] heights;
@@ -1240,7 +1238,7 @@ contract AckiNackiBridge {
     ///      identified by `(bridgeWithdrawalDappFr, bridgeWithdrawalAccFr)`,
     ///      anchored — via the proof's dense-chain extension — to a
     ///      `finalRoot` the bridge has previously observed via `verifyBlock`
-    ///      (`_knownAnchors[finalRoot] == true`).
+    ///      (`_isKnownAnchor(finalRoot) == true`).
     ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
     ///      only — `pub.dstChainId == altDstChainId` while
     ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the

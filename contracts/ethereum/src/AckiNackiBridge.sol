@@ -16,13 +16,6 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      - `deposit(uint256 amount)` stays cheap: funds accumulate in the contract;
 ///        an owner/keeper batches supplies to AAVE with `supplyToAave()` to amortise gas.
 ///      - Owner can harvest accrued yield without touching user principal.
-///      - **Withdraw on ETH side**: deliberately not exposed in this milestone.
-///        A genuine cross-chain withdrawal will land alongside a burn-proof
-///        circuit + state-anchored verification. That milestone has since
-///        shipped as `withdrawByProof` (`docs/EVM-contracts-spec.md` §7.2);
-///        this header predates it. The legacy v1 refund-style
-///        `withdraw(depositId, recipient, amount, blockNumber, proof)` was
-///        retired in Phase 4.3 (2026-05-17) — see Decision Log.
 ///
 ///      AN→ETH state (Phase 4): the bridge stores a rolling commitment to the
 ///      Acki Nacki side (`block_seq_no`, `bk_set_poseidon`, layer-hash roots,
@@ -34,7 +27,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      construction; the bridge enforces those equalities + the monotonic
 ///      `block_seq_no` and chain-anchor invariants on top.
 ///
-///      AN→ETH event verification + payout (Circuit 4, single-final-root):
+///      AN→ETH event verification + payout (withdraw):
 ///      every successful `verifyBlock` also records the new top-of-chain
 ///      anchor in a set of `knownAnchors`. `withdrawByProof` consumes that
 ///      set plus a Circuit 4 (`bridge-event-prove-circuit`) SHPLONK

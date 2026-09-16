@@ -323,8 +323,8 @@ contract AckiNackiBridge {
         uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
     );
 
-    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
-    ///         single-final-root layout). A verified ZK proof releases
+    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4),
+    ///         A verified ZK proof releases
     ///         `amount` USDC to `recipient` exactly once (replay-protected by
     ///         `nullifier`).
     /// @param nullifier The Poseidon-derived nullifier from public input slot [8];
@@ -405,14 +405,16 @@ contract AckiNackiBridge {
     ///         `verifyBlock` to attest a zero BK-set commitment.
     error ZeroBkSetCommitment();
 
-    // withdrawByProof (Circuit 4, single-final-root) errors
+    // withdrawByProof (Circuit 4) errors
     error WithdrawByProofDisabled();
     error WithdrawalProofRejected();
     error NullifierAlreadyUsed(uint256 nullifier);
     /// @notice A public input used as a mapping/window key is not a canonical
     ///         BN254 Fr (`value >= BN254_R`). The SHPLONK Yul verifier reduces
-    ///         instances `mod f_q`, so `x` and `x + k·R` verify as the same
-    ///         field element while remaining distinct `uint256` keys (ETH-1/ETH-2).
+    ///         instances `mod BN254_R` (same modulus, spelled `f_q` in the
+    ///         auto-generated Yul), so `x` and `x + k·BN254_R` verify as the
+    ///         same field element while remaining distinct `uint256` keys
+    ///         (ETH-1 / ETH-2).
     error FieldElementOutOfRange(uint256 value);
     error DstChainIdMismatch(uint256 supplied, uint256 expected);
     error RecipientHalfOutOfRange(uint256 value);
@@ -747,7 +749,7 @@ contract AckiNackiBridge {
         }
         _requireCanonicalFr(prevMaxLevelLayerHash);
         // ETH-02 remainder: `blockId` is only emitted, but Yul still reduces
-        // the instance mod f_q. Reject unreduced words so logs match AN.
+        // the instance mod BN254_R. Reject unreduced words so logs match AN.
         _requireCanonicalFr(blockId);
 
         // ---- Anchor checks against stored state. ----
@@ -1306,8 +1308,8 @@ contract AckiNackiBridge {
             revert InvalidRecipient();
         }
         // ETH-1: Yul reduces instances mod BN254_R; the mapping must not treat
-        // N and N+k·R as distinct spent keys. Reject unreduced words rather
-        // than reducing-and-keying (that would alias two caller-supplied keys).
+        // N and N + k·BN254_R as distinct spent keys. Reject unreduced words
+        // rather than reducing-and-keying (that would alias two caller-supplied keys).
         _requireCanonicalFr(pub.nullifier);
         _requireCanonicalFr(pub.finalRoot);
         bytes32 nullifierKey = bytes32(pub.nullifier);
@@ -1368,8 +1370,9 @@ contract AckiNackiBridge {
 
     /// @dev Revert unless `value` is a canonical BN254 Fr. Public inputs that
     ///      become mapping or window keys must match the Yul verifier's
-    ///      `mod(calldataload, f_q)` image — otherwise `x` and `x + k·R`
-    ///      verify as one field element and occupy two keys (ETH-1 / ETH-2).
+    ///      `mod(calldataload, BN254_R)` image (the auto-generated Yul spells
+    ///      this modulus `f_q`) — otherwise `x` and `x + k·BN254_R` verify as
+    ///      one field element and occupy two keys (ETH-1 / ETH-2).
     function _requireCanonicalFr(uint256 value) internal pure {
         if (value >= BN254_R) revert FieldElementOutOfRange(value);
     }

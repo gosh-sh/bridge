@@ -1,5 +1,6 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy
+        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy \
+        english-check
 
 # Default target
 .DEFAULT_GOAL := help
@@ -191,8 +192,12 @@ production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (gates liv
 	@chmod +x scripts/production_preflight.sh
 	@./scripts/production_preflight.sh
 
+english-check: ## Check that every tracked file is English-only (matches the Woodpecker `english` step)
+	@python3 scripts/check_english_only.py
+
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
 	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"
+	@$(MAKE) english-check
 	@$(MAKE) format-check
 	@$(MAKE) lint
 	@$(MAKE) relayer-fmt

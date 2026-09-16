@@ -775,6 +775,7 @@ mod tests {
         // whose only sin was being wrong.
         let head = "0x742d35Cc6634C0532";
         assert_eq!(head.len(), 19);
+        // non-english-ok: multibyte fixture
         for tail in ["привет", "日本語", "🙂🙂", "e\u{301}\u{301}"] {
             let raw = format!("{head}{tail}");
             let res = parse_to(&raw, Some(11155111));

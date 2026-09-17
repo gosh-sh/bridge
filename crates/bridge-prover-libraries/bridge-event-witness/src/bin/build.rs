@@ -42,7 +42,7 @@
 //! ### `--anchor-layer` semantics
 //!
 //! * `1` (default, **strict**) — target L1. Wait budget ≤ `W·P − 1` blocks
-//!   (W=128, P=4 → ≤ 511).
+//!   (W=128, P=8 → ≤ 1023).
 //! * `n ∈ {2, …, MAX_LAYERS}` (**strict**) — target L(n). Wait budget
 //!   ≤ `W^n − 1` blocks (L2 ≈ 2 h at shellnet cadence; L3 ≈ 12 d).
 //!   Requires `--i-know-the-wait` to guard against surprise multi-hour

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ETH-6: committed SHPLONK .bin + _calldata.bin must exist, match SHA256SUMS,
+# Committed SHPLONK .bin + _calldata.bin must exist, match SHA256SUMS,
 # and stay under EIP-170. Pairing is a separate Foundry gate
 # (ShplonkArtefactPairing.t.sol).
 set -euo pipefail
@@ -9,7 +9,7 @@ VERIFIERS="${ROOT}/contracts/ethereum/verifiers"
 SUMS="${VERIFIERS}/SHA256SUMS"
 SIZES="${VERIFIERS}/SIZES"
 MAX=24576
-# ETH-21: warn well before the cliff. A verifier past EIP-170 does not fail
+# Warn well before the cliff. A verifier past EIP-170 does not fail
 # loudly — `CREATE` returns the zero address and `deployYulFromBin` reverts
 # `YulDeployFailed` — so the useful signal is growth, not the breach. Layer
 # hashes sits at 94% after the k_outer=21 regen while the other three keep
@@ -17,7 +17,7 @@ MAX=24576
 WARN_PCT=90
 
 if [[ ! -f "${SUMS}" ]]; then
-  echo "ETH-6 FAIL: missing ${SUMS}" >&2
+  echo "SHA256SUMS FAIL: missing ${SUMS}" >&2
   exit 1
 fi
 
@@ -36,7 +36,7 @@ fail=0
 for f in "${required[@]}"; do
   path="${VERIFIERS}/${f}"
   if [[ ! -s "${path}" ]]; then
-    echo "ETH-6 FAIL: missing or empty ${path}" >&2
+    echo "artefact FAIL: missing or empty ${path}" >&2
     fail=1
   fi
 done
@@ -72,18 +72,18 @@ do
   fi
 done
 
-# ETH-21: sizes are recorded so growth lands in a diff a reviewer sees, rather
+# Sizes are recorded so growth lands in a diff a reviewer sees, rather
 # than in a deploy that reverts. Regenerating an artefact means updating SIZES
 # in the same commit, next to SHA256SUMS.
 echo "--- recorded sizes ---"
 if [[ ! -f "${SIZES}" ]]; then
-  echo "ETH-21 FAIL: missing ${SIZES}" >&2
+  echo "SIZES FAIL: missing ${SIZES}" >&2
   fail=1
 else
   actual=$(cd "${VERIFIERS}" && wc -c *.bin | grep -v ' total$' | awk '{printf "%s  %s\n", $1, $2}' | sort -k2)
   recorded=$(grep -v '^\s*#' "${SIZES}" | grep -v '^\s*$' | awk '{printf "%s  %s\n", $1, $2}' | sort -k2)
   if [[ "${actual}" != "${recorded}" ]]; then
-    echo "ETH-21 FAIL: sizes drifted from ${SIZES##*/}; update it in this commit" >&2
+    echo "SIZES FAIL: sizes drifted from ${SIZES##*/}; update it in this commit" >&2
     diff <(echo "${recorded}") <(echo "${actual}") | sed 's/^/  /' >&2 || true
     fail=1
   else
@@ -96,7 +96,7 @@ if (( fail )); then
 fi
 
 if (( warn )); then
-  echo "ETH-6 artefact pin OK (with EIP-170 warnings above)."
+  echo "artefact pin OK (with EIP-170 warnings above)."
 else
-  echo "ETH-6 artefact pin OK."
+  echo "artefact pin OK."
 fi

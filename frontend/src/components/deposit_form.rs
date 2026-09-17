@@ -31,7 +31,7 @@ pub struct DepositFormProps {
 /// pasted Ethereum address (40 hex chars) would become a well-formed non-zero
 /// `bytes32`, pass the contract's `anAccount != 0`, be bound in-circuit, and
 /// credit an account nobody owns. Deposit is one-way, so the length is the only
-/// place that mistake can still be caught (ETH-10).
+/// place that mistake can still be caught.
 fn validate_an_account(raw: &str) -> Result<String, String> {
     let v = raw.trim().trim_start_matches("0x").to_lowercase();
     if v.is_empty() {
@@ -187,7 +187,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             // Acki Nacki destination: the 256-bit account. The ABI still carries
             // `anWorkchain`, but the workchain concept is retired on AN — the
             // network ignores the field, so it is pinned to 0 rather than asked
-            // for (ETH-10).
+            // for.
             let workchain = AN_WORKCHAIN;
             let account = match validate_an_account(&an_account) {
                 Ok(a) => a,

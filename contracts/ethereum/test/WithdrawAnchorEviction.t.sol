@@ -131,8 +131,8 @@ contract WithdrawAnchorEvictionTest is Test {
         bridge.withdrawByProof(hex"00", pub);
     }
 
-    /// @dev ETH-3: a `blockSeqNo` jump writes one window slot. The earlier
-    ///      L1 hash stays known — unbounded seq_no is catch-up, not eviction.
+    /// @dev A `blockSeqNo` jump writes one window slot. The earlier L1 hash
+    ///      stays known — unbounded seq_no is catch-up, not eviction.
     function test_seqNoFastForward_doesNotEvictEarlierAnchor() public {
         uint256 firstL1 = _submitBlock(1);
         assertTrue(bridge.isKnownLayerAnchor(1, firstL1));

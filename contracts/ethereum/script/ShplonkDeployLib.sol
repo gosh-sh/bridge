@@ -25,8 +25,8 @@ library ShplonkDeployLib {
 
     error VerifierBinEmpty(string path);
     error YulDeployFailed();
-    /// @notice ETH-06: CREATE'd Yul runtime keccak256 does not match the pin
-    ///         for this artefact. Env-path deploys cannot silently swap circuits.
+    /// @notice CREATE'd Yul runtime keccak256 does not match the pin for this
+    ///         artefact. Env-path deploys cannot silently swap circuits.
     error YulCodehashMismatch(bytes32 actual, bytes32 expected);
 
     /// @dev keccak256 of runtime after CREATE of the committed `.bin`.

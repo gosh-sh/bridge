@@ -11,7 +11,7 @@ import "../src/ShplonkHalo2Verifier.sol";
 import "../script/ShplonkDeployLib.sol";
 
 /// @title ShplonkArtefactPairingTest
-/// @notice ETH-6: each committed SHPLONK `.bin` must accept its committed
+/// @notice Each committed SHPLONK `.bin` must accept its committed
 ///         `_calldata.bin`. All four pairs (1A/1B/C2/C4) are in the default
 ///         suite after the 2026-09-08 n14 regen.
 contract ShplonkArtefactPairingTest is Test {
@@ -47,16 +47,16 @@ contract ShplonkArtefactPairingTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         assertTrue(
-            v.verifyWithdrawal(cd, pub), "ETH-6: Withdrawal .bin must accept its committed calldata"
+            v.verifyWithdrawal(cd, pub), "Withdrawal .bin must accept its committed calldata"
         );
         uint256 g0 = gasleft();
         bool ok = v.verifyWithdrawal(cd, pub);
         uint256 used = g0 - gasleft();
         assertTrue(ok);
-        assertLt(used, VERIFY_GAS_CAP, "ETH-19: Circuit 4 accept must fit VERIFY_GAS_CAP");
+        assertLt(used, VERIFY_GAS_CAP, "Circuit 4 accept must fit VERIFY_GAS_CAP");
     }
 
-    /// @dev ETH-19: a crypto reject must not consume the remaining tx gas.
+    /// @dev A crypto reject must not consume the remaining tx gas.
     function test_eth19_withdrawalReject_staysUnderGasCap() public {
         IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
             "verifiers/BridgeWithdrawalAggregatorVerifier.bin"
@@ -80,7 +80,7 @@ contract ShplonkArtefactPairingTest is Test {
         bool ok = v.verifyWithdrawal(cd, pub);
         uint256 used = g0 - gasleft();
         assertFalse(ok, "mutated proof must fail");
-        assertLt(used, VERIFY_GAS_CAP + 200_000, "ETH-19 reject bound");
+        assertLt(used, VERIFY_GAS_CAP + 200_000, "reject-path gas bound");
     }
 
     function test_eth19_verifyGasCapConstant() public {
@@ -95,7 +95,7 @@ contract ShplonkArtefactPairingTest is Test {
         address yul = ShplonkDeployLib.deployYulFromBin(
             "verifiers/BridgeWithdrawalAggregatorVerifier.bin", pin
         );
-        assertEq(yul.codehash, pin, "ETH-06: CREATE runtime must match committed extcodehash");
+        assertEq(yul.codehash, pin, "CREATE runtime must match committed extcodehash");
     }
 
     function test_eth6_primaryCalldata_verifies() public {
@@ -108,7 +108,7 @@ contract ShplonkArtefactPairingTest is Test {
             v.verifyPrimaryAttestation(
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
             ),
-            "ETH-6: Primary .bin must accept its committed calldata"
+            "Primary .bin must accept its committed calldata"
         );
         uint256 g0 = gasleft();
         bool ok = v.verifyPrimaryAttestation(
@@ -116,7 +116,7 @@ contract ShplonkArtefactPairingTest is Test {
         );
         uint256 used = g0 - gasleft();
         assertTrue(ok);
-        assertLt(used, VERIFY_GAS_CAP, "ETH-19: Circuit 1A accept must fit VERIFY_GAS_CAP");
+        assertLt(used, VERIFY_GAS_CAP, "Circuit 1A accept must fit VERIFY_GAS_CAP");
     }
 
     function test_eth6_fallbackCalldata_verifies() public {
@@ -129,7 +129,7 @@ contract ShplonkArtefactPairingTest is Test {
             v.verifyFallbackAttestation(
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
             ),
-            "ETH-6: Fallback .bin must accept its committed calldata"
+            "Fallback .bin must accept its committed calldata"
         );
         uint256 g0 = gasleft();
         bool ok = v.verifyFallbackAttestation(
@@ -137,7 +137,7 @@ contract ShplonkArtefactPairingTest is Test {
         );
         uint256 used = g0 - gasleft();
         assertTrue(ok);
-        assertLt(used, VERIFY_GAS_CAP, "ETH-19: Circuit 1B accept must fit VERIFY_GAS_CAP");
+        assertLt(used, VERIFY_GAS_CAP, "Circuit 1B accept must fit VERIFY_GAS_CAP");
     }
 
     function test_eth6_layerHashesCalldata_verifies() public {
@@ -160,7 +160,7 @@ contract ShplonkArtefactPairingTest is Test {
                 hashes,
                 _word(cd, ACC + 13)
             ),
-            "ETH-6: LayerHashes .bin must accept its committed calldata"
+            "LayerHashes .bin must accept its committed calldata"
         );
         uint256 g0 = gasleft();
         bool ok = v.verifyLayerHashesMovement(
@@ -168,27 +168,27 @@ contract ShplonkArtefactPairingTest is Test {
         );
         uint256 used = g0 - gasleft();
         assertTrue(ok);
-        assertLt(used, VERIFY_GAS_CAP, "ETH-19: Circuit 2 accept must fit VERIFY_GAS_CAP");
+        assertLt(used, VERIFY_GAS_CAP, "Circuit 2 accept must fit VERIFY_GAS_CAP");
     }
 
     function test_eth6_primaryYul_extcodehashMatchesPin() public {
         bytes32 pin = 0x01cce5259fa68848b2ef87bec2bfa40c47089a67967b2e8ea5d7492c0c18fbd6;
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/PrimaryAggregatorVerifier.bin", pin);
-        assertEq(yul.codehash, pin, "ETH-06: Primary CREATE runtime must match pin");
+        assertEq(yul.codehash, pin, "Primary CREATE runtime must match pin");
     }
 
     function test_eth6_fallbackYul_extcodehashMatchesPin() public {
         bytes32 pin = 0xce215c9aca95eb5c5006615dbfee217d9a3aa0d6847cecef6dcee822ec283c00;
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/FallbackAggregatorVerifier.bin", pin);
-        assertEq(yul.codehash, pin, "ETH-06: Fallback CREATE runtime must match pin");
+        assertEq(yul.codehash, pin, "Fallback CREATE runtime must match pin");
     }
 
     function test_eth6_layerHashesYul_extcodehashMatchesPin() public {
         bytes32 pin = 0xd6f78f3b014cf94b0fbc8d60e409955adf86c7f2274c84ce19b745f5bb92525e;
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/LayerHashesAggregatorVerifier.bin", pin);
-        assertEq(yul.codehash, pin, "ETH-06: LayerHashes CREATE runtime must match pin");
+        assertEq(yul.codehash, pin, "LayerHashes CREATE runtime must match pin");
     }
 }

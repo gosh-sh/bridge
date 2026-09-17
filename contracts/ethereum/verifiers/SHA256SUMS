@@ -1,4 +1,4 @@
-# ETH-6 pin of committed SHPLONK runtime + smoke calldata.
+# Pin of committed SHPLONK runtime + smoke calldata.
 # Default pairing (ShplonkArtefactPairing.t.sol): all four pairs.
 # 1A/1B bins unchanged vs 2026-08-12; calldata regenerated 2026-09-08 on n14
 # (Hermez PPoT). LayerHashes Yul regenerated at k_outer=21 (23111 B).

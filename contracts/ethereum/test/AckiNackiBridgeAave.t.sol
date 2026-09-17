@@ -257,7 +257,7 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(usdc.balanceOf(address(bridge)), 10_700_000, "all USDC home");
     }
 
-    /// @dev ETH-7: a pool that leaves aUSDC after withdraw(max) must not let
+    /// @dev A pool that leaves aUSDC after withdraw(max) must not let
     ///      emergency zero `suppliedPrincipal` — leftover shares would then
     ///      count as `accruedYield` and `harvestYield` would pay them out.
     function test_eth7_emergencyLeftoverAToken_reverts_andDoesNotOpenHarvest() public {
@@ -302,7 +302,7 @@ contract AckiNackiBridgeAaveTest is Test {
         vm.expectEmit(true, true, false, true);
         emit OwnershipTransferStarted(address(this), user2);
         bridge.transferOwnership(user2);
-        assertEq(bridge.owner(), address(this), "ETH-8: still old owner until accept");
+        assertEq(bridge.owner(), address(this), "still old owner until accept");
         assertEq(bridge.pendingOwner(), user2);
 
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
@@ -320,7 +320,7 @@ contract AckiNackiBridgeAaveTest is Test {
         bridge.acceptOwnership();
         assertEq(bridge.owner(), user2);
         assertEq(bridge.pendingOwner(), address(0));
-        assertEq(bridge.yieldRecipient(), user2, "ETH-14: default recipient follows owner");
+        assertEq(bridge.yieldRecipient(), user2, "default recipient follows owner");
 
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
         bridge.setAaveEnabled(false);
@@ -344,10 +344,10 @@ contract AckiNackiBridgeAaveTest is Test {
         vm.prank(user2);
         bridge.harvestYield(300_000);
         assertEq(
-            usdc.balanceOf(user2), newOwnerBefore + 300_000, "ETH-14: harvest follows new owner"
+            usdc.balanceOf(user2), newOwnerBefore + 300_000, "harvest follows new owner"
         );
         assertEq(
-            usdc.balanceOf(compromised), oldOwnerBefore, "ETH-14: old owner must not receive yield"
+            usdc.balanceOf(compromised), oldOwnerBefore, "old owner must not receive yield"
         );
     }
 
@@ -357,7 +357,7 @@ contract AckiNackiBridgeAaveTest is Test {
         vm.prank(user2);
         bridge.acceptOwnership();
         assertEq(bridge.owner(), user2);
-        assertEq(bridge.yieldRecipient(), yieldSink, "ETH-14: explicit recipient stays");
+        assertEq(bridge.yieldRecipient(), yieldSink, "explicit recipient stays");
     }
 
     // -----------------------------------------------------------------

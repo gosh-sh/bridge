@@ -20,10 +20,10 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeEthFieldCongruenceTest
-/// @notice Stage II PDF ETH-1 / ETH-2. Halo2 Yul reduces every instance
-///         `mod f_q` (`BN254_R`); R15 adapters compare the *raw* word; the
-///         bridge keys `_nullifiers` / layer windows by that raw word.
-///         `x` and `x + k·R` are one field element and two mapping keys.
+/// @notice Halo2 Yul reduces every instance `mod f_q` (`BN254_R`); R15
+///         adapters compare the *raw* word; the bridge keys `_nullifiers` /
+///         layer windows by that raw word. `x` and `x + k·R` are one field
+///         element and two mapping keys.
 ///
 /// Invariant (WD-7, extended): a nullifier congruence class pays at most
 /// once. Invariant (verifyBlock): a layer-hash congruence class occupies at
@@ -97,7 +97,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // ETH-1 — crypto fact: Yul still accepts nullifier + R
+    // Crypto fact: Yul still accepts nullifier + R
     // ─────────────────────────────────────────────────────────────────────
 
     function test_eth1_productionYul_acceptsNullifierPlusR() public {
@@ -114,12 +114,12 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
 
         assertTrue(
             verifier.verifyWithdrawal(cd, pub),
-            "ETH-1: Yul reduces instances mod f_q, so N+R must still verify"
+            "Yul reduces instances mod f_q, so N+R must still verify"
         );
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // ETH-1 — WD-7: congruence class pays at most once (production path)
+    // WD-7: congruence class pays at most once (production path)
     // ─────────────────────────────────────────────────────────────────────
 
     function test_eth1_withdrawByProof_nullifierPlusR_doesNotPayTwice() public {
@@ -162,7 +162,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // ETH-1 — same invariant on a Yul-model mock (no .bin required)
+    // Same invariant on a Yul-model mock (no .bin required)
     // ─────────────────────────────────────────────────────────────────────
 
     function test_eth1_yulModelMock_nullifierPlusR_doesNotPayTwice() public {
@@ -188,11 +188,11 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // ETH-2 — unreduced last-layer hash / prevMax cannot enter the window.
-    // Circuit 2 committed .bin/.calldata are desynced (ETH-6), so pairing
-    // is not exercised here. The Yul source still does mod(calldataload, f_q)
-    // on every instance; ETH-1 production pairing confirms that family
-    // accepts x+R. The contract gate is what this test locks.
+    // Unreduced last-layer hash / prevMax cannot enter the window.
+    // Circuit 2 committed .bin/.calldata are desynced, so pairing is not
+    // exercised here. The Yul source still does mod(calldataload, f_q) on
+    // every instance; production pairing confirms that family accepts x+R.
+    // The contract gate is what this test locks.
     // ─────────────────────────────────────────────────────────────────────
 
     function test_eth2_verifyBlock_layerHashPlusR_rejected() public {

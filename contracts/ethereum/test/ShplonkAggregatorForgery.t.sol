@@ -16,7 +16,7 @@ contract ShplonkAggregatorForgeryTest is Test {
     ///         fails. The production adapter uses a low-level staticcall in
     ///         `ShplonkHalo2Verifier`, where a codeless target would return
     ///         success; the real guard is the constructor `extcodesize` check
-    ///         (QC-A4-1 / ETH-19 comment).
+    ///         (QC-A4-1).
     address internal constant FAILING_SHPLONK = address(0xdead);
 
     function test_withdrawalAggregator_rejectsGroth16StubProof() public {

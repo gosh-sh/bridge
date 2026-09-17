@@ -264,7 +264,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     }
 
     function test_constructor_withdrawEnabledWithZeroDappFr_succeeds() public {
-        // Shellnet uses dapp_id=0; accFr must still be non-zero. ETH-5: withdraw
+        // Shellnet uses dapp_id=0; accFr must still be non-zero. Withdraw
         // still requires the verifyBlock triple.
         AckiNackiBridge shellnet = new AckiNackiBridge(
             address(oracle),

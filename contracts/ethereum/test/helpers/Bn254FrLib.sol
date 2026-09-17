@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 /// @title Bn254FrLib
 /// @notice Test helper: reduce an arbitrary 256-bit word into a canonical
-///         BN254 Fr so mock `verifyBlock` inputs survive the ETH-1/ETH-2
+///         BN254 Fr so mock `verifyBlock` inputs survive the
 ///         `FieldElementOutOfRange` gate (`value < r`). Production proofs
 ///         already expose canonical Fr; tests historically used raw keccak.
 library Bn254FrLib {

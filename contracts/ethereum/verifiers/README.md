@@ -23,7 +23,7 @@ Every size is also pinned in `SIZES`, next to `SHA256SUMS`, and
 `scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (layer hashes
 warns today, at 94%). That is deliberate: past the limit `CREATE` returns the zero address and
 `deployYulFromBin` reverts `YulDeployFailed`, so growth has to be visible in a diff rather than in
-a failed deploy (ETH-21). Regenerating an artefact means updating `SIZES` in the same commit.
+a failed deploy. Regenerating an artefact means updating `SIZES` in the same commit.
 
 Each also ships a `*_calldata.bin` reference fixture (`instances ‖ proof`). The generated
 `Halo2Verifier` Solidity sources are kept for reference for 1A, 1B and 2 only — the `.bin` is what
@@ -90,6 +90,6 @@ Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c &
 
 Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
 
-**ETH-6:** hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing` (all four pairs). CREATE `extcodehash` pins are in `ShplonkDeployLib`.
+Hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing` (all four pairs). CREATE `extcodehash` pins are in `ShplonkDeployLib`.
 
 M2 multiply spike fixtures live under `test/fixtures/r15_spike/` for Foundry only — **not** valid production verifiers.

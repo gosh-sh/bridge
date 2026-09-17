@@ -29,8 +29,8 @@ contract MockAUSDC is MockERC20 {
 contract MockAavePool is IAavePool {
     IERC20 public immutable underlying;
     MockAUSDC public immutable aToken;
-    /// @notice ETH-7 PoC: when `withdraw(max)` is called, leave this many
-    ///         aTokens unburned (simulates a pool that under-redeems).
+    /// @notice PoC: when `withdraw(max)` is called, leave this many aTokens
+    ///         unburned (simulates a pool that under-redeems).
     uint256 public leftoverOnMaxWithdraw;
 
     constructor(address _underlying, address _aToken) {

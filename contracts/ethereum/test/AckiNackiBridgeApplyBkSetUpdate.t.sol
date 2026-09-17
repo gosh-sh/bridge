@@ -158,8 +158,8 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         assertEq(bridge.storedBkSetCommitment(), L3);
     }
 
-    /// @notice ETH-02: unreduced `blockId` is rejected at the canonical-Fr
-    ///         gate, before attestation or the SHA fold.
+    /// @notice Unreduced `blockId` is rejected at the canonical-Fr gate,
+    ///         before attestation or the SHA fold.
     function test_applyBkSetUpdate_rejectsUnreducedRoot() public {
         uint256 rawRoot = _rawMerkleRoot(L2, L3);
         assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
@@ -263,7 +263,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     // -----------------------------------------------------------------
-    // ETH-20: the constructor answers to the same invariant as rotation
+    // The constructor answers to the same invariant as rotation
     // -----------------------------------------------------------------
 
     function test_eth20_constructorRejectsZeroGenesisCommitment() public {
@@ -305,7 +305,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
     /// @dev The guard is scoped to a wired `verifyBlock`. With the verifiers
     ///      absent there is no anchor to be canonical, and the all-zero
-    ///      configuration must keep deploying (ETH-5 wiring is unchanged).
+    ///      configuration must keep deploying (verifyBlock wiring unchanged).
     function test_eth20_constructorAllowsZeroGenesisWhenVerifyBlockDisabled() public {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);

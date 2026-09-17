@@ -145,6 +145,12 @@ assigns it when the release is tagged.
 - Constructor now rejects a non-canonical Circuit 4 `dappFr` / `accFr` /
   `altTokenId`. A raw word cannot equal a Yul-reduced instance, so the
   previous values would have made every withdrawal revert permanently.
+- `supplyToAave` books the aUSDC delta, not the USDC sent, so a rounding
+  pool cannot inflate `suppliedPrincipal` above the shares the bridge
+  holds. `emergencyWithdrawAll` keeps `principal - received` when the
+  drain pays short; leftover-aToken still reverts unchanged.
+- `forge` default profile no longer enables `ffi`. Tests only read the
+  tree; write permission is limited to `deployment_real.json`.
 
 ## [0.2.0] – 2026-09-11
 

@@ -9,9 +9,10 @@ optimizer = true
 optimizer_runs = 1 # Optimize for deployment size, not runtime gas
 via_ir = true # Required for large contracts to avoid "stack too deep" errors
 remappings = ["poseidon-solidity/=node_modules/poseidon-solidity/"]
-ffi = true
+ffi = false
 fs_permissions = [
-    { access = "read-write", path = "./" },
+    { access = "read", path = "./" },
+    { access = "read-write", path = "./deployment_real.json" },
     { access = "read", path = "../contracts/" },
     { access = "read", path = "../../crates/" },
 ]

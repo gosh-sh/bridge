@@ -279,6 +279,38 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(bridge.accruedYield(), 0);
     }
 
+    /// @notice Book the aUSDC delta, not the USDC sent. A pool that mints
+    ///         fewer shares than it pulls must not inflate `suppliedPrincipal`
+    ///         above `aUsdcBalance` — that residue cannot be withdrawn.
+    function test_supplyToAave_booksATokenDelta() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        uint256 haircut = 10;
+        pool.setSupplyHaircut(haircut);
+        bridge.supplyToAave(5 * UsdcTestLib.UNIT);
+        assertEq(bridge.suppliedPrincipal(), 5 * UsdcTestLib.UNIT - haircut);
+        assertEq(bridge.aUsdcBalance(), bridge.suppliedPrincipal());
+    }
+
+    /// @notice After a full aToken drain, keep `principal - received` on the
+    ///         books instead of zeroing. Harvest still sees no yield.
+    function test_emergencyWithdrawAll_keepsShortfallOnBooks() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        uint256 haircut = 10;
+        pool.setRedeemHaircut(haircut);
+
+        bridge.emergencyWithdrawAll();
+
+        assertFalse(bridge.aaveEnabled());
+        assertEq(bridge.aUsdcBalance(), 0);
+        assertEq(bridge.suppliedPrincipal(), haircut, "shortfall stays booked");
+        assertEq(bridge.accruedYield(), 0, "empty pool is not yield");
+        assertEq(usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT - haircut);
+
+        vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
+        bridge.withdrawFromAave(type(uint256).max);
+    }
+
     function test_eth9_approveFalse_reverts() public {
         UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
         usdc.setApproveReturnsFalse(true);

@@ -260,6 +260,11 @@ contract AckiNackiBridge {
     ///         re-keygen lands.
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
+        /// @dev Not read by any on-chain check (`lastHeight` is the
+        ///      monotonicity guard). Written so `getLayerWindow` can
+        ///      resurrect the relayer `BridgeState` mirror. Dropping the
+        ///      SSTORE would save ~29k gas on a ten-layer `verifyBlock`
+        ///      and break that bootstrap.
         uint64[HISTORY_PROOF_WINDOW] heights;
         uint16 dataLen;
         uint16 writeCursor;
@@ -1435,9 +1440,12 @@ contract AckiNackiBridge {
         uint256 toSupply = amount == type(uint256).max ? available : amount;
         if (toSupply == 0 || toSupply > available) revert InvalidAmount();
 
-        suppliedPrincipal += toSupply;
         if (!usdc.approve(address(aavePool), toSupply)) revert ApproveFailed();
+        uint256 aBefore = aUsdcBalance();
         aavePool.supply(address(usdc), toSupply, address(this), 0);
+        uint256 credited = aUsdcBalance() - aBefore;
+        if (credited == 0) revert AaveWithdrawFailed(toSupply, 0);
+        suppliedPrincipal += credited;
 
         emit SuppliedToAave(toSupply, suppliedPrincipal);
     }
@@ -1459,6 +1467,8 @@ contract AckiNackiBridge {
     ///      If any aUSDC remains after `withdraw(max)`, revert — do not
     ///      zero `suppliedPrincipal` (that would make leftover shares look like
     ///      `accruedYield` and `harvestYield` would pay them to the owner).
+    ///      If the drain is clean but `received < principal`, keep the
+    ///      shortfall on the books instead of zeroing.
     function emergencyWithdrawAll() external onlyOwner nonReentrant {
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), type(uint256).max, address(this));
@@ -1471,7 +1481,7 @@ contract AckiNackiBridge {
         emit AaveEnabledSet(false);
 
         uint256 principal = suppliedPrincipal;
-        suppliedPrincipal = 0;
+        suppliedPrincipal = received >= principal ? 0 : principal - received;
 
         emit EmergencyWithdrawAll(received);
         emit WithdrawnFromAave(principal, received);
@@ -1580,15 +1590,18 @@ contract AckiNackiBridge {
         if (suppliedPrincipal == 0) revert InsufficientTreasury();
 
         uint256 cap = suppliedPrincipal;
+        uint256 poolBal = aUsdcBalance();
         uint256 toPull = amount > cap ? cap : amount;
+        if (toPull > poolBal) toPull = poolBal;
+        if (toPull == 0) revert InsufficientTreasury();
 
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), toPull, address(this));
         uint256 received = usdc.balanceOf(address(this)) - before;
         if (received < toPull) revert AaveWithdrawFailed(toPull, received);
-        if (received < amount) revert AaveWithdrawFailed(amount, received);
+        if (received < amount && toPull == amount) revert AaveWithdrawFailed(amount, received);
 
-        suppliedPrincipal -= toPull;
+        suppliedPrincipal -= received;
         emit WithdrawnFromAave(amount, received);
     }
 

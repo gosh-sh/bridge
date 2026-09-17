@@ -32,6 +32,10 @@ contract MockAavePool is IAavePool {
     /// @notice PoC: when `withdraw(max)` is called, leave this many aTokens
     ///         unburned (simulates a pool that under-redeems).
     uint256 public leftoverOnMaxWithdraw;
+    /// @notice Mint this many fewer aTokens than USDC pulled on `supply`.
+    uint256 public supplyHaircut;
+    /// @notice Pay this many fewer USDC than aTokens burned on `withdraw`.
+    uint256 public redeemHaircut;
 
     constructor(address _underlying, address _aToken) {
         underlying = IERC20(_underlying);
@@ -42,20 +46,30 @@ contract MockAavePool is IAavePool {
         leftoverOnMaxWithdraw = leftover;
     }
 
+    function setSupplyHaircut(uint256 haircut) external {
+        supplyHaircut = haircut;
+    }
+
+    function setRedeemHaircut(uint256 haircut) external {
+        redeemHaircut = haircut;
+    }
+
     function supply(address, uint256 amount, address onBehalfOf, uint16) external override {
         require(underlying.transferFrom(msg.sender, address(this), amount), "pool: pull");
-        aToken.mintTo(onBehalfOf, amount);
+        uint256 minted = amount > supplyHaircut ? amount - supplyHaircut : 0;
+        if (minted > 0) aToken.mintTo(onBehalfOf, minted);
     }
 
     function withdraw(address, uint256 amount, address to) external override returns (uint256) {
         uint256 bal = aToken.balanceOf(msg.sender);
-        uint256 payout = amount == type(uint256).max ? bal : amount;
+        uint256 toBurn = amount == type(uint256).max ? bal : amount;
         if (amount == type(uint256).max && leftoverOnMaxWithdraw > 0 && leftoverOnMaxWithdraw < bal)
         {
-            payout = bal - leftoverOnMaxWithdraw;
+            toBurn = bal - leftoverOnMaxWithdraw;
         }
-        require(bal >= payout, "pool: insufficient aUSDC");
-        aToken.burnFrom(msg.sender, payout);
+        require(bal >= toBurn, "pool: insufficient aUSDC");
+        aToken.burnFrom(msg.sender, toBurn);
+        uint256 payout = toBurn > redeemHaircut ? toBurn - redeemHaircut : 0;
         require(underlying.transfer(to, payout), "pool: push");
         return payout;
     }

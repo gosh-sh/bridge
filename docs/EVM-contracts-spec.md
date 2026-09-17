@@ -780,6 +780,12 @@ Read off the code, without a formal audit claim.
    a seq_no jump not mass-evicting, re-proving against a still-in-window anchor) and
    `AckiNackiBridgeWithdrawByProof.t.sol:593-659` (L2 and L3 anchors accepted, no-window
    rejected).
+
+   The 8-day L2 figure assumes AN reports `numLayers = 1` on non-boundary
+   bundles. The contract appends one slot per reported layer on every
+   successful `verifyBlock`, with no dedup. If AN started reporting
+   `numLayers = 2` on every bundle, the L2 window would fill at the L1
+   cadence and the horizon would collapse from days to hours.
 4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
    the AAVE side has an emergency lever.
 5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed.**

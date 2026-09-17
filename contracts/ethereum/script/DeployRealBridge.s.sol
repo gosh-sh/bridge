@@ -92,8 +92,12 @@ contract DeployRealBridge is Script {
             require(useAxiomOracle, "mainnet forbids MockBlockHeaderOracle");
             require(w.wireVerifyBlock, "mainnet requires WIRE_VERIFY_BLOCK=true");
             require(w.altTokenId == 0, "mainnet altTokenId must be 0");
+            require(w.altDstChainId == 0, "mainnet altDstChainId must be 0");
+            require(w.altDstHostChainId == 0, "mainnet altDstHostChainId must be 0");
             // Owner 2026-09-08 (sauin Q5): this script-level require is the
-            // intended guarantee. The contract does not enforce altTokenId.
+            // intended guarantee. The contract does not enforce the alias
+            // pair. Same class as altTokenId: envOr defaults to 0, then
+            // immutable.
         }
 
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));

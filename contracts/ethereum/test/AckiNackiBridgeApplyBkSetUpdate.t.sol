@@ -49,6 +49,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         primary.setShouldAccept(true);
         fallbackVerifier.setShouldAccept(true);
+        layer.setShouldAccept(true);
 
         AckiNackiBridge.VerifyBlockConfig memory vb = VerifyBlockConfigLib.with(
             IPrimaryVerifier(address(primary)),
@@ -246,6 +247,59 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         assertEq(bridge.storedBkSetCommitment(), l4);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ + 1);
+    }
+
+    /// @notice After `verifyBlock` the two cursors diverge. The attestation
+    ///         `lastSeen` argument must be the live layer cursor, not the
+    ///         BK-update monotonicity cursor. The mock asserts the value.
+    function test_applyBkSetUpdate_afterVerifyBlock_usesLayerCursor() public {
+        _submitLayerBundle(1);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 1);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), 0);
+
+        primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastSeenBlockSeqNo());
+        _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
+
+        assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 1, "rotation does not advance the layer cursor");
+    }
+
+    /// @notice Baking the BK-update cursor (0 here) after a `verifyBlock`
+    ///         must fail the same way a real adapter would.
+    function test_applyBkSetUpdate_afterVerifyBlock_rejectsBkUpdateCursor() public {
+        _submitLayerBundle(1);
+        uint256 blockId = _merkleRoot(L2, L3);
+        primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastBkSetUpdateSeqNo());
+
+        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        bridge.applyBkSetUpdate(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            blockId,
+            SEQ,
+            L2,
+            L3,
+            SIB_H01,
+            SIB_H4_7,
+            SIB_H8_15
+        );
+    }
+
+    function _submitLayerBundle(uint64 seqNo) internal {
+        uint256[10] memory layers;
+        layers[0] = 1;
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            hex"00",
+            1,
+            L2,
+            seqNo,
+            1,
+            layers,
+            bridge.expectedPrevAnchor(1)
+        );
     }
 
     function _apply(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {

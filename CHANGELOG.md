@@ -50,10 +50,13 @@ assigns it when the release is tagged.
 - `AckiNackiBridge`'s constructor rejects configurations it used to accept: a
   zero `genesisBkSetCommitment` (`ZeroBkSetCommitment`) and a non-canonical
   `genesisBkSetCommitment` or `genesisPrevMaxLevelLayerHash`
-  (`FieldElementOutOfRange`), whenever the verifiers are wired. These are the
-  values that could never have matched `_expectedPrevAnchor`, i.e. deployments
-  that were already broken from block one — but a script that passed zeros to
-  get through construction will now fail at construction.
+  (`FieldElementOutOfRange`), whenever the verifiers are wired; and a
+  non-canonical Circuit 4 `dappFr` / `accFr` / `altTokenId` whenever
+  withdrawal is wired. These are the values that could never have matched
+  `_expectedPrevAnchor` or a Yul-reduced identity instance — deployments
+  that were already broken from block one — but a script that passed zeros
+  or unreduced words to get through construction will now fail at
+  construction.
 
 - Ownership transfer is two-step. `transferOwnership` records `pendingOwner`
   and ownership moves only when that address calls `acceptOwnership`. Any
@@ -128,6 +131,20 @@ assigns it when the release is tagged.
   strictly-next multiple, matching the proof.
 - `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
   survives N-1.
+- `applyBkSetUpdate` attestation `lastSeen` is the live layer cursor
+  (`storedLastSeenBlockSeqNo`). The prover was baking the BK-update cursor,
+  so after the first `verifyBlock` every rotation failed
+  `AttestationProofRejected`. Once AN rotated, `verifyBlock` then failed
+  `BkSetCommitmentMismatch` and unwithdrawn anchors aged out. The prover now
+  uses the layer cursor; a test drives `verifyBlock` then `applyBkSetUpdate`
+  with a mock that checks the argument.
+- Production `verifyBlock` tests that lack `bound_scenario.json` now
+  `vm.skip` instead of returning, so the hole shows up in the forge summary.
+- `DeployRealBridge` on mainnet also requires `altDstChainId` and
+  `altDstHostChainId` to be 0, matching the existing `altTokenId` require.
+- Constructor now rejects a non-canonical Circuit 4 `dappFr` / `accFr` /
+  `altTokenId`. A raw word cannot equal a Yul-reduced instance, so the
+  previous values would have made every withdrawal revert permanently.
 
 ## [0.2.0] – 2026-09-11
 

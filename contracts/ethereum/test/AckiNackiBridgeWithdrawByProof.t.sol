@@ -332,6 +332,31 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
     }
 
+    function test_constructor_rejectsNonCanonicalWithdrawIdentity() public {
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdraw(
+            IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+        );
+        bw.accFr = Bn254FrLib.R;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, Bn254FrLib.R)
+        );
+        new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            bw
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Anchor recording
     // ─────────────────────────────────────────────────────────────────────

@@ -207,7 +207,7 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
 
     /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (10-input 
+    ///         `IBridgeWithdrawalVerifier` interface (10-input
     ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
     ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
@@ -499,7 +499,7 @@ contract AckiNackiBridge {
         uint64 genesisLastSeenBlockSeqNo;
     }
 
-    /// @notice Argument bundle for the AN→ETH Circuit 4 
+    /// @notice Argument bundle for the AN→ETH Circuit 4
     ///         wiring. verifyBlock-only deployments are legal; withdraw-only
     ///         is not (see `WithdrawRequiresVerifyBlock`).
     /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
@@ -584,6 +584,12 @@ contract AckiNackiBridge {
             if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
                 if (_bw.accFr == 0) revert InvalidBridgeWithdrawalIdentity();
                 if (!(p && f && l)) revert WithdrawRequiresVerifyBlock();
+                // Identity slots are compared raw against Yul-reduced
+                // instances. A non-canonical value makes every withdrawal
+                // revert permanently — same invariant as the genesis anchors.
+                _requireCanonicalFr(_bw.dappFr);
+                _requireCanonicalFr(_bw.accFr);
+                _requireCanonicalFr(_bw.altTokenId);
             }
             // Genesis anchors enter the same slots `applyBkSetUpdate`
             // guards, so they answer to the same invariant. Without this a
@@ -901,6 +907,8 @@ contract AckiNackiBridge {
         _requireCanonicalFr(blockId);
         _requireCanonicalFr(newCommitmentL3);
 
+        // lastSeen is the live layer cursor, not `storedLastBkSetUpdateSeqNo`
+        // (monotonicity only). The prover must bake the same word.
         bool attOk;
         if (finType == FinalizationType.Primary) {
             attOk = primaryVerifier.verifyPrimaryAttestation(

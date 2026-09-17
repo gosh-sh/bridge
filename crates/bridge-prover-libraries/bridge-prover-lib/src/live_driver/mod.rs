@@ -422,6 +422,9 @@ pub struct BundleProofArtifacts {
 pub struct BkUpdateProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
+    /// Layer cursor baked into the Circuit 1A/1B `lastSeen` instance
+    /// (`BridgeState::stored_last_seen_block_seq_no`). Not the BK-update
+    /// monotonicity cursor. The field name is historical.
     pub last_seen_bk_update_seq_no: u64,
     /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
     /// depth-4 `block_merkle_tree_leaves` = Solidity

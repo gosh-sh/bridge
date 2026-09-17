@@ -13,11 +13,12 @@ contract ShplonkHalo2Verifier is IShplonkHalo2Verifier {
     /// @notice Yul verifier must have deployed bytecode (QC-A4-1).
     error EmptyYulVerifierCode();
 
-    /// @notice Gas stipend for the Yul `staticcall`. Circuit 4 accept is ~412k
-    ///         on the committed artefact; 1.5M is ~3.6× margin. A reject
-    ///         otherwise burns ~97% of the remaining tx gas. All four accepts
-    ///         (1A/1B/C2/C4) are asserted `< VERIFY_GAS_CAP` in
-    ///         `ShplonkArtefactPairing.t.sol`; regen must re-run those tests.
+    /// @notice Gas stipend for the Yul `staticcall`. Measured accepts on the
+    ///         committed artefacts (`ShplonkArtefactPairing.t.sol`): Primary
+    ///         425_012, Fallback 425_012, LayerHashes 431_024, Withdrawal
+    ///         398_082. 1.5 M is at least 3.5x margin on every accept. A
+    ///         reject lands at 1_503_751, at the cap. All four accepts are
+    ///         asserted `< VERIFY_GAS_CAP` there; regen must re-run those tests.
     uint256 public constant VERIFY_GAS_CAP = 1_500_000;
 
     /// @param _yulVerifier Address returned by CREATE-deploying the exported `.bin` bytecode.

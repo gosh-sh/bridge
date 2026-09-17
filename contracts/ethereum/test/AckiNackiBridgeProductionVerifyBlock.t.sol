@@ -84,7 +84,8 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
 
     function setUp() public {
         if (!_artefactsPresent()) {
-            return;
+            emit log("SKIP: bound_scenario.json + verifier calldata not in repo");
+            vm.skip(true);
         }
         scenario = _loadScenario();
 
@@ -112,7 +113,9 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function test_productionPrimaryAttestation_isolated() public {
-        if (!_artefactsPresent()) return;
+        if (!_artefactsPresent()) {
+            vm.skip(true);
+        }
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);
         assertTrue(
@@ -125,7 +128,9 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function test_productionFallbackAttestation_isolated() public {
-        if (!_artefactsPresent()) return;
+        if (!_artefactsPresent()) {
+            vm.skip(true);
+        }
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         bytes memory proofFallback = vm.readFileBinary(FALLBACK_CALLDATA);
         assertTrue(
@@ -162,8 +167,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     /// binding on-chain — green since the bound-witness fix.
     function test_productionVerifyBlock_boundCalldata_advancesState() public {
         if (!_artefactsPresent()) {
-            emit log("SKIP: bound_scenario.json + verifiers/*_calldata.bin required");
-            return;
+            vm.skip(true);
         }
 
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
@@ -207,7 +211,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
 
     function test_productionVerifyBlock_tamperedCalldata_reverts() public {
         if (!_artefactsPresent()) {
-            return;
+            vm.skip(true);
         }
 
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);

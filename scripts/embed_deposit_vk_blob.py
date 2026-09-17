@@ -9,7 +9,7 @@ hex, and on 2026-08-03 it turned out the patch artefact and the `acki-nacki`
 source had drifted two rotations apart — the patch carried `7322fb82…` while
 the source still had `3e2a2db2…`. Hence this script.
 
-    scripts/embed_deposit_vk_blob.py ../acki-nacki/contracts/exchange/USDCBridge.sol
+    scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol
 
 Pass --check to verify without writing (exit 1 on mismatch).
 """

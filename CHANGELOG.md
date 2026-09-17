@@ -25,8 +25,9 @@ assigns it when the release is tagged.
 ### Added
 
 - **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
-  `eccUSDCBridge` (v1.4.0) and `DepositVoucher` (v1.4.0) moved here from
-  acki-nacki with their sources and the compiled `.tvc` / `.abi.json` that go
+  `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
+  `EthKeccak` library, all v1.4.0, moved here from acki-nacki into
+  `contracts/an/exchange/` with the compiled `.tvc` / `.abi.json` that go
   into the zerostate, at the state of the `contracts/bridge` branch: the anchor
   surface (`setLightClientCode`, `deployLightClient`, the light-client writers,
   `disableOwnerAnchors`), the `ERR_UNKNOWN_BLOCK` gate on `finalizeDeposit`, and
@@ -36,8 +37,11 @@ assigns it when the release is tagged.
   keeps a copy: it pins one commit of this repository and places the files
   into its own tree when a zerostate is generated, so a contract change made
   here reaches a network only after that pin is moved.
-  `make -C contracts/an/exchange SOLD=<sold>` rebuilds them; see
-  `contracts/an/README.md` for which compiler reproduces which artefact.
+  `make -C contracts/an/exchange SOLD_0_80=<sold 0.80.0> SOLD_0_81=<sold 0.81.0>`
+  rebuilds them, each contract with the compiler its tracked artefact was built
+  with: `eccUSDCBridge` with 0.80.0, `DepositVoucher` and `EthBeaconLightClient`
+  with 0.81.0. The build stops if either variable is unset or names a compiler
+  of another version, since any other compiler changes the code hash.
 - **CI pipeline `.woodpecker/an-contracts.yaml`** runs
   `scripts/check_voucher_abi_consistency.py` and
   `scripts/embed_deposit_vk_blob.py --check` on every pull request and on

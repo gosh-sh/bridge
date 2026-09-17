@@ -1,17 +1,29 @@
-# Builds eccUSDCBridge and DepositVoucher next to their sources.
+# Builds eccUSDCBridge, DepositVoucher and EthBeaconLightClient next to their
+# sources.
 #
-# The artefacts that go into a zerostate are the ones under ../0.80.0_compiled
-# and ../0.81.0_compiled. A build here does not touch them: copy a rebuilt
-# pair over by hand, together, and commit both.
+# Each contract is built with the compiler its tracked artefact was built with,
+# because any other one changes the code hash: eccUSDCBridge with sold 0.80.0
+# (../0.80.0_compiled), DepositVoucher and EthBeaconLightClient with sold 0.81.0
+# (../0.81.0_compiled). A build refuses a compiler that reports a different
+# version. It does not touch the tracked artefacts: copy the rebuilt ones over
+# by hand and commit them together.
 #
-#   make SOLD=/path/to/sold
+#   make SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
 
-SOLD ?= sold
+SOLD_0_80 ?=
+SOLD_0_81 ?=
 TVM_VERSION ?= gosh
-TVCS := eccUSDCBridge DepositVoucher
+TVCS := eccUSDCBridge DepositVoucher EthBeaconLightClient
 
-# Each contract imports the other, the modifiers and the subscriber interface.
-SOURCES := $(addsuffix .sol,$(TVCS)) $(wildcard modifiers/*.sol) ../token/interface/ISubscriber.sol
+SOLD_eccUSDCBridge := $(SOLD_0_80)
+SOLD_VERSION_eccUSDCBridge := 0.80.0
+SOLD_DepositVoucher := $(SOLD_0_81)
+SOLD_VERSION_DepositVoucher := 0.81.0
+SOLD_EthBeaconLightClient := $(SOLD_0_81)
+SOLD_VERSION_EthBeaconLightClient := 0.81.0
+
+# The bridge imports the voucher and the light client, and both import it back.
+SOURCES := $(wildcard *.sol) $(wildcard modifiers/*.sol) ../token/interface/ISubscriber.sol
 
 .DEFAULT_GOAL := build
 .PHONY: build clean
@@ -19,7 +31,9 @@ SOURCES := $(addsuffix .sol,$(TVCS)) $(wildcard modifiers/*.sol) ../token/interf
 build: $(addsuffix .tvc,$(TVCS))
 
 %.tvc %.abi.json: %.sol $(SOURCES)
-	$(SOLD) --tvm-version $(TVM_VERSION) --base-path .. $< -o .
+	@test -n "$(SOLD_$*)" || { echo "$*: set $(if $(filter 0.80.0,$(SOLD_VERSION_$*)),SOLD_0_80,SOLD_0_81) to sold $(SOLD_VERSION_$*)"; exit 1; }
+	@$(SOLD_$*) --version | grep -qF "sold $(SOLD_VERSION_$*)+" || { echo "$*: $(SOLD_$*) is not sold $(SOLD_VERSION_$*)"; exit 1; }
+	$(SOLD_$*) --tvm-version $(TVM_VERSION) --base-path .. $< -o .
 	rm -f $*.debug.json $*.code
 
 clean:

@@ -108,7 +108,7 @@ URL above is the one that matters now.
 ```
 acki-nacki-bridge/          ← this repo (Ethereum side + integration)
 ├── contracts/ethereum/     ← Solidity (Foundry): bridge contract, verifiers, oracles
-├── contracts/an/           ← TVM (gosh-solidity): eccUSDCBridge + DepositVoucher sources and the compiled artefacts acki-nacki pins by commit for its zerostate
+├── contracts/an/           ← TVM (gosh-solidity): exchange/ holds eccUSDCBridge, DepositVoucher, EthBeaconLightClient + EthKeccak sources and the compiled artefacts acki-nacki pins by commit for its zerostate (built with SOLD_0_80 / SOLD_0_81); the top-level EthBeaconLightClient.sol / EthKeccak.sol are the standalone light-client variant
 ├── crates/
 │   ├── acki-nacki-interface/  ← Rust traits + mock for AN node communication; live `BkSetClient` + stateful `BkSetTracker` against AN-node REST `/v2/bk_set{,_update}`
 │   └── eth-frontend/          ← Rust Ethereum client (alloy-rs; migrated 2026-05-17 from ethers-rs)

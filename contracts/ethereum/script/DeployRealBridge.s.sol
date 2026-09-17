@@ -17,11 +17,11 @@ import "./ShplonkDeployLib.sol";
  * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 1B + 2 (1B hybrid was retired on e2a962b).
  *
  * Oracle mode:
- *   - chainid 1: USE_AXIOM_ORACLE must be set true (ETH-5; Mock forbidden).
+ *   - chainid 1: USE_AXIOM_ORACLE must be set true (Mock forbidden).
  *   - other nets: USE_AXIOM_ORACLE=true → Axiom; default → Mock (testing).
  *
  * verifyBlock wiring:
- *   - chainid 1: WIRE_VERIFY_BLOCK must be set true (ETH-5).
+ *   - chainid 1: WIRE_VERIFY_BLOCK must be set true.
  *   - WIRE_VERIFY_BLOCK=true → deploy Primary/Fallback/LayerHashes Shplonk adapters.
  *     Requires GENESIS_BK_SET_COMMITMENT (non-zero) and GENESIS_PREV_MAX_LEVEL_LAYER_HASH.
  *     Requires `verifiers/PrimaryAggregatorVerifier.bin` + `FallbackAggregatorVerifier.bin`
@@ -32,7 +32,7 @@ import "./ShplonkDeployLib.sol";
  *   - MANDATORY on the production script (NB-Q8): the C4 aggregator `.bin` is
  *     committed and the Yul adapter is production-ready, so silently shipping
  *     with `address(0)` here bricks user withdrawals. Requires WITHDRAW_ACC_FR
- *     (non-zero). Optional: WITHDRAW_DAPP_FR, alt dst/token ids. ETH-5: this
+ *     (non-zero). Optional: WITHDRAW_DAPP_FR, alt dst/token ids. This
  *     script always wires Circuit 4, so WIRE_VERIFY_BLOCK=true is required on
  *     every chain (`WithdrawRequiresVerifyBlock`). VerifyBlock-only bring-up:
  *     DeployShellnetE2EBridge on local anvil.
@@ -89,9 +89,9 @@ contract DeployRealBridge is Script {
             mainnet ? vm.envBool("USE_AXIOM_ORACLE") : vm.envOr("USE_AXIOM_ORACLE", false);
         WireInputs memory w = _readWireInputs(mainnet);
         if (mainnet) {
-            require(useAxiomOracle, "ETH-5: mainnet forbids MockBlockHeaderOracle");
-            require(w.wireVerifyBlock, "ETH-5: mainnet requires WIRE_VERIFY_BLOCK=true");
-            require(w.altTokenId == 0, "ETH-9: mainnet altTokenId must be 0");
+            require(useAxiomOracle, "mainnet forbids MockBlockHeaderOracle");
+            require(w.wireVerifyBlock, "mainnet requires WIRE_VERIFY_BLOCK=true");
+            require(w.altTokenId == 0, "mainnet altTokenId must be 0");
             // Owner 2026-09-08 (sauin Q5): this script-level require is the
             // intended guarantee. The contract does not enforce altTokenId.
         }
@@ -127,9 +127,9 @@ contract DeployRealBridge is Script {
         w.useAave = vm.envOr("USE_AAVE", false);
         w.wireVerifyBlock =
             mainnet ? vm.envBool("WIRE_VERIFY_BLOCK") : vm.envOr("WIRE_VERIFY_BLOCK", false);
-        // NB-Q8 wires Circuit 4 on this script. ETH-5: that is illegal without
-        // the verifyBlock triple (empty windows → every withdraw UnknownAnchor).
-        require(w.wireVerifyBlock, "ETH-5: DeployRealBridge requires WIRE_VERIFY_BLOCK=true");
+        // NB-Q8 wires Circuit 4 on this script. That is illegal without the
+        // verifyBlock triple (empty windows → every withdraw UnknownAnchor).
+        require(w.wireVerifyBlock, "DeployRealBridge requires WIRE_VERIFY_BLOCK=true");
 
         if (w.wireVerifyBlock) {
             w.genesisBkSetCommitment = vm.envUint("GENESIS_BK_SET_COMMITMENT");

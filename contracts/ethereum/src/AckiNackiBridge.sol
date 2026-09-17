@@ -64,7 +64,7 @@ contract AckiNackiBridge {
     uint256 public constant MAX_LAYER_HASHES = 10;
 
     /// @notice Rolling-window length per layer (`GLOBAL_HISTORY_DATA_SPEC` §8.3).
-    /// @dev WD-Q1 / ETH-3: each successful `verifyBlock` appends one hash per
+    /// @dev WD-Q1: each successful `verifyBlock` appends one hash per
     ///      active layer. The oldest hash in that layer is evicted after 128
     ///      subsequent appends — this is a count of `verifyBlock` calls, not a
     ///      `blockSeqNo` span. A `withdrawByProof` whose `finalRoot` has been
@@ -134,7 +134,7 @@ contract AckiNackiBridge {
 
     /// @notice Address authorised to manage AAVE routing & harvest yield
     address public owner;
-    /// @notice ETH-8: two-step ownership. Set by `transferOwnership`; takes
+    /// @notice Two-step ownership. Set by `transferOwnership`; takes
     ///         effect only after `acceptOwnership` from this address.
     address public pendingOwner;
 
@@ -245,7 +245,7 @@ contract AckiNackiBridge {
     ///         Yul verifier reduces instances `mod BN254_R` (same modulus,
     ///         spelled `f_q` in the auto-generated Yul), so an unreduced
     ///         `N + k·BN254_R` would otherwise be a second mapping key for
-    ///         the same field element (ETH-1 / BRIDGE-ETH-01).
+    ///         the same field element.
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
@@ -293,7 +293,7 @@ contract AckiNackiBridge {
     event AaveEnabledSet(bool enabled);
     event LiquidReserveBpsSet(uint256 bps);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-    /// @notice ETH-8: owner nominated `newOwner`; they must `acceptOwnership`.
+    /// @notice Owner nominated `newOwner`; they must `acceptOwnership`.
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
     event EmergencyWithdrawAll(uint256 amount);
@@ -352,7 +352,7 @@ contract AckiNackiBridge {
     error InvalidAmount();
     error InvalidUsdc();
     error TransferFromFailed();
-    /// @notice ETH-11: `transferFrom` returned true but custody did not grow
+    /// @notice `transferFrom` returned true but custody did not grow
     ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
     error TransferAmountMismatch();
     error DepositTooLarge();
@@ -372,13 +372,13 @@ contract AckiNackiBridge {
     error ReserveBpsTooHigh();
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
-    /// @notice ETH-7: `emergencyWithdrawAll` asked AAVE for `type(uint256).max`
+    /// @notice `emergencyWithdrawAll` asked AAVE for `type(uint256).max`
     ///         but aUSDC still remains. Zeroing `suppliedPrincipal` would let
     ///         `harvestYield` treat leftover principal as yield.
     error EmergencyLeftoverAToken(uint256 leftover);
-    /// @notice ETH-9: USDC `approve` returned false (do not ignore the bool).
+    /// @notice USDC `approve` returned false (do not ignore the bool).
     error ApproveFailed();
-    /// @notice ETH-8: `msg.sender` is not `pendingOwner`.
+    /// @notice `msg.sender` is not `pendingOwner`.
     error OwnershipNotPending();
     error NoYield();
 
@@ -401,7 +401,7 @@ contract AckiNackiBridge {
     error StaleBkSetCommitment(uint256 supplied, uint256 stored);
     error BkUpdateSeqNoNotMonotonic(uint64 supplied, uint64 stored);
     error BkUpdateMerkleMismatch(uint256 computedRoot, uint256 blockId);
-    /// @notice ETH-12: a zero `newCommitmentL3` would force every later
+    /// @notice A zero `newCommitmentL3` would force every later
     ///         `verifyBlock` to attest a zero BK-set commitment.
     error ZeroBkSetCommitment();
 
@@ -413,8 +413,7 @@ contract AckiNackiBridge {
     ///         BN254 Fr (`value >= BN254_R`). The SHPLONK Yul verifier reduces
     ///         instances `mod BN254_R` (same modulus, spelled `f_q` in the
     ///         auto-generated Yul), so `x` and `x + k·BN254_R` verify as the
-    ///         same field element while remaining distinct `uint256` keys
-    ///         (ETH-1 / ETH-2).
+    ///         same field element while remaining distinct `uint256` keys.
     error FieldElementOutOfRange(uint256 value);
     error DstChainIdMismatch(uint256 supplied, uint256 expected);
     error RecipientHalfOutOfRange(uint256 value);
@@ -435,13 +434,13 @@ contract AckiNackiBridge {
     ///         Non-zero token ids are reserved for multi-token wiring in a
     ///         future milestone.
     error UnsupportedTokenId(uint256 tokenId);
-    /// @notice ETH-5: Circuit 4 withdraw is wired but the verifyBlock triple is
+    /// @notice Circuit 4 withdraw is wired but the verifyBlock triple is
     ///         not. Without `verifyBlock`, no anchors ever land and every
     ///         `withdrawByProof` reverts `UnknownAnchor` — a silently dead
     ///         payout path. Wire all three attestation/layer verifiers, or
     ///         disable withdraw too.
     error WithdrawRequiresVerifyBlock();
-    /// @notice ETH-5: verifyBlock is all-or-nothing. Partial wiring (1 or 2 of
+    /// @notice verifyBlock is all-or-nothing. Partial wiring (1 or 2 of
     ///         the three verifier addresses set) is rejected at construction.
     error PartialVerifyBlockWiring();
     error WithdrawTransferFailed(address recipient, uint256 amount);
@@ -502,7 +501,7 @@ contract AckiNackiBridge {
 
     /// @notice Argument bundle for the AN→ETH Circuit 4 
     ///         wiring. verifyBlock-only deployments are legal; withdraw-only
-    ///         is not (ETH-5 / `WithdrawRequiresVerifyBlock`).
+    ///         is not (see `WithdrawRequiresVerifyBlock`).
     /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
     ///      `withdrawByProof` (it reverts with `WithdrawByProofDisabled`).
     ///      When enabled, `accFr` must be non-zero and the verifyBlock triple
@@ -529,7 +528,7 @@ contract AckiNackiBridge {
         /// @notice Optional shellnet alias for `pub.tokenId` (e.g. AN
         ///         `USDC_ECC_ID = 3`). Zero accepts only `tokenId == 0`.
         ///         Production mainnet deploys must leave this zero
-        ///         (`DeployRealBridge` ETH-9); not enforced here because
+        ///         (see `DeployRealBridge`); not enforced here because
         ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
         uint256 altTokenId;
     }
@@ -576,7 +575,7 @@ contract AckiNackiBridge {
         aavePool = IAavePool(_aavePool);
         aUSDC = IERC20(_aUSDC);
 
-        // verifyBlock wiring is all-or-nothing (ETH-5).
+        // verifyBlock wiring is all-or-nothing.
         {
             bool p = address(_vb.primaryVerifier) != address(0);
             bool f = address(_vb.fallbackVerifier) != address(0);
@@ -586,7 +585,7 @@ contract AckiNackiBridge {
                 if (_bw.accFr == 0) revert InvalidBridgeWithdrawalIdentity();
                 if (!(p && f && l)) revert WithdrawRequiresVerifyBlock();
             }
-            // ETH-20: genesis anchors enter the same slots `applyBkSetUpdate`
+            // Genesis anchors enter the same slots `applyBkSetUpdate`
             // guards, so they answer to the same invariant. Without this a
             // non-canonical `genesisPrevMaxLevelLayerHash` is self-contradictory:
             // `_expectedPrevAnchor` hands it back while no layer has data, but
@@ -638,8 +637,8 @@ contract AckiNackiBridge {
     ///                    so the recipient always lives in workchain 0. It is
     ///                    not a public input of the deposit proof. Not
     ///                    range-checked, because no supported set exists to
-    ///                    check against — a wrong value changes nothing
-    ///                    (ETH-10, corrected 2026-09-13). The destination that
+    ///                    check against — a wrong value changes nothing.
+    ///                    The destination that
     ///                    does matter is `anAccount` below.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
@@ -748,8 +747,8 @@ contract AckiNackiBridge {
             _requireCanonicalFr(layerHashes[i]);
         }
         _requireCanonicalFr(prevMaxLevelLayerHash);
-        // ETH-02 remainder: `blockId` is only emitted, but Yul still reduces
-        // the instance mod BN254_R. Reject unreduced words so logs match AN.
+        // `blockId` is only emitted, but Yul still reduces the instance
+        // mod BN254_R. Reject unreduced words so logs match AN.
         _requireCanonicalFr(blockId);
 
         // ---- Anchor checks against stored state. ----
@@ -757,8 +756,8 @@ contract AckiNackiBridge {
             revert BkSetCommitmentMismatch(bkSetCommitment, storedBkSetCommitment);
         }
         // Strictly greater is enough: gaps (seq_no fast-forward) are permitted
-        // so a relayer can catch up with a later valid proof. ETH-3: a jump
-        // does not mass-evict the window — each call still appends one slot.
+        // so a relayer can catch up with a later valid proof. A jump does not
+        // mass-evict the window — each call still appends one slot.
         // Sequential `last_seen+1` is an off-chain relayer policy, not an
         // on-chain cap (see `test_relayerLoop_seqNoFastForward_isPermittedByContract`).
         if (blockSeqNo <= storedLastSeenBlockSeqNo) {
@@ -896,8 +895,8 @@ contract AckiNackiBridge {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
         }
         if (newCommitmentL3 == 0) revert ZeroBkSetCommitment();
-        // ETH-02: stored commitment and attestation `blockId` must be canonical
-        // Fr. Unreduced `newCommitmentL3` would otherwise land in
+        // Stored commitment and attestation `blockId` must be canonical Fr.
+        // Unreduced `newCommitmentL3` would otherwise land in
         // `storedBkSetCommitment` while adapters compare raw words.
         _requireCanonicalFr(blockId);
         _requireCanonicalFr(newCommitmentL3);
@@ -1172,8 +1171,8 @@ contract AckiNackiBridge {
     ///         `layer`: a return of N means the Nth append overwrites it, so the
     ///         anchor survives N-1. 0 = not in the window. When the ring is full
     ///         the oldest hash returns 1 — the next append takes it. Idle layers
-    ///         never evict: remaining stays until that layer appends again
-    ///         (ETH-18 / ETH-03). Duplicate copies return the newest remaining.
+    ///         never evict: remaining stays until that layer appends again.
+    ///         Duplicate copies return the newest remaining.
     function anchorRemainingAppends(uint8 layer, uint256 anchor) external view returns (uint256) {
         if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
         HistoryWindow storage w = _layerWindows[layer];
@@ -1307,7 +1306,7 @@ contract AckiNackiBridge {
         if (_reconstructRecipient(pub.recipientHi, pub.recipientLo) == address(0)) {
             revert InvalidRecipient();
         }
-        // ETH-1: Yul reduces instances mod BN254_R; the mapping must not treat
+        // Yul reduces instances mod BN254_R; the mapping must not treat
         // N and N + k·BN254_R as distinct spent keys. Reject unreduced words
         // rather than reducing-and-keying (that would alias two caller-supplied keys).
         _requireCanonicalFr(pub.nullifier);
@@ -1372,13 +1371,13 @@ contract AckiNackiBridge {
     ///      become mapping or window keys must match the Yul verifier's
     ///      `mod(calldataload, BN254_R)` image (the auto-generated Yul spells
     ///      this modulus `f_q`) — otherwise `x` and `x + k·BN254_R` verify as
-    ///      one field element and occupy two keys (ETH-1 / ETH-2).
+    ///      one field element and occupy two keys.
     function _requireCanonicalFr(uint256 value) internal pure {
         if (value >= BN254_R) revert FieldElementOutOfRange(value);
     }
 
-    /// @dev ETH-11 / TR-4: credit exactly `amount` USDC. A fee-on-transfer or
-    ///      rebasing token that moves a different custody delta reverts.
+    /// @dev Credit exactly `amount` USDC. A fee-on-transfer or rebasing token
+    ///      that moves a different custody delta reverts.
     function _pullExactUsdc(uint256 amount) internal returns (uint256 credited) {
         uint256 before = usdc.balanceOf(address(this));
         if (!usdc.transferFrom(msg.sender, address(this), amount)) {
@@ -1391,7 +1390,7 @@ contract AckiNackiBridge {
         return amount;
     }
 
-    /// @dev ETH-11: debit exactly `amount` USDC. Same FoT/rebase fail-closed.
+    /// @dev Debit exactly `amount` USDC. Same FoT/rebase fail-closed.
     function _pushExactUsdc(address recipient, uint256 amount) internal {
         uint256 before = usdc.balanceOf(address(this));
         if (!usdc.transfer(recipient, amount)) {
@@ -1449,7 +1448,7 @@ contract AckiNackiBridge {
 
     /// @notice Emergency: pull *all* aUSDC back into the bridge as USDC and disable supplies.
     /// @dev Useful if AAVE pauses/depegs. User withdrawals remain available.
-    ///      ETH-7: if any aUSDC remains after `withdraw(max)`, revert — do not
+    ///      If any aUSDC remains after `withdraw(max)`, revert — do not
     ///      zero `suppliedPrincipal` (that would make leftover shares look like
     ///      `accruedYield` and `harvestYield` would pay them to the owner).
     function emergencyWithdrawAll() external onlyOwner nonReentrant {
@@ -1532,7 +1531,7 @@ contract AckiNackiBridge {
     }
 
     /// @notice Nominate `newOwner`. They become `owner` only after
-    ///         `acceptOwnership` (ETH-8). Replaces one-step transfer.
+    ///         `acceptOwnership`. Replaces one-step transfer.
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert InvalidRecipient();
         pendingOwner = newOwner;
@@ -1540,7 +1539,7 @@ contract AckiNackiBridge {
     }
 
     /// @notice Complete a pending ownership transfer. Caller must be `pendingOwner`.
-    /// @dev ETH-14: if `yieldRecipient` still tracks the outgoing owner (the
+    /// @dev If `yieldRecipient` still tracks the outgoing owner (the
     ///      constructor default), move it with the role so a key-rotation
     ///      harvest cannot pay the compromised address. An explicitly set
     ///      recipient is left alone.

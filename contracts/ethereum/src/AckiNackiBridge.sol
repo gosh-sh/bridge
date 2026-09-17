@@ -203,11 +203,11 @@ contract AckiNackiBridge {
     uint256 public immutable storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
-    // Storage: Circuit 4 (Bridge Withdrawal, single-final-root) — AN→ETH payout
+    // Storage: Circuit 4 (Bridge Withdrawal) — AN→ETH payout
     // ---------------------------------------------------------------------
 
     /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (10-input single-final-root
+    ///         `IBridgeWithdrawalVerifier` interface (10-input 
     ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
     ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
@@ -500,7 +500,7 @@ contract AckiNackiBridge {
         uint64 genesisLastSeenBlockSeqNo;
     }
 
-    /// @notice Argument bundle for the AN→ETH Circuit 4 (single-final-root)
+    /// @notice Argument bundle for the AN→ETH Circuit 4 
     ///         wiring. verifyBlock-only deployments are legal; withdraw-only
     ///         is not (ETH-5 / `WithdrawRequiresVerifyBlock`).
     /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
@@ -547,7 +547,7 @@ contract AckiNackiBridge {
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
-    /// @param _bw                 Circuit 4 (single-final-root) wiring. Pass
+    /// @param _bw                 Circuit 4 wiring. Pass
     ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
     ///                            to disable. When `bridgeWithdrawalVerifier`
     ///                            is non-zero, both `dappFr` and `accFr`
@@ -1220,18 +1220,18 @@ contract AckiNackiBridge {
     }
 
     // ---------------------------------------------------------------------
-    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4, single-final-root)
+    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4)
     // ---------------------------------------------------------------------
 
     /// @notice Mask for each half of a split-α `recipient` address (10 bytes = 80 bits).
-    /// @dev Circuit 4 single-final-root uses split-α (10/10) per
+    /// @dev Circuit 4 uses split-α (10/10) per
     ///      `bridge_event_prove_circuit::RECIPIENT_HI_*` / `RECIPIENT_LO_*`
     ///      offsets in the partner repo. The split is locked at deployment
     ///      via the immutable `bridgeWithdrawalVerifier` — its on-chain VK
     ///      only accepts proofs with the matching layout.
     uint256 private constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
 
-    /// @notice Pay out a withdrawal proven by a Circuit 4 (single-final-root)
+    /// @notice Pay out a withdrawal proven by a Circuit 4
     ///         Halo2 SHPLONK aggregator proof.
     ///
     /// Verifies that:

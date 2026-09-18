@@ -13,13 +13,19 @@ punctuation and emoji are not letters and are left alone, so the em dashes,
 the `×` in `12 × 32 B`, the arrows and the ✅/❌ in the CI pipelines all pass.
 Accented Latin (`é`, `ü`) is Latin script and passes too.
 
-Two deliberate exceptions, both for characters that are notation rather than
+Three deliberate exceptions, all for characters that are notation rather than
 language:
 
   * Unaccented Greek letters, which are how the ZK and pairing code names its
     operands. Accented Greek (alpha with tonos and friends) and final sigma
     occur in Greek prose but never in mathematics, so those still fail.
   * MICRO SIGN (U+00B5), for `µUSDC`.
+  * Letters that exist only for formulas: the Mathematical Alphanumeric
+    Symbols block (`𝔾₂`; bold, italic, script, fraktur and double-struck
+    Latin and Greek), the letterlike double-struck, script and black-letter
+    capitals (`ℤ`, `ℚ`, `ℋ`, `ℜ`) and superscript Latin letters
+    (`limbᵢ·(2⁸⁸)ⁱ`). None of them occur in any language's prose, and the
+    homoglyph concern below is about Cyrillic, which stays caught.
 
 A side effect worth having: this also catches homoglyphs. A Cyrillic "a" that
 wandered into a Latin identifier or a config key is the kind of bug that
@@ -61,6 +67,14 @@ MARKER = "non-english-ok"
 MATH_GREEK = re.compile(r"GREEK (SMALL|CAPITAL) LETTER [A-Z]+\Z")
 
 ALLOWED_NAMES = {"MICRO SIGN"}
+# Mathematical notation, by Unicode name: the Mathematical Alphanumeric
+# Symbols block (U+1D400..U+1D7FF) is "MATHEMATICAL ..."; the letters among
+# the letterlike symbols (U+2100..U+214F) are "DOUBLE-STRUCK CAPITAL Z",
+# "SCRIPT CAPITAL H", "BLACK-LETTER CAPITAL R"; superscript Latin letters are
+# "SUPERSCRIPT LATIN SMALL LETTER I" (subscripts already start with "LATIN ").
+MATH_NOTATION = re.compile(
+    r"(MATHEMATICAL |DOUBLE-STRUCK |SCRIPT (CAPITAL|SMALL) |BLACK-LETTER CAPITAL |SUPERSCRIPT LATIN )"
+)
 
 # Directories that hold build output rather than sources. Only consulted in
 # the fallback walk below; `git ls-files` never reports them.
@@ -77,6 +91,8 @@ def is_allowed(char):
     if name.startswith("LATIN "):
         return True
     if name in ALLOWED_NAMES:
+        return True
+    if MATH_NOTATION.match(name):
         return True
     return bool(MATH_GREEK.match(name))
 

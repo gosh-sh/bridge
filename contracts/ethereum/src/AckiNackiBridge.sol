@@ -1492,8 +1492,11 @@ contract AckiNackiBridge {
         emit WithdrawnFromAave(principal, received);
     }
 
-    /// @notice Harvest accrued yield (aUSDC balance above principal) to `yieldRecipient`.
-    /// @param amount Amount of yield to harvest (must be <= accruedYield()).
+    /// @notice Harvest yield still inside AAVE (`accruedYield`) to
+    ///         `yieldRecipient`. After `emergencyWithdrawAll` the surplus is
+    ///         liquid USDC — this reverts `NoYield`; collect with
+    ///         `skimExcessUsdc` (QC-A1-3).
+    /// @param amount Must be `<= accruedYield()` and non-zero.
     function harvestYield(uint256 amount) external onlyOwner nonReentrant {
         uint256 yield = accruedYield();
         if (yield == 0 || amount == 0 || amount > yield) revert NoYield();

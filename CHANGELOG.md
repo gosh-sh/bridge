@@ -299,6 +299,9 @@ assigns it when the release is tagged.
 - Documented that two identical AN burns in one block share a Circuit 4
   nullifier (`msg_id` is not in the preimage): the second payout is
   permanently blocked. Closing it needs a Circuit 4 re-keygen.
+- After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
+  reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
+  (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`

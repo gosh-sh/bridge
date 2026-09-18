@@ -532,9 +532,9 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 |---|---:|---|
 | `supplyToAave(amount)` | 1240 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal += toSupply`. |
 | `withdrawFromAave(amount)` | 1258 | Pull back up to `suppliedPrincipal` preemptively. |
-| `emergencyWithdrawAll()` | 1270 | Sets `aaveEnabled = false`, withdraws `type(uint256).max`, zeroes `suppliedPrincipal`. Payouts stay available. |
-| `harvestYield(amount)` | 1287 | `amount ≤ accruedYield()`; withdraws from AAVE and transfers the *received* amount to `yieldRecipient`. |
-| `skimExcessUsdc(amount)` | 1315 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
+| `emergencyWithdrawAll()` | 1477 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
+| `harvestYield(amount)` | 1497 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. |
+| `skimExcessUsdc(amount)` | 1525 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
 | `setAaveEnabled(bool)` | 1328 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
 | `setLiquidReserveBps(bps)` | 1335 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
 | `setYieldRecipient(addr)` | 1341 | Non-zero. |
@@ -704,7 +704,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
 | `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
 | `AckiNackiBridgeRelayerLoop.t.sol` (6) | 10-block mixed-finType walk, restart, replay, fast-forward, verifier-reject leaves state untouched, anchor mismatch. |
-| `EthAuditQcHardening.t.sol` (4) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths. |
+| `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
 | `ShplonkAggregatorForgery.t.sol` (3) | Groth16-stub proof rejected by the SHPLONK path. |
 | `ShplonkDeployLib.t.sol`, `ShplonkSpikeOnChain.t.sol` (4) | Wrapper accepts/rejects spike calldata (`test/fixtures/r15_spike/`, **not** production verifiers). |

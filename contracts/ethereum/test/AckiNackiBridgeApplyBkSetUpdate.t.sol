@@ -70,6 +70,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_happyPath() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
 
         vm.expectEmit(true, true, true, true);
@@ -98,6 +99,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         to be below the field order already, so the `Fr` reduction is a
     ///         no-op here and the vector stays a pure statement about the fold.
     function test_applyBkSetUpdate_matchesOffChainVector() public {
+        _primeLayerCursor(SEQ);
         bytes32 h01 =
             bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
         bytes32 h4_7 =
@@ -128,6 +130,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         about the fold depth and not about field canonicality (which
     ///         `test_applyBkSetUpdate_rejectsUnreducedRoot` covers separately).
     function test_applyBkSetUpdate_rejectsLegacyDepth3Root() public {
+        _primeLayerCursor(SEQ);
         bytes32 h23 = sha256(abi.encodePacked(_le(L2), _le(L3)));
         uint256 legacyRoot = uint256(
             sha256(abi.encodePacked(sha256(abi.encodePacked(SIB_H01, h23)), SIB_H4_7))
@@ -151,6 +154,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         single argument satisfies both for the other ~81% of rotations —
     ///         this fixture's root among them — and the entry point is dead.
     function test_applyBkSetUpdate_reducesRootIntoFieldBeforeComparing() public {
+        _primeLayerCursor(SEQ);
         uint256 rawRoot = _rawMerkleRoot(L2, L3);
         assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
 
@@ -162,6 +166,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     /// @notice Unreduced `blockId` is rejected at the canonical-Fr gate,
     ///         before attestation or the SHA fold.
     function test_applyBkSetUpdate_rejectsUnreducedRoot() public {
+        _primeLayerCursor(SEQ);
         uint256 rawRoot = _rawMerkleRoot(L2, L3);
         assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
 
@@ -172,6 +177,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_rejectsUnreducedNewCommitment() public {
+        _primeLayerCursor(SEQ);
         uint256 poisoned = L3 + R;
         uint256 blockId = _merkleRoot(L2, poisoned);
         vm.expectRevert(
@@ -181,12 +187,14 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_rejectsZeroNewCommitment() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, 0);
         vm.expectRevert(AckiNackiBridge.ZeroBkSetCommitment.selector);
         _apply(blockId, SEQ, L2, 0);
     }
 
     function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
 
         vm.expectRevert(
@@ -198,6 +206,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsWhenAttestationRejected() public {
+        _primeLayerCursor(SEQ);
         primary.setShouldAccept(false);
         uint256 blockId = _merkleRoot(L2, L3);
 
@@ -216,6 +225,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsOnReplay() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
         _apply(blockId, SEQ, L2, L3);
 
@@ -228,6 +238,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsOnNonMonotonicSeqNo() public {
+        _primeLayerCursor(SEQ);
         uint256 l4 = 0xC0FFEE;
         uint256 secondBlockId = _merkleRoot(L3, l4);
 
@@ -240,6 +251,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_chainsTwoRotations() public {
+        _primeLayerCursor(SEQ + 1);
         uint256 l4 = 0xC0FFEE;
 
         _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
@@ -253,8 +265,13 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         `lastSeen` argument must be the live layer cursor, not the
     ///         BK-update monotonicity cursor. The mock asserts the value.
     function test_applyBkSetUpdate_afterVerifyBlock_usesLayerCursor() public {
-        _submitLayerBundle(1);
-        assertEq(bridge.storedLastSeenBlockSeqNo(), 1);
+        // Prime the layer cursor to exactly SEQ so the ordering invariant
+        // (BRIDGE-ETH-WD-2, `blockSeqNo <= storedLastSeenBlockSeqNo`) holds
+        // at the equality boundary. The two cursors still diverge —
+        // BK-update cursor is 0, layer cursor is SEQ — which is what this
+        // test pins.
+        _submitLayerBundle(SEQ);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), SEQ);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), 0);
 
         primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastSeenBlockSeqNo());
@@ -262,13 +279,19 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         assertEq(bridge.storedBkSetCommitment(), L3);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ);
-        assertEq(bridge.storedLastSeenBlockSeqNo(), 1, "rotation does not advance the layer cursor");
+        assertEq(
+            bridge.storedLastSeenBlockSeqNo(), SEQ, "rotation does not advance the layer cursor"
+        );
     }
 
     /// @notice Baking the BK-update cursor (0 here) after a `verifyBlock`
     ///         must fail the same way a real adapter would.
     function test_applyBkSetUpdate_afterVerifyBlock_rejectsBkUpdateCursor() public {
-        _submitLayerBundle(1);
+        // Prime the layer cursor to SEQ so this test isolates the mock's
+        // `lastSeen` mismatch — otherwise the BRIDGE-ETH-WD-2 ordering guard
+        // would fire first with `VerifyBlockLagBehindRotation` instead of
+        // reaching the attestation adapter.
+        _submitLayerBundle(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
         primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastBkSetUpdateSeqNo());
 
@@ -284,6 +307,14 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             SIB_H4_7,
             SIB_H8_15
         );
+    }
+
+    /// @dev Fast-forward `storedLastSeenBlockSeqNo` to `target` so a subsequent
+    ///      `applyBkSetUpdate(target)` satisfies the BRIDGE-ETH-WD-2 ordering
+    ///      invariant. Wraps `_submitLayerBundle` so tests read like
+    ///      "prime cursor, then apply".
+    function _primeLayerCursor(uint64 target) internal {
+        _submitLayerBundle(target);
     }
 
     function _submitLayerBundle(uint64 seqNo) internal {

@@ -406,6 +406,18 @@ contract AckiNackiBridge {
     /// @notice A zero `newCommitmentL3` would force every later
     ///         `verifyBlock` to attest a zero BK-set commitment.
     error ZeroBkSetCommitment();
+    /// @notice Ordering invariant (BRIDGE-ETH-WD-2): `applyBkSetUpdate(N)`
+    ///         may only proceed once `verifyBlock` has already covered
+    ///         block `N` (`blockSeqNo <= storedLastSeenBlockSeqNo`).
+    ///         Applying the rotation ahead of the layer cursor would flip
+    ///         `storedBkSetCommitment` OLD → NEW while block `N`'s
+    ///         attestation is still signed by OLD keys, permanently
+    ///         bricking `verifyBlock(N)` with `BkSetCommitmentMismatch`
+    ///         and stranding every future block that anchors through
+    ///         `N`'s layer hashes. Since `applyBkSetUpdate` is
+    ///         permissionless, this is an on-chain invariant, not a
+    ///         relayer convention.
+    error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
 
     // withdrawByProof (Circuit 4) errors
     error WithdrawByProofDisabled();
@@ -901,6 +913,25 @@ contract AckiNackiBridge {
         }
         if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
+        }
+        // BRIDGE-ETH-WD-2 ordering invariant. `applyBkSetUpdate(N)` flips
+        // `storedBkSetCommitment` OLD → NEW; any later `verifyBlock(K)` for
+        // `K <= N` carries `bkSetCommitment == OLD` in its PI (the AN block
+        // that announces a rotation is signed by the outgoing set) and
+        // would revert `BkSetCommitmentMismatch`. Block `K`'s layer hashes
+        // would then never enter `_layerWindows`, and every future
+        // `verifyBlock` whose `_expectedPrevAnchor(numLayers)` picks
+        // through that hole would fail `PrevAnchorMismatch`. No admin
+        // recovery exists (verifiers are immutable, no pause, no
+        // state-reset). Since `applyBkSetUpdate` is `external`, this must
+        // be an on-chain invariant, not a relayer discipline — a
+        // wrong-order call by ANY caller (buggy future relayer, hostile
+        // actor front-running the honest relayer at a bundle-boundary
+        // rotation) would otherwise permanently brick the AN→ETH lane.
+        // Requiring the layer chain to have already covered block `N`
+        // turns wrong-order into a clean revert with untouched state.
+        if (blockSeqNo > storedLastSeenBlockSeqNo) {
+            revert VerifyBlockLagBehindRotation(blockSeqNo, storedLastSeenBlockSeqNo);
         }
         if (newCommitmentL3 == 0) revert ZeroBkSetCommitment();
         // Stored commitment and attestation `blockId` must be canonical Fr.

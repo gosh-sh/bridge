@@ -12,7 +12,7 @@ pragma solidity ^0.8.19;
 ///         to a unique `nullifier` for replay protection. The event is
 ///         anchored off-circuit to one specific `finalRoot` — the verifier
 ///         (this adapter, on-chain) checks that `finalRoot` is in the
-///         bridge's set of known anchors (populated by `verifyBlock`).
+///         window named by `anchorLayer` (populated by `verifyBlock`).
 ///
 ///         The AN-side `eccUSDCBridge` emits:
 ///             event WithdrawalInitiated(
@@ -23,10 +23,10 @@ pragma solidity ^0.8.19;
 ///                 address sender
 ///             );
 ///
-///         The `WithdrawalPublicInputs` struct below mirrors slots [0..9] of
-///         the Halo2 circuit's 10-element public-input vector byte-for-byte.
+///         The `WithdrawalPublicInputs` struct below mirrors slots [0..10] of
+///         the Halo2 circuit's 11-element public-input vector byte-for-byte.
 interface IBridgeWithdrawalVerifier {
-    /// @notice Public-input slots [0..9] of the Circuit 4 proof.
+    /// @notice Public-input slots [0..10] of the Circuit 4 proof.
     /// @dev Field order matches the Halo2 circuit's public-input layout
     ///      byte-for-byte. The on-chain adapter forwards this struct
     ///      verbatim to `verifyProof`.
@@ -48,22 +48,25 @@ interface IBridgeWithdrawalVerifier {
         /// @notice Bridge account identifier on AN side (immutable per deployment).
         uint256 accFr;
         /// @notice Replay-protection nullifier — `Poseidon(block_id_fr,
-        ///         tokenId, amount, recipientHi, recipientLo, senderAccFr)`.
-        ///         Does **not** bind `msg_id` / `events_pos`; two identical
-        ///         burns in one AN block collide (BRIDGE-WD-01). Closing
-        ///         that needs a Circuit 4 re-keygen.
+        ///         tokenId, amount, recipientHi, recipientLo, senderAccFr,
+        ///         events_pos)`. `events_pos` is the events-tree leaf
+        ///         index, so two identical burns in one AN block no longer
+        ///         share a nullifier (BRIDGE-WD-01).
         uint256 nullifier;
         /// @notice The dense-chain anchor the proof binds to. The bridge
-        ///         contract independently checks `finalRoot` against its
-        ///         set of known anchors (populated on every successful
+        ///         checks `finalRoot` against the window named by
+        ///         `anchorLayer` (populated on every successful
         ///         `verifyBlock`); the circuit only proves that *some*
         ///         chain extension lands at this value.
         uint256 finalRoot;
+        /// @notice 1-indexed layer window (`1..=MAX_LAYER_HASHES`) the
+        ///         contract scans for `finalRoot`. Range-checked in-circuit.
+        uint256 anchorLayer;
     }
 
     /// @notice Verify a Circuit 4 (single-final-root) proof.
     /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof).
-    /// @param pub Public-input slots [0..9] — the 10 field elements.
+    /// @param pub Public-input slots [0..10] — the 11 field elements.
     /// @return isValid true on a passing proof; reverts inside the underlying SHPLONK
     ///         verifier are caught and surfaced as `false`.
     function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)

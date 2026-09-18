@@ -52,7 +52,7 @@ contract ShplonkDeployLibTest is Test {
     }
 
     function test_eth6_wrongExtcodehash_reverts() public {
-        bytes32 pin = 0x8c7a66973776b835349c8053d1b302149162cbece4a7b70e8a5c25c593fee1b5;
+        bytes32 pin = 0x23e0d1a694c9b7485f81a59eefafa6c0d1865db721133b030ecd6ff86dfe48bb;
         bytes32 wrong = bytes32(uint256(1));
         vm.expectRevert(
             abi.encodeWithSelector(ShplonkDeployLib.YulCodehashMismatch.selector, pin, wrong)

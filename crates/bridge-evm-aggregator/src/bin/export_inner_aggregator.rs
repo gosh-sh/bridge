@@ -64,8 +64,11 @@ fn main() -> anyhow::Result<()> {
         pk_cache_dir.as_deref(),
     )?;
 
+    let calldata_path = out_dir.join(format!("{name}_calldata.bin"));
+    std::fs::write(&calldata_path, &export.evm_calldata)?;
+
     println!(
-        "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={}, universality={:?})",
+        "OK: {} -> {}/{}.bin ({} B, {} instances, K_outer={}, universality={:?}) + _calldata.bin ({} B)",
         inner_path.display(),
         out_dir.display(),
         name,
@@ -73,6 +76,7 @@ fn main() -> anyhow::Result<()> {
         export.total_instances,
         export.k_outer,
         config.universality,
+        export.evm_calldata.len(),
     );
     Ok(())
 }

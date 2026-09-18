@@ -124,7 +124,8 @@ contract WithdrawAnchorEvictionTest is Test {
                 dappFr: DAPP_FR,
                 accFr: ACC_FR,
                 nullifier: 0xDEAD,
-                finalRoot: evictedL1
+                finalRoot: evictedL1,
+                anchorLayer: 1
             });
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, evictedL1));
@@ -213,7 +214,8 @@ contract WithdrawAnchorEvictionTest is Test {
             dappFr: DAPP_FR,
             accFr: ACC_FR,
             nullifier: nullifier,
-            finalRoot: finalRoot
+            finalRoot: finalRoot,
+            anchorLayer: 1
         });
     }
 }

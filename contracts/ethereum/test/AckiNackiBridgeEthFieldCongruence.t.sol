@@ -90,6 +90,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         pub.accFr = _word(cd, ACC + 7);
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
+        pub.anchorLayer = _word(cd, ACC + 10);
     }
 
     function _reconstruct(uint256 hi, uint256 lo) internal pure returns (address) {
@@ -306,7 +307,8 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             dappFr: 0xD499F4CEC0FFEE01,
             accFr: 0xAC0F4CEDEADBEEF1,
             nullifier: nullifier,
-            finalRoot: finalRoot
+            finalRoot: finalRoot,
+            anchorLayer: 1
         });
     }
 

@@ -208,7 +208,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             dappFr: DAPP_FR,
             accFr: ACC_FR,
             nullifier: nullifier,
-            finalRoot: seedAnchor
+            finalRoot: seedAnchor,
+            anchorLayer: 1
         });
     }
 
@@ -453,6 +454,11 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     ///         first payout succeeds; the second is `NullifierAlreadyUsed`
     ///         and that ECC is stranded. Same on-chain mechanics as a
     ///         replay — this name pins the duplicate-burn reading.
+    /// @notice Replay of the same nullifier is rejected (the mapping still
+    ///         guards a second payout even when two Circuit 4 proofs could
+    ///         theoretically be produced). Distinct `events_pos` values now
+    ///         produce distinct circuit nullifiers, so two identical burns
+    ///         in one AN block are no longer stranded by this path.
     function test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked() public {
         uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
         uint256 amount = 1 * UsdcTestLib.UNIT;
@@ -657,9 +663,10 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l2-anchor-withdraw")))
         );
         pub.finalRoot = l2Anchor;
+        pub.anchorLayer = 2;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
-        assertTrue(ok, "L2 anchor withdrawal must succeed under flat _isKnownAnchor");
+        assertTrue(ok, "L2 anchor withdrawal must succeed with matching anchorLayer");
     }
 
     /// @notice NB-Q1 regression (L3 variant): coverage at the highest active
@@ -676,9 +683,34 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l3-anchor-withdraw")))
         );
         pub.finalRoot = l3Anchor;
+        pub.anchorLayer = 3;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
-        assertTrue(ok, "L3 anchor withdrawal must succeed under flat _isKnownAnchor");
+        assertTrue(ok, "L3 anchor withdrawal must succeed with matching anchorLayer");
+    }
+
+    /// @notice Option A: an L2 `finalRoot` presented with `anchorLayer = 1`
+    ///         must revert even though the hash is in some other window.
+    function test_withdrawByProof_l2AnchorWithLayer1_reverts() public {
+        uint256 l2Anchor =
+            Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-seed-layer", uint256(1)))));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l2-as-l1"))));
+        pub.finalRoot = l2Anchor;
+        pub.anchorLayer = 1;
+
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, l2Anchor));
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    function test_withdrawByProof_anchorLayerZero_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-zero"))));
+        pub.anchorLayer = 0;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, uint256(0))
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
     }
 
     /// @notice NB-Q1 regression: a `finalRoot` that matches no layer window

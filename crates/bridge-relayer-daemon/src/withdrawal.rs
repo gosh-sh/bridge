@@ -1,13 +1,13 @@
 //! Circuit 4 (`withdrawByProof`) artefacts from the partner prover daemon.
 //!
 //! The shellnet orchestrator writes `proofs/proof_event_NNN.json` with a raw
-//! Halo2 proof (`proof_hex`) and ten public-instance field elements
+//! Halo2 proof (`proof_hex`) and eleven public-instance field elements
 //! (`public_instances_hex`).
 //!
 //! The production on-chain verifier is the R15 SHPLONK aggregator
 //! (`BridgeWithdrawalAggregatorVerifier`, Yul): it consumes aggregator calldata
 //! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
-//! the 10 re-exposed Circuit-4 public inputs (≥
+//! the 11 re-exposed Circuit-4 public inputs (≥
 //! `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the 1A/1B/2 shape
 //! checks in [`crate::proof_validation`].
 
@@ -30,13 +30,13 @@ use crate::error::RelayerError;
 // success on the actual `withdrawByProof` transaction (or its `eth_call`
 // dry-run) — nothing else.
 
-/// Ten public inputs for Circuit 4 (single-final-root layout).
-pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 10;
+/// Eleven public inputs for Circuit 4 (single-final-root + `anchorLayer`).
+pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 11;
 
 /// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
-/// prefix is 12 KZG accumulator limbs + the 10 re-exposed Circuit-4 public
+/// prefix is 12 KZG accumulator limbs + the 11 re-exposed Circuit-4 public
 /// inputs, each a 32-byte field element (the outer proof bytes follow). Matches
-/// `BridgeWithdrawalAggregatorVerifier`'s 22-instance layout.
+/// `BridgeWithdrawalAggregatorVerifier`'s 23-instance layout.
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
 
 /// Parsed `proof_event_*.json` from
@@ -63,6 +63,7 @@ pub struct WithdrawalPublicInputs {
     pub acc_fr: U256,
     pub nullifier: U256,
     pub final_root: U256,
+    pub anchor_layer: U256,
 }
 
 impl PartnerWithdrawalProof {
@@ -108,6 +109,7 @@ impl PartnerWithdrawalProof {
             acc_fr: field(7)?,
             nullifier: field(8)?,
             final_root: field(9)?,
+            anchor_layer: field(10)?,
         })
     }
 }

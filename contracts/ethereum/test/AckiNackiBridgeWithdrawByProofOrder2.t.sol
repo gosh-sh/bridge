@@ -102,7 +102,8 @@ contract AckiNackiBridgeWithdrawByProofOrder2Test is Test {
                 dappFr: DAPP_FR,
                 accFr: ACC_FR,
                 nullifier: 42,
-                finalRoot: layers[0]
+                finalRoot: layers[0],
+                anchorLayer: 1
             });
 
         assertTrue(bridge.withdrawByProof(_dummyProof(), pub));

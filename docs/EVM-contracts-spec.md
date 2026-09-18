@@ -40,12 +40,12 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/IPrimaryVerifier.sol` | 36 | Circuit 1A (primary attestation) verifier interface — 4 PIs. |
 | `src/IFallbackVerifier.sol` | 33 | Circuit 1B (fallback attestation) verifier interface — 4 PIs. |
 | `src/ILayerHashesMovementVerifier.sol` | 45 | Circuit 2 (layer-hash movement) interface — 14 PIs. |
-| `src/IBridgeWithdrawalVerifier.sol` | 67 | Circuit 4 (bridge withdrawal event) interface — 10 PIs. |
+| `src/IBridgeWithdrawalVerifier.sol` | 77 | Circuit 4 (bridge withdrawal event) interface — 11 PIs. |
 | `src/ShplonkAggregatorVerifierBase.sol` | 32 | Shared adapter base: instance reader + SHPLONK dispatch. |
 | `src/PrimaryAggregatorVerifier.sol` | 30 | 1A adapter (instances[12..15] ↔ args). |
 | `src/FallbackAggregatorVerifier.sol` | 30 | 1B adapter (instances[12..15] ↔ args). |
 | `src/LayerHashesAggregatorVerifier.sol` | 34 | Circuit-2 adapter (instances[12..25] ↔ args). |
-| `src/BridgeWithdrawalAggregatorVerifier.sol` | 40 | Circuit-4 adapter (instances[12..21] ↔ `pub`). |
+| `src/BridgeWithdrawalAggregatorVerifier.sol` | 44 | Circuit-4 adapter (instances[12..22] ↔ `pub`). |
 | `src/ShplonkHalo2Verifier.sol` | 31 | `staticcall` shim onto CREATE-deployed Yul verifier bytecode. |
 | `src/IShplonkHalo2Verifier.sol` | 7 | `verify(bytes) → bool`. |
 | `src/IBlockHeaderOracle.sol` | 27 | Block-hash oracle interface. |
@@ -84,7 +84,7 @@ flowchart TB
     LOG -->|"MPT receipt proof"| DP["deposit-prover (off-chain Halo2)"]
     DP -->|"SHPLONK proof + 12 PIs"| AN["AN USDCBridge.finalizeDeposit"]
     AN -.->|"WithdrawalInitiated event"| C4P["AN-side prover (Circuit 4)"]
-    C4P -.->|"proof + 10 PIs"| R
+    C4P -.->|"proof + 11 PIs"| R
 ```
 
 Two independent directions:
@@ -361,17 +361,12 @@ back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTr
 
 Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1227-1231`).
 
-**Anchor semantics.** `_isKnownAnchor` (`:1034-1041`) scans *every* layer window `L = 1..10` and
-returns true on the first hit. This is deliberate (NB-Q1, 2026-08-04): pinning the check to layer 1
-made every partner witness anchored at `L ≥ 2` revert. Two consequences documented in the code
-itself (`:1016-1033`):
-
-* *Soundness widening* — the bridge no longer asserts which layer a withdrawal is anchored in.
-  Correctness rests entirely on Circuit 4's own binding of `finalRoot` to the event. The intended
-  end state ("Option A") is a C4 public-input slot `anchorLayer` plus a range-checked scan of that
-  one window, blocked on a C4 re-keygen.
-* *Cost* — a miss costs up to `10 × 128 = 1280` cold SLOADs (≈ 2.7 M gas), paid by the caller whose
-  call then reverts.
+**Anchor semantics.** `_isKnownLayerAnchor` (`src/AckiNackiBridge.sol`) scans
+only the window named by Circuit 4's 1-indexed `anchorLayer` public input
+(`1..=MAX_LAYER_HASHES`, also range-checked in-circuit). A proof whose
+`finalRoot` sits in a different layer's window is rejected (`UnknownAnchor`),
+even if that root is a genuine `verifyBlock` anchor. A miss costs at most
+128 cold SLOADs, paid by the caller whose call then reverts.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
 (or its scoped alias), so the same proof cannot be replayed on a second deployment. The
@@ -470,7 +465,7 @@ Proof calldata is `instances (12 accumulator + N inner) ‖ snark_proof`. Each a
 |---|---:|---|
 | `PrimaryAggregatorVerifier` / `FallbackAggregatorVerifier` | 4 | 12 `blockId`, 13 `bkSetCommitment`, 14 `blockSeqNo`, 15 `lastSeenBlockSeqNo` |
 | `LayerHashesAggregatorVerifier` | 14 | 12 `blockId`, 13 `bkSetCommitment`, 14 `numLayers`, 15–24 `layerHashes[0..9]`, 25 `prevMaxLevelLayerHash` |
-| `BridgeWithdrawalAggregatorVerifier` | 10 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot` |
+| `BridgeWithdrawalAggregatorVerifier` | 11 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer` |
 
 All four are `view` and return `bool` — reverts inside the Yul verifier surface as `false`
 because `ShplonkHalo2Verifier.verify` captures only the `staticcall` success flag (`:29`).
@@ -488,8 +483,8 @@ contract's fallback entrypoint via `staticcall`.
 |---|---|---:|---:|---:|
 | `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 494 | 3 840 |
 | `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 493 | 3 840 |
-| `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 19 100 | 3 072 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 (inner K=19) | 10 | 20 990 | 3 616 |
+| `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 23 111 | 4 160 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 (inner K=19) | 11 | 21 152 | 3 648 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
@@ -768,10 +763,11 @@ Read off the code, without a formal audit claim.
 
 **Deliberate trade-offs and limitations (all flagged in-code)**
 
-1. *Anchor layer is not asserted* (`:1016-1022`). `withdrawByProof` accepts a `finalRoot` found in
-   **any** layer window. Soundness rests on Circuit 4's internal binding. Target state: an
-   `anchorLayer` public input (blocked on a C4 re-keygen).
-2. *Anchor-miss gas* (`:1024-1033`). Up to 1280 cold SLOADs (≈ 2.7 M gas) on a failing call, paid by
+1. *Anchor layer is asserted* (`withdrawByProof`). Circuit 4 exposes
+   `anchorLayer` (`1..=10`); the contract scans only that layer's 128-slot
+   window. A `finalRoot` that is a known anchor of a *different* layer
+   reverts `UnknownAnchor`.
+2. *Anchor-miss gas.* At most 128 cold SLOADs on a failing call, paid by
    the caller. An `O(1)` membership map would need eviction handling on window rollover.
 3. *Window depth is finite, per layer.* Each layer keeps 128 anchors, so an anchor older than 128
    appends in **its own layer** is evicted and a proof against that anchor reverts. This is a
@@ -781,7 +777,7 @@ Read off the code, without a formal audit claim.
    window below it. L1 window = 128 × W·P = 131 072 seq (**≈ 12 hours** at ~3 seq/s); L2 =
    128 × W² = 2 097 152 seq (**≈ 8 days**). The L1→L2 step is ×(W/P) = **16**, not ×128; only
    L2→L3 and above are ×W. L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
-   is `Poseidon(block_id, tokenId, amount, hi, lo, sender)` and takes no root as input.
+   is `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` and takes no root as input.
 
    So the operational boundary on the pinned shellnet deploy (L1+L2 active) is **≈ 8 days
    unwithdrawn**. Past L(max) a payout is stranded in `treasuryBalance`. Adding a layer
@@ -825,12 +821,13 @@ Read off the code, without a formal audit claim.
     only the deploy script can catch a wrong one.
 11. *`GenesisCursorBridge`* (in `script/DeployGenesisCursorBridge.s.sol`) can seed the cursor
     arbitrarily. It is explicitly test-only, but it lives in the same tree as production scripts.
-12. *Duplicate burns in one AN block share a Circuit 4 nullifier.* The preimage is
-    `Poseidon(block_id_fr, tokenId, amount, recipientHi, recipientLo, senderAccFr)` —
-    no `msg_id`. Two identical `initiateWithdrawal` calls in the same block both
-    succeed on AN; the first `withdrawByProof` pays, the second reverts
-    `NullifierAlreadyUsed` and that ECC is stranded. Closing this is a Circuit 4
-    re-keygen. Test: `test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked`.
+12. ~~*Duplicate burns in one AN block share a Circuit 4 nullifier.*~~ **Closed.**
+    The preimage is now `Poseidon(block_id_fr, tokenId, amount, recipientHi,
+    recipientLo, senderAccFr, events_pos)`. Two identical `initiateWithdrawal`
+    calls in the same block occupy different events-tree leaves, so they
+    mint distinct nullifiers. The circuit binds `events_pos` to the Merkle
+    direction bits (heap-index reconstruction), so a custom prover cannot
+    vary a fake position to double-spend one event.
 
 ---
 

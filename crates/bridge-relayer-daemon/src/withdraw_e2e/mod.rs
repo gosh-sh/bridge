@@ -18,7 +18,7 @@
 //!    with a Poseidon transcript at K=19, then
 //!    [`crate::aggregator::SubprocessAggregator`] shells out to
 //!    `aggregate-proof --name BridgeWithdrawalAggregatorVerifier` to produce
-//!    the 22-instance SHPLONK calldata the deployed Yul verifier accepts
+//!    the 23-instance SHPLONK calldata the deployed Yul verifier accepts
 //!    byte-for-byte.
 //!
 //! `run_once` intentionally does **not** touch Ethereum — it returns the

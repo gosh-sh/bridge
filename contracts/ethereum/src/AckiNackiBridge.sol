@@ -32,12 +32,13 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      to the per-layer rolling windows (`_layerWindows`).
 ///      `withdrawByProof` consumes those windows plus a Circuit 4
 ///      (`bridge-event-prove-circuit`) SHPLONK aggregator proof whose
-///      10 public inputs include a single `finalRoot`. The bridge
-///      calls `_isKnownAnchor(finalRoot)` off-circuit (this contract) — the
-///      circuit only proves that the event's hash chain extends *into*
-///      `finalRoot` via a dense-chain extension. The proof binds the
-///      payout's `amount` and `recipient` (split-α 10/10 bytes) along
-///      with the AN-side bridge identity `(bridgeWithdrawalDappFr,
+///      11 public inputs include `finalRoot` and `anchorLayer`. The bridge
+///      calls `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit
+///      (this contract) — the circuit only proves that the event's hash
+///      chain extends *into* `finalRoot` via a dense-chain extension and
+///      range-checks `anchorLayer` into `1..=MAX_LAYER_HASHES`. The proof
+///      binds the payout's `amount` and `recipient` (split-α 10/10 bytes)
+///      along with the AN-side bridge identity `(bridgeWithdrawalDappFr,
 ///      bridgeWithdrawalAccFr)` and a Poseidon nullifier for replay
 ///      protection.
 contract AckiNackiBridge {
@@ -238,13 +239,11 @@ contract AckiNackiBridge {
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
-    ///         recipientLo, senderAccFr)` — it does **not** bind `msg_id`.
-    ///         Two identical burns in one AN block share a nullifier: the
-    ///         first `withdrawByProof` pays, the second reverts
-    ///         `NullifierAlreadyUsed` and that ECC is stranded. Closing
-    ///         this is a Circuit 4 re-keygen (add `msg_id` / `events_pos`
-    ///         to the preimage). The mapping still rejects re-submission
-    ///         of an already-paid proof.
+    ///         recipientLo, senderAccFr, events_pos)` — two identical
+    ///         burns in one AN block take different `events_pos` and
+    ///         therefore different nullifiers (BRIDGE-WD-01).
+    ///         The mapping still rejects re-submission of an already-paid
+    ///         proof.
     ///         Keys must be canonical Fr (`nullifier < BN254_R`); the SHPLONK
     ///         Yul verifier reduces instances `mod BN254_R` (same modulus,
     ///         spelled `f_q` in the auto-generated Yul), so an unreduced
@@ -253,15 +252,8 @@ contract AckiNackiBridge {
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
-    ///         Each `withdrawByProof` checks `finalRoot` against *any* layer
-    ///         window via `_isKnownAnchor` (NB-Q1 2026-08-04 — was previously
-    ///         pinned to L1 via a `WITHDRAW_ANCHOR_LAYER` constant that would
-    ///         `revert UnknownAnchor` for every partner L≥2 witness). Every
-    ///         window entry was written by a verified `verifyBlock`, so the
-    ///         layer index adds specificity, not security. Option A (Circuit 4
-    ///         PI slot `anchorLayer` + range-checked scan of the specific
-    ///         window) remains the ultimate target once the Circuit 4
-    ///         re-keygen lands.
+    ///         Each `withdrawByProof` checks `finalRoot` against the window
+    ///         named by Circuit 4's `anchorLayer` public input (Option A).
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
         /// @dev No longer written. `lastHeight` is the on-chain
@@ -1106,31 +1098,8 @@ contract AckiNackiBridge {
     }
 
     /// @dev Flat membership — true if `anchor` appears in any layer window.
-    ///      This is the anchor check consumed by `withdrawByProof` (NB-Q1
-    ///      2026-08-04): every window entry was written by a verified
-    ///      `verifyBlock`, so the layer index adds specificity, not security.
-    ///      Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan
-    ///      of the specific window) remains the ultimate target once the
-    ///      Circuit 4 re-keygen lands.
-    ///
-    ///      **Soundness widening.** Dropping the layer index means the bridge
-    ///      no longer asserts which layer a withdrawal is anchored in. A
-    ///      Circuit 4 proof whose `finalRoot` equals a layer-2 window entry
-    ///      is accepted even if the withdrawal event was intended to anchor
-    ///      to layer 1 (or vice-versa). Correctness therefore rests entirely
-    ///      on Circuit 4's own binding of `finalRoot` to the event — Option A
-    ///      is what would restore per-layer specificity on-chain.
-    ///
-    ///      **Cost.** `_isKnownLayerAnchor` is O(W) with
-    ///      `HISTORY_PROOF_WINDOW = 128`; this flat scan calls it for all
-    ///      `MAX_LAYER_HASHES = 10` layers, so a miss is up to
-    ///      `10 × 128 = 1280` cold SLOADs (~2.7M gas) — ~10× the single-
-    ///      window scan it replaced — and is paid by the caller whose
-    ///      `withdrawByProof` then reverts. An `mapping(uint256 => bool)`
-    ///      written on append would give O(1) membership; the eviction on
-    ///      window rollover must delete the map entry too, or the map
-    ///      quietly becomes the unbounded bag the window was introduced to
-    ///      avoid.
+    ///      Off-chain helper (`isKnownAnchor`); `withdrawByProof` uses the
+    ///      per-layer scan `_isKnownLayerAnchor(pub.anchorLayer, finalRoot)`.
     function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
             if (_isKnownLayerAnchor(L, anchor)) {
@@ -1257,7 +1226,7 @@ contract AckiNackiBridge {
     ///      identified by `(bridgeWithdrawalDappFr, bridgeWithdrawalAccFr)`,
     ///      anchored — via the proof's dense-chain extension — to a
     ///      `finalRoot` the bridge has previously observed via `verifyBlock`
-    ///      (`_isKnownAnchor(finalRoot) == true`).
+    ///      in the window named by `pub.anchorLayer`.
     ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
     ///      only — `pub.dstChainId == altDstChainId` while
     ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the
@@ -1286,7 +1255,7 @@ contract AckiNackiBridge {
     /// @param proof   Circuit 4 proof bytes accepted by
     ///                `IBridgeWithdrawalVerifier` (Halo2 SHPLONK aggregator
     ///                proof in production).
-    /// @param pub     Public-input slots [0..9]; see `IBridgeWithdrawalVerifier`.
+    /// @param pub     Public-input slots [0..10]; see `IBridgeWithdrawalVerifier`.
     /// @return success Always `true` on a successful payout; reverts on failure.
     function withdrawByProof(
         bytes calldata proof,
@@ -1329,24 +1298,22 @@ contract AckiNackiBridge {
         // rather than reducing-and-keying (that would alias two caller-supplied keys).
         _requireCanonicalFr(pub.nullifier);
         _requireCanonicalFr(pub.finalRoot);
+        _requireCanonicalFr(pub.anchorLayer);
         bytes32 nullifierKey = bytes32(pub.nullifier);
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-        // NB-Q1 (2026-08-04): flat scan across every layer window. Option A
-        // (Circuit 4 PI slot `anchorLayer` + range-checked scan of the
-        // specific window) remains the ultimate target — this unblocks
-        // partner L≥2 witnesses today without waiting for the Circuit 4
-        // re-keygen. Every window entry was written by a verified
-        // `verifyBlock`, so the layer index adds specificity, not security.
-        if (!_isKnownAnchor(pub.finalRoot)) {
+        if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
+            revert InvalidNumLayers(pub.anchorLayer);
+        }
+        if (!_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);
         }
 
-        // ---- Crypto: verify the withdrawal proof. The 10 public inputs flow
-        //      verbatim through the adapter; the anchor check above guards
-        //      against a forged `finalRoot` that the circuit alone cannot
-        //      bind to the bridge's view of AN state.
+        // ---- Crypto: verify the withdrawal proof. The 11 public inputs flow
+        //      verbatim through the adapter; the layer-window check above
+        //      guards against a forged `finalRoot` that the circuit alone
+        //      cannot bind to the bridge's view of AN state.
         bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
         if (!ok) revert WithdrawalProofRejected();
 

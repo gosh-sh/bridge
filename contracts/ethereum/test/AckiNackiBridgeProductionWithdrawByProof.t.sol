@@ -14,8 +14,8 @@ import "../script/ShplonkDeployLib.sol";
 ///         verifier accepts real Poseidon-inner aggregated calldata — i.e. the
 ///         withdraw path is cryptographically real, not a mock.
 /// @dev Mirrors `AckiNackiBridgeProductionVerifyBlockTest` (which covers 1A/1B/2).
-///      The 10 Circuit-4 public inputs are re-exposed inside the calldata at
-///      instance slots [12..21], so we extract `WithdrawalPublicInputs` directly
+///      The 11 Circuit-4 public inputs are re-exposed inside the calldata at
+///      instance slots [12..22], so we extract `WithdrawalPublicInputs` directly
 ///      from the calldata rather than a sidecar file.
 contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     string internal constant WITHDRAWAL_BIN = "verifiers/BridgeWithdrawalAggregatorVerifier.bin";
@@ -71,6 +71,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
         pub.accFr = _word(cd, ACC + 7);
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
+        pub.anchorLayer = _word(cd, ACC + 10);
     }
 
     function test_productionWithdrawal_isolated_verifies() public {
@@ -89,7 +90,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
         );
     }
 
-    /// Tampering a byte in the proof region (past the 22 instance words) makes the
+    /// Tampering a byte in the proof region (past the 23 instance words) makes the
     /// SHPLONK pairing fail -> the Yul verifier reverts.
     function test_productionWithdrawal_tamperedProof_reverts() public {
         require(_artefactsPresent(), "C4 verifier artefacts required");

@@ -34,7 +34,7 @@ test-only.
 **That future has since arrived.** Circuit 4 landed: the inner event snark is produced by
 `export-c4-poseidon-snark` in `bridge-snark-utils`, aggregated by this crate's
 `export-inner-aggregator`, and the result is committed as
-`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (20 990 B, inner `K=19`), which
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 152 B, inner `K=19`), which
 `AckiNackiBridge.withdrawByProof` calls through its adapter. The same pipeline produces the 1A, 1B
 and Circuit-2 verifiers. So the milestone text below (M4 → M7) is a historical record of a plan that
 has since been executed, not a description of pending work.
@@ -105,7 +105,7 @@ Two reasons:
   synthetic inner** (2026-05-29): the aggregator now surfaces the inner PIs
   after the 12 accumulator limbs. The remaining M5 work is purely a data
   swap — replace `multiply::build_multiply_circuit` with Circuit 4's prover
-  (10 PIs) once M4 lands; re-confirm K=21 still fits (bump if not).
+  (11 PIs) once M4 lands; re-confirm K=21 still fits (bump if not).
 - M6 — move the generated Yul/bin into `contracts/ethereum/src/` as
   `BridgeWithdrawalAggregatorVerifier.{sol,bin}` and wire
   `BridgeWithdrawalVerifier.sol` (the adapter) to call it.

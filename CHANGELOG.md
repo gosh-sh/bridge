@@ -24,6 +24,16 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The Circuit 4 (withdrawal) verification key is rotated.** The inner
+  Poseidon preimage now includes `events_pos`, and the public-input vector
+  grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
+  `1..=10`). `withdrawByProof` scans only that layer's window.
+  The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
+  instances; the reference `_calldata.bin` is 3 648 B. Redeploy
+  `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
+  verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
+  not decode.
+
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
   20 the outer circuit did not fit the 14 inner public inputs. The runtime
@@ -34,10 +44,10 @@ assigns it when the release is tagged.
   (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
   warning below.
 
-  The other three keys are **unchanged**: `PrimaryAggregatorVerifier.bin`,
-  `FallbackAggregatorVerifier.bin` and `BridgeWithdrawalAggregatorVerifier.bin`
-  are byte-identical to 0.2.0. Primary's and Fallback's `_calldata.bin` fixtures
-  were re-emitted, which is a test-vector refresh and not a rotation.
+  The other two keys are **unchanged**: `PrimaryAggregatorVerifier.bin`
+  and `FallbackAggregatorVerifier.bin` are byte-identical to 0.2.0.
+  Primary's and Fallback's `_calldata.bin` fixtures were re-emitted, which
+  is a test-vector refresh and not a rotation.
 
 - Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
   **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and

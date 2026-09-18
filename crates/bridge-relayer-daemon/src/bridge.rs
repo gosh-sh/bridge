@@ -455,6 +455,7 @@ mod sol_bindings {
                 uint256 accFr;
                 uint256 nullifier;
                 uint256 finalRoot;
+                uint256 anchorLayer;
             }
 
             function withdrawByProof(
@@ -981,6 +982,7 @@ fn to_sol_withdrawal_pub(
         accFr: pub_inputs.acc_fr,
         nullifier: pub_inputs.nullifier,
         finalRoot: pub_inputs.final_root,
+        anchorLayer: pub_inputs.anchor_layer,
     }
 }
 

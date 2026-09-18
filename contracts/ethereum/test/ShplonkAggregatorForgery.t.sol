@@ -34,7 +34,8 @@ contract ShplonkAggregatorForgeryTest is Test {
                 dappFr: 4,
                 accFr: 5,
                 nullifier: 6,
-                finalRoot: 7
+                finalRoot: 7,
+                anchorLayer: 1
             });
 
         // 256-byte legacy Groth16 stub — wrong shape for SHPLONK aggregator calldata.
@@ -63,7 +64,8 @@ contract ShplonkAggregatorForgeryTest is Test {
                 dappFr: 0,
                 accFr: 1,
                 nullifier: 123,
-                finalRoot: 456
+                finalRoot: 456,
+                anchorLayer: 1
             });
 
         assertTrue(mock.verifyWithdrawal(groth16Stub, pub));

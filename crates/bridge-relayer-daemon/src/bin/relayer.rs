@@ -224,7 +224,7 @@ enum Cmd {
     /// transcript ([`InProcessCircuit4SnarkProver`], NB-Q9 PR-B; supersedes
     /// the historical `export-c4-poseidon-snark --fixture` subprocess),
     /// aggregates the inner snark (`aggregate-proof`, which self-checks the
-    /// regenerated Yul == committed `.bin`), cross-checks the calldata binds
+    /// regenerated Yul source == committed `.sol`), cross-checks the calldata binds
     /// the ten public inputs, and writes a `proof_event` JSON that
     /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
@@ -235,8 +235,8 @@ enum Cmd {
         /// `target/release/aggregate-proof`).
         #[arg(long, env = "AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (the aggregator's
-        /// byte-identity self-check target).
+        /// Directory of committed verifier files (the aggregator self-checks
+        /// against the `.sol` sources).
         #[arg(long, default_value = "../../contracts/ethereum/verifiers")]
         verifiers_dir: PathBuf,
         /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
@@ -387,8 +387,8 @@ enum Cmd {
         /// aggregated calldata, so `daemon-live` refuses to start without it.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (aggregator
-        /// self-check).
+        /// Directory of committed verifier files: `aggregate-proof` self-checks
+        /// against the `.sol`, and the `.bin` is what deploys on chain.
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
         verifiers_dir: PathBuf,
         /// Persistent outer-PK cache directory for the `aggregate-proof`
@@ -489,8 +489,9 @@ enum Cmd {
         /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK pipeline.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (aggregator's
-        /// byte-identity self-check target).
+        /// Directory of committed verifier files: `aggregate-proof`'s
+        /// byte-identity self-check target is the `.sol`; the `.bin` is what
+        /// deploys on chain.
         #[arg(
             long,
             env = "BRIDGE_VERIFIERS_DIR",

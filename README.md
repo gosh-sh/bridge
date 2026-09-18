@@ -77,7 +77,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 | Path | What lives there |
 |---|---|
 | `contracts/ethereum/src/` | The bridge, four verifier adapters, the SHPLONK shim, oracles. Solidity 0.8.19, Foundry. |
-| `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, plus reference calldata. The `.bin` is what deploys. |
+| `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, the generated Solidity source (`.sol`) it compiles from, and reference calldata. The `.bin` is what deploys; the `.sol` is what `aggregate-proof` self-checks a proof against. |
 | `contracts/ethereum/script/` | Deploy scripts; `ShplonkDeployLib.sol` wires `.bin` → shim → typed adapter. |
 | `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT, log binding, keccak coprocessor). |
 | `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, drives the prover, submits `finalizeDeposit` on AN. |
@@ -109,8 +109,8 @@ Run `make check` before pushing.
 
 The end-user withdrawal CLI is not built from here at all —
 [`crates/ackinacki-bridge/scripts/install.sh`](crates/ackinacki-bridge/scripts/install.sh) downloads
-the published binaries (the CLI, the prover subprocess it shells out to, `solc`, and the verifier
-bytecode), so an operator needs neither Rust nor a checkout. Start at
+the published binaries (the CLI, the prover subprocess it shells out to, and the verifier bytecode
+and sources), so an operator needs neither Rust nor a checkout. Start at
 [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md).
 
 Contracts on their own:

@@ -22,6 +22,12 @@ indent_style = space
 indent_size = 4
 max_line_length = 100
 
+# Generated verifiers, pinned byte for byte to what `aggregate-proof` self-checks
+# against and what compiles to the deployed bytecode — never hand-edited.
+[contracts/ethereum/verifiers/*.sol]
+trim_trailing_whitespace = false
+insert_final_newline = false
+
 # TOML files
 [*.toml]
 indent_style = space

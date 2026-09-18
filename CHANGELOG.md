@@ -24,6 +24,41 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`aggregate-proof` self-checks the verifier source, so every verifiers
+  directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
+  the verifier it regenerates and compare bytecode, which is why `solc` had
+  to be on every host that proves. It now compares the generated Solidity
+  source with the committed `contracts/ethereum/verifiers/<name>.sol`. The
+  source is fully determined by the aggregator key, so the check catches the
+  same key drift; the refusal still reads `aggregator VK drift`, now names
+  the first differing line, and says that a `snark-verifier` upgrade can
+  cause it too — in that case regenerate both files of each pair.
+  What has to carry the four `*AggregatorVerifier.sol` files:
+    - a source checkout already does;
+    - the release bundle and the relayer image now ship them — upgrade
+      `aggregate-proof`, the relayer image and a `scripts/install.sh` install
+      together, not one at a time;
+    - a self-deployed verifiers directory (`--verifiers-dir` /
+      `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
+      that `export-inner-aggregator` wrote next to its `.bin`.
+  `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
+  rotated Circuit-4 key and compiles to the committed `.bin`. Because a
+  compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
+  source's keccak256, compiling to the identical `.bin` proves a `.sol` is
+  exactly the source of that `.bin` — which also holds for
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 21`,
+  and for `PrimaryAggregatorVerifier.sol` and
+  `FallbackAggregatorVerifier.sol`, whose keys are unchanged and whose
+  sources were not regenerated for this change. What that leaves unconfirmed
+  is only whether the generator at the current `snark-verifier` pin still
+  reproduces those last two sources from their keys — which the relayer's own
+  former bytecode self-check already established on every aggregation it ran
+  before this change. Watch the first `verifyBlock` cycle of each kind after
+  the upgrade in case a future `snark-verifier` bump changes the generated
+  source.
+- **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
+  meaning — a bootstrap escape hatch for a verifier whose source is not
+  committed yet — with no alias for the old spelling.
 - **The Circuit 4 (withdrawal) verification key is rotated.** The inner
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
@@ -172,6 +207,16 @@ assigns it when the release is tagged.
   `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
+- **`.woodpecker/verifier_sources.yaml` checks that every committed verifier
+  source compiles to its committed bytecode.** Nothing at run time ties the
+  `.sol` a proof is checked against to the `.bin` the bridge deploys, so this
+  pipeline does: on every pull request and push to `main` that touches
+  `contracts/ethereum/verifiers/`, it downloads `solc 0.8.19` pinned by
+  SHA-256 and runs `scripts/check_verifier_sources.sh`, which fails when a
+  `.sol` does not compile to its `.bin` byte for byte, when either half of a
+  pair is missing, or when a `.bin` exceeds EIP-170. Run it locally with
+  `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
+
 ### Changed
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
@@ -256,6 +301,21 @@ assigns it when the release is tagged.
   `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
   witness (real sync committee). Unset committee path still emits a synthetic
   committee for VkBlob-only keygen.
+
+- **The release bundle's `verifiers/` directory includes `*.sol`**, and
+  `scripts/install.sh` installs them and reports a host without
+  `BridgeWithdrawalAggregatorVerifier.sol` as incomplete. Run against a
+  release published before this change, the installer instead warns that
+  the bundle predates verifier sources and reports the verifier files as
+  missing rather than installing an incomplete tree — so
+  `scripts/install.sh` from `main` needs a release built from this change.
+- **Stage 1 of `ackinacki-bridge withdraw` checks
+  `BridgeWithdrawalAggregatorVerifier.sol` in `--verifiers-dir`** against the
+  copy embedded in the build, exactly as it already checks the `.bin`, and
+  `--allow-verifier-drift` now covers both files.
+- **The relayer image's `IMAGE-SHA256SUMS` lists the four verifier `.sol`
+  files** and no longer lists `bin/solc`; `preflight.sh` refuses a verifier
+  lane whose `.sol` is missing.
 
 ### Fixed
 
@@ -443,6 +503,17 @@ assigns it when the release is tagged.
   before `provenQueue` landed. The real diff is 206 lines and `provenQueue` is in
   both.
 
+- **`solc 0.8.19` is no longer a prerequisite of `ackinacki-bridge withdraw`
+  or of the relayer.** Stage 1 no longer probes the compiler or its version.
+  `scripts/install.sh` no longer downloads it and `BRIDGE_SOLC_URL` is gone;
+  the closing `export PATH` line is still printed, but only for the CLI. The
+  relayer image no longer contains `/opt/gosh-relayer/bin/solc`, the
+  `solc_bin` build context and `SOLC_BIN_DIR` are gone from
+  `deploy/shellnet-l2/compose.yaml` and `compose.env.example` — delete
+  `SOLC_BIN_DIR` from your `.env` — and the image preflight no longer checks
+  the compiler version. An installed `solc` can stay; nothing on these paths
+  uses it. Regenerating verifiers (`export-inner-aggregator`,
+  `export-spike-artifacts`) still needs `solc 0.8.19`.
 
 ## [0.2.0] – 2026-09-11
 

@@ -834,7 +834,7 @@ What this means in practice:
 Future enhancements (all already sketched in `bridge-event-witness/src/bin/build.rs` as `TODO(L1→L5 escalation)`):
 
 - **L1→Ln escalation.** When the event's bundle has rolled out of the L1 rolling window, walk up: find the parent L2 key block in `state.layer_windows[1]`, append one active `dense_chain` link to bridge L1→L2 (or further). The in-circuit `verify_chain_of_dense_proofs` already supports up to 11 hops; only the witness builder needs work. Production-shape `real_chain_builder::build_layer_n_tree` is the reference layout.
-- **Wait-for-L2 (or higher) by default.** Today the prover anchors at the *nearest* L1 because that's the soonest. A later policy could prefer a higher layer when latency budget allows, to amortise verifier gas across many events under one anchor.
+- **Wait-for-L2 (or higher) by default.** Shellnet and the intended mainnet profile already anchor at L2 (`BRIDGE_ANCHOR_LEVEL=2`). L1 remains the local/CI `AnchorMode` default and this CLI's compile-time default.
 - **Anchor randomization / batching.** When multiple withdrawals fall under the same layer-N root, the submitter could randomize which of the layer's child roots each proof binds to (anonymity-set behaviour the dropped `circuit4-single-final-root` design used to provide in-circuit). Same goes for amortising several proofs under a shared anchor: pick the highest layer that still covers the freshest event.
 - **Anchor recency policy.** Once L1→Ln escalation lands, the bridge contract needs a rule for the maximum staleness it accepts. Probably exposed as a contract parameter so it can be tightened/loosened without redeploying.
 

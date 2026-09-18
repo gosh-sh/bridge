@@ -424,6 +424,12 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
+**Operator rule.** Attestation `lastSeen` is the live layer cursor
+`storedLastSeenBlockSeqNo`. `storedLastBkSetUpdateSeqNo` is monotonicity
+only — a rotation proof baked against that cursor fails after the first
+`verifyBlock`. If `verifyBlock` advances between prove and submit, re-prove;
+do not treat `AttestationProofRejected` as a consensus bug.
+
 ### 7.4 Read surface for AN state
 
 | View | Line | Returns |

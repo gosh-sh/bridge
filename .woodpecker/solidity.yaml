@@ -1,0 +1,28 @@
+# Compile and test the Ethereum contracts on every GitHub PR.
+#
+# Solidity jobs otherwise live only on the GitLab mirror. A comment-only
+# commit once stripped NatSpec and left a file-level `event` the compiler
+# rejects; both GitHub PR checks stayed green. This pipeline is the gate
+# that would have caught it.
+#
+# Fork tests need a mainnet RPC and stay on GitLab (`FOUNDRY_PROFILE=fork`).
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+steps:
+  forge:
+    image: ubuntu:22.04
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates nodejs npm
+      - curl -L https://foundry.paradigm.xyz | bash
+      - export PATH="${HOME}/.foundry/bin:${PATH}"
+      - foundryup
+      - cd contracts/ethereum
+      - npm install
+      - test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
+      - forge build
+      - forge fmt --check
+      - forge test --no-match-contract Fork

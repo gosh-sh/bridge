@@ -41,8 +41,9 @@
 //!
 //! ### `--anchor-layer` semantics
 //!
-//! * `1` (default, **strict**) — target L1. Wait budget ≤ `W·P − 1` blocks
-//!   (W=128, P=8 → ≤ 1023).
+//! * `1` (**strict**, this CLI's compile-time default) — target L1. Wait
+//!   budget ≤ `W·P − 1` blocks (W=128, P=8 → ≤ 1023). Operational default
+//!   on shellnet/mainnet is L2 via `BRIDGE_ANCHOR_LEVEL=2`, not this flag.
 //! * `n ∈ {2, …, MAX_LAYERS}` (**strict**) — target L(n). Wait budget
 //!   ≤ `W^n − 1` blocks (L2 ≈ 2 h at shellnet cadence; L3 ≈ 12 d).
 //!   Requires `--i-know-the-wait` to guard against surprise multi-hour
@@ -180,10 +181,10 @@ impl CliArgs {
             partial_witness.ok_or_else(|| anyhow::anyhow!("--partial-witness is required"))?;
         let out = out.ok_or_else(|| anyhow::anyhow!("--out is required"))?;
 
-        // Resolve anchor_mode from the two flags. Default is explicit L1
-        // (kept for backwards compat with the existing Python drivers
-        // that pass `--layer-idx 0`). Auto-escalation is strictly opt-in
-        // via `--anchor-layer auto`.
+        // Resolve anchor_mode from the two flags. This CLI still defaults
+        // to explicit L1 (Python drivers that pass `--layer-idx 0`). The
+        // daemons' operational default is L2 via env. Auto-escalation is
+        // `--anchor-layer auto`.
         let anchor_mode: AnchorLayerMode = match (anchor_mode_arg, layer_idx_0indexed) {
             (Some(AnchorLayerMode::Auto), Some(_)) => bail!(
                 "--anchor-layer auto cannot be combined with --layer-idx. \

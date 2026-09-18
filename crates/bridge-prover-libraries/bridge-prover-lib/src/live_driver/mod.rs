@@ -232,9 +232,9 @@ pub type DriverResult<T> = Result<T, DriverError>;
 /// CLI knobs, no verifier timeouts — those all live with the caller.
 #[derive(Debug, Clone)]
 pub struct LiveProverConfig {
-    /// Anchor-level mode. See [`crate::AnchorMode`]. Default is
-    /// [`crate::AnchorMode::L1`]; opt in to
-    /// [`crate::AnchorMode::L2`] to switch the driver onto the
+    /// Anchor-level mode. See [`crate::AnchorMode`]. The struct default is
+    /// [`crate::AnchorMode::L1`] (local/CI); shellnet sets
+    /// [`crate::AnchorMode::L2`] via `BRIDGE_ANCHOR_LEVEL=2`, the
     /// supercritical W²-stride schedule described in
     /// `docs/l2_anchoring_proposal.md`.
     ///

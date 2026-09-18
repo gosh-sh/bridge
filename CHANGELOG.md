@@ -302,6 +302,16 @@ assigns it when the release is tagged.
 - After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
   reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
   (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.
+- GitHub Woodpecker now `forge build` + `fmt --check` +
+  `forge test --no-match-contract Fork` on every PR. Solidity compile
+  used to live only on the GitLab mirror, so a broken head could stay
+  mergeable on GitHub.
+- L2 anchoring is the shellnet operational default (Deploy #12), not
+  smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
+  stays L1 for local/CI.
+- Spec §7.3 states the QC-A2-2 rule: `applyBkSetUpdate` attestation
+  `lastSeen` is the live layer cursor. Re-prove if `verifyBlock` advances
+  between prove and submit.
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`

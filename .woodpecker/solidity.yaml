@@ -21,10 +21,11 @@ steps:
     commands:
       - apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates nodejs npm
       - curl -L https://foundry.paradigm.xyz | bash
-      # Shell variables stay unbraced. Woodpecker expands `${...}` from its own
-      # metadata before the container sees the script, and neither HOME nor PATH
-      # is one of its variables, so the braced form resolved to an empty string
-      # and wiped PATH for every later command in the step.
+      # Shell variables stay unbraced. Woodpecker expands the braced form from
+      # its own metadata before the container sees the script, and neither HOME
+      # nor PATH is one of its variables, so braces here resolved to an empty
+      # string and wiped PATH for every later command in the step. Keep braced
+      # sequences out of this file entirely, comments included.
       - export PATH="$FOUNDRY_DIR/bin:$PATH"
       - foundryup
       # Fail here, not four commands later, if the toolchain did not land.

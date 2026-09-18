@@ -375,12 +375,8 @@ contract AckiNackiBridgeAaveTest is Test {
         uint256 oldOwnerBefore = usdc.balanceOf(compromised);
         vm.prank(user2);
         bridge.harvestYield(300_000);
-        assertEq(
-            usdc.balanceOf(user2), newOwnerBefore + 300_000, "harvest follows new owner"
-        );
-        assertEq(
-            usdc.balanceOf(compromised), oldOwnerBefore, "old owner must not receive yield"
-        );
+        assertEq(usdc.balanceOf(user2), newOwnerBefore + 300_000, "harvest follows new owner");
+        assertEq(usdc.balanceOf(compromised), oldOwnerBefore, "old owner must not receive yield");
     }
 
     function test_acceptOwnership_keepsExplicitYieldRecipient() public {

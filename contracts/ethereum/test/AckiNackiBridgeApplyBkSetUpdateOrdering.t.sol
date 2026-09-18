@@ -141,11 +141,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
 
         assertEq(bridge.storedBkSetCommitment(), L3, "commitment rotated");
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), N, "update cursor advanced");
-        assertEq(
-            bridge.storedLastSeenBlockSeqNo(),
-            N,
-            "rotation must not advance the layer cursor"
-        );
+        assertEq(bridge.storedLastSeenBlockSeqNo(), N, "rotation must not advance the layer cursor");
     }
 
     // -----------------------------------------------------------------
@@ -193,9 +189,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         _primeLayerCursor(N);
         assertEq(bridge.storedLastSeenBlockSeqNo(), N);
         assertEq(
-            bridge.storedBkSetCommitment(),
-            L2,
-            "OLD commitment survived the reverted rotation"
+            bridge.storedBkSetCommitment(), L2, "OLD commitment survived the reverted rotation"
         );
 
         // Now the rotation goes through.
@@ -245,9 +239,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         uint256 root = _merkleRoot(L2, L3);
         uint64 target = N + 3;
         vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, target, N
-            )
+            abi.encodeWithSelector(AckiNackiBridge.VerifyBlockLagBehindRotation.selector, target, N)
         );
         _applyPrimary(root, target, L2, L3);
 
@@ -290,9 +282,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         );
     }
 
-    function _applyPrimary(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3)
-        internal
-    {
+    function _applyPrimary(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
             hex"00",
@@ -306,9 +296,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         );
     }
 
-    function _applyFallback(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3)
-        internal
-    {
+    function _applyFallback(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Fallback,
             hex"00",

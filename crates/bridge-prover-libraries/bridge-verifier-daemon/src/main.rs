@@ -915,20 +915,18 @@ fn finalize_bk_update_failure(seq_no: u32, msg: &str, last_seen: &mut u32) {
 // Circuit 4 (event proof) verification
 // =====================================================================
 //
-// The verifier daemon models the future Ethereum bridge contract. Circuit 4
-// publishes exactly 10 public instances:
+// The verifier daemon models the Ethereum bridge contract. Circuit 4
+// publishes exactly 11 public instances:
 //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-//    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]
-// The 9 leading slots are bound to the proof by the circuit. The last
-// slot, `final_root`, is the single Poseidon root the prover committed to;
+//    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
+// The 10 leading slots are bound to the proof by the circuit. Slot 9,
+// `final_root`, is the single Poseidon root the prover committed to;
+// slot 10 is the 1-indexed layer whose window the contract scans.
 
 //
 // Acceptance gate: the daemon does an off-circuit membership check —
-// `final_root` must appear somewhere in the daemon's currently mirrored
-// `state.flatten_layer_hashes()` (= `MAX_LAYERS × W` = 10 × 128 = 1280
-// entries, where `W = HISTORY_PROOF_WINDOW_SIZE`). This mirrors the
-// contract sketch in `acki-nacki-to-eth-bridge-halo2-circuits/README.md`
-// lines 810-853 (`submitWithdrawalProof`).
+// `final_root` must appear in the window named by `anchor_layer`
+// (`1..=MAX_LAYERS`), matching `AckiNackiBridge._isKnownLayerAnchor`.
 //
 // TBD: the daemon does not yet enforce a `proven[]` map against the
 // `nullifier` slot (replay protection), and `recipient_{hi,lo}` are not
@@ -963,7 +961,7 @@ struct EventProofResult<'a> {
     /// Final accept/reject. `verified == anchor_matched && proof_valid`.
     verified: bool,
     /// Whether the proof's `final_root` (public instance slot 9) was found
-    /// in the daemon's current `flatten_layer_hashes()` snapshot.
+    /// in the window named by `anchor_layer` (slot 10).
     anchor_matched: bool,
     /// Whether the halo2 verifier accepted the proof against the event
     /// VK and the supplied public instances. Not run if anchor mismatched.
@@ -1088,10 +1086,8 @@ fn process_event_proof(
 
     // Public instance layout (per `event_verifier.rs`):
     //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]
-    // The circuit now publishes a single `final_root` slot; the verifier
-    // checks it off-circuit against `state.flatten_layer_hashes()` below.
-    let expected_num_instances = 10;
+    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
+    let expected_num_instances = 11;
     if file.public_instances_hex.len() != expected_num_instances {
         let msg = format!(
             "expected {} public instances, got {}",
@@ -1121,18 +1117,24 @@ fn process_event_proof(
 
     // ---- Anchor check (the "current bridge state" gate) ----
     //
-    // The circuit publishes a single `final_root` (instance slot 9). The
-    // verifier accepts the proof iff that root matches one of the layer
-    // hashes the daemon currently mirrors in `state.layer_windows` — the
-    // off-circuit replacement for the old in-circuit candidate vector.
-    let current_hashes = state.flatten_layer_hashes();
-    debug_assert_eq!(current_hashes.len(), MAX_LAYERS * state.window_size);
+    // Option A: `final_root` (slot 9) must sit in the window named by
+    // 1-indexed `anchor_layer` (slot 10). Mirrors
+    // `AckiNackiBridge._isKnownLayerAnchor`.
+    let layer_repr: [u8; 32] = instances[10].to_repr();
+    let layer_canonical = layer_repr[1..].iter().all(|&b| b == 0);
+    let layer = layer_repr[0];
     let final_root_bytes: [u8; 32] = instances[9].to_repr();
-    let anchor_matched = current_hashes.iter().any(|h| *h == final_root_bytes);
+    let anchor_matched = layer_canonical
+        && (1..=MAX_LAYERS as u8).contains(&layer)
+        && state
+            .window(layer)
+            .iter_chronological()
+            .any(|(h, _)| h == final_root_bytes);
     if !anchor_matched {
         let msg = format!(
-            "anchor mismatch — final_root {} not found in current layer_windows",
+            "anchor mismatch — final_root {} not found in layer {} window",
             hex::encode(final_root_bytes),
+            layer,
         );
         warn!("event {}: {}", seq_no, msg);
         let result = EventProofResult {

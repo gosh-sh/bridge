@@ -9,7 +9,7 @@ import "./ShplonkAggregatorVerifierBase.sol";
 contract PrimaryAggregatorVerifier is IPrimaryVerifier, ShplonkAggregatorVerifierBase {
     uint256 private constant NUM_INNER = 4;
 
-    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) {}
+    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
 
     function verifyPrimaryAttestation(
         bytes calldata proof,

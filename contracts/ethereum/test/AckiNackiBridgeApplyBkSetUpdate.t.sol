@@ -36,7 +36,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     bytes32 internal constant SIB_H4_7 = bytes32(uint256(0x5678));
     bytes32 internal constant SIB_H8_15 = bytes32(uint256(0x9ABC));
 
-    event BkSetUpdated(uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo);
+    event BkSetUpdated(
+        uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
+    );
 
     function setUp() public {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
@@ -47,6 +49,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         primary.setShouldAccept(true);
         fallbackVerifier.setShouldAccept(true);
+        layer.setShouldAccept(true);
 
         AckiNackiBridge.VerifyBlockConfig memory vb = VerifyBlockConfigLib.with(
             IPrimaryVerifier(address(primary)),
@@ -67,6 +70,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_happyPath() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
 
         vm.expectEmit(true, true, true, true);
@@ -95,6 +99,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         to be below the field order already, so the `Fr` reduction is a
     ///         no-op here and the vector stays a pure statement about the fold.
     function test_applyBkSetUpdate_matchesOffChainVector() public {
+        _primeLayerCursor(SEQ);
         bytes32 h01 =
             bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
         bytes32 h4_7 =
@@ -125,6 +130,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         about the fold depth and not about field canonicality (which
     ///         `test_applyBkSetUpdate_rejectsUnreducedRoot` covers separately).
     function test_applyBkSetUpdate_rejectsLegacyDepth3Root() public {
+        _primeLayerCursor(SEQ);
         bytes32 h23 = sha256(abi.encodePacked(_le(L2), _le(L3)));
         uint256 legacyRoot = uint256(
             sha256(abi.encodePacked(sha256(abi.encodePacked(SIB_H01, h23)), SIB_H4_7))
@@ -148,6 +154,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         single argument satisfies both for the other ~81% of rotations —
     ///         this fixture's root among them — and the entry point is dead.
     function test_applyBkSetUpdate_reducesRootIntoFieldBeforeComparing() public {
+        _primeLayerCursor(SEQ);
         uint256 rawRoot = _rawMerkleRoot(L2, L3);
         assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
 
@@ -156,19 +163,38 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         assertEq(bridge.storedBkSetCommitment(), L3);
     }
 
-    /// @notice The mirror of the above: the raw root is what the fold literally
-    ///         produces, and it is still not a valid `blockId`. No circuit can
-    ///         have committed to it, so the attestation gate rejects it before
-    ///         the fold is even reached.
+    /// @notice Unreduced `blockId` is rejected at the canonical-Fr gate,
+    ///         before attestation or the SHA fold.
     function test_applyBkSetUpdate_rejectsUnreducedRoot() public {
+        _primeLayerCursor(SEQ);
         uint256 rawRoot = _rawMerkleRoot(L2, L3);
         assertGe(rawRoot, R, "fixture must exercise the non-canonical root case");
 
-        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, rawRoot)
+        );
         _apply(rawRoot, SEQ, L2, L3);
     }
 
+    function test_applyBkSetUpdate_rejectsUnreducedNewCommitment() public {
+        _primeLayerCursor(SEQ);
+        uint256 poisoned = L3 + R;
+        uint256 blockId = _merkleRoot(L2, poisoned);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, poisoned)
+        );
+        _apply(blockId, SEQ, L2, poisoned);
+    }
+
+    function test_applyBkSetUpdate_rejectsZeroNewCommitment() public {
+        _primeLayerCursor(SEQ);
+        uint256 blockId = _merkleRoot(L2, 0);
+        vm.expectRevert(AckiNackiBridge.ZeroBkSetCommitment.selector);
+        _apply(blockId, SEQ, L2, 0);
+    }
+
     function test_applyBkSetUpdate_revertsOnMerkleMismatch() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
 
         vm.expectRevert(
@@ -180,6 +206,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsWhenAttestationRejected() public {
+        _primeLayerCursor(SEQ);
         primary.setShouldAccept(false);
         uint256 blockId = _merkleRoot(L2, L3);
 
@@ -198,6 +225,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsOnReplay() public {
+        _primeLayerCursor(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
         _apply(blockId, SEQ, L2, L3);
 
@@ -210,6 +238,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_revertsOnNonMonotonicSeqNo() public {
+        _primeLayerCursor(SEQ);
         uint256 l4 = 0xC0FFEE;
         uint256 secondBlockId = _merkleRoot(L3, l4);
 
@@ -222,6 +251,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function test_applyBkSetUpdate_chainsTwoRotations() public {
+        _primeLayerCursor(SEQ + 1);
         uint256 l4 = 0xC0FFEE;
 
         _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
@@ -229,6 +259,78 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
 
         assertEq(bridge.storedBkSetCommitment(), l4);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ + 1);
+    }
+
+    /// @notice After `verifyBlock` the two cursors diverge. The attestation
+    ///         `lastSeen` argument must be the live layer cursor, not the
+    ///         BK-update monotonicity cursor. The mock asserts the value.
+    function test_applyBkSetUpdate_afterVerifyBlock_usesLayerCursor() public {
+        // Prime the layer cursor to exactly SEQ so the ordering invariant
+        // (BRIDGE-ETH-WD-2, `blockSeqNo <= storedLastSeenBlockSeqNo`) holds
+        // at the equality boundary. The two cursors still diverge —
+        // BK-update cursor is 0, layer cursor is SEQ — which is what this
+        // test pins.
+        _submitLayerBundle(SEQ);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), SEQ);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), 0);
+
+        primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastSeenBlockSeqNo());
+        _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
+
+        assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ);
+        assertEq(
+            bridge.storedLastSeenBlockSeqNo(), SEQ, "rotation does not advance the layer cursor"
+        );
+    }
+
+    /// @notice Baking the BK-update cursor (0 here) after a `verifyBlock`
+    ///         must fail the same way a real adapter would.
+    function test_applyBkSetUpdate_afterVerifyBlock_rejectsBkUpdateCursor() public {
+        // Prime the layer cursor to SEQ so this test isolates the mock's
+        // `lastSeen` mismatch — otherwise the BRIDGE-ETH-WD-2 ordering guard
+        // would fire first with `VerifyBlockLagBehindRotation` instead of
+        // reaching the attestation adapter.
+        _submitLayerBundle(SEQ);
+        uint256 blockId = _merkleRoot(L2, L3);
+        primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastBkSetUpdateSeqNo());
+
+        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        bridge.applyBkSetUpdate(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            blockId,
+            SEQ,
+            L2,
+            L3,
+            SIB_H01,
+            SIB_H4_7,
+            SIB_H8_15
+        );
+    }
+
+    /// @dev Fast-forward `storedLastSeenBlockSeqNo` to `target` so a subsequent
+    ///      `applyBkSetUpdate(target)` satisfies the BRIDGE-ETH-WD-2 ordering
+    ///      invariant. Wraps `_submitLayerBundle` so tests read like
+    ///      "prime cursor, then apply".
+    function _primeLayerCursor(uint64 target) internal {
+        _submitLayerBundle(target);
+    }
+
+    function _submitLayerBundle(uint64 seqNo) internal {
+        uint256[10] memory layers;
+        layers[0] = 1;
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            hex"00",
+            1,
+            L2,
+            seqNo,
+            1,
+            layers,
+            bridge.expectedPrevAnchor(1)
+        );
     }
 
     function _apply(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
@@ -242,6 +344,103 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             SIB_H01,
             SIB_H4_7,
             SIB_H8_15
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The constructor answers to the same invariant as rotation
+    // -----------------------------------------------------------------
+
+    function test_eth20_constructorRejectsZeroGenesisCommitment() public {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(0, 0);
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+
+        vm.expectRevert(AckiNackiBridge.ZeroBkSetCommitment.selector);
+        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+    }
+
+    function test_eth20_constructorRejectsNonCanonicalGenesisCommitment() public {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(R, 0);
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R));
+        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+    }
+
+    function test_eth20_constructorRejectsNonCanonicalGenesisPrevAnchor() public {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(L2, R + 1);
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R + 1)
+        );
+        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+    }
+
+    /// @dev Zero is a legal prev anchor — a first block may genuinely carry it.
+    ///      Only canonicity is required, so this must still deploy.
+    function test_eth20_constructorAllowsZeroGenesisPrevAnchor() public {
+        AckiNackiBridge deployed = _deployWithGenesis(L2, 0);
+        assertEq(deployed.storedPrevMaxLevelLayerHash(), 0);
+        assertEq(deployed.storedBkSetCommitment(), L2);
+    }
+
+    /// @dev The guard is scoped to a wired `verifyBlock`. With the verifiers
+    ///      absent there is no anchor to be canonical, and the all-zero
+    ///      configuration must keep deploying (verifyBlock wiring unchanged).
+    function test_eth20_constructorAllowsZeroGenesisWhenVerifyBlockDisabled() public {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+
+        AckiNackiBridge deployed = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.disabledWithdraw()
+        );
+
+        assertEq(deployed.storedBkSetCommitment(), 0);
+    }
+
+    /// @dev Deploys the dependencies and returns the config, so a test can put
+    ///      `vm.expectRevert` immediately before `new AckiNackiBridge` — it
+    ///      applies to the next call, and a mock deployment would absorb it.
+    function _genesisFixture(uint256 commitment, uint256 prevAnchor)
+        internal
+        returns (address, address, AckiNackiBridge.VerifyBlockConfig memory)
+    {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        MockPrimaryVerifier p = new MockPrimaryVerifier();
+        MockFallbackVerifier f = new MockFallbackVerifier();
+        MockLayerHashesMovementVerifier l = new MockLayerHashesMovementVerifier();
+
+        return (
+            address(oracle),
+            address(usdc),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(p)),
+                IFallbackVerifier(address(f)),
+                ILayerHashesMovementVerifier(address(l)),
+                commitment,
+                prevAnchor
+            )
+        );
+    }
+
+    function _deployWithGenesis(uint256 commitment, uint256 prevAnchor)
+        internal
+        returns (AckiNackiBridge)
+    {
+        (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
+            _genesisFixture(commitment, prevAnchor);
+        return new AckiNackiBridge(
+            oracle, usdc, address(0), address(0), vb, VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 

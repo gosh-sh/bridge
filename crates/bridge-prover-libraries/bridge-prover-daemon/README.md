@@ -130,8 +130,8 @@ wipe must happen on both together, otherwise they diverge silently.
 At ~3 blk/s a key block lands every `W/3 ≈ 43 s`, but Circuit 1A alone
 takes ~5 min and its cost is invariant in `W`. Without help, the prover
 falls behind the chain by ~7×. **Thinning** is the fix: relay only
-*every P-th* key block (`P = 4` here), so each bundle covers `W·P =
-512` source blocks. The work skipped is absorbed by Circuit 2's
+*every P-th* key block (`P = 8` here), so each bundle covers `W·P =
+1024` source blocks. The work skipped is absorbed by Circuit 2's
 dense-Poseidon proof chain — up to `MAX_CHAIN_LEN = 11` links, freely
 interleaving three primitives on the layer trees: *climb* (jump to a
 lower layer at the same window), *forward* (advance one full window at

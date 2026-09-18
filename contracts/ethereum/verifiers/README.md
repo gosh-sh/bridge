@@ -2,17 +2,28 @@
 
 Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefacts. 
 
-Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-08-18**, the same
-metric `scripts/check_eip170_verifier_bins.sh` uses. Two of them had drifted from the figures this
-table carried since 2026-06-22 (Primary 21 493 → 21 494, Withdrawal 20 987 → 20 990), because the
-artefacts were regenerated on 2026-08-13 and the table was not.
+Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-09-18**, the same
+metric `scripts/check_eip170_verifier_bins.sh` uses. Every figure a table here has carried has at
+some point drifted from the artefacts (Primary 21 493 → 21 494 and Withdrawal 20 987 → 20 990 when
+they were regenerated on 2026-08-13; Layer hashes 19 100 → 23 111; Withdrawal 20 990 → 21 152
+when Circuit 4 grew an 11th public input, see below), so re-measure rather than trusting the row.
 
 | File | Circuit | Inner PIs | Size | EIP-170 (24 576 B) |
 |------|---------|-----------|------|--------------------|
 | `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | 21 494 B | OK |
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 493 B | OK (K=21 inner) |
-| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 19 100 B | OK |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 10 | 20 990 B | OK (K=19 inner) |
+| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 23 111 B | OK (k_outer=21) |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 11 | 21 152 B | OK (K=19 inner) |
+
+Layer hashes grew because the aggregator was re-keygen'd at `k_outer=21`: at `k_outer=20` the
+outer circuit did not fit the 14 inner public inputs. The margin to EIP-170 is 1 465 B, the
+tightest of the four — regenerate with the size gate in the loop, not after it.
+
+Every size is also pinned in `SIZES`, next to `SHA256SUMS`, and
+`scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (layer hashes
+warns today, at 94%). That is deliberate: past the limit `CREATE` returns the zero address and
+`deployYulFromBin` reverts `YulDeployFailed`, so growth has to be visible in a diff rather than in
+a failed deploy. Regenerating an artefact means updating `SIZES` in the same commit.
 
 Each also ships a `*_calldata.bin` reference fixture (`instances ‖ proof`) and its generated Solidity
 source, `<name>.sol`. The two roles are different and both matter:
@@ -37,8 +48,9 @@ regenerate both files, not to suspect the key. Regeneration compiles the source,
 `solc 0.8.19` on `PATH`.
 
 Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
-is keygen'd at `K=19`; the aggregated Yul is 20 987 B (22 outer instances = 12 KZG accumulator
-limbs + 10 re-exposed Circuit-4 public inputs). Landed 2026-07-07 (M4).
+is keygen'd at `K=19`; the aggregated Yul is 21 152 B (23 outer instances = 12 KZG accumulator
+limbs + 11 re-exposed Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`).
+Rotated 2026-09-18 for the `events_pos` nullifier preimage and Option A layer pin.
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation
@@ -98,5 +110,7 @@ SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh contracts/ethereum/v
 ```
 
 Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
+
+Hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing` (all four pairs). CREATE `extcodehash` pins are in `ShplonkDeployLib`.
 
 M2 multiply spike fixtures live under `test/fixtures/r15_spike/` for Foundry only — **not** valid production verifiers.

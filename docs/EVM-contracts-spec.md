@@ -40,12 +40,12 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/IPrimaryVerifier.sol` | 36 | Circuit 1A (primary attestation) verifier interface — 4 PIs. |
 | `src/IFallbackVerifier.sol` | 33 | Circuit 1B (fallback attestation) verifier interface — 4 PIs. |
 | `src/ILayerHashesMovementVerifier.sol` | 45 | Circuit 2 (layer-hash movement) interface — 14 PIs. |
-| `src/IBridgeWithdrawalVerifier.sol` | 67 | Circuit 4 (bridge withdrawal event) interface — 10 PIs. |
+| `src/IBridgeWithdrawalVerifier.sol` | 77 | Circuit 4 (bridge withdrawal event) interface — 11 PIs. |
 | `src/ShplonkAggregatorVerifierBase.sol` | 32 | Shared adapter base: instance reader + SHPLONK dispatch. |
 | `src/PrimaryAggregatorVerifier.sol` | 30 | 1A adapter (instances[12..15] ↔ args). |
 | `src/FallbackAggregatorVerifier.sol` | 30 | 1B adapter (instances[12..15] ↔ args). |
 | `src/LayerHashesAggregatorVerifier.sol` | 34 | Circuit-2 adapter (instances[12..25] ↔ args). |
-| `src/BridgeWithdrawalAggregatorVerifier.sol` | 40 | Circuit-4 adapter (instances[12..21] ↔ `pub`). |
+| `src/BridgeWithdrawalAggregatorVerifier.sol` | 44 | Circuit-4 adapter (instances[12..22] ↔ `pub`). |
 | `src/ShplonkHalo2Verifier.sol` | 31 | `staticcall` shim onto CREATE-deployed Yul verifier bytecode. |
 | `src/IShplonkHalo2Verifier.sol` | 7 | `verify(bytes) → bool`. |
 | `src/IBlockHeaderOracle.sol` | 27 | Block-hash oracle interface. |
@@ -84,7 +84,7 @@ flowchart TB
     LOG -->|"MPT receipt proof"| DP["deposit-prover (off-chain Halo2)"]
     DP -->|"SHPLONK proof + 12 PIs"| AN["AN USDCBridge.finalizeDeposit"]
     AN -.->|"WithdrawalInitiated event"| C4P["AN-side prover (Circuit 4)"]
-    C4P -.->|"proof + 10 PIs"| R
+    C4P -.->|"proof + 11 PIs"| R
 ```
 
 Two independent directions:
@@ -165,14 +165,17 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:100-104`
 ```solidity
 struct HistoryWindow {
     uint256[128] data;      // layer-hash values, circular
-    uint64[128]  heights;   // AN blockSeqNo per entry, circular
+    uint64[128]  heights;   // ABI-stable, always zero; seq_nos are in LayerAnchorAppended
     uint16 dataLen;         // saturating fill level, capped at 128
     uint16 writeCursor;     // next write index
     uint64 lastHeight;      // height of the most recent append
 }
 ```
 
-One window per layer `L ∈ [1, 10]`, in `_layerWindows`. This is the **authoritative** AN-state store;
+One window per layer `L ∈ [1, 10]`, in `_layerWindows`. `heights` is ABI-stable but
+**not written** on `verifyBlock` — `lastHeight` is the monotonicity guard, and
+per-slot seq_nos are in `LayerAnchorAppended`. The relayer paints `heights` from
+those logs on resurrect. This is the **authoritative** AN-state store;
 the flat `storedNumLayers` / `storedLayerHashes[10]` cache was removed in storage v2.0 along with the
 per-block `storedPrevMaxLevelLayerHash` SSTORE (`:629-633`, ≈ 32 k gas/call saved).
 
@@ -205,6 +208,7 @@ Validation performed (and *not* performed):
 | `_usdc != 0` | 518 | else `InvalidUsdc` |
 | AAVE pair is all-or-nothing | 521-523 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 542-546 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:504-506` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
+| C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
 | `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:122`). |
 | verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:662-667`). |
 
@@ -357,22 +361,18 @@ back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTr
 
 Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1227-1231`).
 
-**Anchor semantics.** `_isKnownAnchor` (`:1034-1041`) scans *every* layer window `L = 1..10` and
-returns true on the first hit. This is deliberate (NB-Q1, 2026-08-04): pinning the check to layer 1
-made every partner witness anchored at `L ≥ 2` revert. Two consequences documented in the code
-itself (`:1016-1033`):
-
-* *Soundness widening* — the bridge no longer asserts which layer a withdrawal is anchored in.
-  Correctness rests entirely on Circuit 4's own binding of `finalRoot` to the event. The intended
-  end state ("Option A") is a C4 public-input slot `anchorLayer` plus a range-checked scan of that
-  one window, blocked on a C4 re-keygen.
-* *Cost* — a miss costs up to `10 × 128 = 1280` cold SLOADs (≈ 2.7 M gas), paid by the caller whose
-  call then reverts.
+**Anchor semantics.** `_isKnownLayerAnchor` (`src/AckiNackiBridge.sol`) scans
+only the window named by Circuit 4's 1-indexed `anchorLayer` public input
+(`1..=MAX_LAYER_HASHES`, also range-checked in-circuit). A proof whose
+`finalRoot` sits in a different layer's window is rejected (`UnknownAnchor`),
+even if that root is a genuine `verifyBlock` anchor. A miss costs at most
+128 cold SLOADs, paid by the caller whose call then reverts.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
 (or its scoped alias), so the same proof cannot be replayed on a second deployment. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
-on a deployment whose host chain is not the configured one.
+on a deployment whose host chain is not the configured one. The Circuit 4 preimage does not bind
+`msg_id`, so two identical burns in one AN block share a nullifier (trade-off 12).
 
 ### 7.3 `applyBkSetUpdate` — rotate the BK-set commitment
 
@@ -419,6 +419,12 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
+**Operator rule.** Attestation `lastSeen` is the live layer cursor
+`storedLastSeenBlockSeqNo`. `storedLastBkSetUpdateSeqNo` is monotonicity
+only — a rotation proof baked against that cursor fails after the first
+`verifyBlock`. If `verifyBlock` advances between prove and submit, re-prove;
+do not treat `AttestationProofRejected` as a consensus bug.
+
 ### 7.4 Read surface for AN state
 
 | View | Line | Returns |
@@ -459,7 +465,7 @@ Proof calldata is `instances (12 accumulator + N inner) ‖ snark_proof`. Each a
 |---|---:|---|
 | `PrimaryAggregatorVerifier` / `FallbackAggregatorVerifier` | 4 | 12 `blockId`, 13 `bkSetCommitment`, 14 `blockSeqNo`, 15 `lastSeenBlockSeqNo` |
 | `LayerHashesAggregatorVerifier` | 14 | 12 `blockId`, 13 `bkSetCommitment`, 14 `numLayers`, 15–24 `layerHashes[0..9]`, 25 `prevMaxLevelLayerHash` |
-| `BridgeWithdrawalAggregatorVerifier` | 10 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot` |
+| `BridgeWithdrawalAggregatorVerifier` | 11 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer` |
 
 All four are `view` and return `bool` — reverts inside the Yul verifier surface as `false`
 because `ShplonkHalo2Verifier.verify` captures only the `staticcall` success flag (`:29`).
@@ -477,8 +483,8 @@ contract's fallback entrypoint via `staticcall`.
 |---|---|---:|---:|---:|
 | `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 494 | 3 840 |
 | `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 493 | 3 840 |
-| `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 19 100 | 3 072 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 (inner K=19) | 10 | 20 990 | 3 616 |
+| `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 23 111 | 4 160 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 (inner K=19) | 11 | 21 152 | 3 648 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
@@ -527,9 +533,9 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 |---|---:|---|
 | `supplyToAave(amount)` | 1240 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal += toSupply`. |
 | `withdrawFromAave(amount)` | 1258 | Pull back up to `suppliedPrincipal` preemptively. |
-| `emergencyWithdrawAll()` | 1270 | Sets `aaveEnabled = false`, withdraws `type(uint256).max`, zeroes `suppliedPrincipal`. Payouts stay available. |
-| `harvestYield(amount)` | 1287 | `amount ≤ accruedYield()`; withdraws from AAVE and transfers the *received* amount to `yieldRecipient`. |
-| `skimExcessUsdc(amount)` | 1315 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
+| `emergencyWithdrawAll()` | 1477 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
+| `harvestYield(amount)` | 1497 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. |
+| `skimExcessUsdc(amount)` | 1525 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
 | `setAaveEnabled(bool)` | 1328 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
 | `setLiquidReserveBps(bps)` | 1335 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
 | `setYieldRecipient(addr)` | 1341 | Non-zero. |
@@ -634,16 +640,26 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle`, else mock. |
 | `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | Deploy + wire the 1A/1B/2 triple. |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:132`, unconditional). On mainnet the value is `envBool` with no default (`:129`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned**. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
-| `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). |
+| `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
+
+When a verification key rotates, deploy the new Yul verifier (and confirm its
+`extcodehash` against `ShplonkDeployLib`) **before** pointing the live bridge at
+it. `DeployRealBridge` does this in one broadcast — Yul, then adapter, then the
+bridge constructor — so a first-time deploy cannot invert the order. A later
+rotation of a live bridge is not scripted: cut the verifier over first, then
+the bridge's immutable verifier address (which means a new bridge, or waiting
+for an upgrade path). Pointing the bridge at a key that is not on-chain first
+makes every `verifyBlock` revert `YulCodehashMismatch` or call the zero
+address.
 
 ### 12.3 Hard-coded addresses
 
@@ -684,12 +700,12 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
-| `AckiNackiBridgeWithdrawByProof.t.sol` (30) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, treasury shortfall, byte-for-byte PI forwarding. |
+| `AckiNackiBridgeWithdrawByProof.t.sol` (31) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, same-block duplicate-burn pin, treasury shortfall, byte-for-byte PI forwarding. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
 | `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
 | `AckiNackiBridgeRelayerLoop.t.sol` (6) | 10-block mixed-finType walk, restart, replay, fast-forward, verifier-reject leaves state untouched, anchor mismatch. |
-| `EthAuditQcHardening.t.sol` (4) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths. |
+| `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
 | `ShplonkAggregatorForgery.t.sol` (3) | Groth16-stub proof rejected by the SHPLONK path. |
 | `ShplonkDeployLib.t.sol`, `ShplonkSpikeOnChain.t.sol` (4) | Wrapper accepts/rejects spike calldata (`test/fixtures/r15_spike/`, **not** production verifiers). |
@@ -747,18 +763,47 @@ Read off the code, without a formal audit claim.
 
 **Deliberate trade-offs and limitations (all flagged in-code)**
 
-1. *Anchor layer is not asserted* (`:1016-1022`). `withdrawByProof` accepts a `finalRoot` found in
-   **any** layer window. Soundness rests on Circuit 4's internal binding. Target state: an
-   `anchorLayer` public input (blocked on a C4 re-keygen).
-2. *Anchor-miss gas* (`:1024-1033`). Up to 1280 cold SLOADs (≈ 2.7 M gas) on a failing call, paid by
+1. *Anchor layer is asserted* (`withdrawByProof`). Circuit 4 exposes
+   `anchorLayer` (`1..=10`); the contract scans only that layer's 128-slot
+   window. A `finalRoot` that is a known anchor of a *different* layer
+   reverts `UnknownAnchor`.
+2. *Anchor-miss gas.* At most 128 cold SLOADs on a failing call, paid by
    the caller. An `O(1)` membership map would need eviction handling on window rollover.
-3. *Window depth is finite.* An anchor older than 128 appends in its layer is evicted; a proof
-   against it becomes unredeemable on-chain.
+3. *Window depth is finite, per layer.* Each layer keeps 128 anchors, so an anchor older than 128
+   appends in **its own layer** is evicted and a proof against that anchor reverts. This is a
+   deadline, not a loss: the witness builder escalates a layer at a time
+   (`--anchor-layer auto`, the relayer default), and because a layer L(n) anchor is appended only
+   at its own W^n boundary, the deadline grows with that boundary rather than repeating the
+   window below it. L1 window = 128 × W·P = 131 072 seq (**≈ 12 hours** at ~3 seq/s); L2 =
+   128 × W² = 2 097 152 seq (**≈ 8 days**). The L1→L2 step is ×(W/P) = **16**, not ×128; only
+   L2→L3 and above are ×W. L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
+   is `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` and takes no root as input.
+
+   So the operational boundary on the pinned shellnet deploy (L1+L2 active) is **≈ 8 days
+   unwithdrawn**. Past L(max) a payout is stranded in `treasuryBalance`. Adding a layer
+   rescues only an event whose T_n the chain has not yet passed; a T_n that went by before
+   that layer was relayed is never appended. Tests: `test/WithdrawAnchorEviction.t.sol` (eviction at 128,
+   a seq_no jump not mass-evicting, re-proving against a still-in-window anchor) and
+   `AckiNackiBridgeWithdrawByProof.t.sol:593-659` (L2 and L3 anchors accepted, no-window
+   rejected).
+
+   The 8-day L2 figure assumes AN reports `numLayers = 1` on non-boundary
+   bundles. The contract appends one slot per reported layer on every
+   successful `verifyBlock`, with no dedup. If AN started reporting
+   `numLayers = 2` on every bundle, the L2 window would fill at the L1
+   cadence and the horizon would collapse from days to hours.
 4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
    the AAVE side has an emergency lever.
-5. *Single-step ownership transfer* (`:1347`) — a mistyped owner is unrecoverable.
-6. *`approve` return value ignored* in `supplyToAave` (`:1250`); fine for USDC, not for
-   non-standard tokens. Likewise `deposit` books the requested amount, not the observed delta.
+5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed.**
+   Transfer is two-step: `transferOwnership` records `pendingOwner` (`:143`) and only
+   `acceptOwnership` (`:1551`), called by that address, moves `owner`. A mistyped address can never
+   accept, so the mistake is recoverable by overwriting `pendingOwner`.
+6. ~~*`approve` return value ignored* in `supplyToAave`; `deposit` books the requested amount, not
+   the observed delta.~~ **Closed.** `supplyToAave` reverts `ApproveFailed` on a falsy return
+   (`:1436`, error at `:387`), and the transfer paths measure `balanceOf` before and after and
+   revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1387-1393`,
+   error at `:364`). A fee-on-transfer or rebasing token now fails closed instead of crediting
+   book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
    lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
    first-come-first-served.
@@ -766,11 +811,23 @@ Read off the code, without a formal audit claim.
    is pinned by `accFr` alone.
 9. *`blockHeaderOracle` is dead weight* — a required, non-zero constructor argument that no code path
    reads.
-10. *Genesis parameters are unvalidated on-chain.* A wrong `genesisBkSetCommitment` or
-    `genesisLastSeenBlockSeqNo` bricks `verifyBlock` from block one (only the deploy script guards
-    the non-zero case).
+10. ~~*Genesis parameters are unvalidated on-chain.*~~ **Partly closed.** With the
+    verifiers wired the constructor now rejects a zero `genesisBkSetCommitment`
+    (`ZeroBkSetCommitment`, `:603`) and a non-canonical `genesisBkSetCommitment` or
+    `genesisPrevMaxLevelLayerHash` (`FieldElementOutOfRange`) — the same invariant
+    `applyBkSetUpdate` enforces, so a value that could never match `_expectedPrevAnchor` can no
+    longer be deployed. Zero stays legal for the prev anchor, since a first block may genuinely
+    carry it. `genesisLastSeenBlockSeqNo` remains unvalidated: any value is self-consistent, so
+    only the deploy script can catch a wrong one.
 11. *`GenesisCursorBridge`* (in `script/DeployGenesisCursorBridge.s.sol`) can seed the cursor
     arbitrarily. It is explicitly test-only, but it lives in the same tree as production scripts.
+12. ~~*Duplicate burns in one AN block share a Circuit 4 nullifier.*~~ **Closed.**
+    The preimage is now `Poseidon(block_id_fr, tokenId, amount, recipientHi,
+    recipientLo, senderAccFr, events_pos)`. Two identical `initiateWithdrawal`
+    calls in the same block occupy different events-tree leaves, so they
+    mint distinct nullifiers. The circuit binds `events_pos` to the Merkle
+    direction bits (heap-index reconstruction), so a custom prover cannot
+    vary a fake position to double-spend one event.
 
 ---
 

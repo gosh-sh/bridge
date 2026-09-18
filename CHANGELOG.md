@@ -41,24 +41,97 @@ assigns it when the release is tagged.
     - a self-deployed verifiers directory (`--verifiers-dir` /
       `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
       that `export-inner-aggregator` wrote next to its `.bin`.
-  `BridgeWithdrawalAggregatorVerifier.sol` was regenerated from the deployed
-  key and compiles to the deployed `.bin`. Because a compiled `.bin` ends
-  with `solc`'s CBOR metadata, whose hash commits to the source's keccak256,
-  compiling to the identical `.bin` proves a `.sol` is exactly the source of
-  that `.bin` — which also holds for `PrimaryAggregatorVerifier.sol`,
-  `FallbackAggregatorVerifier.sol` and `LayerHashesAggregatorVerifier.sol`,
-  even though those three were not regenerated from their keys for this
-  change. What that leaves unconfirmed is only whether the generator at the
-  current `snark-verifier` pin still reproduces that same source from their
-  keys — which the relayer's own former bytecode self-check already
-  established on every aggregation it ran before this change. Watch the
-  first `verifyBlock` cycle of each kind after the upgrade in case a future
-  `snark-verifier` bump changes the generated source.
+  `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
+  rotated Circuit-4 key and compiles to the committed `.bin`. Because a
+  compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
+  source's keccak256, compiling to the identical `.bin` proves a `.sol` is
+  exactly the source of that `.bin` — which also holds for
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 21`,
+  and for `PrimaryAggregatorVerifier.sol` and
+  `FallbackAggregatorVerifier.sol`, whose keys are unchanged and whose
+  sources were not regenerated for this change. What that leaves unconfirmed
+  is only whether the generator at the current `snark-verifier` pin still
+  reproduces those last two sources from their keys — which the relayer's own
+  former bytecode self-check already established on every aggregation it ran
+  before this change. Watch the first `verifyBlock` cycle of each kind after
+  the upgrade in case a future `snark-verifier` bump changes the generated
+  source.
 - **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
   meaning — a bootstrap escape hatch for a verifier whose source is not
   committed yet — with no alias for the old spelling.
+- **The Circuit 4 (withdrawal) verification key is rotated.** The inner
+  Poseidon preimage now includes `events_pos`, and the public-input vector
+  grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
+  `1..=10`). `withdrawByProof` scans only that layer's window.
+  The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
+  instances; the reference `_calldata.bin` is 3 648 B. Redeploy
+  `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
+  verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
+  not decode.
+
+- **The layer-hashes verification key is rotated. Redeploy that verifier.**
+  `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
+  20 the outer circuit did not fit the 14 inner public inputs. The runtime
+  artefact grows from 19 100 B to 23 111 B, so its address and `extcodehash`
+  change and the pin in `ShplonkDeployLib` moves with it. Proofs produced
+  against the old key do not verify against the new one; a deployment that
+  updates only the bridge will fail every `verifyBlock`. Margin to EIP-170
+  (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
+  warning below.
+
+  The other two keys are **unchanged**: `PrimaryAggregatorVerifier.bin`
+  and `FallbackAggregatorVerifier.bin` are byte-identical to 0.2.0.
+  Primary's and Fallback's `_calldata.bin` fixtures were re-emitted, which
+  is a test-vector refresh and not a rotation.
+
+- Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
+  **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and
+  `WIRE_VERIFY_BLOCK` are `envBool` with no default and `USE_AXIOM_ORACLE`
+  must be true; `altTokenId` must be 0. A Sepolia deploy that relied on
+  `WIRE_VERIFY_BLOCK` defaulting to false now stops. `LAYER_HASHES_VERIFIER`
+  and `WITHDRAWAL_VERIFIER` are still only read by `DeployReuseVerifiersBridge`
+  and `DeployGenesisCursorBridge`, which already refused `chainid == 1`.
+
+- `AckiNackiBridge`'s constructor rejects configurations it used to accept: a
+  zero `genesisBkSetCommitment` (`ZeroBkSetCommitment`) and a non-canonical
+  `genesisBkSetCommitment` or `genesisPrevMaxLevelLayerHash`
+  (`FieldElementOutOfRange`), whenever the verifiers are wired; and a
+  non-canonical Circuit 4 `dappFr` / `accFr` / `altTokenId` whenever
+  withdrawal is wired. These are the values that could never have matched
+  `_expectedPrevAnchor` or a Yul-reduced identity instance — deployments
+  that were already broken from block one — but a script that passed zeros
+  or unreduced words to get through construction will now fail at
+  construction.
+
+- Ownership transfer is two-step. `transferOwnership` records `pendingOwner`
+  and ownership moves only when that address calls `acceptOwnership`. Any
+  runbook or script that assumed `transferOwnership` completes the handover
+  needs the second call.
 
 ### Added
+
+- `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
+  read-only views of how close an anchor is to eviction from its 128-slot
+  window. A return of N means the Nth further append overwrites it; 0 means it
+  is not in the window. Intended as the monitoring hook for the withdrawal
+  deadline described under the withdrawal-window item below.
+- `VERIFY_GAS_CAP` (1 500 000) bounds the `staticcall` into every Yul verifier,
+  so a malformed proof cannot burn the whole transaction gas.
+- `YulCodehashMismatch` in `ShplonkDeployLib`: deployment asserts the deployed
+  Yul verifier's `extcodehash` against a pinned value, which is what makes an
+  accidentally-substituted verifier a failed deploy rather than a live one.
+- `TransferAmountMismatch` and `ApproveFailed`: token transfers are measured by
+  `balanceOf` delta and `approve` return values are checked, so a
+  fee-on-transfer or non-standard token fails closed instead of crediting book
+  value that never arrived.
+- `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
+  `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
+  size drift, and warns from 90% of EIP-170 (layer hashes warns today at 94%).
+  Growth now shows up in a diff instead of in a reverted deploy.
+- `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
+  appends, a seq_no jump not mass-evicting earlier anchors,
+  `anchorRemainingAppends` at its edges, and the same nullifier paid
+  against a still-in-window anchor after the original evicted.
 
 - `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
   reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
@@ -146,6 +219,21 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
+  (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
+  unvalidated) are closed by this release, and item 3 now states the real
+  withdrawal boundary instead of calling an evicted anchor "unredeemable".
+- The withdrawal deadline, written down for the first time. Each layer keeps
+  128 anchors, and the witness builder escalates a layer at a time
+  (`--anchor-layer auto`, the relayer default). Because an L(n) anchor is
+  appended only at its own W^n boundary, the window grows with that boundary
+  rather than repeating the one below: L1 = 128 × W·P = 131 072 seq (**≈ 12
+  hours**); L2 = 128 × W² = 2 097 152 seq (**≈ 8 days**). L1→L2 is ×(W/P) =
+  **16**; only L2→L3 and above are ×128. Past the highest active layer a
+  payout is stranded in `treasuryBalance`. Adding a layer rescues only an
+  event whose T_n the chain has not yet passed. No code changed here; the
+  horizon was always this and was documented as 12 hours.
+
 - `scripts/check_english_only.py` treats mathematical letters as notation, like
   the unaccented Greek it already accepts: the Mathematical Alphanumeric Symbols
   block (double-struck, bold, italic, script, fraktur), the letterlike
@@ -230,6 +318,70 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
+  required *at most* 64 hex characters, so a pasted 40-character address was
+  left-padded into a well-formed non-zero `bytes32`, passed the contract's
+  `anAccount != 0`, was bound in-circuit, and credited an account nobody owns —
+  with deposit being one-way, the length check was the last place to catch it.
+  Now exactly 64. The workchain field, which Acki Nacki ignores since `dappId`
+  replaced the concept, is no longer editable and is pinned to 0.
+- `MAX_FORWARD_GAP` was sized when the thinning factor `P` was 4 and the bundle
+  stride 512, where its literal 2048 meant "four bundles". `P` is 8 and the
+  stride 1024, so the same literal had quietly become two bundles, and a sibling
+  relayer that advanced three between ticks would halt this one with
+  `HistoryDrift` for no reason. Now derived from `BUNDLE_STRIDE_L1`, with a
+  const assertion that the three-bundle floor holds at build time. Four
+  restatements of `P = 4` / stride 512 as the current setting corrected
+  (module docs, thinning tests, prover-daemon README, verifyBlock runbook).
+- `covering_bundle_seq_no` treated a burn that landed exactly on a stride
+  boundary as already covered by that boundary's bundle. The proof uses the
+  opposite rule (`l1_anchor_boundaries`: for `e = 1024`, `K = 2048`, because
+  the root at 1024 covers the previous batch), so `wait_for_coverage` returned
+  one bundle too early and `resolve_anchor_layer` probed a height the chain
+  may not have produced yet. 1 in 1024 burns; re-running later worked. Now the
+  strictly-next multiple, matching the proof.
+- `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
+  survives N-1.
+- `applyBkSetUpdate` attestation `lastSeen` is the live layer cursor
+  (`storedLastSeenBlockSeqNo`). The prover was baking the BK-update cursor,
+  so after the first `verifyBlock` every rotation failed
+  `AttestationProofRejected`. Once AN rotated, `verifyBlock` then failed
+  `BkSetCommitmentMismatch` and unwithdrawn anchors aged out. The prover now
+  uses the layer cursor; a test drives `verifyBlock` then `applyBkSetUpdate`
+  with a mock that checks the argument.
+- Production `verifyBlock` tests that lack `bound_scenario.json` now
+  `vm.skip` instead of returning, so the hole shows up in the forge summary.
+- `DeployRealBridge` on mainnet also requires `altDstChainId` and
+  `altDstHostChainId` to be 0, matching the existing `altTokenId` require.
+- Constructor now rejects a non-canonical Circuit 4 `dappFr` / `accFr` /
+  `altTokenId`. A raw word cannot equal a Yul-reduced instance, so the
+  previous values would have made every withdrawal revert permanently.
+- `supplyToAave` books the aUSDC delta, not the USDC sent, so a rounding
+  pool cannot inflate `suppliedPrincipal` above the shares the bridge
+  holds. `emergencyWithdrawAll` keeps `principal - received` when the
+  drain pays short; leftover-aToken still reverts unchanged.
+- `forge` default profile no longer enables `ffi`. Tests only read the
+  tree; write permission is limited to `deployment_real.json`.
+- `verifyBlock` no longer SSTOREs per-slot window heights (~29k gas on a
+  ten-layer call). `lastHeight` and `LayerAnchorAppended` remain; the
+  relayer paints `HistoryWindow.heights` from those logs on resurrect.
+- Documented that two identical AN burns in one block share a Circuit 4
+  nullifier (`msg_id` is not in the preimage): the second payout is
+  permanently blocked. Closing it needs a Circuit 4 re-keygen.
+- After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
+  reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
+  (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.
+- GitHub Woodpecker now `forge build` + `fmt --check` +
+  `forge test --no-match-contract Fork` on every PR. Solidity compile
+  used to live only on the GitLab mirror, so a broken head could stay
+  mergeable on GitHub.
+- L2 anchoring is the shellnet operational default (Deploy #12), not
+  smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
+  stays L1 for local/CI.
+- Spec §7.3 states the QC-A2-2 rule: `applyBkSetUpdate` attestation
+  `lastSeen` is the live layer cursor. Re-prove if `verifyBlock` advances
+  between prove and submit.
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`

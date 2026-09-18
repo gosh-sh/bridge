@@ -828,13 +828,13 @@ Likewise not on the daemon path yet. Circuit 3 proves that applying the on-chain
 **Current state — confirmed.** `bridge-event-witness-builder` hard-codes `layer_idx = 0` and rejects anything else (`main.rs` line ~223). The Python orchestrator's `target_seq = thinned_kb_seq` math is the matching client-side consequence: a withdrawal must wait for the **next thinned L1 key block past the event** to be relayed, then is bound directly to that L1 layer hash. `bridge-event-prover-lib` and `bridge-prover-lib` together produce a Circuit 4 witness whose `dense_chain` carries **only inactive padding** to `MAX_CHAIN_LEN = 11` — i.e. zero hops up to a higher layer; the L1 root *is* the anchor.
 
 What this means in practice:
-- **Liveness coupling.** A user withdrawal cannot be proved until the bundle covering its key block has been relayed (one bundle ≈ `W·P = 512` blocks ≈ minutes on devnet, longer on shellnet).
+- **Liveness coupling.** A user withdrawal cannot be proved until the bundle covering its key block has been relayed (one bundle = `W·P` blocks, 1024 at W=128 and the current P=8, ≈ minutes on devnet, longer on shellnet).
 - **No cross-layer compression.** Even when an event sits inside an L2/L3/… aggregation that the prover *is* relaying, the witness still has to anchor against the L1 cell. There is no escalation logic.
 
 Future enhancements (all already sketched in `bridge-event-witness/src/bin/build.rs` as `TODO(L1→L5 escalation)`):
 
 - **L1→Ln escalation.** When the event's bundle has rolled out of the L1 rolling window, walk up: find the parent L2 key block in `state.layer_windows[1]`, append one active `dense_chain` link to bridge L1→L2 (or further). The in-circuit `verify_chain_of_dense_proofs` already supports up to 11 hops; only the witness builder needs work. Production-shape `real_chain_builder::build_layer_n_tree` is the reference layout.
-- **Wait-for-L2 (or higher) by default.** Today the prover anchors at the *nearest* L1 because that's the soonest. A later policy could prefer a higher layer when latency budget allows, to amortise verifier gas across many events under one anchor.
+- **Wait-for-L2 (or higher) by default.** Shellnet and the intended mainnet profile already anchor at L2 (`BRIDGE_ANCHOR_LEVEL=2`). L1 remains the local/CI `AnchorMode` default and this CLI's compile-time default.
 - **Anchor randomization / batching.** When multiple withdrawals fall under the same layer-N root, the submitter could randomize which of the layer's child roots each proof binds to (anonymity-set behaviour the dropped `circuit4-single-final-root` design used to provide in-circuit). Same goes for amortising several proofs under a shared anchor: pick the highest layer that still covers the freshest event.
 - **Anchor recency policy.** Once L1→Ln escalation lands, the bridge contract needs a rule for the maximum staleness it accepts. Probably exposed as a contract parameter so it can be tightened/loosened without redeploying.
 

@@ -238,9 +238,13 @@ contract AckiNackiBridge {
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
-    ///         recipientLo, senderAccFr)` — uniqueness per event
-    ///         is enforced inside the circuit, but the bridge still needs
-    ///         the mapping to reject *re-submission* of an already-paid proof.
+    ///         recipientLo, senderAccFr)` — it does **not** bind `msg_id`.
+    ///         Two identical burns in one AN block share a nullifier: the
+    ///         first `withdrawByProof` pays, the second reverts
+    ///         `NullifierAlreadyUsed` and that ECC is stranded. Closing
+    ///         this is a Circuit 4 re-keygen (add `msg_id` / `events_pos`
+    ///         to the preimage). The mapping still rejects re-submission
+    ///         of an already-paid proof.
     ///         Keys must be canonical Fr (`nullifier < BN254_R`); the SHPLONK
     ///         Yul verifier reduces instances `mod BN254_R` (same modulus,
     ///         spelled `f_q` in the auto-generated Yul), so an unreduced
@@ -260,11 +264,12 @@ contract AckiNackiBridge {
     ///         re-keygen lands.
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
-        /// @dev Not read by any on-chain check (`lastHeight` is the
-        ///      monotonicity guard). Written so `getLayerWindow` can
-        ///      resurrect the relayer `BridgeState` mirror. Dropping the
-        ///      SSTORE would save ~29k gas on a ten-layer `verifyBlock`
-        ///      and break that bootstrap.
+        /// @dev No longer written. `lastHeight` is the on-chain
+        ///      monotonicity guard; per-slot seq_nos live in
+        ///      `LayerAnchorAppended`. The field stays in the ABI so
+        ///      `getLayerWindow` does not break callers; resurrect fills
+        ///      heights from those logs. Skipping the SSTORE saves ~29k
+        ///      gas on a ten-layer `verifyBlock`.
         uint64[HISTORY_PROOF_WINDOW] heights;
         uint16 dataLen;
         uint16 writeCursor;
@@ -1019,7 +1024,6 @@ contract AckiNackiBridge {
         }
 
         w.data[w.writeCursor] = hashValue;
-        w.heights[w.writeCursor] = blockHeight;
         w.writeCursor = uint16((uint256(w.writeCursor) + 1) % HISTORY_PROOF_WINDOW);
         if (w.dataLen < HISTORY_PROOF_WINDOW) {
             w.dataLen = w.dataLen + 1;
@@ -1205,13 +1209,14 @@ contract AckiNackiBridge {
         return _isKnownLayerAnchor(layer, anchor);
     }
 
-    /// @notice Full contents of layer `L`'s rolling window (data, heights, cursors).
+    /// @notice Full contents of layer `L`'s rolling window (data, cursors).
     ///
     /// @dev Off-chain-only reader for daemon bootstrap / resurrect. Never
     ///      called on-chain (would be prohibitively gassy — returns
     ///      `HISTORY_PROOF_WINDOW * (32 + 8)` bytes plus scalars per call).
-    ///      Used by the relayer daemon to reconstruct its `BridgeState`
-    ///      mirror against an already-advanced contract — the scenario a
+    ///      `heights` is always zero here; the relayer paints it from
+    ///      `LayerAnchorAppended` logs. Used to reconstruct `BridgeState`
+    ///      against an already-advanced contract — the scenario a
     ///      fresh install, a co-tester's daemon, or a mid-run machine
     ///      handoff hit when only `getLatestPerLayer()` was exposed
     ///      (heads-only). See

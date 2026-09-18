@@ -49,6 +49,9 @@ interface IBridgeWithdrawalVerifier {
         uint256 accFr;
         /// @notice Replay-protection nullifier — `Poseidon(block_id_fr,
         ///         tokenId, amount, recipientHi, recipientLo, senderAccFr)`.
+        ///         Does **not** bind `msg_id` / `events_pos`; two identical
+        ///         burns in one AN block collide (BRIDGE-WD-01). Closing
+        ///         that needs a Circuit 4 re-keygen.
         uint256 nullifier;
         /// @notice The dense-chain anchor the proof binds to. The bridge
         ///         contract independently checks `finalRoot` against its

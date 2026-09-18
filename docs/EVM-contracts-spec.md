@@ -165,14 +165,17 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:100-104`
 ```solidity
 struct HistoryWindow {
     uint256[128] data;      // layer-hash values, circular
-    uint64[128]  heights;   // AN blockSeqNo per entry, circular
+    uint64[128]  heights;   // ABI-stable, always zero; seq_nos are in LayerAnchorAppended
     uint16 dataLen;         // saturating fill level, capped at 128
     uint16 writeCursor;     // next write index
     uint64 lastHeight;      // height of the most recent append
 }
 ```
 
-One window per layer `L ∈ [1, 10]`, in `_layerWindows`. This is the **authoritative** AN-state store;
+One window per layer `L ∈ [1, 10]`, in `_layerWindows`. `heights` is ABI-stable but
+**not written** on `verifyBlock` — `lastHeight` is the monotonicity guard, and
+per-slot seq_nos are in `LayerAnchorAppended`. The relayer paints `heights` from
+those logs on resurrect. This is the **authoritative** AN-state store;
 the flat `storedNumLayers` / `storedLayerHashes[10]` cache was removed in storage v2.0 along with the
 per-block `storedPrevMaxLevelLayerHash` SSTORE (`:629-633`, ≈ 32 k gas/call saved).
 
@@ -373,7 +376,8 @@ itself (`:1016-1033`):
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
 (or its scoped alias), so the same proof cannot be replayed on a second deployment. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
-on a deployment whose host chain is not the configured one.
+on a deployment whose host chain is not the configured one. The Circuit 4 preimage does not bind
+`msg_id`, so two identical burns in one AN block share a nullifier (trade-off 12).
 
 ### 7.3 `applyBkSetUpdate` — rotate the BK-set commitment
 
@@ -695,7 +699,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
-| `AckiNackiBridgeWithdrawByProof.t.sol` (30) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, treasury shortfall, byte-for-byte PI forwarding. |
+| `AckiNackiBridgeWithdrawByProof.t.sol` (31) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, same-block duplicate-burn pin, treasury shortfall, byte-for-byte PI forwarding. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
 | `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
@@ -815,6 +819,12 @@ Read off the code, without a formal audit claim.
     only the deploy script can catch a wrong one.
 11. *`GenesisCursorBridge`* (in `script/DeployGenesisCursorBridge.s.sol`) can seed the cursor
     arbitrarily. It is explicitly test-only, but it lives in the same tree as production scripts.
+12. *Duplicate burns in one AN block share a Circuit 4 nullifier.* The preimage is
+    `Poseidon(block_id_fr, tokenId, amount, recipientHi, recipientLo, senderAccFr)` —
+    no `msg_id`. Two identical `initiateWithdrawal` calls in the same block both
+    succeed on AN; the first `withdrawByProof` pays, the second reverts
+    `NullifierAlreadyUsed` and that ECC is stranded. Closing this is a Circuit 4
+    re-keygen. Test: `test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked`.
 
 ---
 

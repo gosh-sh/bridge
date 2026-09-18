@@ -47,6 +47,8 @@ use alloy::{
     network::{Network, ReceiptResponse},
     primitives::{Address, B256, U256},
     providers::Provider,
+    rpc::types::Filter,
+    sol_types::SolEvent,
 };
 use async_trait::async_trait;
 // `EthBridgeContractState` and `HistoryWindow` are the alloy-neutral shape shared
@@ -439,6 +441,8 @@ mod sol_bindings {
             }
 
             function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory);
+
+            event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
 
             struct WithdrawalPublicInputs {
                 uint256 tokenId;
@@ -859,7 +863,9 @@ where
                     le
                 })
                 .collect();
-            let heights: Vec<u64> = w.heights.to_vec();
+            // On-chain `heights` are no longer written. The ring is painted
+            // below from `LayerAnchorAppended` logs.
+            let heights = vec![0u64; w.heights.len()];
             // Widen on-chain `uint16` cursors to `usize` for the shared
             // `HistoryWindow` shape. `from_contract` validates bounds.
             windows.push(HistoryWindow {
@@ -870,6 +876,7 @@ where
                 last_height: w.lastHeight,
             });
         }
+        self.paint_heights_from_appended_logs(&mut windows).await?;
         let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] =
             windows.try_into().map_err(|_| {
                 RelayerError::Other("read_full_state: expected 10 layer windows".into())
@@ -882,6 +889,62 @@ where
             genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
+    }
+
+    /// Fill each window's `heights` from `LayerAnchorAppended` (the contract
+    /// no longer SSTOREs them). Logs are oldest-first; we keep the last
+    /// `data_len` per layer and paint the ring the same way `append` does.
+    async fn paint_heights_from_appended_logs(
+        &self,
+        windows: &mut [HistoryWindow],
+    ) -> Result<(), RelayerError> {
+        if windows.iter().all(|w| w.data_len == 0) {
+            return Ok(());
+        }
+        let logs = self
+            .contract
+            .provider()
+            .get_logs(
+                &Filter::new()
+                    .address(self.address)
+                    .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH),
+            )
+            .await
+            .map_err(|e| RelayerError::other(format!("LayerAnchorAppended get_logs: {e}")))?;
+
+        let mut by_layer: Vec<Vec<u64>> = vec![Vec::new(); MAX_LAYER_HASHES];
+        for log in logs {
+            let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let ev = decoded.inner.data;
+            let layer = u8::from(ev.layer);
+            if layer == 0 || (layer as usize) > MAX_LAYER_HASHES {
+                continue;
+            }
+            by_layer[(layer as usize) - 1].push(ev.blockHeight);
+        }
+
+        for (idx, window) in windows.iter_mut().enumerate() {
+            if window.data_len == 0 {
+                continue;
+            }
+            let evs = &by_layer[idx];
+            if evs.len() < window.data_len {
+                return Err(RelayerError::other(format!(
+                    "layer {} has data_len={} but only {} LayerAnchorAppended logs",
+                    idx + 1,
+                    window.data_len,
+                    evs.len()
+                )));
+            }
+            let oldest_first = &evs[evs.len() - window.data_len..];
+            window
+                .apply_chronological_heights(oldest_first)
+                .map_err(|e| RelayerError::other(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 

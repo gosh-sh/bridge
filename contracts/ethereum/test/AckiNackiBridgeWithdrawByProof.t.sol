@@ -447,6 +447,28 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
     }
 
+    /// @notice Two AN burns in one block with the same
+    ///         `(block_id, tokenId, amount, recipient, sender)` share a
+    ///         Circuit 4 nullifier (`msg_id` is not in the preimage). The
+    ///         first payout succeeds; the second is `NullifierAlreadyUsed`
+    ///         and that ECC is stranded. Same on-chain mechanics as a
+    ///         replay — this name pins the duplicate-burn reading.
+    function test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked() public {
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
+        uint256 amount = 1 * UsdcTestLib.UNIT;
+        uint256 treasuryBefore = bridge.treasuryBalance();
+
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+        assertEq(bridge.treasuryBalance(), treasuryBefore - amount);
+        assertTrue(bridge.isNullifierUsed(nullifier));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.NullifierAlreadyUsed.selector, nullifier)
+        );
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+        assertEq(bridge.treasuryBalance(), treasuryBefore - amount, "second amount not paid");
+    }
+
     function test_isNullifierUsed_initiallyFalse() public view {
         assertFalse(bridge.isNullifierUsed(0xDEAD_BEEF));
     }

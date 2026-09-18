@@ -151,6 +151,12 @@ assigns it when the release is tagged.
   drain pays short; leftover-aToken still reverts unchanged.
 - `forge` default profile no longer enables `ffi`. Tests only read the
   tree; write permission is limited to `deployment_real.json`.
+- `verifyBlock` no longer SSTOREs per-slot window heights (~29k gas on a
+  ten-layer call). `lastHeight` and `LayerAnchorAppended` remain; the
+  relayer paints `HistoryWindow.heights` from those logs on resurrect.
+- Documented that two identical AN burns in one block share a Circuit 4
+  nullifier (`msg_id` is not in the preimage): the second payout is
+  permanently blocked. Closing it needs a Circuit 4 re-keygen.
 
 ## [0.2.0] – 2026-09-11
 

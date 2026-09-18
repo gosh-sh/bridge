@@ -7,20 +7,19 @@
 //!   contract binding. Reads `storedLastSeenBlockSeqNo` /
 //!   `storedBkSetCommitment` (mutable) and `expectedPrevAnchor(numLayers)`
 //!   (per-layer anchor pick) from chain, plus the immutable
-//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits
-//!   `verifyBlock(...)` transactions. `storedPrevMaxLevelLayerHash` is
-//!   the storage v2.0 immutable genesis seed (2026-08-04) — never
-//!   mutated post-deploy; use `expectedPrevAnchor` for the actual chain
-//!   anchor going forward.
+//!   `storedPrevMaxLevelLayerHash` genesis seed, and submits `verifyBlock(...)`
+//!   transactions. `storedPrevMaxLevelLayerHash` is the storage v2.0 immutable
+//!   genesis seed (2026-08-04) — never mutated post-deploy; use
+//!   `expectedPrevAnchor` for the actual chain anchor going forward.
 //! - [`MockBridgeClient`] — a deterministic in-memory mirror of the contract's
 //!   state machine, exposed to unit tests so we can drive the relayer through
 //!   5+ blocks in microseconds without spawning Anvil. The mock reproduces
 //!   *exactly* the cheap pre-flight checks the real contract performs
 //!   (numLayers range, tail zero, BK-set match, monotonic seqNo, anchor match)
 //!   — so any consumer that passes the mock will also pass the real bridge
-//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock
-//!   tracks per-layer window heads and implements `expectedPrevAnchor` with
-//!   the same `min(numLayers, highestActiveLayer)` pick used on-chain.
+//!   unless ZK proofs are bad. Under storage v2.0 (2026-08-04) the mock tracks
+//!   per-layer window heads and implements `expectedPrevAnchor` with the same
+//!   `min(numLayers, highestActiveLayer)` pick used on-chain.
 //!
 //! ZK verification itself is *not* mocked here in the way the Solidity
 //! `MockPrimaryVerifier` etc. mocks do; the [`MockBridgeClient`] takes
@@ -48,6 +47,8 @@ use alloy::{
     network::{Network, ReceiptResponse},
     primitives::{Address, B256, U256},
     providers::Provider,
+    rpc::types::Filter,
+    sol_types::SolEvent,
 };
 use async_trait::async_trait;
 // `EthBridgeContractState` and `HistoryWindow` are the alloy-neutral shape shared
@@ -441,6 +442,8 @@ mod sol_bindings {
 
             function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory);
 
+            event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
+
             struct WithdrawalPublicInputs {
                 uint256 tokenId;
                 uint256 amount;
@@ -452,6 +455,7 @@ mod sol_bindings {
                 uint256 accFr;
                 uint256 nullifier;
                 uint256 finalRoot;
+                uint256 anchorLayer;
             }
 
             function withdrawByProof(
@@ -673,7 +677,7 @@ where
                         },
                         tx_hash: Some(receipt.transaction_hash()),
                     })
-                }
+                },
                 Err(e) => Ok(BkSetUpdateSubmitOutcome::Reverted {
                     reason: format!("tx confirmation error: {e}"),
                 }),
@@ -860,7 +864,9 @@ where
                     le
                 })
                 .collect();
-            let heights: Vec<u64> = w.heights.to_vec();
+            // On-chain `heights` are no longer written. The ring is painted
+            // below from `LayerAnchorAppended` logs.
+            let heights = vec![0u64; w.heights.len()];
             // Widen on-chain `uint16` cursors to `usize` for the shared
             // `HistoryWindow` shape. `from_contract` validates bounds.
             windows.push(HistoryWindow {
@@ -871,9 +877,11 @@ where
                 last_height: w.lastHeight,
             });
         }
-        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] = windows
-            .try_into()
-            .map_err(|_| RelayerError::Other("read_full_state: expected 10 layer windows".into()))?;
+        self.paint_heights_from_appended_logs(&mut windows).await?;
+        let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] =
+            windows.try_into().map_err(|_| {
+                RelayerError::Other("read_full_state: expected 10 layer windows".into())
+            })?;
 
         Ok(EthBridgeContractState {
             last_seen_block_seq_no: last,
@@ -882,6 +890,62 @@ where
             genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
+    }
+
+    /// Fill each window's `heights` from `LayerAnchorAppended` (the contract
+    /// no longer SSTOREs them). Logs are oldest-first; we keep the last
+    /// `data_len` per layer and paint the ring the same way `append` does.
+    async fn paint_heights_from_appended_logs(
+        &self,
+        windows: &mut [HistoryWindow],
+    ) -> Result<(), RelayerError> {
+        if windows.iter().all(|w| w.data_len == 0) {
+            return Ok(());
+        }
+        let logs = self
+            .contract
+            .provider()
+            .get_logs(
+                &Filter::new()
+                    .address(self.address)
+                    .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH),
+            )
+            .await
+            .map_err(|e| RelayerError::other(format!("LayerAnchorAppended get_logs: {e}")))?;
+
+        let mut by_layer: Vec<Vec<u64>> = vec![Vec::new(); MAX_LAYER_HASHES];
+        for log in logs {
+            let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let ev = decoded.inner.data;
+            let layer = u8::from(ev.layer);
+            if layer == 0 || (layer as usize) > MAX_LAYER_HASHES {
+                continue;
+            }
+            by_layer[(layer as usize) - 1].push(ev.blockHeight);
+        }
+
+        for (idx, window) in windows.iter_mut().enumerate() {
+            if window.data_len == 0 {
+                continue;
+            }
+            let evs = &by_layer[idx];
+            if evs.len() < window.data_len {
+                return Err(RelayerError::other(format!(
+                    "layer {} has data_len={} but only {} LayerAnchorAppended logs",
+                    idx + 1,
+                    window.data_len,
+                    evs.len()
+                )));
+            }
+            let oldest_first = &evs[evs.len() - window.data_len..];
+            window
+                .apply_chronological_heights(oldest_first)
+                .map_err(|e| RelayerError::other(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -899,7 +963,9 @@ pub enum BkSetUpdateSubmitOutcome {
         new_state: BridgeOnChainState,
         tx_hash: Option<B256>,
     },
-    Reverted { reason: String },
+    Reverted {
+        reason: String,
+    },
 }
 
 fn to_sol_withdrawal_pub(
@@ -916,6 +982,7 @@ fn to_sol_withdrawal_pub(
         accFr: pub_inputs.acc_fr,
         nullifier: pub_inputs.nullifier,
         finalRoot: pub_inputs.final_root,
+        anchorLayer: pub_inputs.anchor_layer,
     }
 }
 
@@ -1009,7 +1076,9 @@ where
                         "dumped verifyBlock submission to {}",
                         path.display()
                     ),
-                    Err(e) => tracing::warn!("dump-submissions: write {} failed: {e}", path.display()),
+                    Err(e) => {
+                        tracing::warn!("dump-submissions: write {} failed: {e}", path.display())
+                    },
                 }
             }
         }
@@ -1099,7 +1168,8 @@ where
         if post_anchor != expected_top {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted block={}",
+                    "post-submit drift: expectedPrevAnchor({})={} != top layer of submitted \
+                     block={}",
                     block.num_layers, post_anchor, expected_top
                 ),
             });
@@ -1238,10 +1308,7 @@ mod tests {
             MockBridgeClient::with_genesis(U256::from(0xBE5E7u64), U256::ZERO, always_accept());
         bridge.submit_block(&block(1, U256::ZERO)).await.unwrap();
         let anchor = bridge.expected_prev_anchor(1).await.unwrap();
-        let outcome = bridge
-            .submit_block(&block(1, anchor))
-            .await
-            .unwrap();
+        let outcome = bridge.submit_block(&block(1, anchor)).await.unwrap();
         match outcome {
             SubmitOutcome::Reverted {
                 reason,

@@ -16,13 +16,6 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      - `deposit(uint256 amount)` stays cheap: funds accumulate in the contract;
 ///        an owner/keeper batches supplies to AAVE with `supplyToAave()` to amortise gas.
 ///      - Owner can harvest accrued yield without touching user principal.
-///      - **Withdraw on ETH side**: deliberately not exposed in this milestone.
-///        A genuine cross-chain withdrawal will land alongside a burn-proof
-///        circuit + state-anchored verification. That milestone has since
-///        shipped as `withdrawByProof` (`docs/EVM-contracts-spec.md` §7.2);
-///        this header predates it. The legacy v1 refund-style
-///        `withdraw(depositId, recipient, amount, blockNumber, proof)` was
-///        retired in Phase 4.3 (2026-05-17) — see Decision Log.
 ///
 ///      AN→ETH state (Phase 4): the bridge stores a rolling commitment to the
 ///      Acki Nacki side (`block_seq_no`, `bk_set_poseidon`, layer-hash roots,
@@ -34,17 +27,18 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      construction; the bridge enforces those equalities + the monotonic
 ///      `block_seq_no` and chain-anchor invariants on top.
 ///
-///      AN→ETH event verification + payout (Circuit 4, single-final-root):
-///      every successful `verifyBlock` also records the new top-of-chain
-///      anchor in a set of `knownAnchors`. `withdrawByProof` consumes that
-///      set plus a Circuit 4 (`bridge-event-prove-circuit`) SHPLONK
-///      aggregator proof whose 10 public inputs include a single
-///      `finalRoot`. The bridge
-///      checks `finalRoot ∈ knownAnchors` off-circuit (this contract) — the
-///      circuit only proves that the event's hash chain extends *into*
-///      `finalRoot` via a dense-chain extension. The proof binds the
-///      payout's `amount` and `recipient` (split-α 10/10 bytes) along
-///      with the AN-side bridge identity `(bridgeWithdrawalDappFr,
+///      AN→ETH event verification + payout (withdraw):
+///      every successful `verifyBlock` appends the new top-of-chain anchor
+///      to the per-layer rolling windows (`_layerWindows`).
+///      `withdrawByProof` consumes those windows plus a Circuit 4
+///      (`bridge-event-prove-circuit`) SHPLONK aggregator proof whose
+///      11 public inputs include `finalRoot` and `anchorLayer`. The bridge
+///      calls `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit
+///      (this contract) — the circuit only proves that the event's hash
+///      chain extends *into* `finalRoot` via a dense-chain extension and
+///      range-checks `anchorLayer` into `1..=MAX_LAYER_HASHES`. The proof
+///      binds the payout's `amount` and `recipient` (split-α 10/10 bytes)
+///      along with the AN-side bridge identity `(bridgeWithdrawalDappFr,
 ///      bridgeWithdrawalAccFr)` and a Poseidon nullifier for replay
 ///      protection.
 contract AckiNackiBridge {
@@ -71,6 +65,18 @@ contract AckiNackiBridge {
     uint256 public constant MAX_LAYER_HASHES = 10;
 
     /// @notice Rolling-window length per layer (`GLOBAL_HISTORY_DATA_SPEC` §8.3).
+    /// @dev WD-Q1: each successful `verifyBlock` appends one hash per
+    ///      active layer. The oldest hash in that layer is evicted after 128
+    ///      subsequent appends — this is a count of `verifyBlock` calls, not a
+    ///      `blockSeqNo` span. A `withdrawByProof` whose `finalRoot` has been
+    ///      evicted reverts `UnknownAnchor`; funds stay in the treasury.
+    ///      The bridge is a stateless verifier and does not retry on anyone's
+    ///      behalf: the withdrawing user is responsible for re-proving
+    ///      Circuit 4 against a still-in-window descendant (dense chain
+    ///      ≤ 11 rungs) before their anchor is evicted. Any relayer is
+    ///      best-effort convenience infrastructure, not a privileged or
+    ///      obligated actor. Fast-forward of `blockSeqNo` does **not** skip
+    ///      extra slots — one call still writes one slot.
     uint256 public constant HISTORY_PROOF_WINDOW = 128;
 
     /// @notice BN254 scalar field order — the modulus every circuit public
@@ -129,6 +135,9 @@ contract AckiNackiBridge {
 
     /// @notice Address authorised to manage AAVE routing & harvest yield
     address public owner;
+    /// @notice Two-step ownership. Set by `transferOwnership`; takes
+    ///         effect only after `acceptOwnership` from this address.
+    address public pendingOwner;
 
     /// @notice Address that receives harvested yield (defaults to owner)
     address public yieldRecipient;
@@ -178,16 +187,15 @@ contract AckiNackiBridge {
     /// @notice Immutable genesis seed for the layer-hash chain anchor. Set
     ///         once at construction from `VerifyBlockConfig.genesisPrevMaxLevelLayerHash`
     ///         and never mutated post-deploy.
-    /// @dev **Deprecated in storage v2.0**: this is now the immutable genesis
-    ///      seed only — no longer tracks per-block max-layer values. Use
-    ///      `getLatestPerLayer()` for per-block per-layer state, and
-    ///      `expectedPrevAnchor(numLayers)` for the chain anchor that the
-    ///      next `verifyBlock` will require.
-    ///
-    ///      Read only by `_expectedPrevAnchor` as the pre-first-block bootstrap
-    ///      seed (before any layer window is populated). Every subsequent call
-    ///      sources the anchor from the per-layer rolling windows in
-    ///      `_layerWindows` — see AB-Q4 / `_expectedPrevAnchor`.
+    /// @dev **Role narrowed in storage v2.0** (was: per-block max-layer cache
+    ///      updated by every `verifyBlock`; now: immutable genesis seed only).
+    ///      Still load-bearing — `_expectedPrevAnchor` reads it as the
+    ///      pre-first-block bootstrap value, before any layer window is
+    ///      populated. Every subsequent call sources the anchor from the
+    ///      per-layer rolling windows in `_layerWindows` (see AB-Q4 /
+    ///      `_expectedPrevAnchor`). For per-block per-layer state use
+    ///      `getLatestPerLayer()`; for the chain anchor the next
+    ///      `verifyBlock` will require use `expectedPrevAnchor(numLayers)`.
     ///
     ///      Storage v2.0 (2026-08-04): removed the hot-path SSTORE and made
     ///      this immutable; also removed the sibling `storedNumLayers` and
@@ -196,11 +204,11 @@ contract AckiNackiBridge {
     uint256 public immutable storedPrevMaxLevelLayerHash;
 
     // ---------------------------------------------------------------------
-    // Storage: Circuit 4 (Bridge Withdrawal, single-final-root) — AN→ETH payout
+    // Storage: Circuit 4 (Bridge Withdrawal) — AN→ETH payout
     // ---------------------------------------------------------------------
 
     /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (10-input single-final-root
+    ///         `IBridgeWithdrawalVerifier` interface (10-input
     ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
     ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
@@ -212,7 +220,7 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` pair via its public inputs — pinning these
     ///         on Ethereum at deploy time prevents a caller from substituting
     ///         an event emitted by a different AN contract (e.g. a malicious
-    ///         lookalike `TokenBridge`).
+    ///         lookalike `eccUSDCBridge`).
     uint256 public immutable bridgeWithdrawalDappFr;
 
     /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeWithdrawalDappFr`).
@@ -229,28 +237,31 @@ contract AckiNackiBridge {
     uint256 public immutable bridgeWithdrawalAltTokenId;
 
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
-    ///         the proof's public input slot [8]. The Circuit 4
-    ///         single-final-root nullifier is
+    ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
-    ///                   recipientLo, senderAccFr)` — uniqueness per event
-    ///         is enforced inside the circuit, but the bridge still needs
-    ///         the mapping to reject *re-submission* of an already-paid proof.
+    ///         recipientLo, senderAccFr, events_pos)` — two identical
+    ///         burns in one AN block take different `events_pos` and
+    ///         therefore different nullifiers (BRIDGE-WD-01).
+    ///         The mapping still rejects re-submission of an already-paid
+    ///         proof.
+    ///         Keys must be canonical Fr (`nullifier < BN254_R`); the SHPLONK
+    ///         Yul verifier reduces instances `mod BN254_R` (same modulus,
+    ///         spelled `f_q` in the auto-generated Yul), so an unreduced
+    ///         `N + k·BN254_R` would otherwise be a second mapping key for
+    ///         the same field element.
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
-    ///         Each `withdrawByProof` checks `finalRoot` against *any* layer
-    ///         window via `_isKnownAnchor` (NB-Q1 2026-08-04 — was previously
-    ///         pinned to L1 via a `WITHDRAW_ANCHOR_LAYER` constant that would
-    ///         `revert UnknownAnchor` for every partner L≥2 witness). Every
-    ///         window entry was written by a verified `verifyBlock`, so the
-    ///         layer index adds specificity, not security. Option A (Circuit 4
-    ///         PI slot `anchorLayer` + range-checked scan of the specific
-    ///         window) remains the ultimate target once the Circuit 4
-    ///         re-keygen lands.
-    ///
-    /// @dev Replaces the legacy flat `_knownAnchors` bag (Q3 / spec §8.3).
+    ///         Each `withdrawByProof` checks `finalRoot` against the window
+    ///         named by Circuit 4's `anchorLayer` public input (Option A).
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
+        /// @dev No longer written. `lastHeight` is the on-chain
+        ///      monotonicity guard; per-slot seq_nos live in
+        ///      `LayerAnchorAppended`. The field stays in the ABI so
+        ///      `getLayerWindow` does not break callers; resurrect fills
+        ///      heights from those logs. Skipping the SSTORE saves ~29k
+        ///      gas on a ten-layer `verifyBlock`.
         uint64[HISTORY_PROOF_WINDOW] heights;
         uint16 dataLen;
         uint16 writeCursor;
@@ -263,11 +274,12 @@ contract AckiNackiBridge {
     // Events
     // ---------------------------------------------------------------------
 
-    /// @notice Emitted on every deposit. `anWorkchain` + `anAccount` are the
-    ///         Acki Nacki destination (TVM `workchain:account`) chosen by the
-    ///         depositor; they are carried as ZK public inputs and credited on
-    ///         the AN side (the EVM `sender` is kept only for provenance, since
-    ///         a 20-byte EVM address is not a valid AN recipient).
+    /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
+    ///         destination: it is carried as ZK public inputs and credited on the
+    ///         AN side (the EVM `sender` is kept only for provenance, since a
+    ///         20-byte EVM address is not a valid AN recipient). `anWorkchain` is
+    ///         inert — see `deposit` — and is emitted only so the event shape
+    ///         stays stable for indexers.
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
@@ -283,6 +295,8 @@ contract AckiNackiBridge {
     event AaveEnabledSet(bool enabled);
     event LiquidReserveBpsSet(uint256 bps);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    /// @notice Owner nominated `newOwner`; they must `acceptOwnership`.
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
     event EmergencyWithdrawAll(uint256 amount);
     /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
@@ -311,8 +325,8 @@ contract AckiNackiBridge {
         uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
     );
 
-    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4,
-    ///         single-final-root layout). A verified ZK proof releases
+    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4),
+    ///         A verified ZK proof releases
     ///         `amount` USDC to `recipient` exactly once (replay-protected by
     ///         `nullifier`).
     /// @param nullifier The Poseidon-derived nullifier from public input slot [8];
@@ -340,11 +354,17 @@ contract AckiNackiBridge {
     error InvalidAmount();
     error InvalidUsdc();
     error TransferFromFailed();
+    /// @notice `transferFrom` returned true but custody did not grow
+    ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
+    error TransferAmountMismatch();
     error DepositTooLarge();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
     error InsufficientTreasury();
+    /// @notice Zero EVM payout address. `withdrawByProof` rejects a reconstructed
+    ///         `address(0)` before verify (WD-Q2). Do not remove — AN
+    ///         `initiateWithdrawal` also rejects empty recipient (QC-AN-10).
     error InvalidRecipient();
     error InvalidOracle();
     error InvalidAaveAddress();
@@ -354,6 +374,14 @@ contract AckiNackiBridge {
     error ReserveBpsTooHigh();
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
+    /// @notice `emergencyWithdrawAll` asked AAVE for `type(uint256).max`
+    ///         but aUSDC still remains. Zeroing `suppliedPrincipal` would let
+    ///         `harvestYield` treat leftover principal as yield.
+    error EmergencyLeftoverAToken(uint256 leftover);
+    /// @notice USDC `approve` returned false (do not ignore the bool).
+    error ApproveFailed();
+    /// @notice `msg.sender` is not `pendingOwner`.
+    error OwnershipNotPending();
     error NoYield();
 
     // verifyBlock errors
@@ -375,11 +403,32 @@ contract AckiNackiBridge {
     error StaleBkSetCommitment(uint256 supplied, uint256 stored);
     error BkUpdateSeqNoNotMonotonic(uint64 supplied, uint64 stored);
     error BkUpdateMerkleMismatch(uint256 computedRoot, uint256 blockId);
+    /// @notice A zero `newCommitmentL3` would force every later
+    ///         `verifyBlock` to attest a zero BK-set commitment.
+    error ZeroBkSetCommitment();
+    /// @notice Ordering invariant (BRIDGE-ETH-WD-2): `applyBkSetUpdate(N)`
+    ///         may only proceed once `verifyBlock` has already covered
+    ///         block `N` (`blockSeqNo <= storedLastSeenBlockSeqNo`).
+    ///         Applying the rotation ahead of the layer cursor would flip
+    ///         `storedBkSetCommitment` OLD → NEW while block `N`'s
+    ///         attestation is still signed by OLD keys, permanently
+    ///         bricking `verifyBlock(N)` with `BkSetCommitmentMismatch`
+    ///         and stranding every future block that anchors through
+    ///         `N`'s layer hashes. Since `applyBkSetUpdate` is
+    ///         permissionless, this is an on-chain invariant, not a
+    ///         relayer convention.
+    error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
 
-    // withdrawByProof (Circuit 4, single-final-root) errors
+    // withdrawByProof (Circuit 4) errors
     error WithdrawByProofDisabled();
     error WithdrawalProofRejected();
     error NullifierAlreadyUsed(uint256 nullifier);
+    /// @notice A public input used as a mapping/window key is not a canonical
+    ///         BN254 Fr (`value >= BN254_R`). The SHPLONK Yul verifier reduces
+    ///         instances `mod BN254_R` (same modulus, spelled `f_q` in the
+    ///         auto-generated Yul), so `x` and `x + k·BN254_R` verify as the
+    ///         same field element while remaining distinct `uint256` keys.
+    error FieldElementOutOfRange(uint256 value);
     error DstChainIdMismatch(uint256 supplied, uint256 expected);
     error RecipientHalfOutOfRange(uint256 value);
     error WithdrawIdentityMismatch();
@@ -399,6 +448,15 @@ contract AckiNackiBridge {
     ///         Non-zero token ids are reserved for multi-token wiring in a
     ///         future milestone.
     error UnsupportedTokenId(uint256 tokenId);
+    /// @notice Circuit 4 withdraw is wired but the verifyBlock triple is
+    ///         not. Without `verifyBlock`, no anchors ever land and every
+    ///         `withdrawByProof` reverts `UnknownAnchor` — a silently dead
+    ///         payout path. Wire all three attestation/layer verifiers, or
+    ///         disable withdraw too.
+    error WithdrawRequiresVerifyBlock();
+    /// @notice verifyBlock is all-or-nothing. Partial wiring (1 or 2 of
+    ///         the three verifier addresses set) is rejected at construction.
+    error PartialVerifyBlockWiring();
     error WithdrawTransferFailed(address recipient, uint256 amount);
     /// @notice Bridge holds less USDC than the proof asks for. Should be
     ///         unreachable in steady state because deposits flow into
@@ -455,13 +513,13 @@ contract AckiNackiBridge {
         uint64 genesisLastSeenBlockSeqNo;
     }
 
-    /// @notice Argument bundle for the AN→ETH Circuit 4 (single-final-root)
-    ///         wiring. Independent of `VerifyBlockConfig` — a deployment may
-    ///         enable one without the other.
+    /// @notice Argument bundle for the AN→ETH Circuit 4
+    ///         wiring. verifyBlock-only deployments are legal; withdraw-only
+    ///         is not (see `WithdrawRequiresVerifyBlock`).
     /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
     ///      `withdrawByProof` (it reverts with `WithdrawByProofDisabled`).
-    ///      When enabled, both `dappFr` and `accFr` must be non-zero — they
-    ///      pin the AN-side identity the Circuit 4 proof must bind to.
+    ///      When enabled, `accFr` must be non-zero and the verifyBlock triple
+    ///      must be fully wired so anchors can land.
     struct BridgeWithdrawConfig {
         IBridgeWithdrawalVerifier bridgeWithdrawalVerifier;
         /// @notice Fr-encoded AN-side bridge dApp identifier. May be zero on
@@ -483,6 +541,9 @@ contract AckiNackiBridge {
         uint256 altDstHostChainId;
         /// @notice Optional shellnet alias for `pub.tokenId` (e.g. AN
         ///         `USDC_ECC_ID = 3`). Zero accepts only `tokenId == 0`.
+        ///         Production mainnet deploys must leave this zero
+        ///         (see `DeployRealBridge`); not enforced here because
+        ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
         uint256 altTokenId;
     }
 
@@ -499,7 +560,7 @@ contract AckiNackiBridge {
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
-    /// @param _bw                 Circuit 4 (single-final-root) wiring. Pass
+    /// @param _bw                 Circuit 4 wiring. Pass
     ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
     ///                            to disable. When `bridgeWithdrawalVerifier`
     ///                            is non-zero, both `dappFr` and `accFr`
@@ -528,22 +589,42 @@ contract AckiNackiBridge {
         aavePool = IAavePool(_aavePool);
         aUSDC = IERC20(_aUSDC);
 
-        // verifyBlock wiring is all-or-nothing: any zero address disables it.
+        // verifyBlock wiring is all-or-nothing.
+        {
+            bool p = address(_vb.primaryVerifier) != address(0);
+            bool f = address(_vb.fallbackVerifier) != address(0);
+            bool l = address(_vb.layerHashesVerifier) != address(0);
+            if ((p || f || l) && !(p && f && l)) revert PartialVerifyBlockWiring();
+            if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
+                if (_bw.accFr == 0) revert InvalidBridgeWithdrawalIdentity();
+                if (!(p && f && l)) revert WithdrawRequiresVerifyBlock();
+                // Identity slots are compared raw against Yul-reduced
+                // instances. A non-canonical value makes every withdrawal
+                // revert permanently — same invariant as the genesis anchors.
+                _requireCanonicalFr(_bw.dappFr);
+                _requireCanonicalFr(_bw.accFr);
+                _requireCanonicalFr(_bw.altTokenId);
+            }
+            // Genesis anchors enter the same slots `applyBkSetUpdate`
+            // guards, so they answer to the same invariant. Without this a
+            // non-canonical `genesisPrevMaxLevelLayerHash` is self-contradictory:
+            // `_expectedPrevAnchor` hands it back while no layer has data, but
+            // `verifyBlock` gates the argument through `_requireCanonicalFr`
+            // first, so the very first block can never match it. Zero is legal
+            // for the layer hash — a first block may genuinely carry zero — so
+            // only canonicity is required there.
+            if (p && f && l) {
+                if (_vb.genesisBkSetCommitment == 0) revert ZeroBkSetCommitment();
+                _requireCanonicalFr(_vb.genesisBkSetCommitment);
+                _requireCanonicalFr(_vb.genesisPrevMaxLevelLayerHash);
+            }
+        }
         primaryVerifier = _vb.primaryVerifier;
         fallbackVerifier = _vb.fallbackVerifier;
         layerHashesVerifier = _vb.layerHashesVerifier;
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
         storedLastSeenBlockSeqNo = _vb.genesisLastSeenBlockSeqNo;
-
-        // Circuit 4 (single-final-root) wiring — independent of `_vb`.
-        // Verifier address is the toggle; if non-zero, both Fr identifiers
-        // must also be non-zero (otherwise no real proof could ever bind).
-        if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
-            if (_bw.accFr == 0) {
-                revert InvalidBridgeWithdrawalIdentity();
-            }
-        }
         bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
         bridgeWithdrawalDappFr = _bw.dappFr;
         bridgeWithdrawalAccFr = _bw.accFr;
@@ -570,24 +651,30 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
-    /// @param anWorkchain Acki Nacki destination workchain id (TVM, e.g. 0).
+    /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
+    ///                    but Acki Nacki ignores it: the workchain concept is
+    ///                    retired there and `dappId` replaced it (2026-06-02),
+    ///                    so the recipient always lives in workchain 0. It is
+    ///                    not a public input of the deposit proof. Not
+    ///                    range-checked, because no supported set exists to
+    ///                    check against — a wrong value changes nothing.
+    ///                    The destination that
+    ///                    does matter is `anAccount` below.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
-    ///                    Must be non-zero. Carried as ZK public inputs and
-    ///                    credited on the AN side — an EVM address cannot be an
-    ///                    AN recipient, so the destination is supplied explicitly.
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
-        external
-        nonReentrant
-    {
+    ///                    Must be non-zero (`InvalidAnAccount`). AN
+    ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
+    ///                    (`ERR_ZERO_RECIPIENT`, QC-AN-10). Keep this ETH
+    ///                    fail-fast — do not drop it. Carried as ZK public
+    ///                    inputs; an EVM address cannot be an AN recipient.
+    ///                    A wrong non-zero destination is one-way (no refund).
+    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
-        if (!usdc.transferFrom(msg.sender, address(this), amount)) {
-            revert TransferFromFailed();
-        }
+        uint256 credited = _pullExactUsdc(amount);
 
         uint256 depositId = depositCounter++;
-        treasuryBalance += amount;
+        treasuryBalance += credited;
 
         emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp);
     }
@@ -677,12 +764,22 @@ contract AckiNackiBridge {
         // layer and desync per-layer windows / `_highestActiveLayer` (QC-A2-3).
         for (uint256 i = 0; i < numLayers; i++) {
             if (layerHashes[i] == 0) revert LayerHashActiveZero(i);
+            _requireCanonicalFr(layerHashes[i]);
         }
+        _requireCanonicalFr(prevMaxLevelLayerHash);
+        // `blockId` is only emitted, but Yul still reduces the instance
+        // mod BN254_R. Reject unreduced words so logs match AN.
+        _requireCanonicalFr(blockId);
 
         // ---- Anchor checks against stored state. ----
         if (bkSetCommitment != storedBkSetCommitment) {
             revert BkSetCommitmentMismatch(bkSetCommitment, storedBkSetCommitment);
         }
+        // Strictly greater is enough: gaps (seq_no fast-forward) are permitted
+        // so a relayer can catch up with a later valid proof. A jump does not
+        // mass-evict the window — each call still appends one slot.
+        // Sequential `last_seen+1` is an off-chain relayer policy, not an
+        // on-chain cap (see `test_relayerLoop_seqNoFastForward_isPermittedByContract`).
         if (blockSeqNo <= storedLastSeenBlockSeqNo) {
             revert BlockSeqNoNotMonotonic(blockSeqNo, storedLastSeenBlockSeqNo);
         }
@@ -817,7 +914,34 @@ contract AckiNackiBridge {
         if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
         }
+        // BRIDGE-ETH-WD-2 ordering invariant. `applyBkSetUpdate(N)` flips
+        // `storedBkSetCommitment` OLD → NEW; any later `verifyBlock(K)` for
+        // `K <= N` carries `bkSetCommitment == OLD` in its PI (the AN block
+        // that announces a rotation is signed by the outgoing set) and
+        // would revert `BkSetCommitmentMismatch`. Block `K`'s layer hashes
+        // would then never enter `_layerWindows`, and every future
+        // `verifyBlock` whose `_expectedPrevAnchor(numLayers)` picks
+        // through that hole would fail `PrevAnchorMismatch`. No admin
+        // recovery exists (verifiers are immutable, no pause, no
+        // state-reset). Since `applyBkSetUpdate` is `external`, this must
+        // be an on-chain invariant, not a relayer discipline — a
+        // wrong-order call by ANY caller (buggy future relayer, hostile
+        // actor front-running the honest relayer at a bundle-boundary
+        // rotation) would otherwise permanently brick the AN→ETH lane.
+        // Requiring the layer chain to have already covered block `N`
+        // turns wrong-order into a clean revert with untouched state.
+        if (blockSeqNo > storedLastSeenBlockSeqNo) {
+            revert VerifyBlockLagBehindRotation(blockSeqNo, storedLastSeenBlockSeqNo);
+        }
+        if (newCommitmentL3 == 0) revert ZeroBkSetCommitment();
+        // Stored commitment and attestation `blockId` must be canonical Fr.
+        // Unreduced `newCommitmentL3` would otherwise land in
+        // `storedBkSetCommitment` while adapters compare raw words.
+        _requireCanonicalFr(blockId);
+        _requireCanonicalFr(newCommitmentL3);
 
+        // lastSeen is the live layer cursor, not `storedLastBkSetUpdateSeqNo`
+        // (monotonicity only). The prover must bake the same word.
         bool attOk;
         if (finType == FinalizationType.Primary) {
             attOk = primaryVerifier.verifyPrimaryAttestation(
@@ -923,7 +1047,6 @@ contract AckiNackiBridge {
         }
 
         w.data[w.writeCursor] = hashValue;
-        w.heights[w.writeCursor] = blockHeight;
         w.writeCursor = uint16((uint256(w.writeCursor) + 1) % HISTORY_PROOF_WINDOW);
         if (w.dataLen < HISTORY_PROOF_WINDOW) {
             w.dataLen = w.dataLen + 1;
@@ -1006,31 +1129,8 @@ contract AckiNackiBridge {
     }
 
     /// @dev Flat membership — true if `anchor` appears in any layer window.
-    ///      This is the anchor check consumed by `withdrawByProof` (NB-Q1
-    ///      2026-08-04): every window entry was written by a verified
-    ///      `verifyBlock`, so the layer index adds specificity, not security.
-    ///      Option A (Circuit 4 PI slot `anchorLayer` + range-checked scan
-    ///      of the specific window) remains the ultimate target once the
-    ///      Circuit 4 re-keygen lands.
-    ///
-    ///      **Soundness widening.** Dropping the layer index means the bridge
-    ///      no longer asserts which layer a withdrawal is anchored in. A
-    ///      Circuit 4 proof whose `finalRoot` equals a layer-2 window entry
-    ///      is accepted even if the withdrawal event was intended to anchor
-    ///      to layer 1 (or vice-versa). Correctness therefore rests entirely
-    ///      on Circuit 4's own binding of `finalRoot` to the event — Option A
-    ///      is what would restore per-layer specificity on-chain.
-    ///
-    ///      **Cost.** `_isKnownLayerAnchor` is O(W) with
-    ///      `HISTORY_PROOF_WINDOW = 128`; this flat scan calls it for all
-    ///      `MAX_LAYER_HASHES = 10` layers, so a miss is up to
-    ///      `10 × 128 = 1280` cold SLOADs (~2.7M gas) — ~10× the single-
-    ///      window scan it replaced — and is paid by the caller whose
-    ///      `withdrawByProof` then reverts. An `mapping(uint256 => bool)`
-    ///      written on append would give O(1) membership; the eviction on
-    ///      window rollover must delete the map entry too, or the map
-    ///      quietly becomes the unbounded bag the window was introduced to
-    ///      avoid.
+    ///      Off-chain helper (`isKnownAnchor`); `withdrawByProof` uses the
+    ///      per-layer scan `_isKnownLayerAnchor(pub.anchorLayer, finalRoot)`.
     function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
             if (_isKnownLayerAnchor(L, anchor)) {
@@ -1057,7 +1157,7 @@ contract AckiNackiBridge {
             HistoryWindow storage w = _layerWindows[L];
             if (w.dataLen > 0) {
                 uint16 head = (w.writeCursor + uint16(HISTORY_PROOF_WINDOW) - 1)
-                              % uint16(HISTORY_PROOF_WINDOW);
+                    % uint16(HISTORY_PROOF_WINDOW);
                 out[L - 1] = w.data[head];
             }
         }
@@ -1070,18 +1170,53 @@ contract AckiNackiBridge {
         return _isKnownAnchor(anchor);
     }
 
+    /// @notice Occupancy of layer `L`'s ring (`0..=HISTORY_PROOF_WINDOW`).
+    ///         Saturates at 128 on first fill and stays there — it is not
+    ///         headroom for a given `finalRoot`. Use `anchorRemainingAppends`.
+    function layerWindowLen(uint8 layer) external view returns (uint16) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
+        return _layerWindows[layer].dataLen;
+    }
+
+    /// @notice Next write index of layer `L`'s ring (`0..=HISTORY_PROOF_WINDOW-1`).
+    function layerWindowWriteCursor(uint8 layer) external view returns (uint16) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
+        return _layerWindows[layer].writeCursor;
+    }
+
+    /// @notice On which further `_appendLayer` call `anchor` is evicted from
+    ///         `layer`: a return of N means the Nth append overwrites it, so the
+    ///         anchor survives N-1. 0 = not in the window. When the ring is full
+    ///         the oldest hash returns 1 — the next append takes it. Idle layers
+    ///         never evict: remaining stays until that layer appends again.
+    ///         Duplicate copies return the newest remaining.
+    function anchorRemainingAppends(uint8 layer, uint256 anchor) external view returns (uint256) {
+        if (layer == 0 || layer > MAX_LAYER_HASHES) revert InvalidNumLayers(layer);
+        HistoryWindow storage w = _layerWindows[layer];
+        uint256 n = w.dataLen;
+        uint256 best = 0;
+        for (uint256 i = 0; i < n; i++) {
+            if (w.data[i] != anchor) continue;
+            uint256 remaining =
+                (i + HISTORY_PROOF_WINDOW - uint256(w.writeCursor)) % HISTORY_PROOF_WINDOW + 1;
+            if (remaining > best) best = remaining;
+        }
+        return best;
+    }
+
     /// @notice View helper: is `anchor` present in layer `L`'s rolling window?
     function isKnownLayerAnchor(uint8 layer, uint256 anchor) external view returns (bool) {
         return _isKnownLayerAnchor(layer, anchor);
     }
 
-    /// @notice Full contents of layer `L`'s rolling window (data, heights, cursors).
+    /// @notice Full contents of layer `L`'s rolling window (data, cursors).
     ///
     /// @dev Off-chain-only reader for daemon bootstrap / resurrect. Never
     ///      called on-chain (would be prohibitively gassy — returns
     ///      `HISTORY_PROOF_WINDOW * (32 + 8)` bytes plus scalars per call).
-    ///      Used by the relayer daemon to reconstruct its `BridgeState`
-    ///      mirror against an already-advanced contract — the scenario a
+    ///      `heights` is always zero here; the relayer paints it from
+    ///      `LayerAnchorAppended` logs. Used to reconstruct `BridgeState`
+    ///      against an already-advanced contract — the scenario a
     ///      fresh install, a co-tester's daemon, or a mid-run machine
     ///      handoff hit when only `getLatestPerLayer()` was exposed
     ///      (heads-only). See
@@ -1102,18 +1237,18 @@ contract AckiNackiBridge {
     }
 
     // ---------------------------------------------------------------------
-    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4, single-final-root)
+    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4)
     // ---------------------------------------------------------------------
 
     /// @notice Mask for each half of a split-α `recipient` address (10 bytes = 80 bits).
-    /// @dev Circuit 4 single-final-root uses split-α (10/10) per
+    /// @dev Circuit 4 uses split-α (10/10) per
     ///      `bridge_event_prove_circuit::RECIPIENT_HI_*` / `RECIPIENT_LO_*`
     ///      offsets in the partner repo. The split is locked at deployment
     ///      via the immutable `bridgeWithdrawalVerifier` — its on-chain VK
     ///      only accepts proofs with the matching layout.
     uint256 private constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
 
-    /// @notice Pay out a withdrawal proven by a Circuit 4 (single-final-root)
+    /// @notice Pay out a withdrawal proven by a Circuit 4
     ///         Halo2 SHPLONK aggregator proof.
     ///
     /// Verifies that:
@@ -1122,7 +1257,7 @@ contract AckiNackiBridge {
     ///      identified by `(bridgeWithdrawalDappFr, bridgeWithdrawalAccFr)`,
     ///      anchored — via the proof's dense-chain extension — to a
     ///      `finalRoot` the bridge has previously observed via `verifyBlock`
-    ///      (`_knownAnchors[finalRoot] == true`).
+    ///      in the window named by `pub.anchorLayer`.
     ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
     ///      only — `pub.dstChainId == altDstChainId` while
     ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the
@@ -1151,7 +1286,7 @@ contract AckiNackiBridge {
     /// @param proof   Circuit 4 proof bytes accepted by
     ///                `IBridgeWithdrawalVerifier` (Halo2 SHPLONK aggregator
     ///                proof in production).
-    /// @param pub     Public-input slots [0..9]; see `IBridgeWithdrawalVerifier`.
+    /// @param pub     Public-input slots [0..10]; see `IBridgeWithdrawalVerifier`.
     /// @return success Always `true` on a successful payout; reverts on failure.
     function withdrawByProof(
         bytes calldata proof,
@@ -1189,24 +1324,27 @@ contract AckiNackiBridge {
         if (_reconstructRecipient(pub.recipientHi, pub.recipientLo) == address(0)) {
             revert InvalidRecipient();
         }
+        // Yul reduces instances mod BN254_R; the mapping must not treat
+        // N and N + k·BN254_R as distinct spent keys. Reject unreduced words
+        // rather than reducing-and-keying (that would alias two caller-supplied keys).
+        _requireCanonicalFr(pub.nullifier);
+        _requireCanonicalFr(pub.finalRoot);
+        _requireCanonicalFr(pub.anchorLayer);
         bytes32 nullifierKey = bytes32(pub.nullifier);
         if (_nullifiers[nullifierKey]) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
-        // NB-Q1 (2026-08-04): flat scan across every layer window. Option A
-        // (Circuit 4 PI slot `anchorLayer` + range-checked scan of the
-        // specific window) remains the ultimate target — this unblocks
-        // partner L≥2 witnesses today without waiting for the Circuit 4
-        // re-keygen. Every window entry was written by a verified
-        // `verifyBlock`, so the layer index adds specificity, not security.
-        if (!_isKnownAnchor(pub.finalRoot)) {
+        if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
+            revert InvalidNumLayers(pub.anchorLayer);
+        }
+        if (!_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);
         }
 
-        // ---- Crypto: verify the withdrawal proof. The 10 public inputs flow
-        //      verbatim through the adapter; the anchor check above guards
-        //      against a forged `finalRoot` that the circuit alone cannot
-        //      bind to the bridge's view of AN state.
+        // ---- Crypto: verify the withdrawal proof. The 11 public inputs flow
+        //      verbatim through the adapter; the layer-window check above
+        //      guards against a forged `finalRoot` that the circuit alone
+        //      cannot bind to the bridge's view of AN state.
         bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
         if (!ok) revert WithdrawalProofRejected();
 
@@ -1230,9 +1368,7 @@ contract AckiNackiBridge {
         }
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        if (!usdc.transfer(recipient, pub.amount)) {
-            revert WithdrawTransferFailed(recipient, pub.amount);
-        }
+        _pushExactUsdc(recipient, pub.amount);
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
@@ -1245,6 +1381,41 @@ contract AckiNackiBridge {
     ///      already-paid proof before paying gas for the verify call.
     function isNullifierUsed(uint256 nullifier) external view returns (bool) {
         return _nullifiers[bytes32(nullifier)];
+    }
+
+    /// @dev Revert unless `value` is a canonical BN254 Fr. Public inputs that
+    ///      become mapping or window keys must match the Yul verifier's
+    ///      `mod(calldataload, BN254_R)` image (the auto-generated Yul spells
+    ///      this modulus `f_q`) — otherwise `x` and `x + k·BN254_R` verify as
+    ///      one field element and occupy two keys.
+    function _requireCanonicalFr(uint256 value) internal pure {
+        if (value >= BN254_R) revert FieldElementOutOfRange(value);
+    }
+
+    /// @dev Credit exactly `amount` USDC. A fee-on-transfer or rebasing token
+    ///      that moves a different custody delta reverts.
+    function _pullExactUsdc(uint256 amount) internal returns (uint256 credited) {
+        uint256 before = usdc.balanceOf(address(this));
+        if (!usdc.transferFrom(msg.sender, address(this), amount)) {
+            revert TransferFromFailed();
+        }
+        uint256 afterBal = usdc.balanceOf(address(this));
+        if (afterBal < before || afterBal - before != amount) {
+            revert TransferAmountMismatch();
+        }
+        return amount;
+    }
+
+    /// @dev Debit exactly `amount` USDC. Same FoT/rebase fail-closed.
+    function _pushExactUsdc(address recipient, uint256 amount) internal {
+        uint256 before = usdc.balanceOf(address(this));
+        if (!usdc.transfer(recipient, amount)) {
+            revert WithdrawTransferFailed(recipient, amount);
+        }
+        uint256 afterBal = usdc.balanceOf(address(this));
+        if (before < afterBal || before - afterBal != amount) {
+            revert WithdrawTransferFailed(recipient, amount);
+        }
     }
 
     /// @dev Recombine a split-α `recipient` (10/10 byte halves) back into the
@@ -1272,9 +1443,12 @@ contract AckiNackiBridge {
         uint256 toSupply = amount == type(uint256).max ? available : amount;
         if (toSupply == 0 || toSupply > available) revert InvalidAmount();
 
-        suppliedPrincipal += toSupply;
-        usdc.approve(address(aavePool), toSupply);
+        if (!usdc.approve(address(aavePool), toSupply)) revert ApproveFailed();
+        uint256 aBefore = aUsdcBalance();
         aavePool.supply(address(usdc), toSupply, address(this), 0);
+        uint256 credited = aUsdcBalance() - aBefore;
+        if (credited == 0) revert AaveWithdrawFailed(toSupply, 0);
+        suppliedPrincipal += credited;
 
         emit SuppliedToAave(toSupply, suppliedPrincipal);
     }
@@ -1293,23 +1467,34 @@ contract AckiNackiBridge {
 
     /// @notice Emergency: pull *all* aUSDC back into the bridge as USDC and disable supplies.
     /// @dev Useful if AAVE pauses/depegs. User withdrawals remain available.
+    ///      If any aUSDC remains after `withdraw(max)`, revert — do not
+    ///      zero `suppliedPrincipal` (that would make leftover shares look like
+    ///      `accruedYield` and `harvestYield` would pay them to the owner).
+    ///      If the drain is clean but `received < principal`, keep the
+    ///      shortfall on the books instead of zeroing.
     function emergencyWithdrawAll() external onlyOwner nonReentrant {
+        uint256 before = usdc.balanceOf(address(this));
+        aavePool.withdraw(address(usdc), type(uint256).max, address(this));
+        uint256 received = usdc.balanceOf(address(this)) - before;
+
+        uint256 leftover = aUsdcBalance();
+        if (leftover != 0) revert EmergencyLeftoverAToken(leftover);
+
         aaveEnabled = false;
         emit AaveEnabledSet(false);
 
-        uint256 before = usdc.balanceOf(address(this));
-        aavePool.withdraw(address(usdc), type(uint256).max, address(this));
-
-        uint256 received = usdc.balanceOf(address(this)) - before;
         uint256 principal = suppliedPrincipal;
-        suppliedPrincipal = 0;
+        suppliedPrincipal = received >= principal ? 0 : principal - received;
 
         emit EmergencyWithdrawAll(received);
         emit WithdrawnFromAave(principal, received);
     }
 
-    /// @notice Harvest accrued yield (aUSDC balance above principal) to `yieldRecipient`.
-    /// @param amount Amount of yield to harvest (must be <= accruedYield()).
+    /// @notice Harvest yield still inside AAVE (`accruedYield`) to
+    ///         `yieldRecipient`. After `emergencyWithdrawAll` the surplus is
+    ///         liquid USDC — this reverts `NoYield`; collect with
+    ///         `skimExcessUsdc` (QC-A1-3).
+    /// @param amount Must be `<= accruedYield()` and non-zero.
     function harvestYield(uint256 amount) external onlyOwner nonReentrant {
         uint256 yield = accruedYield();
         if (yield == 0 || amount == 0 || amount > yield) revert NoYield();
@@ -1349,7 +1534,6 @@ contract AckiNackiBridge {
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
     }
 
-
     /// @notice Enable or disable further supplies to AAVE.
     function setAaveEnabled(bool enabled) external onlyOwner {
         if (enabled && address(aavePool) == address(0)) revert InvalidAaveAddress();
@@ -1370,10 +1554,29 @@ contract AckiNackiBridge {
         emit YieldRecipientSet(recipient);
     }
 
+    /// @notice Nominate `newOwner`. They become `owner` only after
+    ///         `acceptOwnership`. Replaces one-step transfer.
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert InvalidRecipient();
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Complete a pending ownership transfer. Caller must be `pendingOwner`.
+    /// @dev If `yieldRecipient` still tracks the outgoing owner (the
+    ///      constructor default), move it with the role so a key-rotation
+    ///      harvest cannot pay the compromised address. An explicitly set
+    ///      recipient is left alone.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner || msg.sender == address(0)) revert OwnershipNotPending();
+        address previous = owner;
+        emit OwnershipTransferred(previous, msg.sender);
+        if (yieldRecipient == previous) {
+            yieldRecipient = msg.sender;
+            emit YieldRecipientSet(msg.sender);
+        }
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     // ---------------------------------------------------------------------
@@ -1393,15 +1596,18 @@ contract AckiNackiBridge {
         if (suppliedPrincipal == 0) revert InsufficientTreasury();
 
         uint256 cap = suppliedPrincipal;
+        uint256 poolBal = aUsdcBalance();
         uint256 toPull = amount > cap ? cap : amount;
+        if (toPull > poolBal) toPull = poolBal;
+        if (toPull == 0) revert InsufficientTreasury();
 
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), toPull, address(this));
         uint256 received = usdc.balanceOf(address(this)) - before;
         if (received < toPull) revert AaveWithdrawFailed(toPull, received);
-        if (received < amount) revert AaveWithdrawFailed(amount, received);
+        if (received < amount && toPull == amount) revert AaveWithdrawFailed(amount, received);
 
-        suppliedPrincipal -= toPull;
+        suppliedPrincipal -= received;
         emit WithdrawnFromAave(amount, received);
     }
 

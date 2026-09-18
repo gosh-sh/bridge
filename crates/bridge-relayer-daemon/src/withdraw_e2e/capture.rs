@@ -3,25 +3,26 @@
 //!
 //! Mirrors `capture_event_metadata` in `python/helper/bridge_e2e.py`:
 //!
-//! * Baseline snapshot of pre-existing ExtOut message IDs so we ignore
-//!   anything that landed before our capture window opened.
-//! * Loop `query_bridge_extouts` looking for a message whose `dst`
-//!   matches the WithdrawalInitiated `makeAddrExtern(618)` sentinel and
-//!   whose id was not in the baseline.
+//! * Baseline snapshot of pre-existing ExtOut message IDs so we ignore anything
+//!   that landed before our capture window opened.
+//! * Loop `query_bridge_extouts` looking for a message whose `dst` matches the
+//!   WithdrawalInitiated `makeAddrExtern(618)` sentinel and whose id was not in
+//!   the baseline.
 //! * Resolve the containing block via `query_block_by_hash` — the
-//!   `Message.src_transaction.block_id` field is the block's `hash`, NOT
-//!   its consensus `block_id`; we need the direct lookup to obtain the
-//!   real `block_id` and `envelope_hash` that Circuit 4 hashes.
-//! * Fetch the account's on-chain `dapp_id` (falls back to a zero-hex
-//!   pad, matching the Python exporter's tolerance).
+//!   `Message.src_transaction.block_id` field is the block's `hash`, NOT its
+//!   consensus `block_id`; we need the direct lookup to obtain the real
+//!   `block_id` and `envelope_hash` that Circuit 4 hashes.
+//! * Fetch the account's on-chain `dapp_id` (falls back to a zero-hex pad,
+//!   matching the Python exporter's tolerance).
 
-use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::{bail, Context, Result};
-use tracing::{debug, info};
-
 use bridge_gql_fetcher::gql_client::{BridgeExtOutMessage, GqlBlockByHash, GqlClient};
+use tracing::{debug, info};
 
 /// Normalize a message `dst` string for equality comparison. The GQL
 /// server emits both extern-form (`:<hex>`) and workchain-legacy
@@ -181,17 +182,16 @@ pub async fn capture_next_withdrawal_event(
 ///
 /// The walk (all identifiers deterministic once the burn tx exists):
 ///
-/// 1. `blockchain.transaction(hash: an_tx_hash) { out_messages { id dst } }`
-///    — pick the outbound whose `dst` equals `usdc_bridge_legacy`. This
-///    is the internal message the multisig sent to USDCBridge. Retry
-///    briefly to absorb GQL propagation lag.
-/// 2. `blockchain.message(hash: msig_out_msg_id) { dst_transaction
-///    { out_messages { id dst } } }` — retry until USDCBridge has
-///    processed the message and its `dst_transaction` (with the ExtOut
-///    in its `out_messages`) is visible. Pick the outbound with
-///    `dst == ext_out_dst`.
-/// 3. `blockchain.message(hash: withdrawal_msg_id) { … }` — fetch the
-///    full ExtOut row (boc + block metadata) via
+/// 1. `blockchain.transaction(hash: an_tx_hash) { out_messages { id dst } }` —
+///    pick the outbound whose `dst` equals `usdc_bridge_legacy`. This is the
+///    internal message the multisig sent to USDCBridge. Retry briefly to absorb
+///    GQL propagation lag.
+/// 2. `blockchain.message(hash: msig_out_msg_id) { dst_transaction {
+///    out_messages { id dst } } }` — retry until USDCBridge has processed the
+///    message and its `dst_transaction` (with the ExtOut in its `out_messages`)
+///    is visible. Pick the outbound with `dst == ext_out_dst`.
+/// 3. `blockchain.message(hash: withdrawal_msg_id) { … }` — fetch the full
+///    ExtOut row (boc + block metadata) via
 ///    [`GqlClient::query_bridge_extout_by_id`], then reuse the same
 ///    block-by-hash + account-dapp_id resolution as the untargeted path.
 ///
@@ -227,9 +227,8 @@ pub async fn capture_targeted_withdrawal_event(
     let msig_out_msg_id = loop {
         if Instant::now() >= deadline {
             bail!(
-                "targeted capture stalled at stage 1: transaction(hash: {an_tx_hash}) not \
-                 visible via GQL within {:?} — check GQL endpoint reachability and multisig \
-                 broadcast",
+                "targeted capture stalled at stage 1: transaction(hash: {an_tx_hash}) not visible \
+                 via GQL within {:?} — check GQL endpoint reachability and multisig broadcast",
                 timeout
             );
         }
@@ -253,21 +252,23 @@ pub async fn capture_targeted_withdrawal_event(
                 bail!(
                     "transaction {an_tx_hash} produced {} outbound messages but none targeted \
                      USDCBridge ({usdc_bridge_legacy}); saw destinations: {:?}. This means the \
-                     multisig sendTransaction did not forward to the bridge — check the tx on-chain.",
+                     multisig sendTransaction did not forward to the bridge — check the tx \
+                     on-chain.",
                     out_msgs.len(),
                     dsts,
                 );
-            }
+            },
             Some(_) => {
                 bail!(
                     "transaction {an_tx_hash} exists but has zero outbound messages — the \
-                     multisig call reverted before forwarding. Check tx.aborted / compute.exit_code."
+                     multisig call reverted before forwarding. Check tx.aborted / \
+                     compute.exit_code."
                 );
-            }
+            },
             None => {
                 debug!("stage 1: tx not yet visible via GQL, retrying");
                 tokio::time::sleep(poll_interval).await;
-            }
+            },
         }
     };
 
@@ -301,11 +302,11 @@ pub async fn capture_targeted_withdrawal_event(
                     "stage 2: dst_transaction visible but no matching ExtOut yet, retrying",
                 );
                 tokio::time::sleep(poll_interval).await;
-            }
+            },
             None => {
                 debug!("stage 2: dst_transaction not yet visible, retrying");
                 tokio::time::sleep(poll_interval).await;
-            }
+            },
         }
     };
 
@@ -328,7 +329,7 @@ pub async fn capture_targeted_withdrawal_event(
             None => {
                 debug!("stage 3: ExtOut row not readable yet, retrying");
                 tokio::time::sleep(poll_interval).await;
-            }
+            },
         }
     };
 

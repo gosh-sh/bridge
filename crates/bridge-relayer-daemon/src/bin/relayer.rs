@@ -7,8 +7,8 @@
 //!   [`bridge_relayer_daemon::EthBridgeClient`].
 //!
 //! - `daemon` — long-running operator entry point. Drives `Relayer::tick`
-//!   forever with exponential backoff, until SIGINT/SIGTERM. Logs a
-//!   structured metrics snapshot on every shutdown.
+//!   forever with exponential backoff, until SIGINT/SIGTERM. Logs a structured
+//!   metrics snapshot on every shutdown.
 //!
 //! - `verify-fixture` — **read-only** pre-flight check. Loads a fixture, reads
 //!   the on-chain bridge anchors over RPC, and reports field-by-field whether
@@ -38,13 +38,14 @@ use alloy::{
 };
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    discover_event_proofs, run_withdraw_e2e_once, BackoffConfig, BkSetUpdateSubmitOutcome,
-    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
-    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
-    LiveBlockSource, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
-    RelayerMetrics, StatePaths, InProcessCircuit4SnarkProver, SubprocessAggregator,
-    SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
-    TickOutcome, WithdrawE2EConfig, WithdrawSubmitOutcome, WithdrawalProver, check_startup_drift,
+    check_startup_drift, discover_event_proofs, run_withdraw_e2e_once, BackoffConfig,
+    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
+    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, StatePaths,
+    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawE2EConfig, WithdrawSubmitOutcome,
+    WithdrawalProver,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -252,7 +253,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         seq_no: u64,
         /// Persistent outer-PK cache for the `aggregate-proof` subprocess.
-        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live --pk-cache-dir`.
+        /// Defaults to `<params_dir>/pk_cache`. See `daemon-live
+        /// --pk-cache-dir`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
     },
@@ -385,7 +387,8 @@ enum Cmd {
         /// aggregated calldata, so `daemon-live` refuses to start without it.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (aggregator self-check).
+        /// Directory of committed verifier `.bin` files (aggregator
+        /// self-check).
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
         verifiers_dir: PathBuf,
         /// Persistent outer-PK cache directory for the `aggregate-proof`
@@ -488,7 +491,11 @@ enum Cmd {
         aggregator_dir: PathBuf,
         /// Directory of committed verifier `.bin` files (aggregator's
         /// byte-identity self-check target).
-        #[arg(long, env = "BRIDGE_VERIFIERS_DIR", default_value = "../../contracts/ethereum/verifiers")]
+        #[arg(
+            long,
+            env = "BRIDGE_VERIFIERS_DIR",
+            default_value = "../../contracts/ethereum/verifiers"
+        )]
         verifiers_dir: PathBuf,
         /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
         #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
@@ -1480,7 +1487,14 @@ where
         // Idempotency: skip anything already withdrawn on-chain.
         match bridge.is_nullifier_used(pub_inputs.nullifier).await {
             Ok(true) => {
-                info!(proof = %proof_path.display(), nullifier = %pub_inputs.nullifier, "nullifier already used on-chain; skipping");
+                warn!(
+                    proof = %proof_path.display(),
+                    nullifier = %pub_inputs.nullifier,
+                    amount = %pub_inputs.amount,
+                    recipient_hi = %pub_inputs.recipient_hi,
+                    recipient_lo = %pub_inputs.recipient_lo,
+                    "nullifier already used on-chain; skipping (benign retry, or BRIDGE-WD-01 same-block duplicate burn — second ECC is stranded until C4 re-keygen)"
+                );
                 st.skipped += 1;
                 st.done.insert(proof_path);
                 continue;
@@ -1679,10 +1693,7 @@ async fn run_bridge_daemon(
             ),
             Ok(TickOutcome::BkUpdateApplied {
                 seq_no, ..
-            }) => info!(
-                seq_no,
-                "daemon-bridge: applyBkSetUpdate applied"
-            ),
+            }) => info!(seq_no, "daemon-bridge: applyBkSetUpdate applied"),
             Ok(TickOutcome::NotYetAvailable {
                 ..
             }) => {},
@@ -1707,8 +1718,7 @@ async fn run_bridge_daemon(
         }
 
         // ── Leg 2: pay out ready withdrawal proofs (withdrawByProof). ──
-        match withdraw_scan_once(&wd_bridge, &proofs_dir, dry_run, &mut wd_state).await
-        {
+        match withdraw_scan_once(&wd_bridge, &proofs_dir, dry_run, &mut wd_state).await {
             Ok(transient) => had_transient |= transient,
             Err(e) => {
                 warn!(?e, "daemon-bridge: withdraw scan hard error; backing off");
@@ -1871,7 +1881,8 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
             return Ok(());
         },
         _ => anyhow::bail!(
-            "must supply all three of --rpc-url / --bridge-address / --private-key together (or none)"
+            "must supply all three of --rpc-url / --bridge-address / --private-key together (or \
+             none)"
         ),
     };
     let (rpc_url, bridge_address, private_key) = submit.unwrap();
@@ -1952,8 +1963,7 @@ async fn submit_bk_update(
 
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
-            tx_hash,
-            ..
+            tx_hash, ..
         } => info!(?tx_hash, seq_no = block_seq_no, "applyBkSetUpdate applied"),
         BkSetUpdateSubmitOutcome::Reverted {
             reason,
@@ -2070,15 +2080,15 @@ async fn run_daemon_live(
         Some(loaded) => {
             if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
                 anyhow::bail!(
-                    "prover_bk_set commitment {} disagrees with prover_state {} — \
-                     delete BOTH under {} or restore a paired backup",
+                    "prover_bk_set commitment {} disagrees with prover_state {} — delete BOTH \
+                     under {} or restore a paired backup",
                     hex::encode(loaded.commitment),
                     hex::encode(state.stored_bk_set_commitment),
                     prover_state_dir.display(),
                 );
             }
             loaded
-        }
+        },
         None => {
             let pbs = ProverBkSet::from_pubkeys(&bk_set, 0);
             pbs.save(bk_path_str)
@@ -2088,16 +2098,13 @@ async fn run_daemon_live(
                 "bootstrapped prover_bk_set.json"
             );
             pbs
-        }
+        },
     };
 
     // Shared startup guard (parity with bridge-prover-daemon): reject the
     // "stale ./state on top of a re-initialised chain" configuration
     // before we hand off to LiveProverDriver.
-    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
-        &bk_set_config_str,
-        &prover_bk_set,
-    )?;
+    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(&bk_set_config_str, &prover_bk_set)?;
 
     // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
     // owns `prover_bk_set` as the sole BK-pubkey source and derives its
@@ -2135,40 +2142,39 @@ async fn run_daemon_live(
         bundle_stride = anchor_mode.stride(),
         "startup: read on-chain state for routing",
     );
-    // Anchor-mode maturity marker (Sergey's PR#35 review fallback for #2).
-    // L2 has shellnet Deploy #12 smoke but no continuous-production stress
-    // run yet — loud on startup so operators know what regime they're in.
     if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L2) {
-        tracing::warn!(
-            "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified \
-             cold-start end-to-end; no continuous multi-day production run yet. See \
-             crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md \
-             Case 7 for the expected log signature (watch for `layers=2` on the first Circuit 2 bundle) \
-             and drift-recovery deltas. Report anomalies against that signature."
+        tracing::info!(
+            stride = anchor_mode.stride(),
+            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on the first Circuit 2 bundle"
         );
     }
-    let decision = bridge_relayer_daemon::startup_decide(
-        bridge_relayer_daemon::DecideInputs {
-            local: &state,
-            chain: &chain_full,
-            bootstrap_seqno,
-            window_size: HISTORY_WINDOW_SIZE as usize,
-            anchor_level: anchor_mode.level(),
-        },
-    );
+    let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {
+        local: &state,
+        chain: &chain_full,
+        bootstrap_seqno,
+        window_size: HISTORY_WINDOW_SIZE as usize,
+        anchor_level: anchor_mode.level(),
+    });
     let (state, seed_policy) = match decision {
-        bridge_relayer_daemon::StartupDecision::Cold { policy } => {
-            info!(?policy, "startup: Cold — contract at genesis, bootstrapping");
+        bridge_relayer_daemon::StartupDecision::Cold {
+            policy,
+        } => {
+            info!(
+                ?policy,
+                "startup: Cold — contract at genesis, bootstrapping"
+            );
             (state, policy)
-        }
+        },
         bridge_relayer_daemon::StartupDecision::WarmResume => {
             info!(
                 last_seen = state.stored_last_seen_block_seq_no,
                 "startup: WarmResume — local state matches chain byte-for-byte",
             );
             (state, SeedPolicy::Resume)
-        }
-        bridge_relayer_daemon::StartupDecision::Resurrect { fresh_state } => {
+        },
+        bridge_relayer_daemon::StartupDecision::Resurrect {
+            fresh_state,
+        } => {
             let rebuilt = *fresh_state;
             info!(
                 chain_last_seen = chain_full.last_seen_block_seq_no,
@@ -2182,29 +2188,25 @@ async fn run_daemon_live(
                 .save(state_path_str)
                 .map_err(|e| anyhow::anyhow!("save resurrected BridgeState: {e}"))?;
             (rebuilt, SeedPolicy::Resume)
-        }
-        bridge_relayer_daemon::StartupDecision::Stop { reason } => {
+        },
+        bridge_relayer_daemon::StartupDecision::Stop {
+            reason,
+        } => {
             anyhow::bail!("startup routing STOP: {reason}");
-        }
+        },
     };
     info!(?seed_policy, "LiveProverDriver seed policy");
 
-    let driver = LiveProverDriver::new(
-        gql,
-        key_manager,
-        state,
-        prover_bk_set,
-        LiveProverConfig {
-            seed_policy,
-            // Emit Poseidon-transcript proofs directly. Consumed in-process
-            // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
-            // the old `export-1a1b2-poseidon-snark` subprocess that
-            // independently re-fetched + re-proved every bundle.
-            transcript: TranscriptKind::Poseidon,
-            anchor_mode,
-            ..Default::default()
-        },
-    )
+    let driver = LiveProverDriver::new(gql, key_manager, state, prover_bk_set, LiveProverConfig {
+        seed_policy,
+        // Emit Poseidon-transcript proofs directly. Consumed in-process
+        // by `bridge_snark_wrap::wrap_poseidon_snark_in_memory` — replaces
+        // the old `export-1a1b2-poseidon-snark` subprocess that
+        // independently re-fetched + re-proved every bundle.
+        transcript: TranscriptKind::Poseidon,
+        anchor_mode,
+        ..Default::default()
+    })
     .map_err(|e| anyhow::anyhow!("LiveProverDriver::new: {e}"))?;
     let driver = Arc::new(Mutex::new(driver));
 
@@ -2235,9 +2237,9 @@ async fn run_daemon_live(
             anyhow::bail!(
                 "startup drift: state anchor_level={} but daemon configured for L{} \
                  (BRIDGE_ANCHOR_LEVEL / --anchor-level). Rename {} to \
-                 state.pre_L{cfg_level}_$(date +%Y%m%d_%H%M%S) and rebootstrap. \
-                 Never auto-migrate between anchor levels on a live bridge — a mid-run \
-                 flip would submit a verifyBlock against the wrong on-chain window.",
+                 state.pre_L{cfg_level}_$(date +%Y%m%d_%H%M%S) and rebootstrap. Never \
+                 auto-migrate between anchor levels on a live bridge — a mid-run flip would \
+                 submit a verifyBlock against the wrong on-chain window.",
                 drift.state_level,
                 drift.cfg_level,
                 prover_state_dir.display(),
@@ -2252,9 +2254,9 @@ async fn run_daemon_live(
             && chain_full.last_seen_block_seq_no % anchor_mode.stride() != 0
         {
             anyhow::bail!(
-                "on-chain last_seen_block_seq_no={} is not a multiple of the L{} bundle stride {} — \
-                 either the bridge was deployed under a different anchor level, or this daemon is \
-                 pointed at the wrong contract.",
+                "on-chain last_seen_block_seq_no={} is not a multiple of the L{} bundle stride {} \
+                 — either the bridge was deployed under a different anchor level, or this daemon \
+                 is pointed at the wrong contract.",
                 chain_full.last_seen_block_seq_no,
                 anchor_mode.level(),
                 anchor_mode.stride(),
@@ -2312,9 +2314,10 @@ async fn run_daemon_live(
     .await
 }
 
-/// Build a Relayer, run the startup drift audit, then drive `run_until_shutdown`.
-/// Generic over the source types so both aggregation-on and aggregation-off
-/// paths in [`run_daemon_live`] share the same startup + run wiring.
+/// Build a Relayer, run the startup drift audit, then drive
+/// `run_until_shutdown`. Generic over the source types so both aggregation-on
+/// and aggregation-off paths in [`run_daemon_live`] share the same startup +
+/// run wiring.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_and_run<S, U, B>(
     cfg: RelayerConfig,

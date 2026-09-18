@@ -193,7 +193,8 @@ Verification-only — user already added L2+ support.
 **Unit (`bridge-prover-lib`):**
 - `live_driver::thinning::find_next_bundle_boundary`: L1 and L2 strides;
   L1 shim byte-identical to old behaviour.
-- `LiveProverConfig` default is L1; `AnchorMode::L2.stride(W, P) == W²`.
+- `LiveProverConfig` default is L1 (local/CI). Operational shellnet is L2.
+  `AnchorMode::L2.stride() == W²`.
 - `real_chain_builder::l2_anchor_boundaries` already covered.
 
 **Integration (no live GQL):**

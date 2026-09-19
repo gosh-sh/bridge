@@ -63,6 +63,78 @@ use crate::{
     withdrawal::WithdrawalPublicInputs,
 };
 
+/// Environment variable read by [`resolve_bridge_deploy_block`]. Same
+/// name as the deposit relayer so one operator env covers both daemons.
+pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
+
+/// Inclusive `eth_getLogs` span per request. Alchemy free-tier is 10;
+/// paid RPC is typically 2_000. Resurrect is a one-shot, so 2_000 keeps
+/// a months-old Sepolia deploy scannable. Operators on a 10-block cap
+/// must set [`BRIDGE_DEPLOY_BLOCK_ENV`] close to the last append.
+pub const GET_LOGS_CHUNK_BLOCKS: u64 = 2_000;
+
+/// Lower bound for `LayerAnchorAppended` scans. Unset / unparseable → 0
+/// (genesis). Avoid that on a long-lived chain.
+pub fn resolve_bridge_deploy_block() -> u64 {
+    std::env::var(BRIDGE_DEPLOY_BLOCK_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Inclusive `(from, to)` spans covering `from_block..=to_block`.
+pub fn get_logs_chunks(from_block: u64, to_block: u64, chunk: u64) -> Vec<(u64, u64)> {
+    if chunk == 0 || from_block > to_block {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = from_block;
+    while start <= to_block {
+        let end = start.saturating_add(chunk - 1).min(to_block);
+        out.push((start, end));
+        if end == u64::MAX {
+            break;
+        }
+        start = end.saturating_add(1);
+    }
+    out
+}
+
+/// Paint `windows[layer-1].heights` from chronological `(layer, height)`
+/// events (oldest first). Keeps the last `data_len` events per layer,
+/// matching `_appendLayer` ring order. Empty windows are left alone.
+pub fn paint_heights_from_events(
+    windows: &mut [HistoryWindow],
+    events: &[(u8, u64)],
+) -> Result<(), RelayerError> {
+    let mut by_layer: Vec<Vec<u64>> = vec![Vec::new(); MAX_LAYER_HASHES];
+    for &(layer, height) in events {
+        if layer == 0 || (layer as usize) > MAX_LAYER_HASHES {
+            continue;
+        }
+        by_layer[(layer as usize) - 1].push(height);
+    }
+    for (idx, window) in windows.iter_mut().enumerate() {
+        if window.data_len == 0 {
+            continue;
+        }
+        let evs = &by_layer[idx];
+        if evs.len() < window.data_len {
+            return Err(RelayerError::other(format!(
+                "layer {} has data_len={} but only {} LayerAnchorAppended logs",
+                idx + 1,
+                window.data_len,
+                evs.len()
+            )));
+        }
+        let oldest_first = &evs[evs.len() - window.data_len..];
+        window
+            .apply_chronological_heights(oldest_first)
+            .map_err(|e| RelayerError::other(e.to_string()))?;
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Public types
 // ─────────────────────────────────────────────────────────────────────
@@ -514,6 +586,11 @@ use sol_bindings::AckiNackiBridge;
 pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     contract: AckiNackiBridge::AckiNackiBridgeInstance<P, N>,
     address: Address,
+    /// Inclusive lower bound for `LayerAnchorAppended` scans. Read from
+    /// [`BRIDGE_DEPLOY_BLOCK_ENV`] in [`Self::new`]; without it the scan
+    /// starts at genesis. Must be set in production — a 2_000-block
+    /// chunk from block 0 is a denial of service against the RPC.
+    deploy_block: u64,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -522,10 +599,15 @@ where
     N: Network,
 {
     pub fn new(address: Address, provider: P) -> Self {
+        Self::with_deploy_block(address, provider, resolve_bridge_deploy_block())
+    }
+
+    pub fn with_deploy_block(address: Address, provider: P, deploy_block: u64) -> Self {
         let contract = AckiNackiBridge::new(address, provider);
         Self {
             contract,
             address,
+            deploy_block,
         }
     }
 
@@ -902,50 +984,43 @@ where
         if windows.iter().all(|w| w.data_len == 0) {
             return Ok(());
         }
-        let logs = self
+        // Without from/to, eth_getLogs defaults both to `latest` and
+        // returns one block. Resurrect then fails
+        // `data_len=X but only 0 LayerAnchorAppended logs` (ETH-31).
+        let to = self
             .contract
             .provider()
-            .get_logs(
-                &Filter::new()
-                    .address(self.address)
-                    .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH),
-            )
+            .get_block_number()
             .await
-            .map_err(|e| RelayerError::other(format!("LayerAnchorAppended get_logs: {e}")))?;
-
-        let mut by_layer: Vec<Vec<u64>> = vec![Vec::new(); MAX_LAYER_HASHES];
-        for log in logs {
-            let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let ev = decoded.inner.data;
-            let layer = u8::from(ev.layer);
-            if layer == 0 || (layer as usize) > MAX_LAYER_HASHES {
-                continue;
+            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
+        let from = self.deploy_block.min(to);
+        let mut events: Vec<(u8, u64)> = Vec::new();
+        for (start, end) in get_logs_chunks(from, to, GET_LOGS_CHUNK_BLOCKS) {
+            let filter = Filter::new()
+                .address(self.address)
+                .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
+                .from_block(start)
+                .to_block(end);
+            let logs = self
+                .contract
+                .provider()
+                .get_logs(&filter)
+                .await
+                .map_err(|e| {
+                    RelayerError::other(format!(
+                        "LayerAnchorAppended get_logs [{start},{end}]: {e}"
+                    ))
+                })?;
+            for log in logs {
+                let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let ev = decoded.inner.data;
+                events.push((u8::from(ev.layer), ev.blockHeight));
             }
-            by_layer[(layer as usize) - 1].push(ev.blockHeight);
         }
-
-        for (idx, window) in windows.iter_mut().enumerate() {
-            if window.data_len == 0 {
-                continue;
-            }
-            let evs = &by_layer[idx];
-            if evs.len() < window.data_len {
-                return Err(RelayerError::other(format!(
-                    "layer {} has data_len={} but only {} LayerAnchorAppended logs",
-                    idx + 1,
-                    window.data_len,
-                    evs.len()
-                )));
-            }
-            let oldest_first = &evs[evs.len() - window.data_len..];
-            window
-                .apply_chronological_heights(oldest_first)
-                .map_err(|e| RelayerError::other(e.to_string()))?;
-        }
-        Ok(())
+        paint_heights_from_events(windows, &events)
     }
 }
 
@@ -1350,5 +1425,37 @@ mod tests {
             },
             _ => panic!("expected revert"),
         }
+    }
+
+    #[test]
+    fn get_logs_chunks_covers_range_inclusively() {
+        assert_eq!(get_logs_chunks(100, 350, 100), vec![
+            (100, 199),
+            (200, 299),
+            (300, 350)
+        ]);
+        assert_eq!(get_logs_chunks(5, 5, 10), vec![(5, 5)]);
+        assert_eq!(get_logs_chunks(10, 9, 10), Vec::<(u64, u64)>::new());
+        assert_eq!(get_logs_chunks(0, 0, 2_000), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn paint_heights_keeps_last_data_len_events() {
+        let mut window = HistoryWindow::new(4);
+        window.append([1u8; 32], 0);
+        window.append([2u8; 32], 0);
+        let mut windows = vec![window];
+        paint_heights_from_events(&mut windows, &[(1, 10), (1, 20), (1, 30)]).unwrap();
+        let heights: Vec<u64> = windows[0].iter_chronological().map(|(_, h)| h).collect();
+        assert_eq!(heights, vec![20, 30]);
+    }
+
+    #[test]
+    fn paint_heights_errors_when_logs_are_short() {
+        let mut window = HistoryWindow::new(4);
+        window.append([1u8; 32], 0);
+        window.append([2u8; 32], 0);
+        let err = paint_heights_from_events(&mut [window], &[(1, 10)]).unwrap_err();
+        assert!(err.to_string().contains("data_len=2 but only 1"), "{err}");
     }
 }

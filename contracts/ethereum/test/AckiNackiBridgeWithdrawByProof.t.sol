@@ -52,8 +52,8 @@ import "./helpers/Bn254FrLib.sol";
 /// 7. **Recipient split validation**: `recipientHi` or `recipientLo`
 ///    exceeding 80 bits reverts with `RecipientHalfOutOfRange`. Valid splits
 ///    round-trip cleanly through `_reconstructRecipient`.
-/// 8. **Anchor unknown**: a proof referencing a `finalRoot` not in
-///    `_knownAnchors` reverts with `UnknownAnchor`.
+/// 8. **Anchor unknown**: a proof whose `finalRoot` is not in the
+///    window named by `anchorLayer` reverts with `UnknownAnchor`.
 /// 9. **Treasury shortfall**: amount > treasuryBalance reverts with
 ///    `WithdrawTreasuryShortfall`.
 /// 10. **Unsupported tokenId**: any `tokenId != 0` reverts (Phase B is
@@ -96,7 +96,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     /// @dev Sample funder for deposits.
     address internal funder = address(0xF00D);
 
-    /// @dev Anchor recorded into `_knownAnchors` via `setUp`'s seed
+    /// @dev Anchor recorded into layer 1's window via `setUp`'s seed
     ///      `verifyBlock`. Used as `pub.finalRoot` for happy-path tests.
     uint256 internal seedAnchor;
 
@@ -448,18 +448,12 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
     }
 
-    /// @notice Two AN burns in one block with the same
-    ///         `(block_id, tokenId, amount, recipient, sender)` share a
-    ///         Circuit 4 nullifier (`msg_id` is not in the preimage). The
-    ///         first payout succeeds; the second is `NullifierAlreadyUsed`
-    ///         and that ECC is stranded. Same on-chain mechanics as a
-    ///         replay — this name pins the duplicate-burn reading.
-    /// @notice Replay of the same nullifier is rejected (the mapping still
-    ///         guards a second payout even when two Circuit 4 proofs could
-    ///         theoretically be produced). Distinct `events_pos` values now
-    ///         produce distinct circuit nullifiers, so two identical burns
-    ///         in one AN block are no longer stranded by this path.
-    function test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked() public {
+    /// @notice A second `withdrawByProof` with the same nullifier reverts
+    ///         `NullifierAlreadyUsed`. This is replay protection, not the
+    ///         duplicate-burn collision: after the Circuit 4 rotation two
+    ///         identical burns in one AN block produce two keys because
+    ///         `events_pos` is in the Poseidon preimage.
+    function test_withdrawByProof_sameNullifier_secondPayoutBlocked() public {
         uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
         uint256 amount = 1 * UsdcTestLib.UNIT;
         uint256 treasuryBefore = bridge.treasuryBalance();
@@ -707,10 +701,46 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-zero"))));
         pub.anchorLayer = 0;
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, uint256(0))
-        );
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(0)));
         bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice `anchorLayer` above `MAX_LAYER_HASHES` uses the same
+    ///         `LayerOutOfRange` as `getLayerWindow`, not `InvalidNumLayers`.
+    function test_withdrawByProof_anchorLayerAboveMax_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-eleven"))));
+        pub.anchorLayer = 11;
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(11)));
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice `anchorLayer` above `uint8` max saturates the error argument
+    ///         at 255 rather than wrapping.
+    function test_withdrawByProof_anchorLayerAboveUint8_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-256"))));
+        pub.anchorLayer = 256;
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(255)));
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice Two distinct Circuit 4 nullifiers both pay. After
+    ///         `events_pos` entered the preimage, two identical burns in
+    ///         one AN block mint two keys; the mapping does not collapse
+    ///         them. The circuit binding itself waits on the circuits pin
+    ///         (bridge-audit #56 / #91).
+    function test_withdrawByProof_distinctNullifiers_bothPay() public {
+        uint256 amount = 1 * UsdcTestLib.UNIT;
+        uint256 a = Bn254FrLib.toFr(uint256(keccak256("events-pos-0")));
+        uint256 b = Bn254FrLib.toFr(uint256(keccak256("events-pos-1")));
+        uint256 treasuryBefore = bridge.treasuryBalance();
+
+        assertTrue(bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, a)));
+        assertTrue(bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, b)));
+        assertTrue(bridge.isNullifierUsed(a));
+        assertTrue(bridge.isNullifierUsed(b));
+        assertEq(bridge.treasuryBalance(), treasuryBefore - 2 * amount);
     }
 
     /// @notice NB-Q1 regression: a `finalRoot` that matches no layer window

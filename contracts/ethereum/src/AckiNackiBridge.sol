@@ -1164,8 +1164,10 @@ contract AckiNackiBridge {
         return out;
     }
 
-    /// @notice O(1) helper: is `anchor` in the bridge's set of known anchors?
-    ///         Cheap to call off-chain; mirrored inside `withdrawByProof`.
+    /// @notice Flat membership across all ten layer windows. Off-chain
+    ///         monitors can use this to ask "is this hash an anchor at
+    ///         all"; `withdrawByProof` does not. It scans only the window
+    ///         named by `pub.anchorLayer` (`isKnownLayerAnchor`).
     function isKnownAnchor(uint256 anchor) external view returns (bool) {
         return _isKnownAnchor(anchor);
     }
@@ -1335,7 +1337,9 @@ contract AckiNackiBridge {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
         if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
-            revert InvalidNumLayers(pub.anchorLayer);
+            revert LayerOutOfRange(
+                pub.anchorLayer > type(uint8).max ? type(uint8).max : uint8(pub.anchorLayer)
+            );
         }
         if (!_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);

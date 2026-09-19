@@ -24,6 +24,13 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`. Circuit
+  1A/1B proves `block_seq_no > last_seen`, so the live cursor after
+  `verifyBlock(N)` cannot be that argument. Relayers must pass the word
+  the proof was baked against and must not submit the rotation until
+  `verifyBlock` has covered N (ETH-36 / ETH-37). Callers of the old
+  nine-argument ABI will fail to decode.
+
 - **The Circuit 4 (withdrawal) verification key is rotated.** The inner
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
@@ -173,6 +180,12 @@ assigns it when the release is tagged.
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
 ### Changed
+
+- The AN→ETH relayer no longer submits `applyBkSetUpdate` (and abort the
+  tick) while `storedLastSeenBlockSeqNo` is behind the rotation. It
+  defers that call and continues into `verifyBlock`. The live prover
+  likewise keeps proving bundles when a rotation is pending, so the
+  layer cursor can catch up (ETH-36).
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis

@@ -10,7 +10,8 @@ pragma solidity ^0.8.19;
 ///      [0] blockId              32-byte AN block identifier hash, reduced mod Fr
 ///      [1] bkSetCommitment      Poseidon commitment to the active BK set
 ///      [2] blockSeqNo           AN block sequence number being attested
-///      [3] lastSeenBlockSeqNo   monotonic anchor: the contract's currently stored seqno
+///      [3] lastSeenBlockSeqNo   last_seen the attestation was proven against
+///                               (`block_seq_no > last_seen`, in-circuit)
 interface IFallbackVerifier {
     /// @notice Verify a Circuit 1B (Fallback attestation) proof.
     /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof)

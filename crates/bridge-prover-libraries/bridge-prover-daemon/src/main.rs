@@ -290,9 +290,13 @@ async fn main() -> anyhow::Result<()> {
                 blocked_by_pending_bk_update,
             }) => {
                 if blocked_by_pending_bk_update {
-                    // Loop back immediately; the rotation-drain lane needs
-                    // to run before bundle can advance past this height.
-                    continue;
+                    // Informational: a rotation is pending, but bundle
+                    // proving is no longer held for it (ETH-36). Sleep
+                    // like the ordinary Nothing path.
+                    info!(
+                        "rotation pending at or below next target {}; bundle lane stays open",
+                        next_target_seqno
+                    );
                 }
                 tracing::debug!(
                     "no new key block (next target {}, chain head {})",

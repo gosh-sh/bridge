@@ -130,6 +130,7 @@ impl From<&bridge_prover_lib::live_driver::BkUpdateProofArtifacts> for BkSetUpda
             fin_type: u.fin_type.into(),
             block_id: block_id_to_field(u.block_id_be),
             block_seq_no: u.block_seq_no,
+            attestation_last_seen: u.last_seen_bk_update_seq_no,
             old_commitment_l2: U256::from_le_bytes(u.old_bk_set_commitment_be),
             new_commitment_l3: U256::from_le_bytes(u.new_bk_set_commitment_be),
             sibling_h01: u.merkle_sibling_h01_be,
@@ -181,6 +182,9 @@ pub struct BkSetUpdateData {
     pub fin_type: FinalizationType,
     pub block_id: U256,
     pub block_seq_no: u64,
+    /// `last_seen` the attestation was proven against (`< block_seq_no`).
+    /// Not the live `storedLastSeenBlockSeqNo` after `verifyBlock(N)`.
+    pub attestation_last_seen: u64,
     pub old_commitment_l2: U256,
     pub new_commitment_l3: U256,
     /// Depth-3 sibling: hashes with `SHA(L2‖L3)` to form `h0_3`.

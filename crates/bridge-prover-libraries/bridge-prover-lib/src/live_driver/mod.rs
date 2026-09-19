@@ -31,12 +31,12 @@
 //!   [`LiveProverDriver::ack_bk_update`] compare `block_seq_no` to the
 //!   in-memory cursor and no-op if the state is already past. This means the
 //!   caller can re-ack after a crash-restart without corrupting state.
-//! * **`bk-updates block bundles`.** [`LiveProverDriver::poll_next_bundle`]
-//!   returns [`LiveBundleEvent::Nothing`] with
-//!   `blocked_by_pending_bk_update = true` whenever there is an un-drained
-//!   rotation whose block-height sits `<=` the next thinned-key-block target.
-//!   The caller must drain via [`poll_next_bk_update`](LiveProverDriver::poll_next_bk_update)
-//!   before bundles can advance past that height.
+//! * **Pending rotations no longer block bundles.** On-chain
+//!   `applyBkSetUpdate(N)` requires `verifyBlock` to have covered N
+//!   (BRIDGE-ETH-WD-2). [`LiveProverDriver::poll_next_bundle`] still
+//!   reports `blocked_by_pending_bk_update` when a rotation sits at or
+//!   below the next target, but it keeps proving the bundle so the
+//!   layer cursor can catch up (ETH-36).
 //!
 //! This module's public API *is* the two-daemon integration contract
 //! (`poll_next_bundle` / `ack_bundle` and their bk-update siblings)
@@ -715,25 +715,20 @@ impl LiveProverDriver {
             }
         };
 
-        // Guard: if there is an un-drained rotation at height `<= target`,
-        // bundle advance is blocked. Caller must drain via
-        // `poll_next_bk_update` first.
-        if self.pending_bk_update_below(next_target_seqno).await? {
-            return Ok(LiveBundleEvent::Nothing {
-                next_target_seqno,
-                chain_head_seqno,
-                blocked_by_pending_bk_update: true,
-            });
-        }
+        // Do not block bundle advance on a pending rotation. On-chain
+        // `applyBkSetUpdate(N)` now requires `verifyBlock` to have covered
+        // N (BRIDGE-ETH-WD-2 / ETH-36). Holding the bundle lane here
+        // deadlocks the live relayer: rotation waits on the cursor, the
+        // cursor waits on this poll. Surface the flag so callers can still
+        // see a rotation is pending, then prove the next bundle.
+        let blocked = self.pending_bk_update_below(next_target_seqno).await?;
 
-        // Delegate to the bundle sub-module. Returns None when attestation
-        // evidence is not ready yet (transient; caller retries).
         match bundle::drive_next_bundle(self, next_target_seqno).await? {
             Some(artifacts) => Ok(LiveBundleEvent::Bundle(artifacts)),
             None => Ok(LiveBundleEvent::Nothing {
                 next_target_seqno,
                 chain_head_seqno,
-                blocked_by_pending_bk_update: false,
+                blocked_by_pending_bk_update: blocked,
             }),
         }
     }

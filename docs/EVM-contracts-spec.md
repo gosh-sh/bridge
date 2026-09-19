@@ -94,7 +94,7 @@ Two independent directions:
   is proven off-chain and consumed natively by the AN `USDCBridge`. The bridge keeps custody of the
   USDC.
 * **AN → ETH (state attestation + payout).** `verifyBlock` (`:650`) advances a rolling commitment to
-  AN state from two cross-bound ZK proofs; `withdrawByProof` (`:1262`) pays out USDC against a
+  AN state from two cross-bound ZK proofs; `withdrawByProof` (`:1293`) pays out USDC against a
   Circuit-4 proof anchored into state that `verifyBlock` already recorded. `applyBkSetUpdate`
   (`:799`) rotates the AN validator-set (BK-set) commitment.
 
@@ -332,7 +332,7 @@ key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must re
 function withdrawByProof(
     bytes calldata proof,
     IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-) external nonReentrant returns (bool success)            // :1262-1350
+) external nonReentrant returns (bool success)            // :1293-1381
 ```
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
@@ -343,24 +343,24 @@ finalRoot, anchorLayer`.
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | C4 verifier wired | 1264 | `WithdrawByProofDisabled` |
-| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1269 | `WithdrawIdentityMismatch` |
-| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1272-1278 | `DstChainIdMismatch` |
-| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1280-1283 | `UnsupportedTokenId` |
-| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1285-1289 | `RecipientHalfOutOfRange` |
-| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1293 | `InvalidRecipient` |
-| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1303 | `NullifierAlreadyUsed` |
-| 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1306 | `LayerOutOfRange` |
-| 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1309 | `UnknownAnchor` |
-| 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1317 | `WithdrawalProofRejected` |
-| 11 | `pub.amount ≤ treasuryBalance` | 1321 | `WithdrawTreasuryShortfall` |
+| 1 | C4 verifier wired | 1297 | `WithdrawByProofDisabled` |
+| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1302 | `WithdrawIdentityMismatch` |
+| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1305-1311 | `DstChainIdMismatch` |
+| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1313-1316 | `UnsupportedTokenId` |
+| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1318-1322 | `RecipientHalfOutOfRange` |
+| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1326 | `InvalidRecipient` |
+| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1336 | `NullifierAlreadyUsed` |
+| 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1339 | `LayerOutOfRange` |
+| 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1344 | `UnknownAnchor` |
+| 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1352 | `WithdrawalProofRejected` |
+| 11 | `pub.amount ≤ treasuryBalance` | 1356 | `WithdrawTreasuryShortfall` |
 
-Effects then interactions (`:1330-1349`): mark the nullifier used, `treasuryBalance -= amount`;
+Effects then interactions (`:1361-1379`): mark the nullifier used, `treasuryBalance -= amount`;
 then, if liquid USDC < `amount` and `suppliedPrincipal > 0`, pull `min(shortfall, suppliedPrincipal)`
 back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
 
-Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1397-1400`).
+Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1428-1431`).
 
 **Anchor semantics.** `_isKnownLayerAnchor` (`src/AckiNackiBridge.sol`) scans
 only the window named by Circuit 4's 1-indexed `anchorLayer` public input
@@ -433,9 +433,9 @@ do not treat `AttestationProofRejected` as a consensus bug.
 |---|---:|---|
 | `expectedPrevAnchor(uint8 numLayers)` | 1004 | The anchor the next `verifyBlock` will require. |
 | `getLatestPerLayer()` | 1054 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
-| `isKnownAnchor(uint256)` | 1140 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
-| `isKnownLayerAnchor(uint8, uint256)` | 1179 | Membership in one window. This is what `withdrawByProof` uses. |
-| `isNullifierUsed(uint256)` | 1355 | Replay pre-check for relayers. |
+| `isKnownAnchor(uint256)` | 1171 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
+| `isKnownLayerAnchor(uint8, uint256)` | 1210 | Membership in one window. This is what `withdrawByProof` uses. |
+| `isNullifierUsed(uint256)` | 1386 | Replay pre-check for relayers. |
 
 ---
 

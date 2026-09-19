@@ -34,6 +34,12 @@ assigns it when the release is tagged.
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
   not decode.
 
+- `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
+  greater than 10, the same error `getLayerWindow` already uses.
+  `InvalidNumLayers` stays on `verifyBlock`. A caller that caught
+  `InvalidNumLayers` on a bad withdrawal layer will need to catch
+  `LayerOutOfRange` instead.
+
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
   20 the outer circuit did not fit the 14 inner public inputs. The runtime
@@ -173,12 +179,6 @@ assigns it when the release is tagged.
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
 ### Changed
-
-- `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
-  greater than 10, the same error `getLayerWindow` already uses.
-  `InvalidNumLayers` stays on `verifyBlock`. A caller that caught
-  `InvalidNumLayers` on a bad withdrawal layer will need to catch
-  `LayerOutOfRange` instead.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis

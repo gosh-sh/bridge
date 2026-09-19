@@ -174,6 +174,12 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
+  greater than 10, the same error `getLayerWindow` already uses.
+  `InvalidNumLayers` stays on `verifyBlock`. A caller that caught
+  `InvalidNumLayers` on a bad withdrawal layer will need to catch
+  `LayerOutOfRange` instead.
+
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
   unvalidated) are closed by this release, and item 3 now states the real

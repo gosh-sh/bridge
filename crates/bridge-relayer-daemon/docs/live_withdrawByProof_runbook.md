@@ -730,9 +730,10 @@ MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 
 **Failure isolation.** Because the on-chain anchor path is level-opaque
 (constructor stores a single genesis scalar; `_expectedPrevAnchor` uses
-per-layer picks; `withdrawByProof`'s `_isKnownAnchor` scans all
-layers — see change log), any revert in cycle N ≥ 2 is almost
-certainly reproducing a Case 3b failure mode, not something L2-specific.
+per-layer picks; `withdrawByProof`'s `_isKnownLayerAnchor` scans only
+the window named by `anchorLayer` — see change log), any revert in
+cycle N ≥ 2 is almost certainly reproducing a Case 3b failure mode,
+not something L2-specific.
 Start with the Case 3b catalog before diagnosing L2.
 
 ---

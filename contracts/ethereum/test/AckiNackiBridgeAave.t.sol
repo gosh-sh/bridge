@@ -32,6 +32,7 @@ contract AckiNackiBridgeAaveTest is Test {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
+    event UnbackedPrincipalWrittenOff(uint256 amount);
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
@@ -309,6 +310,29 @@ contract AckiNackiBridgeAaveTest is Test {
 
         vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
         bridge.withdrawFromAave(type(uint256).max);
+
+        vm.expectEmit(false, false, false, true);
+        emit UnbackedPrincipalWrittenOff(haircut);
+        bridge.writeOffUnbackedPrincipal();
+        assertEq(bridge.suppliedPrincipal(), 0);
+    }
+
+    function test_writeOffUnbackedPrincipal_revertsWhenATokenRemains() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        vm.expectRevert(AckiNackiBridge.NothingToWriteOff.selector);
+        bridge.writeOffUnbackedPrincipal();
+    }
+
+    function test_writeOffUnbackedPrincipal_revertsWhenBooksAreClean() public {
+        vm.expectRevert(AckiNackiBridge.NothingToWriteOff.selector);
+        bridge.writeOffUnbackedPrincipal();
+    }
+
+    function test_writeOffUnbackedPrincipal_onlyOwner() public {
+        vm.prank(user1);
+        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
+        bridge.writeOffUnbackedPrincipal();
     }
 
     function test_eth9_approveFalse_reverts() public {

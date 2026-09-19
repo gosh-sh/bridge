@@ -531,20 +531,24 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 
 | Function | Line | Behaviour |
 |---|---:|---|
-| `supplyToAave(amount)` | 1240 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal += toSupply`. |
-| `withdrawFromAave(amount)` | 1258 | Pull back up to `suppliedPrincipal` preemptively. |
-| `emergencyWithdrawAll()` | 1477 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
-| `harvestYield(amount)` | 1497 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. |
-| `skimExcessUsdc(amount)` | 1525 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
-| `setAaveEnabled(bool)` | 1328 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
-| `setLiquidReserveBps(bps)` | 1335 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
-| `setYieldRecipient(addr)` | 1341 | Non-zero. |
-| `transferOwnership(addr)` | 1347 | Non-zero; single-step. |
+| `supplyToAave(amount)` | 1450 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, books the aUSDC delta (`suppliedPrincipal += credited`). A zero delta reverts `AaveSupplyFailed`. |
+| `withdrawFromAave(amount)` | 1471 | Pull back up to `_backedPrincipal()` (`min(suppliedPrincipal, aUsdcBalance)`). |
+| `emergencyWithdrawAll()` | 1488 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Clear a leftover book with `writeOffUnbackedPrincipal`. Payouts that fit in liquid USDC stay available. |
+| `writeOffUnbackedPrincipal()` | 1510 | Owner-only. Requires `aUsdcBalance() == 0` and `suppliedPrincipal > 0`; zeroes the book and emits `UnbackedPrincipalWrittenOff`. Does not move funds (ETH-28). |
+| `harvestYield(amount)` | 1522 | `amount ≤ accruedYield()` — yield still inside AAVE. Transfers the requested `amount` (surplus from an overpaying pool stays liquid). After a successful emergency this is zero and the call reverts `NoYield`. |
+| `skimExcessUsdc(amount)` | 1550 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
+| `setAaveEnabled(bool)` | 1562 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
+| `setLiquidReserveBps(bps)` | 1569 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
+| `setYieldRecipient(addr)` | 1575 | Non-zero. |
+| `transferOwnership(addr)` | 1583 | Non-zero; two-step (`acceptOwnership`). |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
-floored at 0 (`:1358`). `_pullFromAave(amount)` withdraws `min(amount, suppliedPrincipal)`, requires
-the *received* delta to cover both `toPull` and `amount` (`AaveWithdrawFailed`), and decrements
-`suppliedPrincipal` (`:1366-1380`).
+floored at 0. `_backedPrincipal()` = `min(suppliedPrincipal, aUsdcBalance)`.
+`_pullFromAave(amount)` withdraws exactly `amount` when that is ≤ `_backedPrincipal()`,
+requires the received USDC delta to cover `toPull` (`AaveWithdrawFailed`), and decrements
+`suppliedPrincipal` by `toPull` (an overpaying pool cannot panic the subtract).
+`withdrawByProof` uses the same backed cap: a phantom book with empty aUSDC no longer
+enters the AAVE pull (it reverts `InsufficientTreasury` if liquid cannot cover the payout).
 
 Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal` floored at 0,
 `totalAssets()` = liquid USDC + aUSDC (`:1387-1402`).
@@ -554,7 +558,7 @@ Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal`
 | Function | Caller |
 |---|---|
 | `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone |
-| `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
 | everything else | view/pure |
 
 There is **no pause switch** (removed in commit `d6bfed4`, "Remove EVM pause") and **no owner path

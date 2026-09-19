@@ -456,6 +456,12 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- The AN→ETH relayer reconstructs per-slot window heights from
+  `LayerAnchorAppended` between `BRIDGE_DEPLOY_BLOCK` and latest, in
+  2 000-block `eth_getLogs` chunks. A scan with no from/to block used
+  to default both ends to `latest` and fail resurrect on any contract
+  that already had history (ETH-31). Set the env var; leaving it unset
+  still scans from genesis.
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
   exponential backoff.** With the aggregator now binding the inner-circuit

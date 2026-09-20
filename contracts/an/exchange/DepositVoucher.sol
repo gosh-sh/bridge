@@ -36,7 +36,7 @@ contract DepositVoucher is eccUSDCBridgeModifiers {
         uint256 anAccount
     ) internalMsg {
         tvm.accept();
-        require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
+        require(msg.sender == USDC_BRIDGE_ADDRESS && _senderIsInDapp(0), ERR_INVALID_SENDER);
         require(
             tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId)) == _depositHash,
             ERR_HASH_MISMATCH

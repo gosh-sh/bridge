@@ -210,11 +210,27 @@
 			]
 		},
 		{
+			"name": "setUsdcWalletDapp",
+			"inputs": [
+				{"name":"dappId","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "getUsdcWallet",
 			"inputs": [
 			],
 			"outputs": [
 				{"name":"value0","type":"address"}
+			]
+		},
+		{
+			"name": "getUsdcWalletDapp",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"uint256"}
 			]
 		},
 		{
@@ -321,6 +337,7 @@
 		{"init":false,"name":"_constructorFlag","type":"bool"},
 		{"init":false,"name":"_ownerPubkey","type":"uint256"},
 		{"init":false,"name":"_usdcWallet","type":"address"},
+		{"init":false,"name":"_usdcWalletDappId","type":"uint256"},
 		{"init":false,"name":"_totalMinted","type":"uint128"},
 		{"init":false,"name":"_mintNonce","type":"uint64"},
 		{"init":false,"name":"_mintAccumulatorNonce","type":"uint64"},

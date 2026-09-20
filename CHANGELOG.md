@@ -25,8 +25,8 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - **The Acki Nacki contracts are built with `sold` 0.82.0, and all three code
-  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `852072bc…`, `DepositVoucher`
-  `bd44b82a…` → `ced75c55…`, `EthBeaconLightClient` `78905cf7…` → `18d518dc…`.
+  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `905581d5…`, `DepositVoucher`
+  `bd44b82a…` → `f1598019…`, `EthBeaconLightClient` `78905cf7…` → `0312e93a…`.
   The artefacts now live in `contracts/an/0.82.0_compiled/exchange/`; the
   `0.80.0_compiled/` and `0.81.0_compiled/` folders are gone. The three move
   together: the bridge carries the voucher's code in its data and the
@@ -43,9 +43,12 @@ assigns it when the release is tagged.
     until the owner re-seeds the allowlist and the anchors.
 - **Every public function now states which message types it accepts.** 0.82.0
   requires `internalMsg` / `externalMsg` / `crossDappMsg` on every public
-  function, and a call arriving as the wrong type fails with **exit 81**
-  instead of running. The ABI does not show this — it is a runtime check — so
-  the mapping is spelled out here:
+  function, and a call arriving as the wrong type fails instead of running:
+  **exit 71** for an `externalMsg` function reached by an internal message,
+  **exit 72** for an `internalMsg` one reached by an external message, **exit
+  81** for a cross-dapp message at a function that does not take one. The ABI
+  does not show this — it is a runtime check — so the mapping is spelled out
+  here:
   - **external message only:** every owner-key call on both contracts
     (`setPubkey`, `setTrustedL1Bridge`, `setAcceptedBlockHash`,
     `setLightClientCode`, `deployLightClient`, `disableOwnerAnchors`,
@@ -71,13 +74,24 @@ assigns it when the release is tagged.
   - **either message type:** all read-only getters, so nothing that reads the
     contracts has to change.
 
-  A cross-dapp message carries no source dapp — `msg` exposes `sender` and
-  `isCrossDapp`, nothing more — so a function that both accepts cross-dapp
-  messages and authorises its caller by address would accept an account with
-  the same address in any other dapp. That is why the light-client writers, the
-  voucher callback and the constructors stay internal-only: the bridge knows
-  the light client by an address derived from its code, the light client knows
-  the bridge by a constant, and neither pair carries a dapp.
+- **Every caller authorised by address is now also checked against the dapp
+  it is in.** An address does not carry a dapp, so `msg.sender == X` on its own
+  admits an account with the same address in any other dapp — and the deposit
+  anchors, the voucher callback and the TIP-3 mint are all authorised that way.
+  The contracts now read the `src_dapp_id` the node stamps into the inbound
+  message header (it comes from the sending account's own state, not from the
+  caller) and require it to match. `acceptBlockHashFromLightClient`,
+  `forgetBlockHashFromLightClient`, `confirmDeposit` and both deployed
+  constructors require the bridge's own dapp; `onTransferReceived` requires the
+  dapp declared for the TIP-3 wallet. A mismatch is `ERR_INVALID_SENDER`
+  (exit 207), the same error the address mismatch already returned.
+- **New owner call `setUsdcWalletDapp(uint256 dappId)` and getter
+  `getUsdcWalletDapp()`.** Declares which dapp the TIP-3 USDC TokenWallet
+  lives in, so `onTransferReceived` can accept it across a dapp boundary; 0
+  means the bridge's own dapp, which is the default and today's behaviour. Like
+  `_trustedL1Bridge` it is not carried through `onCodeUpgrade` — if the wallet
+  is not a neighbour, re-declare it after an upgrade or TIP-3 deposits stop.
+  Both calls are additions to the bridge's ABI; nothing existing changed.
 - **A deposit's destination dapp comes from the proof instead of being pinned
   to 0.** `finalizeDeposit` reads `dapp_id` out of public inputs #5/#6, which
   the circuit has always carried and the contract discarded. Three effects:

@@ -75,6 +75,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // TokenWallet address for TIP-3 USDC bridge (one-way: TIP-3 -> ECC[3])
     address _usdcWallet;
 
+    // Dapp `_usdcWallet` lives in; 0 means the bridge's own. The wallet is
+    // authorized by address, and an address does not carry a dapp, so without
+    // this the same address in any other dapp would pass. Owner-managed via
+    // `setUsdcWalletDapp`; like `_trustedL1Bridge` it is NOT carried through
+    // `onCodeUpgrade`, so after an upgrade it is 0 again.
+    uint256 _usdcWalletDappId;
+
     // Total ECC[3] USDC minted by the stripe (TIP-3) bridge
     uint128 _totalMinted;
 
@@ -284,7 +291,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 value,
         uint128 /*balance*/
     ) external override internalMsg crossDappMsg {
-        require(msg.sender == _usdcWallet, ERR_INVALID_SENDER);
+        require(msg.sender == _usdcWallet && _senderIsInDapp(_usdcWalletDappId), ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
 
@@ -521,7 +528,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         chain. Authorized solely by being the light client this bridge
     ///         — no human asserts canonicality, the proof does.
     function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public internalMsg {
-        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
+        require(_lightClient != address(0) && msg.sender == _lightClient && _senderIsInDapp(0),
+                ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
         _acceptedBlockHash[chainId][blockHash] = true;
@@ -529,7 +537,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Drops a hash the light client has aged out of its window.
     function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public internalMsg {
-        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
+        require(_lightClient != address(0) && msg.sender == _lightClient && _senderIsInDapp(0),
+                ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
         delete _acceptedBlockHash[chainId][blockHash];
@@ -640,7 +649,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             varInit: { _depositHash: depositHash },
             code: _depositVoucherCode
         });
-        require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+        require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)) && _senderIsInDapp(0),
+                ERR_INVALID_SENDER);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
 
         tvm.accept();
@@ -784,9 +794,25 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // Getters
     // ========================================================
 
+    /// @notice Declares which dapp the TIP-3 USDC TokenWallet lives in, so a
+    ///         wallet outside the bridge's own dapp can reach
+    ///         `onTransferReceived`. 0 means the bridge's own dapp. Not carried
+    ///         through `onCodeUpgrade`: re-declare it after an upgrade if the
+    ///         wallet is not a neighbour.
+    function setUsdcWalletDapp(uint256 dappId) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        _usdcWalletDappId = dappId;
+    }
+
     /// @notice Returns the TIP-3 USDC TokenWallet address used for the bridge.
     function getUsdcWallet() external view externalMsg internalMsg returns (address) {
         return _usdcWallet;
+    }
+
+    /// @notice Returns the dapp the TIP-3 USDC TokenWallet is declared to live
+    ///         in (0 = the bridge's own).
+    function getUsdcWalletDapp() external view externalMsg internalMsg returns (uint256) {
+        return _usdcWalletDappId;
     }
 
     /// @notice Returns the owner public key.

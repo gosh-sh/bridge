@@ -25,8 +25,11 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - **The Acki Nacki contracts are built with `sold` 0.82.0, and all three code
-  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `905581d5…`, `DepositVoucher`
-  `bd44b82a…` → `f1598019…`, `EthBeaconLightClient` `78905cf7…` → `0312e93a…`.
+  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `bdd5bfca…`, `DepositVoucher`
+  `bd44b82a…` → `93571b3e…`, `EthBeaconLightClient` `78905cf7…` → `37700e77…`.
+  The compiler is `sold` 0.82.0 **plus `msg.src_dapp_id`** (branch
+  `msg-src-dapp-id` of the compiler fork); stock 0.82.0 refuses these sources
+  rather than producing a different artefact.
   The artefacts now live in `contracts/an/0.82.0_compiled/exchange/`; the
   `0.80.0_compiled/` and `0.81.0_compiled/` folders are gone. The three move
   together: the bridge carries the voucher's code in its data and the
@@ -78,9 +81,9 @@ assigns it when the release is tagged.
   it is in.** An address does not carry a dapp, so `msg.sender == X` on its own
   admits an account with the same address in any other dapp — and the deposit
   anchors, the voucher callback and the TIP-3 mint are all authorised that way.
-  The contracts now read the `src_dapp_id` the node stamps into the inbound
-  message header (it comes from the sending account's own state, not from the
-  caller) and require it to match. `acceptBlockHashFromLightClient`,
+  The contracts now read `msg.src_dapp_id` — the dapp the node stamps into the
+  inbound message header from the sending account's own state, not from the
+  caller — and require it to match. `acceptBlockHashFromLightClient`,
   `forgetBlockHashFromLightClient`, `confirmDeposit` and both deployed
   constructors require the bridge's own dapp; `onTransferReceived` requires the
   dapp declared for the TIP-3 wallet. A mismatch is `ERR_INVALID_SENDER`

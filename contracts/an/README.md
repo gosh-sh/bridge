@@ -41,8 +41,14 @@ folder carries that name. Any other compiler changes the code hash, so the
 
 0.82.0 is not optional here: the sources use cross-dapp messages
 (`internalMsg` / `externalMsg` / `crossDappMsg` on every public function, the
-`dest_dapp_id` option on the deposit payout) and the per-emit event version
-(`emit …{version: 1}`), and neither 0.80.0 nor 0.81.0 parses them.
+`dest_dapp_id` option on the deposit payout), the per-emit event version
+(`emit …{version: 1}`) and `msg.src_dapp_id`, and neither 0.80.0 nor 0.81.0
+parses them.
+
+`msg.src_dapp_id` is not in stock 0.82.0 either: it is added on the
+`msg-src-dapp-id` branch of the compiler fork. Until that branch is merged,
+`SOLD` has to point at a build of it — a stock 0.82.0 fails on the unknown
+member rather than producing a different artefact.
 
 The bridge keeps the voucher's code in its data, and the zerostate installs the
 light client's code into the bridge, so replace the rebuilt artefacts together.

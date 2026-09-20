@@ -290,8 +290,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         address /*to*/,
         uint128 value,
         uint128 /*balance*/
-    ) external override internalMsg crossDappMsg {
-        require(msg.sender == _usdcWallet && _senderIsInDapp(_usdcWalletDappId), ERR_INVALID_SENDER);
+    ) external override internalMsg crossDappMsg senderIs(_usdcWallet, _usdcWalletDappId) {
         tvm.accept();
         ensureBalance();
 
@@ -527,18 +526,20 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Admits a block hash the light client proved final on the source
     ///         chain. Authorized solely by being the light client this bridge
     ///         — no human asserts canonicality, the proof does.
-    function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public internalMsg {
-        require(_lightClient != address(0) && msg.sender == _lightClient && _senderIsInDapp(0),
-                ERR_INVALID_SENDER);
+    function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash)
+        public internalMsg senderIs(_lightClient, 0)
+    {
+        require(_lightClient != address(0), ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
         _acceptedBlockHash[chainId][blockHash] = true;
     }
 
     /// @notice Drops a hash the light client has aged out of its window.
-    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public internalMsg {
-        require(_lightClient != address(0) && msg.sender == _lightClient && _senderIsInDapp(0),
-                ERR_INVALID_SENDER);
+    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash)
+        public internalMsg senderIs(_lightClient, 0)
+    {
+        require(_lightClient != address(0), ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
         delete _acceptedBlockHash[chainId][blockHash];
@@ -649,8 +650,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             varInit: { _depositHash: depositHash },
             code: _depositVoucherCode
         });
-        require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)) && _senderIsInDapp(0),
-                ERR_INVALID_SENDER);
+        require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+        require(msg.src_dapp_id == address(this).dapp_id, ERR_INVALID_SENDER);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
 
         tvm.accept();

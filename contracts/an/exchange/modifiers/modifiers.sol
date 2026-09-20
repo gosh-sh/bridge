@@ -18,14 +18,13 @@ abstract contract eccUSDCBridgeModifiers is eccUSDCBridgeErrors {
     uint128 constant WithdrawalInitiatedEmit = 618;
     uint128 constant DepositFinalizedEmit    = 619;
 
-    /// @dev `dappId` 0 means this contract's own dapp. `address(this).dapp_id`
-    ///      throws when the account has no dapp, so it is read only when the
-    ///      answer actually depends on it.
-    function _senderIsInDapp(uint256 dappId) internal pure returns (bool) {
-        uint256 src = msg.src_dapp_id;
-        if (src == 0) { return dappId == 0; }
-        if (dappId == 0) { return src == address(this).dapp_id; }
-        return src == dappId;
+    modifier senderIs(address addr, uint256 dappId) {
+        require(msg.sender == addr, ERR_INVALID_SENDER);
+        require(
+            dappId == 0 ? msg.src_dapp_id == address(this).dapp_id : msg.src_dapp_id == dappId,
+            ERR_INVALID_SENDER
+        );
+        _;
     }
 
     modifier accept() {

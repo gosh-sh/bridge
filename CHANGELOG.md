@@ -25,8 +25,8 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - **The Acki Nacki contracts are built with `sold` 0.82.0, and all three code
-  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `bdd5bfca…`, `DepositVoucher`
-  `bd44b82a…` → `93571b3e…`, `EthBeaconLightClient` `78905cf7…` → `37700e77…`.
+  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `db54d5d1…`, `DepositVoucher`
+  `bd44b82a…` → `23e83331…`, `EthBeaconLightClient` `78905cf7…` → `529c9f4f…`.
   The compiler is `sold` 0.82.0 **plus `msg.src_dapp_id`** (branch
   `msg-src-dapp-id` of the compiler fork); stock 0.82.0 refuses these sources
   rather than producing a different artefact.
@@ -81,13 +81,19 @@ assigns it when the release is tagged.
   it is in.** An address does not carry a dapp, so `msg.sender == X` on its own
   admits an account with the same address in any other dapp — and the deposit
   anchors, the voucher callback and the TIP-3 mint are all authorised that way.
-  The contracts now read `msg.src_dapp_id` — the dapp the node stamps into the
-  inbound message header from the sending account's own state, not from the
-  caller — and require it to match. `acceptBlockHashFromLightClient`,
+  A caller is now named by both: the `senderIs(addr, dappId)` modifier checks
+  `msg.sender` against the address and `msg.src_dapp_id` — the dapp the node
+  stamps into the inbound message header from the sending account's own state,
+  not from the caller — against the dapp. `dappId` 0 means the contract's own
+  dapp. `acceptBlockHashFromLightClient`,
   `forgetBlockHashFromLightClient`, `confirmDeposit` and both deployed
   constructors require the bridge's own dapp; `onTransferReceived` requires the
   dapp declared for the TIP-3 wallet. A mismatch is `ERR_INVALID_SENDER`
-  (exit 207), the same error the address mismatch already returned.
+  (exit 207), the same error the address mismatch already returned. Where the
+  expected dapp is the contract's own, the check reads `address(this).dapp_id`,
+  which throws **exit 35** on an account that has no dapp — so these entry
+  points fail closed off-chain, in `tvm-debugger` among others, where no dapp
+  is assigned.
 - **New owner call `setUsdcWalletDapp(uint256 dappId)` and getter
   `getUsdcWalletDapp()`.** Declares which dapp the TIP-3 USDC TokenWallet
   lives in, so `onTransferReceived` can accept it across a dapp boundary; 0

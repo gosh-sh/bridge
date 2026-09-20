@@ -25,7 +25,7 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - **The Acki Nacki contracts are built with `sold` 0.82.0, and all three code
-  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `02088cec…`, `DepositVoucher`
+  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `852072bc…`, `DepositVoucher`
   `bd44b82a…` → `ced75c55…`, `EthBeaconLightClient` `78905cf7…` → `18d518dc…`.
   The artefacts now live in `contracts/an/0.82.0_compiled/exchange/`; the
   `0.80.0_compiled/` and `0.81.0_compiled/` folders are gone. The three move
@@ -55,8 +55,10 @@ assigns it when the release is tagged.
     (`finalizeDeposit`, `submitUpdate`, `submitRotate`, `submitAncestry`,
     `rePushAnchor`). This is how the daemons and the update scripts already
     call them — signed external messages.
-  - **internal message only:** the contract-to-contract callbacks
-    (`onTransferReceived`, `confirmDeposit`, `acceptBlockHashFromLightClient`,
+  - **internal or cross-dapp:** `onTransferReceived`, so the TIP-3 USDC
+    TokenWallet that calls it may sit in another dapp.
+  - **internal message only:** the callbacks whose caller is pinned by address
+    (`confirmDeposit`, `acceptBlockHashFromLightClient`,
     `forgetBlockHashFromLightClient`) and all three constructors. The voucher
     and the light client are deployed by the bridge, and the bridge itself is
     premined into the zerostate and upgraded through `updateCode`, so no
@@ -68,6 +70,14 @@ assigns it when the release is tagged.
     `crates/ackinacki-bridge` does.
   - **either message type:** all read-only getters, so nothing that reads the
     contracts has to change.
+
+  A cross-dapp message carries no source dapp — `msg` exposes `sender` and
+  `isCrossDapp`, nothing more — so a function that both accepts cross-dapp
+  messages and authorises its caller by address would accept an account with
+  the same address in any other dapp. That is why the light-client writers, the
+  voucher callback and the constructors stay internal-only: the bridge knows
+  the light client by an address derived from its code, the light client knows
+  the bridge by a constant, and neither pair carries a dapp.
 - **A deposit's destination dapp comes from the proof instead of being pinned
   to 0.** `finalizeDeposit` reads `dapp_id` out of public inputs #5/#6, which
   the circuit has always carried and the contract discarded. Three effects:

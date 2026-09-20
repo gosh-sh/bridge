@@ -8,7 +8,7 @@ import "./EthBeaconLightClient.sol";
 import "../token/interface/ISubscriber.sol";
 
 interface IShellAccumulator {
-    function buyShellFor(address buyer) external internalMsg;
+    function buyShellFor(address buyer) external internalMsg crossDappMsg;
 }
 
 /// @title eccUSDCBridge
@@ -283,7 +283,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         address /*to*/,
         uint128 value,
         uint128 /*balance*/
-    ) external override internalMsg {
+    ) external override internalMsg crossDappMsg {
         require(msg.sender == _usdcWallet, ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();

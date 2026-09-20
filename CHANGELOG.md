@@ -22,6 +22,77 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **The Acki Nacki contracts are built with `sold` 0.82.0, and all three code
+  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `02088cec…`, `DepositVoucher`
+  `bd44b82a…` → `ced75c55…`, `EthBeaconLightClient` `78905cf7…` → `18d518dc…`.
+  The artefacts now live in `contracts/an/0.82.0_compiled/exchange/`; the
+  `0.80.0_compiled/` and `0.81.0_compiled/` folders are gone. The three move
+  together: the bridge carries the voucher's code in its data and the
+  light client's code in `_lightClientCode`. Consequences for an operator:
+  - A network takes this as a fresh zerostate, or as a full `updateCode` round
+    on the bridge — not as an in-place patch.
+  - The light-client address is derived from the code stored in the bridge, so
+    a bridge that installs `18d518dc…` derives a **different** light-client
+    address than one running `78905cf7…`. An already deployed light client at
+    the old address stops being recognised as a writer, and the new address has
+    to be deployed and re-bootstrapped (committee commitment, head).
+  - `_trustedL1Bridge` and `_acceptedBlockHash` are not carried through
+    `onCodeUpgrade`, as before: after the upgrade the bridge accepts no deposits
+    until the owner re-seeds the allowlist and the anchors.
+- **Every public function now states which message types it accepts.** 0.82.0
+  requires `internalMsg` / `externalMsg` / `crossDappMsg` on every public
+  function, and a call arriving as the wrong type fails with **exit 81**
+  instead of running. The ABI does not show this — it is a runtime check — so
+  the mapping is spelled out here:
+  - **external message only:** every owner-key call on both contracts
+    (`setPubkey`, `setTrustedL1Bridge`, `setAcceptedBlockHash`,
+    `setLightClientCode`, `deployLightClient`, `disableOwnerAnchors`,
+    `mintAndSend`, `mintAndSendAccumulator`, `triggerTransaction`,
+    `updateCode`, `setCommitteeCommitment`, `disableOwnerRotation`,
+    `reAnchorCommittee`) and every permissionless relayer submission
+    (`finalizeDeposit`, `submitUpdate`, `submitRotate`, `submitAncestry`,
+    `rePushAnchor`). This is how the daemons and the update scripts already
+    call them — signed external messages.
+  - **internal message only:** the contract-to-contract callbacks
+    (`onTransferReceived`, `confirmDeposit`, `acceptBlockHashFromLightClient`,
+    `forgetBlockHashFromLightClient`) and all three constructors. The voucher
+    and the light client are deployed by the bridge, and the bridge itself is
+    premined into the zerostate and upgraded through `updateCode`, so no
+    constructor is reached by an external message any more: deploying the
+    bridge with a signed external deploy message now fails with exit 81.
+  - **internal or cross-dapp:** `initiateWithdrawal`. Widened deliberately —
+    ECC is what crosses a dapp boundary, so a holder in another dapp can now
+    burn into the bridge. It is still called from a multisig, as
+    `crates/ackinacki-bridge` does.
+  - **either message type:** all read-only getters, so nothing that reads the
+    contracts has to change.
+- **A deposit's destination dapp comes from the proof instead of being pinned
+  to 0.** `finalizeDeposit` reads `dapp_id` out of public inputs #5/#6, which
+  the circuit has always carried and the contract discarded. Three effects:
+  - The dapp id is part of the deposit identity, so the `DepositVoucher`
+    address for a given deposit changes unless the L1 side reports 0. Vouchers
+    already on chain are unaffected — they are keyed on the hash they were
+    deployed with.
+  - `DepositFinalized` now reports the dapp the L1 side asked for, not a
+    constant 0.
+  - The payout in `confirmDeposit` names that dapp on the transfer
+    (`dest_dapp_id`) when it differs from the bridge's own, so the minted ECC
+    actually crosses the boundary. A reported dapp id of 0, and the bridge's
+    own dapp, both mean "no boundary" and send exactly as before — so an L1
+    bridge that does not fill the field keeps today's behaviour.
+- **`WithdrawalInitiated` keeps the legacy event format; every other event
+  moves to the current one.** Under 0.80.0 every `eccUSDCBridge` event was
+  emitted as `ext_out_msg_info$11` (tag 11); 0.82.0 emits the current format
+  (tag 110110) by default. `WithdrawalInitiated` is pinned back to the legacy
+  format with `emit …{version: 1}`, because the withdrawal prover reads the raw
+  message. `UsdcMigrated`, `UsdcMinted` and `DepositFinalized` move to the
+  current format, as the light client's events already had. **The format is not
+  visible in the ABI** — both encode identically there, and differ only in the
+  raw `CommonMsgInfo` (136 bits against 141) — so anything that parses those
+  three events off the wire rather than through the ABI has to be checked.
+
 ### Added
 
 - **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
@@ -32,16 +103,13 @@ assigns it when the release is tagged.
   surface (`setLightClientCode`, `deployLightClient`, the light-client writers,
   `disableOwnerAnchors`), the `ERR_UNKNOWN_BLOCK` gate on `finalizeDeposit`, and
   `ERR_ZERO_RECIPIENT` on both directions including `initiateWithdrawal`
-  (audit WD-AN-07). The bridge's code hash is `48d5c0ed…`, which is what
-  shellnet runs. acki-nacki no longer
+  (audit WD-AN-07). acki-nacki no longer
   keeps a copy: it pins one commit of this repository and places the files
   into its own tree when a zerostate is generated, so a contract change made
   here reaches a network only after that pin is moved.
-  `make -C contracts/an/exchange SOLD_0_80=<sold 0.80.0> SOLD_0_81=<sold 0.81.0>`
-  rebuilds them, each contract with the compiler its tracked artefact was built
-  with: `eccUSDCBridge` with 0.80.0, `DepositVoucher` and `EthBeaconLightClient`
-  with 0.81.0. The build stops if either variable is unset or names a compiler
-  of another version, since any other compiler changes the code hash.
+  `make -C contracts/an/exchange SOLD=<sold 0.82.0>` rebuilds all three; the
+  build stops if `SOLD` is unset or names a compiler of another version, since
+  any other compiler changes the code hash.
 - **CI pipeline `.woodpecker/an-contracts.yaml`** runs
   `scripts/check_voucher_abi_consistency.py` and
   `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
@@ -49,19 +117,27 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`DepositVoucher`'s ABI header gains `pubkey`.** 0.82.0 gives every contract
+  the `pubkey`, `time` and `expire` header whatever the source declares, and
+  `DepositVoucher.sol` only asked for `expire`. The bridge and the light client
+  already declared all three, so their ABIs are byte-identical to the 0.81.0
+  ones; the voucher's is not. It is deployed by the bridge over an internal
+  message, so nothing off-chain signs for it.
+- **`make -C contracts/an/exchange` takes one `SOLD` again.** `SOLD_0_80` and
+  `SOLD_0_81` are gone: all three contracts build with `sold` 0.82.0, and the
+  build still refuses a compiler that reports another version.
 - **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
   default.** With no arguments it checks the sources in
   `contracts/an/exchange/` against the compiled ABIs in
-  `contracts/an/0.80.0_compiled/exchange/` and
-  `contracts/an/0.81.0_compiled/exchange/`. It does not check the ABI copies
+  `contracts/an/0.82.0_compiled/exchange/`. It does not check the ABI copies
   the tooling loads: `crates/bridge-prover-libraries/python/contracts/` was
   the previous default and is no longer checked, and
   `crates/ackinacki-bridge/abi/` was never covered. Those copies predate the
   `chainId` deposit identity and are known to be stale; pass them with
   `--compiled-bridge` / `--compiled-voucher` to see the drift.
   `--compiled DIR` is replaced by `--compiled-bridge FILE` and
-  `--compiled-voucher FILE`, because the two artefacts sit in different
-  folders, and the bridge source it reads is `eccUSDCBridge.sol`.
+  `--compiled-voucher FILE`, and the bridge source it reads is
+  `eccUSDCBridge.sol`.
 - `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
   reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
   against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)

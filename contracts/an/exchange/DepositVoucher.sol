@@ -34,7 +34,7 @@ contract DepositVoucher is eccUSDCBridgeModifiers {
         uint256 chainId,
         uint128 amount,
         uint256 anAccount
-    ) {
+    ) internalMsg {
         tvm.accept();
         require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
         require(
@@ -46,7 +46,7 @@ contract DepositVoucher is eccUSDCBridgeModifiers {
         );
     }
 
-    function getVersion() external pure returns (string, string) {
+    function getVersion() external pure externalMsg internalMsg returns (string, string) {
         return (version, "DepositVoucher");
     }
 }

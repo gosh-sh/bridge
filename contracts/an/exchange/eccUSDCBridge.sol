@@ -8,7 +8,7 @@ import "./EthBeaconLightClient.sol";
 import "../token/interface/ISubscriber.sol";
 
 interface IShellAccumulator {
-    function buyShellFor(address buyer) external;
+    function buyShellFor(address buyer) external internalMsg;
 }
 
 /// @title eccUSDCBridge
@@ -66,7 +66,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 amount;        // fr[2]
         uint256 contractAddr;  // fr[3] — L1 bridge contract that emitted the event
         uint256 chainId;       // fr[4] — source L1 chain id (EIP-1559 tx proof-bound)
-        uint256 dappId;        // pinned to 0 — see _parsePublicInputs
+        uint256 dappId;        // fr[5]<<128 | fr[6] — destination dapp (0 = the bridge's own)
         uint256 anAccount;     // fr[7]<<128 | fr[8] — AN recipient (256-bit, proof-bound)
     }
 
@@ -258,7 +258,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     constructor(
         uint256 pubkey,
         address usdcWallet
-    ) accept {
+    ) internalMsg accept {
         _ownerPubkey = pubkey;
         _usdcWallet = usdcWallet;
     }
@@ -283,7 +283,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         address /*to*/,
         uint128 value,
         uint128 /*balance*/
-    ) external override {
+    ) external override internalMsg {
         require(msg.sender == _usdcWallet, ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
@@ -309,7 +309,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         Only callable by the owner (by public key).
     /// @param recipient — address to receive the minted ECC[3] USDC
     /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
-    function mintAndSend(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function mintAndSend(address recipient, uint128 value, uint64 nonce) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
         require(value > 0, ERR_ZERO_AMOUNT);
@@ -335,7 +335,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         which will process the purchase and send ECC[2] Shell to the buyer.
     /// @param buyer — address to receive Shell from the Accumulator
     /// @param value — amount of ECC[3] USDC to mint (in micro-USDC)
-    function mintAndSendAccumulator(address buyer, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function mintAndSendAccumulator(address buyer, uint128 value, uint64 nonce) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         require(nonce == _mintAccumulatorNonce + 1, ERR_INVALID_NONCE);
         require(value > 0, ERR_ZERO_AMOUNT);
@@ -365,7 +365,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         to this contract — `dstChainId` is just passed through to the event.
     /// @param dstChainId — opaque destination chain identifier (passed through to event)
     /// @param recipient  — destination-chain recipient bytes (≤64 bytes)
-    function initiateWithdrawal(uint256 dstChainId, bytes recipient) public {
+    function initiateWithdrawal(uint256 dstChainId, bytes recipient) public internalMsg crossDappMsg {
         tvm.accept();
         ensureBalance();
         require(recipient.length > 0, ERR_RECIPIENT_EMPTY);
@@ -387,7 +387,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _totalBurnedBridgeByToken[tokenId] += amount;
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
-        emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
+        emit WithdrawalInitiated{dest: addrExtern, version: 1}(dstChainId, recipient, amount, tokenId, msg.sender);
     }
 
     /// @dev True when every byte of `recipient` is zero. The destination chain
@@ -419,7 +419,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         chain at once (rotation window). Applies to `finalizeDeposit`
     ///         only — the outbound path and the TIP-3/owner-mint flows are
     ///         unaffected.
-    function setTrustedL1Bridge(uint256 chainId, uint256 l1Bridge, bool allowed) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setTrustedL1Bridge(uint256 chainId, uint256 l1Bridge, bool allowed) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         if (allowed) {
             _trustedL1Bridge[chainId][l1Bridge] = true;
@@ -429,12 +429,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Returns the trusted L1 bridge SET for `chainId` (address -> true).
-    function getTrustedL1Bridges(uint256 chainId) external view returns (mapping(uint256 => bool)) {
+    function getTrustedL1Bridges(uint256 chainId) external view externalMsg internalMsg returns (mapping(uint256 => bool)) {
         return _trustedL1Bridge[chainId];
     }
 
     /// @notice True if `l1Bridge` is in the trusted set of `chainId`.
-    function isTrustedL1Bridge(uint256 chainId, uint256 l1Bridge) external view returns (bool) {
+    function isTrustedL1Bridge(uint256 chainId, uint256 l1Bridge) external view externalMsg internalMsg returns (bool) {
         return _trustedL1Bridge[chainId][l1Bridge];
     }
 
@@ -453,7 +453,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @param accepted  — true to admit, false to retract (e.g. on discovering
     ///                    the block was reorged out before any deposit landed).
     function setAcceptedBlockHash(uint256 chainId, uint256 blockHash, bool accepted)
-        public onlyOwnerPubkey(_ownerPubkey) accept
+        public externalMsg onlyOwnerPubkey(_ownerPubkey) accept
     {
         require(_ownerAnchorsEnabled, ERR_OWNER_ANCHORS_DISABLED);
         ensureBalance();
@@ -467,7 +467,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Installs the code the light client is deployed from. Changing it
     ///         moves the light-client address, so an already deployed one stops
     ///         being recognized as a writer.
-    function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setLightClientCode(TvmCell code) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         _lightClientCode = code;
         _lightClient = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
@@ -485,7 +485,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint256 l1ChainId,
         uint256 bootstrapCommittee,
         uint64  bootstrapPeriod
-    ) public onlyOwnerPubkey(_ownerPubkey) accept {
+    ) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         new EthBeaconLightClient{
@@ -501,7 +501,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Address the light client is deployed at, derived from its code
     ///         (0 while no code is installed).
-    function getLightClient() external view returns (address) {
+    function getLightClient() external view externalMsg internalMsg returns (address) {
         return _lightClient;
     }
 
@@ -511,7 +511,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         into "a proof of Ethereum finality".
     /// @dev One-way, with no re-enable. Requires a light client first, so this
     ///      cannot brick the only working writer.
-    function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
+    function disableOwnerAnchors() public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         _ownerAnchorsEnabled = false;
@@ -520,7 +520,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Admits a block hash the light client proved final on the source
     ///         chain. Authorized solely by being the light client this bridge
     ///         — no human asserts canonicality, the proof does.
-    function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
+    function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public internalMsg {
         require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
@@ -528,7 +528,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Drops a hash the light client has aged out of its window.
-    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
+    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public internalMsg {
         require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
@@ -536,13 +536,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice True if `blockHash` is admitted as canonical for `chainId`.
-    function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
+    function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view externalMsg internalMsg returns (bool) {
         return _acceptedBlockHash[chainId][blockHash];
     }
 
     /// @notice Anchor-path configuration: the light client and whether the
     ///         owner may still admit anchors.
-    function getAnchorConfig() external view returns (address lightClient, bool ownerAnchorsEnabled) {
+    function getAnchorConfig() external view externalMsg internalMsg returns (address lightClient, bool ownerAnchorsEnabled) {
         return (_lightClient, _ownerAnchorsEnabled);
     }
 
@@ -563,7 +563,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///                         + 2 block-hash halves + promise commit). Verified
     ///                         verbatim; business fields read at fixed offsets —
     ///                         see `_parsePublicInputs`.
-    function finalizeDeposit(bytes proof, bytes publicInputs) public view {
+    function finalizeDeposit(bytes proof, bytes publicInputs) public view externalMsg {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
@@ -600,8 +600,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
         ensureBalance();
 
-        // Anti-replay anchor = proof-bound (deposit_id, source contract, source
-        // chain); the dapp component is pinned to 0 (see _parsePublicInputs).
+        // Anti-replay anchor = proof-bound (deposit_id, source contract,
+        // destination dapp, source chain).
         // chainId is IN the key: two different L1s may legitimately emit the
         // same (deposit_id, contract) pair. amount/recipient are NOT in the
         // key — they are fixed by the proof, so a replay can never re-route or
@@ -633,7 +633,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint256 chainId,
         uint128 amount,
         uint256 anAccount
-    ) public {
+    ) public internalMsg {
         uint256 depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId));
         TvmCell stateInit = abi.encodeStateInit({
             contr: DepositVoucher,
@@ -651,12 +651,26 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
         mapping(uint32 => varuint32) ecc;
         ecc[USDC_ECC_ID] = varuint32(amount);
-        address.makeAddrStd(0, anAccount).transfer({
-            value: 1 vmshell,
-            bounce: false,
-            flag: 1,
-            currencies: ecc
-        });
+        // `dappId` is where the proof says the recipient lives. 0, and the
+        // bridge's own dapp, both mean "no boundary to cross" — anything else
+        // has to name the destination dapp on the message, or the ECC never
+        // leaves this one.
+        if (dappId == 0 || dappId == address(this).dapp_id) {
+            address.makeAddrStd(0, anAccount).transfer({
+                value: 1 vmshell,
+                bounce: false,
+                flag: 1,
+                currencies: ecc
+            });
+        } else {
+            address.makeAddrStd(0, anAccount).transfer({
+                value: 1 vmshell,
+                bounce: false,
+                flag: 1,
+                currencies: ecc,
+                dest_dapp_id: dappId
+            });
+        }
 
         address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
         emit DepositFinalized{dest: addrExtern}(
@@ -676,7 +690,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Replaces the owner public key. Only callable by the current owner.
     /// @param pubkey — new owner public key (uint256)
-    function setPubkey(uint256 pubkey) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setPubkey(uint256 pubkey) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         _ownerPubkey = pubkey;
     }
@@ -685,7 +699,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         Used to trigger Transaction contracts deployed by the bridge's USDC wallet
     ///         (e.g. SET_SUBSCRIBER_TYPE). Only callable by the owner.
     /// @param txAddr — address of the Transaction contract to trigger
-    function triggerTransaction(address txAddr) public view onlyOwnerPubkey(_ownerPubkey) accept {
+    function triggerTransaction(address txAddr) public view externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         txAddr.transfer({value: 1 vmshell, bounce: true, flag: 1});
     }
@@ -701,7 +715,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///        from snapshot of current storage). Future upgrades can read
     ///        this slot once `onCodeUpgrade` is extended; today it lets the
     ///        ABI stay stable.
-    function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function updateCode(TvmCell newcode, TvmCell userCell) public externalMsg onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
@@ -771,38 +785,38 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // ========================================================
 
     /// @notice Returns the TIP-3 USDC TokenWallet address used for the bridge.
-    function getUsdcWallet() external view returns (address) {
+    function getUsdcWallet() external view externalMsg internalMsg returns (address) {
         return _usdcWallet;
     }
 
     /// @notice Returns the owner public key.
-    function getOwnerPubkey() external view returns (uint256) {
+    function getOwnerPubkey() external view externalMsg internalMsg returns (uint256) {
         return _ownerPubkey;
     }
 
     /// @notice Returns total ECC[3] USDC minted by this contract.
-    function getTotalMinted() external view returns (uint128) {
+    function getTotalMinted() external view externalMsg internalMsg returns (uint128) {
         return _totalMinted;
     }
 
     /// @notice Returns total ECC minted/burned via the cross-chain bridge path
     ///         for a specific tokenId.
-    function getTotalBridged(uint32 tokenId) external view returns (uint128 minted, uint128 burned) {
+    function getTotalBridged(uint32 tokenId) external view externalMsg internalMsg returns (uint128 minted, uint128 burned) {
         return (_totalMintedBridgeByToken[tokenId], _totalBurnedBridgeByToken[tokenId]);
     }
 
     /// @notice Returns the hash of the currently installed DepositVoucher code.
-    function getDepositVoucherCodeHash() external view returns (uint256) {
+    function getDepositVoucherCodeHash() external view externalMsg internalMsg returns (uint256) {
         return tvm.hash(_depositVoucherCode);
     }
 
     /// @notice Returns current nonces for double-spend protection.
-    function getNonces() external view returns (uint64 mintNonce, uint64 mintAccumulatorNonce) {
+    function getNonces() external view externalMsg internalMsg returns (uint64 mintNonce, uint64 mintAccumulatorNonce) {
         return (_mintNonce, _mintAccumulatorNonce);
     }
 
     /// @notice Returns contract version and name.
-    function getVersion() external pure returns (string, string) {
+    function getVersion() external pure externalMsg internalMsg returns (string, string) {
         return (version, "eccUSDCBridge");
     }
 
@@ -829,19 +843,20 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             fr.push(v);
         }
         require(fr[2] <= uint256(type(uint64).max), ERR_OVERFLOW);
-        // The circuit splits the 256-bit AN account into two 16-byte halves
-        // (fr[6]=high, fr[7]=low), exactly like dapp_id above — reassemble it.
+        // The circuit splits both the dapp id and the 256-bit AN account into
+        // two 16-byte halves — dapp_id in fr[5]=high / fr[6]=low, an_account in
+        // fr[7]=high / fr[8]=low. Reassemble both.
         // The workchain concept is retired on AN, so the recipient always lives
         // in workchain 0 (see confirmDeposit's makeAddrStd).
         f.depositId    = fr[0];
         f.amount       = uint128(fr[2]);
         f.contractAddr = fr[3];
         f.chainId      = fr[4];
-        // Deposits into AN always land in dapp 0, so the dapp halves carried by
-        // the circuit (fr[5]=high, fr[6]=low) are not used. Pinning the field to
-        // 0 keeps the deposit identity — and therefore the DepositVoucher
-        // address — independent of what the L1 side reports.
-        f.dappId       = 0;
+        // The dapp the deposit is destined for, as the L1 side reported it and
+        // the proof bound it. It is part of the deposit identity (and therefore
+        // of the DepositVoucher address), and it routes the payout in
+        // confirmDeposit. 0 means the bridge's own dapp.
+        f.dappId       = (fr[5] << 128) | fr[6];
         f.anAccount    = (fr[7] << 128) | fr[8];
     }
 

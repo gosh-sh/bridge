@@ -28,8 +28,8 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPO / "contracts/an/exchange"
-DEFAULT_COMPILED_BRIDGE = REPO / "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
-DEFAULT_COMPILED_VOUCHER = REPO / "contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json"
+DEFAULT_COMPILED_BRIDGE = REPO / "contracts/an/0.82.0_compiled/exchange/eccUSDCBridge.abi.json"
+DEFAULT_COMPILED_VOUCHER = REPO / "contracts/an/0.82.0_compiled/exchange/DepositVoucher.abi.json"
 
 # The voucher constructor's leading parameters are the deposit identity plus the
 # payout; `confirmDeposit` must accept the same list, in the same order.

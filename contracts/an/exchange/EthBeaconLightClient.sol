@@ -230,7 +230,7 @@ contract EthBeaconLightClient {
         uint256 l1ChainId,
         uint256 bootstrapCommittee,
         uint64  bootstrapPeriod
-    ) accept {
+    ) internalMsg accept {
         require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
@@ -261,7 +261,7 @@ contract EthBeaconLightClient {
     /// @param publicInputs — the circuit instance column: 10 × 32-byte LE Fr in
     ///                        the `step.rs::pack_step_instances` order. Verified
     ///                        verbatim; fields read at fixed offsets.
-    function submitUpdate(bytes proof, bytes publicInputs) public {
+    function submitUpdate(bytes proof, bytes publicInputs) public externalMsg {
         // Cheap parse + sanity BEFORE accept (pre-accept gas budget).
         StepPI pi = _parsePublicInputs(publicInputs);
         // Supermajority is enforced in-circuit; re-assert cheaply as documented
@@ -353,7 +353,7 @@ contract EthBeaconLightClient {
     /// @param proof        — SHPLONK proof bytes, the `proof_cell` operand.
     /// @param publicInputs — 15 × 32-byte LE Fr: 12 accumulator limbs then
     ///                       [current_commit, next_commit, period].
-    function submitRotate(bytes proof, bytes publicInputs) public {
+    function submitRotate(bytes proof, bytes publicInputs) public externalMsg {
         RotatePI pi = _parseRotatePublicInputs(publicInputs);
         // Chain to the trusted committee; fail-closed until bootstrapped.
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
@@ -387,7 +387,7 @@ contract EthBeaconLightClient {
     ///         header's keccak256 must equal the previous header's RLP
     ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
     ///         Permissionless: the keccak + parent links are the authorization.
-    function submitAncestry(bytes[] headerRlps) public {
+    function submitAncestry(bytes[] headerRlps) public externalMsg {
         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
         tvm.accept();
@@ -483,7 +483,7 @@ contract EthBeaconLightClient {
     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
     ///         push that landed before `setLightClient`). Does not re-prove.
-    function rePushAnchor(uint256 blockHash) public {
+    function rePushAnchor(uint256 blockHash) public externalMsg {
         require(_isLive(blockHash), ERR_NOT_PROVEN);
         tvm.accept();
         _notifySink(blockHash);
@@ -518,7 +518,7 @@ contract EthBeaconLightClient {
     // Admin
     // ========================================================
 
-    function setPubkey(uint256 pubkey) public onlyOwnerPubkey accept {
+    function setPubkey(uint256 pubkey) public externalMsg onlyOwnerPubkey accept {
         ensureBalance();
         _ownerPubkey = pubkey;
     }
@@ -532,7 +532,7 @@ contract EthBeaconLightClient {
     /// @param committeeCommitment — the period's sync-committee Poseidon commitment.
     /// @param period             — the period it belongs to (rotate monotonicity baseline).
     function setCommitteeCommitment(uint256 committeeCommitment, uint64 period)
-        public onlyOwnerPubkey accept
+        public externalMsg onlyOwnerPubkey accept
     {
         require(_ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();
@@ -550,7 +550,7 @@ contract EthBeaconLightClient {
     ///      Requires the committee to be bootstrapped first. Do not call until
     ///      the opcode decider is on every node; the relayer SLA still matters
     ///      because re-anchor is a trust hop, not a substitute for liveness.
-    function disableOwnerRotation() public onlyOwnerPubkey accept {
+    function disableOwnerRotation() public externalMsg onlyOwnerPubkey accept {
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
         ensureBalance();
         _ownerRotationEnabled = false;
@@ -570,7 +570,7 @@ contract EthBeaconLightClient {
     /// @param committeeCommitment — Poseidon commitment of the new WS committee.
     /// @param period             — period it belongs to (must be ≥ current).
     function reAnchorCommittee(uint256 committeeCommitment, uint64 period)
-        public onlyOwnerPubkey accept
+        public externalMsg onlyOwnerPubkey accept
     {
         require(!_ownerRotationEnabled, ERR_REANCHOR_NOT_ARMED);
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
@@ -594,7 +594,7 @@ contract EthBeaconLightClient {
     ///         a step/rotate re-emit or an Ethereum gindex shift cannot be a
     ///         fresh deploy without spending the weak-subjectivity trust
     ///         step again. Mirrors `USDCBridge.updateCode`.
-    function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey accept {
+    function updateCode(TvmCell newcode, TvmCell userCell) public externalMsg onlyOwnerPubkey accept {
         ensureBalance();
         TvmCell migrationCell = abi.encode(
             _ownerPubkey,
@@ -664,7 +664,7 @@ contract EthBeaconLightClient {
     // ========================================================
 
     /// @notice The current light-client head.
-    function getHead() external view returns (
+    function getHead() external view externalMsg internalMsg returns (
         uint64  finalizedSlot,
         uint256 finalizedBeaconRoot,
         uint256 executionBlockHash,
@@ -681,27 +681,27 @@ contract EthBeaconLightClient {
     }
 
     /// @notice Whether a finalized execution block hash has been proven canonical.
-    function isProvenExecutionBlockHash(uint256 blockHash) external view returns (bool) {
+    function isProvenExecutionBlockHash(uint256 blockHash) external view externalMsg internalMsg returns (bool) {
         return _isLive(blockHash);
     }
 
     /// @notice Drop-in canonicality query matching `USDCBridge.isAcceptedBlockHash`:
     ///         true only for the followed L1 and a live (in-window) proven hash.
-    function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
+    function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view externalMsg internalMsg returns (bool) {
         return chainId == _l1ChainId && _isLive(blockHash);
     }
 
     /// @notice Ethereum slots kept in the proven set (`365d / 12s`).
-    function slotsPerYear() external pure returns (uint64) {
+    function slotsPerYear() external pure externalMsg internalMsg returns (uint64) {
         return SLOTS_PER_YEAR;
     }
 
     /// @notice Occupancy of the eviction FIFO (live + not-yet-compacted expired).
-    function provenQueueLen() external view returns (uint64) {
+    function provenQueueLen() external view externalMsg internalMsg returns (uint64) {
         return _provenQueueHead - _provenQueueTail;
     }
 
-    function getConfig() external view returns (uint256 l1ChainId, address usdcBridge, uint256 ownerPubkey) {
+    function getConfig() external view externalMsg internalMsg returns (uint256 l1ChainId, address usdcBridge, uint256 ownerPubkey) {
         return (_l1ChainId, USDC_BRIDGE_ADDRESS, _ownerPubkey);
     }
 
@@ -710,7 +710,7 @@ contract EthBeaconLightClient {
     ///         is the owner key regardless of the rotate proof. `reAnchorsApplied`
     ///         should stay 0 under a live relayer SLA — each increment is a
     ///         logged weak-subjectivity hop.
-    function getCommitteeState() external view returns (
+    function getCommitteeState() external view externalMsg internalMsg returns (
         uint256 currentCommittee,
         uint64  committeePeriod,
         bool    ownerRotationEnabled,
@@ -719,7 +719,7 @@ contract EthBeaconLightClient {
         return (_currentCommittee, _committeePeriod, _ownerRotationEnabled, _reAnchorsApplied);
     }
 
-    function getVersion() external pure returns (string, string) {
+    function getVersion() external pure externalMsg internalMsg returns (string, string) {
         return (version, "EthBeaconLightClient");
     }
 

@@ -24,5 +24,5 @@ interface ISubscriber {
         address to, 
         uint128 value,
         uint128 balance
-    ) external;
+    ) external internalMsg;
 }

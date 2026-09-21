@@ -6,8 +6,17 @@
 Last functional change to `src/AckiNackiBridge.sol`: `2026-08-06`.
 **Re-anchoring note:** §1–§13 and §15–§16 were originally derived at commit `a7a1130` (`2026-08-13`).
 `a69ba36` touched **no file under `contracts/ethereum/`** — `git diff --stat a7a1130 a69ba36 -- contracts/ethereum`
-is empty — so every `file:line` citation below still resolves unchanged. Only §12.2/§12.3
-(deploy-time genesis alignment) and §14 (off-chain surface) were updated for it.
+is empty — so most `file:line` citations below still resolve at that pair. Only §12.2/§12.3
+(deploy-time genesis alignment) and §14 (off-chain surface) were updated for `a69ba36`.
+
+**Two line-number bases.** This branch rewrote `withdrawByProof` and the
+layer-window views, so these cites resolve at this file's last edit (PR
+head), not at `a69ba36`: §7.2; the §7.4 rows for `isKnownAnchor`,
+`isKnownLayerAnchor` and the layer-window views; the §2
+`withdrawByProof` (`:1293`) mention; and the Circuit-4 rows of the §15
+check table. Every other `file:line` is still `a69ba36` / `a7a1130`.
+§15 enforced invariant 2 still cites the `withdrawByProof` CEI block as
+`:1192-1209` (`a69ba36`); at head that block is `:1361-1379`.
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -372,9 +381,12 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
 (or its scoped alias), so the same proof cannot be replayed on a second deployment. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
-on a deployment whose host chain is not the configured one. The Circuit 4
-preimage binds `events_pos` (the events-tree leaf index), so two identical
-burns in one AN block mint distinct nullifiers (trade-off 12, closed).
+on a deployment whose host chain is not the configured one. The rotated
+Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
+nullifier, so two identical burns in one AN block mint distinct
+nullifiers (trade-off 12). The circuits revision pinned in
+`crates/bridge-prover-libraries/Cargo.toml` predates the rotation, so
+this cannot yet be checked from this repository.
 
 ### 7.3 `applyBkSetUpdate` — rotate the BK-set commitment
 
@@ -779,7 +791,9 @@ Read off the code, without a formal audit claim.
    window below it. L1 window = 128 × W·P = 131 072 seq (**≈ 12 hours** at ~3 seq/s); L2 =
    128 × W² = 2 097 152 seq (**≈ 8 days**). The L1→L2 step is ×(W/P) = **16**, not ×128; only
    L2→L3 and above are ×W. L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
-   is `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` and takes no root as input.
+   is `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` on
+   the rotated key (the pinned circuits revision predates that bind) and
+   takes no root as input.
 
    So the operational boundary on the pinned shellnet deploy (L1+L2 active) is **≈ 8 days
    unwithdrawn**. Past L(max) a payout is stranded in `treasuryBalance`. Adding a layer
@@ -823,13 +837,16 @@ Read off the code, without a formal audit claim.
     only the deploy script can catch a wrong one.
 11. *`GenesisCursorBridge`* (in `script/DeployGenesisCursorBridge.s.sol`) can seed the cursor
     arbitrarily. It is explicitly test-only, but it lives in the same tree as production scripts.
-12. ~~*Duplicate burns in one AN block share a Circuit 4 nullifier.*~~ **Closed.**
-    The preimage is now `Poseidon(block_id_fr, tokenId, amount, recipientHi,
-    recipientLo, senderAccFr, events_pos)`. Two identical `initiateWithdrawal`
-    calls in the same block occupy different events-tree leaves, so they
-    mint distinct nullifiers. The circuit binds `events_pos` to the Merkle
+12. ~~*Duplicate burns in one AN block share a Circuit 4 nullifier.*~~ **Closed
+    on the rotated key.** The preimage is now
+    `Poseidon(block_id_fr, tokenId, amount, recipientHi, recipientLo,
+    senderAccFr, events_pos)`. Two identical `initiateWithdrawal` calls in
+    the same block occupy different events-tree leaves, so they mint
+    distinct nullifiers. The circuit binds `events_pos` to the Merkle
     direction bits (heap-index reconstruction), so a custom prover cannot
-    vary a fake position to double-spend one event.
+    vary a fake position to double-spend one event. The circuits revision
+    pinned in `crates/bridge-prover-libraries/Cargo.toml` predates that
+    rotation, so this cannot yet be checked from this repository.
 
 ---
 

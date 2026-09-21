@@ -208,7 +208,7 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
 
     /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (10-input
+    ///         `IBridgeWithdrawalVerifier` interface (11-input
     ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
     ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
@@ -1337,9 +1337,9 @@ contract AckiNackiBridge {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
         if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
-            revert LayerOutOfRange(
-                pub.anchorLayer > type(uint8).max ? type(uint8).max : uint8(pub.anchorLayer)
-            );
+            revert LayerOutOfRange(pub.anchorLayer > type(uint8).max
+                    ? type(uint8).max
+                    : uint8(pub.anchorLayer));
         }
         if (!_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)) {
             revert UnknownAnchor(pub.finalRoot);

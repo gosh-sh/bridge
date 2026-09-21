@@ -449,10 +449,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     }
 
     /// @notice A second `withdrawByProof` with the same nullifier reverts
-    ///         `NullifierAlreadyUsed`. This is replay protection, not the
-    ///         duplicate-burn collision: after the Circuit 4 rotation two
-    ///         identical burns in one AN block produce two keys because
-    ///         `events_pos` is in the Poseidon preimage.
+    ///         `NullifierAlreadyUsed`. Replay protection only — the
+    ///         contract does not see how the key was derived.
     function test_withdrawByProof_sameNullifier_secondPayoutBlocked() public {
         uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
         uint256 amount = 1 * UsdcTestLib.UNIT;
@@ -721,15 +719,15 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-256"))));
         pub.anchorLayer = 256;
-        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(255)));
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(255))
+        );
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
-    /// @notice Two distinct Circuit 4 nullifiers both pay. After
-    ///         `events_pos` entered the preimage, two identical burns in
-    ///         one AN block mint two keys; the mapping does not collapse
-    ///         them. The circuit binding itself waits on the circuits pin
-    ///         (bridge-audit #56 / #91).
+    /// @notice Two distinct Circuit 4 nullifiers both pay. The mapping
+    ///         does not collapse different keys. How those keys are
+    ///         derived is a circuit fact, not something this test shows.
     function test_withdrawByProof_distinctNullifiers_bothPay() public {
         uint256 amount = 1 * UsdcTestLib.UNIT;
         uint256 a = Bn254FrLib.toFr(uint256(keccak256("events-pos-0")));

@@ -16,8 +16,8 @@
 //! 2. [`ProofAggregator`] — aggregate that inner snark into EVM calldata
 //!    `instances ‖ proof` ([`SubprocessAggregator`] shells out to
 //!    `bridge-evm-aggregator`'s `aggregate-proof`, which additionally
-//!    self-checks that the regenerated Yul verifier is byte-identical to the
-//!    committed/deployed `.bin`).
+//!    self-checks that the regenerated verifier source is byte-identical to
+//!    the committed `.sol` of the deployed verifier).
 //!
 //! [`Circuit4ShplonkPipeline`] composes the two and returns a
 //! [`PartnerWithdrawalProof`] whose `proof_hex` is the aggregator calldata and
@@ -49,7 +49,7 @@ use crate::{
 /// re-exposed inner public inputs (snark-verifier SHPLONK accumulator).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
-/// The committed Circuit-4 withdrawal verifier name (matches the `.bin` in
+/// The committed Circuit-4 withdrawal verifier name (matches the `.sol` / `.bin` pair in
 /// `contracts/ethereum/verifiers/`).
 pub const WITHDRAWAL_VERIFIER_NAME: &str = "BridgeWithdrawalAggregatorVerifier";
 
@@ -301,8 +301,8 @@ pub struct SubprocessAggregatorConfig {
     /// binary is expected at `<dir>/target/release/aggregate-proof`; if absent
     /// we fall back to `cargo run --release --bin aggregate-proof`.
     pub aggregator_dir: PathBuf,
-    /// Directory of committed verifier `.bin` files (the self-check target).
-    /// Passed as `--verifiers-dir`.
+    /// Directory of committed verifier files; `aggregate-proof` self-checks
+    /// against the `.sol` sources. Passed as `--verifiers-dir`.
     pub verifiers_dir: PathBuf,
     /// Directory holding `kzg_bn254_21.srs` (the outer SRS). Exported as
     /// `PARAMS_DIR` for the subprocess so `gen_srs(21)` finds the ceremony
@@ -714,7 +714,7 @@ impl ProofAggregator for MockAggregator {
 //      incompatible with the gosh fork the daemon links (mixing them in one
 //      build unit does not compile).
 
-/// Committed R15 aggregator verifier names (match the `.bin` files in
+/// Committed R15 aggregator verifier names (match the `.sol` / `.bin` pairs in
 /// `contracts/ethereum/verifiers/`). Names line up with
 /// `bridge_evm_aggregator::AggregatorConfig::for_verifier_name`.
 pub const PRIMARY_VERIFIER_NAME: &str = "PrimaryAggregatorVerifier";

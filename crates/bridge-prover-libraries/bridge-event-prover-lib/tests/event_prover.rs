@@ -8,21 +8,20 @@
 //! validation guardrails `build_proof_inputs` enforces against an
 //! ill-formed daemon-side anchor.
 
-use bridge_event_witness::{
-    export_from_event_boc_base64,
-    schema::{
-        AnchorRef, DenseChainLinkSer, MerkleProofData, PrivateWitness, SCHEMA_VERSION,
-    },
-    BlockContextInput,
-};
 use bridge_event_prove_circuit::bridge_event_prove_circuit::TOTAL_PUBLIC_INPUTS;
 use bridge_event_prover_lib::{build_proof_inputs, default_event_circuit_params};
+use bridge_event_witness::{
+    export_from_event_boc_base64,
+    schema::{AnchorRef, DenseChainLinkSer, MerkleProofData, PrivateWitness, SCHEMA_VERSION},
+    BlockContextInput,
+};
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
 // Reused from the test_withdrawal.rs fixture — first record of the
 // upstream `withdrawals.txt`. Inlining keeps the test hermetic.
 const EVENT_BOC_B64: &str = "te6ccgEBBAEAyQABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAIZdmoHXvdgAQJwPIOJWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAA9CQAAAAAIDAgBDgAm3yq/MUPIYsiAFU9xmlVK1j7ShCFBTfqlHoaqgQg+0MAAodC01zGY0wFMpJaO4RLxFTkQ49E4=";
-// NOTE: keep this string identical to bridge-event-witness/tests/test_withdrawal.rs.
+// NOTE: keep this string identical to
+// bridge-event-witness/tests/test_withdrawal.rs.
 
 const EXPECTED_TOKEN_ID: u32 = 2;
 
@@ -59,7 +58,9 @@ fn populated_witness() -> PrivateWitness {
     // Block tree depth ceil(log2(130)) = 8.
     let block_tree_proof = MerkleProofData {
         position: 0,
-        siblings_hex: (0..8).map(|i| hex::encode([(0x80 | i) as u8; 32])).collect(),
+        siblings_hex: (0..8)
+            .map(|i| hex::encode([(0x80 | i) as u8; 32]))
+            .collect(),
     };
 
     let chosen_layer_hash = hex::encode([0xCAu8; 32]);
@@ -69,7 +70,9 @@ fn populated_witness() -> PrivateWitness {
     let active_link = DenseChainLinkSer {
         active: true,
         position: 0,
-        siblings_hex: (0..8).map(|i| hex::encode([(0xA0 | i) as u8; 32])).collect(),
+        siblings_hex: (0..8)
+            .map(|i| hex::encode([(0xA0 | i) as u8; 32]))
+            .collect(),
         leaf_hex: hex::encode([0xEEu8; 32]),
     };
     let inactive_link = DenseChainLinkSer {
@@ -104,11 +107,14 @@ fn happy_path_translates_to_circuit_inputs() {
     let inputs = build_proof_inputs(&w, default_event_circuit_params())
         .expect("build_proof_inputs must succeed on fully-populated witness");
 
-    // public_instances layout (10 slots, see event_verifier.rs):
+    // public_instances layout (11 slots, see event_verifier.rs):
     //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]
+    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
     assert_eq!(inputs.public_instances.len(), TOTAL_PUBLIC_INPUTS);
-    assert_eq!(inputs.public_instances[0], Fr::from(EXPECTED_TOKEN_ID as u64));
+    assert_eq!(
+        inputs.public_instances[0],
+        Fr::from(EXPECTED_TOKEN_ID as u64)
+    );
 
     // The remaining slots come from BE/LE byte-packing of the fixture
     // data; we don't recompute them here, but we assert they're distinct

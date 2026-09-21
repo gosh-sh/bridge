@@ -112,6 +112,32 @@ contract EthAuditQcHardeningTest is Test {
         assertEq(bridge.treasuryBalance(), 10 * UsdcTestLib.UNIT);
     }
 
+    /// @notice QC-A1-3: after emergency the surplus is liquid.
+    ///         `harvestYield` reads AAVE (`accruedYield`) and reverts
+    ///         `NoYield`; collect with `skimExcessUsdc`.
+    function test_harvestYield_afterEmergency_revertsNoYield() public {
+        address user = makeAddr("user");
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user, 10 * UsdcTestLib.UNIT);
+
+        bridge.supplyToAave(type(uint256).max);
+        aUSDC.accrueYield(address(bridge), 500_000);
+        usdc.mint(address(pool), 500_000);
+
+        bridge.emergencyWithdrawAll();
+        assertEq(bridge.accruedYield(), 0, "nothing left in AAVE");
+        assertGt(bridge.excessUsdc(), 0, "yield is liquid");
+
+        vm.expectRevert(AckiNackiBridge.NoYield.selector);
+        bridge.harvestYield(1);
+        vm.expectRevert(AckiNackiBridge.NoYield.selector);
+        bridge.harvestYield(type(uint256).max);
+
+        uint256 excess = bridge.excessUsdc();
+        bridge.skimExcessUsdc(excess);
+        assertEq(bridge.excessUsdc(), 0);
+        assertEq(bridge.treasuryBalance(), 10 * UsdcTestLib.UNIT, "user principal untouched");
+    }
+
     function test_skimExcessUsdc_noExcess_reverts() public {
         vm.expectRevert(AckiNackiBridge.NoExcessUsdc.selector);
         bridge.skimExcessUsdc(1);

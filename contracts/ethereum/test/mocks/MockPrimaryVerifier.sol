@@ -33,18 +33,29 @@ contract MockPrimaryVerifier is IPrimaryVerifier {
         shouldAccept = v;
     }
 
+    /// @notice When `checkExpectedLastSeen` is set, `lastSeenBlockSeqNo` must
+    ///         equal `expectedLastSeenBlockSeqNo`. A range-only check lets
+    ///         `verifyBlock` then `applyBkSetUpdate` pass while the two cursors
+    ///         have already diverged.
+    uint256 public expectedLastSeenBlockSeqNo;
+    bool public checkExpectedLastSeen;
+
+    function setExpectedLastSeenBlockSeqNo(uint256 v) external {
+        expectedLastSeenBlockSeqNo = v;
+        checkExpectedLastSeen = true;
+    }
+
     function verifyPrimaryAttestation(
         bytes calldata, /* proof */
         uint256 blockId,
         uint256 bkSetCommitment,
         uint256 blockSeqNo,
         uint256 lastSeenBlockSeqNo
-    )
-        external
-        view
-        returns (bool)
-    {
+    ) external view returns (bool) {
         if (!shouldAccept) return false;
+        if (checkExpectedLastSeen && lastSeenBlockSeqNo != expectedLastSeenBlockSeqNo) {
+            return false;
+        }
         return blockId < R && bkSetCommitment < R && blockSeqNo < R && lastSeenBlockSeqNo < R;
     }
 }

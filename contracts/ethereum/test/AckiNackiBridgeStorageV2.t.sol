@@ -113,9 +113,7 @@ contract AckiNackiBridgeStorageV2Test is Test {
         a[2] = A3;
         _submit(0xA, 1, 3, _layers(a), GENESIS_PREV_ANCHOR);
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
-            GENESIS_PREV_ANCHOR,
-            "unchanged after block 1"
+            bridge.storedPrevMaxLevelLayerHash(), GENESIS_PREV_ANCHOR, "unchanged after block 1"
         );
 
         // Block 2: 1 layer, anchored at A1 (per-layer pick).
@@ -123,9 +121,7 @@ contract AckiNackiBridgeStorageV2Test is Test {
         b[0] = B1;
         _submit(0xB, 2, 1, _layers(b), A1);
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
-            GENESIS_PREV_ANCHOR,
-            "unchanged after block 2"
+            bridge.storedPrevMaxLevelLayerHash(), GENESIS_PREV_ANCHOR, "unchanged after block 2"
         );
 
         // Block 3: 2 layers, anchored at A2 (per-layer pick).
@@ -134,9 +130,7 @@ contract AckiNackiBridgeStorageV2Test is Test {
         c[1] = C2;
         _submit(0xC, 3, 2, _layers(c), A2);
         assertEq(
-            bridge.storedPrevMaxLevelLayerHash(),
-            GENESIS_PREV_ANCHOR,
-            "unchanged after block 3"
+            bridge.storedPrevMaxLevelLayerHash(), GENESIS_PREV_ANCHOR, "unchanged after block 3"
         );
     }
 
@@ -185,12 +179,11 @@ contract AckiNackiBridgeStorageV2Test is Test {
     }
 
     /// @notice `getLayerWindow(L)` (added for chain-resurrect, 2026-08) returns
-    ///         the full `HistoryWindow` for layer `L` — data, heights,
-    ///         dataLen, writeCursor, lastHeight — byte-for-byte matching the
-    ///         internal `_layerWindows[L]` state that verifyBlock builds up.
-    ///         Off-chain daemon uses this to reconstruct its BridgeState
-    ///         mirror when starting fresh against an already-advanced
-    ///         contract.
+    ///         the `HistoryWindow` for layer `L` — data, dataLen, writeCursor,
+    ///         lastHeight — matching the internal `_layerWindows[L]` state
+    ///         that verifyBlock builds up. Per-slot `heights` are no longer
+    ///         written; they stay zero and resurrect reads
+    ///         `LayerAnchorAppended` instead.
     function test_getLayerWindow_mirrorsInternalStateAcrossSequence() public {
         // Empty state: dataLen == 0, writeCursor == 0, all slots zero.
         AckiNackiBridge.HistoryWindow memory w0 = bridge.getLayerWindow(1);
@@ -198,17 +191,18 @@ contract AckiNackiBridgeStorageV2Test is Test {
         assertEq(w0.writeCursor, 0, "writeCursor == 0 pre-verify");
         assertEq(w0.lastHeight, 0, "lastHeight == 0 pre-verify");
         assertEq(w0.data[0], 0, "data[0] zero pre-verify");
-        assertEq(w0.heights[0], 0, "heights[0] zero pre-verify");
+        assertEq(w0.heights[0], 0, "heights unused");
 
-        // NOTE: `_appendLayerHashes(..., blockSeqNo)` on line 755 of
-        // AckiNackiBridge.sol passes `blockSeqNo` as the `blockHeight` slot,
-        // so on-chain `_layerWindows[L].heights[i]` actually stores the
-        // seqNo. Off-chain the daemon distinguishes them, but for the
-        // getter mirror test we only assert what the contract records.
+        // `_appendLayerHashes` still receives `blockSeqNo` as `blockHeight`
+        // (monotonicity + `LayerAnchorAppended`). Per-slot `heights[]` are
+        // no longer written.
 
         // Block A (blockId=0xA, seqNo=1) — 4 layers.
         uint256[] memory a = new uint256[](4);
-        a[0] = A1; a[1] = A2; a[2] = A3; a[3] = A4;
+        a[0] = A1;
+        a[1] = A2;
+        a[2] = A3;
+        a[3] = A4;
         _submit(0xA, 1, 4, _layers(a), GENESIS_PREV_ANCHOR);
 
         // Block B (blockId=0xB, seqNo=2) — 1 layer.
@@ -218,7 +212,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
         // Block C (blockId=0xC, seqNo=3) — 2 layers.
         uint256[] memory c = new uint256[](2);
-        c[0] = C1; c[1] = C2;
+        c[0] = C1;
+        c[1] = C2;
         _submit(0xC, 3, 2, _layers(c), A2);
 
         // Expected timeline per layer (heights = seqNo per contract):
@@ -234,9 +229,9 @@ contract AckiNackiBridgeStorageV2Test is Test {
         assertEq(w1.data[0], A1, "L1 slot 0");
         assertEq(w1.data[1], B1, "L1 slot 1");
         assertEq(w1.data[2], C1, "L1 slot 2");
-        assertEq(w1.heights[0], 1, "L1 h[0]");
-        assertEq(w1.heights[1], 2, "L1 h[1]");
-        assertEq(w1.heights[2], 3, "L1 h[2]");
+        assertEq(w1.heights[0], 0, "L1 heights no longer stored");
+        assertEq(w1.heights[1], 0, "L1 heights no longer stored");
+        assertEq(w1.heights[2], 0, "L1 heights no longer stored");
         // Unused slots must read as zero (default storage).
         assertEq(w1.data[3], 0, "L1 slot 3 zero");
         assertEq(w1.data[127], 0, "L1 slot W-1 zero");
@@ -246,8 +241,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
         assertEq(w2.writeCursor, 2, "L2 writeCursor");
         assertEq(w2.data[0], A2, "L2 slot 0");
         assertEq(w2.data[1], C2, "L2 slot 1");
-        assertEq(w2.heights[0], 1, "L2 h[0]");
-        assertEq(w2.heights[1], 3, "L2 h[1]");
+        assertEq(w2.heights[0], 0, "L2 heights no longer stored");
+        assertEq(w2.heights[1], 0, "L2 heights no longer stored");
 
         AckiNackiBridge.HistoryWindow memory w3 = bridge.getLayerWindow(3);
         assertEq(w3.dataLen, 1, "L3 dataLen");
@@ -272,9 +267,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
     /// @notice Layer index 0 must revert with `LayerOutOfRange`.
     function test_getLayerWindow_revertsOnLayerZero() public {
-        (bool ok, bytes memory ret) = address(bridge).staticcall(
-            abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(0))
-        );
+        (bool ok, bytes memory ret) = address(bridge)
+            .staticcall(abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(0)));
         assertFalse(ok, "call must revert");
         assertEq(
             bytes4(ret),
@@ -285,9 +279,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
 
     /// @notice Layer index > MAX_LAYER_HASHES must revert with `LayerOutOfRange`.
     function test_getLayerWindow_revertsOnLayerAboveMax() public {
-        (bool ok, bytes memory ret) = address(bridge).staticcall(
-            abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(11))
-        );
+        (bool ok, bytes memory ret) = address(bridge)
+            .staticcall(abi.encodeWithSelector(bridge.getLayerWindow.selector, uint8(11)));
         assertFalse(ok, "call must revert");
         assertEq(
             bytes4(ret),

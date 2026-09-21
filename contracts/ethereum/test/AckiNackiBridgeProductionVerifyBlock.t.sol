@@ -2,7 +2,7 @@
 pragma solidity ^0.8.19;
 
 import "forge-std/Test.sol";
-import {stdJson} from "forge-std/StdJson.sol";
+import { stdJson } from "forge-std/StdJson.sol";
 
 import "../src/AckiNackiBridge.sol";
 import "../src/MockBlockHeaderOracle.sol";
@@ -27,8 +27,10 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     string internal constant FALLBACK_BIN = "verifiers/FallbackAggregatorVerifier.bin";
     string internal constant LAYER_BIN = "verifiers/LayerHashesAggregatorVerifier.bin";
     string internal constant PRIMARY_CALLDATA = "verifiers/PrimaryAggregatorVerifier_calldata.bin";
-    string internal constant FALLBACK_CALLDATA = "verifiers/FallbackAggregatorVerifier_calldata.bin";
-    string internal constant LAYER_CALLDATA = "verifiers/LayerHashesAggregatorVerifier_calldata.bin";
+    string internal constant FALLBACK_CALLDATA =
+        "verifiers/FallbackAggregatorVerifier_calldata.bin";
+    string internal constant LAYER_CALLDATA =
+        "verifiers/LayerHashesAggregatorVerifier_calldata.bin";
     string internal constant BOUND_SCENARIO =
         "../../crates/bridge-snark-utils/proofs/bound/bound_scenario.json";
 
@@ -53,7 +55,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function _artefactsPresent() internal view returns (bool) {
-        try vm.readFile(BOUND_SCENARIO) returns (string memory) {}
+        try vm.readFile(BOUND_SCENARIO) returns (string memory) { }
         catch {
             return false;
         }
@@ -68,7 +70,8 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         s.bkSetPoseidon = vm.parseUint(json.readString(".bk_set_poseidon_decimal"));
         s.blockSeqNo = uint64(json.readUint(".block_seq_no"));
         s.numLayers = uint8(json.readUint(".num_layers"));
-        s.prevMaxLevelLayerHash = vm.parseUint(json.readString(".prev_max_level_layer_hash_decimal"));
+        s.prevMaxLevelLayerHash =
+            vm.parseUint(json.readString(".prev_max_level_layer_hash_decimal"));
         for (uint256 i = 0; i < 10; i++) {
             string memory key = string.concat(".layer_hash_decimals[", vm.toString(i), "]");
             s.layerHashes[i] = vm.parseUint(json.readString(key));
@@ -81,7 +84,8 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
 
     function setUp() public {
         if (!_artefactsPresent()) {
-            return;
+            emit log("SKIP: bound_scenario.json + verifier calldata not in repo");
+            vm.skip(true);
         }
         scenario = _loadScenario();
 
@@ -109,33 +113,31 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function test_productionPrimaryAttestation_isolated() public {
-        if (!_artefactsPresent()) return;
+        if (!_artefactsPresent()) {
+            vm.skip(true);
+        }
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);
         assertTrue(
-            v.primary.verifyPrimaryAttestation(
-                proofPrimary,
-                scenario.blockId,
-                scenario.bkSetPoseidon,
-                scenario.blockSeqNo,
-                0
-            ),
+            v.primary
+                .verifyPrimaryAttestation(
+                    proofPrimary, scenario.blockId, scenario.bkSetPoseidon, scenario.blockSeqNo, 0
+                ),
             "primary SHPLONK calldata must verify"
         );
     }
 
     function test_productionFallbackAttestation_isolated() public {
-        if (!_artefactsPresent()) return;
+        if (!_artefactsPresent()) {
+            vm.skip(true);
+        }
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         bytes memory proofFallback = vm.readFileBinary(FALLBACK_CALLDATA);
         assertTrue(
-            v.fallback_.verifyFallbackAttestation(
-                proofFallback,
-                scenario.blockId,
-                scenario.bkSetPoseidon,
-                scenario.blockSeqNo,
-                0
-            ),
+            v.fallback_
+                .verifyFallbackAttestation(
+                    proofFallback, scenario.blockId, scenario.bkSetPoseidon, scenario.blockSeqNo, 0
+                ),
             "fallback SHPLONK (K=21) calldata must verify"
         );
     }
@@ -149,14 +151,15 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         view
         returns (bool)
     {
-        return v.layerHashes.verifyLayerHashesMovement(
-            vm.readFileBinary(LAYER_CALLDATA),
-            scenario.blockId,
-            scenario.bkSetPoseidon,
-            scenario.numLayers,
-            scenario.layerHashes,
-            scenario.prevMaxLevelLayerHash
-        );
+        return v.layerHashes
+            .verifyLayerHashesMovement(
+                vm.readFileBinary(LAYER_CALLDATA),
+                scenario.blockId,
+                scenario.bkSetPoseidon,
+                scenario.numLayers,
+                scenario.layerHashes,
+                scenario.prevMaxLevelLayerHash
+            );
     }
 
     /// Full `verifyBlock` E2E with both real SHPLONK aggregator proofs (Primary
@@ -164,8 +167,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     /// binding on-chain — green since the bound-witness fix.
     function test_productionVerifyBlock_boundCalldata_advancesState() public {
         if (!_artefactsPresent()) {
-            emit log("SKIP: bound_scenario.json + verifiers/*_calldata.bin required");
-            return;
+            vm.skip(true);
         }
 
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
@@ -209,7 +211,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
 
     function test_productionVerifyBlock_tamperedCalldata_reverts() public {
         if (!_artefactsPresent()) {
-            return;
+            vm.skip(true);
         }
 
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);

@@ -36,7 +36,7 @@ covered in [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
 > **Notation.** `seq_no` is the Acki Nacki block sequence number.
 > A **key block** is a block at height `seq_no`, where `seq_no % W == 0` (producer-side,
 > `W = 128` -- historical window size). Key block carries out essential AN historical data that will serve as an anchor in Ethereum bridge contract. A **bundle** is what the daemon actually proves; its
-> stride depends on anchor mode — `W·P = 1024` under L1 (thinning `P = 4`),
+> stride depends on anchor mode — `W·P = 1024` under L1 (thinning `P = 8`),
 > `W² = 16384` under L2 (no thinning).
 
 **Why we do not prove every key block.** A single bundle proof
@@ -1019,7 +1019,7 @@ not a transport blip:
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [`changelog.md` — 2026-08-03 BN254 Fr canonicalization client fix](verifyBlock_changelog.md#2026-08-03--bn254-fr-canonicalization-client-fix). |
+| `0x87bf1c06` | `AttestationProofRejected()` | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. See [`changelog.md` — 2026-08-03 BN254 Fr canonicalization client fix](verifyBlock_changelog.md#2026-08-03--bn254-fr-canonicalization-client-fix). On `applyBkSetUpdate`, also fires if the proof was baked against `storedLastBkSetUpdateSeqNo` instead of the live `storedLastSeenBlockSeqNo` — re-prove against the layer cursor. |
 | `0x...PrevAnchorMismatch` | `PrevAnchorMismatch(supplied, stored)` | Local prev-anchor state diverged from on-chain `expectedPrevAnchor(numLayers)`. Either the daemon crashed mid-tx (extremely rare) or the chain advanced without us. |
 | `0x...BkSetCommitmentMismatch` | `BkSetCommitmentMismatch(...)` | On-chain BK-set was rotated by an `applyBkSetUpdate` we don't know about, OR `bk_set.shellnet.json` drifted from live shellnet BLS keys. |
 | `0x...BlockSeqNoNotMonotonic` | `BlockSeqNoNotMonotonic(supplied, stored)` | We're trying to submit a `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |
@@ -1335,8 +1335,8 @@ Scope of *this* deployment (dismisses several open questions upfront):
    its key/RPC credentials only in root-owned env files outside the clone.
    Never reuse the tracked development burner for a server.
 3. **SRS + toolchain** — provision K=17,19,20,21,22, generate the inner
-   PK/VK/config set, install `solc 0.8.19`, then seal and hash the static
-   artifact manifest. Keep the outer `pk_cache` writable on a bind mount.
+   PK/VK/config set, then seal and hash the static artifact manifest. Keep
+   the outer `pk_cache` writable on a bind mount.
 4. **Deploy the bundle** — load deployment values from the external env and
    run the helper once from `crates/bridge-prover-libraries/`:
    ```bash

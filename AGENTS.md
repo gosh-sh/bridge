@@ -491,14 +491,15 @@ Two systems, and only one of them runs from GitHub.
 | Pipeline | Trigger | What it does |
 |---|---|---|
 | `hygiene.yaml` | every PR, and pushes to `main` | Three hygiene checks that share a clone and take no secrets by design — the one job that stays safe on a fork's PR. **`gitleaks`**: `gitleaks detect` over the branch's whole history, not the diff, because a key added and removed before merge still has to be rotated. Rules and the shellnet-fixture allowlist live in `.gitleaks.toml`; reviewed historical findings are pinned in `.gitleaksignore`. **`links`**: `lychee` over the Markdown and `Cargo.toml`, config in `lychee.toml`. **`english`**: `scripts/check_english_only.py` fails on a letter outside the Latin script — Cyrillic, CJK and the rest — in any tracked file, so comments and docs stay readable to everyone who touches them next. Unaccented Greek and `µ` pass as notation; intentional non-Latin (a multibyte test fixture, a localised tool's output) is exempted with a `non-english-ok` marker on the offending line or the line above it. Reproduce locally with `make english-check`, which `make pre-push` also runs. A finding in any of the three fails the pipeline. |
+| `verifier_sources.yaml` | PRs and pushes to `main` touching `contracts/ethereum/verifiers/`, the script or the pipeline | Runs on `alpine/curl`, installs `gcompat` because the official `solc-static-linux` 0.8.19 is dynamically linked against glibc, downloads `solc 0.8.19` pinned by SHA-256, and runs `scripts/check_verifier_sources.sh`: every `*AggregatorVerifier.sol` must compile to its `.bin` byte for byte, both halves of each pair must exist, and no `.bin` may exceed EIP-170. It is the only place that link is checked — `aggregate-proof` compares sources, the chain checks bytecode. No secrets. |
 | `request_review.yaml` | every PR | Re-requests review from everyone holding a verdict the new commits made stale, and pings them in Discord. Skips drafts, and skips merges of the base branch into the PR (detected structurally, by a merged-in parent already contained in the base). |
 | `notify_review_submitted.yaml` | cron job `review-submitted` | Tells the PR author in Discord that someone reviewed. Woodpecker has no trigger for a submitted review, so it polls; the window is (start of the last successful cron run, start of this one], read back from Woodpecker's own API, which is why consecutive runs neither repeat a ping nor drop one. |
 
 Secrets are configured per repository in Woodpecker and handed only to the events ticked on them — one
 without the right event arrives as an empty string rather than an error, which is worth remembering
-when a step fails with an unexplained 401. **No build, test or lint job runs here.** Those are the
-GitLab jobs below, so `make check` and `make pre-push` are what stands between a branch and a
-regression today.
+when a step fails with an unexplained 401. **No Rust or Solidity build, test or lint job runs
+here — the only artefact check is `verifier_sources.yaml`.** Those are the GitLab jobs below, so
+`make check` and `make pre-push` are what stands between a branch and a regression today.
 
 ### GitLab (`.gitlab-ci.yml`) — build, test and lint, on the GitLab remote only
 

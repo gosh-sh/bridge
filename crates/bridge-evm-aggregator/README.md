@@ -10,6 +10,23 @@ produces all four production verifier artefacts under `contracts/ethereum/verifi
 directory's README for the exact invocations. The spike parts described below (the multiply gate,
 `export-spike-artifacts`) still exist alongside it.
 
+## The runtime self-check needs no compiler
+
+`aggregate-proof` — the per-proof bin the withdrawal CLI and the relayer shell out to — regenerates
+the outer verifier's Solidity source from the aggregator key and refuses to emit calldata unless it
+is byte-identical to the committed `contracts/ethereum/verifiers/<name>.sol`. It compiles nothing,
+so the hosts that run it need no `solc`. `--allow-source-drift` turns the refusal into a warning and
+exists only to bootstrap a verifier whose source is not committed yet.
+
+Bytecode is produced only when a verifier is regenerated: `export-inner-aggregator` writes the
+`.sol` and the `.bin` compiled from it and applies the EIP-170 gate, and that path, like
+`export-spike-artifacts` and the round-trip test, needs `solc 0.8.19` on `PATH`. That each committed
+`.sol` compiles to its `.bin` is checked by `scripts/check_verifier_sources.sh` in CI.
+
+A mismatch reads `aggregator VK drift` and names the first differing line. It means either a
+different key or a `snark-verifier` upgrade that changed the generated text; after an upgrade,
+regenerate both files of every pair.
+
 ## Status (M2 closed 2026-05-27; M5 instance-exposure de-risked 2026-05-29)
 
 | Step | Status | Evidence |
@@ -34,7 +51,7 @@ test-only.
 **That future has since arrived.** Circuit 4 landed: the inner event snark is produced by
 `export-c4-poseidon-snark` in `bridge-snark-utils`, aggregated by this crate's
 `export-inner-aggregator`, and the result is committed as
-`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (20 990 B, inner `K=19`), which
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 152 B, inner `K=19`), which
 `AckiNackiBridge.withdrawByProof` calls through its adapter. The same pipeline produces the 1A, 1B
 and Circuit-2 verifiers. So the milestone text below (M4 → M7) is a historical record of a plan that
 has since been executed, not a description of pending work.
@@ -105,7 +122,7 @@ Two reasons:
   synthetic inner** (2026-05-29): the aggregator now surfaces the inner PIs
   after the 12 accumulator limbs. The remaining M5 work is purely a data
   swap — replace `multiply::build_multiply_circuit` with Circuit 4's prover
-  (10 PIs) once M4 lands; re-confirm K=21 still fits (bump if not).
+  (11 PIs) once M4 lands; re-confirm K=21 still fits (bump if not).
 - M6 — move the generated Yul/bin into `contracts/ethereum/src/` as
   `BridgeWithdrawalAggregatorVerifier.{sol,bin}` and wire
   `BridgeWithdrawalVerifier.sol` (the adapter) to call it.

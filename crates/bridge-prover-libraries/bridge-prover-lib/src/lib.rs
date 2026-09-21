@@ -72,22 +72,16 @@ pub const BUNDLE_STRIDE_L2: u64 =
 pub enum AnchorMode {
     /// L1 anchoring: one bundle per `W·P` seq_nos, `chain_steps = P` L1 hops.
     ///
-    /// **Status:** exercised in dev/CI + one fire+withdraw E2E per iteration.
-    /// Known subcritical regime under shellnet 3 seq/s (prover 1.75× slower
-    /// than chain) — sustainable for short runs, drifts over days.
+    /// **Status:** local / CI default (`#[default]`). Subcritical under
+    /// shellnet 3 seq/s (prover slower than chain) — fine for short runs.
     #[default]
     L1,
     /// L2 anchoring: one bundle per `W²` seq_nos, `chain_steps = 1` L2 hop.
     ///
-    /// **Status: SMOKE-PENDING.** First live shellnet deploy landed 2026-08-18
-    /// (Deploy #12, `AckiNackiBridge` at `0xf31E316C…FFEEE`, seed 9_175_040).
-    /// Cold-start + first covering bundle verified end-to-end; multi-day
-    /// continuous-production stress run not yet on record. Daemons emit a
-    /// `warn!` on startup when this mode is selected — see
-    /// `crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md` Case 7 for
-    /// the expected log signature. Circuit 2 itself is level-parametric
-    /// (same VK across L1/L2); the maturity gap is in operational coverage,
-    /// not the ZK stack.
+    /// **Status:** operational default on shellnet since 2026-08-18
+    /// (Deploy #12). `BRIDGE_ANCHOR_LEVEL=2` in the shellnet-l2 runtime
+    /// env and in `bridge_config.shellnet`. Circuit 2 is level-parametric
+    /// (same VK across L1/L2). Local `bridge_config.local` stays L1.
     L2,
 }
 

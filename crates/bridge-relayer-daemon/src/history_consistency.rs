@@ -26,7 +26,11 @@ impl std::fmt::Display for HistoryDrift {
     }
 }
 
-fn drift(field: &'static str, expected: impl Into<String>, actual: impl Into<String>) -> HistoryDrift {
+fn drift(
+    field: &'static str,
+    expected: impl Into<String>,
+    actual: impl Into<String>,
+) -> HistoryDrift {
     HistoryDrift {
         field,
         expected: expected.into(),
@@ -80,7 +84,8 @@ pub fn check_chain_monotonicity(
     remembered: &BridgeOnChainState,
     actual: &BridgeOnChainState,
     // Max gap (in seq_no) another actor may advance between our ticks
-    // before we halt. Bundles are thinned by W·P=512; allow a few.
+    // before we halt. Caller derives it from the bundle stride (W·P = 1024 at
+    // W=128, P=8); see `MAX_FORWARD_GAP`.
     max_forward_gap: u64,
 ) -> Result<(), HistoryDrift> {
     if actual.last_seen_block_seq_no < remembered.last_seen_block_seq_no {
@@ -96,7 +101,10 @@ pub fn check_chain_monotonicity(
     if gap > max_forward_gap {
         return Err(drift(
             "last_seen_block_seq_no_jumped",
-            format!("{} (gap≤{max_forward_gap})", remembered.last_seen_block_seq_no),
+            format!(
+                "{} (gap≤{max_forward_gap})",
+                remembered.last_seen_block_seq_no
+            ),
             format!("{} (gap={gap})", actual.last_seen_block_seq_no),
         ));
     }

@@ -25,8 +25,8 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - **The Acki Nacki contracts are built with `sold` 0.82.0, and all three code
-  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `db54d5d1…`, `DepositVoucher`
-  `bd44b82a…` → `23e83331…`, `EthBeaconLightClient` `78905cf7…` → `529c9f4f…`.
+  hashes move.** `eccUSDCBridge` `48d5c0ed…` → `276f3933…`, `DepositVoucher`
+  `bd44b82a…` → `8117d5c8…`, `EthBeaconLightClient` `78905cf7…` → `d029f62f…`.
   The compiler is `sold` 0.82.0 **plus `msg.src_dapp_id`** (branch
   `msg-src-dapp-id` of the compiler fork); stock 0.82.0 refuses these sources
   rather than producing a different artefact.

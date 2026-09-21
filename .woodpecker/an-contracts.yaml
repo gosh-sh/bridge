@@ -22,3 +22,8 @@ steps:
     depends_on: [ ]
     commands:
       - python3 scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
+  zerostate-encoder:
+    image: python:3-alpine
+    depends_on: [ ]
+    commands:
+      - python3 scripts/check_zerostate_data_encoder.py

@@ -46,6 +46,19 @@ assigns it when the release is tagged.
   `scripts/check_voucher_abi_consistency.py` and
   `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
   `main`.
+- **The zerostate setup of the Acki Nacki bridge lives here too.**
+  `contracts/an/zerostate_init.py` builds the data cell, upgrades the premined
+  stub to the bridge's code, seeds the trusted L1 bridge, installs the
+  light-client code and writes the account into the zerostate; acki-nacki
+  places it with the contracts and calls it while generating one. A new setup
+  call, a new parameter or a new storage field is now a change in this
+  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
+  the trusted L1 bridge a generated zerostate starts with.
+  `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
+  the cell — never deployed, executed in `tvm-debugger` — and
+  `scripts/check_zerostate_data_encoder.py`, wired into
+  `.woodpecker/an-contracts.yaml`, fails if it and
+  `eccUSDCBridge.onCodeUpgrade` stop agreeing on the tuple.
 
 ### Changed
 

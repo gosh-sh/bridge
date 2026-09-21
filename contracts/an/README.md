@@ -23,6 +23,7 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
 | `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
 | `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json` |
+| `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and the test of the module below. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 
 The compiled artefacts are what goes into a zerostate. acki-nacki does not keep
@@ -53,3 +54,19 @@ Before committing new artefacts:
 
     scripts/check_voucher_abi_consistency.py
     scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
+
+## The zerostate module
+
+`zerostate_init.py` brings a premined `eccUSDCBridge` to the state a fresh chain
+needs: it builds the data cell with `BridgeZerostateData`, upgrades the premine
+stub to the bridge's code, seeds the trusted L1 bridge, installs the
+light-client code, and writes the account into the zerostate. acki-nacki places
+it next to the contracts and calls `initialize(ctx)` while generating a
+zerostate, so a new setup call or a new storage field is a change in this
+repository alone.
+
+`BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override the trusted L1 bridge
+a generated zerostate starts with.
+
+    python3 contracts/an/zerostate/test_zerostate_init.py
+    scripts/check_zerostate_data_encoder.py

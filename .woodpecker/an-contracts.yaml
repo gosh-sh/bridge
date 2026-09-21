@@ -1,4 +1,4 @@
-# The Acki Nacki contracts under contracts/an/ carry two invariants the
+# The Acki Nacki contracts under contracts/an/ carry three invariants the
 # compiler does not check:
 #
 #   * eccUSDCBridge embeds DepositVoucher's code, and the voucher calls back
@@ -6,6 +6,11 @@
 #     that argument list, deposits abort in the voucher constructor.
 #   * The deposit verifying key is a hex literal in eccUSDCBridge.sol and must
 #     match deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin.
+#   * BridgeZerostateData.getBridgeData must encode the same tuple that
+#     eccUSDCBridge.onCodeUpgrade decodes.
+#
+# The zerostate module's own unit tests (contracts/an/zerostate_init.py) also
+# run here.
 
 when:
   - event: pull_request

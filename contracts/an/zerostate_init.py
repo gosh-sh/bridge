@@ -21,9 +21,10 @@ import tempfile
 
 CONTEXT_VERSION = 1
 
-# The Ethereum bridge a fresh chain trusts, and the chain it lives on. The
-# allowlist starts empty and fail-closed, so a network generated without this
-# refuses every deposit until its owner seeds one by hand.
+# The Ethereum bridge a fresh chain trusts, and the chain it lives on; the
+# defaults are the Sepolia bridge and chain id. The allowlist starts empty
+# and fail-closed, so a network generated without this refuses every deposit
+# until its owner seeds one by hand.
 L1_CHAIN_ID = os.environ.get("BRIDGE_ZS_L1_CHAIN_ID", "11155111")
 L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE", "0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb")
 
@@ -67,7 +68,9 @@ ENCODER_ADDRESS = "0:" + "22" * 32
 # format_params      -- see the shell-quoting invariant above (dict -> `-p` argument)
 # get_code           -- callable: .tvc path -> TVM code cell for that image
 # read_public_key    -- callable: keys-file path -> hex public key (no 0x)
-# artefact           -- callable: repo-relative artefact path -> its placed, absolute path
+# artefact           -- callable: repo-relative artefact path -> its placed path, resolved
+#                        against the current working directory (the generator runs from the
+#                        repo root); not necessarily absolute
 REQUIRED_KEYS = (
     "version", "tvm_debugger", "zerostate_helper", "zerostate_path", "account_tvc",
     "update_zero_abi", "root_keys", "address", "keys", "usdc_wallet", "balance",

@@ -199,6 +199,11 @@ class InitializeTest(unittest.TestCase):
         self.assertIn("/tmp/stub.tvc 1000000000000 0:" + "1a" * 32, add)
         self.assertIn("0x" + "00" * 32, add)
 
+    def test_l1_parameters_default_to_sepolia(self):
+        params = params_argument(self.run_initialize()[2])
+        self.assertEqual(params["chainId"], "11155111")
+        self.assertEqual(params["l1Bridge"], "0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb")
+
     def test_l1_parameters_come_from_the_environment(self):
         os.environ["BRIDGE_ZS_L1_CHAIN_ID"] = "1"
         os.environ["BRIDGE_ZS_L1_BRIDGE"] = "0xfeed"

@@ -23,15 +23,17 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
 | `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
 | `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json` |
-| `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and the test of the module below. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
+| `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 
 The compiled artefacts are what goes into a zerostate. acki-nacki does not keep
 its own copy: its `contracts/scripts/bridge_contracts.py` pins one commit of
 this repository and places the `exchange/` sources and these artefacts at
 `contracts/exchange/`, `contracts/0.80.0_compiled/exchange/` and
-`contracts/0.81.0_compiled/exchange/` before the zerostate is generated. A
-change here reaches a network only after that pin is moved.
+`contracts/0.81.0_compiled/exchange/`, plus the zerostate module at
+`contracts/scripts/bridge_zerostate_init.py` and the encoder artefacts at
+`contracts/zerostate/`, before the zerostate is generated. A change here
+reaches a network only after that pin is moved.
 
 ## Rebuilding
 
@@ -50,10 +52,17 @@ compile the bridge. The bridge keeps the voucher's code in its data, and the
 zerostate installs the light client's code into the bridge, so replace the
 rebuilt artefacts together.
 
+Editing `BridgeZerostateData.sol` is a separate rebuild:
+
+    make -C contracts/an/zerostate SOLD=/path/to/sold
+
+and its rebuilt `.tvc` / `.abi.json` are committed too.
+
 Before committing new artefacts:
 
     scripts/check_voucher_abi_consistency.py
     scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
+    scripts/check_zerostate_data_encoder.py
 
 ## The zerostate module
 
@@ -66,7 +75,8 @@ zerostate, so a new setup call or a new storage field is a change in this
 repository alone.
 
 `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override the trusted L1 bridge
-a generated zerostate starts with.
+a generated zerostate starts with, defaulting to `11155111` and
+`0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
 
     python3 contracts/an/zerostate/test_zerostate_init.py
     scripts/check_zerostate_data_encoder.py

@@ -139,11 +139,12 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | 5 | 0 | `owner` | `address` | 131 | constructor, `transferOwnership` |
 | 6 | 0 | `yieldRecipient` | `address` | 134 | constructor, `setYieldRecipient` |
 | 7 | 0 | `_reentrancyStatus` | `uint256` | 139 | `nonReentrant` |
-| 8 | 0 | `storedBkSetCommitment` | `uint256` | 167 | constructor, `applyBkSetUpdate` |
+| 8 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
 | 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 172 | `applyBkSetUpdate` |
 | 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 176 | constructor, `verifyBlock` |
-| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 238 | `withdrawByProof` |
-| 11 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 260 | `_appendLayer` |
+| 10 | 0 | `storedPrevBkSetCommitment` | `uint256` | — | `applyBkSetUpdate`; `verifyBlock` for `seqNo <= last update` |
+| 11 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 238 | `withdrawByProof` |
+| 12 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 260 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:525`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:100-104`).
@@ -281,7 +282,7 @@ Permissionless. Order of operations is deliberately cheap-checks-first, then cry
 | 2 | `1 ≤ numLayers ≤ 10` | 670 | `InvalidNumLayers` |
 | 3 | `layerHashes[i] == 0` for `i ≥ numLayers` | 673 | `LayerHashTailNonZero(i)` |
 | 4 | `layerHashes[i] != 0` for `i < numLayers` | 678 | `LayerHashActiveZero(i)` (QC-A2-3: a zero active slot would let `_appendLayerHashes` skip a layer and desync the windows) |
-| 5 | `bkSetCommitment == storedBkSetCommitment` | 683 | `BkSetCommitmentMismatch` |
+| 5 | `bkSetCommitment == _expectedBkSetFor(blockSeqNo)` | — | `BkSetCommitmentMismatch` (previous set for `seqNo <= last update`) |
 | 6 | `blockSeqNo > storedLastSeenBlockSeqNo` | 686 | `BlockSeqNoNotMonotonic` |
 | 7 | `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` | 698-703 | `PrevAnchorMismatch` |
 | 8 | attestation proof accepted (1A or 1B per `finType`) | 713-733 | `AttestationProofRejected` |
@@ -397,8 +398,11 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (no
 1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment`.
 2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` — an
    **independent** cursor from `storedLastSeenBlockSeqNo`.
-3. `blockSeqNo <= storedLastSeenBlockSeqNo` else `VerifyBlockLagBehindRotation`
-   (BRIDGE-ETH-WD-2: the layer chain must already cover the rotation block).
+3. `storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo` else
+   `VerifyBlockLagBehindRotation` (the previous rotation must already be
+   covered). The first rotation always proceeds. After apply, `verifyBlock`
+   accepts `storedPrevBkSetCommitment` for `blockSeqNo <= N`, so an
+   off-boundary N is not a deadlock.
 4. `attestationLastSeen < blockSeqNo` else `AttestationLastSeenNotBeforeSeqNo`.
    Circuit 1A/1B range-checks the same inequality; after `verifyBlock(N)` the
    live cursor is N and cannot be this argument.
@@ -419,7 +423,9 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (no
    `Fr` image that the attestation adapter compares against — without it roughly four rotations in
    five would be unsatisfiable by any argument.
 
-7. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
+7. Effects: `storedPrevBkSetCommitment = storedBkSetCommitment`,
+   `storedBkSetCommitment = newCommitmentL3`,
+   `storedLastBkSetUpdateSeqNo = blockSeqNo`,
    `emit BkSetUpdated(old, new, blockSeqNo)`.
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
@@ -429,8 +435,9 @@ proof was baked against (`block_seq_no > last_seen`). That is the layer
 cursor at prove time, typically the previous key block — not
 `storedLastSeenBlockSeqNo` after `verifyBlock(N)`, which equals N and
 makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` is
-monotonicity only. Relayers must not submit the rotation until
-`verifyBlock` has covered N, and must not abort the tick while waiting.
+monotonicity only. Relayers apply a rotation as soon as the previous
+one is covered, then keep proving bundles; `verifyBlock` still accepts
+the outgoing set for `seqNo <= N`.
 
 ### 7.4 Read surface for AN state
 

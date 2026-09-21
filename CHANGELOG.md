@@ -27,9 +27,15 @@ assigns it when the release is tagged.
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`. Circuit
   1A/1B proves `block_seq_no > last_seen`, so the live cursor after
   `verifyBlock(N)` cannot be that argument. Relayers must pass the word
-  the proof was baked against and must not submit the rotation until
-  `verifyBlock` has covered N (ETH-36 / ETH-37). Callers of the old
+  the proof was baked against (ETH-36 / ETH-37). Callers of the old
   nine-argument ABI will fail to decode.
+
+- `applyBkSetUpdate(N)` no longer waits for `verifyBlock` to cover N.
+  It stores the outgoing set in `storedPrevBkSetCommitment` and
+  `verifyBlock` accepts that set for `blockSeqNo <= N`. A second
+  rotation is blocked until the layer cursor covers the previous N
+  (`VerifyBlockLagBehindRotation`). Off-boundary rotations (N not a
+  bundle target) can apply as soon as they are discovered.
 
 - **The Circuit 4 (withdrawal) verification key is rotated.** The inner
   Poseidon preimage now includes `events_pos`, and the public-input vector
@@ -181,11 +187,11 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- The AN→ETH relayer no longer submits `applyBkSetUpdate` (and abort the
-  tick) while `storedLastSeenBlockSeqNo` is behind the rotation. It
-  defers that call and continues into `verifyBlock`. The live prover
-  likewise keeps proving bundles when a rotation is pending, so the
-  layer cursor can catch up (ETH-36).
+- The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
+  rotation is covered, even if the layer cursor is still behind this N.
+  It only defers a second rotation, and it does not abort the tick.
+  The live prover keeps proving bundles when a rotation is pending
+  (ETH-36).
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis

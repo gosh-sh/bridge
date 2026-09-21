@@ -267,9 +267,8 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     ///         was baked against the previous cursor (0 here), not the
     ///         live one. The mock asserts the value the contract forwards.
     function test_applyBkSetUpdate_afterVerifyBlock_usesBakedLastSeen() public {
-        // Prime the layer cursor to exactly SEQ so the ordering invariant
-        // (BRIDGE-ETH-WD-2, `blockSeqNo <= storedLastSeenBlockSeqNo`) holds
-        // at the equality boundary.
+        // Prime the layer cursor to SEQ. Apply after verifyBlock still
+        // works; lastSeen is not the attestation instance.
         _submitLayerBundle(SEQ);
         assertEq(bridge.storedLastSeenBlockSeqNo(), SEQ);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), 0);
@@ -278,10 +277,20 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
 
         assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ);
         assertEq(
             bridge.storedLastSeenBlockSeqNo(), SEQ, "rotation does not advance the layer cursor"
         );
+    }
+
+    /// @notice Apply first. `verifyBlock(N)` still accepts the outgoing set.
+    function test_applyBkSetUpdate_beforeVerifyBlock_storesPrev() public {
+        _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
+        assertEq(bridge.storedBkSetCommitment(), L3);
+        _submitLayerBundle(SEQ);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), SEQ);
     }
 
     /// @notice Passing the live cursor after `verifyBlock(N)` as
@@ -310,10 +319,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         );
     }
 
-    /// @dev Fast-forward `storedLastSeenBlockSeqNo` to `target` so a subsequent
-    ///      `applyBkSetUpdate(target)` satisfies the BRIDGE-ETH-WD-2 ordering
-    ///      invariant. Wraps `_submitLayerBundle` so tests read like
-    ///      "prime cursor, then apply".
+    /// @dev Fast-forward `storedLastSeenBlockSeqNo` to `target`. The first
+    ///      rotation no longer requires this; tests still use it to show
+    ///      apply-after-verifyBlock and baked lastSeen.
     function _primeLayerCursor(uint64 target) internal {
         _submitLayerBundle(target);
     }

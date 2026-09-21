@@ -188,18 +188,21 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             }
         }
 
-        // ── Phase 1: drain BK-set updates that the layer cursor already
-        // covers. `applyBkSetUpdate(N)` reverts `VerifyBlockLagBehindRotation`
-        // while `storedLastSeen < N`. Submitting then aborting the tick
-        // (ETH-36) deadlocks: the only thing that advances the cursor is
-        // Phase 2. Defer without counting an attempt and fall through.
+        // ── Phase 1: apply a rotation when the previous one is already
+        // covered. `applyBkSetUpdate` keeps one outgoing set, so a second
+        // rotation while `lastBk > lastSeen` reverts. The first rotation
+        // (and any later one after the cursor passed the last N) may
+        // land ahead of the layer cursor — `verifyBlock` accepts the
+        // previous commitment for `seqNo <= N`. Defer only the
+        // previous-uncovered case; do not abort the tick.
         let bk_target = on_chain.last_bk_set_update_seq_no.saturating_add(1);
         if let Some(upd) = self.bk_update_source.fetch_bk_update(bk_target).await? {
-            if upd.block_seq_no > on_chain.last_seen_block_seq_no {
+            if on_chain.last_bk_set_update_seq_no > on_chain.last_seen_block_seq_no {
                 info!(
                     rotation = upd.block_seq_no,
+                    last_bk = on_chain.last_bk_set_update_seq_no,
                     last_seen = on_chain.last_seen_block_seq_no,
-                    "deferring applyBkSetUpdate until verifyBlock covers the rotation block",
+                    "deferring applyBkSetUpdate until verifyBlock covers the previous rotation",
                 );
             } else if upd.old_commitment_l2 != on_chain.bk_set_commitment {
                 self.state.record_bk_update_attempt(upd.block_seq_no);
@@ -717,7 +720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tick_defers_rotation_until_verify_block_covers_it() {
+    async fn tick_applies_rotation_ahead_of_cursor_then_verifies() {
         let dir = tempdir().unwrap();
         let bridge = Arc::new(MockBridgeClient::with_genesis(
             U256::from(BK),
@@ -742,22 +745,8 @@ mod tests {
         };
         let mut r = Relayer::new(cfg, source, bk, bridge.clone()).unwrap();
 
-        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
-            seq_no: 1,
-            ..
-        }));
-        assert_eq!(
-            bridge.read_state().await.unwrap().last_bk_set_update_seq_no,
-            0
-        );
-        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
-            seq_no: 2,
-            ..
-        }));
-        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
-            seq_no: 3,
-            ..
-        }));
+        // First rotation may apply before any verifyBlock. Blocks 1..=3
+        // are then accepted under the previous commitment.
         assert!(matches!(
             r.tick().await.unwrap(),
             TickOutcome::BkUpdateApplied {
@@ -769,6 +758,18 @@ mod tests {
             bridge.read_state().await.unwrap().last_bk_set_update_seq_no,
             3
         );
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 1,
+            ..
+        }));
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 2,
+            ..
+        }));
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 3,
+            ..
+        }));
         assert_eq!(r.state().bk_update_attempts_since_progress, 0);
     }
 }

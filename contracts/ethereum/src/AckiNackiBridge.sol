@@ -184,6 +184,13 @@ contract AckiNackiBridge {
     ///         verified on-chain. Strictly monotonic via `verifyBlock`.
     uint64 public storedLastSeenBlockSeqNo;
 
+    /// @notice Commitment that signed blocks at
+    ///         `blockSeqNo <= storedLastBkSetUpdateSeqNo`. Zero until the
+    ///         first `applyBkSetUpdate`. `verifyBlock` accepts this for
+    ///         those seqnos so a rotation can land before the layer
+    ///         cursor covers N (off-boundary rotations have no bundle at N).
+    uint256 public storedPrevBkSetCommitment;
+
     /// @notice Immutable genesis seed for the layer-hash chain anchor. Set
     ///         once at construction from `VerifyBlockConfig.genesisPrevMaxLevelLayerHash`
     ///         and never mutated post-deploy.
@@ -406,17 +413,14 @@ contract AckiNackiBridge {
     /// @notice A zero `newCommitmentL3` would force every later
     ///         `verifyBlock` to attest a zero BK-set commitment.
     error ZeroBkSetCommitment();
-    /// @notice Ordering invariant (BRIDGE-ETH-WD-2): `applyBkSetUpdate(N)`
-    ///         may only proceed once `verifyBlock` has already covered
-    ///         block `N` (`blockSeqNo <= storedLastSeenBlockSeqNo`).
-    ///         Applying the rotation ahead of the layer cursor would flip
-    ///         `storedBkSetCommitment` OLD → NEW while block `N`'s
-    ///         attestation is still signed by OLD keys, permanently
-    ///         bricking `verifyBlock(N)` with `BkSetCommitmentMismatch`
-    ///         and stranding every future block that anchors through
-    ///         `N`'s layer hashes. Since `applyBkSetUpdate` is
-    ///         permissionless, this is an on-chain invariant, not a
-    ///         relayer convention.
+    /// @notice A second `applyBkSetUpdate` is blocked until `verifyBlock`
+    ///         has covered the previous rotation
+    ///         (`storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo`).
+    ///         Only one outgoing set is kept (`storedPrevBkSetCommitment`);
+    ///         applying N2 while the cursor is still behind N1 would need
+    ///         a third commitment. The first rotation (cursor 0) is always
+    ///         allowed — `verifyBlock` then accepts the previous set for
+    ///         `blockSeqNo <= N` so an off-boundary N is not a deadlock.
     error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
     /// @notice Circuit 1A/1B range-checks `block_seq_no > last_seen`.
     ///         Passing the live layer cursor after `verifyBlock(N)` as
@@ -701,7 +705,9 @@ contract AckiNackiBridge {
     ///      chain-anchor invariant holds.
     ///
     /// Invariants enforced (revert-on-violation):
-    ///   - `bkSetCommitment == storedBkSetCommitment`           (BK-set anchor; rotated only by Phase 1.C Circuit 3 in future)
+    ///   - `bkSetCommitment` matches `_expectedBkSetFor(blockSeqNo)`
+    ///     (current set after the last rotation, previous set for
+    ///     `blockSeqNo <= storedLastBkSetUpdateSeqNo`)
     ///   - `blockSeqNo > storedLastSeenBlockSeqNo`              (strictly monotonic)
     ///   - `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` (chain anchor — per-layer pick, guards against fork & replay)
     ///   - `1 <= numLayers <= MAX_LAYER_HASHES`                 (shape)
@@ -777,8 +783,11 @@ contract AckiNackiBridge {
         _requireCanonicalFr(blockId);
 
         // ---- Anchor checks against stored state. ----
-        if (bkSetCommitment != storedBkSetCommitment) {
-            revert BkSetCommitmentMismatch(bkSetCommitment, storedBkSetCommitment);
+        {
+            uint256 expectedBk = _expectedBkSetFor(blockSeqNo);
+            if (bkSetCommitment != expectedBk) {
+                revert BkSetCommitmentMismatch(bkSetCommitment, expectedBk);
+            }
         }
         // Strictly greater is enough: gaps (seq_no fast-forward) are permitted
         // so a relayer can catch up with a later valid proof. A jump does not
@@ -924,24 +933,16 @@ contract AckiNackiBridge {
         if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
         }
-        // BRIDGE-ETH-WD-2 ordering invariant. `applyBkSetUpdate(N)` flips
-        // `storedBkSetCommitment` OLD → NEW; any later `verifyBlock(K)` for
-        // `K <= N` carries `bkSetCommitment == OLD` in its PI (the AN block
-        // that announces a rotation is signed by the outgoing set) and
-        // would revert `BkSetCommitmentMismatch`. Block `K`'s layer hashes
-        // would then never enter `_layerWindows`, and every future
-        // `verifyBlock` whose `_expectedPrevAnchor(numLayers)` picks
-        // through that hole would fail `PrevAnchorMismatch`. No admin
-        // recovery exists (verifiers are immutable, no pause, no
-        // state-reset). Since `applyBkSetUpdate` is `external`, this must
-        // be an on-chain invariant, not a relayer discipline — a
-        // wrong-order call by ANY caller (buggy future relayer, hostile
-        // actor front-running the honest relayer at a bundle-boundary
-        // rotation) would otherwise permanently brick the AN→ETH lane.
-        // Requiring the layer chain to have already covered block `N`
-        // turns wrong-order into a clean revert with untouched state.
-        if (blockSeqNo > storedLastSeenBlockSeqNo) {
-            revert VerifyBlockLagBehindRotation(blockSeqNo, storedLastSeenBlockSeqNo);
+        // One outgoing set only. A second rotation while the layer
+        // cursor is still behind the previous N would drop the set that
+        // still has to sign `verifyBlock` for those seqnos. The first
+        // rotation (storedLastBkSetUpdateSeqNo == 0) always proceeds;
+        // `verifyBlock` accepts `storedPrevBkSetCommitment` for
+        // `blockSeqNo <= N` so an off-boundary N is not a deadlock.
+        if (storedLastBkSetUpdateSeqNo > storedLastSeenBlockSeqNo) {
+            revert VerifyBlockLagBehindRotation(
+                storedLastBkSetUpdateSeqNo, storedLastSeenBlockSeqNo
+            );
         }
         // Circuit 1A/1B proves `block_seq_no > last_seen`. After
         // `verifyBlock(N)` the live cursor is N, which cannot be the
@@ -1011,6 +1012,7 @@ contract AckiNackiBridge {
             revert BkUpdateMerkleMismatch(rootFr, blockId);
         }
 
+        storedPrevBkSetCommitment = storedBkSetCommitment;
         storedBkSetCommitment = newCommitmentL3;
         storedLastBkSetUpdateSeqNo = blockSeqNo;
 
@@ -1126,6 +1128,16 @@ contract AckiNackiBridge {
     ///      diverged from the prover whenever `numLayers` *decreased* between
     ///      consecutive key blocks (e.g. a 3-layer block followed by a 1-layer
     ///      block), permanently halting `verifyBlock`.
+    /// @dev Commitment `verifyBlock` must see for `blockSeqNo`. After
+    ///      `applyBkSetUpdate(N)` the outgoing set still signs every
+    ///      block at or before N (including N itself).
+    function _expectedBkSetFor(uint64 blockSeqNo) internal view returns (uint256) {
+        if (storedLastBkSetUpdateSeqNo != 0 && blockSeqNo <= storedLastBkSetUpdateSeqNo) {
+            return storedPrevBkSetCommitment;
+        }
+        return storedBkSetCommitment;
+    }
+
     function _expectedPrevAnchor(uint8 numLayers) internal view returns (uint256) {
         uint8 t = _highestActiveLayer();
         if (t == 0) {

@@ -170,6 +170,7 @@ pub struct MockBridgeClient {
 struct MockBridgeInner {
     last_seen_block_seq_no: u64,
     bk_set_commitment: U256,
+    prev_bk_set_commitment: U256,
     last_bk_set_update_seq_no: u64,
     /// Storage v2.0 (2026-08-04): immutable genesis seed set by
     /// [`MockBridgeClient::with_genesis`]. Corresponds to the on-chain
@@ -198,6 +199,7 @@ impl MockBridgeClient {
             inner: Mutex::new(MockBridgeInner {
                 last_seen_block_seq_no: 0,
                 bk_set_commitment,
+                prev_bk_set_commitment: U256::ZERO,
                 last_bk_set_update_seq_no: 0,
                 genesis_prev_max_level_layer_hash: prev_max_level_layer_hash,
                 latest_per_layer: [U256::ZERO; MAX_LAYER_HASHES],
@@ -266,11 +268,18 @@ impl BridgeClient for MockBridgeClient {
 
         let mut inner = self.inner.lock().expect("poisoned lock");
 
-        if block.bk_set_commitment != inner.bk_set_commitment {
+        let expected_bk = if inner.last_bk_set_update_seq_no != 0
+            && block.block_seq_no <= inner.last_bk_set_update_seq_no
+        {
+            inner.prev_bk_set_commitment
+        } else {
+            inner.bk_set_commitment
+        };
+        if block.bk_set_commitment != expected_bk {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
                     "BkSetCommitmentMismatch(supplied={:#x}, stored={:#x})",
-                    block.bk_set_commitment, inner.bk_set_commitment
+                    block.bk_set_commitment, expected_bk
                 ),
             });
         }
@@ -346,11 +355,11 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
-        if update.block_seq_no > inner.last_seen_block_seq_no {
+        if inner.last_bk_set_update_seq_no > inner.last_seen_block_seq_no {
             return Ok(BkSetUpdateSubmitOutcome::Reverted {
                 reason: format!(
                     "VerifyBlockLagBehindRotation(rotation={}, last_seen={})",
-                    update.block_seq_no, inner.last_seen_block_seq_no
+                    inner.last_bk_set_update_seq_no, inner.last_seen_block_seq_no
                 ),
             });
         }
@@ -362,6 +371,7 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
+        inner.prev_bk_set_commitment = inner.bk_set_commitment;
         inner.bk_set_commitment = update.new_commitment_l3;
         inner.last_bk_set_update_seq_no = update.block_seq_no;
         Ok(BkSetUpdateSubmitOutcome::Applied {

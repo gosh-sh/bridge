@@ -641,7 +641,7 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
     }
 }
 
-/// Deterministic aggregator for tests: returns 3616-byte calldata whose
+/// Deterministic aggregator for tests: returns 3648-byte calldata whose
 /// re-exposed instance words (12..22) match [`MockCircuit4SnarkProver`]'s eleven
 /// ascending LE instances, so [`calldata_binds_instances`] passes.
 #[derive(Clone, Debug, Default)]
@@ -651,9 +651,10 @@ pub struct MockAggregator {
 
 impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
-    /// words at positions 12..22), padded to a realistic 3616-byte length.
+    /// words at positions 12..22), padded to the committed Circuit 4
+    /// `_calldata.bin` length (3648 B).
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
-        let total_len = 3616;
+        let total_len = 3648;
         let mut cd = vec![0u8; total_len];
         for (i, inst) in instances_hex.iter().enumerate() {
             let val = fr_hex_to_u256(inst).unwrap_or(U256::ZERO);
@@ -1230,7 +1231,7 @@ mod tests {
     #[tokio::test]
     async fn mock_c12_pipeline_attestation_returns_aggregated_calldata() {
         // MockSnarkWrapper writes a placeholder snark tempfile; MockAggregator
-        // ignores the file bytes and synthesizes 3616-byte calldata. Verifies
+        // ignores the file bytes and synthesizes 3648-byte calldata. Verifies
         // the full wrap → aggregate wiring end-to-end without needing a real
         // params_dir on disk.
         let pipeline =
@@ -1246,7 +1247,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cd.len(), 3616);
+        assert_eq!(cd.len(), 3648);
     }
 
     #[tokio::test]
@@ -1264,7 +1265,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cd.len(), 3616);
+        assert_eq!(cd.len(), 3648);
     }
 
     #[tokio::test]

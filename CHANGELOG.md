@@ -37,7 +37,7 @@ assigns it when the release is tagged.
 - `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
   greater than 10, the same error `getLayerWindow` already uses.
   `InvalidNumLayers` stays on `verifyBlock` and on the layer-window
-  views (`getLayerWindow`, `layerWindowLen`, `layerWindowWriteCursor`,
+  views (`layerWindowLen`, `layerWindowWriteCursor`,
   `anchorRemainingAppends`). A caller that caught `InvalidNumLayers` on
   a bad withdrawal layer will need to catch `LayerOutOfRange` instead.
 

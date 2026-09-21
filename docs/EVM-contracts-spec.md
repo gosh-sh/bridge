@@ -9,14 +9,21 @@ Last functional change to `src/AckiNackiBridge.sol`: `2026-08-06`.
 is empty — so most `file:line` citations below still resolve at that pair. Only §12.2/§12.3
 (deploy-time genesis alignment) and §14 (off-chain surface) were updated for `a69ba36`.
 
-**Two line-number bases.** This branch rewrote `withdrawByProof` and the
-layer-window views, so these cites resolve at this file's last edit (PR
-head), not at `a69ba36`: §7.2; the §7.4 rows for `isKnownAnchor`,
-`isKnownLayerAnchor` and the layer-window views; the §2
-`withdrawByProof` (`:1293`) mention; and the Circuit-4 rows of the §15
-check table. Every other `file:line` is still `a69ba36` / `a7a1130`.
-§15 enforced invariant 2 still cites the `withdrawByProof` CEI block as
-`:1192-1209` (`a69ba36`); at head that block is `:1361-1379`.
+**Two line-number bases.** Most `file:line` cites still resolve at
+`a69ba36` / `a7a1130`. These do not — they were rewritten on this
+branch and resolve at the commit that last changed this file
+(`git log -1 -- docs/EVM-contracts-spec.md`):
+
+- the §2 `withdrawByProof` mention (`:1293`)
+- §7.2
+- the last three rows of §7.4 (`isKnownAnchor` `:1171`,
+  `isKnownLayerAnchor` `:1210`, `isNullifierUsed` `:1386`)
+
+§15 enforced invariant 2 cites the `withdrawByProof` CEI block as
+`:1361-1379` at that same commit. §15 trade-offs 5 and 6 are closed
+items whose cites were already off both bases before this branch
+and are not claimed to resolve at either.
+
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -765,7 +772,7 @@ Read off the code, without a formal audit claim.
 
 1. Reentrancy: every state-mutating external entrypoint is `nonReentrant` (`:419-424`).
 2. CEI: `withdrawByProof` marks the nullifier and decrements `treasuryBalance` *before* the AAVE pull
-   and the USDC transfer (`:1192-1209`); `verifyBlock` commits state only after both verifiers pass.
+   and the USDC transfer (`:1361-1379`); `verifyBlock` commits state only after both verifiers pass.
 3. Monotonicity: `blockSeqNo` strictly increases per `verifyBlock`; the BK-update cursor increases
    strictly and independently; per-layer window heights are non-decreasing.
 4. Cross-circuit binding: shared `blockId` / `bkSetCommitment` are compared instance-by-instance
@@ -811,14 +818,14 @@ Read off the code, without a formal audit claim.
 4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
    the AAVE side has an emergency lever.
 5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed.**
-   Transfer is two-step: `transferOwnership` records `pendingOwner` (`:143`) and only
-   `acceptOwnership` (`:1551`), called by that address, moves `owner`. A mistyped address can never
+   Transfer is two-step: `transferOwnership` records `pendingOwner` (`:140`) and only
+   `acceptOwnership` (`:1574`), called by that address, moves `owner`. A mistyped address can never
    accept, so the mistake is recoverable by overwriting `pendingOwner`.
 6. ~~*`approve` return value ignored* in `supplyToAave`; `deposit` books the requested amount, not
    the observed delta.~~ **Closed.** `supplyToAave` reverts `ApproveFailed` on a falsy return
-   (`:1436`, error at `:387`), and the transfer paths measure `balanceOf` before and after and
-   revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1387-1393`,
-   error at `:364`). A fee-on-transfer or rebasing token now fails closed instead of crediting
+   (`:1450`, error at `:382`), and the transfer paths measure `balanceOf` before and after and
+   revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1401-1409`,
+   error at `:359`). A fee-on-transfer or rebasing token now fails closed instead of crediting
    book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
    lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),

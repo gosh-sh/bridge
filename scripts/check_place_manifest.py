@@ -23,6 +23,15 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST_PATH = "contracts/an/place.json"
 ROOT = "contracts/an/"
 
+# acki-nacki keeps its own original of each of these paths at the destination
+# our layout would imply. Placing our copy would silently overwrite
+# acki-nacki's own copy, so the manifest can never list one of these as
+# `place` no matter what `to` says — moving one out of here is a deliberate
+# edit of this constant, not a one-line slip in the manifest.
+NEVER_PLACED = frozenset({
+    "contracts/an/token/interface/ISubscriber.sol",
+})
+
 
 def tracked_files() -> set[str]:
     out = subprocess.run(
@@ -43,11 +52,27 @@ def main() -> int:
 
     placed = manifest.get("place", [])
     not_placed = manifest.get("not_placed", [])
+
+    if not isinstance(placed, list):
+        problems.append(f"`place` must be a list, got {type(placed).__name__}")
+        placed = []
+    if not isinstance(not_placed, list):
+        problems.append(f"`not_placed` must be a list, got {type(not_placed).__name__}")
+        not_placed = []
+
     listed: dict[str, str] = {}
     destinations: dict[str, str] = {}
 
     for entry in placed:
+        if not isinstance(entry, dict):
+            problems.append(f"`place` entry is not an object: {entry!r}")
+            continue
         src, dst = entry.get("from", ""), entry.get("to", "")
+        if src in NEVER_PLACED:
+            problems.append(
+                f"{src} must never be placed: acki-nacki owns the original at "
+                "its destination, placing it would overwrite acki-nacki's own copy"
+            )
         if not src.startswith(ROOT):
             problems.append(f"`from` outside {ROOT}: {src}")
         if src in listed:

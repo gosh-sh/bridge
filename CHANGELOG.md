@@ -219,6 +219,13 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- The AN→ETH relayer reconstructs per-slot window heights from
+  `LayerAnchorAppended` between `BRIDGE_DEPLOY_BLOCK` and latest, in
+  2 000-block `eth_getLogs` chunks. A scan with no from/to block used
+  to default both ends to `latest` and fail resurrect on any contract
+  that already had history (ETH-31). Set the env var; leaving it unset
+  still scans from genesis.
+
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
   unvalidated) are closed by this release, and item 3 now states the real

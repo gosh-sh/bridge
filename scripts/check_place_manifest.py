@@ -4,13 +4,20 @@
 acki-nacki pins one commit of this repository and places the files this manifest
 lists; nothing else about the set lives on that side. Two mistakes are therefore
 silent and expensive: a new artefact that nobody lists never reaches a zerostate,
-and a destination that escapes `contracts/` writes into a tree that is not ours —
-`contracts/an/token/interface/ISubscriber.sol`, for one, would overwrite
-acki-nacki's own copy of that interface if it were ever placed.
+and a destination outside the few directories acki-nacki gives us writes over a
+file acki-nacki tracks — `contracts/an/token/interface/ISubscriber.sol`, for one,
+would overwrite acki-nacki's own copy of that interface if it were ever placed.
 
     scripts/check_place_manifest.py
 
 Exits non-zero describing every problem.
+
+This guarantees completeness and the shape of each entry, not the decision
+behind it. A new artefact parked in `not_placed` to make this pass is fully
+accounted for and still never reaches a zerostate, and a `to` under
+`0.80.0_compiled` for a file built by the 0.81.0 compiler is a destination
+acki-nacki owns and still the wrong one. Both are review's job, not this
+script's.
 """
 
 import argparse
@@ -31,6 +38,34 @@ ROOT = "contracts/an/"
 NEVER_PLACED = frozenset({
     "contracts/an/token/interface/ISubscriber.sol",
 })
+
+# The destinations acki-nacki gives us: exactly the block its .gitignore
+# devotes to the placed files. Anything else is a file acki-nacki tracks, and a
+# typo in a `to` would overwrite it on every run of its zerostate generator and
+# of all five tests/exchange scripts — after which our file is what acki-nacki
+# imports as its own. Directories, not files, so that adding a file under one
+# of them stays a change to this manifest alone.
+PLACED_DIRS = (
+    "contracts/exchange/",
+    "contracts/zerostate/",
+    "contracts/0.80.0_compiled/exchange/",
+    "contracts/0.81.0_compiled/exchange/",
+)
+# Plus contracts/scripts/bridge_*.py, the one destination outside those
+# directories — with one exception: bridge_contracts.py is acki-nacki's own
+# module, the one that does the placing. acki-nacki's .gitignore negates it
+# inside the same bridge_*.py rule for that reason, and so do we: a manifest
+# naming it would replace the placing module with a file of ours.
+PLACED_SCRIPT_DIR = "contracts/scripts"
+PLACING_MODULE = "contracts/scripts/bridge_contracts.py"
+
+
+def destination_allowed(dst: str) -> bool:
+    if any(dst.startswith(prefix) for prefix in PLACED_DIRS):
+        return True
+    parent, _, name = dst.rpartition("/")
+    return (parent == PLACED_SCRIPT_DIR
+            and name.startswith("bridge_") and name.endswith(".py"))
 
 
 def tracked_files() -> set[str]:
@@ -73,13 +108,24 @@ def main() -> int:
                 f"{src} must never be placed: acki-nacki owns the original at "
                 "its destination, placing it would overwrite acki-nacki's own copy"
             )
-        if not src.startswith(ROOT):
-            problems.append(f"`from` outside {ROOT}: {src}")
+        if not src.startswith(ROOT) or ".." in src.split("/"):
+            problems.append(f"`from` must stay inside {ROOT} and carry no '..': {src}")
         if src in listed:
             problems.append(f"listed twice: {src}")
         listed[src] = dst
-        if not dst.startswith("contracts/") or dst.startswith("/") or ".." in dst.split("/"):
-            problems.append(f"`to` must stay inside contracts/ and carry no '..': {dst}")
+        if dst.startswith("/") or ".." in dst.split("/"):
+            problems.append(f"`to` must be a relative path with no '..': {dst}")
+        elif dst == PLACING_MODULE:
+            problems.append(
+                f"`to` must never be {PLACING_MODULE}: that module is acki-nacki's own — "
+                "it is what places these files — and placing over it would replace the "
+                "placing module with a file of ours"
+            )
+        elif not destination_allowed(dst):
+            problems.append(
+                f"`to` outside the destinations acki-nacki gives us: {dst} "
+                f"(one of {', '.join(PLACED_DIRS)} or {PLACED_SCRIPT_DIR}/bridge_*.py)"
+            )
         if dst in destinations:
             problems.append(f"two sources write to {dst}: {destinations[dst]} and {src}")
         destinations[dst] = src

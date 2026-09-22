@@ -40,8 +40,13 @@ places every file the manifest lists at the destination it names, before the
 zerostate is generated, so a new contract or artefact only needs adding to
 `place.json` — no edit on the acki-nacki side beyond moving the pin, and no
 file list there to keep in step. `scripts/check_place_manifest.py` fails if a
-tracked file under `contracts/an/` is left out of both lists. A change here
-reaches a network only after that pin is moved.
+tracked file under `contracts/an/` is left out of both lists, and if a
+destination is not one of the few directories acki-nacki gives us —
+`contracts/exchange/`, `contracts/zerostate/`, the two `*_compiled/exchange/`
+folders and `contracts/scripts/bridge_*.py`, never
+`contracts/scripts/bridge_contracts.py`, which is acki-nacki's own module and
+the one that does the placing. A change here reaches a network only after that
+pin is moved.
 
 ## Rebuilding
 

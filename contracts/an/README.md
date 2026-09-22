@@ -30,8 +30,10 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 The compiled artefacts are what goes into a zerostate. acki-nacki does not keep
 its own copy: `contracts/an/place.json` lists every file that goes into an
 Acki Nacki tree together with its destination there, and names what stays only
-here — the standalone light-client variant, the `Makefile`s, this README, the
-module's own test, and this repository's copy of `ISubscriber.sol`, which
+here — the standalone light-client variant (`EthBeaconLightClient.sol`,
+`EthKeccak.sol`), the two `Makefile`s, the zerostate encoder's source
+`BridgeZerostateData.sol` (only its compiled artefacts travel), the module's
+own test, this README, and this repository's copy of `ISubscriber.sol`, which
 acki-nacki keeps its own original of. acki-nacki's
 `contracts/scripts/bridge_contracts.py` pins one commit of this repository and
 places every file the manifest lists at the destination it names, before the

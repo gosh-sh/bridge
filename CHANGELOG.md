@@ -255,9 +255,10 @@ assigns it when the release is tagged.
   `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
 - **`contracts/an/place.json` says which files acki-nacki places and where.**
   It lists every file that goes into an Acki Nacki tree with its destination
-  there, and names the ones that stay here — the standalone light client, the
-  makefiles, this repository's copy of `ISubscriber.sol` (acki-nacki keeps its
-  own) and the module's own test. acki-nacki now pins only a commit of this
+  there, and names the ones that stay here — among them this repository's
+  copy of `ISubscriber.sol` (acki-nacki keeps its own original) and
+  `zerostate/BridgeZerostateData.sol`, the encoder source whose compiled
+  artefacts ship without it. acki-nacki now pins only a commit of this
   repository and follows the manifest, so a new contract or artefact is a
   change here plus a pin move there, with no file list to keep in step.
   `scripts/check_place_manifest.py`, wired into `.woodpecker/an-contracts.yaml`,

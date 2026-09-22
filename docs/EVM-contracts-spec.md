@@ -10,19 +10,17 @@ is empty — so most `file:line` citations below still resolve at that pair. Onl
 (deploy-time genesis alignment) and §14 (off-chain surface) were updated for `a69ba36`.
 
 **Two line-number bases.** Most `file:line` cites still resolve at
-`a69ba36` / `a7a1130`. These do not — they were rewritten on this
-branch and resolve at the commit that last changed this file
+`a69ba36` / `a7a1130`. These do not — they resolve at the commit
+that last changed this file
 (`git log -1 -- docs/EVM-contracts-spec.md`):
 
 - the §2 `withdrawByProof` mention (`:1293`)
 - §7.2
 - the last three rows of §7.4 (`isKnownAnchor` `:1171`,
   `isKnownLayerAnchor` `:1210`, `isNullifierUsed` `:1386`)
-
-§15 enforced invariant 2 cites the `withdrawByProof` CEI block as
-`:1361-1379` at that same commit. §15 trade-offs 5 and 6 are closed
-items whose cites were already off both bases before this branch
-and are not claimed to resolve at either.
+- §15 enforced invariant 2 (`:1361-1379`)
+- §15 trade-offs 5 and 6 (`:140`, `:1574`, `:1450`, `:382`,
+  `:1401-1409`, `:359`)
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.

@@ -976,7 +976,7 @@ up, so all three are spelled out here:
 `pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
 eleven `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
 dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot, anchorLayer)` — so the
-signature is a parenthesised tuple, not `uint256[13]`:
+signature is a parenthesised tuple, not `uint256[11]`:
 
 ```bash
 # $PROVER_OUT_DIR is yours to set — the CLI reads the directory from

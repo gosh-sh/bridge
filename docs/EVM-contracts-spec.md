@@ -136,15 +136,16 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | 2 | 20 | `aaveEnabled` | `bool` | 120 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
 | 3 | 0 | `suppliedPrincipal` | `uint256` | 123 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
 | 4 | 0 | `liquidReserveBps` | `uint256` | 128 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 131 | constructor, `transferOwnership` |
-| 6 | 0 | `yieldRecipient` | `address` | 134 | constructor, `setYieldRecipient` |
-| 7 | 0 | `_reentrancyStatus` | `uint256` | 139 | `nonReentrant` |
-| 8 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
-| 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 172 | `applyBkSetUpdate` |
-| 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 176 | constructor, `verifyBlock` |
-| 10 | 0 | `storedPrevBkSetCommitment` | `uint256` | — | `applyBkSetUpdate`; `verifyBlock` for `seqNo <= last update` |
-| 11 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 238 | `withdrawByProof` |
-| 12 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 260 | `_appendLayer` |
+| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
+| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
+| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient` |
+| 8 | 0 | `_reentrancyStatus` | `uint256` | 148 | `nonReentrant` |
+| 9 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
+| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 181 | `applyBkSetUpdate` |
+| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 185 | constructor, `verifyBlock` |
+| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 192 | `applyBkSetUpdate`; `verifyBlock` for `seqNo <= last update` |
+| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 259 | `withdrawByProof` |
+| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 278 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:525`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:100-104`).

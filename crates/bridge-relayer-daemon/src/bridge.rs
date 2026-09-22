@@ -73,6 +73,11 @@ use crate::{
 pub struct BridgeOnChainState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: U256,
+    /// Outgoing BK-set after `applyBkSetUpdate(N)`. `verifyBlock` accepts
+    /// this for `blockSeqNo <= last_bk_set_update_seq_no`. Zero until the
+    /// first rotation. `serde(default)` keeps old `state.json` readable.
+    #[serde(default)]
+    pub prev_bk_set_commitment: U256,
     /// Storage v2.0 (2026-08-04): mirrors the on-chain **immutable**
     /// `storedPrevMaxLevelLayerHash()` getter — a constant genesis seed
     /// set by the constructor, never mutated by `verifyBlock`. This
@@ -85,6 +90,17 @@ pub struct BridgeOnChainState {
     /// Highest seq_no applied via `applyBkSetUpdate` (0 if none yet).
     #[serde(default)]
     pub last_bk_set_update_seq_no: u64,
+}
+
+impl BridgeOnChainState {
+    /// Same rule as `AckiNackiBridge._expectedBkSetFor`.
+    pub fn expected_bk_set_for(&self, block_seq_no: u64) -> U256 {
+        if self.last_bk_set_update_seq_no != 0 && block_seq_no <= self.last_bk_set_update_seq_no {
+            self.prev_bk_set_commitment
+        } else {
+            self.bk_set_commitment
+        }
+    }
 }
 
 /// Width of the on-chain per-layer rolling window
@@ -247,6 +263,7 @@ impl BridgeClient for MockBridgeClient {
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: inner.last_seen_block_seq_no,
             bk_set_commitment: inner.bk_set_commitment,
+            prev_bk_set_commitment: inner.prev_bk_set_commitment,
             // Storage v2.0: `prev_max_level_layer_hash` is the *immutable
             // genesis seed* mirror of `storedPrevMaxLevelLayerHash()`.
             // For the per-layer anchor query used by the pre-submit drift
@@ -327,6 +344,7 @@ impl BridgeClient for MockBridgeClient {
             new_state: BridgeOnChainState {
                 last_seen_block_seq_no: inner.last_seen_block_seq_no,
                 bk_set_commitment: inner.bk_set_commitment,
+                prev_bk_set_commitment: inner.prev_bk_set_commitment,
                 prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
                 last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
             },
@@ -378,6 +396,7 @@ impl BridgeClient for MockBridgeClient {
             new_state: BridgeOnChainState {
                 last_seen_block_seq_no: inner.last_seen_block_seq_no,
                 bk_set_commitment: inner.bk_set_commitment,
+                prev_bk_set_commitment: inner.prev_bk_set_commitment,
                 prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
                 last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
             },
@@ -429,6 +448,7 @@ mod sol_bindings {
 
             function storedLastSeenBlockSeqNo() external view returns (uint64);
             function storedBkSetCommitment() external view returns (uint256);
+            function storedPrevBkSetCommitment() external view returns (uint256);
             function storedLastBkSetUpdateSeqNo() external view returns (uint64);
             /// Storage v2.0 (2026-08-04): immutable genesis seed. Retained
             /// so historical indexers reading the constructor value keep
@@ -558,6 +578,14 @@ where
 
     pub fn address(&self) -> Address {
         self.address
+    }
+
+    async fn fetch_prev_bk_set(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .storedPrevBkSetCommitment()
+            .call()
+            .await
+            .map_err(map_contract_err)
     }
 
     /// Direct access to the underlying contract (escape hatch for
@@ -696,10 +724,12 @@ where
                         .call()
                         .await
                         .map_err(map_contract_err)?;
+                    let prev_bk = self.fetch_prev_bk_set().await?;
                     Ok(BkSetUpdateSubmitOutcome::Applied {
                         new_state: BridgeOnChainState {
                             last_seen_block_seq_no: last,
                             bk_set_commitment: bk,
+                            prev_bk_set_commitment: prev_bk,
                             prev_max_level_layer_hash: anchor,
                             last_bk_set_update_seq_no: last_bk,
                         },
@@ -814,9 +844,17 @@ where
             .call()
             .await
             .map_err(map_contract_err)?;
+        let prev_bk = self
+            .contract
+            .storedPrevBkSetCommitment()
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk,
+            prev_bk_set_commitment: prev_bk,
             prev_max_level_layer_hash: anchor,
             last_bk_set_update_seq_no: last_bk,
         })
@@ -1045,9 +1083,11 @@ where
             .call()
             .await
             .map_err(map_contract_err)?;
+        let prev_bk = self.fetch_prev_bk_set().await?;
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk,
+            prev_bk_set_commitment: prev_bk,
             prev_max_level_layer_hash: anchor,
             last_bk_set_update_seq_no: last_bk,
         })

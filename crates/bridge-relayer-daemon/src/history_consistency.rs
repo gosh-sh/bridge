@@ -52,6 +52,7 @@ fn drift(
 pub fn check_history_consistency(
     expected: &BridgeState,
     actual: &BridgeOnChainState,
+    check_bk: bool,
 ) -> Result<(), HistoryDrift> {
     if expected.stored_last_seen_block_seq_no != actual.last_seen_block_seq_no {
         return Err(drift(
@@ -59,6 +60,9 @@ pub fn check_history_consistency(
             expected.stored_last_seen_block_seq_no.to_string(),
             actual.last_seen_block_seq_no.to_string(),
         ));
+    }
+    if !check_bk {
+        return Ok(());
     }
     let actual_bk = actual.bk_set_commitment.to_le_bytes::<32>();
     if expected.stored_bk_set_commitment != actual_bk {
@@ -148,10 +152,11 @@ mod tests {
         let actual = BridgeOnChainState {
             last_seen_block_seq_no: 0,
             bk_set_commitment: U256::ZERO,
+            prev_bk_set_commitment: U256::ZERO,
             prev_max_level_layer_hash: U256::ZERO,
             last_bk_set_update_seq_no: 0,
         };
-        assert!(check_history_consistency(&expected, &actual).is_ok());
+        assert!(check_history_consistency(&expected, &actual, true).is_ok());
     }
 
     #[test]
@@ -159,6 +164,7 @@ mod tests {
         let remembered = BridgeOnChainState {
             last_seen_block_seq_no: 10,
             bk_set_commitment: U256::from(1u64),
+            prev_bk_set_commitment: U256::ZERO,
             prev_max_level_layer_hash: U256::ZERO,
             last_bk_set_update_seq_no: 0,
         };

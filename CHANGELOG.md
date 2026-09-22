@@ -190,8 +190,12 @@ assigns it when the release is tagged.
 - The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
   rotation is covered, even if the layer cursor is still behind this N.
   It only defers a second rotation, and it does not abort the tick.
-  The live prover keeps proving bundles when a rotation is pending
-  (ETH-36).
+  After an apply it does **not** ack the live prover until the next
+  bundle target is above N, so the outgoing set can still sign
+  `verifyBlock` for `seqNo <= N` (ETH-36). Two rotations inside one
+  bundle stride (1024 at L1, 16384 at L2) cannot land: only one
+  outgoing set is stored. AN must not rotate twice between consecutive
+  bundle targets.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis

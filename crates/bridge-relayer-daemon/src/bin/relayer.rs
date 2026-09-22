@@ -1107,16 +1107,17 @@ async fn verify_fixture(
     let mut ok = true;
     let mut diagnostics: Vec<String> = Vec::new();
 
-    if block.bk_set_commitment != on_chain.bk_set_commitment {
+    let expected_bk = on_chain.expected_bk_set_for(block.block_seq_no);
+    if block.bk_set_commitment != expected_bk {
         ok = false;
         diagnostics.push(format!(
-            "BkSetCommitment MISMATCH: fixture = {:#x}, on-chain = {:#x}",
-            block.bk_set_commitment, on_chain.bk_set_commitment
+            "BkSetCommitment MISMATCH: fixture = {:#x}, expected = {:#x}",
+            block.bk_set_commitment, expected_bk
         ));
     } else {
         info!(
             bk_set_commitment = ?block.bk_set_commitment,
-            "BkSetCommitment matches on-chain",
+            "BkSetCommitment matches expected set for this seq_no",
         );
     }
 
@@ -1271,11 +1272,12 @@ async fn verify_prover_proof(
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let on_chain = bridge.read_state().await?;
 
-    if block.bk_set_commitment != on_chain.bk_set_commitment {
+    let expected_bk = on_chain.expected_bk_set_for(block.block_seq_no);
+    if block.bk_set_commitment != expected_bk {
         anyhow::bail!(
-            "bk_set mismatch: proof={} chain={}",
+            "bk_set mismatch: proof={} expected={}",
             block.bk_set_commitment,
-            on_chain.bk_set_commitment
+            expected_bk
         );
     }
     if block.block_seq_no <= on_chain.last_seen_block_seq_no {
@@ -2145,7 +2147,8 @@ async fn run_daemon_live(
     if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L2) {
         tracing::info!(
             stride = anchor_mode.stride(),
-            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on the first Circuit 2 bundle"
+            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on \
+             the first Circuit 2 bundle"
         );
     }
     let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {

@@ -418,9 +418,14 @@ contract AckiNackiBridge {
     ///         (`storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo`).
     ///         Only one outgoing set is kept (`storedPrevBkSetCommitment`);
     ///         applying N2 while the cursor is still behind N1 would need
-    ///         a third commitment. The first rotation (cursor 0) is always
-    ///         allowed — `verifyBlock` then accepts the previous set for
+    ///         a third commitment. The first rotation
+    ///         (`storedLastBkSetUpdateSeqNo == 0`) is always allowed —
+    ///         `verifyBlock` then accepts the previous set for
     ///         `blockSeqNo <= N` so an off-boundary N is not a deadlock.
+    ///         Two rotations inside one bundle stride (1024 at L1, 16384
+    ///         at L2) deadlock: N2 waits on a bundle after N1, and that
+    ///         bundle is signed by the third set. AN must not rotate
+    ///         twice between consecutive bundle targets.
     error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
     /// @notice Circuit 1A/1B range-checks `block_seq_no > last_seen`.
     ///         Passing the live layer cursor after `verifyBlock(N)` as
@@ -947,8 +952,9 @@ contract AckiNackiBridge {
         // Circuit 1A/1B proves `block_seq_no > last_seen`. After
         // `verifyBlock(N)` the live cursor is N, which cannot be the
         // instance the rotation proof was baked against. The caller
-        // supplies that baked word; WD-2 above already required the
-        // layer chain to have covered N.
+        // supplies that baked word. The layer cursor need not have
+        // covered N — the first rotation, and any later one after the
+        // previous N is covered, may lead the cursor.
         if (attestationLastSeen >= blockSeqNo) {
             revert AttestationLastSeenNotBeforeSeqNo(attestationLastSeen, blockSeqNo);
         }

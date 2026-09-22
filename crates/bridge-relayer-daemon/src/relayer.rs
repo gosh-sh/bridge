@@ -3,10 +3,13 @@
 //! [`Relayer::tick`] is the testable single-step entry point. It:
 //!
 //! 1. reads the on-chain anchors (+ Check B vs last observed);
-//! 2. **Phase 1** — applies a pending BK-set update (`applyBkSetUpdate`) only
-//!    once `verifyBlock` has already covered that seqno; otherwise the update
-//!    is deferred and the tick continues;
-//! 3. **Phase 2** — fetches the next block and submits `verifyBlock`;
+//! 2. **Phase 1** — applies a pending BK-set update (`applyBkSetUpdate`) when
+//!    the previous rotation is already covered. The first rotation (and any
+//!    later one after the cursor passed the last N) may land ahead of the layer
+//!    cursor. The live prover is acked only once the next bundle target is
+//!    above N, so it keeps the outgoing set for blocks `<= N`.
+//! 3. **Phase 2** — fetches the next block and submits `verifyBlock` against
+//!    `_expectedBkSetFor` (outgoing set for `seqNo <= N`);
 //! 4. on success — acks the live driver (if any), runs Check A, persists state.
 //!
 //! [`Relayer::run_loop`] just calls `tick` in a `loop` with a configurable
@@ -220,11 +223,15 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         new_state,
                         tx_hash,
                     } => {
-                        self.bk_update_source
-                            .ack_last_bk_update(upd.block_seq_no)
-                            .await?;
-                        self.after_ack_consistency(upd.block_seq_no, &new_state)
-                            .await?;
+                        // Keep the prover on the outgoing set until the
+                        // next bundle target is above N. Acking here
+                        // rotates its only key table and it can never
+                        // prove a remaining boundary M <= N.
+                        self.maybe_ack_prover_rotation(&new_state).await?;
+                        if Self::prover_rotation_may_ack(&new_state) {
+                            self.after_ack_consistency(upd.block_seq_no, &new_state)
+                                .await?;
+                        }
                         self.state.record_bk_update_progress(upd.block_seq_no);
                         self.state.last_observed_on_chain = Some(new_state.clone());
                         self.persist_state()?;
@@ -269,6 +276,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         }
 
         // ── Phase 2: verifyBlock lane ────────────────────────────────
+        self.maybe_ack_prover_rotation(&on_chain).await?;
         let target = on_chain.last_seen_block_seq_no.saturating_add(1);
 
         debug!(target_seq_no = target, "fetching block");
@@ -320,14 +328,15 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                 ),
             });
         }
-        if block.bk_set_commitment != on_chain.bk_set_commitment {
+        let expected_bk = on_chain.expected_bk_set_for(block.block_seq_no);
+        if block.bk_set_commitment != expected_bk {
             self.state.record_attempt(target);
             self.persist_state()?;
             return Ok(TickOutcome::BridgeReverted {
                 target_seq_no: target,
                 reason: format!(
-                    "off-chain bk_set_commitment {:#x} != on-chain {:#x}",
-                    block.bk_set_commitment, on_chain.bk_set_commitment
+                    "off-chain bk_set_commitment {:#x} != expected {:#x}",
+                    block.bk_set_commitment, expected_bk
                 ),
             });
         }
@@ -338,6 +347,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                 tx_hash,
             } => {
                 self.source.ack_last_bundle(seq_no).await?;
+                self.maybe_ack_prover_rotation(&new_state).await?;
                 self.after_ack_consistency(seq_no, &new_state).await?;
                 self.state.record_progress(seq_no);
                 self.state.last_observed_on_chain = Some(new_state.clone());
@@ -382,6 +392,30 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         }
     }
 
+    /// Next thinned-bundle seq_no strictly after `last_seen` (L1 stride).
+    fn next_bundle_boundary(last_seen: u64) -> u64 {
+        ((last_seen / BUNDLE_STRIDE_L1) + 1) * BUNDLE_STRIDE_L1
+    }
+
+    /// The live prover may rotate once the next bundle it would prove
+    /// is signed by the new set (`seq > N`).
+    fn prover_rotation_may_ack(on_chain: &BridgeOnChainState) -> bool {
+        let n = on_chain.last_bk_set_update_seq_no;
+        n != 0 && Self::next_bundle_boundary(on_chain.last_seen_block_seq_no) > n
+    }
+
+    async fn maybe_ack_prover_rotation(
+        &self,
+        on_chain: &BridgeOnChainState,
+    ) -> Result<(), RelayerError> {
+        if !Self::prover_rotation_may_ack(on_chain) {
+            return Ok(());
+        }
+        self.bk_update_source
+            .ack_last_bk_update(on_chain.last_bk_set_update_seq_no)
+            .await
+    }
+
     async fn after_ack_consistency(
         &self,
         seq_no: u64,
@@ -390,7 +424,10 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let Some(expected) = self.source.driver_snapshot().await else {
             return Ok(());
         };
-        if let Err(drift) = check_history_consistency(&expected, actual) {
+        // While the next bundle is still at or below N the prover has
+        // not been acked and still holds the outgoing set.
+        let check_bk = Self::prover_rotation_may_ack(actual);
+        if let Err(drift) = check_history_consistency(&expected, actual, check_bk) {
             error!(
                 seq_no,
                 ?drift,
@@ -684,6 +721,7 @@ mod tests {
 
     struct OneShotBkUpdate {
         upd: std::sync::Mutex<Option<BkSetUpdateData>>,
+        acks: std::sync::atomic::AtomicU64,
     }
 
     #[async_trait::async_trait]
@@ -699,6 +737,7 @@ mod tests {
             let mut g = self.upd.lock().unwrap();
             if g.as_ref().is_some_and(|u| u.block_seq_no == seq_no) {
                 *g = None;
+                self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Ok(())
         }
@@ -736,6 +775,7 @@ mod tests {
         }
         let bk = Arc::new(OneShotBkUpdate {
             upd: std::sync::Mutex::new(Some(dummy_update(3, 0))),
+            acks: std::sync::atomic::AtomicU64::new(0),
         });
         let cfg = RelayerConfig {
             state_path: dir.path().join("state.json"),
@@ -743,7 +783,7 @@ mod tests {
             max_attempts_warn: 16,
             max_attempts_abort: u32::MAX,
         };
-        let mut r = Relayer::new(cfg, source, bk, bridge.clone()).unwrap();
+        let mut r = Relayer::new(cfg, source, bk.clone(), bridge.clone()).unwrap();
 
         // First rotation may apply before any verifyBlock. Blocks 1..=3
         // are then accepted under the previous commitment.
@@ -771,5 +811,63 @@ mod tests {
             ..
         }));
         assert_eq!(r.state().bk_update_attempts_since_progress, 0);
+        // N=3, next L1 bundle is 1024 > 3, so the prover may rotate now.
+        assert_eq!(bk.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tick_defers_prover_ack_while_next_bundle_at_or_below_n() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(InMemoryBlockSource::new());
+        let mut anchor = U256::ZERO;
+        for seq in 1..=3 {
+            let b = block(seq, anchor);
+            anchor = b.next_anchor();
+            source.insert(b);
+        }
+        // Rotation past the next L1 bundle (1024). The prover must keep
+        // the outgoing set until that bundle is proven.
+        let bk = Arc::new(OneShotBkUpdate {
+            upd: std::sync::Mutex::new(Some(dummy_update(2000, 0))),
+            acks: std::sync::atomic::AtomicU64::new(0),
+        });
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+        };
+        let mut r = Relayer::new(cfg, source, bk.clone(), bridge.clone()).unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 2000,
+                ..
+            }
+        ));
+        assert_eq!(bk.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 1,
+            ..
+        }));
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 2,
+            ..
+        }));
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 3,
+            ..
+        }));
+        assert_eq!(
+            bk.acks.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "next bundle 1024 is still <= 2000"
+        );
     }
 }

@@ -203,6 +203,31 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     }
 
     // -----------------------------------------------------------------
+    // Case 5 — `_expectedBkSetFor` negatives
+    // -----------------------------------------------------------------
+
+    /// @notice After apply(N) a later block signed by the outgoing set
+    ///         reverts. This is the point of rotating.
+    function test_verifyBlock_afterRotation_rejectsPrevCommitmentPastN() public {
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        uint256 anchor = bridge.expectedPrevAnchor(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.BkSetCommitmentMismatch.selector, L2, L3)
+        );
+        _verify(N + 1, L2, anchor);
+    }
+
+    /// @notice At or below N the new set is not yet the signer.
+    function test_verifyBlock_afterRotation_rejectsNewCommitmentAtOrBeforeN() public {
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        uint256 anchor = bridge.expectedPrevAnchor(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.BkSetCommitmentMismatch.selector, L3, L2)
+        );
+        _verify(N, L3, anchor);
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -220,6 +245,10 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     ///      requirement is strict-greater, so any positive `target` works from
     ///      a fresh state.
     function _primeLayerCursor(uint64 target, uint256 bkSet) internal {
+        _verify(target, bkSet, bridge.expectedPrevAnchor(1));
+    }
+
+    function _verify(uint64 target, uint256 bkSet, uint256 prevAnchor) internal {
         uint256[10] memory layers;
         layers[0] = 1;
         bridge.verifyBlock(
@@ -231,7 +260,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
             target,
             1,
             layers,
-            bridge.expectedPrevAnchor(1)
+            prevAnchor
         );
     }
 

@@ -5,8 +5,8 @@ target/
 .cargo/*
 !.cargo/audit.toml
 
-# Cargo lock files: track the workspace-root Cargo.lock (CI's setup:rust runs
-# `cargo fetch --locked` and `Dockerfile` copies it).
+# Cargo lock files: workspace-root Cargo.lock is not tracked here; individual
+# lock files in vendored / standalone subtrees are listed below and ignored.
 #
 # Tracked locks in excluded crates (reproducible VK / daemon `--locked` builds):
 #   deposit-prover/Cargo.lock
@@ -14,9 +14,13 @@ target/
 #   crates/deposit-relayer-daemon/Cargo.lock
 #   crates/eth-light-client-relayer/Cargo.lock
 # Ignore the rest of the excluded trees' locks (not gated in CI `--locked`):
+/Cargo.lock
 poseidon-proof/Cargo.lock
 crates/bridge-snark-utils/Cargo.lock
 crates/bridge-relayer-daemon/Cargo.lock
+crates/bridge-circuits/Cargo.lock
+crates/bridge-evm-aggregator/Cargo.lock
+crates/bridge-prover-libraries/Cargo.lock
 
 # Foundry / Solidity
 contracts/ethereum/out/
@@ -206,9 +210,8 @@ deployment_addresses.json
 contracts/ethereum/deployment_real.json
 deposit-prover/deposit_proof_output.json
 
-# R15 / M2 bridge-evm-aggregator standalone workspace. Its Cargo.lock is
-# committed because `aggregate-proof` is a deployed binary; only generated
-# target/SRS/output artefacts remain local.
+# R15 / M2 bridge-evm-aggregator standalone workspace: generated
+# target/SRS/output artefacts and the Cargo.lock (listed above) are local-only.
 crates/bridge-evm-aggregator/target/
 crates/bridge-evm-aggregator/params/
 crates/bridge-evm-aggregator/out/

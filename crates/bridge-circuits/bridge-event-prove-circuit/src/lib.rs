@@ -1,5 +1,6 @@
 pub mod boc_helper;
 pub mod bridge_event_prove_circuit;
+pub mod dense_merkle_bound;
 pub mod event_data_helper;
 pub mod poseidon;
 

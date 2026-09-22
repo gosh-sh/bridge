@@ -208,8 +208,10 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
 
     /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (10-input
-    ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
+    ///         `IBridgeWithdrawalVerifier` interface (11-input
+    ///         layout — slot 10 is `anchorLayer`, 1-indexed and range-checked
+    ///         in-circuit to `1..=MAX_LAYER_HASHES`; production backend:
+    ///         Halo2 SHPLONK aggregator adapter).
     ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
     ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock`.

@@ -448,17 +448,15 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
     }
 
-    /// @notice Two AN burns in one block with the same
-    ///         `(block_id, tokenId, amount, recipient, sender)` share a
-    ///         Circuit 4 nullifier (`msg_id` is not in the preimage). The
-    ///         first payout succeeds; the second is `NullifierAlreadyUsed`
-    ///         and that ECC is stranded. Same on-chain mechanics as a
-    ///         replay — this name pins the duplicate-burn reading.
-    /// @notice Replay of the same nullifier is rejected (the mapping still
-    ///         guards a second payout even when two Circuit 4 proofs could
-    ///         theoretically be produced). Distinct `events_pos` values now
-    ///         produce distinct circuit nullifiers, so two identical burns
-    ///         in one AN block are no longer stranded by this path.
+    /// @notice On-chain replay guard for identical nullifiers. Since
+    ///         BRIDGE-WD-01 (Circuit 4 revision 3) `events_pos` is bound
+    ///         into the Poseidon preimage, so two *distinct* AN
+    ///         `WithdrawalInitiated` events in the same block now produce
+    ///         distinct circuit nullifiers and neither is stranded. This
+    ///         test still asserts the belt-and-suspenders on-chain mapping:
+    ///         if the same nullifier is somehow presented twice (e.g. a
+    ///         literal proof replay), the second `withdrawByProof` reverts
+    ///         with `NullifierAlreadyUsed` and no double-payout occurs.
     function test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked() public {
         uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
         uint256 amount = 1 * UsdcTestLib.UNIT;

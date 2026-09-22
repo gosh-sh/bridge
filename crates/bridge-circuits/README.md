@@ -64,17 +64,17 @@ Block-finalization proofs feed the contract a rolling commitment to Acki Nacki h
 | 1A | Primary Attestation | Verify ≥⌈2n/3⌉ BLS supermajority for a single attestation | `[block_id, bk_poseidon, block_seq_no, last_seen]` | 20 |
 | 1B | Fallback Attestation | Verify two >50% attestations (Primary + Fallback type) referencing the same `block_id` | same as 1A | 20 |
 | 2 | Layer Historical Hashes | Open L0 (Poseidon layer-hash preimage) + SHA-256 Merkle path to `block_id`; verify Poseidon dense chain (`MAX_CHAIN_LEN = 11`) for layer-hash progression | `[block_id, bk_poseidon, num_layers, layer_hash_frs[0..9], prev_max_level_layer_hash]` (14 instances) | 17 |
-| 4 | Bridge Event Prover | Re-hash event BOC cells; bind `tokenId/dapp/account` to a `Poseidon96` block leaf; climb the dense chain to a layer root and publish it as `final_root` | `[tokenId, amount, recipient_hi, recipient_lo, dst_chain_id, sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]` (`TOTAL_PUBLIC_INPUTS = 10`) | 19 |
+| 4 | Bridge Event Prover | Re-hash event BOC cells; bind `tokenId/dapp/account` to a `Poseidon96` block leaf; climb the dense chain to a layer root and publish it as `final_root`; publish the anchor's 1-indexed `anchor_layer` for on-chain slot dispatch | `[tokenId, amount, recipient_hi, recipient_lo, dst_chain_id, sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` (`TOTAL_PUBLIC_INPUTS = 11`) | 19 |
 
 ### Circuit 4 — single-final-root design
 
 The bridge uses ZK proofs to spare the Ethereum contract from implementing Acki Nacki's crypto primitives natively — BLS-12-381 pairings on the supermajority, the dense Poseidon chain over layer hashes, SHA-256 block-ID Merkle paths — none of which are cheap (or, in BLS-12-381's case, possible without a precompile) in Solidity. There is **no anonymity goal**: every public input the circuits expose is a value the contract already needs to mirror Acki Nacki's `GlobalHistoryData`. So Circuit 4 publishes exactly what the verifier needs to recognise the event, and nothing more.
 
-Concretely, Circuit 4 publishes a single `final_root` (slot 9 of the 10 public instances) — the layer-hash it reaches by climbing the dense chain from the event's block leaf.
+Concretely, Circuit 4 publishes a single `final_root` (slot 9 of the 11 public instances) — the layer-hash it reaches by climbing the dense chain from the event's block leaf. Slot 10 carries the 1-indexed `anchor_layer` (range-checked `1..=MAX_ANCHOR_LAYER = 10`) so the on-chain verifier knows which layer window to check `final_root` against.
 
 Recognising `final_root` is the verifier's job, off-circuit. Any entity that mirrors Acki Nacki's `GlobalHistoryData` (the Ethereum contract via `verifyBlock` → `appendLayer`, the off-chain verifier daemon via its own state) holds the same layer-hash windows the producer emits. Verification reduces to: **does `final_root` appear among the layer hashes in that mirrored history?** Membership in that set is what proves the event was committed to a finalised block.
 
-The public-instance vector is fixed at `10` and the Circuit 4 VK is **independent of `W`** — no per-`W` feature flag, no separate test/prod shapes.
+The public-instance vector is fixed at `11` and the Circuit 4 VK is **independent of `W`** — no per-`W` feature flag, no separate test/prod shapes.
 
 ---
 
@@ -146,21 +146,21 @@ The contract:
 
 1. **`verifyBlock`** — accepts a (Circuit 1A/1B + Circuit 2) bundle per thinned key block; verifies each proof; cross-checks shared `block_id` and `bk_set_poseidon_hash`; calls `appendLayer(L, root, blockHeight)` for each layer the bundle publishes; advances `storedLastSeenBlockSeqNo` and `storedLastSeenBlockHeight`. BK-set rotations are applied separately via `applyBkSetUpdate(L2, L3, …)`, which the verifier daemon (and eventually the contract) calls with the two open SHA-256 siblings against an already-verified `block_id` — `storedBkSetCommitment` is rolled forward there, not in `verifyBlock`.
 
-2. **`proveWithdrawal`** — accepts one Circuit 4 proof plus its 10 public-instance Frs. The contract verifies the SNARK then checks that `pub[9]` (the `final_root`) appears in **any** slot of any active `layerWindows[L].data[i]`. On success: sets `proven[pubHash]` and emits `WithdrawalProofVerified`. **Token release / nullifier / recipient binding are deliberately TBD** — the contract sketch stops at "proof OK + final_root recognised".
+2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 11 public-instance Frs. The contract verifies the SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan (see ETH-15 fix). On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
 
    ```solidity
-   function proveWithdrawal(bytes calldata proof4, uint256[10] calldata pub4) external {
+   function withdrawByProof(bytes calldata proof4, uint256[11] calldata pub4) external {
        require(verifier.verify(vk4, proof4, pub4), "proof");
+       uint8 anchorLayer = uint8(pub4[10]);
+       require(anchorLayer != 0 && anchorLayer <= MAX_LAYER_HASHES, "anchorLayer");
        bytes32 finalRoot = bytes32(pub4[9]);
+       HistoryWindow storage w = layerWindows[anchorLayer];
        bool found = false;
-       for (uint8 L = 1; L <= MAX_LAYERS && !found; L++) {
-           HistoryWindow storage w = layerWindows[L];
-           for (uint256 i = 0; i < w.dataLen; i++) {
-               if (w.data[i] == finalRoot) { found = true; break; }
-           }
+       for (uint256 i = 0; i < w.dataLen; i++) {
+           if (w.data[i] == finalRoot) { found = true; break; }
        }
        require(found, "anchor not in layerWindows");
-       // …mark proven, emit WithdrawalProofVerified
+       // …consume nullifier pub4[8], pay out, emit
    }
    ```
 

@@ -474,6 +474,12 @@ pub fn build_dense_chain(
 /// Native nullifier — mirrors the in-circuit `hash_fix_len_array` call in
 /// `BridgeEventProveCircuit::synthesize`. Used by tests and downstream
 /// orchestrators to predict the public-instance `PUB_NULLIFIER` value.
+///
+/// `events_pos` (BRIDGE-WD-01) is appended so two identical
+/// `WithdrawalInitiated` events in the same AN block produce distinct
+/// nullifiers. The value MUST be the same `events_pos` used to build the
+/// events-tree merkle proof (bound to the walker's direction bits inside
+/// the circuit).
 pub fn nullifier_native(
     block_id_fr: Fr,
     token_id: Fr,
@@ -481,6 +487,7 @@ pub fn nullifier_native(
     recipient_hi: Fr,
     recipient_lo: Fr,
     sender_acc_fr: Fr,
+    events_pos: Fr,
 ) -> Fr {
     crate::poseidon::poseidon_hash(&[
         block_id_fr,
@@ -489,6 +496,7 @@ pub fn nullifier_native(
         recipient_hi,
         recipient_lo,
         sender_acc_fr,
+        events_pos,
     ])
 }
 
@@ -528,17 +536,24 @@ impl LeadingPublicInputs {
 /// + the two-level tree witnesses + the sender's `account_id`. The
 /// `sender_account_id` must match the algebraic decode of the BoC sender
 /// cell (cross-checked in [`extract_withdrawal_fields`]).
+///
+/// `events_pos` (BRIDGE-WD-01) participates in the nullifier preimage so
+/// two identical `WithdrawalInitiated` events in the same AN block produce
+/// distinct nullifiers. It MUST be the same `events_pos` used to build the
+/// events-tree merkle proof passed to the circuit.
 pub fn compute_leading_public_inputs(
     w: &WithdrawalFields,
     block_id: &[u8; 32],
     account_dapp_id: &[u8; 32],
     account_id: &[u8; 32],
     sender_account_id: &[u8; 32],
+    events_pos: usize,
 ) -> LeadingPublicInputs {
     let block_id_fr = bytes_to_fr(block_id);
     let dapp_fr = bytes_to_fr(account_dapp_id);
     let acc_fr = bytes_to_fr(account_id);
     let sender_acc_fr = bytes_to_fr(sender_account_id);
+    let events_pos_fr = Fr::from(events_pos as u64);
     let nullifier = nullifier_native(
         block_id_fr,
         w.token_id_val,
@@ -546,6 +561,7 @@ pub fn compute_leading_public_inputs(
         w.recipient_hi_val,
         w.recipient_lo_val,
         sender_acc_fr,
+        events_pos_fr,
     );
     LeadingPublicInputs {
         token_id: w.token_id_val,
@@ -560,12 +576,22 @@ pub fn compute_leading_public_inputs(
     }
 }
 
-/// Concatenate `[leading_public_inputs..., final_root]` into a single
-/// instance vector matching the circuit's `assigned_instances` order.
-pub fn make_instances(leading: LeadingPublicInputs, final_root: Fr) -> Vec<Fr> {
+/// Concatenate `[leading_public_inputs..., final_root, anchor_layer]` into
+/// a single instance vector matching the circuit's `assigned_instances`
+/// order.
+///
+/// `anchor_layer` (ETH-15) is the 1-indexed layer index the on-chain
+/// verifier uses to route to the correct `anchorRoots[layer]` mapping and
+/// is range-checked `1..=MAX_ANCHOR_LAYER` inside the circuit.
+pub fn make_instances(
+    leading: LeadingPublicInputs,
+    final_root: Fr,
+    anchor_layer: Fr,
+) -> Vec<Fr> {
     let mut v = Vec::with_capacity(TOTAL_PUBLIC_INPUTS);
     v.extend(leading.to_vec());
     v.push(final_root);
+    v.push(anchor_layer);
     v
 }
 
@@ -590,10 +616,15 @@ pub fn build_synthetic_event_keygen_inputs(
     let final_root_fr = bytes_to_fr(&final_root_bytes);
 
     let params = base_circuit_params();
+    // Synthetic anchor_layer must sit inside `1..=MAX_ANCHOR_LAYER`; the
+    // exact value doesn't matter for keygen shape — pick the smallest
+    // legal one so the range checks always pass on the reference witness.
+    let anchor_layer: u8 = 1;
+    let events_pos = tw.events_pos;
     let circuit = BridgeEventProveCircuit::new(
         w.entries.clone(),
         tw.events_siblings,
-        tw.events_pos,
+        events_pos,
         tw.account_dapp_id,
         tw.account_id,
         tw.block_id,
@@ -602,6 +633,7 @@ pub fn build_synthetic_event_keygen_inputs(
         tw.block_pos,
         dense_chain,
         1,
+        anchor_layer,
         params,
     );
 
@@ -611,8 +643,9 @@ pub fn build_synthetic_event_keygen_inputs(
         &tw.account_dapp_id,
         &tw.account_id,
         &w.sender_account_id,
+        events_pos,
     );
-    let instances = make_instances(leading, final_root_fr);
+    let instances = make_instances(leading, final_root_fr, Fr::from(anchor_layer as u64));
 
     (circuit, instances)
 }

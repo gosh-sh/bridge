@@ -800,7 +800,7 @@ Sepolia revert. The log prints the selector.
 | Selector | Error | Root cause pattern |
 |---|---|---|
 | `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
-| `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender)` tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. |
+| `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender, events_pos)` 7-tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. Note: since BRIDGE-WD-01 (2026-09), `events_pos` is bound into the preimage, so two *distinct* `WithdrawalInitiated` events in the same AN block no longer collide — this error truly means the same event was replayed. |
 | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
 | `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
@@ -809,7 +809,7 @@ Sepolia revert. The log prints the selector.
 ```bash
 # Re-run the exact eth_call with --trace for a decoded reason
 cast call $BRIDGE \
-  'withdrawByProof(bytes,uint256[13])' \
+  'withdrawByProof(bytes,uint256[11])' \
   <calldata_hex_from_log> \
   '[<pi array from log>]' \
   --rpc-url $RPC --trace

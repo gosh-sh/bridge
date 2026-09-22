@@ -15,14 +15,30 @@
 //!   7: accFr          — Fr-encoding of account_id       (binds proof to account)
 //!   8: nullifier      — Poseidon(block_id_fr, tokenId, amount,
 //!                                  recipientHi, recipientLo,
-//!                                  senderAccFr)
+//!                                  senderAccFr, eventsPos)
+//!                       `eventsPos` disambiguates two identical
+//!                       `WithdrawalInitiated` events in the same AN block
+//!                       (BRIDGE-WD-01). It is a PRIVATE witness — soundness
+//!                       comes from binding its bit-decomposition to the
+//!                       events-tree merkle path via
+//!                       [`dense_merkle_bound::dense_merkle_root_padded_bound`],
+//!                       so the events_pos value hashed into the nullifier
+//!                       IS the position walked in the events tree.
 //!   9: finalRoot      — Anchor root the proof binds to. The verifier
-//!                       checks `finalRoot` against its known set of
-//!                       layer hashes off-circuit. The bridge has no
+//!                       checks `finalRoot` against the layer window named
+//!                       by `anchorLayer` off-circuit. The bridge has no
 //!                       anonymization goal, so the prover exposes a
 //!                       single anchor root rather than the previous
 //!                       `NUM_LAYER_HASHES`-wide candidate vector with
 //!                       a private index.
+//!  10: anchorLayer    — 1-indexed layer hosting `finalRoot`
+//!                       (`1..=MAX_ANCHOR_LAYER`, range-checked). The L1
+//!                       verifier scans only that layer's HISTORY_PROOF
+//!                       window for `finalRoot` (Option A in ETH-15). 0 is
+//!                       rejected both on-chain and here (a genuine layer
+//!                       index below 1 is meaningless — the smallest AN
+//!                       layer index is 0, but this PI is 1-indexed to
+//!                       reserve 0 as "invalid/unset").
 //!
 //! Why no `senderDappFr`: the TVM address type (`std_addr$10`, see
 //! `MsgAddrStd { anycast, workchain_id, address }` in
@@ -69,9 +85,13 @@
 //! 10. Verify `block_leaf -> root_1` via block Merkle proof.
 //! 11. Verify `root_1 -> final_root` via dense chain (`verify_chain_of_dense_proofs`).
 //! 12. `nullifier = Poseidon(block_id_fr, tokenId, amount, recipientHi,
-//!     recipientLo, senderAccFr)` via `hash_fix_len_array`.
+//!     recipientLo, senderAccFr, eventsPos)` via `hash_fix_len_array`.
+//!     `eventsPos` (BRIDGE-WD-01) is bound to the events-tree walker's
+//!     direction bits so two identical `WithdrawalInitiated` events in
+//!     one AN block yield distinct nullifiers.
 //! 13. Push public instances in the [`PUB_*`] order — leading fields,
-//!     `nullifier`, then `final_root` — to instance column 0.
+//!     `nullifier`, `final_root`, then `anchorLayer` (1-indexed,
+//!     range-checked `1..=MAX_ANCHOR_LAYER`) — to instance column 0.
 
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::halo2_proofs::halo2curves::ff::Field as _;
@@ -94,15 +114,23 @@ use halo2_base::{
 use std::cell::RefCell;
 
 use crate::boc_helper::*;
+use crate::dense_merkle_bound::dense_merkle_root_padded_bound;
 use crate::poseidon::*;
 use gosh_dense_balanced_tree::{
-    bytes_to_fr, compute_root_native, dense_merkle_root_circuit,
-    dense_merkle_root_circuit_padded, fr_to_bytes, poseidon_hash_native,
-    preprocess_dense_proof, preprocess_dense_proof_padded, verify_chain_of_dense_proofs,
-    DenseChainLink, MAX_CHAIN_LEN,
+    bytes_to_fr, compute_root_native, dense_merkle_root_circuit, fr_to_bytes,
+    poseidon_hash_native, preprocess_dense_proof, preprocess_dense_proof_padded,
+    verify_chain_of_dense_proofs, DenseChainLink, MAX_CHAIN_LEN,
 };
 
 pub const MAX_EVENTS_TREE_DEPTH: usize = 8;
+
+/// Maximum 1-indexed layer number for `PUB_ANCHOR_LAYER`. Must equal the
+/// Solidity `MAX_LAYER_HASHES` in `AckiNackiBridge.sol` (currently 10). Any
+/// change here MUST land together with the on-chain constant — the verifier
+/// range-checks `pub.anchorLayer > MAX_LAYER_HASHES` and reverts, so a
+/// circuit that emits `anchorLayer > 10` would produce proofs the bridge
+/// silently rejects.
+pub const MAX_ANCHOR_LAYER: u8 = 10;
 
 // ───── Public-input layout (instance column 0) ─────────────────────────────
 //
@@ -120,7 +148,8 @@ pub const PUB_DAPP_FR: usize = 6;
 pub const PUB_ACC_FR: usize = 7;
 pub const PUB_NULLIFIER: usize = 8;
 pub const PUB_FINAL_ROOT: usize = 9;
-pub const TOTAL_PUBLIC_INPUTS: usize = 10;
+pub const PUB_ANCHOR_LAYER: usize = 10;
+pub const TOTAL_PUBLIC_INPUTS: usize = 11;
 
 /// First-cut hardcoded recipient length — Ethereum addresses are 20 bytes.
 /// All 10 captured fixtures match this. To support variable lengths,
@@ -320,6 +349,9 @@ pub struct BridgeEventProveCircuit {
     pub block_merkle_proof_position: usize,
     pub dense_chain: Vec<DenseChainLink>,
     pub num_active_chain_steps: usize,
+    /// 1-indexed layer number of the anchor `final_root` — exposed as
+    /// `PUB_ANCHOR_LAYER`. Range-checked `1..=MAX_ANCHOR_LAYER` in-circuit.
+    pub anchor_layer: u8,
     pub base_circuit_params: BaseCircuitParams,
     pub base_circuit_builder: RefCell<BaseCircuitBuilder<Fr>>,
 }
@@ -338,12 +370,15 @@ impl BridgeEventProveCircuit {
         block_merkle_proof_position: usize,
         dense_chain: Vec<DenseChainLink>,
         num_active_chain_steps: usize,
+        anchor_layer: u8,
         base_circuit_params: BaseCircuitParams,
     ) -> Self {
         Self::assert_invariants(
             &merkle_proof_siblings,
+            merkle_proof_position,
             &dense_chain,
             num_active_chain_steps,
+            anchor_layer,
         );
         let base_circuit_builder = RefCell::new(
             BaseCircuitBuilder::<Fr>::new(false).use_params(base_circuit_params.clone()),
@@ -360,6 +395,7 @@ impl BridgeEventProveCircuit {
             block_merkle_proof_position,
             dense_chain,
             num_active_chain_steps,
+            anchor_layer,
             base_circuit_params,
             base_circuit_builder,
         }
@@ -378,13 +414,16 @@ impl BridgeEventProveCircuit {
         block_merkle_proof_position: usize,
         dense_chain: Vec<DenseChainLink>,
         num_active_chain_steps: usize,
+        anchor_layer: u8,
         base_circuit_params: BaseCircuitParams,
         break_points: MultiPhaseThreadBreakPoints,
     ) -> Self {
         Self::assert_invariants(
             &merkle_proof_siblings,
+            merkle_proof_position,
             &dense_chain,
             num_active_chain_steps,
+            anchor_layer,
         );
         let base_circuit_builder = RefCell::new(BaseCircuitBuilder::<Fr>::prover(
             base_circuit_params.clone(),
@@ -402,6 +441,7 @@ impl BridgeEventProveCircuit {
             block_merkle_proof_position,
             dense_chain,
             num_active_chain_steps,
+            anchor_layer,
             base_circuit_params,
             base_circuit_builder,
         }
@@ -409,8 +449,10 @@ impl BridgeEventProveCircuit {
 
     fn assert_invariants(
         merkle_proof_siblings: &[[u8; 32]],
+        merkle_proof_position: usize,
         dense_chain: &[DenseChainLink],
         num_active_chain_steps: usize,
+        anchor_layer: u8,
     ) {
         assert!(
             merkle_proof_siblings.len() <= MAX_EVENTS_TREE_DEPTH,
@@ -418,8 +460,26 @@ impl BridgeEventProveCircuit {
             merkle_proof_siblings.len(),
             MAX_EVENTS_TREE_DEPTH,
         );
+        // Native mirror of the in-circuit `range_check(events_pos, MAX_EVENTS_TREE_DEPTH)`
+        // + zero-on-inactive-bits constraints. Fails fast on invalid witnesses so
+        // the divergence is caught at construction rather than as a MockProver
+        // constraint violation.
+        let max_pos = 1usize << merkle_proof_siblings.len();
+        assert!(
+            merkle_proof_position < max_pos.max(1),
+            "merkle_proof_position {} out of range for depth {} (max={})",
+            merkle_proof_position,
+            merkle_proof_siblings.len(),
+            max_pos,
+        );
         assert_eq!(dense_chain.len(), MAX_CHAIN_LEN);
         assert!(num_active_chain_steps <= MAX_CHAIN_LEN);
+        assert!(
+            anchor_layer >= 1 && anchor_layer <= MAX_ANCHOR_LAYER,
+            "anchor_layer {} out of range 1..={}",
+            anchor_layer,
+            MAX_ANCHOR_LAYER,
+        );
     }
 }
 
@@ -456,6 +516,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
             0,
             dummy_chain,
             0,
+            self.anchor_layer,
             self.base_circuit_params.clone(),
         )
     }
@@ -511,6 +572,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 acc_fr,
                 nullifier_fr,
                 final_root,
+                anchor_layer_fr,
             ) = {
                 let gate = range.gate();
                 let ctx = builder.pool(0).main();
@@ -726,13 +788,54 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 let ev_diff = gate.sub(ctx, max_ev_const, num_events_levels);
                 range.range_check(ctx, ev_diff, 4);
 
-                let ext_out_root = dense_merkle_root_circuit_padded(
+                // === events_pos binding (BRIDGE-WD-01) ===================
+                // `events_pos` feeds the nullifier Poseidon preimage so that
+                // two identical `WithdrawalInitiated` events in one AN block
+                // produce distinct nullifiers. That defense is only sound if
+                // the value hashed IS the position walked in the events
+                // tree — otherwise a malicious prover picks any events_pos
+                // to disambiguate the hash and walks a different path.
+                //
+                // We (1) assign `events_pos` as a witness, (2) range-check
+                // it to MAX_EVENTS_TREE_DEPTH bits, (3) bit-decompose it via
+                // `num_to_bits`, (4) force high bits (j >=
+                // num_events_levels) to zero — matching
+                // `preprocess_dense_proof_padded`'s `direction_bit = false`
+                // convention on padded levels — and (5) pass those bits to
+                // `dense_merkle_root_padded_bound` as the walker's direction
+                // bits, so the position witness is now the unique
+                // determinant of the walked path.
+                let events_pos_fr =
+                    ctx.load_witness(Fr::from(self.merkle_proof_position as u64));
+                range.range_check(ctx, events_pos_fr, MAX_EVENTS_TREE_DEPTH);
+                let events_pos_bits =
+                    gate.num_to_bits(ctx, events_pos_fr, MAX_EVENTS_TREE_DEPTH);
+                for (j, bit) in events_pos_bits.iter().enumerate() {
+                    let j_const = ctx.load_constant(Fr::from(j as u64));
+                    let active_j =
+                        range.is_less_than(ctx, j_const, num_events_levels, 4);
+                    let one_const = ctx.load_constant(Fr::one());
+                    let inactive_j = gate.sub(
+                        ctx,
+                        QuantumCell::Existing(one_const),
+                        QuantumCell::Existing(active_j),
+                    );
+                    let prod = gate.mul(
+                        ctx,
+                        QuantumCell::Existing(*bit),
+                        QuantumCell::Existing(inactive_j),
+                    );
+                    gate.assert_is_const(ctx, &prod, &Fr::zero());
+                }
+
+                let ext_out_root = dense_merkle_root_padded_bound(
                     ctx,
                     &range,
                     &hasher,
                     &events_proof_padded,
                     ext_msg_leaf_fr,
                     num_events_levels,
+                    &events_pos_bits,
                 );
 
                 // === block_leaf = Poseidon96(block_id, envelope_hash, ext_out_root) ===
@@ -876,9 +979,12 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
 
                 // === Nullifier ============================================
                 //   Poseidon(block_id_fr, tokenId, amount, recipientHi,
-                //            recipientLo, senderAccFr)
-                // Single sponge call (RATE=2 → 3 absorb rounds + squeeze).
-                // `block_id_fr` is already in scope from the block_leaf step.
+                //            recipientLo, senderAccFr, eventsPos)
+                // `eventsPos` (BRIDGE-WD-01) makes two identical
+                // WithdrawalInitiated events in the same AN block collide-
+                // free at the replay-protection layer. It stays PRIVATE —
+                // soundness comes from binding its bit-decomposition to the
+                // events-tree walker above (`dense_merkle_root_padded_bound`).
                 let nullifier_fr = hasher.hash_fix_len_array(
                     ctx,
                     gate,
@@ -889,8 +995,36 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                         recipient_hi_fr,
                         recipient_lo_fr,
                         sender_acc_fr,
+                        events_pos_fr,
                     ],
                 );
+
+                // === anchorLayer (slot PUB_ANCHOR_LAYER) =================
+                // 1-indexed layer number of the anchor `final_root`, bound
+                // by the L1 verifier's per-layer HISTORY_PROOF window scan
+                // (`_isKnownLayerAnchor` in AckiNackiBridge.sol). Range
+                // `1..=MAX_ANCHOR_LAYER` enforced by two 4-bit range checks
+                // on `anchor_layer - 1` and `MAX_ANCHOR_LAYER - anchor_layer`
+                // (both must be non-negative). Solidity ALSO validates on
+                // deposit at `withdrawByProof:1337-1339` — this in-circuit
+                // check is defense in depth, matching the audit's Option A.
+                let anchor_layer_fr =
+                    ctx.load_witness(Fr::from(self.anchor_layer as u64));
+                let one_const = ctx.load_constant(Fr::one());
+                let al_minus_1 = gate.sub(
+                    ctx,
+                    QuantumCell::Existing(anchor_layer_fr),
+                    QuantumCell::Existing(one_const),
+                );
+                range.range_check(ctx, al_minus_1, 4);
+                let max_al_const =
+                    ctx.load_constant(Fr::from(MAX_ANCHOR_LAYER as u64));
+                let max_minus_al = gate.sub(
+                    ctx,
+                    QuantumCell::Existing(max_al_const),
+                    QuantumCell::Existing(anchor_layer_fr),
+                );
+                range.range_check(ctx, max_minus_al, 4);
 
                 (
                     token_id,
@@ -903,6 +1037,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                     acc_fr,
                     nullifier_fr,
                     final_root,
+                    anchor_layer_fr,
                 )
             };
 
@@ -917,6 +1052,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
             //   7  PUB_ACC_FR
             //   8  PUB_NULLIFIER
             //   9  PUB_FINAL_ROOT
+            //  10  PUB_ANCHOR_LAYER
             let slots: [AssignedValue<Fr>; TOTAL_PUBLIC_INPUTS] = [
                 token_id,
                 amount_fr,
@@ -928,6 +1064,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 acc_fr,
                 nullifier_fr,
                 final_root,
+                anchor_layer_fr,
             ];
             for slot in slots {
                 builder.assigned_instances[0].push(slot);
@@ -994,6 +1131,7 @@ mod tests {
                 tw.block_pos,
                 dense_chain,
                 1,
+                1,
                 params.clone(),
             );
 
@@ -1003,8 +1141,9 @@ mod tests {
                 &tw.account_dapp_id,
                 &tw.account_id,
                 &w.sender_account_id,
+                tw.events_pos,
             );
-            let instances = make_instances(leading, final_root_fr);
+            let instances = make_instances(leading, final_root_fr, Fr::from(1u64));
             let prover = MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
             prover.assert_satisfied();
             println!("Withdrawal {} passed", idx);
@@ -1048,6 +1187,7 @@ mod tests {
                 tw.block_pos,
                 dense_chain,
                 t,
+                1,
                 params.clone(),
             );
 
@@ -1057,8 +1197,9 @@ mod tests {
                 &tw.account_dapp_id,
                 &tw.account_id,
                 &w.sender_account_id,
+                tw.events_pos,
             );
-            let instances = make_instances(leading, final_root_fr);
+            let instances = make_instances(leading, final_root_fr, Fr::from(1u64));
             let prover = MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
             prover.assert_satisfied();
             println!("T={} passed!", t);
@@ -1102,6 +1243,7 @@ mod tests {
             tw.block_pos,
             keygen_chain,
             1,
+            1,
             params.clone(),
         );
 
@@ -1144,6 +1286,7 @@ mod tests {
                 tw.block_pos,
                 dense_chain,
                 chain_len,
+                1,
                 params.clone(),
                 break_points.clone(),
             );
@@ -1155,8 +1298,9 @@ mod tests {
                 &tw.account_dapp_id,
                 &tw.account_id,
                 &w.sender_account_id,
+                tw.events_pos,
             );
-            let instance_fr = make_instances(leading, final_root_fr);
+            let instance_fr = make_instances(leading, final_root_fr, Fr::from(1u64));
             let proof_bytes =
                 gen_proof_with_instances(&srs, &pk, prover_circuit, &[&instance_fr]);
             let prove_ms = start.elapsed().as_millis();
@@ -1222,6 +1366,7 @@ mod tests {
                 build_dense_chain(tw.blocks_root_level_0, 1, 130);
             let final_root_fr = bytes_to_fr(&final_root_bytes);
 
+            let events_pos = tw.events_pos;
             let circuit = BridgeEventProveCircuit::new(
                 w.entries.clone(),
                 tw.events_siblings,
@@ -1234,6 +1379,7 @@ mod tests {
                 tw.block_pos,
                 dense_chain,
                 1,
+                1,
                 params.clone(),
             );
 
@@ -1243,8 +1389,9 @@ mod tests {
                 &tw.account_dapp_id,
                 &tw.account_id,
                 &w.sender_account_id,
+                events_pos,
             );
-            let instances = make_instances(leading, final_root_fr);
+            let instances = make_instances(leading, final_root_fr, Fr::from(1u64));
             let prover = MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
             prover.assert_satisfied();
             println!("depth={} passed!", depth);
@@ -1264,9 +1411,9 @@ mod tests {
 
     /// Belt-and-suspenders: the native nullifier produced by
     /// `compute_leading_public_inputs` (= `nullifier_native(...)`) is the
-    /// value the in-circuit `hash_fix_len_array` emits at instance slot 9.
-    /// MockProver checks instance equality, so if this test passes the
-    /// circuit and native paths agree.
+    /// value the in-circuit `hash_fix_len_array` emits at instance slot
+    /// `PUB_NULLIFIER`. MockProver checks instance equality, so if this test
+    /// passes the circuit and native paths agree.
     #[test]
     fn test_nullifier_recomputes_natively() {
         let (_circuit, instances) = build_synthetic_event_keygen_inputs(0xDEAD_BEEF);

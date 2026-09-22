@@ -473,6 +473,37 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(bridge.treasuryBalance(), treasuryBefore - amount, "second amount not paid");
     }
 
+    /// @notice BRIDGE-WD-01 positive: two DIFFERENT nullifiers (as the rev-3
+    ///         circuit now emits when `events_pos` differs) sharing the same
+    ///         block / token / amount / recipient all execute end-to-end.
+    ///         Together with `test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked`
+    ///         this pins the mapping-based replay guard as the SOLE nullifier
+    ///         gate — no accidental over-guarding on any other pub field.
+    function test_twoDistinctBurns_sameFields_bothSucceed() public {
+        uint256 amount = 1 * UsdcTestLib.UNIT;
+        uint256 nullifierA = Bn254FrLib.toFr(uint256(keccak256("dup-burn-evt0")));
+        uint256 nullifierB = Bn254FrLib.toFr(uint256(keccak256("dup-burn-evt1")));
+        assertTrue(nullifierA != nullifierB, "test sanity: nullifiers must differ");
+        uint256 treasuryBefore = bridge.treasuryBalance();
+        uint256 recipientBefore = usdc.balanceOf(RECIPIENT);
+
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifierA));
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifierB));
+
+        assertTrue(bridge.isNullifierUsed(nullifierA), "nullifier A marked");
+        assertTrue(bridge.isNullifierUsed(nullifierB), "nullifier B marked");
+        assertEq(
+            bridge.treasuryBalance(),
+            treasuryBefore - 2 * amount,
+            "both amounts debited from treasury"
+        );
+        assertEq(
+            usdc.balanceOf(RECIPIENT),
+            recipientBefore + 2 * amount,
+            "recipient credited twice"
+        );
+    }
+
     function test_isNullifierUsed_initiallyFalse() public view {
         assertFalse(bridge.isNullifierUsed(0xDEAD_BEEF));
     }
@@ -707,6 +738,62 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         pub.anchorLayer = 0;
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, uint256(0))
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice ETH-15 upper bound: `anchorLayer > MAX_LAYER_HASHES` reverts
+    ///         on the contract-side range guard. In-circuit the same value
+    ///         is already refused by the two 4-bit lookups on
+    ///         `anchor_layer - 1` / `MAX_ANCHOR_LAYER - anchor_layer` — this
+    ///         test locks in the belt-and-suspenders on the on-chain side so
+    ///         a future circuit change that weakens the range constraint
+    ///         still cannot route to an unbacked `layerWindows[layer]` slot.
+    function test_withdrawByProof_anchorLayerAboveMax_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-too-high")))
+        );
+        pub.anchorLayer = uint256(bridge.MAX_LAYER_HASHES()) + 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, pub.anchorLayer)
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice ETH-15 canonical-Fr guard: a non-canonical `anchorLayer`
+    ///         (>= BN254_R) reverts before the range check. The Yul verifier
+    ///         reduces PIs mod BN254_R, so treating unreduced words as
+    ///         distinct window keys would let a caller alias two
+    ///         `layerWindows[layer]` slots — `_requireCanonicalFr` closes it.
+    function test_withdrawByProof_nonCanonicalAnchorLayer_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-nc"))));
+        pub.anchorLayer = Bn254FrLib.R;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.FieldElementOutOfRange.selector, Bn254FrLib.R
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice ETH-15 wrong-layer scan (symmetric to
+    ///         `test_withdrawByProof_l2AnchorWithLayer1_reverts`): an L1
+    ///         `finalRoot` presented with `anchorLayer = 2` must revert
+    ///         `UnknownAnchor`. Guards against Option-A scan drift in either
+    ///         direction — the SLOAD budget is O(one window), not O(all
+    ///         windows).
+    function test_withdrawByProof_l1AnchorWithLayer2_reverts() public {
+        assertTrue(bridge.isKnownLayerAnchor(1, seedAnchor), "seed anchor is in L1 window");
+        assertFalse(
+            bridge.isKnownLayerAnchor(2, seedAnchor),
+            "seed anchor absent from L2 (rules out false positive)"
+        );
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l1-as-l2"))));
+        pub.anchorLayer = 2;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, seedAnchor)
         );
         bridge.withdrawByProof(_dummyProof(), pub);
     }

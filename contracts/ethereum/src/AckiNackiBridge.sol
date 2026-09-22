@@ -299,6 +299,10 @@ contract AckiNackiBridge {
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
     event EmergencyWithdrawAll(uint256 amount);
+    /// @notice Owner zeroed `suppliedPrincipal` after the aToken
+    ///         balance hit zero (drift or an emergency shortfall).
+    ///         Does not move funds (ETH-28).
+    event UnbackedPrincipalWrittenOff(uint256 amount);
     /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
     ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
     event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
@@ -374,6 +378,14 @@ contract AckiNackiBridge {
     error ReserveBpsTooHigh();
     error NothingToSupply();
     error AaveWithdrawFailed(uint256 requested, uint256 received);
+    /// @notice `supplyToAave` booked no aUSDC. Distinct from
+    ///         `AaveWithdrawFailed` so an ABI consumer does not read a
+    ///         failed supply as a failed withdraw (ETH-28).
+    error AaveSupplyFailed(uint256 requested, uint256 received);
+    /// @notice `writeOffUnbackedPrincipal` needs `aUsdcBalance() == 0`
+    ///         and `suppliedPrincipal > 0`. Any aToken left would be
+    ///         user principal looking like yield after a write-off.
+    error NothingToWriteOff();
     /// @notice `emergencyWithdrawAll` asked AAVE for `type(uint256).max`
     ///         but aUSDC still remains. Zeroing `suppliedPrincipal` would let
     ///         `harvestYield` treat leftover principal as yield.
@@ -1361,10 +1373,11 @@ contract AckiNackiBridge {
         // Top up liquid USDC from AAVE if the contract's plain USDC balance
         // is below the requested amount.
         uint256 liquid = usdc.balanceOf(address(this));
-        if (liquid < pub.amount && suppliedPrincipal > 0) {
+        if (liquid < pub.amount) {
             uint256 shortfall = pub.amount - liquid;
-            uint256 toPull = shortfall > suppliedPrincipal ? suppliedPrincipal : shortfall;
-            _pullFromAave(toPull);
+            uint256 backed = _backedPrincipal();
+            if (backed < shortfall) revert InsufficientTreasury();
+            _pullFromAave(shortfall);
         }
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
@@ -1447,7 +1460,7 @@ contract AckiNackiBridge {
         uint256 aBefore = aUsdcBalance();
         aavePool.supply(address(usdc), toSupply, address(this), 0);
         uint256 credited = aUsdcBalance() - aBefore;
-        if (credited == 0) revert AaveWithdrawFailed(toSupply, 0);
+        if (credited == 0) revert AaveSupplyFailed(toSupply, 0);
         suppliedPrincipal += credited;
 
         emit SuppliedToAave(toSupply, suppliedPrincipal);
@@ -1490,6 +1503,17 @@ contract AckiNackiBridge {
         emit WithdrawnFromAave(principal, received);
     }
 
+    /// @notice Zero `suppliedPrincipal` when the aToken balance is
+    ///         already empty. Recovers the `aUsdc == 0 && suppliedPrincipal
+    ///         > 0` book state that otherwise makes `_pullFromAave` and
+    ///         `withdrawFromAave` revert forever (ETH-28).
+    function writeOffUnbackedPrincipal() external onlyOwner {
+        if (aUsdcBalance() != 0 || suppliedPrincipal == 0) revert NothingToWriteOff();
+        uint256 amount = suppliedPrincipal;
+        suppliedPrincipal = 0;
+        emit UnbackedPrincipalWrittenOff(amount);
+    }
+
     /// @notice Harvest yield still inside AAVE (`accruedYield`) to
     ///         `yieldRecipient`. After `emergencyWithdrawAll` the surplus is
     ///         liquid USDC — this reverts `NoYield`; collect with
@@ -1506,10 +1530,10 @@ contract AckiNackiBridge {
 
         emit WithdrawnFromAave(amount, received);
 
-        if (!usdc.transfer(yieldRecipient, received)) {
-            revert WithdrawTransferFailed(yieldRecipient, received);
+        if (!usdc.transfer(yieldRecipient, amount)) {
+            revert WithdrawTransferFailed(yieldRecipient, amount);
         }
-        emit YieldHarvested(yieldRecipient, received);
+        emit YieldHarvested(yieldRecipient, amount);
     }
 
     /// @notice Liquid USDC held by the bridge above `treasuryBalance` (user
@@ -1591,23 +1615,27 @@ contract AckiNackiBridge {
         return bal - reserve;
     }
 
-    /// @dev Pull `amount` USDC from AAVE. Reverts if short.
-    function _pullFromAave(uint256 amount) internal {
-        if (suppliedPrincipal == 0) revert InsufficientTreasury();
-
-        uint256 cap = suppliedPrincipal;
+    /// @dev Booked principal that is actually sitting in aUSDC.
+    function _backedPrincipal() internal view returns (uint256) {
+        uint256 booked = suppliedPrincipal;
         uint256 poolBal = aUsdcBalance();
-        uint256 toPull = amount > cap ? cap : amount;
-        if (toPull > poolBal) toPull = poolBal;
-        if (toPull == 0) revert InsufficientTreasury();
+        return booked < poolBal ? booked : poolBal;
+    }
+
+    /// @dev Pull `amount` USDC from AAVE. Reverts if the aToken balance
+    ///      cannot cover it (phantom `suppliedPrincipal` does not count).
+    function _pullFromAave(uint256 amount) internal {
+        uint256 toPull = amount;
+        uint256 cap = _backedPrincipal();
+        if (toPull > cap) toPull = cap;
+        if (toPull == 0 || toPull < amount) revert InsufficientTreasury();
 
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), toPull, address(this));
         uint256 received = usdc.balanceOf(address(this)) - before;
         if (received < toPull) revert AaveWithdrawFailed(toPull, received);
-        if (received < amount && toPull == amount) revert AaveWithdrawFailed(amount, received);
 
-        suppliedPrincipal -= received;
+        suppliedPrincipal -= toPull;
         emit WithdrawnFromAave(amount, received);
     }
 

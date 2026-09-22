@@ -71,3 +71,26 @@ steps:
     depends_on: [ ]
     commands:
       - python3 scripts/check_english_only.py
+
+  # Fourth question: does the text say which of the two assets it means. The
+  # bridge holds Circle's USDC on Ethereum and issues a wrapped token against
+  # it on Acki Nacki. Writing both as "USDC" makes prose and identifiers lie
+  # about which side of the bridge they are on, and that confusion is
+  # expensive in an audit. Ours is `eccUSDC`, on both sides; a bare mention is
+  # reserved for the genuine token and has to be declared as such, either in
+  # `usdc-naming.toml` or with a `real-usdc-ok` marker on the line.
+  #
+  # THIS STEP IS RED ON PURPOSE. It reports every unprefixed mention in the
+  # repository — contents and file names — and nothing has been triaged yet.
+  # Deciding which mentions are Circle's token and which are ours is the work
+  # this step exists to scope; until that is done and recorded, the pipeline
+  # stays red and nothing merges on its word.
+  #
+  # `make usdc-check` runs exactly this locally. Deliberately NOT part of
+  # `make pre-push`: that gate is meant to be green, and wiring a known-red
+  # check into it would train everyone to ignore it.
+  ecc-usdc:
+    image: *python_image
+    depends_on: [ ]
+    commands:
+      - python3 scripts/check_ecc_usdc_prefix.py

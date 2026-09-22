@@ -1,6 +1,6 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
         coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy \
-        english-check
+        english-check usdc-check
 
 # Default target
 .DEFAULT_GOAL := help
@@ -194,6 +194,12 @@ production-preflight: ## Phase 0 gates before Sepolia/shellnet deploy (gates liv
 
 english-check: ## Check that every tracked file is English-only (matches the Woodpecker `english` step)
 	@python3 scripts/check_english_only.py
+
+# Not in pre-push: this one is red until every mention has been triaged as
+# either ours (eccUSDC) or Circle's (declared in usdc-naming.toml). Wiring a
+# known-red check into the pre-push gate would only teach people to skip it.
+usdc-check: ## Check that USDC always carries the ecc prefix (matches the Woodpecker `ecc-usdc` step)
+	@python3 scripts/check_ecc_usdc_prefix.py
 
 pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run before `git push`.
 	@echo "$(BLUE)── pre-push: mirroring CI ──$(NC)"

@@ -1,0 +1,23 @@
+# Where a bare `USDC` is allowed to stay.
+#
+# Read by `scripts/check_ecc_usdc_prefix.py`, whose docstring is the reference
+# for the rule. In short: our token, our contracts and our components are
+# `eccUSDC` on both sides of the bridge; a bare `USDC` may only mean Circle's
+# ERC-20 on Ethereum, and every place that relies on that has to say so here
+# or with a `real-usdc-ok` marker on the line.
+#
+# An entry in this file is a claim about the world, not a way to quiet the
+# check: "every mention in this path is the genuine Circle token". Add one
+# only when that is true of the whole path.
+
+# Whole paths, as glob patterns or directory prefixes.
+exclude_path = [
+  # This check and its configuration necessarily spell the abbreviation out.
+  "scripts/check_ecc_usdc_prefix.py",
+  "usdc-naming.toml",
+]
+
+# Regular expressions matched against a whole line. A line that matches is
+# accepted wherever it appears, so keep these narrow — prefer `exclude_path`
+# for a file, and the inline marker for a one-off.
+allow = []

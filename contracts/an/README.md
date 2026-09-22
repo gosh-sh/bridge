@@ -25,14 +25,20 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 | `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
+| `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
 
 The compiled artefacts are what goes into a zerostate. acki-nacki does not keep
-its own copy: its `contracts/scripts/bridge_contracts.py` pins one commit of
-this repository and places the `exchange/` sources and these artefacts at
-`contracts/exchange/`, `contracts/0.80.0_compiled/exchange/` and
-`contracts/0.81.0_compiled/exchange/`, plus the zerostate module at
-`contracts/scripts/bridge_zerostate_init.py` and the encoder artefacts at
-`contracts/zerostate/`, before the zerostate is generated. A change here
+its own copy: `contracts/an/place.json` lists every file that goes into an
+Acki Nacki tree together with its destination there, and names what stays only
+here — the standalone light-client variant, the `Makefile`s, this README, the
+module's own test, and this repository's copy of `ISubscriber.sol`, which
+acki-nacki keeps its own original of. acki-nacki's
+`contracts/scripts/bridge_contracts.py` pins one commit of this repository and
+places every file the manifest lists at the destination it names, before the
+zerostate is generated, so a new contract or artefact only needs adding to
+`place.json` — no edit on the acki-nacki side beyond moving the pin, and no
+file list there to keep in step. `scripts/check_place_manifest.py` fails if a
+tracked file under `contracts/an/` is left out of both lists. A change here
 reaches a network only after that pin is moved.
 
 ## Rebuilding

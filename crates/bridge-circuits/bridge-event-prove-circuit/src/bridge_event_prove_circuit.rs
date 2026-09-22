@@ -1154,6 +1154,301 @@ mod tests {
         );
     }
 
+    /// BRIDGE-WD-01 regression: two identical `WithdrawalInitiated` events at
+    /// different `events_pos` in the *same* AN block must produce distinct
+    /// nullifiers. Pre-fix, both proofs hit the same 6-arg Poseidon preimage
+    /// and their nullifiers collided — the second on-chain payout was
+    /// permanently blocked by `NullifierAlreadyUsed` on the first's slot.
+    ///
+    /// We reuse the first captured withdrawal and place its `ext_msg_leaf` at
+    /// slots 3 and 7 of a single events tree that also shares its
+    /// `block_id / account_dapp_id / account_id / envelope_hash` between the
+    /// two runs. Two MockProver runs — one per slot — must both
+    /// `assert_satisfied()` AND yield different `PUB_NULLIFIER` values.
+    #[test]
+    fn test_nullifier_distinct_for_same_block_different_events_pos() {
+        use dense_balanced_tree::{dense_merkle_proof, dense_merkle_root};
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rand::Rng;
+
+        let w = load_first_withdrawal();
+        let dense_hasher = DensePoseidonHasher::new();
+        let mut rng = StdRng::seed_from_u64(20260922);
+
+        // Same-block scenario: dapp / account / block_id / envelope are shared
+        // between the two proofs — the ONLY witness difference is which slot
+        // of the events tree we walk to.
+        let mut dapp_id = [0u8; 32];
+        let mut account_id_b = [0u8; 32];
+        let mut block_id = [0u8; 32];
+        let mut envelope_hash = [0u8; 32];
+        rng.fill(&mut dapp_id);
+        rng.fill(&mut account_id_b);
+        rng.fill(&mut block_id);
+        rng.fill(&mut envelope_hash);
+
+        const NUM_EVENTS_LEAVES: usize = 128;
+        const NUM_BLOCK_LEAVES: usize = 130;
+        const POS_A: usize = 3;
+        const POS_B: usize = 7;
+
+        let ext_msg_leaf =
+            poseidon_hash_96_native(&dapp_id, &account_id_b, &w.repr_hash);
+
+        // Same ext_msg_leaf at TWO slots — this is precisely the collision
+        // that pre-BRIDGE-WD-01 would have masked at the nullifier level.
+        let mut events_leaves = vec![[0u8; 32]; NUM_EVENTS_LEAVES];
+        for leaf in events_leaves.iter_mut() {
+            rng.fill(leaf);
+        }
+        events_leaves[POS_A] = ext_msg_leaf;
+        events_leaves[POS_B] = ext_msg_leaf;
+
+        let events_root = dense_merkle_root(&dense_hasher, &events_leaves);
+        let siblings_a = dense_merkle_proof(&dense_hasher, &events_leaves, POS_A);
+        let siblings_b = dense_merkle_proof(&dense_hasher, &events_leaves, POS_B);
+
+        // Single-block tree — same block_leaf, so the block-tree proof and
+        // the downstream dense chain are identical between the two runs.
+        let block_leaf =
+            poseidon_hash_96_native(&block_id, &envelope_hash, &events_root);
+        let mut block_leaves = vec![[0u8; 32]; NUM_BLOCK_LEAVES];
+        for leaf in block_leaves.iter_mut() {
+            rng.fill(leaf);
+        }
+        block_leaves[0] = block_leaf;
+        let blocks_root = dense_merkle_root(&dense_hasher, &block_leaves);
+        let block_siblings = dense_merkle_proof(&dense_hasher, &block_leaves, 0);
+
+        let (dense_chain, final_root_bytes) = build_dense_chain(blocks_root, 1, 130);
+        let final_root_fr = bytes_to_fr(&final_root_bytes);
+        let params = base_circuit_params();
+
+        let mut nullifiers = Vec::new();
+        for (events_pos, events_siblings) in [
+            (POS_A, siblings_a.clone()),
+            (POS_B, siblings_b.clone()),
+        ] {
+            let circuit = BridgeEventProveCircuit::new(
+                w.entries.clone(),
+                events_siblings,
+                events_pos,
+                dapp_id,
+                account_id_b,
+                block_id,
+                envelope_hash,
+                block_siblings.clone(),
+                0,
+                dense_chain.clone(),
+                1,
+                1, // anchor_layer — legal, keeps range-check happy
+                params.clone(),
+            );
+            let leading = compute_leading_public_inputs(
+                &w,
+                &block_id,
+                &dapp_id,
+                &account_id_b,
+                &w.sender_account_id,
+                events_pos,
+            );
+            let instances = make_instances(leading, final_root_fr, Fr::from(1u64));
+            let prover =
+                MockProver::<Fr>::run(K, &circuit, vec![instances.clone()]).unwrap();
+            prover.assert_satisfied();
+            nullifiers.push(instances[PUB_NULLIFIER]);
+        }
+
+        assert_ne!(
+            nullifiers[0], nullifiers[1],
+            "BRIDGE-WD-01: two identical WithdrawalInitiated events at \
+             different events_pos in the same AN block must yield distinct \
+             nullifiers"
+        );
+    }
+
+    /// ETH-15 regression: the in-circuit range check on `anchor_layer`
+    /// (two 4-bit lookups on `anchor_layer - 1` and `MAX_ANCHOR_LAYER
+    /// - anchor_layer`) must satisfy exactly the closed interval
+    /// `1..=MAX_ANCHOR_LAYER` — which the on-chain verifier trusts when
+    /// routing to `layerWindows[anchorLayer]` for the single-window scan.
+    ///
+    /// Positive sweep: `{1, 5, MAX_ANCHOR_LAYER}` all `assert_satisfied()`.
+    ///
+    /// Negative sweep: `{0, MAX_ANCHOR_LAYER + 1}` — the constructor's own
+    /// `assert_invariants` refuses these on any legitimate call site, so
+    /// the negative branch instantiates `BridgeEventProveCircuit` directly
+    /// (all fields are `pub`) to actually exercise the in-circuit range
+    /// check rather than the Rust-side guard. `MockProver::verify` must
+    /// return `Err`.
+    #[test]
+    fn test_anchor_layer_range_boundary() {
+        use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use std::cell::RefCell;
+
+        let w = load_first_withdrawal();
+        let dense_hasher = DensePoseidonHasher::new();
+        let mut rng = StdRng::seed_from_u64(20260922_2);
+
+        // Shared witnesses — only `anchor_layer` (witness + PI slot 10)
+        // varies across the sweep.
+        let tw = build_two_level_tree(&w.repr_hash, &mut rng, &dense_hasher, 128, 130);
+        let (dense_chain, final_root_bytes) =
+            build_dense_chain(tw.blocks_root_level_0, 1, 130);
+        let final_root_fr = bytes_to_fr(&final_root_bytes);
+        let params = base_circuit_params();
+
+        let leading = compute_leading_public_inputs(
+            &w,
+            &tw.block_id,
+            &tw.account_dapp_id,
+            &tw.account_id,
+            &w.sender_account_id,
+            tw.events_pos,
+        );
+
+        // Positive: legal values must all satisfy.
+        for anchor_layer in [1u8, 5u8, MAX_ANCHOR_LAYER] {
+            let circuit = BridgeEventProveCircuit::new(
+                w.entries.clone(),
+                tw.events_siblings.clone(),
+                tw.events_pos,
+                tw.account_dapp_id,
+                tw.account_id,
+                tw.block_id,
+                tw.envelope_hash_bytes,
+                tw.block_siblings.clone(),
+                tw.block_pos,
+                dense_chain.clone(),
+                1,
+                anchor_layer,
+                params.clone(),
+            );
+            let instances = make_instances(
+                leading,
+                final_root_fr,
+                Fr::from(anchor_layer as u64),
+            );
+            let prover =
+                MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
+            prover.assert_satisfied();
+            println!("anchor_layer={} accepted", anchor_layer);
+        }
+
+        // Negative: 0 and `MAX_ANCHOR_LAYER + 1` must be rejected by the
+        // in-circuit range check. `BridgeEventProveCircuit::new` refuses
+        // both on the Rust side, so we build the struct directly (all
+        // fields are `pub`) to isolate the ZK constraint under test.
+        for bad_layer in [0u8, MAX_ANCHOR_LAYER + 1] {
+            let circuit = BridgeEventProveCircuit {
+                entries: w.entries.clone(),
+                merkle_proof_siblings: tw.events_siblings.clone(),
+                merkle_proof_position: tw.events_pos,
+                account_dapp_id: tw.account_dapp_id,
+                account_id: tw.account_id,
+                block_id: tw.block_id,
+                envelope_hash_bytes: tw.envelope_hash_bytes,
+                block_merkle_proof_siblings: tw.block_siblings.clone(),
+                block_merkle_proof_position: tw.block_pos,
+                dense_chain: dense_chain.clone(),
+                num_active_chain_steps: 1,
+                anchor_layer: bad_layer,
+                base_circuit_params: params.clone(),
+                base_circuit_builder: RefCell::new(
+                    BaseCircuitBuilder::<Fr>::new(false)
+                        .use_params(params.clone()),
+                ),
+            };
+            let instances = make_instances(
+                leading,
+                final_root_fr,
+                Fr::from(bad_layer as u64),
+            );
+            let prover =
+                MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
+            let verdict = prover.verify();
+            assert!(
+                verdict.is_err(),
+                "ETH-15: anchor_layer={} (outside 1..={}) must be rejected \
+                 by the in-circuit range check, but MockProver::verify \
+                 returned Ok",
+                bad_layer,
+                MAX_ANCHOR_LAYER,
+            );
+            println!("anchor_layer={} rejected as expected", bad_layer);
+        }
+    }
+
+    /// ETH-15 plumbing: the witness `anchor_layer` and the value the on-chain
+    /// verifier reads from `pub4[10]` are wired through a single copy
+    /// constraint. A proof that carries a different PI than the witness the
+    /// prover ran on must not verify — otherwise a malicious prover could
+    /// point the contract at any `layerWindows[layer]` slot regardless of
+    /// which anchor the circuit actually walked to.
+    ///
+    /// We build a valid circuit at `anchor_layer = 2` but assemble the
+    /// instance vector with slot 10 = `Fr::from(3)`. `MockProver::verify` must
+    /// return `Err` (equality constraint on the instance column fails).
+    #[test]
+    fn test_anchor_layer_pi_witness_mismatch() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let w = load_first_withdrawal();
+        let dense_hasher = DensePoseidonHasher::new();
+        let mut rng = StdRng::seed_from_u64(20260922_3);
+
+        let tw = build_two_level_tree(&w.repr_hash, &mut rng, &dense_hasher, 128, 130);
+        let (dense_chain, final_root_bytes) =
+            build_dense_chain(tw.blocks_root_level_0, 1, 130);
+        let final_root_fr = bytes_to_fr(&final_root_bytes);
+        let params = base_circuit_params();
+
+        let witness_layer: u8 = 2;
+        let pi_layer: u8 = 3;
+
+        let circuit = BridgeEventProveCircuit::new(
+            w.entries.clone(),
+            tw.events_siblings.clone(),
+            tw.events_pos,
+            tw.account_dapp_id,
+            tw.account_id,
+            tw.block_id,
+            tw.envelope_hash_bytes,
+            tw.block_siblings.clone(),
+            tw.block_pos,
+            dense_chain.clone(),
+            1,
+            witness_layer,
+            params.clone(),
+        );
+
+        let leading = compute_leading_public_inputs(
+            &w,
+            &tw.block_id,
+            &tw.account_dapp_id,
+            &tw.account_id,
+            &w.sender_account_id,
+            tw.events_pos,
+        );
+        // Assemble instances with a DIFFERENT anchor_layer at PI slot 10
+        // than the witness the circuit was built with.
+        let instances = make_instances(leading, final_root_fr, Fr::from(pi_layer as u64));
+
+        let prover = MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
+        let verdict = prover.verify();
+        assert!(
+            verdict.is_err(),
+            "ETH-15: witness anchor_layer={} but PI slot 10 = {} — the copy \
+             constraint must reject, but MockProver::verify returned Ok",
+            witness_layer,
+            pi_layer,
+        );
+    }
+
     /// Exercise every supported dense-chain length T = 0..=MAX_CHAIN_LEN with
     /// the first real withdrawal.
     #[test]

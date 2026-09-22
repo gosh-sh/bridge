@@ -6,18 +6,148 @@
 # ERC-20 on Ethereum, and every place that relies on that has to say so here
 # or with a `real-usdc-ok` marker on the line.
 #
-# An entry in this file is a claim about the world, not a way to quiet the
-# check: "every mention in this path is the genuine Circle token". Add one
-# only when that is true of the whole path.
+# An entry is a claim about the world, not a way to quiet the check. Each one
+# below was checked against the code it names — where an identifier leads to
+# `an_usdc_bridge`, a TIP-3 wallet or `gosh.mintecc`, it is ours and is
+# deliberately absent, however much it looks like the others.
 
 # Whole paths, as glob patterns or directory prefixes.
 exclude_path = [
   # This check and its configuration necessarily spell the abbreviation out.
   "scripts/check_ecc_usdc_prefix.py",
   "usdc-naming.toml",
+
+  # --- The L1 contract's own surface: an ERC-20 interface and the mocks that
+  # stand in for Circle's token in tests. Nothing here crosses to Acki Nacki.
+  "contracts/ethereum/src/IERC20.sol",
+  "contracts/ethereum/test/mocks/*.sol",
+  "contracts/ethereum/test/helpers/UsdcTestLib.sol",
+
+  # --- Ethereum-side tests. Each was checked for a mention of the AN bridge,
+  # the ECC currency or a TIP-3 wallet; these have none, so every mention is
+  # the ERC-20 held in custody on L1.
+  "contracts/ethereum/test/AckiNackiBridgeAave.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeAaveFork.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeApplyBkSetUpdate.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeApplyBkSetUpdateOrdering.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeEthFieldCongruence.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeLayerAnchor.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeProductionVerifyBlock.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeRelayerLoop.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeStorageV2.t.sol",
+  "contracts/ethereum/test/AckiNackiBridgeWithdrawByProofOrder2.t.sol",
+  "contracts/ethereum/test/EthAuditQcHardening.t.sol",
+  "contracts/ethereum/test/FuzzVerifiers.t.sol",
+  "contracts/ethereum/test/WithdrawAnchorEviction.t.sol",
+
+  # --- Deploy scripts: they wire the L1 bridge to a token address on Sepolia
+  # or mainnet, which is Circle's deployment.
+  "contracts/ethereum/script/DeployRealBridge.s.sol",
+  "contracts/ethereum/script/DeployShellnetE2EBridge.s.sol",
+  "contracts/ethereum/script/DeployTestBridge.s.sol",
+  "contracts/ethereum/script/GenDepositSetup.s.sol",
+
+  # --- The web client and its Ethereum client crate: approve and deposit the
+  # ERC-20 on Sepolia, read its balance. The AN side is not reached from here.
+  "crates/eth-frontend/src/contract.rs",
+  "crates/eth-frontend/src/deposit.rs",
+  "crates/eth-frontend/src/tests.rs",
+  "frontend/src/web3.rs",
+  "frontend/src/config.rs",
+  "frontend/src/components/stats.rs",
+  "frontend/README.md",
+
+  # --- Documents that only describe the L1 custody and yield side.
+  "docs/aave-yield.md",
+  "docs/archive/audit/eth-qc-hardening-runbook.md",
+  "crates/bridge-relayer-daemon/docs/withdrawByProof_changelog.md",
+  "crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh",
 ]
 
-# Regular expressions matched against a whole line. A line that matches is
-# accepted wherever it appears, so keep these narrow — prefer `exclude_path`
-# for a file, and the inline marker for a one-off.
-allow = []
+# Identifiers that always denote Circle's ERC-20, wherever they appear. Named
+# whole, so a line carrying both one of these and a bare mention is still
+# reported on the bare one.
+allow_token = [
+  # --- AAVE's receipt token for real USDC, and the mocks standing in for it.
+  "aUSDC",
+  "_aUSDC",
+  "aUsdcBalance",
+  "aUsdcBefore",
+  "aUsdcStart",
+  "MockAUSDC",
+  "maUSDC",                        # MockAave: symbol of the mock aUSDC
+  "AAVE_V3_aUSDC_MAINNET",
+  "AAVE_V3_aUSDC_SEPOLIA",
+  "fund_usdc_from_aave_faucet",
+  "mUSDC",                         # MockERC20("Mock USDC", "mUSDC", 6)
+  "bUSDC",                         # BlacklistableERC20, Circle can blacklist
+
+  # --- Identity of the ERC-20 the L1 bridge holds in custody.
+  "_usdc",
+  "usdcAddr",
+  "usdc_addr",
+  "usdc_address",
+  "USDC_ADDRESS",
+  "EXPECTED_USDC_ADDRESS",
+  "USDC_CONTRACT_ADDRESS",
+  "USDC_SEPOLIA",
+  "USDC_MAINNET",
+  "InvalidUsdc",                   # constructor guard on the ERC-20 address
+  "USDC_UNIT",                     # 10 ** 6, the L1 token's unit
+
+  # --- Moving that ERC-20 in and out of the L1 contract.
+  "_pullExactUsdc",
+  "_pushExactUsdc",
+  "depositUsdc",
+  "depositUsdcTo",
+  "UsdcTestLib",
+  "usdcBefore",
+  "usdcStart",
+  "skimExcessUsdc",
+  "excessUsdc",
+  "NoExcessUsdc",
+  "ExcessUsdcSkimmed",
+  "SkimExcessUsdc",
+  "test_skimExcessUsdc_afterEmergency",
+  "test_skimExcessUsdc_noExcess_reverts",
+  "test_constructor_wiresAaveAndUsdc",
+  "test_constructor_zeroUsdcReverts",
+
+  # --- The user-facing L1 deposit flow: approve and send Circle's token.
+  "approve_usdc",
+  "ensure_usdc_approval",
+  "get_usdc_balance",
+  "mint_test_usdc",                # Sepolia faucet for the test ERC-20
+  "usdc_to_units",
+  "units_to_usdc",
+  "FAUCET_USDC_UNITS",
+  "MAX_USDC_UNITS",
+]
+
+# Identifiers allowed only inside one path. This is for files that talk about
+# both assets: a bare mention is Circle's token there, while the AN contract
+# keeps its own name and stays reported, so the rename backlog is not hidden.
+#
+# Every entry below was read line by line before it was added.
+
+[[path]]
+glob = "contracts/ethereum/src/AckiNackiBridge.sol"
+allow_token = ["USDC", "usdc"]
+# All 63 bare mentions are the ERC-20 held in custody: `IERC20 public
+# immutable usdc`, "deposits pull USDC via transferFrom", "aUSDC token minted
+# by AAVE when supplying USDC". "bridged USDC" here is tokenId == 0, the asset
+# paid out on L1. Mentions of the AN counterpart use `USDCBridge` and are
+# still reported.
+
+[[path]]
+glob = "contracts/ethereum/test/AckiNackiBridgeWithdrawByProof.t.sol"
+allow_token = ["USDC", "usdc"]
+# `MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6)` plus
+# `UsdcTestLib.depositUsdc` — the L1 token throughout. The ECC currency id in
+# this file is `SHELLNET_USDC_TOKEN_ID`, a separate identifier, still reported.
+
+[[path]]
+glob = "frontend/src/components/deposit_form.rs"
+allow_token = ["USDC", "usdc"]
+# The deposit form mints test USDC from the Aave Sepolia faucet and approves
+# the bridge to pull it. Every mention is Circle's Sepolia deployment.

@@ -17,12 +17,24 @@ tracked text file and in the tracked paths themselves. There is no attempt to
 guess which side of the bridge a given line is about: that judgement belongs
 to a person, and recording it is what the two exemption mechanisms are for.
 
-Exemptions, both meaning "this one really is Circle's token":
+Exemptions, all meaning "this one really is Circle's token":
 
   * `usdc-naming.toml` next to this script's repository root, for whole paths
-    and for patterns that are the real token wherever they occur. Use it for
-    files this repository does not author — vendored patches, compiler output,
-    third-party ABIs — and for directories that only ever talk to the L1 side.
+    and for identifiers that are the real token wherever they occur. Use it
+    for files this repository does not author — vendored patches, compiler
+    output, third-party ABIs — and for directories that only ever talk to the
+    L1 side.
+
+    `allow_token` there is the precise instrument: it names whole identifiers
+    (`aUSDC`, `USDC_SEPOLIA`, `UsdcTestLib`) rather than lines, so a line that
+    mentions both an allowed identifier and a bare one is still reported on
+    the bare one. Each entry is an auditable claim — "this identifier always
+    denotes Circle's ERC-20" — which a line-level pattern could never be.
+
+    A `[[path]]` table narrows that claim to one file, which is what files
+    dealing with both assets need: the L1 contract may say `usdc` sixty times
+    about the ERC-20 it holds while still naming the Acki Nacki counterpart,
+    and only the first of those should be excused.
 
   * the marker `real-usdc-ok` on the offending line or the line directly above
     it, for one-off mentions inside a file that is otherwise about our token:
@@ -57,20 +69,25 @@ CONFIG = "usdc-naming.toml"
 # `ECCUSDC` in a shouted heading is prefixed all the same.
 BARE = re.compile(r"(?<!ecc)usdc", re.IGNORECASE)
 
+# The whole identifier a match sits inside, so an exemption can name
+# `aUSDC` without also excusing a bare `USDC` elsewhere on the same line.
+WORD = re.compile(r"[A-Za-z0-9_]*(?<!ecc)usdc[A-Za-z0-9_]*", re.IGNORECASE)
+
 SKIP_DIRS = {".git", "target", "node_modules", "out", "dist", "build", "cache"}
 
 
 def load_config(root):
-    """`exclude_path` globs and `allow` regexes from the config, if present."""
+    """Exclusions from the config: paths, identifiers, and per-path identifiers."""
     path = root / CONFIG
     if not path.is_file():
-        return [], []
+        return [], set(), []
     if tomllib is None:
         print(f"note: {CONFIG} ignored, this Python has no tomllib")
-        return [], []
+        return [], set(), []
     with path.open("rb") as handle:
         cfg = tomllib.load(handle)
-    return cfg.get("exclude_path", []), [re.compile(p) for p in cfg.get("allow", [])]
+    scoped = [(e["glob"], set(e.get("allow_token", []))) for e in cfg.get("path", [])]
+    return cfg.get("exclude_path", []), set(cfg.get("allow_token", [])), scoped
 
 
 def is_checkable(path):
@@ -120,7 +137,12 @@ def read_text(path):
 
 
 def excluded(display, globs):
-    return any(Path(display).match(g) or str(display).startswith(g.rstrip("*")) for g in globs)
+    return any(matches(display, g) for g in globs)
+
+
+def bare_words(line, allow):
+    """Identifiers on `line` that mention the token without the prefix."""
+    return [w for w in WORD.finditer(line) if w.group(0) not in allow]
 
 
 def check_contents(path, display, allow):
@@ -134,9 +156,7 @@ def check_contents(path, display, allow):
         previous = lines[lineno - 2] if lineno > 1 else ""
         if MARKER in line or MARKER in previous:
             continue
-        if any(p.search(line) for p in allow):
-            continue
-        hits = list(BARE.finditer(line))
+        hits = bare_words(line, allow)
         if not hits:
             continue
         found += len(hits)
@@ -146,9 +166,13 @@ def check_contents(path, display, allow):
     return found
 
 
+def matches(display, glob):
+    return Path(display).match(glob) or str(display).startswith(glob.rstrip("*"))
+
+
 def main(argv):
     root = Path(__file__).resolve().parent.parent
-    globs, allow = load_config(root)
+    globs, allow, scoped = load_config(root)
 
     if argv:
         paths = [Path(a).resolve() for a in argv]
@@ -164,17 +188,23 @@ def main(argv):
         if excluded(display, globs):
             skipped += 1
             continue
-        if BARE.search(Path(display).name):
+        here = set(allow)
+        for glob, tokens in scoped:
+            if matches(display, glob):
+                here |= tokens
+        # The stem, not the whole name: `UsdcTestLib.sol` is the identifier
+        # `UsdcTestLib` plus an extension, and an exemption names the former.
+        if bare_words(Path(display).stem, here):
             in_names += 1
             print(f"{display}: the file name itself carries an unprefixed mention")
-        in_text += check_contents(path, display, allow)
+        in_text += check_contents(path, display, here)
 
     if in_names or in_text:
         print()
         print(f"{in_text} mention(s) and {in_names} file name(s) without the `ecc` prefix.")
         print("Our token, contracts and components are `eccUSDC` on both sides.")
-        print("If the line really means Circle's token, record that — either with")
-        print(f"`{MARKER}` on the line, or as a path/pattern in {CONFIG}.")
+        print("If the line really means Circle's token, record that — with")
+        print(f"`{MARKER}` on the line, or as a path or identifier in {CONFIG}.")
         return 1
 
     print(f"{len(paths) - skipped} file(s) checked ({skipped} excluded), all prefixed.")

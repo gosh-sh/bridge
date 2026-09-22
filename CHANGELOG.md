@@ -24,6 +24,16 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`applyBkSetUpdate` takes a tenth argument, `attestationLastSeen`, after
+  `blockSeqNo`.** Selector `0x2a2c14a0` → `0xdcb4c795`. Old 9-argument
+  calldata does not decode. Circuit 1A/1B proves `block_seq_no > last_seen`.
+  After `verifyBlock(N)` the live cursor is N, so passing
+  `storedLastSeenBlockSeqNo` is `last_seen == blockSeqNo` and reverts
+  `AttestationLastSeenNotBeforeSeqNo`. Pass the `last_seen` baked into the
+  proof (the previous key block). BRIDGE-ETH-WD-2 is unchanged: still
+  `verifyBlock(N)` first, then `applyBkSetUpdate(N)`. File-based
+  `bkupd_*.json` without `last_seen_bk_update_seqno` defaults that word to 0.
+
 - **`aggregate-proof` self-checks the verifier source, so every verifiers
   directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
   the verifier it regenerates and compare bytecode, which is why `solc` had
@@ -413,13 +423,10 @@ assigns it when the release is tagged.
   strictly-next multiple, matching the proof.
 - `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
   survives N-1.
-- `applyBkSetUpdate` attestation `lastSeen` is the live layer cursor
-  (`storedLastSeenBlockSeqNo`). The prover was baking the BK-update cursor,
-  so after the first `verifyBlock` every rotation failed
-  `AttestationProofRejected`. Once AN rotated, `verifyBlock` then failed
-  `BkSetCommitmentMismatch` and unwithdrawn anchors aged out. The prover now
-  uses the layer cursor; a test drives `verifyBlock` then `applyBkSetUpdate`
-  with a mock that checks the argument.
+- `applyBkSetUpdate` attestation `lastSeen` is the prove-time cursor
+  (`attestationLastSeen`, strictly less than `blockSeqNo`), not the live
+  layer cursor after `verifyBlock(N)`. Passing the live cursor reverts
+  `AttestationLastSeenNotBeforeSeqNo` before the adapter. See Breaking.
 - Production `verifyBlock` tests that lack `bound_scenario.json` now
   `vm.skip` instead of returning, so the hole shows up in the forge summary.
 - `DeployRealBridge` on mainnet also requires `altDstChainId` and
@@ -449,9 +456,9 @@ assigns it when the release is tagged.
 - L2 anchoring is the shellnet operational default (Deploy #12), not
   smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
   stays L1 for local/CI.
-- Spec §7.3 states the QC-A2-2 rule: `applyBkSetUpdate` attestation
-  `lastSeen` is the live layer cursor. Re-prove if `verifyBlock` advances
-  between prove and submit.
+- Spec §7.3: `applyBkSetUpdate` attestation `lastSeen` is the caller-
+  supplied prove-time cursor. Re-prove if that word is not the instance
+  baked into the Circuit 1A/1B proof.
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`

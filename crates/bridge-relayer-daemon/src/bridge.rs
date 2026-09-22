@@ -346,6 +346,14 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
+        if update.attestation_last_seen >= update.block_seq_no {
+            return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!(
+                    "AttestationLastSeenNotBeforeSeqNo(last_seen={}, seq={})",
+                    update.attestation_last_seen, update.block_seq_no
+                ),
+            });
+        }
         inner.bk_set_commitment = update.new_commitment_l3;
         inner.last_bk_set_update_seq_no = update.block_seq_no;
         Ok(BkSetUpdateSubmitOutcome::Applied {
@@ -393,6 +401,7 @@ mod sol_bindings {
                 bytes calldata attestationProof,
                 uint256 blockId,
                 uint64 blockSeqNo,
+                uint64 attestationLastSeen,
                 uint256 oldCommitmentL2,
                 uint256 newCommitmentL3,
                 bytes32 siblingH01,
@@ -633,6 +642,7 @@ where
             update.attestation_proof.clone(),
             update.block_id,
             update.block_seq_no,
+            update.attestation_last_seen,
             update.old_commitment_l2,
             update.new_commitment_l3,
             B256::from(update.sibling_h01),

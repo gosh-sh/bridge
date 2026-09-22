@@ -165,6 +165,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
                 hex"00",
                 bkBlockId,
                 bkSeqNo,
+                0,
                 bkOldL2,
                 bkNewL3,
                 bkSib01,

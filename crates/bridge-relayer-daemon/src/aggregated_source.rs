@@ -437,6 +437,7 @@ mod tests {
             fin_type: fin,
             block_id: U256::from(seqno),
             block_seq_no: seqno,
+            attestation_last_seen: 0,
             old_commitment_l2: U256::ZERO,
             new_commitment_l3: U256::from(0xC0FFEEu64),
             sibling_h01: [0u8; 32],

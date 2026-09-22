@@ -418,6 +418,11 @@ contract AckiNackiBridge {
     ///         permissionless, this is an on-chain invariant, not a
     ///         relayer convention.
     error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
+    /// @notice Circuit 1A/1B range-checks `block_seq_no > last_seen`.
+    ///         Passing the live layer cursor after `verifyBlock(N)` as
+    ///         `attestationLastSeen` for `applyBkSetUpdate(N)` is
+    ///         `last_seen == blockSeqNo` and is unsatisfiable.
+    error AttestationLastSeenNotBeforeSeqNo(uint64 lastSeen, uint64 blockSeqNo);
 
     // withdrawByProof (Circuit 4) errors
     error WithdrawByProofDisabled();
@@ -888,6 +893,10 @@ contract AckiNackiBridge {
     ///        BN254_R`) rather than the raw SHA-256 root — the same convention
     ///        `verifyBlock` uses.
     /// @param blockSeqNo Sequence number of the BK-update block (monotonic cursor).
+    /// @param attestationLastSeen `last_seen` the attestation was proven
+    ///        against. Circuit 1A/1B requires `blockSeqNo > last_seen`.
+    ///        This is the cursor at prove time (the previous key block),
+    ///        not `storedLastSeenBlockSeqNo` after `verifyBlock(N)`.
     /// @param oldCommitmentL2 Must equal `storedBkSetCommitment`.
     /// @param newCommitmentL3 New BK-set Poseidon commitment after rotation.
     /// @param siblingH01 Merkle sibling `SHA256(L0 ‖ L1)` — depth-1 pair hash.
@@ -898,6 +907,7 @@ contract AckiNackiBridge {
         bytes calldata attestationProof,
         uint256 blockId,
         uint64 blockSeqNo,
+        uint64 attestationLastSeen,
         uint256 oldCommitmentL2,
         uint256 newCommitmentL3,
         bytes32 siblingH01,
@@ -933,6 +943,14 @@ contract AckiNackiBridge {
         if (blockSeqNo > storedLastSeenBlockSeqNo) {
             revert VerifyBlockLagBehindRotation(blockSeqNo, storedLastSeenBlockSeqNo);
         }
+        // Circuit 1A/1B proves `block_seq_no > last_seen`. After
+        // `verifyBlock(N)` the live cursor is N, which cannot be the
+        // instance the rotation proof was baked against. The caller
+        // supplies that baked word; WD-2 above already required the
+        // layer chain to have covered N.
+        if (attestationLastSeen >= blockSeqNo) {
+            revert AttestationLastSeenNotBeforeSeqNo(attestationLastSeen, blockSeqNo);
+        }
         if (newCommitmentL3 == 0) revert ZeroBkSetCommitment();
         // Stored commitment and attestation `blockId` must be canonical Fr.
         // Unreduced `newCommitmentL3` would otherwise land in
@@ -940,8 +958,6 @@ contract AckiNackiBridge {
         _requireCanonicalFr(blockId);
         _requireCanonicalFr(newCommitmentL3);
 
-        // lastSeen is the live layer cursor, not `storedLastBkSetUpdateSeqNo`
-        // (monotonicity only). The prover must bake the same word.
         bool attOk;
         if (finType == FinalizationType.Primary) {
             attOk = primaryVerifier.verifyPrimaryAttestation(
@@ -949,7 +965,7 @@ contract AckiNackiBridge {
                 blockId,
                 oldCommitmentL2,
                 uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
+                uint256(attestationLastSeen)
             );
         } else {
             attOk = fallbackVerifier.verifyFallbackAttestation(
@@ -957,7 +973,7 @@ contract AckiNackiBridge {
                 blockId,
                 oldCommitmentL2,
                 uint256(blockSeqNo),
-                uint256(storedLastSeenBlockSeqNo)
+                uint256(attestationLastSeen)
             );
         }
         if (!attOk) revert AttestationProofRejected();

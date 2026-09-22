@@ -110,6 +110,43 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
+  `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
+  `EthKeccak` library, all v1.4.0, moved here from acki-nacki into
+  `contracts/an/exchange/` with the compiled `.tvc` / `.abi.json` that go
+  into the zerostate, at the state of the `contracts/bridge` branch: the anchor
+  surface (`setLightClientCode`, `deployLightClient`, the light-client writers,
+  `disableOwnerAnchors`), the `ERR_UNKNOWN_BLOCK` gate on `finalizeDeposit`, and
+  `ERR_ZERO_RECIPIENT` on both directions including `initiateWithdrawal`
+  (audit WD-AN-07). The bridge's code hash is `48d5c0ed…`, which is what
+  shellnet runs. acki-nacki no longer
+  keeps a copy: it pins one commit of this repository and places the files
+  into its own tree when a zerostate is generated, so a contract change made
+  here reaches a network only after that pin is moved.
+  `make -C contracts/an/exchange SOLD_0_80=<sold 0.80.0> SOLD_0_81=<sold 0.81.0>`
+  rebuilds them, each contract with the compiler its tracked artefact was built
+  with: `eccUSDCBridge` with 0.80.0, `DepositVoucher` and `EthBeaconLightClient`
+  with 0.81.0. The build stops if either variable is unset or names a compiler
+  of another version, since any other compiler changes the code hash.
+- **CI pipeline `.woodpecker/an-contracts.yaml`** runs
+  `scripts/check_voucher_abi_consistency.py` and
+  `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
+  `main`.
+- **The zerostate setup of the Acki Nacki bridge lives here too.**
+  `contracts/an/zerostate_init.py` builds the data cell, upgrades the premined
+  stub to the bridge's code, seeds the trusted L1 bridge, installs the
+  light-client code and writes the account into the zerostate; acki-nacki
+  places it with the contracts and calls it while generating one. A new setup
+  call, a new parameter or a new storage field is now a change in this
+  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
+  the trusted L1 bridge a generated zerostate starts with, defaulting to
+  `11155111` and `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+  `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
+  the cell — never deployed, executed in `tvm-debugger` — and
+  `scripts/check_zerostate_data_encoder.py`, wired into
+  `.woodpecker/an-contracts.yaml`, fails if it and
+  `eccUSDCBridge.onCodeUpgrade` stop agreeing on the tuple.
+
 - `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
   read-only views of how close an anchor is to eviction from its 128-slot
   window. A return of N means the Nth further append overwrites it; 0 means it
@@ -218,6 +255,20 @@ assigns it when the release is tagged.
   `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
 
 ### Changed
+
+- **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
+  default.** With no arguments it checks the sources in
+  `contracts/an/exchange/` against the compiled ABIs in
+  `contracts/an/0.80.0_compiled/exchange/` and
+  `contracts/an/0.81.0_compiled/exchange/`. It does not check the ABI copies
+  the tooling loads: `crates/bridge-prover-libraries/python/contracts/` was
+  the previous default and is no longer checked, and
+  `crates/ackinacki-bridge/abi/` was never covered. Those copies predate the
+  `chainId` deposit identity and are known to be stale; pass them with
+  `--compiled-bridge` / `--compiled-voucher` to see the drift.
+  `--compiled DIR` is replaced by `--compiled-bridge FILE` and
+  `--compiled-voucher FILE`, because the two artefacts sit in different
+  folders, and the bridge source it reads is `eccUSDCBridge.sol`.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis

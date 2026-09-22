@@ -1449,6 +1449,111 @@ mod tests {
         );
     }
 
+    /// BRIDGE-WD-01 canonical-order guard: the on-chain `PUB_NULLIFIER` slot
+    /// must equal `poseidon_hash([block_id, token_id, amount, recip_hi,
+    /// recip_lo, sender_acc, events_pos])` — in that exact order. A silent
+    /// reorder inside `nullifier_native` (the wrapper every witness path
+    /// funnels through) would still pass every other regression here because
+    /// prover and verifier would agree on the wrong preimage.
+    ///
+    /// Part 1 (fast): fuzz `nullifier_native` against a direct
+    /// `poseidon_hash` call over K random 7-tuples — no circuit, pure native.
+    /// Part 2 (one MockProver): assert `instances[PUB_NULLIFIER]` — the slot
+    /// wired to the on-chain verifier — equals `poseidon_hash` on the
+    /// canonically ordered inputs read straight from the withdrawal fields,
+    /// independent of `nullifier_native`.
+    #[test]
+    fn test_nullifier_canonical_argument_order() {
+        use rand::rngs::StdRng;
+        use rand::Rng;
+        use rand::SeedableRng;
+
+        // Part 1: native fuzz — catches wrapper reorders without MockProver
+        // cost, and documents the canonical order via the direct call.
+        let mut rng = StdRng::seed_from_u64(20260922_5);
+        for _ in 0..16 {
+            let mut buf = [0u8; 32];
+            let mut fr_of = || {
+                rng.fill(&mut buf);
+                bytes_to_fr(&buf)
+            };
+            let block_id = fr_of();
+            let token_id = fr_of();
+            let amount = fr_of();
+            let hi = fr_of();
+            let lo = fr_of();
+            let sender_acc = fr_of();
+            let events_pos = fr_of();
+
+            let expected = poseidon_hash(&[
+                block_id, token_id, amount, hi, lo, sender_acc, events_pos,
+            ]);
+            let via_helper = nullifier_native(
+                block_id, token_id, amount, hi, lo, sender_acc, events_pos,
+            );
+            assert_eq!(
+                expected, via_helper,
+                "canonical 7-arg nullifier order violated by nullifier_native"
+            );
+        }
+
+        // Part 2: single MockProver — the PI slot fed to the on-chain
+        // verifier must match `poseidon_hash` on canonical inputs.
+        let w = load_first_withdrawal();
+        let dense_hasher = DensePoseidonHasher::new();
+        let mut rng = StdRng::seed_from_u64(20260922_6);
+        let tw = build_two_level_tree(&w.repr_hash, &mut rng, &dense_hasher, 128, 130);
+        let (dense_chain, final_root_bytes) =
+            build_dense_chain(tw.blocks_root_level_0, 1, 130);
+        let final_root_fr = bytes_to_fr(&final_root_bytes);
+        let params = base_circuit_params();
+
+        let circuit = BridgeEventProveCircuit::new(
+            w.entries.clone(),
+            tw.events_siblings.clone(),
+            tw.events_pos,
+            tw.account_dapp_id,
+            tw.account_id,
+            tw.block_id,
+            tw.envelope_hash_bytes,
+            tw.block_siblings.clone(),
+            tw.block_pos,
+            dense_chain.clone(),
+            1,
+            1,
+            params.clone(),
+        );
+
+        let leading = compute_leading_public_inputs(
+            &w,
+            &tw.block_id,
+            &tw.account_dapp_id,
+            &tw.account_id,
+            &w.sender_account_id,
+            tw.events_pos,
+        );
+        let instances = make_instances(leading, final_root_fr, Fr::from(1u64));
+        let prover =
+            MockProver::<Fr>::run(K, &circuit, vec![instances.clone()]).unwrap();
+        prover.assert_satisfied();
+
+        let expected_pub_nullifier = poseidon_hash(&[
+            bytes_to_fr(&tw.block_id),
+            w.token_id_val,
+            w.amount_val,
+            w.recipient_hi_val,
+            w.recipient_lo_val,
+            bytes_to_fr(&w.sender_account_id),
+            Fr::from(tw.events_pos as u64),
+        ]);
+        assert_eq!(
+            instances[PUB_NULLIFIER], expected_pub_nullifier,
+            "PUB_NULLIFIER slot must equal poseidon_hash on canonically \
+             ordered [block_id, token_id, amount, recip_hi, recip_lo, \
+             sender_acc, events_pos]"
+        );
+    }
+
     /// Exercise every supported dense-chain length T = 0..=MAX_CHAIN_LEN with
     /// the first real withdrawal.
     #[test]

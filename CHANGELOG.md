@@ -253,6 +253,25 @@ assigns it when the release is tagged.
   `.sol` does not compile to its `.bin` byte for byte, when either half of a
   pair is missing, or when a `.bin` exceeds EIP-170. Run it locally with
   `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
+- **`contracts/an/place.json` says which files acki-nacki places and where.**
+  It lists every file that goes into an Acki Nacki tree with its destination
+  there, and names the ones that stay here — among them this repository's
+  copy of `ISubscriber.sol` (acki-nacki keeps its own original) and
+  `zerostate/BridgeZerostateData.sol`, the encoder source whose compiled
+  artefacts ship without it. acki-nacki now pins only a commit of this
+  repository and follows the manifest, so a new contract or artefact is a
+  change here plus a pin move there, with no file list to keep in step.
+  `scripts/check_place_manifest.py`, wired into `.woodpecker/an-contracts.yaml`,
+  fails when a file under `contracts/an/` appears in neither list, when a
+  destination is not one of the few acki-nacki gives us (`contracts/exchange/`,
+  `contracts/zerostate/`, the two `*_compiled/exchange/` folders and
+  `contracts/scripts/bridge_*.py`, but never
+  `contracts/scripts/bridge_contracts.py`, which is acki-nacki's own module and
+  the one that does the placing), when two files claim one destination, or when
+  the manifest tries to place `ISubscriber.sol` at all — acki-nacki keeps its
+  own original of that interface at the destination our layout would imply, so
+  placing our copy would silently overwrite it. acki-nacki enforces the same
+  destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
 

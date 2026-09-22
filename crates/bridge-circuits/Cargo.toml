@@ -1,0 +1,44 @@
+[workspace]
+# Sub-workspace: uses the gosh-fork halo2 backend (bump-halo2-lib-v0.4.1),
+# which collides with the root workspace's alloy stack — same reason
+# `crates/bridge-prover-libraries` is excluded from the root. Build
+# standalone: `cd crates/bridge-circuits && cargo build`.
+members = [
+    "attestation-bls-checker-circuit",
+    "historical-layer-hashes-movement-checker-circuit",
+    "bridge-event-prove-circuit",
+    "test-data-gen",
+    "bridge-poseidon",
+    "cross-circuit-block-id-test",
+]
+resolver = "2"
+
+[workspace.dependencies]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+
+# --- Halo2 backend unification (collapse to ONE halo2-axiom instance) ---
+#
+# Without these patches, cargo can resolve two `halo2-axiom` copies in the
+# graph (gosh-fork 0.4.5 from git + crates.io 0.5.1 pulled transitively via
+# axiom-eth / snark-verifier-sdk). Two versions coexist "peacefully" only
+# while Cargo.lock happens to hold a compatible commit set — any
+# `cargo update` can re-split them, causing E0277 on `Circuit<Fr>` bounds.
+# Mirrors the [patch] block in
+# `crates/bridge-prover-libraries/Cargo.toml:130-142`.
+[patch.crates-io]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+
+[patch."https://github.com/axiom-crypto/axiom-eth"]
+axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", branch = "gosh-stable-rlcmanager-assignment" }
+
+[profile.dev]
+opt-level = 3

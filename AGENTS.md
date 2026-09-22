@@ -369,7 +369,7 @@ The chain of three coordinated commits:
 
 - `acki-nacki@8c54dd7c` — single source of truth lives in `node/libs/node-block-client/src/history_proof.rs` (value reverted to `= 4` for fast E2E coverage); `node/src/types/history_proof.rs` now does `pub use node_block_client::history_proof::HISTORY_PROOF_WINDOW_SIZE`. Old `8` and production `128` preserved as comments.
 - `acki-nacki-to-eth-bridge-halo2-prover@4cdc932 + c8495f9 + 24dffa1` — `bridge-prover-daemon` no longer carries its own `HISTORY_WINDOW_SIZE = …` literal; it imports `node_block_client::history_proof::HISTORY_PROOF_WINDOW_SIZE` at compile time. `ensure_layer_keys` computes `REF_TREE_DEPTH = (W + 2).next_power_of_two().trailing_zeros() as usize` — exactly the recommendation above. For the current `W = 4` this is depth `3`, bit-identical to the pre-fix literal, so cached VK/PK survive the patch with no keygen rerun.
-- `acki-nacki-to-eth-bridge-halo2-circuits@55a22b9` — `historical-layer-hashes-movement-checker-circuit/tests/real_prover.rs` aligned to `TREE_DEPTH = 3`, README table now lists all three rows (W=4 → depth 3, W=8 → 4, W=128 → 8), `.gitignore` covers `test_cache_real_prover/`.
+- Bridge circuits (now vendored at `crates/bridge-circuits/`) — `historical-layer-hashes-movement-checker-circuit/tests/real_prover.rs` aligned to `TREE_DEPTH = 3`, README table now lists all three rows (W=4 → depth 3, W=8 → 4, W=128 → 8), `.gitignore` covers `test_cache_real_prover/`.
 
 She independently re-verified end-to-end on her lightweight stand: 16/16 key blocks (heights 8..68) BOTH VERIFIED OK at `~3:20`/block steady state. Her note for future testing: stay on `W = 4` to maximise configuration coverage per unit time; bump to `8` only for the mid-size sanity sweep, and to `128` for production. The class of bug ("daemon literal drifts from node constant") is now eliminated at the type-system level — the prover crate physically depends on `node-block-client`, and the node crate physically re-exports the same constant.
 
@@ -964,7 +964,7 @@ Unit + env templates: `scripts/ursus/deposit-relayer.{service,env.example}`, `sc
 
 - `docs/four_circuit_architecture.md` — **canonical v2 entry point**: envelope-hash leaf table, per-circuit public-input layouts, cross-circuit binding (CC-#), state machine, gas table.
 - `docs/audit_trail_v2.md` — **v1 → v2 trust delta**: 7 reduced assumptions, 12 retained, the cross-circuit soundness argument, the pre-tag sign-off checklist.
-- `docs/an_partner_integration_plan.md` — **active integration plan** against the partner's four-circuit architecture (`acki-nacki-to-eth-bridge-halo2-circuits` + `acki-nacki-to-eth-bridge-halo2-prover` sibling repos).
+- `docs/an_partner_integration_plan.md` — **active integration plan** against the four-circuit architecture (now vendored under `crates/bridge-circuits/` + `crates/bridge-prover-libraries/`).
 - `docs/integration_analysis.md` — architecture analysis with §3 / §5 rewritten for v2 (deposit/AN-platform sections still original).
 - `docs/bridge_verification.md` — invariant labels (DEP-#, **LH-#** v2, **BK-#** Phase 1.C placeholder, OR-#, AC-#, FORK-#, **CC-#** new in v2, ZK-#) + reproducible run recipe.
 - `docs/manual_verification_runbook.md` — hands-on review (Phase D bound proof, Phase F `verifyBlock` walk, Phase G Phase-1.C placeholder, Phase J ≥ 30 attack scenarios incl. CC-1..CC-7).

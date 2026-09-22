@@ -44,11 +44,9 @@ steps:
       GH_TOKEN:
         from_secret: REVIEW_GH_TOKEN
     commands:
-      # One of the ten gosh-sh git dependencies in Cargo.lock —
-      # acki-nacki-to-eth-bridge-halo2-circuits — is a private repository, so
-      # cargo cannot fetch it anonymously. The token must be able to read that
-      # repository too; a token scoped to this one alone fails here, not at the
-      # upload step.
+      # Any private gosh-sh git dependency the graph still resolves cannot
+      # be fetched anonymously. The token must be able to read those repos;
+      # a token missing that scope fails here, not at the upload step.
       - git config --global url."https://x-access-token:$GH_TOKEN@github.com/".insteadOf "https://github.com/"
       # The CLI builds as a member of the prover workspace — the symlink at
       # crates/bridge-prover-libraries/ackinacki-bridge is what resolves its

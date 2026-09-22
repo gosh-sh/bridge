@@ -16,9 +16,8 @@ variables:
   CI_SERVER_TLS_CA_FILE: ""
   # Resolve cargo git deps via the system git CLI so the github.com
   # url.insteadOf rewrite (with $GH_READ_TOKEN) in .rust_base is honoured.
-  # Needed by the crates/bridge-prover-libraries + crates/bridge-evm-aggregator
-  # jobs, which pull the private gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits
-  # dependency (the other three gosh-sh halo2 repos are public).
+  # Kept in place for any transitive private gosh-sh git dependency the
+  # workspace still resolves at build time.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 # Cache configuration
@@ -52,11 +51,11 @@ default:
   before_script:
     # Configure git to use CI_JOB_TOKEN for GitLab authentication
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
-    # Authenticate to github.com for the ONE private cargo git dependency
-    # (gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits). $GH_READ_TOKEN is a
-    # masked+protected CI/CD variable; it is only present on protected refs
-    # (main/tags), so the private-dep jobs are gated on it via `rules` and skip
-    # cleanly on MR/branch pipelines where it is absent.
+    # Authenticate to github.com for any private gosh-sh cargo git dep the
+    # graph still resolves transitively. $GH_READ_TOKEN is a masked+protected
+    # CI/CD variable; it is only present on protected refs (main/tags), so
+    # jobs that need it are gated via `.private_dep_gate` and skip cleanly on
+    # MR/branch pipelines where it is absent.
     - if [ -n "$GH_READ_TOKEN" ]; then git config --global url."https://${GH_READ_TOKEN}@github.com/".insteadOf "https://github.com/"; fi
     # Ensure we're using nightly toolchain
     - rustup default nightly
@@ -64,10 +63,9 @@ default:
     - cargo --version
     - rustup component add rustfmt clippy
 
-# Gate for every job that resolves the private circuits dependency
-# (gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits — the other three gosh-sh
-# halo2 repos are public). $GH_READ_TOKEN is a masked+protected CI/CD variable,
-# so it exists only on protected refs (main/tags): there these jobs run, and on
+# Gate for every job that resolves a private gosh-sh git dependency
+# transitively. $GH_READ_TOKEN is a masked+protected CI/CD variable, so it
+# exists only on protected refs (main/tags): there these jobs run, and on
 # MR/branch pipelines they skip cleanly instead of hard-failing the clone.
 #
 # Anything that runs cargo inside crates/bridge-prover-libraries,

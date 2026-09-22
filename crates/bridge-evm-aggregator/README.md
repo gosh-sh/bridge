@@ -105,9 +105,8 @@ These are all `.gitignore`d (see root `.gitignore` `# R15 / M2` section).
 
 Two reasons:
 
-1. **Independence from the partner.** Circuit 4 is still on
-   `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits#circuit4-single-final-root`
-   (M4 blocker). The spike must NOT block on that work — its job is to
+1. **Independence from the partner.** Circuit 4 was still in flux at spike
+   time (M4 blocker). The spike must NOT block on that work — its job is to
    validate the pipeline in our build env.
 2. **Minimum surface area.** A single multiplication gate keeps inner-K
    small (9), keygen seconds, total wall-clock ~3 min, and makes the

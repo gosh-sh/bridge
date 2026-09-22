@@ -34,18 +34,21 @@ pub(super) const PREFIX: &str = "event";
 /// circuit definition would be stronger; it needs a stable serialisation
 /// of the circuit that this tree does not have.
 ///
-/// **The circuit is pinned by revision for this reason.**
-/// `bridge-event-prove-circuit` and its four siblings are `rev = "…"` in
-/// `crates/bridge-prover-libraries/Cargo.toml`, not `branch = "main"`.
-/// Under a branch, one `cargo update` moves the circuit while this number
-/// stays put, and nothing downstream notices: `KeyManagerState::new`
-/// checks the manifest format, this revision, and the vk/config digests,
-/// and all of them still match — the FILES did not change, the circuit
-/// did. The keys then prove, and the proof is rejected at stage 5, after
-/// the burn and the anchor wait. A revision pin turns that move into an
-/// edit visible in review next to this constant.
+/// **Bump this in the same PR as the circuit edit.**
+/// `bridge-event-prove-circuit` and its four siblings live in-tree at
+/// `crates/bridge-circuits/` and are pulled in by path from
+/// `crates/bridge-prover-libraries/Cargo.toml`, so an edit under
+/// `bridge-circuits/` shows up in `git diff` right next to whatever else
+/// the PR touches. That solves the "silent circuit move" that a git-rev
+/// dep used to enable, but it does not solve cache staleness on a running
+/// host: `KeyManagerState::new` compares the manifest format, this
+/// revision, and the vk/config digests against what is on disk, and if
+/// they still match after a circuit edit the daemon reuses the old keys.
+/// The proof then verifies against the old VK inside the prover, is
+/// rejected at stage 5 by the on-chain verifier, and the failure surfaces
+/// after the burn and the anchor wait.
 ///
-/// So the two travel together: change the pin, bump this.
+/// So the two travel together: edit the circuit, bump this.
 ///
 /// Distinct from `MANIFEST_FORMAT`: this describes the CIRCUIT the keys
 /// were built for, that one describes the FILE that says so.

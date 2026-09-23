@@ -65,9 +65,10 @@ assigns it when the release is tagged.
   `1..=10`). `withdrawByProof` scans only that layer's window.
   Behavioural consequence of the `events_pos` binding: two structurally
   identical `WithdrawalInitiated` events emitted in the same source
-  block (same token/amount/recipient/sender pair) now nullify to
-  distinct values and can both pay out on the ETH side; pre-rotation
-  they would have collided on the second withdraw as a replay.
+  block (matching on all four of `tokenId`, `amount`, `recipient` and
+  `sender`) now nullify to distinct values and can both pay out on the
+  ETH side; pre-rotation they would have collided on the second
+  withdraw as a replay.
   The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
   instances; the reference `_calldata.bin` is 3 648 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
@@ -331,8 +332,12 @@ assigns it when the release is tagged.
   `crates/deposit-relayer-daemon` and `crates/eth-light-client-relayer`.
   The three binaries that actually link `tvm_client` — `ackinacki-bridge`
   (inside `bridge-prover-libraries`), `deposit-relayer-daemon` and
-  `eth-light-client-relayer` — all ship the new version; `bridge-relayer-daemon`
-  does not depend on `tvm_client` and is unaffected.
+  `eth-light-client-relayer` — all ship the new version.
+  `bridge-relayer-daemon` does not link `tvm_client`, but it does pick
+  up the bump: it consumes `tvm_block` transitively through
+  `bridge-event-witness`, which pins `tvm_block` at the same tvm-sdk
+  workspace tag. So no line in `bridge-relayer-daemon`'s own manifest
+  changes, but its build now compiles against `tvm_block v3.0.6.an`.
   `dense-balanced-tree` also moves off a floating branch onto tag
   `v1.0.0`.
 

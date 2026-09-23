@@ -63,6 +63,11 @@ assigns it when the release is tagged.
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
   `1..=10`). `withdrawByProof` scans only that layer's window.
+  Behavioural consequence of the `events_pos` binding: two structurally
+  identical `WithdrawalInitiated` events emitted in the same source
+  block (same token/amount/recipient/sender pair) now nullify to
+  distinct values and can both pay out on the ETH side; pre-rotation
+  they would have collided on the second withdraw as a replay.
   The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
   instances; the reference `_calldata.bin` is 3 648 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
@@ -305,8 +310,11 @@ assigns it when the release is tagged.
 
 - **`tvm-sdk` moves from `v3.0.5.an` to `v3.0.6.an`** across the root
   workspace, `crates/bridge-prover-libraries`,
-  `crates/deposit-relayer-daemon` and `crates/eth-light-client-relayer`;
-  the CLI and every relayer ship a new `tvm_client`.
+  `crates/deposit-relayer-daemon` and `crates/eth-light-client-relayer`.
+  The three binaries that actually link `tvm_client` — `ackinacki-bridge`
+  (inside `bridge-prover-libraries`), `deposit-relayer-daemon` and
+  `eth-light-client-relayer` — all ship the new version; `bridge-relayer-daemon`
+  does not depend on `tvm_client` and is unaffected.
   `dense-balanced-tree` also moves off a floating branch onto tag
   `v1.0.0`.
 

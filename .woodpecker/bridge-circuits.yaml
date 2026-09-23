@@ -11,16 +11,18 @@
 # cross-circuit-block-id-test runs Circuit 1 at K=20 (Circuit 1's `K` is
 # re-exported as `C1_K` and passed to `MockProver::run` — see
 # `crates/bridge-circuits/cross-circuit-block-id-test/tests/cross_circuit_block_id.rs`).
-# On pipeline 1913 the fast step took 309 s wall (~134 s of `cargo build`
-# from a fresh CI checkout that fetched all pinned gosh git deps + compiled
-# the halo2 stack, plus ~162 s of MockProver test execution). Warm-cache
-# reruns save the build half but the tests themselves are not seconds-fast.
+# Cold runs are dominated by `cargo build` fetching the pinned gosh git
+# deps and compiling the halo2 stack (order of ~2 min on a fresh CI
+# checkout), plus another couple of minutes of MockProver test execution
+# for the fast step (order of five minutes end-to-end). Warm-cache reruns
+# save the build half, but the tests themselves are not seconds-fast.
 # Attestation-BLS MockProvers are K=20 and each takes several minutes at
 # ~10 GB RSS; real halo2 keygen+prove tests (`test_real_prover_*`) are
-# `#[ignore]`d because they take tens of minutes and >14 GB RSS (see
-# `PARALLEL_BENCHMARK_N14_REPORT.md:17`). Trigger them manually with
-# `cargo test -- --ignored` when the corresponding circuit constraints
-# change.
+# `#[ignore]`d because at K=20 they can run tens of minutes and above
+# 14 GB RSS (see `PARALLEL_BENCHMARK_N14_REPORT.md:76-79`). Trigger them
+# manually with `cargo test -- --ignored` when the corresponding circuit
+# constraints change — see the recipe in AGENTS.md's "What no pipeline
+# runs" section for the per-crate weight class.
 #
 # `bridge-circuits/` is its own sub-workspace with a distinct halo2 backend
 # (see the header of `crates/bridge-circuits/Cargo.toml` for why the root
@@ -66,9 +68,10 @@ steps:
   # Runs first and independently so a red result in the slower step below
   # does not hide a Circuit 4 regression — and so reviewers see the
   # dense-merkle-bound and events-position-binding regressions surface
-  # quickly. See the header for the pipeline-1913 breakdown (~309 s cold:
-  # ~134 s `cargo build` + ~162 s of MockProver test execution). Warm-cache
-  # reruns save the build half but the tests themselves are not seconds-fast.
+  # quickly. See the header for the fast-step timing shape (cold-cache runs
+  # split roughly evenly between `cargo build` and MockProver test
+  # execution; warm-cache reruns save the build half but the tests
+  # themselves are not seconds-fast).
   # ---------------------------------------------------------------------------
   bridge-circuits-fast:
     image: *rust_image

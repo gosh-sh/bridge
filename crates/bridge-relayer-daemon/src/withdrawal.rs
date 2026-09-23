@@ -7,9 +7,9 @@
 //! The production on-chain verifier is the R15 SHPLONK aggregator
 //! (`BridgeWithdrawalAggregatorVerifier`, Yul): it consumes aggregator calldata
 //! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
-//! the 11 re-exposed Circuit-4 public inputs (≥
-//! `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the 1A/1B/2 shape
-//! checks in [`crate::proof_validation`].
+//! the 11 re-exposed Circuit-4 public inputs + a Poseidon digest of the inner
+//! VK witnesses (≥ `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the
+//! 1A/1B/2 shape checks in [`crate::proof_validation`].
 
 use std::path::{Path, PathBuf};
 
@@ -35,9 +35,10 @@ pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 11;
 
 /// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
 /// prefix is 12 KZG accumulator limbs + the 11 re-exposed Circuit-4 public
-/// inputs, each a 32-byte field element (the outer proof bytes follow). Matches
-/// `BridgeWithdrawalAggregatorVerifier`'s 23-instance layout.
-pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
+/// inputs + 1 inner-VK Poseidon digest slot, each a 32-byte field element
+/// (the outer proof bytes follow). Matches `BridgeWithdrawalAggregatorVerifier`'s
+/// 24-instance layout.
+pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS + 1) * 32;
 
 /// Parsed `proof_event_*.json` from
 #[derive(Clone, Debug, Deserialize)]
@@ -78,7 +79,8 @@ impl PartnerWithdrawalProof {
         if raw.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
             return Err(RelayerError::other(format!(
                 "withdrawal proof is {} bytes; expected SHPLONK aggregator calldata (>= {} bytes: \
-                 12 accumulator limbs + {} Circuit-4 public inputs, then the outer proof)",
+                 12 accumulator limbs + {} Circuit-4 public inputs + 1 inner-VK digest, then the \
+                 outer proof)",
                 raw.len(),
                 SHPLONK_MIN_WITHDRAWAL_INSTANCES,
                 WITHDRAWAL_PUBLIC_INPUTS,

@@ -454,12 +454,16 @@ AckiNackiBridge
 layout), `_readInstance(data, i)` = `uint256(bytes32(data[i*32 : i*32+32]))` with a
 `"short instances"` require, and `_verifyShplonk`.
 
-Proof calldata is `instances (12 accumulator + N inner) ‖ snark_proof`. Each adapter:
+Proof calldata is `instances (12 accumulator + N inner + 1 inner-VK digest) ‖ snark_proof`. Each
+adapter:
 
-1. returns `false` if `proof.length < (12 + N) * 32`;
+1. returns `false` if `proof.length < (12 + N + 1) * 32`;
 2. compares every re-exposed inner instance at index `12 + k` against the corresponding argument,
    returning `false` on the first mismatch;
-3. delegates to the Yul verifier.
+3. returns `false` if the instance at index `12 + N` does not equal the adapter's immutable
+   `vkDigest` (Poseidon digest of the inner-circuit VK witnesses; base contract's constructor
+   rejects `bytes32(0)`);
+4. delegates to the Yul verifier.
 
 | Adapter | N | Instance index ↔ argument |
 |---|---:|---|

@@ -569,7 +569,8 @@ pub fn calldata_binds_instances(
 ) -> Result<(), RelayerError> {
     if calldata.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
         return Err(RelayerError::other(format!(
-            "aggregator calldata is {} bytes; need >= {} to hold {} accumulator limbs + {} inputs",
+            "aggregator calldata is {} bytes; need >= {} to hold {} accumulator limbs + {} inputs \
+             + 1 inner-VK digest",
             calldata.len(),
             SHPLONK_MIN_WITHDRAWAL_INSTANCES,
             NUM_ACCUMULATOR_INSTANCES,

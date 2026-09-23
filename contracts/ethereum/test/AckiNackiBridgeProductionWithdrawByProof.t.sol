@@ -23,9 +23,10 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
         "verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin";
 
     /// Calldata file to feed the deployed verifier. Override with `C4_CALLDATA`
-    /// (path relative to `contracts/ethereum`) to exercise a *different* inner
-    /// snark's aggregated calldata against the same committed verifier — the M7
-    /// universality check.
+    /// (path relative to `contracts/ethereum`) to swap the committed calldata
+    /// artefact. The adapter pins the inner-circuit VK via `vkDigest`, so any
+    /// override that carries a different inner VK is rejected at the digest
+    /// check — the override is for re-proofs of the *same* inner circuit only.
     function _calldataPath() internal view returns (string memory) {
         return vm.envOr("C4_CALLDATA", WITHDRAWAL_CALLDATA_DEFAULT);
     }

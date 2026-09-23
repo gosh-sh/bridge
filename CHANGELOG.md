@@ -528,6 +528,19 @@ assigns it when the release is tagged.
   `contracts/ethereum/.env.example` when it is missing, instead of silently
   failing to copy a root `.env.example` that does not exist. `make audit` runs
   `cargo audit` only; the `forge audit` it also called is not a Foundry command.
+- **`make setup` (`setup.sh`) no longer runs `forge init --force` in
+  `contracts/ethereum`.** On a fresh clone, where the gitignored `lib/` is
+  absent, it did, and left Foundry's template `src/Counter.sol`,
+  `script/Counter.s.sol`, `test/Counter.t.sol` and a `README.md` in the
+  project, where they were built and tested with it. It now installs the
+  Solidity dependencies the way CI does — `npm install` and `forge-std` — and
+  stops with an error when `npm` is missing, since `poseidon-solidity` comes
+  from npm. It also installs the pinned Rust toolchains from
+  `rust-toolchain.toml` and `deposit-prover/rust-toolchain.toml` instead of
+  switching the global default to the latest nightly, keeps an existing
+  `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
+  `test/integration/` directory or a root `.env.example`; the template for
+  the deploy scripts is `contracts/ethereum/.env.example`.
 
 ### Known issues
 

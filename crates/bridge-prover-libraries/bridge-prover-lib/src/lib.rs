@@ -20,7 +20,7 @@ pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
 /// Prover-side thinning factor `P`: the prover only emits a (Circuit 1 + Circuit 2)
 /// bundle every `P`-th master key block instead of every key block. See
-/// `bridge/crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`.
+/// `crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`.
 ///
 /// Hard constraints (checked at runtime by `chain_proof_builder::build_chain_proofs`):
 ///   * `P <= MAX_CHAIN_LEN = 11` (from `gosh-dense-balanced-tree`)

@@ -44,10 +44,10 @@ steps:
       GH_TOKEN:
         from_secret: REVIEW_GH_TOKEN
     commands:
-      # Any private gosh-sh git dependency the graph still resolves cannot
-      # be fetched anonymously. The token must be able to read those repos;
-      # a token missing that scope fails here, not at the upload step.
-      - git config --global url."https://x-access-token:$GH_TOKEN@github.com/".insteadOf "https://github.com/"
+      # All gosh-sh git repos in the dependency graph are public
+      # post-vendoring, so no token is required for cargo to fetch them.
+      # `GH_TOKEN` above is kept because the `publish` step uploads assets
+      # to the GitHub release and needs Contents: write.
       # The CLI builds as a member of the prover workspace — the symlink at
       # crates/bridge-prover-libraries/ackinacki-bridge is what resolves its
       # workspace=true circuit dependencies. A standalone `cargo build` in

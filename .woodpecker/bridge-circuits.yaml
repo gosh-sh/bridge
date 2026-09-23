@@ -24,10 +24,9 @@
 # lock to. The `[patch.crates-io]` block in the sub-workspace root pins the
 # halo2-axiom backend deterministically regardless of resolution order.
 #
-# Requires REVIEW_GH_TOKEN: `gosh-sh/gosh-halo2-crypto-lib` and
-# `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` are still private git
-# dependencies, and cargo cannot fetch them anonymously. The same secret
-# the review and release pipelines already use — Contents: Read is enough.
+# All gosh-sh git repos in the dependency graph are public post-vendoring,
+# so cargo fetches every dep anonymously — no GitHub token or url rewrite
+# is needed here.
 
 when:
   - event: pull_request
@@ -45,11 +44,6 @@ steps:
       # same worker reuse the same `$CARGO_HOME/git` checkouts (matches
       # `release.yaml`'s convention).
       CARGO_HOME: .cargo_home
-      GH_TOKEN:
-        from_secret: REVIEW_GH_TOKEN
     commands:
-      # Private gosh-sh git dependencies cannot be fetched anonymously.
-      # A token missing `Contents: Read` on those repos fails here.
-      - git config --global url."https://x-access-token:$GH_TOKEN@github.com/".insteadOf "https://github.com/"
       - cd crates/bridge-circuits
       - cargo test --workspace

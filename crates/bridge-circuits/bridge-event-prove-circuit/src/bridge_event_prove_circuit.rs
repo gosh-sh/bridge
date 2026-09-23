@@ -1005,9 +1005,9 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 // (`_isKnownLayerAnchor` in AckiNackiBridge.sol). Range
                 // `1..=MAX_ANCHOR_LAYER` enforced by two 4-bit range checks
                 // on `anchor_layer - 1` and `MAX_ANCHOR_LAYER - anchor_layer`
-                // (both must be non-negative). Solidity ALSO validates on
-                // deposit at `withdrawByProof:1337-1339` — this in-circuit
-                // check is defense in depth.
+                // (both must be non-negative). Solidity ALSO validates the
+                // `anchorLayer` bound on the `withdrawByProof` path — this
+                // in-circuit check is defense in depth.
                 let anchor_layer_fr =
                     ctx.load_witness(Fr::from(self.anchor_layer as u64));
                 let one_const = ctx.load_constant(Fr::one());

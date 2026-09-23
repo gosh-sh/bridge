@@ -5,7 +5,7 @@ A zero-knowledge proof system bridging Acki Nacki blockchain state to Ethereum. 
 1. **Block finalization** — Acki Nacki blocks were signed by a supermajority of validators (Circuits 1A/1B + 2).
 2. **Withdrawal authenticity** — a `WithdrawalInitiated` event was committed to a finalized block (Circuit 4).
 
-> **BK-set updates are tracked off-circuit.** Rotations of the validator set are handled in the open: the verifier opens the L2/L3 leaves of the block-id Merkle tree (old/new BK-set Poseidon commitments) with two SHA-256 siblings against the `block_id` already verified by Circuit 1A/1B, then advances `storedBkSetCommitment` directly. No Circuit 3 is in the production path — see `bridge/crates/bridge-prover-libraries/bridge-prover-lib/docs/bk_set_update_no_circuit3_plan.md` for the design.
+> **BK-set updates are tracked off-circuit.** Rotations of the validator set are handled in the open: the verifier opens the L2/L3 leaves of the block-id Merkle tree (old/new BK-set Poseidon commitments) with two SHA-256 siblings against the `block_id` already verified by Circuit 1A/1B, then advances `storedBkSetCommitment` directly. No Circuit 3 is in the production path.
 
 Block-finalization proofs feed the contract a rolling commitment to Acki Nacki history (the layer-hash windows of `GlobalHistoryData`). Withdrawal proofs publish a single `final_root` that the contract matches against any cell in those windows.
 

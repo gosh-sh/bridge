@@ -44,9 +44,10 @@ pub(super) const PREFIX: &str = "event";
 /// host: `KeyManagerState::new` compares the manifest format, this
 /// revision, and the vk/config digests against what is on disk, and if
 /// they still match after a circuit edit the daemon reuses the old keys.
-/// The proof then verifies against the old VK inside the prover, is
-/// rejected at stage 5 by the on-chain verifier, and the failure surfaces
-/// after the burn and the anchor wait.
+/// The proof is then built with the old proving key and rejected in
+/// stage 5 by the prover's own native self-verification against the
+/// mismatched circuit (the relayer surfaces it as
+/// `failed native self-verification`), after the burn and the anchor wait.
 ///
 /// So the two travel together: edit the circuit, bump this.
 ///

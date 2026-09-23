@@ -24,8 +24,7 @@ bridge-poseidon = { path = "../bridge-poseidon" }
 # `github.com/x/y` and `github.com/x/y.git` as DIFFERENT sources, so any
 # other crate in the graph that spells the URL with `.git` (e.g.
 # `dense-balanced-tree -> tvm_vm`) will pull a second copy. Tag pin
-# additionally prevents drift with tvm-sdk's `main`. Kept in sync with
-# `[patch."https://github.com/tvmlabs/tvm-sdk.git"]` in the workspace root.
+# additionally prevents drift with tvm-sdk's `main`.
 tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", package = "tvm_types" }
 tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", package = "tvm_block" }
 failure = "0.1"

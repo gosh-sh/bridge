@@ -38,7 +38,7 @@ that summary current.
 
 The node maintains, per thread and per layer `L ∈ {0..10}`, a
 fixed-size circular buffer of `W = 128` Poseidon hashes (see
-`GLOBAL_HISTORY_DATA_SPEC.md` in `bridge/crates/bridge-circuits/docs/`).
+`GLOBAL_HISTORY_DATA_SPEC.md` in `crates/bridge-circuits/docs/`).
 Layer 0 holds per-block leaves `Poseidon(block_id ‖ envelope_hash ‖
 ext_out_messages_root)` — appended every finalized block. Layer
 `L ≥ 1` holds the Poseidon-Merkle root of the previous full layer-`L-1`
@@ -138,7 +138,7 @@ lower layer at the same window), *forward* (advance one full window at
 the current layer), and *descend* (drop to a higher layer). The producer's
 emission cadence is unchanged — thinning is purely a prover-side
 relay-rate change. See
-`BRIDGE_PROVER_THINNING_SPEC.md` in `bridge/crates/bridge-circuits/docs/`
+`BRIDGE_PROVER_THINNING_SPEC.md` in `crates/bridge-circuits/docs/`
 for the catalogue of chain shapes and slack analysis.
 
 ---

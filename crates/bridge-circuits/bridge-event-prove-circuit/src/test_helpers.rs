@@ -580,7 +580,7 @@ pub fn compute_leading_public_inputs(
 /// order.
 ///
 /// `anchor_layer` is the 1-indexed layer index the on-chain verifier uses
-/// to route to the correct `anchorRoots[layer]` mapping and is
+/// to route to the correct `_layerWindows[layer]` history window and is
 /// range-checked `1..=MAX_ANCHOR_LAYER` inside the circuit.
 pub fn make_instances(
     leading: LeadingPublicInputs,

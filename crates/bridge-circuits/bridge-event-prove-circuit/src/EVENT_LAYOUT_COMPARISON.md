@@ -196,7 +196,8 @@ hashes. Slot indices are exported as `PUB_*` constants.
 [6]   dappFr         bytes_to_fr(account_dapp_id)    (destination dApp)
 [7]   accFr          bytes_to_fr(account_id)         (destination account)
 [8]   nullifier      Poseidon(block_id_fr, tokenId, amount,
-                              recipientHi, recipientLo, senderAccFr)
+                              recipientHi, recipientLo, senderAccFr,
+                              eventsPos)
 [9 .. 9+NUM_LAYER_HASHES] layer hash candidates
 ```
 
@@ -239,7 +240,7 @@ appears in the body BOC and can be parsed/bound the same way as
 
 ### 4.8 Nullifier (slot 8)
 
-Single-sponge call (`hash_fix_len_array` over 6 Fr inputs, RATE=2 → 3 absorb
+Single-sponge call (`hash_fix_len_array` over 7 Fr inputs, RATE=2 → 4 absorb
 rounds + squeeze). Native counterpart is `test_helpers::nullifier_native`,
 which delegates to `bridge_poseidon::poseidon_hash_fr` for the same params
 (T=3, R_F=8, R_P=57). MockProver checks instance equality, so test

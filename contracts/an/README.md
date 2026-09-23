@@ -24,10 +24,13 @@ verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Two writers fill
 the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which is one-way and needs a light client first;
-the light client adds and ages out hashes with `acceptBlockHashFromLightClient`
-and `forgetBlockHashFromLightClient`. `getAnchorConfig()` returns the light
-client and whether the owner may still write.
+until `disableOwnerAnchors()`, which needs a light client first; the light
+client adds and ages out hashes with `acceptBlockHashFromLightClient` and
+`forgetBlockHashFromLightClient`. `getAnchorConfig()` returns the light client
+and whether the owner may still write. No function turns owner anchors back on,
+but the owner keeps two ways around it: `updateCode` does (`onCodeUpgrade` sets
+the flag back to true), and `setLightClientCode` still replaces the light
+client afterwards.
 
 | Path | Contents |
 |------|----------|

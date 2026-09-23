@@ -80,7 +80,7 @@ The public-instance vector is fixed at `11` and the Circuit 4 VK is **independen
 
 ## Thinning (W, P)
 
-Full design in [`BRIDGE_PROVER_THINNING_SPEC.md`](./BRIDGE_PROVER_THINNING_SPEC.md). Quick summary:
+Full design in [`BRIDGE_PROVER_THINNING_SPEC.md`](./docs/BRIDGE_PROVER_THINNING_SPEC.md). Quick summary:
 
 - `W` ≡ `HISTORY_PROOF_WINDOW_SIZE` (producer-side: layer-`L` hashes emitted every `W^L` blocks).
 - `P` ≡ `THINNING_FACTOR_P` (prover-side: relay one bundle per `P` key blocks; bundle covers `W·P` source blocks).
@@ -470,5 +470,5 @@ Circuit 4's VK is now **W-independent** (single `final_root` public input), so n
 
 ## Companion Specs
 
-- [`BRIDGE_PROVER_THINNING_SPEC.md`](./BRIDGE_PROVER_THINNING_SPEC.md) — full thinning design (the math behind `P`, chain-shape catalogue, throughput analysis, open issues).
-- [`GLOBAL_HISTORY_DATA_SPEC.md`](./GLOBAL_HISTORY_DATA_SPEC.md) — reverse-engineered `GlobalHistoryData` spec; what the bridge contract mirrors.
+- [`BRIDGE_PROVER_THINNING_SPEC.md`](./docs/BRIDGE_PROVER_THINNING_SPEC.md) — full thinning design (the math behind `P`, chain-shape catalogue, throughput analysis, open issues).
+- [`GLOBAL_HISTORY_DATA_SPEC.md`](./docs/GLOBAL_HISTORY_DATA_SPEC.md) — reverse-engineered `GlobalHistoryData` spec; what the bridge contract mirrors.

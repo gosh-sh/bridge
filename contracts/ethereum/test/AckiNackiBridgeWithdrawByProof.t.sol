@@ -498,9 +498,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             "both amounts debited from treasury"
         );
         assertEq(
-            usdc.balanceOf(RECIPIENT),
-            recipientBefore + 2 * amount,
-            "recipient credited twice"
+            usdc.balanceOf(RECIPIENT), recipientBefore + 2 * amount, "recipient credited twice"
         );
     }
 
@@ -770,9 +768,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-nc"))));
         pub.anchorLayer = Bn254FrLib.R;
         vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.FieldElementOutOfRange.selector, Bn254FrLib.R
-            )
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, Bn254FrLib.R)
         );
         bridge.withdrawByProof(_dummyProof(), pub);
     }
@@ -792,9 +788,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l1-as-l2"))));
         pub.anchorLayer = 2;
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, seedAnchor)
-        );
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, seedAnchor));
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 

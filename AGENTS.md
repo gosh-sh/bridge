@@ -165,34 +165,6 @@ Circuit 4 proof, nullifier-guarded. Each circuit is verified by a SHPLONK aggreg
 relayer submits them. Contract detail: [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md);
 custody and accounting: [`docs/EVM-custody-and-accounting.md`](docs/EVM-custody-and-accounting.md).
 
-## Pitfalls
-
-- **Never hand-edit the VkBlob hex** in `eccUSDCBridge.sol`: rotate it with
-  `scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol`; CI runs the same script
-  with `--check`. After a deposit-circuit change, run the MockProver pre-flight
-  (`cd deposit-prover && cargo run --release --example mock_fixture -- <input.json> [--mutate header-pad]`)
-  before paying for keygen.
-- **The bridge and its voucher are recompiled and redeployed as a pair.** `eccUSDCBridge` embeds
-  `DepositVoucher`'s code, so a change to the voucher's ABI compiles cleanly against a stale
-  `_depositVoucherCode` and then aborts every voucher constructor on chain (`exit_code 9`) — no
-  deposit mints. `scripts/check_voucher_abi_consistency.py` (in CI) compares the sources and the
-  compiled ABIs under `contracts/an/`. It does not cover the ABI copies the tooling loads,
-  `crates/ackinacki-bridge/abi/USDCBridge.abi.json` and
-  `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`, whose `confirmDeposit`
-  still lacks `chainId`.
-- **The KZG setup is Hermez.** Every prover in this repository loads the Hermez Perpetual Powers of
-  Tau (`s_g2` head `928fafb3d0cc`) and refuses anything else: `assert_hermez_ceremony` in
-  `crates/bridge-evm-aggregator/src/srs_guard.rs`, `assert_hermez_srs` in
-  `crates/bridge-prover-libraries/bridge-prover-lib/src/keys/common.rs`, and
-  `load_kzg_params_from_trusted_setup` in `deposit-prover/src/prover.rs`, which reads only
-  `data/kzg_params_{k}.srs`. A missing SRS must never be replaced by `gen_srs`: whoever generated it
-  knows tau and can forge proofs. The header of `deposit-prover/download_trusted_setup.sh` still
-  describes an Acki Nacki chain ceremony (`c6028acf…`) as the production deposit setup; the code does
-  not load it.
-- **A fresh clone or worktree has no Solidity dependencies** (`lib/` and `node_modules/` are
-  gitignored): `cd contracts/ethereum && npm install && forge install --no-git foundry-rs/forge-std`,
-  or `make setup`.
-
 ## Upstream repositories
 
 Pinned in the `Cargo.toml` files; clone them next to this repository when you need their source.

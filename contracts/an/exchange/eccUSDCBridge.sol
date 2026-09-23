@@ -141,8 +141,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // (verified via keygen-only regen from current circuit_v2.rs on 2026-08-07).
     // Magic "VKBLOB\x00\x00" + version 2, shape "Rlc". 5006 bytes;
     // sha256 = 9dacd998af5fd03af8097cb80a571df098c925bba235af61d920cc808360fae3.
-    // To rotate: regenerate via deposit-prover `export_vk_blob` and replace
-    // the constant below (and the fixtures under tests/exchange/fixtures).
+    // To rotate: regenerate the fixture above with deposit-prover's
+    // `export_vk_blob`, then rewrite the constant below with
+    //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol
+    // — never by hand; CI runs the same script with --check. The fixtures
+    // under tests/exchange/fixtures follow the new blob.
     bytes constant VK_BLOB =
         hex"564b424c4f4200000200010000000000ec0000007b22726c63223a7b2262617365223a7b226b223a31382c226e756d5f6164"
         hex"766963655f7065725f7068617365223a5b31372c31335d2c226e756d5f6669786564223a312c226e756d5f6c6f6f6b75705f"

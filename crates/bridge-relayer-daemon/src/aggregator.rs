@@ -1212,8 +1212,14 @@ mod tests {
         let bytes = proof.proof_bytes().unwrap();
         assert!(bytes.len() >= SHPLONK_MIN_WITHDRAWAL_INSTANCES);
         // The eleven public inputs decode into a well-formed struct.
+        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :634-637),
+        // so slot 0 (`token_id`) decodes as 0 and slot 10 (`anchor_layer`) as 10.
+        // Slot 10 is the newest addition; guarding it here means a slot-swap
+        // that reordered the last two instances trips this pipeline test, not
+        // just downstream JSON consumers.
         let pi = proof.public_inputs().unwrap();
-        assert_eq!(pi.token_id, U256::ZERO); // MockCircuit4SnarkProver: instance[0]=0
+        assert_eq!(pi.token_id, U256::ZERO);
+        assert_eq!(pi.anchor_layer, U256::from(10u64));
         std::fs::remove_dir_all(&dir).ok();
     }
 

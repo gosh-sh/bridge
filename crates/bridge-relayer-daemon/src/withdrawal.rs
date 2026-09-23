@@ -257,6 +257,48 @@ mod tests {
         let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
         let pi = p.public_inputs().unwrap();
         assert_eq!(pi.token_id, U256::from(3u64));
+        // Slot 10 (`anchor_layer`) is the newest addition in the R6 layout
+        // and lives in the very last public-instance entry. Guarding it
+        // explicitly so a future off-by-one that swapped the last two
+        // slots (or dropped `anchor_layer` entirely) trips this test
+        // immediately — the on-chain revert path is `WithdrawIdentityMismatch`
+        // / `InvalidNumLayers`, so a mutation here would break every
+        // withdraw with a misleading error.
+        assert_eq!(pi.anchor_layer, U256::from(1u64));
+    }
+
+    /// Negative: a `proof_event_*.json` carrying 12 public instances
+    /// (one too many for the current layout) must fail
+    /// `public_inputs()` — silent truncation would let a payload with an
+    /// extra field sneak through, and any decoder that ignored the
+    /// trailing entry would still match the first 11 slots. Guards
+    /// against a future layout bump that forgets to update
+    /// `WITHDRAWAL_PUBLIC_INPUTS` on the consumer side.
+    #[test]
+    fn public_inputs_rejects_wrong_instance_count() {
+        let mut hexes: Vec<String> = (0..WITHDRAWAL_PUBLIC_INPUTS + 1)
+            .map(|i| format!("{:02x}{}", (i + 1) as u8, "00".repeat(31)))
+            .collect();
+        let p = PartnerWithdrawalProof {
+            seq_no: 0,
+            proof_hex: "aa".into(),
+            public_instances_hex: hexes.clone(),
+            self_verified: false,
+        };
+        assert!(p.public_inputs().is_err(), "12 instances must not decode");
+        // And 10 (one short) also fails.
+        hexes.pop();
+        hexes.pop();
+        let p_short = PartnerWithdrawalProof {
+            seq_no: 0,
+            proof_hex: "aa".into(),
+            public_instances_hex: hexes,
+            self_verified: false,
+        };
+        assert!(
+            p_short.public_inputs().is_err(),
+            "10 instances must not decode either"
+        );
     }
 
     fn proof_json_with(proof_len: usize) -> String {

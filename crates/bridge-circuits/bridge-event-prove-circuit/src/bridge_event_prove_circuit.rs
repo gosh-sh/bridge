@@ -1809,17 +1809,20 @@ mod tests {
         prover.assert_satisfied();
     }
 
-    /// Belt-and-suspenders: the native nullifier produced by
-    /// `compute_leading_public_inputs` (= `nullifier_native(...)`) is the
-    /// value the in-circuit `hash_fix_len_array` emits at instance slot
-    /// `PUB_NULLIFIER`. MockProver checks instance equality, so if this test
-    /// passes the circuit and native paths agree.
+    /// Sanity check on the native nullifier slot produced by
+    /// `compute_leading_public_inputs` (= `nullifier_native(...)`): the value
+    /// at `PUB_NULLIFIER` must be non-zero (Fr::zero would mean the hasher
+    /// silently absorbed nothing).
+    ///
+    /// This test does NOT run MockProver and therefore does not itself pin
+    /// circuit-vs-native equality on the nullifier slot. That equality is
+    /// covered by `test_build_synthetic_event_keygen_inputs_mock_prover`
+    /// (which does invoke MockProver and would surface any instance-slot
+    /// drift, including on `PUB_NULLIFIER`).
     #[test]
     fn test_nullifier_recomputes_natively() {
         let (_circuit, instances) = build_synthetic_event_keygen_inputs(0xDEAD_BEEF);
         let nullifier = instances[PUB_NULLIFIER];
-        // Not zero is a weak but useful invariant — Fr::zero would mean the
-        // hasher silently absorbed nothing.
         assert_ne!(nullifier, Fr::zero(), "nullifier must not be zero");
     }
 

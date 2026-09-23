@@ -448,15 +448,15 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
     }
 
-    /// @notice On-chain replay guard for identical nullifiers. `events_pos`
-    ///         is bound into the Poseidon preimage, so two *distinct* AN
-    ///         `WithdrawalInitiated` events in the same block produce
-    ///         distinct circuit nullifiers and neither is stranded. This
-    ///         test still asserts the belt-and-suspenders on-chain mapping:
-    ///         if the same nullifier is somehow presented twice (e.g. a
-    ///         literal proof replay), the second `withdrawByProof` reverts
-    ///         with `NullifierAlreadyUsed` and no double-payout occurs.
-    function test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked() public {
+    /// @notice On-chain replay guard for a literal proof/nullifier replay.
+    ///         Two invocations that carry the *same* nullifier value —
+    ///         regardless of what event they claim to attest — must produce
+    ///         at most one payout. Note: distinct AN `WithdrawalInitiated`
+    ///         events (even in the same block) do NOT reach this branch,
+    ///         because `events_pos` is bound into the Poseidon preimage and
+    ///         gives each event a distinct circuit nullifier
+    ///         (see `test_twoDistinctBurns_sameFields_bothSucceed`).
+    function test_sameNullifierPresentedTwice_secondPayoutBlocked() public {
         uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
         uint256 amount = 1 * UsdcTestLib.UNIT;
         uint256 treasuryBefore = bridge.treasuryBalance();
@@ -472,12 +472,18 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(bridge.treasuryBalance(), treasuryBefore - amount, "second amount not paid");
     }
 
-    /// @notice Positive: two DIFFERENT nullifiers (as the circuit emits when
-    ///         `events_pos` differs) sharing the same block / token / amount
-    ///         / recipient all execute end-to-end.
-    ///         Together with `test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked`
-    ///         this pins the mapping-based replay guard as the SOLE nullifier
+    /// @notice On-chain positive: two distinct nullifier values that agree
+    ///         on every other public input (block / token / amount /
+    ///         recipient) both execute end-to-end. Together with
+    ///         `test_sameNullifierPresentedTwice_secondPayoutBlocked` this
+    ///         pins the mapping-based replay guard as the SOLE nullifier
     ///         gate — no accidental over-guarding on any other pub field.
+    ///
+    ///         Scope: exercises the on-chain `NullifierAlreadyUsed` mapping
+    ///         only. The mock verifier never inspects `events_pos`, so this
+    ///         test does NOT witness the circuit's `events_pos`-based
+    ///         nullifier disambiguation — that lives in the Circuit 4
+    ///         gadget tests (`bridge-event-prove-circuit`).
     function test_twoDistinctBurns_sameFields_bothSucceed() public {
         uint256 amount = 1 * UsdcTestLib.UNIT;
         uint256 nullifierA = Bn254FrLib.toFr(uint256(keccak256("dup-burn-evt0")));
@@ -755,6 +761,49 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, pub.anchorLayer)
         );
         bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice Boundary companion to
+    ///         `test_withdrawByProof_anchorLayerAboveMax_reverts`: the exact
+    ///         inclusive edge `anchorLayer == MAX_LAYER_HASHES` must be
+    ///         accepted. Without this test, a slip of the range guard from
+    ///         `> MAX_LAYER_HASHES` to `>= MAX_LAYER_HASHES` would silently
+    ///         pass every other layer test (all use anchorLayer <= 3).
+    function test_withdrawByProof_anchorLayerAtMax_succeeds() public {
+        uint8 maxLayers = uint8(bridge.MAX_LAYER_HASHES());
+
+        // Seed a block that populates every layer window up to MAX_LAYER_HASHES
+        // so `_isKnownLayerAnchor(MAX_LAYER_HASHES, finalRoot)` returns true.
+        uint256[10] memory layers;
+        for (uint256 i = 0; i < maxLayers; i++) {
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("max-layer-seed", i))));
+        }
+        uint256 maxLayerAnchor = layers[maxLayers - 1];
+
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("max-att")),
+            abi.encodePacked(keccak256("max-lh")),
+            FIRST_BLOCK_ID + 1,
+            BK_SET,
+            FIRST_SEQ_NO + 1,
+            maxLayers,
+            layers,
+            bridge.expectedPrevAnchor(maxLayers)
+        );
+        assertTrue(
+            bridge.isKnownLayerAnchor(maxLayers, maxLayerAnchor),
+            "max-layer window must be seeded before withdraw"
+        );
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("max-layer-withdraw")))
+        );
+        pub.finalRoot = maxLayerAnchor;
+        pub.anchorLayer = uint256(maxLayers);
+
+        bool ok = bridge.withdrawByProof(_dummyProof(), pub);
+        assertTrue(ok, "withdrawal at anchorLayer == MAX_LAYER_HASHES must succeed");
     }
 
     /// @notice Canonical-Fr guard: a non-canonical `anchorLayer`

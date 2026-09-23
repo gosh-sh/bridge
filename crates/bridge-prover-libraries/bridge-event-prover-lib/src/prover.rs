@@ -184,8 +184,30 @@ pub fn build_proof_inputs(
             events_siblings.len(),
         );
     }
+    // Mirror `BridgeEventProveCircuit::assert_invariants`'s events_pos range
+    // check here so an out-of-range witness surfaces as a decoded error with
+    // context rather than a blocking-task join failure from the panic that
+    // fires when the circuit is later synthesized on a worker thread.
+    let events_pos_max = 1usize << events_siblings.len();
+    if events_pos >= events_pos_max {
+        bail!(
+            "events_tree_proof position {events_pos} out of range for depth {} (max={events_pos_max})",
+            events_siblings.len(),
+        );
+    }
 
     let (block_siblings, block_pos) = merkle_proof_to_native(block_tree, "block_tree_proof")?;
+    // Same range mirror for the block-tree position; the circuit constructor
+    // does not currently panic on this axis but a future refactor could add
+    // an equivalent bounds check, and reporting here keeps both axes
+    // symmetric under a decoded error path.
+    let block_pos_max = 1usize << block_siblings.len();
+    if block_pos >= block_pos_max {
+        bail!(
+            "block_tree_proof position {block_pos} out of range for depth {} (max={block_pos_max})",
+            block_siblings.len(),
+        );
+    }
 
     let account_dapp_id = parse_hex_array::<32>(
         "block_context.account_dapp_id_hex",

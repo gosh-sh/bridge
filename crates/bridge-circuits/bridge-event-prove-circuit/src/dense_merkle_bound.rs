@@ -205,9 +205,15 @@ pub(crate) fn walk_dense_merkle_bind_pos(
 //   * positive walks at bit patterns today's fixtures never touch
 //     (pos = 255 at max depth; pos = 129 on a 130-leaf non-power-of-two
 //     tree — same depth-8 tree the events proof walks on chain);
-//   * a wrong position witness (bit pattern differs inside the active
-//     range) desynchronizes the walked path from the honest proof, so
-//     the equality constraint on `expected_root` fails;
+//   * a wrong position witness whose bit pattern differs inside the
+//     active range makes the walker take a different path. This gadget
+//     does not by itself compare its output root to anything, so in the
+//     test the reject only fires via the test-only `expected_root`
+//     equality constraint added inside `run_gadget` — active-bit binding
+//     in production rests on the walked root flowing into `final_root`
+//     and being compared against `_layerWindows[anchorLayer]` in
+//     `withdrawByProof` on chain (see the header comment on
+//     [`test_dense_merkle_bound_negative_flipped_bit_within_active_levels`]);
 //   * `walk_dense_merkle_bind_pos` rejects a position with a bit set
 //     above `num_active_levels` (the zero-forcing loop trips) —
 //     including the boundary case `j == num_active_levels`;

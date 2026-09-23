@@ -21,7 +21,7 @@
 //!                       It is a PRIVATE witness — soundness comes from
 //!                       binding its bit-decomposition to the events-tree
 //!                       merkle path via
-//!                       [`dense_merkle_bound::dense_merkle_root_padded_bound`],
+//!                       [`dense_merkle_bound::walk_dense_merkle_bind_pos`],
 //!                       so the value hashed IS the position walked.
 //!   9: finalRoot      — Anchor root the proof binds to. The verifier
 //!                       checks `finalRoot` against the layer window named
@@ -964,7 +964,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 // events in the same AN block collide-free at the
                 // replay-protection layer. It stays PRIVATE — soundness
                 // comes from binding its bit-decomposition to the
-                // events-tree walker above (`dense_merkle_root_padded_bound`).
+                // events-tree walker above (`walk_dense_merkle_bind_pos`).
                 let nullifier_fr = hasher.hash_fix_len_array(
                     ctx,
                     gate,

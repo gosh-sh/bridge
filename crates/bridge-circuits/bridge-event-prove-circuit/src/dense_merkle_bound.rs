@@ -57,7 +57,7 @@ use crate::poseidon::{RATE, T};
 ///   bound direction bit with the preprocessor's `direction_bit = false`
 ///   convention on padded levels, so the chunk-decomposition constraints
 ///   inside the walk hold uniformly across active/inactive levels.
-pub fn dense_merkle_root_padded_bound(
+fn dense_merkle_root_padded_bound(
     ctx: &mut Context<Fr>,
     range: &impl RangeInstructions<Fr>,
     hasher: &PoseidonHasher<Fr, T, RATE>,
@@ -134,9 +134,11 @@ pub fn dense_merkle_root_padded_bound(
 /// `pos_witness` cell into both this gadget and the external hash, or the
 /// binding is trivially forgeable.
 ///
-/// The raw walker [`dense_merkle_root_padded_bound`] is left public so
-/// gadget-level regression tests can demonstrate what happens WITHOUT the
-/// zero-forcing loop — real circuit code should never call it directly.
+/// The raw walker `dense_merkle_root_padded_bound` is module-private; the
+/// child-module regression tests reach it via `super::` and use it to
+/// demonstrate what happens WITHOUT the zero-forcing loop. External callers
+/// cannot bypass this gadget's binding guarantees by depending on the raw
+/// walker directly.
 pub(crate) fn walk_dense_merkle_bind_pos(
     ctx: &mut Context<Fr>,
     range: &impl RangeInstructions<Fr>,
@@ -561,13 +563,17 @@ mod tests {
     /// gadget, never the raw walker.
     ///
     /// Note: this test records the raw walker's *weakness* as a **passing**
-    /// assertion (`assert!(run_gadget_raw_walker_no_binding(...))`). If the
-    /// header's future plan — lifting the zero-forcing into
-    /// [`dense_merkle_root_padded_bound`] itself so callers can no longer
-    /// bypass it — ever lands, this test will turn red and should be either
-    /// deleted or inverted to `assert!(!...)`. Until then, the passing
-    /// assertion is the regression witness the composed gadget was built to
-    /// close.
+    /// assertion (`assert!(run_gadget_raw_walker_no_binding(...))`). The
+    /// header's future plan is to lift `walk_dense_merkle_bind_pos` (the
+    /// composed gadget, including its zero-forcing loop) into
+    /// `gosh-dense-balanced-tree` so every consumer of that crate gets a
+    /// position-bindable walker without having to duplicate this module.
+    /// That does not change the raw walker's semantics — it stays as
+    /// permissive as it is today upstream — so this regression test
+    /// continues to hold after the lift. It would only turn red if some
+    /// later change strengthened the raw walker itself (e.g. moved the
+    /// zero-forcing inside it), at which point invert the assertion or
+    /// delete the test.
     #[test]
     fn test_dense_merkle_bound_raw_walker_accepts_bit_above_active_levels() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xCAFE);

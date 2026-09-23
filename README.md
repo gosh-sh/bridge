@@ -104,6 +104,7 @@ are symlinked members of `crates/bridge-prover-libraries/` and build only from t
 make setup                 # toolchains and dependencies
 make build                 # Rust workspace + Solidity
 make test                  # both test suites
+make test-all              # every crate's tests + forge test
 make check                 # format-check + lint + test
 ```
 

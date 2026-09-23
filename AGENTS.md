@@ -164,6 +164,7 @@ Acki Nacki endpoints and ports are in [`docs/eth-light-client.md`](docs/eth-ligh
 make setup                 # toolchains and Solidity dependencies
 make build                 # root workspace + Solidity
 make test                  # root workspace tests + forge test
+make test-all              # every crate's tests + forge test; lists what failed at the end
 make pre-push              # everything a branch should pass; see CI below
 make format                # rustfmt every crate, then forge fmt
 
@@ -216,7 +217,9 @@ what stands between a branch and a Rust regression.
 ### What no pipeline runs
 
 `make pre-push` covers the root workspace, `bridge-relayer-daemon` and `bridge-evm-aggregator`. No
-pipeline and no `make` target runs the tests of:
+pipeline runs the tests of the crates below; `make test-all` runs them with everything else, keeps
+going past a failing suite and lists the failures at the end, leaving `#[ignore]`d tests skipped. To
+run one on its own:
 
 - the other members of `crates/bridge-prover-libraries` — `ackinacki-bridge`, `bridge-prover-lib`,
   `bridge-gql-fetcher`, `bridge-event-prover-lib`, `bridge-event-witness`; run them from that

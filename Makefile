@@ -1,5 +1,5 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy aggregator-fmt \
+        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy aggregator-fmt test-all \
         english-check
 
 # Default target
@@ -70,10 +70,27 @@ test-coverage: ## Generate test coverage report
 
 # Crates outside the root workspace that are packages of their own. The relayer
 # and the withdrawal CLI are members of crates/bridge-prover-libraries and are
-# formatted through it.
+# formatted and tested through it.
 STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
 	crates/bridge-evm-aggregator crates/bridge-snark-utils \
 	crates/deposit-relayer-daemon crates/eth-light-client-relayer
+
+# Every suite runs even when an earlier one fails; the failures are listed at
+# the end. --locked is passed only where a Cargo.lock is committed, and the
+# aggregator runs in release as in aggregator-test. #[ignore]d tests stay skipped.
+test-all: ## Run the tests of every Rust crate and the Solidity suite, then list what failed
+	@failed=""; \
+	run() { dir=$$1; shift; echo "$(BLUE)── $$dir: $$*$(NC)"; (cd $$dir && "$$@") || failed="$$failed $$dir"; }; \
+	run . cargo test --workspace --locked; \
+	run crates/bridge-prover-libraries cargo test --workspace --locked; \
+	for d in $(STANDALONE_CRATES); do \
+		flags=""; [ -f $$d/Cargo.lock ] && flags="--locked"; \
+		[ $$d = crates/bridge-evm-aggregator ] && flags="$$flags --release"; \
+		run $$d cargo test $$flags; \
+	done; \
+	run contracts/ethereum forge test; \
+	if [ -n "$$failed" ]; then echo "$(YELLOW)Failed:$$failed$(NC)"; exit 1; fi; \
+	echo "$(GREEN)All test suites passed$(NC)"
 
 format: ## Format all code (every Rust crate + Solidity)
 	@echo "$(BLUE)Formatting code...$(NC)"

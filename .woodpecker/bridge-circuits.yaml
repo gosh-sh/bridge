@@ -5,24 +5,29 @@
 # checker, the BLS attestation checker, cross-circuit block-id parity, and
 # the poseidon reference — used to require read access to a private gosh-sh
 # repo, so they never had a place in this pipeline. Since the vendoring PR
-# they build with only public deps, so a per-MR job is now safe and cheap
-# (~seconds under MockProver at K<=19).
+# they build with only public deps, so a per-MR job is now safe.
+#
+# Runtime shape: Circuit 4 + cross-circuit block-id are seconds under
+# MockProver at K<=19. Attestation-BLS MockProvers are K=20 and each
+# takes several minutes at ~10 GB RSS; real halo2 keygen+prove tests
+# (`test_real_prover_*`) are `#[ignore]`d because they take tens of minutes
+# and >14 GB RSS (see `PARALLEL_BENCHMARK_N14_REPORT.md:17`). Trigger
+# them manually with `cargo test -- --ignored` when the corresponding
+# circuit constraints change.
 #
 # `bridge-circuits/` is its own sub-workspace with a distinct halo2 backend
 # (see the header of `crates/bridge-circuits/Cargo.toml` for why the root
-# workspace excludes it). `cd`-then-`cargo test --workspace` from inside is
-# the only way to run its tests without dragging in the alloy/tvm graph.
+# workspace excludes it). `cd`-then-`cargo test` from inside is the only
+# way to run its tests without dragging in the alloy/tvm graph.
 #
-# `--ignored` is deliberately NOT passed:
-#   * `test_bridge_event_prove_circuit_real_proof_for_fixed_k` runs a real
-#     halo2 keygen at K=19 (~7 min, ~1.5 GB PK); it belongs to on-demand
-#     runs, not per-MR CI. Trigger it manually with
-#     `cargo test -- --ignored` when a Circuit 4 constraint change lands.
-#
-# `--locked` is also NOT passed: `crates/bridge-circuits/Cargo.lock` is
+# `--locked` is NOT passed: `crates/bridge-circuits/Cargo.lock` is
 # gitignored (see `.gitignore`), so a fresh CI clone has no lockfile to
 # lock to. The `[patch.crates-io]` block in the sub-workspace root pins the
-# halo2-axiom backend deterministically regardless of resolution order.
+# halo2-axiom backend to a specific git commit (branch = "main"); if
+# upstream halo2-axiom moves, `cargo test` will pick up the new tip on the
+# next CI run. That is deliberate — the sub-workspace tracks the backend
+# used by the production `crates/bridge-prover-libraries` prover, which
+# also resolves to the same tip.
 #
 # All gosh-sh git repos in the dependency graph are public post-vendoring,
 # so cargo fetches every dep anonymously — no GitHub token or url rewrite
@@ -37,19 +42,40 @@ variables:
   - &rust_image "docker.gosh.sh/rust"
 
 steps:
-  bridge-circuits-tests:
+  # ---------------------------------------------------------------------------
+  # Step 1: fast MockProver tests (Circuit 4 + cross-circuit block-id).
+  # Runs first and independently so a red result in the slower step below
+  # does not hide a Circuit 4 regression — and so reviewers see the
+  # bug-fix regressions (BRIDGE-WD-01, ETH-15) pass or fail in seconds.
+  # ---------------------------------------------------------------------------
+  bridge-circuits-fast:
+    image: *rust_image
+    environment:
+      CARGO_HOME: .cargo_home
+    commands:
+      - cd crates/bridge-circuits
+      - cargo test --no-fail-fast
+          -p bridge-event-prove-circuit
+          -p cross-circuit-block-id-test
+
+  # ---------------------------------------------------------------------------
+  # Step 2: the rest of the sub-workspace (attestation-BLS MockProvers,
+  # historical-layer-hashes MockProver, poseidon reference, test-data-gen).
+  # `RUST_TEST_THREADS=1` keeps peak RSS bounded — the K=20 attestation
+  # MockProvers pull several GB of witness tables each; running them in
+  # parallel OOM-kills the CI worker (SIGKILL). `--no-fail-fast` so a
+  # single flake doesn't hide the rest.
+  # ---------------------------------------------------------------------------
+  bridge-circuits-heavy:
     image: *rust_image
     environment:
       # Keep cargo's registry cache inside the workspace so re-runs on the
       # same worker reuse the same `$CARGO_HOME/git` checkouts (matches
       # `release.yaml`'s convention).
       CARGO_HOME: .cargo_home
-      # Serialize test execution: the heaviest MockProver run (attestation
-      # BLS checker) is K=20 (~1M rows) and pulls several GB of witness
-      # tables. Running the crate's ~5 heavy `#[test]` fns in parallel
-      # OOM-kills the CI worker (SIGKILL). One-at-a-time keeps peak RSS
-      # bounded; the whole suite still finishes in minutes.
       RUST_TEST_THREADS: "1"
     commands:
       - cd crates/bridge-circuits
-      - cargo test --workspace
+      - cargo test --workspace --no-fail-fast
+          --exclude bridge-event-prove-circuit
+          --exclude cross-circuit-block-id-test

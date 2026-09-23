@@ -247,12 +247,24 @@ fn run_primary_real_prover_case(max_signers: usize, bk_set_sizes: &[usize]) {
 
 /// Universality check at `MAX_SIGNERS = 300`: one VK/PK proves across
 /// three BK set sizes.
+///
+/// Gated behind `#[ignore]`: this runs a real K=20 halo2 keygen + several
+/// proofs at 300 signers — the same weight class as the sizing tests
+/// below (~110 s per proof, ~14 GB RSS, ~3.5 GB PK per
+/// `PARALLEL_BENCHMARK_N14_REPORT.md:17`). It belongs to on-demand runs,
+/// not per-MR CI. Trigger it manually with `cargo test -- --ignored`
+/// when the primary aggregator or `MAX_SIGNERS` changes.
 #[test]
+#[ignore]
 fn test_real_prover_primary_multi_bk_set() {
     run_primary_real_prover_case(MAX_SIGNERS, &[10, 100, 299, 300]);
 }
 
+/// Same rationale as `test_real_prover_primary_multi_bk_set` above —
+/// real K=20 keygen + real proof at the production ceiling. `#[ignore]`d
+/// so per-MR CI doesn't drag it in.
 #[test]
+#[ignore]
 fn test_real_prover_primary_max_300() {
     run_primary_real_prover_case(MAX_SIGNERS, &[MAX_SIGNERS]);
 }

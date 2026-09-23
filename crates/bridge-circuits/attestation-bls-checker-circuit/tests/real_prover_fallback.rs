@@ -112,7 +112,13 @@ fn keygen_and_cache(
 // Main test
 // ---------------------------------------------------------------------------
 
+/// Real K=20 fallback aggregator keygen + three proofs across the
+/// `[10, 100, 299]` BK-set sweep. Same weight class as
+/// `test_real_prover_primary_multi_bk_set` — on-demand only, gated
+/// behind `#[ignore]` so per-MR CI doesn't OOM-kill the worker.
+/// Trigger with `cargo test -- --ignored`.
 #[test]
+#[ignore]
 fn test_real_prover_fallback_multi_bk_set() {
     let vk_path = format!("{}/fallback_vk.bin", ARTIFACT_DIR);
     let pk_path = format!("{}/fallback_pk.bin", ARTIFACT_DIR);

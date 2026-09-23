@@ -120,7 +120,13 @@ const TEST_CASES: &[(usize, usize)] = &[
     (10, 10), // max layers, max chain
 ];
 
+/// Real K=17 layer-hashes-movement-checker keygen + six proofs across
+/// the `(layers, chain)` sweep above. Cheaper than the K=20 attestation
+/// aggregators but still tens of seconds per proof; gated behind
+/// `#[ignore]` for CI hygiene — trigger with `cargo test -- --ignored`
+/// when a `LayerHashesCircuit` constraint changes.
 #[test]
+#[ignore]
 fn test_real_prover_layer_hashes_sweep() {
     let cache = format!(
         "{}/{}",

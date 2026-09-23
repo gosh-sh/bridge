@@ -70,9 +70,15 @@ assigns it when the release is tagged.
   not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover
   host regenerates its Circuit 4 keys on first use — the bump is what
   makes the key cache reject an `event_pk.bin` / `event_vk.bin` from the
-  pre-rotation constraint system. Keygen (over the `K = 20` SRS) blocks
-  the next `verifyBlock` or withdraw cycle; preseed `BRIDGE_PARAMS_DIR`
-  to skip it.
+  pre-rotation constraint system. Keygen (over the `K = 20` SRS) runs at
+  stage 5 of the next `ackinacki-bridge withdraw`, `relayer
+  withdraw-e2e` or bare CLI proof job, whichever fires first — see
+  `preflight.rs:1595` (`"Circuit-4 keys will be generated on this run"`)
+  for the operator-facing signal. It has nothing to do with `verifyBlock`
+  on the ETH side, which reads only the aggregator VK. To skip the ~2.65
+  GB write and the associated wall time, preseed `--params-dir` with an
+  `event_pk.bin` + `event_vk.bin` pair whose sibling
+  `event_circuit_revision` reads `3`.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
@@ -281,17 +287,21 @@ assigns it when the release is tagged.
 ### Changed
 
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
-  building the prover, CLI or aggregator no longer needs read access to a
-  private repository.** The five crates
-  (`attestation-bls-checker-circuit`,
+  building the prover or the CLI no longer needs read access to a private
+  repository.** The five crates (`attestation-bls-checker-circuit`,
   `historical-layer-hashes-movement-checker-circuit`,
   `bridge-event-prove-circuit`, `bridge-poseidon`, `bridge-test-data-gen`)
   used to live in gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits, pinned
   by revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
-  which no longer applies). `bridge-prover-libraries` and
-  `bridge-snark-utils` now reach them by workspace path; the external
-  `[patch]` block is gone, and a circuit edit plus its
-  `EVENT_CIRCUIT_REVISION` bump land in the same PR.
+  which no longer applies). `bridge-prover-libraries`,
+  `bridge-relayer-daemon` and `bridge-snark-utils` now reach the circuit
+  crates via path deps that cross sub-workspace boundaries
+  (`bridge-circuits` is a standalone sub-workspace, excluded from the
+  root workspace so its gosh-fork halo2 backend does not clash with the
+  root's); the external `[patch]` block is gone, and a circuit edit plus
+  its `EVENT_CIRCUIT_REVISION` bump land in the same PR.
+  `bridge-evm-aggregator` never depended on these crates and is
+  unaffected.
 
 - **`tvm-sdk` moves from `v3.0.5.an` to `v3.0.6.an`** across the root
   workspace, `crates/bridge-prover-libraries`,

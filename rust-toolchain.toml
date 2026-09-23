@@ -1,22 +1,11 @@
 [toolchain]
 # Pinned because `rustfmt.toml` is mostly nightly-only options
 # (`imports_granularity`, `group_imports`, `format_strings`, `wrap_comments`, …)
-# and CI runs `cargo clippy -- -D warnings`. On a rolling `nightly` both verdicts
-# are a moving target: a new nightly reflows code or adds a lint and the job goes
-# red on a commit nobody touched. Empirically, nightly-2026-06-05 and
+# and `make lint` runs `cargo clippy -- -D warnings`. On a rolling `nightly` both
+# verdicts are a moving target: a new nightly reflows code or adds a lint and the
+# check goes red on a commit nobody touched. Empirically, nightly-2026-06-05 and
 # nightly-2026-08-03 disagree about this tree, so "nightly" was never one thing.
-# Pinning also makes `make pre-push` locally mean what it means in CI.
-#
-# Verified on this commit under this toolchain: `cargo fmt --all -- --check` and
-# `cargo clippy --workspace --all-targets -- -D warnings` are clean at the root,
-# and clippy is clean in `crates/deposit-relayer-daemon`.
-#
-# Known not clean, both pre-existing and both deliberately left alone here because
-# PRs #20 and #27 are in flight over exactly these files:
-#   - `crates/bridge-relayer-daemon` — 40 `cargo fmt --check` diffs (#27 refactors
-#     that crate), so `lint:rust:relayer:fmt` is red independently of this pin;
-#   - `contracts/ethereum` — 16 `forge fmt --check` diffs including
-#     `src/AckiNackiBridge.sol`, so `lint:solidity:fmt` is red too.
+# Pinning also makes `make pre-push` give the same verdict on every machine.
 #
 # To bump: change the date, then run `make pre-push` and land any resulting
 # reformat in the *same* commit, so the tree is never clean under one toolchain

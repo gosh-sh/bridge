@@ -1609,7 +1609,12 @@ mod tests {
 
     /// Real (non-mock) prover: keygen once at T=1, then prove for a sweep of
     /// chain lengths and verify each proof.
+    ///
+    /// Marked `#[ignore]` because it runs a real halo2 keygen (~7 min at
+    /// `K = 19`, ~1.5 GB PK), which is too heavy for a per-MR CI job. Run
+    /// on demand with `cargo test -- --ignored`.
     #[test]
+    #[ignore]
     fn test_bridge_event_prove_circuit_real_proof_for_fixed_k() {
         use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
         use halo2_base::utils::fs::gen_srs;

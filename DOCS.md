@@ -17,7 +17,8 @@ is being emptied into — read the rules in it before writing anything new.
 | [`docs/aave-yield.md`](docs/aave-yield.md) | **Verified.** Operator runbook for the AAVE module: where the money sits, which collector applies to which pocket, the two ways to get it wrong, and the owner/`yieldRecipient` divergence. Written against the same commit. |
 | [`crates/ackinacki-bridge/QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md) · [`README.md`](crates/ackinacki-bridge/README.md) · [`docs/advanced_user_withdraw_runbook.md`](crates/ackinacki-bridge/docs/advanced_user_withdraw_runbook.md) | **User documentation for the withdrawal CLI**, next to its crate per rule 3 below. QUICKSTART is the install-and-run path for an operator with no checkout and no Rust; the crate README is the reference; the runbook is the same six stages done by hand, for when a run has to be picked apart. Written alongside the code it describes, not verified independently of it. |
 | `docs/archive/` (66 files) | Everything else the repository had. **Staged for deletion.** Not maintained, not authoritative, and in several places contradicted by the code. Source material for the rewrite — nothing more. |
-| `README.md`, `AGENTS.md`, `*/README.md`, `.cursor/skills/**` | Left in place, unchanged, by decision. See *Reference conventions* below. |
+| [`AGENTS.md`](AGENTS.md) | Context for agents and contributors: changelog policy, workspaces, the two directions, pitfalls, build and CI. Rewritten 2026-09-23 against the tree; its paths are current. |
+| `README.md`, `*/README.md`, `.cursor/skills/**` | Left in place, unchanged, by decision. See *Reference conventions* below. |
 
 Everything under `docs/` other than the spec was moved into `docs/archive/`, with directory structure
 preserved so a half-remembered path still finds its file: `docs/reviews/x.md` → `docs/archive/reviews/x.md`,
@@ -27,7 +28,7 @@ preserved so a half-remembered path still finds its file: `docs/reviews/x.md` �
 
 * **Stale path in a doc or comment?** The rule is mechanical: `docs/<name>` → `docs/archive/<name>`.
   References in code, scripts, `Makefile` and `.gitignore` were repointed during the move.
-* `README.md`, `AGENTS.md` and the agent skills under `.cursor/` were deliberately **not** edited, so
+* `README.md` and the agent skills under `.cursor/` were deliberately **not** edited, so
   their `docs/…` paths still read as they did before the move. Apply the rule above when following one.
 * Inside `docs/archive/`, cross-references were left untouched. The files are being replaced, not
   maintained.
@@ -147,7 +148,7 @@ must be answered by some document in the target set before the archive is delete
 | Verifiers, R15 / SHPLONK | `r15_snark_verifier_roadmap`, `r15_verifier_sizing_report`, `halo2_on_chain_verification_paths`, `circuit1a_yul_verifier_implementation_plan`, `layer_hashes_circuit_audit`, `proof_metrics_report`, `hermez_kzg_repos_and_branches`, `keccak_coprocessor_flowchart.mmd` |
 | Deposit direction | `deposit_chain_binding_track2`, `deposit_max_key_byte_len`, `deposit_vk_witness_independence`, `deposit_vk_reproducibility`, `deposit_vk_mpt_depth_witness_dependence_*`, `deposit_finalize_vk_gap_*`, `bridge_deposit_chain_binding_fix_proposal_*`, `verifying_eth_proof_on_an`, `zk_halo2_an_side_design`, `zkhalo2verifywithvk_reference`, `shellnet_usdcbridge_deposit_vk_redeploy`, `partner_note_usdcbridge_chainid_hermez_*` |
 | Withdrawal / state direction | `verifying_an_proof`, `circuit_4_open_questions`, `an_partner_questions_circuit4_*`, `an_partner_circuit4_alina_replies_*`, `an_partner_circuit4_concept_response_*`, `an_eth_daemon_withdraw_e2e_*`, `shellnet_an_eth_relayer_wiring`, `legacy/verifying_an_proof_v1` |
-| Operations and runbooks | `archive/crates/bridge-prover-libraries/docs/live_verifyBlock_runbook`, `…/live_withdrawByProof_runbook`, `…/daemon_live_performance`, `…/bridge-prover-daemon/docs/PROBE_BK_UPDATES`, `audit/deposit-relayer-operator-runbook`, `audit/eth-qc-hardening-runbook`, `shellnet_e2e_acceptance_runbook`, `manual_verification_runbook`, `bridge_verification`, `user/USER_GUIDE` |
+| Operations and runbooks | `archive/crates/bridge-prover-libraries/docs/live_verifyBlock_runbook`, `…/live_withdrawByProof_runbook`, `…/daemon_live_performance`, `…/bridge-prover-daemon/docs/PROBE_BK_UPDATES`, `audit/deposit-relayer-operator-runbook`, `audit/eth-qc-hardening-runbook`, `ursus_operator_host_2026-06-11`, `shellnet_e2e_acceptance_runbook`, `manual_verification_runbook`, `bridge_verification`, `user/USER_GUIDE` |
 | Status, plans, handoffs | `production_plan`, `testnet_security_status`, `m7_eth_side_prover_status_*`, `handoff_m7_*`, `live_e2e_prover_relayer_plan`, `audit/F10-deposit-pipeline-remediation-plan`, `audit/HANDOFF-f10-prover-relayer-ru.txt`, `SUMMARY`, `FIX_TASK_FOR_AGENT` |
 | Reviews and partner threads | `reviews/pr27_answers_nb_q1_q11_*`, `reviews/pr20_review_*`, `reviews/deposit_circuit_audit_*`, `reviews/alina_circuit4_single_final_root_*` (+ pdf), `reviews/alina_review_pack_*`, `reviews/an_partner_questions_circuit4_*_audit`, `reviews/an_token_bridge_pr2112_review`, `an_partner_phase0_questions`, `an_partner_questions_2026-05-11.txt`, `aave_integration` |
 

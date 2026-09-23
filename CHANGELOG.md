@@ -275,6 +275,39 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover host
+  regenerates its Circuit 4 keys on first use after the upgrade.** The bump
+  is what makes the key cache reject an `event_pk.bin` / `event_vk.bin`
+  written under the pre-rotation constraint system (`events_pos` was not in
+  the nullifier preimage, `anchorLayer` was not a public input); without it
+  the manifest still matched and the daemon would have loaded stale keys.
+  Keygen at `k = 20` takes ~7 minutes and blocks the next `verifyBlock` or
+  withdraw cycle. Preseed by copying fresh artefacts into
+  `BRIDGE_PARAMS_DIR` before the daemon starts.
+
+- **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
+  building the prover, the CLI or the aggregator no longer needs read
+  access to a private repository.** The five crates
+  (`attestation-bls-checker-circuit`,
+  `historical-layer-hashes-movement-checker-circuit`,
+  `bridge-event-prove-circuit`, `bridge-poseidon`, `test-data-gen`) used to
+  live in the gosh-sh/acki-nacki-to-eth-bridge-halo2-prover repository and
+  were pinned by revision from the prover workspace (see the 0.2.0 "pinned
+  by revision, not `branch = main`" note). They now sit next to the
+  prover; `bridge-prover-libraries` and `bridge-snark-utils` reach them by
+  workspace-relative path, the `[patch]` block against the external
+  repository is removed, and a circuit edit plus the
+  `EVENT_CIRCUIT_REVISION` bump that invalidates the cached keys land in
+  the same PR — `git diff` under `crates/bridge-circuits/` is what review
+  looks at.
+
+- **`tvm-sdk` moves from `v3.0.5.an` to `v3.0.6.an`** in the root workspace,
+  the prover workspace (`crates/bridge-prover-libraries`),
+  `crates/deposit-relayer-daemon` and `crates/eth-light-client-relayer`. The
+  CLI (`ackinacki-bridge`) and every relayer ship a new `tvm_client` with
+  it. `dense-balanced-tree` also moves off its floating branch onto the
+  fresh tag `v1.0.0` so `cargo update` no longer drifts that dep.
+
 - **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
   default.** With no arguments it checks the sources in
   `contracts/an/exchange/` against the compiled ABIs in

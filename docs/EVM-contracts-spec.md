@@ -586,7 +586,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0xa41d0229` | `deposit(uint256,int8,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
 | `0x2a2c14a0` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
-| `0x6e6f66ad` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
+| `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
 | `0x6e55e4eb` | `expectedPrevAnchor(uint8)` |
 | `0x22c341e9` | `getLatestPerLayer()` |
 | `0xe57869a8` | `isKnownAnchor(uint256)` |

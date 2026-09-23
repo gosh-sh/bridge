@@ -73,7 +73,16 @@ assigns it when the release is tagged.
   instances; the reference `_calldata.bin` is 3 648 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
-  not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
+  not decode. The extra tuple field also **changes the `withdrawByProof`
+  4-byte selector**: from the pre-R6 ten-slot `0x6e6f66ad`
+  (`withdrawByProof(bytes,(uint256×10))`) to the eleven-slot
+  `0xa9753d18`
+  (`withdrawByProof(bytes,(uint256×11))`, verified with
+  `cast sig`). Integrators that hand-craft calldata (`cast call`
+  scripts, custom relayers, front-ends) have to update the tuple
+  signature; a client still emitting the old selector will hit
+  `function selector not recognized` at the router, not a decode
+  error deeper in. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
   prover host regenerates its Circuit 4 keys on first use — the bump
   is what makes the key cache reject a pre-rotation
   `event_pk.bin` / `event_vk.bin`. Keygen (over the `K = 20` SRS) runs

@@ -55,9 +55,9 @@ pub trait WithdrawalProver: Send + Sync {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic withdrawal prover for tests. Returns a canned, self-verified
-/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + ten 32-byte LE
-/// public inputs) so the submit path is exercised end-to-end without running
-/// halo2.
+/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + eleven 32-byte LE
+/// public inputs, matching the post-anchorLayer `WITHDRAWAL_PUBLIC_INPUTS = 11`
+/// layout) so the submit path is exercised end-to-end without running halo2.
 #[derive(Clone, Debug)]
 pub struct MockWithdrawalProver {
     canned: PartnerWithdrawalProof,

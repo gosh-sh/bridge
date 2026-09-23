@@ -382,23 +382,29 @@ function applyBkSetUpdate(
     bytes calldata attestationProof,
     uint256 blockId,
     uint64  blockSeqNo,
+    uint64  attestationLastSeen,
     uint256 oldCommitmentL2,
     uint256 newCommitmentL3,
     bytes32 siblingH01,
     bytes32 siblingH4_7,
     bytes32 siblingH8_15
-) external nonReentrant                                   // :799-878
+) external nonReentrant                                   // :905-1010
 ```
 
-Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:810`, note
+Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:917`, note
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
 
-1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment` (`:814`).
-2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` (`:817`) — an
+1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment` (`:921`).
+2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` (`:924`) — an
    **independent** cursor from `storedLastSeenBlockSeqNo`.
-3. Attestation proof verified with `(blockId, oldCommitmentL2, blockSeqNo, storedLastSeenBlockSeqNo)`
-   (`:821-839`).
-4. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:854-859`):
+3. `blockSeqNo <= storedLastSeenBlockSeqNo` else `VerifyBlockLagBehindRotation` (`:943`) —
+   BRIDGE-ETH-WD-2: `verifyBlock(N)` first, then `applyBkSetUpdate(N)`.
+4. `attestationLastSeen < blockSeqNo` else `AttestationLastSeenNotBeforeSeqNo` (`:951`).
+   Circuit 1A/1B proves `block_seq_no > last_seen`. After `verifyBlock(N)` the live
+   cursor is N and cannot be the instance the rotation proof was baked against.
+   The caller supplies that prove-time word; the adapters receive
+   `(blockId, oldCommitmentL2, blockSeqNo, attestationLastSeen)` (`:961-978`).
+5. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:981-1004`):
 
    ```
    h23   = SHA256( LE32(oldCommitmentL2) ‖ LE32(newCommitmentL3) )
@@ -414,16 +420,19 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
    `Fr` image that the attestation adapter compares against — without it roughly four rotations in
    five would be unsatisfiable by any argument.
 
-5. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
-   `emit BkSetUpdated(old, new, blockSeqNo)` (`:874-877`).
+6. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
+   `emit BkSetUpdated(old, new, blockSeqNo)` (`:1014-1017`).
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
-**Operator rule.** Attestation `lastSeen` is the live layer cursor
-`storedLastSeenBlockSeqNo`. `storedLastBkSetUpdateSeqNo` is monotonicity
-only — a rotation proof baked against that cursor fails after the first
-`verifyBlock`. If `verifyBlock` advances between prove and submit, re-prove;
-do not treat `AttestationProofRejected` as a consensus bug.
+**Operator rule.** Attestation `lastSeen` is the prove-time cursor baked
+into the Circuit 1A/1B proof (`attestationLastSeen < blockSeqNo`), not
+the live `storedLastSeenBlockSeqNo` after `verifyBlock(N)`. Passing the
+live cursor reverts `AttestationLastSeenNotBeforeSeqNo`.
+`storedLastBkSetUpdateSeqNo` is monotonicity only. WD-2 still requires
+`verifyBlock(N)` before `applyBkSetUpdate(N)`. If the baked `last_seen`
+is not the instance in the proof, re-prove; do not treat
+`AttestationProofRejected` as a consensus bug.
 
 ### 7.4 Read surface for AN state
 
@@ -585,7 +594,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 |---|---|
 | `0xa41d0229` | `deposit(uint256,int8,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
-| `0x2a2c14a0` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
+| `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
 | `0x6e6f66ad` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
 | `0x6e55e4eb` | `expectedPrevAnchor(uint8)` |
 | `0x22c341e9` | `getLatestPerLayer()` |
@@ -610,7 +619,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `LayerHashTailNonZero`, `LayerHashActiveZero`, `LayerOutOfRange`, `NonMonotonicLayerHeight`.
 
 `applyBkSetUpdate`: `BkUpdateDisabled`, `StaleBkSetCommitment`, `BkUpdateSeqNoNotMonotonic`,
-`BkUpdateMerkleMismatch`.
+`VerifyBlockLagBehindRotation`, `AttestationLastSeenNotBeforeSeqNo`, `BkUpdateMerkleMismatch`.
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,

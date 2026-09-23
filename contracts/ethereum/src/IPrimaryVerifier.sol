@@ -13,7 +13,10 @@ pragma solidity ^0.8.19;
 ///      [0] blockId              32-byte AN block identifier hash, reduced mod Fr
 ///      [1] bkSetCommitment      Poseidon commitment to the active BK set
 ///      [2] blockSeqNo           AN block sequence number being attested
-///      [3] lastSeenBlockSeqNo   monotonic anchor: the contract's currently stored seqno
+///      [3] lastSeenBlockSeqNo   last_seen the attestation was proven against
+///                               (`< blockSeqNo`). `verifyBlock` forwards
+///                               `storedLastSeenBlockSeqNo`; `applyBkSetUpdate`
+///                               forwards caller-supplied `attestationLastSeen`.
 interface IPrimaryVerifier {
     /// @notice Verify a Circuit 1A (Primary attestation) proof.
     /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof)

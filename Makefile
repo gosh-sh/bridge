@@ -70,10 +70,13 @@ test-coverage: ## Generate test coverage report
 
 # Crates outside the root workspace that are packages of their own. The relayer
 # and the withdrawal CLI are members of crates/bridge-prover-libraries and are
-# formatted and tested through it.
+# formatted and tested through it. `crates/bridge-circuits` is a sub-workspace
+# (its own [workspace] with the gosh-fork halo2 backend); `cargo test` from
+# that dir runs the workspace tests.
 STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
 	crates/bridge-evm-aggregator crates/bridge-snark-utils \
-	crates/deposit-relayer-daemon crates/eth-light-client-relayer
+	crates/deposit-relayer-daemon crates/eth-light-client-relayer \
+	crates/bridge-circuits
 
 # Every suite runs even when an earlier one fails; the failures are listed at
 # the end. --locked is passed only where a Cargo.lock is committed, and the

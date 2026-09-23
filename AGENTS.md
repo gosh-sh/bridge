@@ -120,6 +120,9 @@ crates/
   bridge-snark-utils/      offline SNARK tools: bound Circuit 1A/1B/2 fixtures, Poseidon snark export
   bridge-evm-aggregator/   SHPLONK aggregator: export-inner-aggregator writes the production
                            verifiers, aggregate-proof is the prover subprocess the CLI shells out to
+  bridge-circuits/         AN→ETH halo2 circuits (1A/1B, 2, 4, poseidon reference, test-data-gen),
+                           vendored 0.3.0 from gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits;
+                           its own sub-workspace with a distinct halo2 backend
 frontend/                  WASM deposit UI (Yew)
 scripts/                   operational scripts; CI checks live here too
 params/                    SRS files
@@ -138,8 +141,10 @@ those dependency versions.**
   `crates/ackinacki-bridge` are symlinked members of it and inherit its dependencies, so cargo cannot
   even parse their manifests on their own: every cargo command for them runs from
   `crates/bridge-prover-libraries` with `-p <crate>`.
-- `deposit-prover`, `eth-light-client-prover` and `crates/bridge-evm-aggregator` declare their own
-  `[workspace]`. `deposit-prover` also has its own `rust-toolchain.toml`.
+- `deposit-prover`, `eth-light-client-prover`, `crates/bridge-evm-aggregator` and
+  `crates/bridge-circuits` declare their own `[workspace]`. `deposit-prover` also has its own
+  `rust-toolchain.toml`. `bridge-circuits` uses the gosh-fork halo2 backend that the prover pins;
+  the root's halo2-axiom cannot coexist with it, which is why the root workspace excludes it.
 - `crates/deposit-relayer-daemon`, `crates/eth-light-client-relayer`, `crates/bridge-snark-utils` and
   `frontend` are standalone packages excluded by the root `Cargo.toml`.
 
@@ -149,7 +154,7 @@ Pinned in the `Cargo.toml` files; clone them next to this repository when you ne
 
 | Repository | Role |
 |---|---|
-| `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` | The AN→ETH circuits (1A/1B, 2, 4), pinned by `rev` in `crates/bridge-prover-libraries/Cargo.toml`. Private: cargo needs a token to fetch it |
+| `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` | The AN→ETH circuits (1A/1B, 2, 4). Vendored under `crates/bridge-circuits/` as of 0.3.0 — nothing in this repository fetches it any more; a clone of the upstream repo is only useful if you want its issue tracker or its pre-vendor history |
 | `tvmlabs/tvm-sdk` | TVM SDK, including the `ZKHALO2VERIFYWITHVK` opcode the AN side verifies deposits with |
 | `acki-nacki` | The node. Pins a commit of this repository and places the files `contracts/an/place.json` lists |
 | `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381`, `gosh-sh/halo2-axiom`, `gosh-sh/gosh-halo2-crypto-lib`, `gosh-sh/axiom-eth`, `gosh-sh/snark-verifier` | The gosh halo2 forks and chips the circuits and provers build on |
@@ -204,15 +209,20 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 | `solidity.yaml` | PRs, pushes to `main` | `forge build`, `forge fmt --check`, `forge test --no-match-contract Fork` |
 | `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json` |
 | `verifier_sources.yaml` | PRs, pushes touching `contracts/ethereum/verifiers/` | Every `*AggregatorVerifier.sol` compiles with `solc` 0.8.19 to its `.bin` byte for byte; EIP-170 |
+| `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
 | `release.yaml` | tags `v*` | Builds `ackinacki-bridge` and `aggregate-proof` and publishes the three assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Builds only |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
 
 Each pipeline's header comment has the detail. A secret reaches only the events ticked on it, and a
 missing one arrives as an empty string rather than an error.
 
-**No Rust job runs on a PR or on `main`**, and neither do the fork suites or `forge coverage`. They
-exist only as GitLab jobs in `.gitlab-ci.yml`, which nothing runs from GitHub, so `make pre-push` is
-what stands between a branch and a Rust regression.
+**The only Rust job that runs on a PR or on `main` is `bridge-circuits.yaml`** (added with the
+0.3.0 vendoring — previously the circuits lived in a private repo, so no CI here could reach
+them). Every other Rust crate — including the root workspace, `bridge-relayer-daemon`,
+`bridge-evm-aggregator`, `deposit-prover` and friends — has no PR-triggered pipeline and neither
+do the fork suites or `forge coverage`. Those exist only as GitLab jobs in `.gitlab-ci.yml`, which
+nothing runs from GitHub, so `make pre-push` is what stands between a branch and a Rust regression
+outside `bridge-circuits/`.
 
 ### What no pipeline runs
 
@@ -226,7 +236,11 @@ run one on its own:
   directory with `cargo test --locked -p <crate>`;
 - the standalone crates, each from its own directory with `cargo test`: `deposit-prover`,
   `eth-light-client-prover`, `deposit-relayer-daemon`, `eth-light-client-relayer`,
-  `bridge-snark-utils`, `frontend`.
+  `bridge-snark-utils`, `frontend`;
+- the members of `crates/bridge-circuits` — same recipe: `cd crates/bridge-circuits && cargo test
+  -p <crate>`. `bridge-circuits.yaml` runs its fast + heavy suites on every PR, but the
+  `#[ignore]`d `test_real_prover_*` tests still need a manual `cargo test -- --ignored` when the
+  corresponding circuit constraints change.
 
 ### Before pushing
 
@@ -235,9 +249,14 @@ run one on its own:
 `cargo test --workspace --locked`, `make relayer-test` and `make aggregator-test`. It does not run
 the `an-contracts.yaml` checks, `scripts/check_verifier_sources.sh`, gitleaks or lychee.
 
-**It does not go green today.** `make aggregator-fmt` fails because `crates/bridge-evm-aggregator`
-is not formatted yet, and `make relayer-clippy` and `make relayer-test` fail to compile because the
-`crates/bridge-prover-libraries` workspace does not build against its pinned circuit revision.
+**It does not go green today.** `make aggregator-fmt` fails because
+`crates/bridge-evm-aggregator` is not formatted yet, and `make relayer-clippy` fails on a stray
+`clippy::useless_conversion` (`useless u8::from(ev.layer)`) that the `-D warnings` gate turns into
+an error. The prior wording of this paragraph blamed a pinned circuit revision that the workspace
+could not build against; that claim was accurate when the circuits lived in a private git repo,
+but it is no longer — since the 0.3.0 vendoring, `crates/bridge-prover-libraries` reaches its
+circuit deps by path (see [Cargo workspaces](#cargo-workspaces) above), and the build failures
+that remain are the fmt drift and the one clippy warning above, not a revision mismatch.
 
 `forge coverage` is there for two failure modes a plain `forge test` can miss. A fuzz test whose
 `vm.assume` rejects nearly every input trips Foundry's rejection cap depending on the seed — use

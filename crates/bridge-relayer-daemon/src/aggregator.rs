@@ -97,7 +97,8 @@ pub trait Circuit4SnarkProver: Send + Sync {
 ///   3. Load event PK.
 ///   4. `generate_event_proof_with_transcript(&km, &witness, Poseidon)`.
 ///   5. Native `verify_event_proof_with_transcript` self-check.
-///   6. Save 10-field-element instances as flat LE-Fr bytes (`.instances.bin`).
+///   6. Save 11-field-element instances (10 + `anchorLayer`) as flat LE-Fr
+///      bytes (`.instances.bin`).
 ///   7. `bridge_snark_wrap::wrap_poseidon_snark_in_memory` → serialise
 ///      snark-verifier `Snark` bincode → write `.snark`.
 ///

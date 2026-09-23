@@ -113,7 +113,7 @@ use halo2_base::{
 use std::cell::RefCell;
 
 use crate::boc_helper::*;
-use crate::dense_merkle_bound::dense_merkle_root_padded_bound;
+use crate::dense_merkle_bound::walk_dense_merkle_bind_pos;
 use crate::poseidon::*;
 use gosh_dense_balanced_tree::{
     bytes_to_fr, compute_root_native, dense_merkle_root_circuit, fr_to_bytes,
@@ -796,46 +796,25 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 // tree — otherwise a malicious prover picks any events_pos
                 // to disambiguate the hash and walks a different path.
                 //
-                // We (1) assign `events_pos` as a witness, (2) range-check
-                // it to MAX_EVENTS_TREE_DEPTH bits, (3) bit-decompose it via
-                // `num_to_bits`, (4) force high bits (j >=
-                // num_events_levels) to zero — matching
+                // `walk_dense_merkle_bind_pos` bundles the range check,
+                // bit-decomposition, zero-forcing loop (bits above
+                // `num_events_levels` pinned to 0 to match
                 // `preprocess_dense_proof_padded`'s `direction_bit = false`
-                // convention on padded levels — and (5) pass those bits to
-                // `dense_merkle_root_padded_bound` as the walker's direction
-                // bits, so the position witness is now the unique
-                // determinant of the walked path.
+                // convention), and the walker call. The `events_pos_fr`
+                // cell we pass here is the same cell fed into the
+                // nullifier Poseidon below — that shared cell is what
+                // makes the binding hold.
                 let events_pos_fr =
                     ctx.load_witness(Fr::from(self.merkle_proof_position as u64));
-                range.range_check(ctx, events_pos_fr, MAX_EVENTS_TREE_DEPTH);
-                let events_pos_bits =
-                    gate.num_to_bits(ctx, events_pos_fr, MAX_EVENTS_TREE_DEPTH);
-                for (j, bit) in events_pos_bits.iter().enumerate() {
-                    let j_const = ctx.load_constant(Fr::from(j as u64));
-                    let active_j =
-                        range.is_less_than(ctx, j_const, num_events_levels, 4);
-                    let one_const = ctx.load_constant(Fr::one());
-                    let inactive_j = gate.sub(
-                        ctx,
-                        QuantumCell::Existing(one_const),
-                        QuantumCell::Existing(active_j),
-                    );
-                    let prod = gate.mul(
-                        ctx,
-                        QuantumCell::Existing(*bit),
-                        QuantumCell::Existing(inactive_j),
-                    );
-                    gate.assert_is_const(ctx, &prod, &Fr::zero());
-                }
-
-                let ext_out_root = dense_merkle_root_padded_bound(
+                let (ext_out_root, _events_pos_bits) = walk_dense_merkle_bind_pos(
                     ctx,
                     &range,
                     &hasher,
                     &events_proof_padded,
                     ext_msg_leaf_fr,
                     num_events_levels,
-                    &events_pos_bits,
+                    events_pos_fr,
+                    MAX_EVENTS_TREE_DEPTH,
                 );
 
                 // === block_leaf = Poseidon96(block_id, envelope_hash, ext_out_root) ===

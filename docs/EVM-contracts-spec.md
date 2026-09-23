@@ -397,8 +397,9 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (no
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
 
 1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment`.
-2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` — an
-   **independent** cursor from `storedLastSeenBlockSeqNo`.
+2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic`.
+   That cursor also selects the set `verifyBlock` accepts and gates the
+   next rotation.
 3. `storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo` else
    `VerifyBlockLagBehindRotation` (the previous rotation must already be
    covered). The first rotation always proceeds. After apply, `verifyBlock`
@@ -435,10 +436,14 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (no
 proof was baked against (`block_seq_no > last_seen`). That is the layer
 cursor at prove time, typically the previous key block — not
 `storedLastSeenBlockSeqNo` after `verifyBlock(N)`, which equals N and
-makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` is
-monotonicity only. Relayers apply a rotation as soon as the previous
-one is covered, then keep proving bundles; `verifyBlock` still accepts
-the outgoing set for `seqNo <= N`.
+makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` selects
+the set and gates the next rotation. Relayers apply a rotation as soon
+as the previous one is covered; `verifyBlock` accepts the outgoing set
+for `seqNo <= N`. AN must announce a rotation at bundle target N
+*before* that bundle is proven: a proof that already baked
+`last_seen = N` cannot satisfy `attestationLastSeen < N`. Two
+rotations with no bundle target in `[N1, N2]` (inclusive) stall
+permanently.
 
 ### 7.4 Read surface for AN state
 

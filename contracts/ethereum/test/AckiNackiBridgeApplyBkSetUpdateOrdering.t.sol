@@ -188,6 +188,42 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), N + 3);
     }
 
+    /// @notice Lower edge of the second-rotation guard: cursor = N1 − 1
+    ///         still reverts, and the first field is the previous N.
+    function test_applyBkSetUpdate_secondRotation_revertsAtCursorN1MinusOne() public {
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        _primeLayerCursor(N - 1, L2);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), N - 1);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
+
+        uint256 l4 = 0xC0DE;
+        uint256 root2 = _merkleRoot(L3, l4);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, uint64(N), uint64(N - 1)
+            )
+        );
+        bridge.applyBkSetUpdate(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            root2,
+            N + 3,
+            0,
+            L3,
+            l4,
+            SIB_H01,
+            SIB_H4_7,
+            SIB_H8_15
+        );
+    }
+
+    /// @notice Fallback path forwards a non-zero baked `lastSeen`.
+    function test_applyBkSetUpdate_fallback_forwardsBakedLastSeen() public {
+        fallbackVerifier.setExpectedLastSeenBlockSeqNo(3);
+        _applyFallbackWithLastSeen(_merkleRoot(L2, L3), N, 3, L2, L3);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
+    }
+
     /// @notice After the cursor covers the first rotation, a further
     ///         rotation may apply even if it is ahead of the cursor.
     function test_applyBkSetUpdate_secondRotation_afterCover_mayLeadCursor() public {
@@ -280,12 +316,22 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     }
 
     function _applyFallback(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
+        _applyFallbackWithLastSeen(blockId, seqNo, 0, oldL2, newL3);
+    }
+
+    function _applyFallbackWithLastSeen(
+        uint256 blockId,
+        uint64 seqNo,
+        uint64 lastSeen,
+        uint256 oldL2,
+        uint256 newL3
+    ) internal {
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Fallback,
             hex"00",
             blockId,
             seqNo,
-            0,
+            lastSeen,
             oldL2,
             newL3,
             SIB_H01,

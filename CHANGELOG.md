@@ -24,18 +24,24 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`. Circuit
-  1A/1B proves `block_seq_no > last_seen`, so the live cursor after
-  `verifyBlock(N)` cannot be that argument. Relayers must pass the word
-  the proof was baked against (ETH-36 / ETH-37). Callers of the old
-  nine-argument ABI will fail to decode.
+- `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
+  (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
+  `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,
+  then run the relayer only against that deployment — the new
+  `storedPrevBkSetCommitment()` getter is not on the live contract, so
+  every tick, `verify-fixture` and `verify-prover-proof` fail there.
+  Circuit 1A/1B proves `block_seq_no > last_seen`; pass the word baked
+  into the proof, not the live cursor after `verifyBlock(N)`. Old
+  nine-argument calldata does not decode.
 
 - `applyBkSetUpdate(N)` no longer waits for `verifyBlock` to cover N.
   It stores the outgoing set in `storedPrevBkSetCommitment` and
   `verifyBlock` accepts that set for `blockSeqNo <= N`. A second
   rotation is blocked until the layer cursor covers the previous N
-  (`VerifyBlockLagBehindRotation`). Off-boundary rotations (N not a
-  bundle target) can apply as soon as they are discovered.
+  (`VerifyBlockLagBehindRotation`; the first field is that previous N,
+  not the seq being applied). Off-boundary rotations can apply as soon
+  as they are discovered. Two rotations with no bundle target in
+  `[N1, N2]` (inclusive) stall permanently and stop `verifyBlock` too.
 
 - **The Circuit 4 (withdrawal) verification key is rotated.** The inner
   Poseidon preimage now includes `events_pos`, and the public-input vector
@@ -190,12 +196,15 @@ assigns it when the release is tagged.
 - The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
   rotation is covered, even if the layer cursor is still behind this N.
   It only defers a second rotation, and it does not abort the tick.
-  After an apply it does **not** ack the live prover until the next
-  bundle target is above N, so the outgoing set can still sign
-  `verifyBlock` for `seqNo <= N` (ETH-36). Two rotations inside one
-  bundle stride (1024 at L1, 16384 at L2) cannot land: only one
-  outgoing set is stored. AN must not rotate twice between consecutive
-  bundle targets.
+  After an apply, `daemon-live` does **not** ack the live prover until
+  the next bundle target (the driver's stride: 1024 at L1, 16384 at L2)
+  is above N, so the outgoing set can still sign `verifyBlock` for
+  `seqNo <= N`. `daemon-bridge` does not apply rotations. Two rotations
+  with no bundle target in `[N1, N2]` (inclusive) cannot land: only one
+  outgoing set is stored, and the stall is permanent. AN must announce
+  a rotation before the bundle at the same seq is proven — a bundle at
+  N acked first bakes `last_seen = N` and the rotation becomes
+  unsatisfiable.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
@@ -306,13 +315,10 @@ assigns it when the release is tagged.
   strictly-next multiple, matching the proof.
 - `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
   survives N-1.
-- `applyBkSetUpdate` attestation `lastSeen` is the live layer cursor
-  (`storedLastSeenBlockSeqNo`). The prover was baking the BK-update cursor,
-  so after the first `verifyBlock` every rotation failed
-  `AttestationProofRejected`. Once AN rotated, `verifyBlock` then failed
-  `BkSetCommitmentMismatch` and unwithdrawn anchors aged out. The prover now
-  uses the layer cursor; a test drives `verifyBlock` then `applyBkSetUpdate`
-  with a mock that checks the argument.
+- `applyBkSetUpdate` attestation `lastSeen` is the prove-time cursor
+  (`attestationLastSeen`, strictly less than `blockSeqNo`). Passing the
+  live cursor after `verifyBlock(N)` reverts
+  `AttestationLastSeenNotBeforeSeqNo`. See Breaking.
 - Production `verifyBlock` tests that lack `bound_scenario.json` now
   `vm.skip` instead of returning, so the hole shows up in the forge summary.
 - `DeployRealBridge` on mainnet also requires `altDstChainId` and
@@ -342,9 +348,9 @@ assigns it when the release is tagged.
 - L2 anchoring is the shellnet operational default (Deploy #12), not
   smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
   stays L1 for local/CI.
-- Spec §7.3 states the QC-A2-2 rule: `applyBkSetUpdate` attestation
-  `lastSeen` is the live layer cursor. Re-prove if `verifyBlock` advances
-  between prove and submit.
+- Spec §7.3: `applyBkSetUpdate` attestation `lastSeen` is the prove-time
+  cursor. `storedLastBkSetUpdateSeqNo` selects the set and gates the
+  next rotation.
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`

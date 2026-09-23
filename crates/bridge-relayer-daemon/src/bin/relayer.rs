@@ -2271,7 +2271,8 @@ async fn run_daemon_live(
         // state — see the top-of-decide gate in `startup_decide.rs`.
     }
 
-    let cfg = RelayerConfig::new(&state_path);
+    let mut cfg = RelayerConfig::new(&state_path);
+    cfg.bundle_stride = anchor_mode.stride();
 
     // Wrap the live source so the two proof-byte fields in AnBlockData carry
     // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.

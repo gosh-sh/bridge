@@ -32,8 +32,8 @@
 //!   in-memory cursor and no-op if the state is already past. This means the
 //!   caller can re-ack after a crash-restart without corrupting state.
 //! * **Pending rotations no longer block bundles.** On-chain
-//!   `applyBkSetUpdate(N)` may land before `verifyBlock` covers N
-//!   (ETH-36). The relayer acks this driver only once the next bundle
+//!   `applyBkSetUpdate(N)` may land before `verifyBlock` covers N.
+//!   The relayer acks this driver only once the next bundle
 //!   target is above N, so the outgoing set stays available for
 //!   `seqNo <= N`. [`LiveProverDriver::poll_next_bundle`] still
 //!   reports `blocked_by_pending_bk_update` when a rotation sits at or
@@ -165,7 +165,7 @@ pub enum DriverError {
 
     /// `ack_bk_update` refused because the next key block at
     /// `cursor + stride` still lies at or below the rotation's
-    /// `block_seq_no` — under Sergey's ETH-36 `_expectedBkSetFor` rule
+    /// `block_seq_no` — under the `_expectedBkSetFor` rule
     /// that key block is still OLD-signed. Rotating `prover_bk_set` +
     /// `bk_set_commitment_fr` to NEW now would discard the OLD pubkey
     /// table Circuit 1 witness gen needs for that bundle.
@@ -735,11 +735,11 @@ impl LiveProverDriver {
             }
         };
 
-        // Refined ETH-36 guard.
+        // Rotation-hold guard.
         //
         // On-chain `applyBkSetUpdate(N)` may land before `verifyBlock`
-        // covers N (that's what ETH-36's `storedPrevBkSetCommitment`
-        // buys). But this driver still holds ONE pubkey table at a time
+        // covers N (that's what `storedPrevBkSetCommitment` buys). But
+        // this driver still holds ONE pubkey table at a time
         // (`prover_bk_set`). Circuit 1 witness gen for the next key
         // block requires whichever set signed that block:
         //
@@ -861,11 +861,11 @@ impl LiveProverDriver {
         &mut self,
         artifacts: &BkUpdateProofArtifacts,
     ) -> DriverResult<()> {
-        // Structural guard on Sergey's ETH-36 two-slot model.
+        // Structural guard on the two-slot BK-set model.
         //
         // The rotation on-chain (`applyBkSetUpdate(N)`) may land BEFORE
         // `verifyBlock` has caught up to N — that's the whole point of
-        // ETH-36's `storedPrevBkSetCommitment`. But the prover-side
+        // `storedPrevBkSetCommitment`. But the prover-side
         // rotation (this call) must NOT land while any OLD-signed key
         // block ≤ N still needs bundling: rotating `prover_bk_set` +
         // `bk_set_commitment_fr` to NEW discards the OLD pubkey table
@@ -884,7 +884,7 @@ impl LiveProverDriver {
         //   * N=100, cursor=96: cursor+16=112 > 100 → safe. Bundles 80,
         //     96 done; 112 is post-rotation NEW-signed.
         //   * N=112 (KB boundary), cursor=96: cursor+16=112 ≤ 112 →
-        //     block. Bundle 112 itself is OLD-signed under ETH-36
+        //     block. Bundle 112 itself is OLD-signed
         //     (`_expectedBkSetFor(112)` returns OLD when
         //     storedLastBkSetUpdateSeqNo == 112).
         //   * N=112, cursor=112: cursor+16=128 > 112 → safe.

@@ -244,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Single-slot deferred bk-update ack.
     //
-    // Sergey's ETH-36 caps in-flight rotations at 1 via
+    // The contract caps in-flight rotations at 1 via
     // `VerifyBlockLagBehindRotation`, so this slot is bounded by
     // construction. It holds the already-verified rotation artifacts
     // returned by the verifier daemon when `driver.ack_bk_update` refused
@@ -325,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
             }) => {
                 if blocked_by_pending_bk_update {
                     // Informational: a rotation is pending, but bundle
-                    // proving is no longer held for it (ETH-36). Sleep
+                    // proving is no longer held for it. Sleep
                     // like the ordinary Nothing path.
                     info!(
                         "rotation pending at or below next target {}; bundle lane stays open",

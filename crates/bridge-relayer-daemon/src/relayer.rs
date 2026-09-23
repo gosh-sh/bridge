@@ -17,6 +17,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use alloy::primitives::U256;
 use bridge_prover_lib::BUNDLE_STRIDE_L1;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -65,6 +66,11 @@ pub struct RelayerConfig {
     /// applyBkSetUpdate lane (`bk_update_attempts_since_progress`).
     #[serde(default = "default_max_attempts_abort")]
     pub max_attempts_abort: u32,
+    /// Bundle stride the live prover uses (`AnchorMode::stride()`).
+    /// The deferred-ack rule must use this, not a hardcoded L1 1024:
+    /// in L2 the next target is 16384.
+    #[serde(default = "default_bundle_stride")]
+    pub bundle_stride: u64,
 }
 
 fn default_poll_interval() -> Duration {
@@ -76,6 +82,9 @@ fn default_max_attempts_warn() -> u32 {
 fn default_max_attempts_abort() -> u32 {
     3
 }
+fn default_bundle_stride() -> u64 {
+    BUNDLE_STRIDE_L1
+}
 
 impl RelayerConfig {
     /// Sensible defaults: 2-second polling, warn after 16 attempts on
@@ -86,6 +95,7 @@ impl RelayerConfig {
             poll_interval: default_poll_interval(),
             max_attempts_warn: default_max_attempts_warn(),
             max_attempts_abort: default_max_attempts_abort(),
+            bundle_stride: default_bundle_stride(),
         }
     }
 }
@@ -201,6 +211,21 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let bk_target = on_chain.last_bk_set_update_seq_no.saturating_add(1);
         if let Some(upd) = self.bk_update_source.fetch_bk_update(bk_target).await? {
             if on_chain.last_bk_set_update_seq_no > on_chain.last_seen_block_seq_no {
+                let next = Self::next_bundle_boundary(
+                    on_chain.last_seen_block_seq_no,
+                    self.config.bundle_stride,
+                );
+                if upd.block_seq_no < next {
+                    return Err(RelayerError::Stuck {
+                        seq_no: upd.block_seq_no,
+                        attempts: 0,
+                        reason: format!(
+                            "two rotations with no bundle target in [{}, {}]: next target {} is \
+                             after N2; verifyBlock cannot move and this stall is permanent",
+                            on_chain.last_bk_set_update_seq_no, upd.block_seq_no, next
+                        ),
+                    });
+                }
                 info!(
                     rotation = upd.block_seq_no,
                     last_bk = on_chain.last_bk_set_update_seq_no,
@@ -224,11 +249,12 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         tx_hash,
                     } => {
                         // Keep the prover on the outgoing set until the
-                        // next bundle target is above N. Acking here
-                        // rotates its only key table and it can never
-                        // prove a remaining boundary M <= N.
-                        self.maybe_ack_prover_rotation(&new_state).await?;
-                        if Self::prover_rotation_may_ack(&new_state) {
+                        // next bundle target is above N. Ack the just-
+                        // applied seq, not an unpinned `last_bk` read.
+                        if Self::prover_rotation_may_ack(&new_state, self.config.bundle_stride) {
+                            self.bk_update_source
+                                .ack_last_bk_update(upd.block_seq_no)
+                                .await?;
                             self.after_ack_consistency(upd.block_seq_no, &new_state)
                                 .await?;
                         }
@@ -392,23 +418,37 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         }
     }
 
-    /// Next thinned-bundle seq_no strictly after `last_seen` (L1 stride).
-    fn next_bundle_boundary(last_seen: u64) -> u64 {
-        ((last_seen / BUNDLE_STRIDE_L1) + 1) * BUNDLE_STRIDE_L1
+    /// Next thinned-bundle seq_no strictly after `last_seen`.
+    fn next_bundle_boundary(last_seen: u64, stride: u64) -> u64 {
+        let stride = stride.max(1);
+        ((last_seen / stride) + 1) * stride
     }
 
     /// The live prover may rotate once the next bundle it would prove
     /// is signed by the new set (`seq > N`).
-    fn prover_rotation_may_ack(on_chain: &BridgeOnChainState) -> bool {
+    fn prover_rotation_may_ack(on_chain: &BridgeOnChainState, stride: u64) -> bool {
         let n = on_chain.last_bk_set_update_seq_no;
-        n != 0 && Self::next_bundle_boundary(on_chain.last_seen_block_seq_no) > n
+        n != 0 && Self::next_bundle_boundary(on_chain.last_seen_block_seq_no, stride) > n
+    }
+
+    /// BK-set the prover must still hold: current set before any
+    /// rotation and after the ack; outgoing set during the hold window.
+    fn expected_prover_bk(on_chain: &BridgeOnChainState, stride: u64) -> (U256, Option<u64>) {
+        let n = on_chain.last_bk_set_update_seq_no;
+        if n == 0 {
+            (on_chain.bk_set_commitment, Some(0))
+        } else if !Self::prover_rotation_may_ack(on_chain, stride) {
+            (on_chain.prev_bk_set_commitment, None)
+        } else {
+            (on_chain.bk_set_commitment, Some(n))
+        }
     }
 
     async fn maybe_ack_prover_rotation(
         &self,
         on_chain: &BridgeOnChainState,
     ) -> Result<(), RelayerError> {
-        if !Self::prover_rotation_may_ack(on_chain) {
+        if !Self::prover_rotation_may_ack(on_chain, self.config.bundle_stride) {
             return Ok(());
         }
         self.bk_update_source
@@ -424,10 +464,10 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let Some(expected) = self.source.driver_snapshot().await else {
             return Ok(());
         };
-        // While the next bundle is still at or below N the prover has
-        // not been acked and still holds the outgoing set.
-        let check_bk = Self::prover_rotation_may_ack(actual);
-        if let Err(drift) = check_history_consistency(&expected, actual, check_bk) {
+        let (want_bk, want_last_bk) = Self::expected_prover_bk(actual, self.config.bundle_stride);
+        if let Err(drift) =
+            check_history_consistency(&expected, actual, Some((want_bk, want_last_bk)))
+        {
             error!(
                 seq_no,
                 ?drift,
@@ -475,7 +515,7 @@ mod tests {
     use super::*;
     use crate::{
         bridge::{BridgeClient, MockBridgeClient},
-        source::{BkUpdateSource, EmptyBkUpdateSource, InMemoryBlockSource},
+        source::{BkUpdateSource, BlockSource, EmptyBkUpdateSource, InMemoryBlockSource},
         types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES},
     };
 
@@ -513,6 +553,7 @@ mod tests {
             // Tests want soft-retry: assertions inspect state after long
             // revert streaks and would trip the abort gate.
             max_attempts_abort: u32::MAX,
+            bundle_stride: BUNDLE_STRIDE_L1,
         };
         Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge).unwrap()
     }
@@ -782,6 +823,7 @@ mod tests {
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
             max_attempts_abort: u32::MAX,
+            bundle_stride: BUNDLE_STRIDE_L1,
         };
         let mut r = Relayer::new(cfg, source, bk.clone(), bridge.clone()).unwrap();
 
@@ -841,6 +883,7 @@ mod tests {
             poll_interval: Duration::from_millis(0),
             max_attempts_warn: 16,
             max_attempts_abort: u32::MAX,
+            bundle_stride: BUNDLE_STRIDE_L1,
         };
         let mut r = Relayer::new(cfg, source, bk.clone(), bridge.clone()).unwrap();
 
@@ -869,5 +912,205 @@ mod tests {
             0,
             "next bundle 1024 is still <= 2000"
         );
+    }
+
+    /// Shared fake prover: one signer set, a stride, queued rotations.
+    /// Serves a boundary only when the block was signed by the set it holds.
+    struct FakeProver {
+        stride: u64,
+        current_bk: std::sync::Mutex<U256>,
+        last_bk: std::sync::atomic::AtomicU64,
+        pending: std::sync::Mutex<Option<BkSetUpdateData>>,
+        queued: std::sync::Mutex<Vec<BkSetUpdateData>>,
+        blocks: std::sync::Mutex<std::collections::BTreeMap<u64, AnBlockData>>,
+        acks: std::sync::atomic::AtomicU64,
+    }
+
+    impl FakeProver {
+        fn new(stride: u64, genesis: U256) -> Self {
+            Self {
+                stride,
+                current_bk: std::sync::Mutex::new(genesis),
+                last_bk: std::sync::atomic::AtomicU64::new(0),
+                pending: std::sync::Mutex::new(None),
+                queued: std::sync::Mutex::new(Vec::new()),
+                blocks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                acks: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+
+        fn insert_block(&self, b: AnBlockData) {
+            self.blocks.lock().unwrap().insert(b.block_seq_no, b);
+        }
+
+        fn queue_update(&self, upd: BkSetUpdateData) {
+            self.queued.lock().unwrap().push(upd);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for FakeProver {
+        async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            let hold = *self.current_bk.lock().unwrap();
+            let blocks = self.blocks.lock().unwrap();
+            Ok(blocks
+                .values()
+                .find(|b| {
+                    b.block_seq_no >= target
+                        && b.block_seq_no.is_multiple_of(self.stride)
+                        && b.bk_set_commitment == hold
+                })
+                .cloned())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BkUpdateSource for FakeProver {
+        async fn fetch_bk_update(
+            &self,
+            target: u64,
+        ) -> Result<Option<BkSetUpdateData>, RelayerError> {
+            {
+                let pending = self.pending.lock().unwrap();
+                if let Some(p) = pending.as_ref() {
+                    if p.block_seq_no >= target {
+                        return Ok(Some(p.clone()));
+                    }
+                    return Ok(None);
+                }
+            }
+            let mut queued = self.queued.lock().unwrap();
+            if let Some(i) = queued.iter().position(|u| u.block_seq_no >= target) {
+                let u = queued.remove(i);
+                *self.pending.lock().unwrap() = Some(u.clone());
+                return Ok(Some(u));
+            }
+            Ok(None)
+        }
+
+        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+            if self.last_bk.load(std::sync::atomic::Ordering::SeqCst) >= seq_no {
+                return Ok(());
+            }
+            let mut pending = self.pending.lock().unwrap();
+            let matches = pending.as_ref().is_some_and(|u| u.block_seq_no == seq_no);
+            if !matches {
+                return Ok(());
+            }
+            let u = pending.take().expect("matched");
+            *self.current_bk.lock().unwrap() = u.new_commitment_l3;
+            self.last_bk
+                .store(u.block_seq_no, std::sync::atomic::Ordering::SeqCst);
+            self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_acks_immediately_when_l2_next_target_is_past_n() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let prover = Arc::new(FakeProver::new(16_384, U256::from(BK)));
+        prover.queue_update(dummy_update(2000, 0));
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+            bundle_stride: 16_384,
+        };
+        let mut r = Relayer::new(cfg, prover.clone(), prover.clone(), bridge).unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 2000,
+                ..
+            }
+        ));
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tick_keeps_pending_n2_when_acking_already_applied_n1() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
+        prover.queue_update(dummy_update(500, 0));
+        let mut n2 = dummy_update(2000, 0);
+        n2.old_commitment_l2 = U256::from(0xC0FFEEu64);
+        n2.new_commitment_l3 = U256::from(0xD00Du64);
+        prover.queue_update(n2);
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+            bundle_stride: 1024,
+        };
+        let mut r = Relayer::new(cfg, prover.clone(), prover.clone(), bridge).unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 500,
+                ..
+            }
+        ));
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // N2 is discovered and deferred (bundle 1024 sits between 500 and 2000).
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::NotYetAvailable { .. }),
+            "got {out:?}"
+        );
+        assert!(
+            prover
+                .pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|u| u.block_seq_no == 2000),
+            "N2 must stay pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_fails_loud_when_n2_has_no_bundle_target_in_range() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
+        prover.queue_update(dummy_update(500, 0));
+        let mut n2 = dummy_update(800, 0);
+        n2.old_commitment_l2 = U256::from(0xC0FFEEu64);
+        n2.new_commitment_l3 = U256::from(0xD00Du64);
+        prover.queue_update(n2);
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+            bundle_stride: 1024,
+        };
+        let mut r = Relayer::new(cfg, prover.clone(), prover.clone(), bridge).unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 500,
+                ..
+            }
+        ));
+        let err = r.tick().await.expect_err("two rotations without a target");
+        assert!(err.to_string().contains("no bundle target"), "{err}");
     }
 }

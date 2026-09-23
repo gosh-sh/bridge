@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
     // as `storedLastBkUpdateSeq`. Starts from the persisted v4 field so a
     // restart resumes from the last verified bk-update without re-applying.
     let mut last_seen_bk_update_seqno: u32 = state.stored_last_bk_set_update_seq_no as u32;
-    // ETH-36 two-slot BK-set mirror.
+    // Two-slot BK-set mirror.
     //
     // Sergey's `AckiNackiBridge.sol` carries `storedBkSetCommitment` +
     // `storedPrevBkSetCommitment` and picks between them via
@@ -324,7 +324,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // V4 (ETH-36): last_seen is a public input of Circuit 1 that the
+            // V4: last_seen is a public input of Circuit 1 that the
             // contract mirrors verbatim. A mismatch between what the prover
             // baked into the proof and what the daemon (mirroring the
             // contract's future state) tracks means the prover is producing
@@ -376,7 +376,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // V3 (ETH-36 selector): bind `bk_set_hash_fr` to the commitment
+            // V3 (two-slot selector): bind `bk_set_hash_fr` to the commitment
             // the on-chain contract would pick for this block's seq_no. The
             // Solidity `_expectedBkSetFor(seqNo)` returns:
             //   - `storedPrevBkSetCommitment` when seqNo ≤ storedLastBkSetUpdateSeqNo (OLD window)
@@ -925,7 +925,7 @@ fn process_bk_update_bundle(
 
     let verify_ok = attestation_verified && merkle_verified && monotonicity_ok;
     if verify_ok {
-        // V2 (ETH-36 two-slot mirror): snapshot the OLD commitment BEFORE
+        // V2 (two-slot mirror): snapshot the OLD commitment BEFORE
         // rotating. Matches `AckiNackiBridge.applyBkSetUpdate` which does
         // `storedPrevBkSetCommitment = storedBkSetCommitment` immediately
         // before overwriting the primary slot. The selector at bundle-verify

@@ -176,8 +176,10 @@ contract AckiNackiBridge {
     uint256 public storedBkSetCommitment;
 
     /// @notice Highest AN block sequence number whose BK-set rotation has been
-    ///         applied on-chain via `applyBkSetUpdate`. Independent from
-    ///         `storedLastSeenBlockSeqNo` (layer-bundle cursor).
+    ///         applied on-chain via `applyBkSetUpdate`. Selects the set
+    ///         `verifyBlock` must see (`_expectedBkSetFor`) and gates the
+    ///         next rotation (`VerifyBlockLagBehindRotation`). Not only a
+    ///         monotonicity cursor.
     uint64 public storedLastBkSetUpdateSeqNo;
 
     /// @notice Highest AN block sequence number whose attestation has been
@@ -422,10 +424,13 @@ contract AckiNackiBridge {
     ///         (`storedLastBkSetUpdateSeqNo == 0`) is always allowed —
     ///         `verifyBlock` then accepts the previous set for
     ///         `blockSeqNo <= N` so an off-boundary N is not a deadlock.
-    ///         Two rotations inside one bundle stride (1024 at L1, 16384
-    ///         at L2) deadlock: N2 waits on a bundle after N1, and that
-    ///         bundle is signed by the third set. AN must not rotate
-    ///         twice between consecutive bundle targets.
+    ///         Two rotations with no bundle target in `[N1, N2]`
+    ///         (inclusive) deadlock permanently: N2 waits on a bundle
+    ///         after N1, that bundle is signed by a third set, and
+    ///         `verifyBlock` cannot move either. The first field is the
+    ///         previous N already stored, not the `blockSeqNo` being
+    ///         applied. AN must not place two rotations with no bundle
+    ///         target between them (ends included).
     error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
     /// @notice Circuit 1A/1B range-checks `block_seq_no > last_seen`.
     ///         Passing the live layer cursor after `verifyBlock(N)` as
@@ -1120,6 +1125,16 @@ contract AckiNackiBridge {
         return hi;
     }
 
+    /// @dev Commitment `verifyBlock` must see for `blockSeqNo`. After
+    ///      `applyBkSetUpdate(N)` the outgoing set still signs every
+    ///      block at or before N (including N itself).
+    function _expectedBkSetFor(uint64 blockSeqNo) internal view returns (uint256) {
+        if (storedLastBkSetUpdateSeqNo != 0 && blockSeqNo <= storedLastBkSetUpdateSeqNo) {
+            return storedPrevBkSetCommitment;
+        }
+        return storedBkSetCommitment;
+    }
+
     /// @dev Expected chain anchor for an incoming block that carries
     ///      `numLayers` non-empty layers — the exact mirror of the partner
     ///      prover's `BridgeState::prev_max_level_layer_hash_for`
@@ -1134,16 +1149,6 @@ contract AckiNackiBridge {
     ///      diverged from the prover whenever `numLayers` *decreased* between
     ///      consecutive key blocks (e.g. a 3-layer block followed by a 1-layer
     ///      block), permanently halting `verifyBlock`.
-    /// @dev Commitment `verifyBlock` must see for `blockSeqNo`. After
-    ///      `applyBkSetUpdate(N)` the outgoing set still signs every
-    ///      block at or before N (including N itself).
-    function _expectedBkSetFor(uint64 blockSeqNo) internal view returns (uint256) {
-        if (storedLastBkSetUpdateSeqNo != 0 && blockSeqNo <= storedLastBkSetUpdateSeqNo) {
-            return storedPrevBkSetCommitment;
-        }
-        return storedBkSetCommitment;
-    }
-
     function _expectedPrevAnchor(uint8 numLayers) internal view returns (uint256) {
         uint8 t = _highestActiveLayer();
         if (t == 0) {

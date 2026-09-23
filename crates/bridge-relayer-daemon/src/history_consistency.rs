@@ -5,6 +5,7 @@
 //! Check B — across ticks, on-chain anchors must not rewind or jump without
 //! an explained BK-update.
 
+use alloy::primitives::U256;
 use bridge_prover_lib::bridge_state::BridgeState;
 
 use crate::bridge::BridgeOnChainState;
@@ -49,10 +50,13 @@ fn drift(
 /// helper therefore no longer touches
 /// [`BridgeOnChainState::prev_max_level_layer_hash`] (which is now the
 /// immutable genesis seed, not the runtime anchor).
+/// `bk` is the set the prover must hold: `Some((commitment, last_bk))`
+/// with `last_bk = None` during the hold window (only the outgoing
+/// commitment is known on-chain). `None` skips the BK comparison.
 pub fn check_history_consistency(
     expected: &BridgeState,
     actual: &BridgeOnChainState,
-    check_bk: bool,
+    bk: Option<(U256, Option<u64>)>,
 ) -> Result<(), HistoryDrift> {
     if expected.stored_last_seen_block_seq_no != actual.last_seen_block_seq_no {
         return Err(drift(
@@ -61,23 +65,25 @@ pub fn check_history_consistency(
             actual.last_seen_block_seq_no.to_string(),
         ));
     }
-    if !check_bk {
+    let Some((want_bk, want_last_bk)) = bk else {
         return Ok(());
-    }
-    let actual_bk = actual.bk_set_commitment.to_le_bytes::<32>();
-    if expected.stored_bk_set_commitment != actual_bk {
+    };
+    let want_bk = want_bk.to_le_bytes::<32>();
+    if expected.stored_bk_set_commitment != want_bk {
         return Err(drift(
             "bk_set_commitment",
+            hex::encode(want_bk),
             hex::encode(expected.stored_bk_set_commitment),
-            hex::encode(actual_bk),
         ));
     }
-    if expected.stored_last_bk_set_update_seq_no != actual.last_bk_set_update_seq_no {
-        return Err(drift(
-            "last_bk_set_update_seq_no",
-            expected.stored_last_bk_set_update_seq_no.to_string(),
-            actual.last_bk_set_update_seq_no.to_string(),
-        ));
+    if let Some(n) = want_last_bk {
+        if expected.stored_last_bk_set_update_seq_no != n {
+            return Err(drift(
+                "last_bk_set_update_seq_no",
+                n.to_string(),
+                expected.stored_last_bk_set_update_seq_no.to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -156,7 +162,7 @@ mod tests {
             prev_max_level_layer_hash: U256::ZERO,
             last_bk_set_update_seq_no: 0,
         };
-        assert!(check_history_consistency(&expected, &actual, true).is_ok());
+        assert!(check_history_consistency(&expected, &actual, Some((U256::ZERO, Some(0)))).is_ok());
     }
 
     #[test]

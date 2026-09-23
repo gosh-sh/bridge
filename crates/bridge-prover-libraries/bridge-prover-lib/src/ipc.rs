@@ -217,9 +217,9 @@ pub struct BkUpdateRequest {
     pub block_seq_no: u32,
     /// Thread-anchored `BlockHeight.height` of the bk-update block.
     pub block_height: u64,
-    /// Seq_no of the previously applied bk-update (i.e. the verifier's
-    /// `stored_last_bk_set_update_seq_no` at the time this bundle is
-    /// produced). The verifier checks `block_seq_no > this`.
+    /// Layer cursor the attestation was proven against (`last_seen`).
+    /// Goes on-chain as `applyBkSetUpdate.attestationLastSeen`. The
+    /// circuit requires `block_seq_no > this`.
     pub last_seen_bk_update_seqno: u32,
     /// Chain's raw 32-byte block hash BE — same encoding as
     /// [`ProofRequest::block_id_hex`]. Consumed by `applyBkSetUpdate`

@@ -340,14 +340,27 @@ impl BridgeClient for MockBridgeClient {
         }
         inner.accepted_log.push(block.clone());
 
+        let new_state = BridgeOnChainState {
+            last_seen_block_seq_no: inner.last_seen_block_seq_no,
+            bk_set_commitment: inner.bk_set_commitment,
+            prev_bk_set_commitment: inner.prev_bk_set_commitment,
+            prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
+            last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
+        };
+        // Same post-submit check as `EthBridgeClient`: the current
+        // commitment is the new set after `applyBkSetUpdate(N)`, so
+        // compare against `_expectedBkSetFor`.
+        if new_state.expected_bk_set_for(block.block_seq_no) != block.bk_set_commitment {
+            return Ok(SubmitOutcome::Reverted {
+                reason: format!(
+                    "post-submit drift: expected_bk_set_for({}) != submitted",
+                    block.block_seq_no
+                ),
+            });
+        }
+
         Ok(SubmitOutcome::Verified {
-            new_state: BridgeOnChainState {
-                last_seen_block_seq_no: inner.last_seen_block_seq_no,
-                bk_set_commitment: inner.bk_set_commitment,
-                prev_bk_set_commitment: inner.prev_bk_set_commitment,
-                prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
-                last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
-            },
+            new_state,
             tx_hash: None,
         })
     }
@@ -949,10 +962,12 @@ where
                 RelayerError::Other("read_full_state: expected 10 layer windows".into())
             })?;
 
+        let prev_bk = self.fetch_prev_bk_set().await?;
         Ok(EthBridgeContractState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk.to_le_bytes::<32>(),
             last_bk_set_update_seq_no: last_bk,
+            prev_bk_set_commitment: prev_bk.to_le_bytes::<32>(),
             genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
@@ -1242,11 +1257,12 @@ where
                 ),
             });
         }
-        if new_state.bk_set_commitment != block.bk_set_commitment {
+        let expected_bk = new_state.expected_bk_set_for(block.block_seq_no);
+        if expected_bk != block.bk_set_commitment {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "post-submit drift: chain bk_set_commitment={} != submitted={}",
-                    new_state.bk_set_commitment, block.bk_set_commitment
+                    "post-submit drift: expected_bk_set_for({})={} != submitted={}",
+                    block.block_seq_no, expected_bk, block.bk_set_commitment
                 ),
             });
         }

@@ -31,10 +31,16 @@
 //!                       single anchor root rather than the previous
 //!                       `NUM_LAYER_HASHES`-wide candidate vector with
 //!                       a private index.
-//!  10: anchorLayer    — 1-indexed layer hosting `finalRoot`
-//!                       (`1..=MAX_ANCHOR_LAYER`, range-checked). The L1
-//!                       verifier scans only that layer's HISTORY_PROOF
-//!                       window for `finalRoot` (Option A in ETH-15). 0 is
+//!  10: anchorLayer    — 1-indexed routing hint the prover chooses. The
+//!                       circuit only range-checks it to
+//!                       `1..=MAX_ANCHOR_LAYER` and forwards it to slot 10
+//!                       — nothing inside the circuit ties it to the walked
+//!                       chain (the dense-chain walk produces `finalRoot`
+//!                       but carries no layer tag). Layer identity is
+//!                       enforced OFF-CIRCUIT: the L1 verifier scans
+//!                       `layerWindows[anchorLayer]` for `finalRoot`
+//!                       (`AckiNackiBridge.sol:1342`, Option A in ETH-15) —
+//!                       a wrong hint just fails window membership. 0 is
 //!                       rejected both on-chain and here (a genuine layer
 //!                       index below 1 is meaningless — the smallest AN
 //!                       layer index is 0, but this PI is 1-indexed to
@@ -349,8 +355,11 @@ pub struct BridgeEventProveCircuit {
     pub block_merkle_proof_position: usize,
     pub dense_chain: Vec<DenseChainLink>,
     pub num_active_chain_steps: usize,
-    /// 1-indexed layer number of the anchor `final_root` — exposed as
-    /// `PUB_ANCHOR_LAYER`. Range-checked `1..=MAX_ANCHOR_LAYER` in-circuit.
+    /// 1-indexed layer routing hint the prover picks — exposed as
+    /// `PUB_ANCHOR_LAYER`. Range-checked `1..=MAX_ANCHOR_LAYER` in-circuit;
+    /// binding to the actual `layerWindows[]` mapping happens on-chain
+    /// (`AckiNackiBridge.sol:1342`). Nothing inside the circuit ties this
+    /// value to the walked chain.
     pub anchor_layer: u8,
     pub base_circuit_params: BaseCircuitParams,
     pub base_circuit_builder: RefCell<BaseCircuitBuilder<Fr>>,
@@ -1382,16 +1391,24 @@ mod tests {
         }
     }
 
-    /// ETH-15 plumbing: the witness `anchor_layer` and the value the on-chain
-    /// verifier reads from `pub4[10]` are wired through a single copy
-    /// constraint. A proof that carries a different PI than the witness the
-    /// prover ran on must not verify — otherwise a malicious prover could
-    /// point the contract at any `layerWindows[layer]` slot regardless of
-    /// which anchor the circuit actually walked to.
+    /// ETH-15 plumbing: PI slot 10 is wired to the `anchor_layer` witness
+    /// via a copy constraint on the instance column, so the value the
+    /// on-chain verifier reads from `pub4[10]` is exactly the witness the
+    /// prover ran on. Nothing here binds `anchor_layer` to the walked
+    /// chain — the circuit has no notion of "which layer `final_root`
+    /// belongs to" and can't have one, because roots don't carry layer
+    /// tags inside the walk. Layer identity is enforced OFF-CIRCUIT by
+    /// `AckiNackiBridge.sol:1342` doing
+    /// `final_root ∈ layerWindows[anchor_layer]`; a wrong hint just fails
+    /// that on-chain membership check.
     ///
-    /// We build a valid circuit at `anchor_layer = 2` but assemble the
-    /// instance vector with slot 10 = `Fr::from(3)`. `MockProver::verify` must
-    /// return `Err` (equality constraint on the instance column fails).
+    /// This test is a regression pin for the generic halo2 PI/witness
+    /// equality property, applied to slot 10: we build a valid circuit at
+    /// `anchor_layer = 2` but assemble the instance vector with slot 10 =
+    /// `Fr::from(3)`. `MockProver::verify` must return `Err` (equality
+    /// constraint on the instance column fails). Nothing anchor-specific —
+    /// same shape holds for every PI slot — but worth pinning because slot
+    /// 10 is the value the contract routes on.
     #[test]
     fn test_anchor_layer_pi_witness_mismatch() {
         use rand::rngs::StdRng;

@@ -624,6 +624,8 @@ assigns it when the release is tagged.
   an `eth-frontend` integration test and a `generate-verifier` binary, none of
   which exists, so each failed on every run. Production verifiers are
   regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
+- `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
+  which ran the same missing `generate-proof` binary.
 
 ## [0.2.0] – 2026-09-11
 

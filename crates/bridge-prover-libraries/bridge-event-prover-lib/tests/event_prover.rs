@@ -219,9 +219,14 @@ fn block_tree_position_out_of_range_errors() {
 /// depth of exactly `usize::BITS` (or more) is what the guard catches.
 /// Without it a debug build panics with `attempt to shift left with
 /// overflow` and a release build masks the shift amount modulo
-/// `usize::BITS`, silently yielding `block_pos_max = 1` and letting
-/// every non-zero `block_pos` through — hence the explicit closed-form
-/// error message.
+/// `usize::BITS`, so `1usize << 64` collapses to `1` and
+/// `block_pos_max` becomes `1`. The `block_pos >= block_pos_max` check
+/// then over-rejects (every `block_pos >= 1` is turned away), but a
+/// `block_pos == 0` witness with a 64-deep sibling list slips through
+/// silently — that is the single case the explicit closed-form
+/// `checked_shl` error message stops. The test therefore uses
+/// `position = 0` to prove the guard fires even on the case the naive
+/// shift-mask semantics would accept.
 #[test]
 fn block_tree_pathological_depth_errors_via_checked_shl() {
     let mut w = populated_witness();
@@ -242,9 +247,13 @@ fn block_tree_pathological_depth_errors_via_checked_shl() {
 
 /// Boundary sanity: with the fixture's 8-sibling block-tree proof, the
 /// maximum in-range `position` is `(1 << 8) - 1 == 255`, and it must be
-/// accepted. Guards against a future off-by-one that turns `>= max` into
-/// `> max` (or vice versa) and starts rejecting a legitimate top-of-range
-/// witness.
+/// accepted. This asserts the accepted range still reaches its top —
+/// i.e. it catches a future *tightening* that lowers the accepted max
+/// below `(1<<depth) - 1` (for example turning `>= max` into
+/// `>= max - 1`, or adding a `+ 1` on the position side that shifts
+/// everything down). It does NOT catch a *loosening* that flips `>=`
+/// to `>` — that swap accepts one position past the legitimate top and
+/// still accepts everything below, so the max-1 witness stays green.
 #[test]
 fn block_tree_position_at_max_minus_one_is_accepted() {
     let mut w = populated_witness();
@@ -253,4 +262,20 @@ fn block_tree_position_at_max_minus_one_is_accepted() {
     proof.position = (1u32 << depth) - 1;
     build_proof_inputs(&w, default_event_circuit_params())
         .expect("boundary block_tree position (1<<depth)-1 must be accepted");
+}
+
+/// Mirror of `block_tree_position_at_max_minus_one_is_accepted` on the
+/// events axis: the fixture uses 7 siblings, so `position = (1 << 7) - 1
+/// == 127` is the top of the accepted range. The events-axis check goes
+/// through the circuit's own `MAX_EVENTS_DEPTH` guard rather than the
+/// prover's `checked_shl` shim, so the same "tightening" mutation would
+/// survive without this positive test.
+#[test]
+fn events_tree_position_at_max_minus_one_is_accepted() {
+    let mut w = populated_witness();
+    let proof = w.events_tree_proof.as_mut().unwrap();
+    let depth = proof.siblings_hex.len();
+    proof.position = (1u32 << depth) - 1;
+    build_proof_inputs(&w, default_event_circuit_params())
+        .expect("boundary events_tree position (1<<depth)-1 must be accepted");
 }

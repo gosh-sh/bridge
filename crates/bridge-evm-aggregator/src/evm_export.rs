@@ -1,7 +1,6 @@
 //! Export aggregated SHPLONK proofs + Yul verifiers for on-chain consumption.
 //!
-//! Calldata layout matches snark-verifier-sdk: `encode_calldata(instances,
-//! proof)`.
+//! Calldata layout matches snark-verifier-sdk: `encode_calldata(instances, proof)`.
 
 use std::path::Path;
 
@@ -32,8 +31,7 @@ use crate::{
     verifier_source::gen_evm_verifier_sol_shplonk,
 };
 
-/// Full M2 spike artefacts: inner multiply proof → aggregator → Yul verifier +
-/// EVM calldata.
+/// Full M2 spike artefacts: inner multiply proof → aggregator → Yul verifier + EVM calldata.
 pub struct SpikeArtifacts {
     pub inner_a: Fr,
     pub inner_b: Fr,
@@ -61,19 +59,12 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
     let inner_snark = prove_inner(&params_inner, a, b)?;
     let c = inner_snark.instances[0][0];
 
-    let export = aggregate_and_prove(
-        "MultiplierSpikeVerifier",
-        inner_snark,
-        config,
-        Some(workdir),
-    )?;
+    let export =
+        aggregate_and_prove("MultiplierSpikeVerifier", inner_snark, config, Some(workdir))?;
     let verifier_bytecode = export
         .verifier_bytecode
         .expect("an artifacts dir was given, so the verifier was compiled");
-    std::fs::write(
-        workdir.join("multiplier_spike_calldata.bin"),
-        &export.evm_calldata,
-    )?;
+    std::fs::write(workdir.join("multiplier_spike_calldata.bin"), &export.evm_calldata)?;
 
     let meta = serde_json::json!({
         "inner_a": format!("{a:?}"),
@@ -108,16 +99,14 @@ pub struct AggregatorExportResult {
     /// self-checks against the committed `<name>.sol`.
     pub verifier_source: String,
     /// Compiled deployment bytecode. `Some` only when an `artifacts_dir` was
-    /// given: that is the regeneration path, and the only one that needs
-    /// `solc`.
+    /// given: that is the regeneration path, and the only one that needs `solc`.
     pub verifier_bytecode: Option<Vec<u8>>,
     pub k_outer: u32,
     pub total_instances: usize,
     pub evm_calldata: Vec<u8>,
 }
 
-/// Aggregate `inner_snark` and produce the outer verifier bytecode + EVM
-/// calldata.
+/// Aggregate `inner_snark` and produce the outer verifier bytecode + EVM calldata.
 ///
 /// Back-compat wrapper: delegates to [`aggregate_and_prove_cached`] with no PK
 /// cache directory, i.e. full outer keygen on every call. Existing call sites
@@ -145,8 +134,8 @@ pub fn aggregate_and_prove(
 ///   (`export-inner-aggregator`), which needs `solc 0.8.19` on `PATH`. Without
 ///   one only the source is generated, which is all the runtime self-check in
 ///   `aggregate-proof` compares, and no compiler is involved.
-/// - `pk_cache_dir` controls whether the outer PK is persisted for reuse across
-///   runs (runtime aggregation path, `aggregate-proof`).
+/// - `pk_cache_dir` controls whether the outer PK is persisted for reuse
+///   across runs (runtime aggregation path, `aggregate-proof`).
 pub fn aggregate_and_prove_cached(
     base_name: &str,
     inner_snark: Snark,
@@ -177,10 +166,7 @@ pub fn aggregate_and_prove_cached(
     prover_circuit.expose_previous_instances(false);
     let prover_circuit = prover_circuit.use_break_points(break_points);
     let instances = prover_circuit.instances();
-    let flat: Vec<Fr> = instances
-        .iter()
-        .flat_map(|col| col.iter().copied())
-        .collect();
+    let flat: Vec<Fr> = instances.iter().flat_map(|col| col.iter().copied()).collect();
 
     // DIAG: dump instance layout so we can confirm what actually lives at each
     // slot (esp. positions 12..NUM_ACCUMULATOR_INSTANCES+N_inner). When
@@ -210,22 +196,15 @@ pub fn aggregate_and_prove_cached(
                 ));
             }
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&diag_path)
-        {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&diag_path) {
             let _ = f.write_all(buf.as_bytes());
         }
     }
 
     let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
 
-    let verifier_source = gen_evm_verifier_sol_shplonk::<AggregationCircuit>(
-        &params_outer,
-        pk.get_vk(),
-        num_instance,
-    );
+    let verifier_source =
+        gen_evm_verifier_sol_shplonk::<AggregationCircuit>(&params_outer, pk.get_vk(), num_instance);
     let verifier_bytecode = match artifacts_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
@@ -242,7 +221,7 @@ pub fn aggregate_and_prove_cached(
             // for inspection.
             eip170::assert_eip170(&bytecode, &bin_path.display().to_string())?;
             Some(bytecode)
-        },
+        }
         None => None,
     };
 
@@ -268,9 +247,18 @@ pub fn aggregate_snark_from_bytes(
 }
 
 /// Re-export inner multiply proof generation for fixture builders.
-pub fn prove_multiply_spike(params: &ParamsKZG<Bn256>, a: Fr, b: Fr) -> anyhow::Result<Snark> {
-    let (builder, _) =
-        build_multiply_circuit(false, K_INNER_SPIKE as usize, LOOKUP_BITS_INNER_SPIKE, a, b);
+pub fn prove_multiply_spike(
+    params: &ParamsKZG<Bn256>,
+    a: Fr,
+    b: Fr,
+) -> anyhow::Result<Snark> {
+    let (builder, _) = build_multiply_circuit(
+        false,
+        K_INNER_SPIKE as usize,
+        LOOKUP_BITS_INNER_SPIKE,
+        a,
+        b,
+    );
     let pk = gen_pk(params, &builder, None);
     Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
 }

@@ -1,6 +1,4 @@
-//! Export a bincode-serialized inner [`Snark`] to a production verifier:
-//! `<name>.sol` and the `<name>.bin` compiled from it (needs `solc 0.8.19` on
-//! `PATH`).
+//! Export a bincode-serialized inner [`Snark`] to a production verifier: `<name>.sol` and the `<name>.bin` compiled from it (needs `solc 0.8.19` on `PATH`).
 //!
 //! ```bash
 //! cd crates/bridge-evm-aggregator
@@ -12,7 +10,10 @@
 
 use std::path::PathBuf;
 
-use bridge_evm_aggregator::{aggregator::AggregatorConfig, evm_export::aggregate_and_prove_cached};
+use bridge_evm_aggregator::{
+    aggregator::AggregatorConfig,
+    evm_export::aggregate_and_prove_cached,
+};
 use snark_verifier_sdk::Snark;
 
 fn main() -> anyhow::Result<()> {
@@ -34,14 +35,12 @@ fn main() -> anyhow::Result<()> {
             "--k-outer" => k_outer = args.next().and_then(|s| s.parse().ok()),
             "--universality" => {
                 universality = Some(AggregatorConfig::parse_universality(
-                    &args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("--universality needs value"))?,
+                    &args.next().ok_or_else(|| anyhow::anyhow!("--universality needs value"))?,
                 )?)
-            },
+            }
             "--inner-instances" => {
                 let _ = args.next();
-            },
+            }
             // Optional persistent outer PK cache. First run against a new
             // (name, k_outer, lookup_bits, universality, inner-shape) slot
             // does full keygen (~3-5 min at K=21); subsequent runs load PK
@@ -74,8 +73,7 @@ fn main() -> anyhow::Result<()> {
         .map(Vec::len)
         .expect("an --out-dir is always passed, so the verifier was compiled");
     println!(
-        "OK: {} -> {}/{}.{{sol,bin}} ({} B bytecode, {} B source, {} instances, K_outer={}, \
-         universality={:?}) + _calldata.bin ({} B)",
+        "OK: {} -> {}/{}.{{sol,bin}} ({} B bytecode, {} B source, {} instances, K_outer={}, universality={:?}) + _calldata.bin ({} B)",
         inner_path.display(),
         out_dir.display(),
         name,

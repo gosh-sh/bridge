@@ -3,8 +3,7 @@
 /// Maximum deployable runtime bytecode size per EIP-170.
 pub const EIP170_MAX_BYTES: usize = 24_576;
 
-/// Assert `bytecode.len() <= EIP170_MAX_BYTES`, returning a descriptive error
-/// on violation.
+/// Assert `bytecode.len() <= EIP170_MAX_BYTES`, returning a descriptive error on violation.
 pub fn assert_eip170(bytecode: &[u8], label: &str) -> anyhow::Result<usize> {
     let size = bytecode.len();
     if size > EIP170_MAX_BYTES {

@@ -45,11 +45,12 @@ pub fn assert_hermez_ceremony(srs: &ParamsKZG<Bn256>) -> Result<()> {
     let head = &buf[..HERMEZ_S_G2_HEAD.len()];
     if head != HERMEZ_S_G2_HEAD {
         bail!(
-            "outer aggregator SRS (k={}) is NOT Hermez Perpetual Powers of Tau (s_g2 head \
-             {:02x?}, expected {:02x?}). PARAMS_DIR likely lacks kzg_bn254_{}.srs and `gen_srs` \
-             silently generated a toxic-waste SRS whose tau is known to the local process — every \
-             proof produced with it is forgeable. Bootstrap via \
-             `scripts/bootstrap_hermez_srs.sh`. REFUSING to proceed.",
+            "outer aggregator SRS (k={}) is NOT Hermez Perpetual Powers of Tau \
+             (s_g2 head {:02x?}, expected {:02x?}). \
+             PARAMS_DIR likely lacks kzg_bn254_{}.srs and `gen_srs` silently \
+             generated a toxic-waste SRS whose tau is known to the local \
+             process — every proof produced with it is forgeable. \
+             Bootstrap via `scripts/bootstrap_hermez_srs.sh`. REFUSING to proceed.",
             srs.k(),
             head,
             HERMEZ_S_G2_HEAD,

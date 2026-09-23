@@ -13,8 +13,7 @@
 //! (a stable function of the inner VK).
 //!
 //! Cache slot layout under `<cache_dir>`:
-//! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~800 MB @
-//!   K=21)
+//! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~800 MB @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
 //!
 //! Slot stem: `<base_name>__v2__<content_hash:hex[..32]>`. `base_name` is
@@ -35,24 +34,25 @@
 //! byte-drift check would catch it before on-chain use, but the cache-side
 //! precondition is now enforced properly.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+};
 
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
-        halo2curves::{
-            bn256::{Bn256, G1Affine},
-            serde::SerdeObject,
-        },
+        halo2curves::{bn256::{Bn256, G1Affine}, serde::SerdeObject},
         plonk::ProvingKey,
         poly::kzg::commitment::ParamsKZG,
     },
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use snark_verifier_sdk::{
     gen_pk,
-    halo2::aggregation::{AggregationCircuit, AggregationConfigParams, VerifierUniversality},
+    halo2::aggregation::{
+        AggregationCircuit, AggregationConfigParams, VerifierUniversality,
+    },
     CircuitExt, Snark, SHPLONK,
 };
 
@@ -128,8 +128,7 @@ fn universality_byte(u: VerifierUniversality) -> u8 {
 }
 
 /// SRS `s_g2` bytes — the public MPC-ceremony fingerprint. Fresh SRS ⇒ fresh
-/// bytes ⇒ fresh cache slot. Same encoding path as
-/// `srs_guard::assert_hermez_ceremony`.
+/// bytes ⇒ fresh cache slot. Same encoding path as `srs_guard::assert_hermez_ceremony`.
 fn srs_s_g2_bytes(params: &ParamsKZG<Bn256>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
     params
@@ -155,7 +154,11 @@ fn snark_protocol_bytes(inner_snark: &Snark) -> Vec<u8> {
 ///   u32(s_g2_len)     || s_g2_bytes
 ///   u32(protocol_len) || protocol_bytes
 /// ```
-fn content_hash(config: &AggregatorConfig, s_g2_bytes: &[u8], protocol_bytes: &[u8]) -> [u8; 32] {
+fn content_hash(
+    config: &AggregatorConfig,
+    s_g2_bytes: &[u8],
+    protocol_bytes: &[u8],
+) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"bridge-evm-aggregator-cache-v2");
     h.update((config.k_outer as u32).to_le_bytes());
@@ -218,7 +221,7 @@ pub fn keygen_or_load(
             std::fs::create_dir_all(dir)?;
             let stem = cache_stem(base_name, &config, agg_params, inner_snark);
             Some(slot_paths(dir, &stem))
-        },
+        }
         None => None,
     };
 
@@ -327,10 +330,7 @@ mod tests {
         let cfg = base_cfg();
         let s_g2 = b"srs-s-g2-bytes";
         let proto = b"protocol-bytes";
-        assert_eq!(
-            content_hash(&cfg, s_g2, proto),
-            content_hash(&cfg, s_g2, proto)
-        );
+        assert_eq!(content_hash(&cfg, s_g2, proto), content_hash(&cfg, s_g2, proto));
     }
 
     #[test]
@@ -365,30 +365,18 @@ mod tests {
 
         let mut c = base_cfg();
         c.k_outer = base_cfg().k_outer + 1;
-        assert_ne!(
-            base,
-            content_hash(&c, s_g2, proto),
-            "k_outer must be in key"
-        );
+        assert_ne!(base, content_hash(&c, s_g2, proto), "k_outer must be in key");
 
         let mut c = base_cfg();
         c.lookup_bits_outer = base_cfg().lookup_bits_outer + 1;
-        assert_ne!(
-            base,
-            content_hash(&c, s_g2, proto),
-            "lookup_bits_outer must be in key"
-        );
+        assert_ne!(base, content_hash(&c, s_g2, proto), "lookup_bits_outer must be in key");
 
         let mut c = base_cfg();
         c.universality = match c.universality {
             VerifierUniversality::None => VerifierUniversality::Full,
             _ => VerifierUniversality::None,
         };
-        assert_ne!(
-            base,
-            content_hash(&c, s_g2, proto),
-            "universality must be in key"
-        );
+        assert_ne!(base, content_hash(&c, s_g2, proto), "universality must be in key");
     }
 
     #[test]
@@ -399,9 +387,6 @@ mod tests {
         let cfg = base_cfg();
         let a = content_hash(&cfg, b"ab", b"cd");
         let b = content_hash(&cfg, b"a", b"bcd");
-        assert_ne!(
-            a, b,
-            "field lengths must be encoded to disambiguate boundaries"
-        );
+        assert_ne!(a, b, "field lengths must be encoded to disambiguate boundaries");
     }
 }

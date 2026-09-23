@@ -33,8 +33,7 @@ use crate::{
 pub const K_INNER_SPIKE: u32 = 9;
 pub const LOOKUP_BITS_INNER_SPIKE: usize = 8;
 
-/// Default outer row count — safe minimum for `expose_previous_instances` @ ~13
-/// inner PIs.
+/// Default outer row count — safe minimum for `expose_previous_instances` @ ~13 inner PIs.
 pub const K_OUTER_DEFAULT: u32 = 21;
 pub const LOOKUP_BITS_OUTER_DEFAULT: usize = 20;
 
@@ -64,9 +63,12 @@ impl Default for AggregatorConfig {
 
 impl AggregatorConfig {
     pub fn for_inner_instances(num_inner: usize) -> Self {
-        // Empirics: 13 re-exposed PIs fit @ K=21 (~13 KB). Circuit 2 (14 PIs) may need
-        // K=22.
-        let k_outer = if num_inner <= 13 { 21 } else { 22 };
+        // Empirics: 13 re-exposed PIs fit @ K=21 (~13 KB). Circuit 2 (14 PIs) may need K=22.
+        let k_outer = if num_inner <= 13 {
+            21
+        } else {
+            22
+        };
         Self {
             k_outer,
             lookup_bits_outer: k_outer.saturating_sub(1) as usize,
@@ -74,14 +76,12 @@ impl AggregatorConfig {
         }
     }
 
-    /// Production R15 verifier presets (empirical on bound Poseidon snarks,
-    /// 2026-06-22).
+    /// Production R15 verifier presets (empirical on bound Poseidon snarks, 2026-06-22).
     pub fn for_verifier_name(name: &str) -> Self {
         Self::for_verifier_name_with_overrides(name, None, None)
     }
 
-    /// Like [`for_verifier_name`] but allows sweep overrides (`k_outer`,
-    /// universality tag).
+    /// Like [`for_verifier_name`] but allows sweep overrides (`k_outer`, universality tag).
     pub fn for_verifier_name_with_overrides(
         name: &str,
         k_outer: Option<u32>,
@@ -125,15 +125,14 @@ impl AggregatorConfig {
             "none" => Ok(VerifierUniversality::None),
             "preprocessed" | "preprocessed-as-witness" => {
                 Ok(VerifierUniversality::PreprocessedAsWitness)
-            },
+            }
             "full" => Ok(VerifierUniversality::Full),
             other => anyhow::bail!("unknown universality {other} (none|preprocessed|full)"),
         }
     }
 }
 
-/// Number of public-instance scalars contributed by the KZG accumulator (12
-/// limbs).
+/// Number of public-instance scalars contributed by the KZG accumulator (12 limbs).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
 /// Generate a SHPLONK SNARK proving `a * b == c` (M2 spike inner circuit).
@@ -154,8 +153,7 @@ pub fn prove_inner_multiply(
     Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
 }
 
-/// Wrap a pre-built inner [`Snark`] in an [`AggregationCircuit`] and prove the
-/// aggregator.
+/// Wrap a pre-built inner [`Snark`] in an [`AggregationCircuit`] and prove the aggregator.
 ///
 /// Back-compat wrapper: delegates to [`aggregate_inner_cached`] with no PK
 /// cache directory. Every call runs full outer keygen. Prefer
@@ -198,12 +196,7 @@ pub fn aggregate_inner_cached(
     prover_circuit.expose_previous_instances(false);
     let prover_circuit = prover_circuit.use_break_points(break_points);
 
-    Ok(gen_snark_shplonk(
-        agg_params,
-        &pk,
-        prover_circuit,
-        None::<&Path>,
-    ))
+    Ok(gen_snark_shplonk(agg_params, &pk, prover_circuit, None::<&Path>))
 }
 
 /// Back-compat wrapper using default outer config.
@@ -213,8 +206,8 @@ pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::R
 
 /// Generate Yul EVM verifier for an aggregator keyed on `inner_snark`.
 ///
-/// Writes `.sol` + sibling `.bin`. When `enforce_eip170` is true, fails if
-/// bytecode exceeds 24 576 bytes.
+/// Writes `.sol` + sibling `.bin`. When `enforce_eip170` is true, fails if bytecode
+/// exceeds 24 576 bytes.
 pub fn generate_yul_verifier(
     agg_params: &ParamsKZG<Bn256>,
     inner_snark: &Snark,

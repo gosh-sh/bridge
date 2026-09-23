@@ -1,5 +1,4 @@
-//! Export M2 multiply-spike aggregator verifier + EVM calldata for Foundry
-//! tests.
+//! Export M2 multiply-spike aggregator verifier + EVM calldata for Foundry tests.
 //!
 //! ```bash
 //! cd crates/bridge-evm-aggregator

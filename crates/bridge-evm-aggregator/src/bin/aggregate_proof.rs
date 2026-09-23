@@ -13,11 +13,11 @@
 //! regenerates the verifier's Solidity source for the supplied inner snark and
 //! asserts it is **byte-identical** to the committed
 //! `contracts/ethereum/verifiers/<name>.sol`. The source is fully determined by
-//! the aggregator VK, so a drifted VK (wrong inner shape / config / SRS) —
-//! whose calldata the deployed verifier would reject — fails the comparison and
-//! we refuse to emit it. Nothing is compiled here, so no `solc` is needed; that
-//! the committed `.sol` compiles to the deployed `.bin` is checked where
-//! verifiers are regenerated (`scripts/check_verifier_sources.sh`).
+//! the aggregator VK, so a drifted VK (wrong inner shape / config / SRS) — whose
+//! calldata the deployed verifier would reject — fails the comparison and we
+//! refuse to emit it. Nothing is compiled here, so no `solc` is needed; that the
+//! committed `.sol` compiles to the deployed `.bin` is checked where verifiers
+//! are regenerated (`scripts/check_verifier_sources.sh`).
 //!
 //! ```bash
 //! cd crates/bridge-evm-aggregator
@@ -57,15 +57,13 @@ fn main() -> anyhow::Result<()> {
             "--out" => out_path = args.next().map(PathBuf::from),
             "--verifiers-dir" => {
                 verifiers_dir = args.next().map(PathBuf::from).unwrap_or(verifiers_dir)
-            },
+            }
             "--k-outer" => k_outer = args.next().and_then(|s| s.parse().ok()),
             "--universality" => {
                 universality = Some(AggregatorConfig::parse_universality(
-                    &args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("--universality needs value"))?,
+                    &args.next().ok_or_else(|| anyhow::anyhow!("--universality needs value"))?,
                 )?)
-            },
+            }
             // Escape hatch for the very first bootstrap of a verifier whose
             // .sol is not committed yet. Never use once a verifier is deployed.
             "--allow-source-drift" => allow_source_drift = true,
@@ -81,12 +79,12 @@ fn main() -> anyhow::Result<()> {
             // so the usage text must keep naming the real flags.
             "--help" | "-h" => {
                 println!(
-                    "aggregate-proof --inner-snark <path> --name <verifier> --out <path>\n\x20 \
-                     [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n\x20 \
-                     [--allow-source-drift] [--pk-cache-dir <dir>]"
+                    "aggregate-proof --inner-snark <path> --name <verifier> --out <path>\n\
+                     \x20 [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n\
+                     \x20 [--allow-source-drift] [--pk-cache-dir <dir>]"
                 );
                 return Ok(());
-            },
+            }
             other => anyhow::bail!("unknown arg: {other}"),
         }
     }
@@ -104,9 +102,14 @@ fn main() -> anyhow::Result<()> {
 
     // Pure in-memory aggregation: no scratch dir, no .sol/.bin written.
     // `pk_cache_dir` (if set) memoises the outer keygen across runs.
-    let export =
-        aggregate_and_prove_cached(&name, inner_snark, config, None, pk_cache_dir.as_deref())
-            .context("aggregate + evm-proof (aggregate_and_prove_cached)")?;
+    let export = aggregate_and_prove_cached(
+        &name,
+        inner_snark,
+        config,
+        None,
+        pk_cache_dir.as_deref(),
+    )
+    .context("aggregate + evm-proof (aggregate_and_prove_cached)")?;
 
     // Self-check: the regenerated verifier source must match the committed one.
     match check_committed_source(&verifiers_dir, &name, &export.verifier_source)
@@ -114,10 +117,10 @@ fn main() -> anyhow::Result<()> {
     {
         SourceCheck::Match(len) => {
             println!("VK match: regenerated {name}.sol == committed ({len} B) [OK]")
-        },
+        }
         SourceCheck::Drift(msg) if allow_source_drift => {
             eprintln!("WARNING (--allow-source-drift): {msg}")
-        },
+        }
         SourceCheck::Drift(msg) => anyhow::bail!(msg),
         SourceCheck::Missing(path) if allow_source_drift => eprintln!(
             "WARNING (--allow-source-drift): no committed {}; self-check skipped",

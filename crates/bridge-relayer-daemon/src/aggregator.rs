@@ -204,13 +204,13 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                 // keygens at K=19 with its own degree-matched SRS.
                 let mut km = KeyManager::new(&params_dir);
                 km.ensure_event_keys()
-                    .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e}")))?;
+                    .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e:#}")))?;
 
                 let event_k = km.event_config().k as u32;
                 ensure_srs_for_event(&km, &params_dir, event_k)?;
 
                 km.load_event_pk()
-                    .map_err(|e| RelayerError::other(format!("load_event_pk: {e}")))?;
+                    .map_err(|e| RelayerError::other(format!("load_event_pk: {e:#}")))?;
 
                 let raw = std::fs::read_to_string(&witness_path).map_err(|e| {
                     RelayerError::other(format!("read witness {}: {e}", witness_path.display()))
@@ -224,7 +224,7 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                     &witness,
                     TranscriptKind::Poseidon,
                 )
-                .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e}")))?;
+                .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e:#}")))?;
 
                 // Native Poseidon self-verify — refuse to hand the aggregator an
                 // invalid inner snark (stale event keys are the usual culprit).
@@ -260,7 +260,7 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                     &out.proof_bytes,
                     &out.public_instances,
                 )
-                .map_err(|e| RelayerError::other(format!("wrap Poseidon snark: {e}")))?;
+                .map_err(|e| RelayerError::other(format!("wrap Poseidon snark: {e:#}")))?;
 
                 let snark_path = snark_dir.join(format!("{name}.snark"));
                 std::fs::write(&snark_path, &snark_bytes).map_err(|e| {

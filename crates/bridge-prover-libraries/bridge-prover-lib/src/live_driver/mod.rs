@@ -163,6 +163,25 @@ pub enum DriverError {
     #[error("driver state inconsistent with chain: {0}")]
     StateInconsistent(#[source] anyhow::Error),
 
+    /// `ack_bk_update` refused because the next key block at
+    /// `cursor + stride` still lies at or below the rotation's
+    /// `block_seq_no` — under Sergey's ETH-36 `_expectedBkSetFor` rule
+    /// that key block is still OLD-signed. Rotating `prover_bk_set` +
+    /// `bk_set_commitment_fr` to NEW now would discard the OLD pubkey
+    /// table Circuit 1 witness gen needs for that bundle.
+    ///
+    /// **Retryable**: caller should keep polling bundles until
+    /// `cursor + stride > rotation_seqno`, then re-ack the same
+    /// artifacts (idempotent).
+    #[error(
+        "ack_bk_update too early: cursor {cursor} + stride ≤ rotation {rotation_seqno} \
+         (bundle the next OLD-signed key block first, then re-ack)"
+    )]
+    AckTooEarly {
+        cursor: u64,
+        rotation_seqno: u64,
+    },
+
     /// Bootstrap-phase signal: driver is still waiting for chain head to
     /// catch up to the seed height. Not an error in the usual sense; both
     /// poll methods return this via [`LiveBundleEvent::Bootstrapping`] /
@@ -716,13 +735,50 @@ impl LiveProverDriver {
             }
         };
 
-        // Do not block bundle advance on a pending rotation. On-chain
-        // `applyBkSetUpdate(N)` may land before `verifyBlock` covers N
-        // (ETH-36). Holding the bundle lane here would deadlock the live
-        // relayer: the prover must still produce M <= N under the
-        // outgoing set. Surface the flag so callers can still see a
-        // rotation is pending, then prove the next bundle.
-        let blocked = self.pending_bk_update_below(next_target_seqno).await?;
+        // Refined ETH-36 guard.
+        //
+        // On-chain `applyBkSetUpdate(N)` may land before `verifyBlock`
+        // covers N (that's what ETH-36's `storedPrevBkSetCommitment`
+        // buys). But this driver still holds ONE pubkey table at a time
+        // (`prover_bk_set`). Circuit 1 witness gen for the next key
+        // block requires whichever set signed that block:
+        //
+        //   * next_target_seqno <= N  → key block is signed by OLD set
+        //                               (last acts of the outgoing
+        //                               committee). We still have OLD
+        //                               in `prover_bk_set` because ack
+        //                               is gated on cursor > N — proceed.
+        //   * next_target_seqno == N  → the rotation block itself IS a
+        //                               key block, signed by OLD (last
+        //                               act). Proceed and bundle it;
+        //                               the caller will ack the rotation
+        //                               immediately after.
+        //   * next_target_seqno >  N  → key block after the rotation,
+        //                               signed by NEW. `prover_bk_set`
+        //                               is still OLD, so witness gen
+        //                               would fail at the pairing check.
+        //                               Refuse — return `Nothing{blocked=true}`
+        //                               so caller drains the rotation first.
+        //
+        // This is the "no bundle produced while rotation pending at
+        // height < next_target" invariant. Sergey removed the strict
+        // guard in favour of a doc-comment contract with the caller;
+        // this restores structural enforcement for the case where the
+        // caller violation would actually break proof generation.
+        let pending_rot = self.pending_bk_update_height().await?;
+        let unsafe_pending =
+            pending_rot.map(|h| h < next_target_seqno).unwrap_or(false);
+        if unsafe_pending {
+            return Ok(LiveBundleEvent::Nothing {
+                next_target_seqno,
+                chain_head_seqno,
+                blocked_by_pending_bk_update: true,
+            });
+        }
+        // Not unsafe — but still surface the informational flag when
+        // ANY rotation is pending at or below next_target (K == N case
+        // above) so external callers see the state.
+        let blocked = pending_rot.map(|h| h <= next_target_seqno).unwrap_or(false);
 
         match bundle::drive_next_bundle(self, next_target_seqno).await? {
             Some(artifacts) => Ok(LiveBundleEvent::Bundle(artifacts)),
@@ -805,6 +861,50 @@ impl LiveProverDriver {
         &mut self,
         artifacts: &BkUpdateProofArtifacts,
     ) -> DriverResult<()> {
+        // Structural guard on Sergey's ETH-36 two-slot model.
+        //
+        // The rotation on-chain (`applyBkSetUpdate(N)`) may land BEFORE
+        // `verifyBlock` has caught up to N — that's the whole point of
+        // ETH-36's `storedPrevBkSetCommitment`. But the prover-side
+        // rotation (this call) must NOT land while any OLD-signed key
+        // block ≤ N still needs bundling: rotating `prover_bk_set` +
+        // `bk_set_commitment_fr` to NEW discards the OLD pubkey table
+        // Circuit 1 witness gen needs for those bundles.
+        //
+        // Threshold: `cursor + stride <= N`. In words: the next key
+        // block at height `cursor + stride` is still ≤ N and therefore
+        // OLD-signed under `_expectedBkSetFor` — must be bundled before
+        // ack. Once `cursor + stride > N`, every OLD-signed key block ≤
+        // N has been covered by an on-chain `verifyBlock`, and the
+        // prover is free to rotate its in-memory set.
+        //
+        // Concretely (stride=16):
+        //   * N=100, cursor=80: cursor+16=96 ≤ 100 → block. Bundle 96
+        //     (OLD-signed) still pending.
+        //   * N=100, cursor=96: cursor+16=112 > 100 → safe. Bundles 80,
+        //     96 done; 112 is post-rotation NEW-signed.
+        //   * N=112 (KB boundary), cursor=96: cursor+16=112 ≤ 112 →
+        //     block. Bundle 112 itself is OLD-signed under ETH-36
+        //     (`_expectedBkSetFor(112)` returns OLD when
+        //     storedLastBkSetUpdateSeqNo == 112).
+        //   * N=112, cursor=112: cursor+16=128 > 112 → safe.
+        //
+        // Idempotent replays (block_seq_no already <= stored cursor) are
+        // handled by the no-op branch inside `ack_bk_update_inner` and
+        // must not trip this guard.
+        let stride = self.cfg.bundle_stride();
+        if artifacts.block_seq_no > self.state.stored_last_bk_set_update_seq_no
+            && self
+                .state
+                .stored_last_seen_block_seq_no
+                .saturating_add(stride)
+                <= artifacts.block_seq_no
+        {
+            return Err(DriverError::AckTooEarly {
+                cursor: self.state.stored_last_seen_block_seq_no,
+                rotation_seqno: artifacts.block_seq_no,
+            });
+        }
         self.ack_bk_update_inner(artifacts).map_err(DriverError::StateInconsistent)
     }
 
@@ -906,16 +1006,30 @@ impl LiveProverDriver {
     /// hiccup here should not prevent bundle advance; the caller will
     /// retry on the next tick and the correct answer will surface.
     async fn pending_bk_update_below(&self, max_height: u64) -> DriverResult<bool> {
+        Ok(self
+            .pending_bk_update_height()
+            .await?
+            .map(|h| h <= max_height)
+            .unwrap_or(false))
+    }
+
+    /// Height of the earliest un-drained bk-set rotation past the driver's
+    /// bk-update cursor, or `None` when caught up. Uses GQL — one round-trip
+    /// per call. Transient errors are swallowed with a warn (returning
+    /// `None`) so a spurious GQL hiccup here does not deadlock the caller;
+    /// the correct answer surfaces on the next tick.
+    async fn pending_bk_update_height(&self) -> DriverResult<Option<u64>> {
         let cursor = self.state.stored_last_bk_set_update_seq_no;
         match bridge_gql_fetcher::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
-            Ok(Some(upd)) => Ok(upd.height.map(|h| h <= max_height).unwrap_or(false)),
-            Ok(None) => Ok(false),
+            Ok(Some(upd)) => Ok(upd.height),
+            Ok(None) => Ok(None),
             Err(e) => {
                 warn!(
-                    "pending_bk_update_below: next_update_after failed ({}), assuming no pending update",
+                    "pending_bk_update_height: next_update_after failed ({}), \
+                     assuming no pending update",
                     e,
                 );
-                Ok(false)
+                Ok(None)
             }
         }
     }

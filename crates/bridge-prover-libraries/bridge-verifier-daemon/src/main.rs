@@ -194,6 +194,28 @@ async fn main() -> anyhow::Result<()> {
     // as `storedLastBkUpdateSeq`. Starts from the persisted v4 field so a
     // restart resumes from the last verified bk-update without re-applying.
     let mut last_seen_bk_update_seqno: u32 = state.stored_last_bk_set_update_seq_no as u32;
+    // ETH-36 two-slot BK-set mirror.
+    //
+    // Sergey's `AckiNackiBridge.sol` carries `storedBkSetCommitment` +
+    // `storedPrevBkSetCommitment` and picks between them via
+    // `_expectedBkSetFor(seqNo)`: OLD when `seqNo <= storedLastBkSetUpdateSeqNo`,
+    // NEW otherwise. The mirror below lets the daemon apply the same
+    // selector when checking `bundle.bk_set_poseidon_hash` — otherwise a
+    // bundle for an OLD-signed block ≤ N verifying with the NEW
+    // commitment would be silently accepted by the daemon even though
+    // the contract would refuse it.
+    //
+    // Not persisted in `BridgeState` on purpose: the parallel work on
+    // `feature/extra-public-inputs-layer-id-and-event-id` mutates that
+    // struct; keeping the mirror local avoids a schema collision. Cost
+    // of resetting to zero on restart: any bundle for a block seqno ≤
+    // last_seen_bk_update_seqno arriving before the next rotation
+    // regressively verifies against a `[0u8; 32]` sentinel and fails.
+    // Under the honest-AN threat model that only happens during the
+    // stride window right after a bk-update apply; a restart mid-window
+    // must resync via a fresh bk-update replay before the OLD-set
+    // window ends.
+    let mut stored_prev_bk_set_commitment: [u8; 32] = [0u8; 32];
     // Event-proof seqno tracker. Independent from `last_seen_seqno` because
     // `bridge-event-prove` writes `proof_event_NNNNNN.json` with its own
     // counter (typically 0..N per orchestrator run). Not persisted across
@@ -276,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
                 &key_manager,
                 &mut state,
                 &mut last_seen_bk_update_seqno,
+                &mut stored_prev_bk_set_commitment,
                 &state_file,
             );
             continue;
@@ -301,13 +324,26 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Validate consistency.
+            // V4 (ETH-36): last_seen is a public input of Circuit 1 that the
+            // contract mirrors verbatim. A mismatch between what the prover
+            // baked into the proof and what the daemon (mirroring the
+            // contract's future state) tracks means the prover is producing
+            // a proof that would be rejected on-chain by the
+            // `_expectedLastSeenFor(seqNo)` check. Failing loudly here catches
+            // the divergence before we submit and forces a bootstrap-seed
+            // resync (or a genuine bug fix), rather than silently advancing.
             if request.last_seen_block_seqno != last_seen_seqno {
                 let msg = format!(
                     "last_seen mismatch: prover says {} but verifier tracked {}",
                     request.last_seen_block_seqno, last_seen_seqno
                 );
-                warn!("block {}: {} (proceeding anyway for PoC)", next_seqno, msg);
+                error!("block {}: {} — rejecting proof", next_seqno, msg);
+                write_failure(next_seqno, &msg);
+                stats.total_proofs += 1;
+                stats.both_failed += 1;
+                stats.failures.push((next_seqno, msg));
+                last_seen_seqno = next_seqno;
+                continue;
             }
 
             // ---- Verify Circuit 1a ----
@@ -339,6 +375,62 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
             };
+
+            // V3 (ETH-36 selector): bind `bk_set_hash_fr` to the commitment
+            // the on-chain contract would pick for this block's seq_no. The
+            // Solidity `_expectedBkSetFor(seqNo)` returns:
+            //   - `storedPrevBkSetCommitment` when seqNo ≤ storedLastBkSetUpdateSeqNo (OLD window)
+            //   - `storedBkSetCommitment` otherwise (NEW window)
+            // Without this check, a bundle for an OLD-signed key block ≤ N
+            // arriving after the daemon rotates the primary slot would be
+            // silently accepted here (Circuit 1 verifies against whatever Fr
+            // the caller supplies as public input), even though the contract
+            // would refuse it. The mirror at `stored_prev_bk_set_commitment`
+            // above is populated by `process_bk_update_bundle` via V2.
+            //
+            // Decoding the request hex to `[u8; 32]` matches how
+            // `process_bk_update_bundle` compares `l2 vs stored_bk_set_commitment`
+            // — the hex is the 32-byte LE Fr repr of the Poseidon output, and
+            // the state slots hold the same bytes. So a byte-equality check
+            // suffices; no separate Fr conversion of the state slot is needed.
+            let bk_set_hash_bytes = match hex::decode(&request.bk_set_poseidon_hash_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    a
+                }
+                _ => {
+                    let msg = "bk_set_poseidon_hash_hex: expected 32 bytes".to_string();
+                    error!("block {}: {}", next_seqno, msg);
+                    write_failure(next_seqno, &msg);
+                    stats.total_proofs += 1;
+                    stats.both_failed += 1;
+                    last_seen_seqno = next_seqno;
+                    continue;
+                }
+            };
+            let expected_bk_set = if (next_seqno as u64) <= state.stored_last_bk_set_update_seq_no {
+                stored_prev_bk_set_commitment
+            } else {
+                state.stored_bk_set_commitment
+            };
+            if bk_set_hash_bytes != expected_bk_set {
+                let msg = format!(
+                    "bk_set commitment mismatch: bundle asserts {} but selector picks {} \
+                     (seq_no={}, stored_last_bk_set_update_seq_no={})",
+                    hex::encode(bk_set_hash_bytes),
+                    hex::encode(expected_bk_set),
+                    next_seqno,
+                    state.stored_last_bk_set_update_seq_no,
+                );
+                error!("block {}: {}", next_seqno, msg);
+                write_failure(next_seqno, &msg);
+                stats.total_proofs += 1;
+                stats.both_failed += 1;
+                stats.failures.push((next_seqno, msg));
+                last_seen_seqno = next_seqno;
+                continue;
+            }
 
             let attestation_proof_bytes = match hex::decode(&request.attestation_proof_hex) {
                 Ok(b) => b,
@@ -701,6 +793,7 @@ fn process_bk_update_bundle(
     key_manager: &KeyManager,
     state: &mut BridgeState,
     last_seen_bk_update_seqno: &mut u32,
+    stored_prev_bk_set_commitment: &mut [u8; 32],
     state_file: &str,
 ) {
     info!("found bk-update bundle for seq_no={}", seq_no);
@@ -832,6 +925,13 @@ fn process_bk_update_bundle(
 
     let verify_ok = attestation_verified && merkle_verified && monotonicity_ok;
     if verify_ok {
+        // V2 (ETH-36 two-slot mirror): snapshot the OLD commitment BEFORE
+        // rotating. Matches `AckiNackiBridge.applyBkSetUpdate` which does
+        // `storedPrevBkSetCommitment = storedBkSetCommitment` immediately
+        // before overwriting the primary slot. The selector at bundle-verify
+        // time (V3) reads back from this snapshot for blocks whose seq_no
+        // is ≤ the just-applied rotation seq_no.
+        let prev_snapshot = state.stored_bk_set_commitment;
         if let Err(e) = state.apply_bk_set_update(l2, l3, req.block_seq_no as u64) {
             // apply_bk_set_update re-checks the preconditions; if it
             // disagrees with what we just verified, something is racing
@@ -849,13 +949,18 @@ fn process_bk_update_bundle(
             *last_seen_bk_update_seqno = seq_no;
             return;
         }
+        // Rotation succeeded — publish the snapshot to the local mirror.
+        // Done AFTER `apply_bk_set_update` succeeds so a rejected apply
+        // (racing precondition failure) leaves the mirror untouched.
+        *stored_prev_bk_set_commitment = prev_snapshot;
         if let Err(e) = state.save(state_file) {
             error!("bk-update {}: state save failed: {}", seq_no, e);
         } else {
             info!(
-                "bk-update {}: APPLIED — stored_bk_set_commitment now {}, stored_last_bk_set_update_seq_no={}",
+                "bk-update {}: APPLIED — stored_bk_set_commitment now {}, stored_prev_bk_set_commitment now {}, stored_last_bk_set_update_seq_no={}",
                 seq_no,
                 hex::encode(state.stored_bk_set_commitment),
+                hex::encode(*stored_prev_bk_set_commitment),
                 state.stored_last_bk_set_update_seq_no,
             );
         }

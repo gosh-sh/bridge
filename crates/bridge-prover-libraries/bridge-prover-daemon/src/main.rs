@@ -31,7 +31,7 @@ use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
 use bridge_prover_lib::live_driver::{
     BkUpdateProofArtifacts, BundleFinalizationType, BundleProofArtifacts,
-    HISTORY_WINDOW_SIZE, LiveBkUpdateEvent, LiveBundleEvent, LiveProverConfig,
+    DriverError, HISTORY_WINDOW_SIZE, LiveBkUpdateEvent, LiveBundleEvent, LiveProverConfig,
     LiveProverDriver, SeedPolicy,
 };
 use bridge_poseidon as poseidon;
@@ -242,34 +242,68 @@ async fn main() -> anyhow::Result<()> {
     // seed file was written by an earlier run — treat it as already persisted.
     let mut seed_persisted = matches!(seed_policy, SeedPolicy::Resume);
 
+    // Single-slot deferred bk-update ack.
+    //
+    // Sergey's ETH-36 caps in-flight rotations at 1 via
+    // `VerifyBlockLagBehindRotation`, so this slot is bounded by
+    // construction. It holds the already-verified rotation artifacts
+    // returned by the verifier daemon when `driver.ack_bk_update` refused
+    // to rotate `prover_bk_set` because the bundle lane hasn't yet
+    // covered the last OLD-signed key block ≤ N. The main loop keeps
+    // retrying the ack after every successful bundle ack until it takes.
+    let mut deferred_bk_ack: Option<BkUpdateProofArtifacts> = None;
+
     // ---- Main loop ---------------------------------------------------------
     while !shutdown.load(Ordering::SeqCst) {
+        // Try to drain any deferred bk-update ack first. It only becomes
+        // ack-able once the bundle lane has advanced past the last
+        // OLD-signed key block ≤ rotation_seqno, so a successful drain
+        // here means the previous iteration ack'd a bundle whose height
+        // pushed `cursor + stride > rotation_seqno`.
+        if try_drain_deferred_bk_ack(&mut driver, &mut deferred_bk_ack)? {
+            persist_seed_if_needed(&driver, &mut seed_persisted)?;
+        }
+
         // Drain rotations first — `poll_next_bundle` refuses to advance past
         // an un-acked bk-update whose height is <= the next thinned target.
-        match driver.poll_next_bk_update().await {
-            Ok(LiveBkUpdateEvent::Bootstrapping {
-                seed_seqno,
-                chain_head_seqno,
-            }) => {
-                info!(
-                    "bootstrap: waiting for seed {} (chain head {})",
-                    seed_seqno, chain_head_seqno
-                );
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-            Ok(LiveBkUpdateEvent::BkUpdate(update)) => {
-                if !handle_bk_update(&mut driver, &update).await? {
-                    break;
+        // Skip the poll when a rotation is already parked in the deferred
+        // slot: re-polling would re-fetch the same rotation, redundantly
+        // re-prove Circuit 1, and re-submit the IPC request the verifier
+        // already ACK'd.
+        if deferred_bk_ack.is_none() {
+            match driver.poll_next_bk_update().await {
+                Ok(LiveBkUpdateEvent::Bootstrapping {
+                    seed_seqno,
+                    chain_head_seqno,
+                }) => {
+                    info!(
+                        "bootstrap: waiting for seed {} (chain head {})",
+                        seed_seqno, chain_head_seqno
+                    );
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
                 }
-                persist_seed_if_needed(&driver, &mut seed_persisted)?;
-                continue;
-            }
-            Ok(LiveBkUpdateEvent::Nothing) => { /* fall through to bundle poll */ }
-            Err(e) => {
-                warn!("poll_next_bk_update: {} — retrying", e);
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
+                Ok(LiveBkUpdateEvent::BkUpdate(update)) => {
+                    match handle_bk_update(&mut driver, update).await? {
+                        HandleBkUpdate::Acked => {
+                            persist_seed_if_needed(&driver, &mut seed_persisted)?;
+                            continue;
+                        }
+                        HandleBkUpdate::Deferred(artifacts) => {
+                            deferred_bk_ack = Some(artifacts);
+                            // Fall through to bundle poll: only bundle
+                            // acks can push cursor + stride past the
+                            // rotation seqno, unblocking the deferred ack.
+                        }
+                        HandleBkUpdate::Rejected => break,
+                    }
+                }
+                Ok(LiveBkUpdateEvent::Nothing) => { /* fall through to bundle poll */ }
+                Err(e) => {
+                    warn!("poll_next_bk_update: {} — retrying", e);
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
             }
         }
 
@@ -484,17 +518,37 @@ async fn handle_bundle(
     Ok(true)
 }
 
+/// Result of a `handle_bk_update` call.
+///
+/// `Deferred` carries the already-verified artifacts back to the caller so
+/// they can be re-`ack`'d against the driver once the bundle lane advances
+/// past the "next OLD-signed key block" threshold (see
+/// [`DriverError::AckTooEarly`]). The verifier IPC round-trip is NOT
+/// repeated: the caller only retries `driver.ack_bk_update(&deferred)`.
+enum HandleBkUpdate {
+    /// Verifier ACK'd and driver state advanced.
+    Acked,
+    /// Verifier ACK'd but driver refused to rotate its in-memory
+    /// `prover_bk_set` because there is still an un-bundled OLD-signed
+    /// key block ≤ `rotation_seqno`. Caller must retry
+    /// `driver.ack_bk_update` after each successful bundle ack until it
+    /// succeeds.
+    Deferred(BkUpdateProofArtifacts),
+    /// Verifier rejected the proof — caller should stop the loop.
+    Rejected,
+}
+
 async fn handle_bk_update(
     driver: &mut LiveProverDriver,
-    update: &BkUpdateProofArtifacts,
-) -> anyhow::Result<bool> {
+    update: BkUpdateProofArtifacts,
+) -> anyhow::Result<HandleBkUpdate> {
     info!(
         "bk-update {}: {} rotation ready ({}ms proof)",
         update.block_seq_no,
         update.fin_type.as_str(),
         update.attestation_proof_gen_ms,
     );
-    let req = bkupdate_to_ipc_request(update);
+    let req = bkupdate_to_ipc_request(&update);
     ipc::write_bk_update_request(&req)?;
 
     #[cfg(not(feature = "self-verify"))]
@@ -532,13 +586,52 @@ async fn handle_bk_update(
             result.monotonicity_ok,
             result.error,
         );
-        return Ok(false);
+        return Ok(HandleBkUpdate::Rejected);
     }
     info!("bk-update {}: verifier ACK", update.block_seq_no);
 
-    driver.ack_bk_update(update)?;
-    persist(driver)?;
-    Ok(true)
+    match driver.ack_bk_update(&update) {
+        Ok(()) => {
+            persist(driver)?;
+            Ok(HandleBkUpdate::Acked)
+        }
+        Err(DriverError::AckTooEarly { cursor, rotation_seqno }) => {
+            info!(
+                "bk-update {}: driver defers ack — cursor {} + stride ≤ rotation {} \
+                 (bundle lane must advance first). Retaining verified artifacts; \
+                 will re-ack after each successful bundle ack.",
+                update.block_seq_no, cursor, rotation_seqno,
+            );
+            Ok(HandleBkUpdate::Deferred(update))
+        }
+        Err(e) => Err(anyhow::Error::from(e)),
+    }
+}
+
+/// Attempt to drain a deferred bk-update ack. Returns `Ok(true)` when the
+/// ack succeeded and the deferred slot has been cleared; `Ok(false)` when
+/// the driver still refuses (guard unchanged) — the slot is preserved
+/// unchanged. Errors on any driver error other than `AckTooEarly`.
+fn try_drain_deferred_bk_ack(
+    driver: &mut LiveProverDriver,
+    slot: &mut Option<BkUpdateProofArtifacts>,
+) -> anyhow::Result<bool> {
+    let Some(update) = slot.take() else { return Ok(false); };
+    match driver.ack_bk_update(&update) {
+        Ok(()) => {
+            info!(
+                "bk-update {}: deferred ack drained (bundle lane advanced past rotation)",
+                update.block_seq_no
+            );
+            persist(driver)?;
+            Ok(true)
+        }
+        Err(DriverError::AckTooEarly { .. }) => {
+            *slot = Some(update);
+            Ok(false)
+        }
+        Err(e) => Err(anyhow::Error::from(e)),
+    }
 }
 
 // -------------------------------------------------------------------------

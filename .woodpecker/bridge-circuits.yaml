@@ -44,6 +44,12 @@ steps:
       # same worker reuse the same `$CARGO_HOME/git` checkouts (matches
       # `release.yaml`'s convention).
       CARGO_HOME: .cargo_home
+      # Serialize test execution: the heaviest MockProver run (attestation
+      # BLS checker) is K=20 (~1M rows) and pulls several GB of witness
+      # tables. Running the crate's ~5 heavy `#[test]` fns in parallel
+      # OOM-kills the CI worker (SIGKILL). One-at-a-time keeps peak RSS
+      # bounded; the whole suite still finishes in minutes.
+      RUST_TEST_THREADS: "1"
     commands:
       - cd crates/bridge-circuits
       - cargo test --workspace

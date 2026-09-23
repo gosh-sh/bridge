@@ -63,15 +63,40 @@ assigns it when the release is tagged.
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
   `1..=10`). `withdrawByProof` scans only that layer's window.
-  The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
-  instances; the reference `_calldata.bin` is 3 648 B. Redeploy
-  `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
-  verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
-  not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover
-  host regenerates its Circuit 4 keys on first use — the bump is what
-  makes the key cache reject an `event_pk.bin` / `event_vk.bin` from the
-  pre-rotation constraint system. Keygen at `k = 19` blocks the next
-  `verifyBlock` or withdraw cycle; preseed `BRIDGE_PARAMS_DIR` to skip it.
+  The aggregated Yul grows from 20 990 B / 22 instances to 21 314 B / 24
+  instances (the extra slot is the inner-VK digest introduced in the
+  aggregator-binding change below); the reference `_calldata.bin` is
+  3 680 B. Redeploy `BridgeWithdrawalAggregatorVerifier`; proofs against
+  the old key do not verify, and a `WithdrawalPublicInputs` struct without
+  `anchorLayer` will not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3,
+  so every prover host regenerates its Circuit 4 keys on first use — the
+  bump is what makes the key cache reject an `event_pk.bin` / `event_vk.bin`
+  from the pre-rotation constraint system. Keygen at `k = 19` blocks the
+  next `verifyBlock` or withdraw cycle; preseed `BRIDGE_PARAMS_DIR` to skip
+  it.
+
+- **All four SHPLONK aggregator adapters bind on-chain to the inner-circuit
+  VK.** `ShplonkAggregatorVerifierBase`'s constructor now takes a
+  `bytes32 vkDigest` (the Poseidon digest of the inner-circuit VK witnesses)
+  alongside the Yul verifier address, rejecting `bytes32(0)`, and every
+  adapter's `verifyX(...)` compares the aggregator's tail public instance
+  at slot `12 + NUM_INNER` against that pin before delegating to the Yul.
+  Calldata is one 32-byte word longer (`instances (12 acc + N inner + 1
+  digest) ‖ snark_proof`). All four `.bin` verifiers rotated as a
+  consequence and their addresses / `extcodehash` change: `PrimaryAggregatorVerifier`
+  and `FallbackAggregatorVerifier` were not rotated in prior entries but
+  are rotated here; `LayerHashesAggregatorVerifier` and
+  `BridgeWithdrawalAggregatorVerifier` rotate again on top of their entries
+  above. `ShplonkDeployLib` carries the new per-adapter `*_VK_DIGEST` and
+  `*_YUL_CODEHASH` constants and wires them into `deployPrimaryAdapter`
+  etc., so a script that already uses the deploy library needs no change
+  beyond redeploying — re-derive the digest constants from
+  `bridge_evm_aggregator::vk_binding::expected_vk_digest` whenever an
+  inner snark is rotated. Daemon-side minimum-length constants
+  (`SHPLONK_MIN_ATTESTATION_INSTANCES`, `SHPLONK_MIN_LAYER_INSTANCES`,
+  `SHPLONK_MIN_WITHDRAWAL_INSTANCES`) are bumped by one 32-byte word to
+  match; a relayer built against the pre-rotation constants rejects the
+  new calldata as too short.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
@@ -83,10 +108,12 @@ assigns it when the release is tagged.
   (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
   warning below.
 
-  The other two keys are **unchanged**: `PrimaryAggregatorVerifier.bin`
-  and `FallbackAggregatorVerifier.bin` are byte-identical to 0.2.0.
-  Primary's and Fallback's `_calldata.bin` fixtures were re-emitted, which
-  is a test-vector refresh and not a rotation.
+  The other two keys — `PrimaryAggregatorVerifier.bin` and
+  `FallbackAggregatorVerifier.bin` — are also rotated by the aggregator
+  inner-VK-digest binding described below (they were byte-identical to
+  0.2.0 through the layer-hashes rotation, but that binding gives every
+  aggregator a fresh key). See that entry for the per-adapter deploy
+  constants.
 
 - Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
   **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and

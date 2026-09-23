@@ -7,13 +7,17 @@
 # repo, so they never had a place in this pipeline. Since the vendoring PR
 # they build with only public deps, so a per-MR job is now safe.
 #
-# Runtime shape: Circuit 4 + cross-circuit block-id are seconds under
-# MockProver at K<=19. Attestation-BLS MockProvers are K=20 and each
-# takes several minutes at ~10 GB RSS; real halo2 keygen+prove tests
-# (`test_real_prover_*`) are `#[ignore]`d because they take tens of minutes
-# and >14 GB RSS (see `PARALLEL_BENCHMARK_N14_REPORT.md:17`). Trigger
-# them manually with `cargo test -- --ignored` when the corresponding
-# circuit constraints change.
+# Runtime shape: Circuit 4 + cross-circuit block-id run under MockProver
+# at K<=19; the fast step is dominated by cold `cargo build` (fresh
+# checkouts fetch the pinned gosh git deps and compile the halo2 stack,
+# ~5 min on the current CI worker) and the tests themselves complete in
+# the low seconds once the artifacts are cached. Attestation-BLS
+# MockProvers are K=20 and each takes several minutes at ~10 GB RSS;
+# real halo2 keygen+prove tests (`test_real_prover_*`) are `#[ignore]`d
+# because they take tens of minutes and >14 GB RSS (see
+# `PARALLEL_BENCHMARK_N14_REPORT.md:17`). Trigger them manually with
+# `cargo test -- --ignored` when the corresponding circuit constraints
+# change.
 #
 # `bridge-circuits/` is its own sub-workspace with a distinct halo2 backend
 # (see the header of `crates/bridge-circuits/Cargo.toml` for why the root
@@ -22,15 +26,19 @@
 #
 # `--locked` is NOT passed: `crates/bridge-circuits/Cargo.lock` is
 # gitignored (see `.gitignore`), so a fresh CI clone has no lockfile to
-# lock to. The `[patch.crates-io]` block in the sub-workspace root points
-# `halo2-axiom` at a branch (`branch = "main"`), not a pinned commit, so
-# `cargo test` picks up whatever tip `gosh-sh/halo2-axiom@main` resolves
-# to at fetch time. This is deliberately non-deterministic across CI
-# runs: the sub-workspace tracks the same tip the production
-# `crates/bridge-prover-libraries` prover resolves to, so a green run
-# here is a proxy signal about that prover's build too. If a red run
-# needs reproducing, capture the resolved commits from the failing
-# `cargo tree` output first.
+# lock to. Every gosh-sh git dep in this sub-workspace is `branch =
+# "..."` pinned rather than `rev`-pinned — halo2-axiom@main,
+# halo2-lib-zkevm-sha256-and-bls12-381@bump-halo2-lib-v0.4.1,
+# gosh-halo2-crypto-lib@bump-halo2-lib-v0.4.1,
+# axiom-eth@gosh-stable-rlcmanager-assignment — so `cargo test` picks
+# up whatever tip each branch resolves to at fetch time. This is
+# deliberately non-deterministic across CI runs. The production
+# `crates/bridge-prover-libraries` sub-workspace pins the same branches
+# to the same names, so as long as both are fetched around the same
+# time a green run here is a decent proxy for that prover's build too;
+# the coupling is not enforced, only conventional. If a red run needs
+# reproducing, run `cargo tree -p <suspect-crate>` locally against the
+# failing commit hashes reported in the cargo build output.
 #
 # All gosh-sh git repos in the dependency graph are public post-vendoring,
 # so cargo fetches every dep anonymously — no GitHub token or url rewrite
@@ -49,8 +57,8 @@ steps:
   # Step 1: fast MockProver tests (Circuit 4 + cross-circuit block-id).
   # Runs first and independently so a red result in the slower step below
   # does not hide a Circuit 4 regression — and so reviewers see the
-  # dense-merkle-bound and events-position-binding regressions pass or
-  # fail in seconds.
+  # dense-merkle-bound and events-position-binding regressions surface
+  # quickly (cold: ~5 min dominated by `cargo build`; warm: low seconds).
   # ---------------------------------------------------------------------------
   bridge-circuits-fast:
     image: *rust_image

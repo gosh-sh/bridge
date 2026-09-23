@@ -1,10 +1,14 @@
 //! Real KZG prover test for the Primary Attestation BLS Checker Circuit.
 //!
-//! The default `test_real_prover_primary_multi_bk_set` test uses
-//! `MAX_SIGNERS = 300` and generates a single proving key / verification
-//! key, then creates and verifies proofs for several BK set sizes
-//! (10, 100, 299) using the same keys — i.e. it asserts that one VK/PK
-//! works across BK set sizes that share the same `max_signers` padding.
+//! Every test in this file is `#[ignore]`d — see the per-test doc-comments
+//! for why (K=20 keygen + real proofs at ~110 s and ~14 GB RSS a piece).
+//! The canonical universality check is
+//! `test_real_prover_primary_multi_bk_set`: it uses `MAX_SIGNERS = 300`,
+//! generates a single proving key / verification key, then creates and
+//! verifies proofs for four BK set sizes (10, 100, 299, 300) using the
+//! same keys — i.e. it asserts that one VK/PK works across BK set sizes
+//! that share the same `max_signers` padding, including the boundary at
+//! `max_signers` itself.
 //!
 //! The `#[ignore]` `test_real_prover_primary_max_{500,1000,2000}` tests
 //! exercise larger `max_signers` paddings. Each gets its own VK/PK
@@ -250,8 +254,9 @@ fn run_primary_real_prover_case(max_signers: usize, bk_set_sizes: &[usize]) {
 ///
 /// Gated behind `#[ignore]`: this runs a real K=20 halo2 keygen + several
 /// proofs at 300 signers — the same weight class as the sizing tests
-/// below (~110 s per proof, ~14 GB RSS, ~3.5 GB PK per
-/// `PARALLEL_BENCHMARK_N14_REPORT.md:17`). It belongs to on-demand runs,
+/// below (~110 s per proof, ~14 GB solo RSS per
+/// `PARALLEL_BENCHMARK_N14_REPORT.md:17`; the on-disk PK caches in
+/// `params/` are in the low-GB range too). It belongs to on-demand runs,
 /// not per-MR CI. Trigger it manually with `cargo test -- --ignored`
 /// when the primary aggregator or `MAX_SIGNERS` changes.
 #[test]

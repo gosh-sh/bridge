@@ -41,13 +41,9 @@ steps:
     environment:
       # Keep cargo's data inside the workspace so the next step still sees it.
       CARGO_HOME: .cargo_home
-      GH_TOKEN:
-        from_secret: REVIEW_GH_TOKEN
     commands:
       # All gosh-sh git repos in the dependency graph are public
       # post-vendoring, so no token is required for cargo to fetch them.
-      # `GH_TOKEN` above is kept because the `publish` step uploads assets
-      # to the GitHub release and needs Contents: write.
       # The CLI builds as a member of the prover workspace — the symlink at
       # crates/bridge-prover-libraries/ackinacki-bridge is what resolves its
       # workspace=true circuit dependencies. A standalone `cargo build` in

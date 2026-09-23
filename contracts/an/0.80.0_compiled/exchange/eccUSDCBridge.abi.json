@@ -126,6 +126,14 @@
 			]
 		},
 		{
+			"name": "setPaused",
+			"inputs": [
+				{"name":"paused","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "acceptBlockHashFromLightClient",
 			"inputs": [
 				{"name":"chainId","type":"uint256"},
@@ -160,6 +168,14 @@
 			"outputs": [
 				{"name":"lightClient","type":"address"},
 				{"name":"ownerAnchorsEnabled","type":"bool"}
+			]
+		},
+		{
+			"name": "isPaused",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
 			]
 		},
 		{
@@ -331,6 +347,7 @@
 		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},
 		{"init":false,"name":"_lightClientCode","type":"cell"},
 		{"init":false,"name":"_lightClient","type":"address"},
-		{"init":false,"name":"_ownerAnchorsEnabled","type":"bool"}
+		{"init":false,"name":"_ownerAnchorsEnabled","type":"bool"},
+		{"init":false,"name":"_paused","type":"bool"}
 	]
 }

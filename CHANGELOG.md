@@ -110,6 +110,27 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
+  read back with `isPaused()`.** While it is paused, the two cross-chain entry
+  points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:
+  `finalizeDeposit` (an inbound L1 deposit, rejected before the proof is even
+  parsed, so a paused bridge spends no gas on verification) and
+  `initiateWithdrawal` (an outbound burn, rejected before `tvm.accept()`, so
+  the attached ECC bounces back to the sender untouched).
+
+  Deliberately narrow — everything else stays available while the bridge is
+  stopped: `confirmDeposit`, so a deposit already proven and vouched is still
+  paid out instead of hanging half-finished; the TIP-3 inbound callback
+  `onTransferReceived` and the owner mints; and every anchor, allowlist and
+  light-client call, so the owner can keep the configuration current during the
+  stop. Pausing is reversible and, like the allowlist and the anchor set, is
+  **not** carried through `onCodeUpgrade`: an upgraded bridge starts unpaused.
+
+  The bridge's code hash moves with this, `48d5c0ed…` → `68b17ae3…`, and the
+  contract reports version `1.5.0`. A network takes it as a fresh zerostate or
+  as an `updateCode` round on the bridge, not as an in-place patch; the voucher
+  and the light client are unchanged and their artefacts are byte-identical.
+
 - **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
   `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
   `EthKeccak` library, all v1.4.0, moved here from acki-nacki into

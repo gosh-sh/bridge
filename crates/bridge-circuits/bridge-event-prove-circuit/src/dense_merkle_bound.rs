@@ -491,12 +491,25 @@ mod tests {
 
     /// Zero-forcing rejection: bit 5 set on an inactive level
     /// (`num_active = 3`, bit index 5 ≥ 3). `pos_witness = 5 + 2^5 = 37`;
-    /// bit 5 = 1 trips `assert_is_const(prod, 0)` inside
+    /// bit 5 = 1 must trip `assert_is_const(prod, 0)` inside
     /// `walk_dense_merkle_bind_pos`.
+    ///
+    /// The proof is [`tamper_level_to_bit_1`]-ed at level 5 so that the raw
+    /// walker's chunk-link constraints are satisfied for the flipped
+    /// orientation there — otherwise the padded level's honest chunks
+    /// (built for `bit = 0`) fail on their own and the test would still
+    /// pass even if the zero-forcing loop were removed. The paired raw-
+    /// walker test [`test_dense_merkle_bound_raw_walker_accepts_bit_above_active_levels`]
+    /// confirms the tampered proof satisfies the walker without the loop,
+    /// so the constraint that actually rejects this test is the loop.
     #[test]
     fn test_dense_merkle_bound_zero_forcing_rejects_bit_above_active_levels() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xCAFE);
-        let proof = preprocess_dense_proof_padded(leaf, &siblings, 5, MAX_DEPTH);
+        let mut proof = preprocess_dense_proof_padded(leaf, &siblings, 5, MAX_DEPTH);
+        // Sew the padded level's chunks to the flipped orientation so the
+        // only remaining rejection surface is the composed gadget's
+        // zero-forcing loop.
+        tamper_level_to_bit_1(&mut proof, 5, root);
         assert!(
             !run_gadget(&proof, leaf, 3, 5 + (1 << 5), root),
             "the composed gadget must reject any pos_witness bit set above \
@@ -505,16 +518,26 @@ mod tests {
         );
     }
 
-    /// Zero-forcing rejection at the exact boundary `j == num_active_levels`.
-    /// Reviewer explicitly asked for this case: it's the tightest edge of
-    /// the `is_less_than(j, num_active_levels)` predicate — if the
-    /// comparison were mistakenly written `<=`, this test would incorrectly
-    /// accept `pos_witness = p + 2^d` for `d = num_active_levels`.
+    /// Zero-forcing rejection at the exact boundary `j == num_active_levels`:
+    /// the tightest edge of the `is_less_than(j, num_active_levels)`
+    /// predicate — if the comparison were mistakenly written `<=`, the
+    /// composed gadget would accept `pos_witness = p + 2^d` for
+    /// `d = num_active_levels`.
+    ///
+    /// As with the above-active-levels test, the proof is tampered at the
+    /// boundary level so the raw walker's chunk-link constraints are
+    /// satisfied for the flipped orientation there; without the tamper
+    /// the honest chunks reject on their own and the boundary of the
+    /// predicate is not what fires. The paired raw-walker test
+    /// [`test_dense_merkle_bound_raw_walker_accepts_bit_at_boundary_j_equals_num_active`]
+    /// confirms the tampered proof satisfies the walker, isolating the
+    /// zero-forcing loop as the rejecting constraint.
     #[test]
     fn test_dense_merkle_bound_zero_forcing_boundary_j_equals_num_active() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xD00D);
-        let proof = preprocess_dense_proof_padded(leaf, &siblings, 5, MAX_DEPTH);
+        let mut proof = preprocess_dense_proof_padded(leaf, &siblings, 5, MAX_DEPTH);
         // num_active = 3, boundary bit index j = 3 → witness = 5 + 2^3 = 13.
+        tamper_level_to_bit_1(&mut proof, 3, root);
         assert!(
             !run_gadget(&proof, leaf, 3, 5 + (1 << 3), root),
             "the composed gadget must reject a bit set at the boundary \
@@ -560,6 +583,34 @@ mod tests {
             "regression witness: the raw walker must NOT reject a bit set \
              above `num_active_levels` when the prover supplies matching \
              tampered chunks — that job belongs to the composed gadget",
+        );
+    }
+
+    /// Regression witness paired with
+    /// [`test_dense_merkle_bound_zero_forcing_boundary_j_equals_num_active`]:
+    /// the raw walker, with the same tampered proof and the boundary bit
+    /// (`j = num_active_levels`) set, satisfies every constraint on its
+    /// own. Only the composed gadget's zero-forcing loop rejects the
+    /// boundary case — the raw walker cannot, since bit `j == num_active`
+    /// is on a padded level where `gate.select` discards the walker's
+    /// computed hash.
+    #[test]
+    fn test_dense_merkle_bound_raw_walker_accepts_bit_at_boundary_j_equals_num_active() {
+        let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xD00D);
+        let mut proof = preprocess_dense_proof_padded(leaf, &siblings, 5, MAX_DEPTH);
+        // num_active = 3 → level 3 is the first padded level, so `cur` at
+        // entry to it is the honest root (padded levels leave `cur`
+        // unchanged). That's the `cur_bytes` the tampered chunks must
+        // agree with.
+        tamper_level_to_bit_1(&mut proof, 3, root);
+        let mut bits = bit_vec(5, MAX_DEPTH);
+        bits[3] = 1; // boundary bit — exactly at num_active_levels
+        assert!(
+            run_gadget_raw_walker_no_binding(&proof, leaf, 3, &bits, root),
+            "regression witness: the raw walker must NOT reject a bit set \
+             at the boundary `j == num_active_levels` when the prover \
+             supplies matching tampered chunks — that job belongs to the \
+             composed gadget's `is_less_than(j, num_active_levels)` guard",
         );
     }
 }

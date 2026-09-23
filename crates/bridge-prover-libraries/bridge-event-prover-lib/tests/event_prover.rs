@@ -183,3 +183,34 @@ fn dense_chain_wrong_length_errors() {
     let err = must_err(&w, "undersized dense_chain");
     assert!(format!("{err}").contains("MAX_CHAIN_LEN"));
 }
+
+/// `events_tree_proof.position` is bounded by `1 << siblings.len()`. The
+/// fixture uses 7 siblings, so `position = 128` is one past the max and
+/// must be caught by the mirrored range check in `build_proof_inputs`.
+#[test]
+fn events_tree_position_out_of_range_errors() {
+    let mut w = populated_witness();
+    let proof = w.events_tree_proof.as_mut().unwrap();
+    proof.position = 1u32 << proof.siblings_hex.len();
+    let err = must_err(&w, "events_tree_proof position out of range");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("events_tree_proof position") && msg.contains("out of range"),
+        "unexpected error message: {msg}"
+    );
+}
+
+/// Same axis for `block_tree_proof`: 8 siblings, so `position = 256` is
+/// one past the max and must be rejected symmetrically.
+#[test]
+fn block_tree_position_out_of_range_errors() {
+    let mut w = populated_witness();
+    let proof = w.block_tree_proof.as_mut().unwrap();
+    proof.position = 1u32 << proof.siblings_hex.len();
+    let err = must_err(&w, "block_tree_proof position out of range");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("block_tree_proof position") && msg.contains("out of range"),
+        "unexpected error message: {msg}"
+    );
+}

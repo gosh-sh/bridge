@@ -186,8 +186,13 @@ pub fn build_proof_inputs(
     }
     // Mirror `BridgeEventProveCircuit::assert_invariants`'s events_pos range
     // check here so an out-of-range witness surfaces as a decoded error with
-    // context rather than a blocking-task join failure from the panic that
-    // fires when the circuit is later synthesized on a worker thread.
+    // context rather than a panic. `assert_invariants` fires from
+    // `BridgeEventProveCircuit::new` further down in this same function
+    // (`build_proof_inputs`), so without this mirror an out-of-range witness
+    // would panic on the caller's thread, not on a worker.
+    //
+    // Shift is safe: we already bounded `events_siblings.len()` by
+    // `MAX_EVENTS_TREE_DEPTH` above, which fits comfortably inside `usize::BITS`.
     let events_pos_max = 1usize << events_siblings.len();
     if events_pos >= events_pos_max {
         bail!(
@@ -201,7 +206,19 @@ pub fn build_proof_inputs(
     // does not currently panic on this axis but a future refactor could add
     // an equivalent bounds check, and reporting here keeps both axes
     // symmetric under a decoded error path.
-    let block_pos_max = 1usize << block_siblings.len();
+    //
+    // Unlike `events_siblings.len()` above there is no explicit `MAX_*_DEPTH`
+    // cap on `block_siblings.len()` in the circuit, so a pathological witness
+    // could otherwise trip UB by shifting a `usize` by ≥ `usize::BITS`.
+    // `checked_shl` fails closed at that boundary.
+    let block_pos_max = 1usize
+        .checked_shl(block_siblings.len() as u32)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "block_tree_proof depth {} is not representable as a usize width shift",
+                block_siblings.len(),
+            )
+        })?;
     if block_pos >= block_pos_max {
         bail!(
             "block_tree_proof position {block_pos} out of range for depth {} (max={block_pos_max})",

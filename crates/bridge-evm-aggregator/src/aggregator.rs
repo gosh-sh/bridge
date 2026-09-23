@@ -255,7 +255,7 @@ pub fn generate_yul_verifier_cached(
 
     let bin_path = output_path.with_extension("bin");
     std::fs::write(&bin_path, &bytecode)
-        .map_err(|e| anyhow::anyhow!("write {}: {e}", bin_path.display()))?;
+        .map_err(|e| anyhow::anyhow!("write {}: {e:#}", bin_path.display()))?;
 
     let size = if enforce_eip170 {
         eip170::assert_eip170(&bytecode, &output_path.display().to_string())?

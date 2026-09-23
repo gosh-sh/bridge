@@ -541,6 +541,15 @@ assigns it when the release is tagged.
   `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
   `test/integration/` directory or a root `.env.example`; the template for
   the deploy scripts is `contracts/ethereum/.env.example`.
+- **`deposit-prover/download_trusted_setup.sh` no longer calls the Hermez SRS
+  a test-only fallback.** It told operators that production deposit proofs need
+  an Acki Nacki chain-ceremony SRS in `params/kzg_bn254_18.srs` and that proofs
+  keyed on Hermez are rejected on chain. The reverse is true: the
+  `ZKHALO2VERIFYWITHVK` opcode embeds the Hermez `[s]·G2`, and the deposit
+  prover loads only the Hermez `data/kzg_params_18.srs` this script downloads.
+  The script now checks that file's `[s]·G2` and refuses one from any other
+  ceremony. A failed download is reported as such instead of as a corrupted
+  file — the default source currently answers HTTP 403.
 
 ### Known issues
 

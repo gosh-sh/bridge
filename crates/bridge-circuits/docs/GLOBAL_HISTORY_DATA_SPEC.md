@@ -2,7 +2,7 @@
 
 **Status:** Source-grounded reverse-engineering of the acki-nacki node, intended as a foundation for designing how the Ethereum-side bridge contract should store layer hashes.
 
-**Source repo:** `acki-nacki` at the `poseidon_profile_new` branch (HEAD `36cd98721`). This branch pins the canonical 16-leaf depth-4 SHA-256 block-id Merkle tree consumed by this repo — see `GLOBAL_HISTORY_DATA_SPEC_MULTITHREAD.md` for the leaf layout.
+**Source repo:** `acki-nacki` at the `poseidon_profile_new` branch (HEAD `36cd98721`). This branch pins the canonical 16-leaf depth-4 SHA-256 block-id Merkle tree consumed by this repo — see `BLOCK_ID_ALG_NEW.md` (sibling doc in this directory) for the leaf layout.
 
 **Why this document exists.** Circuit 4 (`bridge-event-prove-circuit`) takes a `public_latest_layer_hashes: [Fr; NUM_LAYER_HASHES]` array as public input and constrains the proof's `final_root` to equal **one** of them (without revealing which). Those hashes have to come from somewhere the verifier can trust — they will eventually be stored by the Ethereum-side `TokenBridge` contract. To know what subset of layer hashes the contract must keep, we first have to understand exactly what `GlobalHistoryData` is, how the node accumulates it, and how it discards entries. This document is that recap. The follow-up question — "of all the layer hashes that ever exist, which minimal subset must the eth contract store?" — is then addressed at the end.
 

@@ -21,8 +21,8 @@
 //!
 //! [`Circuit4ShplonkPipeline`] composes the two and returns a
 //! [`PartnerWithdrawalProof`] whose `proof_hex` is the aggregator calldata and
-//! whose `public_instances_hex` are the eleven Circuit-4 public inputs (LE Fr) —
-//! exactly the shape `submit-withdraw` / `daemon-withdraw` / `daemon-bridge`
+//! whose `public_instances_hex` are the eleven Circuit-4 public inputs (LE Fr)
+//! — exactly the shape `submit-withdraw` / `daemon-withdraw` / `daemon-bridge`
 //! already consume. A cross-check ([`calldata_binds_instances`]) proves the
 //! calldata's re-exposed instances match the eleven public inputs before the
 //! proof is surfaced, so a passing pipeline cannot forward mismatched bytes.
@@ -508,8 +508,9 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
     }
 
     /// Prove `witness_path` → Poseidon snark → aggregate → calldata, and return
-    /// a [`PartnerWithdrawalProof`] carrying the calldata + eleven public inputs.
-    /// `snark_dir` receives the intermediate `<name>.snark` / `.instances.bin`.
+    /// a [`PartnerWithdrawalProof`] carrying the calldata + eleven public
+    /// inputs. `snark_dir` receives the intermediate `<name>.snark` /
+    /// `.instances.bin`.
     pub async fn prove(
         &self,
         witness_path: &Path,
@@ -655,8 +656,8 @@ pub struct MockAggregator {
 
 impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
-    /// words at positions `12..12 + instances_hex.len()`), padded to a realistic
-    /// 3616-byte length.
+    /// words at positions `12..12 + instances_hex.len()`), padded to a
+    /// realistic 3616-byte length.
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
         let total_len = 3616;
         let mut cd = vec![0u8; total_len];

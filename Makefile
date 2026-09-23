@@ -68,9 +68,18 @@ test-coverage: ## Generate test coverage report
 	@chmod +x test.sh
 	@./test.sh --coverage
 
-format: ## Format all code (Rust + Solidity)
+# Crates outside the root workspace that are packages of their own. The relayer
+# and the withdrawal CLI are members of crates/bridge-prover-libraries and are
+# formatted through it.
+STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
+	crates/bridge-evm-aggregator crates/bridge-snark-utils \
+	crates/deposit-relayer-daemon crates/eth-light-client-relayer
+
+format: ## Format all code (every Rust crate + Solidity)
 	@echo "$(BLUE)Formatting code...$(NC)"
 	@cargo fmt --all
+	@cd crates/bridge-prover-libraries && cargo fmt --all
+	@for d in $(STANDALONE_CRATES); do (cd $$d && cargo fmt) || exit 1; done
 	@cd contracts/ethereum && forge fmt
 
 format-check: ## Check code formatting without modifying

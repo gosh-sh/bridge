@@ -188,6 +188,7 @@ make setup                 # toolchains and Solidity dependencies
 make build                 # root workspace + Solidity
 make test                  # root workspace tests + forge test
 make pre-push              # everything a branch should pass; see CI below
+make format                # rustfmt every crate, then forge fmt
 
 cd contracts/ethereum && forge test                          # fork suites skip without FORK_URL
 FOUNDRY_PROFILE=fork FORK_URL=<RPC URL> forge test --match-contract AaveFork
@@ -254,9 +255,9 @@ pipeline and no `make` target runs the tests of:
 `cargo test --workspace --locked`, `make relayer-test` and `make aggregator-test`. It does not run
 the `an-contracts.yaml` checks, `scripts/check_verifier_sources.sh`, gitleaks or lychee.
 
-**It does not go green today:** `make relayer-clippy` and `make relayer-test` fail to compile,
-because the `crates/bridge-prover-libraries` workspace does not build against its pinned circuit
-revision.
+**It does not go green today.** `make aggregator-fmt` fails because `crates/bridge-evm-aggregator`
+is not formatted yet, and `make relayer-clippy` and `make relayer-test` fail to compile because the
+`crates/bridge-prover-libraries` workspace does not build against its pinned circuit revision.
 
 `forge coverage` is there for two failure modes a plain `forge test` can miss. A fuzz test whose
 `vm.assume` rejects nearly every input trips Foundry's rejection cap depending on the seed — use

@@ -67,7 +67,11 @@ assigns it when the release is tagged.
   instances; the reference `_calldata.bin` is 3 648 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
-  not decode.
+  not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover
+  host regenerates its Circuit 4 keys on first use — the bump is what
+  makes the key cache reject an `event_pk.bin` / `event_vk.bin` from the
+  pre-rotation constraint system. Keygen at `k = 19` blocks the next
+  `verifyBlock` or withdraw cycle; preseed `BRIDGE_PARAMS_DIR` to skip it.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
@@ -275,21 +279,14 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- **`EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover host
-  regenerates its Circuit 4 keys on first use.** The bump is what makes
-  the key cache reject an `event_pk.bin` / `event_vk.bin` from the
-  pre-rotation constraint system. Keygen at `k = 20` takes ~7 minutes and
-  blocks the next `verifyBlock` or withdraw cycle; preseed
-  `BRIDGE_PARAMS_DIR` to skip it.
-
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
   building the prover, CLI or aggregator no longer needs read access to a
   private repository.** The five crates
   (`attestation-bls-checker-circuit`,
   `historical-layer-hashes-movement-checker-circuit`,
-  `bridge-event-prove-circuit`, `bridge-poseidon`, `test-data-gen`) used to
-  live in gosh-sh/acki-nacki-to-eth-bridge-halo2-prover, pinned by
-  revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
+  `bridge-event-prove-circuit`, `bridge-poseidon`, `bridge-test-data-gen`)
+  used to live in gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits, pinned
+  by revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
   which no longer applies). `bridge-prover-libraries` and
   `bridge-snark-utils` now reach them by workspace path; the external
   `[patch]` block is gone, and a circuit edit plus its
@@ -463,9 +460,6 @@ assigns it when the release is tagged.
 - `verifyBlock` no longer SSTOREs per-slot window heights (~29k gas on a
   ten-layer call). `lastHeight` and `LayerAnchorAppended` remain; the
   relayer paints `HistoryWindow.heights` from those logs on resurrect.
-- Documented that two identical AN burns in one block share a Circuit 4
-  nullifier (`msg_id` is not in the preimage): the second payout is
-  permanently blocked. Closing it needs a Circuit 4 re-keygen.
 - After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
   reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
   (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.

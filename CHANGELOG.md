@@ -506,6 +506,21 @@ assigns it when the release is tagged.
   live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
   uses the same `_piForm` name and body, so the two trees differ only
   structurally.
+- **`scripts/production_preflight.sh` runs its relayer step through the
+  prover workspace.** The step ran `cargo test` inside
+  `crates/bridge-relayer-daemon`, where cargo cannot read the manifest on its
+  own, so the script aborted there after the Foundry gates and never printed
+  `RESULT:`. `scripts/shellnet_e2e.sh` stopped at the same point, because it
+  starts with the preflight. The step now runs the relayer tests from
+  `crates/bridge-prover-libraries`, the way `make relayer-test` does. Fixed the
+  same way: `make relayer-fmt`, which `make pre-push` runs, and the
+  `verify-fixture` step of `scripts/shellnet_e2e.sh`, which could not start the
+  relayer and reported every run as
+  `verify-fixture failed (deploy bridge first or check anchors)`. That step also
+  passes its fixtures directory as an absolute path now: from a relative one the
+  relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
+  looks for legacy Groth16 fixtures instead. The preflight step still fails for
+  as long as that workspace does not build against its pinned circuit revision.
 
 ### Known issues
 

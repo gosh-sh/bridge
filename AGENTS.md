@@ -411,13 +411,13 @@ cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeVerifyBlock
 cd contracts/ethereum && forge test --match-contract "AckiNackiBridgeRelayerLoop" -vv    # Phase 5.1 relayer loop (6 tests)
 cd contracts/ethereum && forge test --match-contract "(Primary|Fallback|LayerHashesMovement)Verifier" -vv  # Per-circuit Groth16 adapters
 
-# Relayer skeleton (Phase 5.1, standalone)
-# NOT standalone: bridge-relayer-daemon reaches bridge-prover-lib / bridge-gql-fetcher
-# through the crates/bridge-prover-libraries workspace (symlink members), so a bare
-# `cd crates/bridge-relayer-daemon && cargo test` fails to resolve them. Same as CI:
+# AN→ETH relayer (Phase 5.1)
+# NOT standalone: bridge-relayer-daemon is a symlink member of the crates/bridge-prover-libraries
+# workspace and inherits its dependencies from it, so a bare `cd crates/bridge-relayer-daemon &&
+# cargo …` cannot even parse the manifest. Every cargo command for it runs from the workspace
+# with `-p bridge-relayer-daemon`; relative paths below are relative to that directory.
 cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon              # 49 unit tests
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- --help                     # CLI surface
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --ticks 5     # poll AN testnet, print BK-set events
+cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- --help  # CLI surface
 # AN→ETH is fully daemonized. Since 2026-07-04 BOTH ETH legs run in ONE systemd service
 # (bridge-relayer.service = `relayer daemon-bridge`) on a SINGLE relayer EOA, interleaved
 # sequentially so there is never more than one in-flight tx (nonces can't race). This unified
@@ -435,21 +435,26 @@ cd crates/bridge-relayer-daemon && cargo run --bin relayer -- sentry-watch --tic
 #   verifyBlock (fall-forward 1083905→1084416) tx 0x7653fbfc…; withdraw tx 0xae9233ce…
 #   (1 USDC → 0x742d35Cc…). Service unit: scripts/ursus/bridge-relayer.service (daemon-bridge).
 #   See docs/an_eth_daemon_withdraw_e2e_2026-07-03.md.
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-bridge \
+cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...  # unified AN→ETH (verifyBlock + withdrawByProof)
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon-withdraw \
+cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-withdraw \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ... --poll-secs 20  # standalone withdrawByProof leg
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- smoke-fixture \
-    --fixtures-dir ./fixtures --rpc-url ... --bridge-address ... \
-    --an-node-url http://<an-node-host>:8600                                              # smoke run wrapped in SentryGuardedRelayer
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
-    --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+# The fixture commands read bound_scenario.json from --fixtures-dir (written by
+# export-bound-block-proofs, see the end of this block) and the R15 calldata
+# *_calldata.bin from --verifiers-dir. Left out, --verifiers-dir is searched for
+# among the ancestors of --fixtures-dir, which finds it only when that path is
+# absolute; otherwise the relayer falls back to legacy Groth16 JSON that
+# export-bound-block-proofs does not write.
+cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- smoke-fixture \
+    --fixtures-dir ../bridge-snark-utils/proofs/bound --verifiers-dir ../../contracts/ethereum/verifiers \
+    --rpc-url ... --bridge-address ... --private-key ...                                 # one-shot submission of the fixture block
+cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- verify-fixture \
+    --fixtures-dir ../bridge-snark-utils/proofs/bound --verifiers-dir ../../contracts/ethereum/verifiers \
     --rpc-url ... --bridge-address ...                                                   # read-only pre-flight (no key, exits non-zero on mismatch)
-cd crates/bridge-relayer-daemon && cargo run --bin relayer -- daemon \
-    --fixtures-dir ../bridge-prover-orchestrator/proofs/bound \
+cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon \
+    --fixtures-dir ../bridge-snark-utils/proofs/bound --verifiers-dir ../../contracts/ethereum/verifiers \
     --rpc-url ... --bridge-address ... --private-key ... \
     --backoff-initial-secs 2 --backoff-max-secs 60 --backoff-multiplier 2                # long-running operator entry (B5)
-cd crates/bridge-relayer-daemon && cargo test --test live_bk_set_sentry -- --ignored     # live BK-set sentry against AN testnet
 
 # Deposit relayer (EVM→AN direction, standalone)
 cd crates/deposit-relayer-daemon && cargo test                                           # 32 lib + 1 fixture (+2 ignored live)
@@ -476,10 +481,8 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=11025180 SEPOLIA_RPC_URL
     cargo test --test live_log_discovery -- --ignored --nocapture                        # live eth_getLogs discovery (production path)
 
 # Cross-circuit-bound proof generation (Phase 4.1 fixture builder)
-cd crates/bridge-prover-orchestrator
-cargo run --bin export-bound-block-proofs --release        # writes proofs/bound/{primary,layer-hashes}/*
-cd gnark-wrappers/circuit-1a && ./circuit-1a prove ../../proofs/bound/primary/halo2_proof.json
-cd ../circuit-2                && ./circuit-2 prove ../../proofs/bound/layer-hashes/halo2_proof.json
+cd crates/bridge-snark-utils
+cargo run --release --bin export-bound-block-proofs   # writes proofs/bound/{primary,fallback,layer-hashes}/* + bound_scenario.json
 ```
 
 ## CI
@@ -747,8 +750,8 @@ ssh ubuntu@ursus-tools.dev '
   source ~/.cargo/env
   cd /home/ubuntu/bridge-e2e/acki-nacki-bridge/crates/deposit-relayer-daemon
   cargo build --release --locked && install -m 755 target/release/deposit-relayer /home/ubuntu/bridge-e2e/bin/
-  cd ../bridge-relayer-daemon
-  cargo build --release --locked && install -m 755 target/release/relayer /home/ubuntu/bridge-e2e/bin/
+  cd ../bridge-prover-libraries
+  cargo build --release --locked -p bridge-relayer-daemon --bin relayer && install -m 755 target/release/relayer /home/ubuntu/bridge-e2e/bin/
   sudo systemctl restart deposit-relayer.service
 '
 ```
@@ -914,8 +917,8 @@ ssh ubuntu@ursus-tools.dev '
   source ~/.cargo/env
   cd /home/ubuntu/bridge-e2e/acki-nacki-bridge/crates/deposit-relayer-daemon
   cargo build --release --locked && install -m 755 target/release/deposit-relayer /home/ubuntu/bridge-e2e/bin/
-  cd ../bridge-relayer-daemon
-  cargo build --release --locked && install -m 755 target/release/relayer /home/ubuntu/bridge-e2e/bin/
+  cd ../bridge-prover-libraries
+  cargo build --release --locked -p bridge-relayer-daemon --bin relayer && install -m 755 target/release/relayer /home/ubuntu/bridge-e2e/bin/
   sudo systemctl restart deposit-relayer.service
 '
 ```

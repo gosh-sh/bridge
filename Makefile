@@ -182,8 +182,8 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike
 	@echo "$(GREEN)Spike artefacts written to contracts/ethereum/test/fixtures/r15_spike/$(NC)"
 
-relayer-fmt: ## Check bridge-relayer-daemon formatting
-	@cd crates/bridge-relayer-daemon && cargo fmt --check
+relayer-fmt: ## Check bridge-relayer-daemon formatting (via bridge-prover-libraries workspace)
+	@cd crates/bridge-prover-libraries && cargo fmt -p bridge-relayer-daemon -- --check
 
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via bridge-prover-libraries workspace)
 	@cd crates/bridge-prover-libraries && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings

@@ -180,8 +180,12 @@ dev-setup: setup ## Setup development environment
 ci: format-check lint test ## Run CI checks locally
 
 # ────────────────────────────────────────────────────────────────────────────
-# Coverage and pre-push targets. No pipeline on GitHub runs Rust or
-# `forge coverage`, so `make pre-push` is the gate for both; see the CI section
+# Coverage and pre-push targets. No pipeline on GitHub runs `forge coverage`,
+# and the only Rust pipeline (`bridge-circuits.yaml`) only covers
+# `crates/bridge-circuits/`; every other Rust crate — the root workspace,
+# `bridge-relayer-daemon`, `bridge-evm-aggregator`, `deposit-prover`, etc. —
+# has no PR-triggered CI. So `make pre-push` is the gate for both `forge
+# coverage` and the Rust crates outside `bridge-circuits`; see the CI section
 # of AGENTS.md.
 #
 # Two patterns pass `forge test` and `cargo test` but trip `forge coverage`:

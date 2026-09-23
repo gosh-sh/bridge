@@ -236,11 +236,30 @@ run one on its own:
   directory with `cargo test --locked -p <crate>`;
 - the standalone crates, each from its own directory with `cargo test`: `deposit-prover`,
   `eth-light-client-prover`, `deposit-relayer-daemon`, `eth-light-client-relayer`,
-  `bridge-snark-utils`, `frontend`;
-- the members of `crates/bridge-circuits` — same recipe: `cd crates/bridge-circuits && cargo test
-  -p <crate>`. `bridge-circuits.yaml` runs its fast + heavy suites on every PR, but the
-  `#[ignore]`d `test_real_prover_*` tests still need a manual `cargo test -- --ignored` when the
-  corresponding circuit constraints change.
+  `bridge-snark-utils`, `frontend`.
+
+`crates/bridge-circuits` is different: `bridge-circuits.yaml` runs its fast + heavy `#[test]`
+suites automatically on every PR and every push to `main`, so that sub-workspace is *not* in the
+uncovered set above. What still needs a manual run is the `#[ignore]`d `test_real_prover_*` tests
+gated for CI hygiene (tens of minutes and >14 GB RSS each). Trigger them per-crate when the
+corresponding circuit constraints change — from `crates/bridge-circuits/`:
+
+```
+cargo test -p bridge-event-prove-circuit -- --ignored
+cargo test -p historical-layer-hashes-movement-checker-circuit -- --ignored
+```
+
+**Attestation-BLS is a special case.** A bare `cargo test -p attestation-bls-checker-circuit --
+--ignored` also picks up `test_real_prover_primary_max_2000`, which — like every other real-prover
+case in that crate — is K=20, but at 2000 signers a single proof runs at ~78 GB RSS (see
+`PARALLEL_BENCHMARK_N14_REPORT.md:39,79`). Do not run it on a workstation without explicit intent.
+Prefer naming the case:
+
+```
+cargo test -p attestation-bls-checker-circuit -- --ignored \
+    test_real_prover_primary_max_500 \
+    test_real_prover_fallback_multi_bk_set
+```
 
 ### Before pushing
 

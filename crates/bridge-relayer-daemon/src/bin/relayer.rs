@@ -225,7 +225,7 @@ enum Cmd {
     /// the historical `export-c4-poseidon-snark --fixture` subprocess),
     /// aggregates the inner snark (`aggregate-proof`, which self-checks the
     /// regenerated Yul source == committed `.sol`), cross-checks the calldata
-    /// binds the ten public inputs, and writes a `proof_event` JSON that
+    /// binds the eleven public inputs, and writes a `proof_event` JSON that
     /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).

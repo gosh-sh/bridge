@@ -21,10 +21,10 @@
 //!
 //! [`Circuit4ShplonkPipeline`] composes the two and returns a
 //! [`PartnerWithdrawalProof`] whose `proof_hex` is the aggregator calldata and
-//! whose `public_instances_hex` are the ten Circuit-4 public inputs (LE Fr) —
+//! whose `public_instances_hex` are the eleven Circuit-4 public inputs (LE Fr) —
 //! exactly the shape `submit-withdraw` / `daemon-withdraw` / `daemon-bridge`
 //! already consume. A cross-check ([`calldata_binds_instances`]) proves the
-//! calldata's re-exposed instances match the ten public inputs before the
+//! calldata's re-exposed instances match the eleven public inputs before the
 //! proof is surfaced, so a passing pipeline cannot forward mismatched bytes.
 
 use std::{
@@ -65,8 +65,8 @@ pub const AGGREGATE_BIN: &str = "aggregate-proof";
 pub struct SnarkArtefacts {
     /// The bincode-serialized snark-verifier `Snark` (aggregator inner input).
     pub snark_path: PathBuf,
-    /// The ten Circuit-4 public instances, 32-byte **little-endian** Fr each
-    /// (`save_instances_binary` layout), i.e. 320 bytes total.
+    /// The eleven Circuit-4 public instances, 32-byte **little-endian** Fr each
+    /// (`save_instances_binary` layout), i.e. 352 bytes total.
     pub instances_path: PathBuf,
 }
 
@@ -202,7 +202,9 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
         let artefacts =
             tokio::task::spawn_blocking(move || -> Result<SnarkArtefacts, RelayerError> {
                 // KeyManager owns four per-circuit sub-managers; the event sub-manager
-                // keygens at K=19 with its own degree-matched SRS.
+                // keygens the event circuit (whose `event_config_params.json` records
+                // k = 19) against the K=20 KZG SRS (`EventKeyManager::KEYGEN_SRS_K`,
+                // matching the event circuit's `vk.domain.k`).
                 let mut km = KeyManager::new(&params_dir);
                 km.ensure_event_keys()
                     .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e:#}")))?;
@@ -506,7 +508,7 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
     }
 
     /// Prove `witness_path` → Poseidon snark → aggregate → calldata, and return
-    /// a [`PartnerWithdrawalProof`] carrying the calldata + ten public inputs.
+    /// a [`PartnerWithdrawalProof`] carrying the calldata + eleven public inputs.
     /// `snark_dir` receives the intermediate `<name>.snark` / `.instances.bin`.
     pub async fn prove(
         &self,
@@ -526,8 +528,9 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
 
         let instances_hex = read_instances_le(&artefacts.instances_path)?;
 
-        // The calldata's re-exposed inner instances (words 12..21, big-endian)
-        // must equal the ten public inputs. If they don't, the on-chain verifier
+        // The calldata's re-exposed inner instances (words 12..22 inclusive,
+        // big-endian) must equal the eleven public inputs. If they don't, the
+        // on-chain verifier
         // would bind different values than the caller passes in
         // `WithdrawalPublicInputs` — refuse to surface such a proof.
         calldata_binds_instances(&calldata, &instances_hex)?;
@@ -561,7 +564,7 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
     Ok(chunks.iter().map(hex::encode).collect())
 }
 
-/// Assert that the aggregator calldata re-exposes exactly the ten Circuit-4
+/// Assert that the aggregator calldata re-exposes exactly the eleven Circuit-4
 /// public inputs: `calldata[(12+i)*32 .. (13+i)*32]` (big-endian EVM word)
 /// numerically equals `instances_hex[i]` (little-endian Fr repr), for all i.
 pub fn calldata_binds_instances(
@@ -604,7 +607,7 @@ pub fn calldata_binds_instances(
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic snark prover for tests: writes an empty `<name>.snark` and a
-/// 320-byte instances file (ten ascending LE Fr) into `snark_dir`.
+/// 352-byte instances file (eleven ascending LE Fr) into `snark_dir`.
 #[derive(Clone, Debug, Default)]
 pub struct MockCircuit4SnarkProver {
     pub fail: bool,
@@ -643,8 +646,8 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
 }
 
 /// Deterministic aggregator for tests: returns 3616-byte calldata whose
-/// re-exposed instance words (12..21) match [`MockCircuit4SnarkProver`]'s ten
-/// ascending LE instances, so [`calldata_binds_instances`] passes.
+/// re-exposed instance words (12..22) match [`MockCircuit4SnarkProver`]'s
+/// eleven ascending LE instances, so [`calldata_binds_instances`] passes.
 #[derive(Clone, Debug, Default)]
 pub struct MockAggregator {
     pub fail: bool,
@@ -652,7 +655,8 @@ pub struct MockAggregator {
 
 impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
-    /// words at positions 12..21), padded to a realistic 3616-byte length.
+    /// words at positions `12..12 + instances_hex.len()`), padded to a realistic
+    /// 3616-byte length.
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
         let total_len = 3616;
         let mut cd = vec![0u8; total_len];
@@ -1206,7 +1210,7 @@ mod tests {
         // proof_hex is the aggregator calldata (>= SHPLONK min).
         let bytes = proof.proof_bytes().unwrap();
         assert!(bytes.len() >= SHPLONK_MIN_WITHDRAWAL_INSTANCES);
-        // The ten public inputs decode into a well-formed struct.
+        // The eleven public inputs decode into a well-formed struct.
         let pi = proof.public_inputs().unwrap();
         assert_eq!(pi.token_id, U256::ZERO); // MockCircuit4SnarkProver: instance[0]=0
         std::fs::remove_dir_all(&dir).ok();

@@ -41,10 +41,12 @@ halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12
 # `EVENT_CIRCUIT_REVISION` (bridge-prover-lib/src/keys/event.rs) is bumped
 # BY HAND when a Circuit-4 change in `bridge-circuits/bridge-event-prove-circuit`
 # invalidates cached keys. `KeyManagerState::new` cross-checks manifest format,
-# that revision, and the vk/config/pk digests. Without a revision bump, a
-# code change compiles cleanly, keygen is skipped as "warm", and the proof is
-# rejected at verification — after the burn, after the anchor wait. Bump it in
-# the same commit that moves the circuit.
+# that revision, and the vk/config digests (see
+# `bridge-prover-lib/src/keys/state.rs:257-261`); the PK is not hashed there
+# and is validated separately by the CLI probe in `preflight.rs`. Without a
+# revision bump, a code change compiles cleanly, keygen is skipped as "warm",
+# and the proof is rejected at verification — after the burn, after the anchor
+# wait. Bump it in the same commit that moves the circuit.
 attestation-bls-checker-circuit = { path = "../bridge-circuits/attestation-bls-checker-circuit" }
 historical-layer-hashes-movement-checker-circuit = { path = "../bridge-circuits/historical-layer-hashes-movement-checker-circuit" }
 bridge-poseidon = { path = "../bridge-circuits/bridge-poseidon" }

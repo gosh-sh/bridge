@@ -214,3 +214,43 @@ fn block_tree_position_out_of_range_errors() {
         "unexpected error message: {msg}"
     );
 }
+
+/// The `checked_shl` guard on `block_siblings.len()`: a witness with a
+/// depth of exactly `usize::BITS` (or more) is what the guard catches.
+/// Without it a debug build panics with `attempt to shift left with
+/// overflow` and a release build masks the shift amount modulo
+/// `usize::BITS`, silently yielding `block_pos_max = 1` and letting
+/// every non-zero `block_pos` through — hence the explicit closed-form
+/// error message.
+#[test]
+fn block_tree_pathological_depth_errors_via_checked_shl() {
+    let mut w = populated_witness();
+    let proof = w.block_tree_proof.as_mut().unwrap();
+    proof.siblings_hex = (0..usize::BITS as usize)
+        .map(|i| hex::encode([(i & 0xff) as u8; 32]))
+        .collect();
+    // Any `position` — including 0 — must be rejected because we cannot
+    // even compute `block_pos_max` for a depth this big.
+    proof.position = 0;
+    let err = must_err(&w, "block_tree_proof pathological depth");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not representable as a usize width shift"),
+        "unexpected error message: {msg}"
+    );
+}
+
+/// Boundary sanity: with the fixture's 8-sibling block-tree proof, the
+/// maximum in-range `position` is `(1 << 8) - 1 == 255`, and it must be
+/// accepted. Guards against a future off-by-one that turns `>= max` into
+/// `> max` (or vice versa) and starts rejecting a legitimate top-of-range
+/// witness.
+#[test]
+fn block_tree_position_at_max_minus_one_is_accepted() {
+    let mut w = populated_witness();
+    let proof = w.block_tree_proof.as_mut().unwrap();
+    let depth = proof.siblings_hex.len();
+    proof.position = (1u32 << depth) - 1;
+    build_proof_inputs(&w, default_event_circuit_params())
+        .expect("boundary block_tree position (1<<depth)-1 must be accepted");
+}

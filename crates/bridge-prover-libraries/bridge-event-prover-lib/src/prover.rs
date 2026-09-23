@@ -209,8 +209,11 @@ pub fn build_proof_inputs(
     //
     // Unlike `events_siblings.len()` above there is no explicit `MAX_*_DEPTH`
     // cap on `block_siblings.len()` in the circuit, so a pathological witness
-    // could otherwise trip UB by shifting a `usize` by ≥ `usize::BITS`.
-    // `checked_shl` fails closed at that boundary.
+    // could otherwise trip Rust's shift-by-≥-`usize::BITS` handling: a debug
+    // build panics with `attempt to shift left with overflow`; a release
+    // build silently masks the shift amount modulo `usize::BITS` and yields
+    // a bogus `max` that lets the wrong `block_pos` through. `checked_shl`
+    // fails closed at that boundary in every profile.
     let block_pos_max = 1usize
         .checked_shl(block_siblings.len() as u32)
         .ok_or_else(|| {

@@ -172,10 +172,20 @@ final_root    = verify_chain_of_dense_proofs(root_1, dense_chain,
 ### 4.5 Anchor binding (`finalRoot` + `anchorLayer`)
 
 The circuit walks `verify_chain_of_dense_proofs` to produce `final_root`
-and exposes it directly as `PUB_FINAL_ROOT`. The prover also witnesses a
-`layer_idx` (0-based), adds one to produce the 1-indexed `anchor_layer`,
-range-checks it into `1..=MAX_ANCHOR_LAYER` (=`MAX_LAYER_HASHES = 10` on
-the ETH side), and exposes it as `PUB_ANCHOR_LAYER`.
+and exposes it directly as `PUB_FINAL_ROOT`. Anchor-layer plumbing is
+split across the two layers:
+
+- **Daemon side** (`bridge-event-prover-lib::prover`): converts the
+  witness's 0-based `AnchorRef.layer_idx` to a 1-indexed `anchor_layer`
+  via `layer_idx.checked_add(1)` and range-filters it against
+  `MAX_ANCHOR_LAYER` before handing an already-1-indexed `u8` to the
+  circuit.
+- **Circuit side**: receives that 1-indexed `anchor_layer` directly,
+  range-checks it into `1..=MAX_ANCHOR_LAYER` (=`MAX_LAYER_HASHES = 10`
+  on the ETH side) with two 4-bit lookups, and exposes it as
+  `PUB_ANCHOR_LAYER`.
+
+The circuit does not see the 0-based `layer_idx` at all.
 
 Result: the verifier learns *which* layer the proof anchors to; the ETH
 side then checks `pub.finalRoot ∈ _layerWindows[pub.anchorLayer]`
@@ -259,7 +269,10 @@ The nullifier binds the destination chain side's burn record to:
   anonymity is preserved because the verifier still doesn't learn `block_id`
   directly; only the nullifier is public;
 - every settled withdrawal field (token, amount, recipient, sender), so
-  replay protection is over the full tuple, not just a single field.
+  replay protection is over the full tuple, not just a single field;
+- the event's in-block position (`eventsPos`, the 7th sponge input) —
+  this is what makes two otherwise-identical burns in the same block
+  produce distinct nullifiers instead of colliding.
 
 ---
 

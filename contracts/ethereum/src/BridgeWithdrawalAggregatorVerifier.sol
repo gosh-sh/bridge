@@ -6,15 +6,18 @@ import "./ShplonkAggregatorVerifierBase.sol";
 
 /// @title BridgeWithdrawalAggregatorVerifier
 /// @notice R15 adapter: verifies Circuit 4 via SHPLONK aggregator Yul verifier.
-/// @dev `proof` calldata = `instances (12 acc + 11 inner) ‖ snark_proof`.
-///      Re-exposed inner PIs at indices 12..22 must match `pub`.
+/// @dev `proof` calldata = `instances (12 acc + 11 inner + 1 vk_digest) ‖ snark_proof`.
+///      Re-exposed inner PIs at indices 12..22 must match `pub`; the tail slot
+///      at index 23 must equal the immutable `vkDigest` set at deploy time.
 contract BridgeWithdrawalAggregatorVerifier is
     IBridgeWithdrawalVerifier,
     ShplonkAggregatorVerifierBase
 {
     uint256 private constant NUM_INNER = 11;
 
-    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
+    constructor(address _shplonkVerifier, bytes32 _vkDigest)
+        ShplonkAggregatorVerifierBase(_shplonkVerifier, _vkDigest)
+    { }
 
     /// @inheritdoc IBridgeWithdrawalVerifier
     function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)
@@ -23,7 +26,7 @@ contract BridgeWithdrawalAggregatorVerifier is
         override
         returns (bool isValid)
     {
-        if (proof.length < (NUM_ACCUMULATOR_INSTANCES + NUM_INNER) * 32) {
+        if (proof.length < (NUM_ACCUMULATOR_INSTANCES + NUM_INNER + 1) * 32) {
             return false;
         }
 
@@ -38,6 +41,9 @@ contract BridgeWithdrawalAggregatorVerifier is
         if (_readInstance(proof, 20) != pub.nullifier) return false;
         if (_readInstance(proof, 21) != pub.finalRoot) return false;
         if (_readInstance(proof, 22) != pub.anchorLayer) return false;
+        if (_readInstance(proof, NUM_ACCUMULATOR_INSTANCES + NUM_INNER) != uint256(vkDigest)) {
+            return false;
+        }
 
         return _verifyShplonk(proof);
     }

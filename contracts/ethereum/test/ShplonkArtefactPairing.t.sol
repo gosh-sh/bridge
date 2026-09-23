@@ -93,7 +93,7 @@ contract ShplonkArtefactPairingTest is Test {
     }
 
     function test_eth6_withdrawalYul_extcodehashMatchesPin() public {
-        bytes32 pin = 0x23e0d1a694c9b7485f81a59eefafa6c0d1865db721133b030ecd6ff86dfe48bb;
+        bytes32 pin = 0xf3a462e3006568299a439c58c12da7356abf3b73b4ae84c5c168aa0b44ffc18f;
         address yul = ShplonkDeployLib.deployYulFromBin(
             "verifiers/BridgeWithdrawalAggregatorVerifier.bin", pin
         );
@@ -174,21 +174,21 @@ contract ShplonkArtefactPairingTest is Test {
     }
 
     function test_eth6_primaryYul_extcodehashMatchesPin() public {
-        bytes32 pin = 0x01cce5259fa68848b2ef87bec2bfa40c47089a67967b2e8ea5d7492c0c18fbd6;
+        bytes32 pin = 0x87667b88a829e82cd3a840d7840e531cc479b46c383081c906ed6ab77c8f7d7c;
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/PrimaryAggregatorVerifier.bin", pin);
         assertEq(yul.codehash, pin, "Primary CREATE runtime must match pin");
     }
 
     function test_eth6_fallbackYul_extcodehashMatchesPin() public {
-        bytes32 pin = 0xce215c9aca95eb5c5006615dbfee217d9a3aa0d6847cecef6dcee822ec283c00;
+        bytes32 pin = 0xea25ba9c1cab6df9616122cb951875a47f41c962ebc699dfb53819215efaf963;
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/FallbackAggregatorVerifier.bin", pin);
         assertEq(yul.codehash, pin, "Fallback CREATE runtime must match pin");
     }
 
     function test_eth6_layerHashesYul_extcodehashMatchesPin() public {
-        bytes32 pin = 0xd6f78f3b014cf94b0fbc8d60e409955adf86c7f2274c84ce19b745f5bb92525e;
+        bytes32 pin = 0xe1f47d047e03d59dcacb747fd168efe120da942a84a4e7003d74e8208d99f07b;
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/LayerHashesAggregatorVerifier.bin", pin);
         assertEq(yul.codehash, pin, "LayerHashes CREATE runtime must match pin");

@@ -267,7 +267,7 @@ fn block_tree_position_at_max_minus_one_is_accepted() {
 /// Mirror of `block_tree_position_at_max_minus_one_is_accepted` on the
 /// events axis: the fixture uses 7 siblings, so `position = (1 << 7) - 1
 /// == 127` is the top of the accepted range. The events-axis check goes
-/// through the circuit's own `MAX_EVENTS_DEPTH` guard rather than the
+/// through the circuit's own `MAX_EVENTS_TREE_DEPTH` guard rather than the
 /// prover's `checked_shl` shim, so the same "tightening" mutation would
 /// survive without this positive test.
 #[test]

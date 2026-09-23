@@ -215,11 +215,13 @@ pub fn build_proof_inputs(
     // `siblings.len() == 64` on a 64-bit target — the mask reduces the
     // shift to `64 % 64 = 0`, so `1usize << 64` evaluates to `1` and
     // `block_pos_max` becomes `1`. The subsequent `block_pos >= block_pos_max`
-    // check then over-rejects (positions in `1..2^64` are turned away
-    // instead of accepted for a 64-deep tree) but still lets `block_pos == 0`
-    // through — a pathological deep-tree witness with a zero position would
-    // silently pass this check on release. `checked_shl` fails closed at
-    // that boundary in every profile and stops the zero-position case too.
+    // check then over-rejects (positions in `1..2^32` — the actual range a
+    // witness can encode, since `MerkleProofData::position` is `u32` — are
+    // turned away instead of accepted for a 64-deep tree) but still lets
+    // `block_pos == 0` through — a pathological deep-tree witness with a
+    // zero position would silently pass this check on release. `checked_shl`
+    // fails closed at that boundary in every profile and stops the
+    // zero-position case too.
     let block_pos_max = 1usize
         .checked_shl(block_siblings.len() as u32)
         .ok_or_else(|| {

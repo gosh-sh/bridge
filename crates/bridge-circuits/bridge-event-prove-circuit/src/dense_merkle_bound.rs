@@ -463,23 +463,25 @@ mod tests {
     }
 
     /// Negative: a position witness with a bit flipped inside the active
-    /// range does NOT diverge the computed root — the chunk-decomposition
-    /// witnesses are copy-constrained against the honest `(left, right)`
-    /// orientation, so once the walker's `cond_swap` produces the swapped
-    /// orientation, the level-`j` chunk copies fail before any hash is
-    /// re-computed with the swapped inputs. If you deleted the final
-    /// `ctx.constrain_equal(&root_fr, &expected_fr)` line, this test would
-    /// still fail — on the chunk-link copies — and the walker's `root_fr`
-    /// would in fact equal the honest root. The moral: soundness of the
-    /// binding rests on the chunk-decomposition copies, not on the caller
-    /// comparing the walked root to an external value.
+    /// range makes the walker take a different path. In this test the
+    /// chunk witnesses are still those the preprocessor built for the
+    /// honest orientation, so what actually rejects the proof is the
+    /// walker's level-`j` chunk-link constraint — but that is NOT where
+    /// active-bit position-binding rests. The chunk cells are prover-
+    /// supplied `load_witness` values: an attacker willing to rebuild
+    /// them for the flipped orientation satisfies every chunk link, and
+    /// the walker instead produces a root that differs from the honest
+    /// one. What rejects that stronger attacker is the root leaving this
+    /// gadget flowing into `final_root`, which the bridge compares
+    /// against `_layerWindows[anchorLayer]` in `withdrawByProof` — so a
+    /// flipped-active-bit proof is rejected on-chain by the layer-window
+    /// check, not by anything inside this gadget.
     #[test]
     fn test_dense_merkle_bound_negative_flipped_bit_within_active_levels() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xBEEF);
         let proof = preprocess_dense_proof_padded(leaf, &siblings, 5, MAX_DEPTH);
         // Honest pos = 5 (0b101). Flip bit 1 → witness = 7 (0b111). Within
-        // the active range [0..3], so zero-forcing does NOT catch it — the
-        // walker itself must diverge.
+        // the active range [0..3], so zero-forcing does NOT catch it.
         assert!(
             !run_gadget(&proof, leaf, 3, 7, root),
             "supplying a pos_witness whose bit pattern differs inside the \

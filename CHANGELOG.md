@@ -70,8 +70,9 @@ assigns it when the release is tagged.
   not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover
   host regenerates its Circuit 4 keys on first use — the bump is what
   makes the key cache reject an `event_pk.bin` / `event_vk.bin` from the
-  pre-rotation constraint system. Keygen at `k = 19` blocks the next
-  `verifyBlock` or withdraw cycle; preseed `BRIDGE_PARAMS_DIR` to skip it.
+  pre-rotation constraint system. Keygen (over the `K = 20` SRS) blocks
+  the next `verifyBlock` or withdraw cycle; preseed `BRIDGE_PARAMS_DIR`
+  to skip it.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at

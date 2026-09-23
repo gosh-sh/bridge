@@ -49,7 +49,8 @@ steps:
   # Step 1: fast MockProver tests (Circuit 4 + cross-circuit block-id).
   # Runs first and independently so a red result in the slower step below
   # does not hide a Circuit 4 regression — and so reviewers see the
-  # bug-fix regressions (BRIDGE-WD-01, ETH-15) pass or fail in seconds.
+  # dense-merkle-bound and events-position-binding regressions pass or
+  # fail in seconds.
   # ---------------------------------------------------------------------------
   bridge-circuits-fast:
     image: *rust_image

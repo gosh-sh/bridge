@@ -164,6 +164,11 @@ pub fn aggregate_and_prove_cached(
         config.universality,
     );
     prover_circuit.expose_previous_instances(false);
+    // ETH-40 fix: append the VK digest so the prover's instance count matches
+    // the outer VK (which `keygen_or_load` built with the digest slot
+    // included). Without this, calldata would ship 12+N scalars but the Yul
+    // would demand 12+N+1 → runtime revert.
+    crate::vk_binding::expose_vk_digest(&mut prover_circuit);
     let prover_circuit = prover_circuit.use_break_points(break_points);
     let instances = prover_circuit.instances();
     let flat: Vec<Fr> = instances.iter().flat_map(|col| col.iter().copied()).collect();

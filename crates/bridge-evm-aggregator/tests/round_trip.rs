@@ -14,8 +14,12 @@
 
 use std::{env, path::PathBuf};
 
-use bridge_evm_aggregator::aggregator::{
-    aggregate, generate_yul_verifier_gated, prove_inner, K_OUTER, NUM_ACCUMULATOR_INSTANCES,
+use bridge_evm_aggregator::{
+    aggregator::{
+        aggregate, generate_yul_verifier_gated, prove_inner, AggregatorConfig, K_OUTER,
+        NUM_ACCUMULATOR_INSTANCES,
+    },
+    vk_binding::{expected_vk_digest, vk_digest_index, NUM_VK_BINDING_INSTANCES},
 };
 use halo2_base::{halo2_proofs::halo2curves::bn256::Fr, utils::fs::gen_srs};
 
@@ -60,10 +64,11 @@ fn aggregator_round_trip() {
     );
     assert_eq!(
         agg_snark.instances[0].len(),
-        NUM_ACCUMULATOR_INSTANCES + INNER_NUM_INSTANCES,
-        "aggregator instance count = {} acc limbs + {} re-exposed inner PI(s)",
+        NUM_ACCUMULATOR_INSTANCES + INNER_NUM_INSTANCES + NUM_VK_BINDING_INSTANCES,
+        "aggregator instance count = {} acc limbs + {} re-exposed inner PI(s) + {} VK digest(s)",
         NUM_ACCUMULATOR_INSTANCES,
         INNER_NUM_INSTANCES,
+        NUM_VK_BINDING_INSTANCES,
     );
     // The re-exposed inner PI sits immediately after the accumulator limbs and
     // must equal the inner circuit's public output a*b == 77.
@@ -71,6 +76,15 @@ fn aggregator_round_trip() {
         agg_snark.instances[0][NUM_ACCUMULATOR_INSTANCES],
         Fr::from(77u64),
         "re-exposed inner public input must be a*b == 77",
+    );
+    // ETH-40 binding: the digest sits at the tail of the instance column and
+    // must equal the value the native helper predicts for this inner snark.
+    let expected_digest =
+        expected_vk_digest(&params_outer, &inner_snark, AggregatorConfig::default());
+    let digest_slot = vk_digest_index(INNER_NUM_INSTANCES);
+    assert_eq!(
+        agg_snark.instances[0][digest_slot], expected_digest,
+        "in-circuit VK digest must match the native `expected_vk_digest` value",
     );
 
     let yul_path = workdir.join("AggregatorVerifierSpike.sol");

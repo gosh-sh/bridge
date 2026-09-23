@@ -16,7 +16,7 @@
 //! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~800 MB @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
 //!
-//! Slot stem: `<base_name>__v2__<content_hash:hex[..32]>`. `base_name` is
+//! Slot stem: `<base_name>__v3__<content_hash:hex[..32]>`. `base_name` is
 //! a human-readable label only — it is **not** trusted for correctness. Two
 //! callers using the same `base_name` with distinct inner VKs, distinct
 //! aggregator configs, or a distinct SRS produce distinct content hashes, so
@@ -24,8 +24,11 @@
 //! content share a slot even under different names (deemed acceptable — this
 //! is the classical cache-dedup property).
 //!
-//! Format tag `v2` in the stem gates against silent breakage if the hash
-//! preimage layout ever changes; bump to `v3` to invalidate all v2 slots.
+//! Format tag `v3` in the stem gates against silent breakage if the hash
+//! preimage layout ever changes; bump to `v4` to invalidate all v3 slots.
+//! History: bumped v2→v3 when the ETH-40 fix added `expose_vk_digest`
+//! inside the keygen circuit — the outer PK, `calculated` params, and
+//! `num_instance` all changed, so pre-v3 cache slots must not be reused.
 //!
 //! History: v1 used a 64-bit `SipHash` of the protocol bytes alone plus
 //! trusted `base_name`; the SRS was **not** in the key. That meant a
@@ -149,7 +152,7 @@ fn snark_protocol_bytes(inner_snark: &Snark) -> Vec<u8> {
 ///
 /// Preimage layout (all little-endian):
 /// ```text
-///   b"bridge-evm-aggregator-cache-v2"
+///   b"bridge-evm-aggregator-cache-v3"
 ///   u32(k_outer) || u32(lookup_bits_outer) || u8(universality)
 ///   u32(s_g2_len)     || s_g2_bytes
 ///   u32(protocol_len) || protocol_bytes
@@ -160,7 +163,7 @@ fn content_hash(
     protocol_bytes: &[u8],
 ) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"bridge-evm-aggregator-cache-v2");
+    h.update(b"bridge-evm-aggregator-cache-v3");
     h.update((config.k_outer as u32).to_le_bytes());
     h.update((config.lookup_bits_outer as u32).to_le_bytes());
     h.update([universality_byte(config.universality)]);
@@ -171,7 +174,7 @@ fn content_hash(
     h.finalize().into()
 }
 
-/// Deterministic slot stem: `<base_name>__v2__<content_hash[..32]>`.
+/// Deterministic slot stem: `<base_name>__v3__<content_hash[..32]>`.
 ///
 /// `base_name` is a human-readable label only. Correctness is enforced by the
 /// content hash — see module-level docs.
@@ -189,7 +192,7 @@ pub fn cache_stem(
     // 128 bits of the 256-bit digest keeps filenames short; a full collision
     // there is still infeasible and the byte-drift check in aggregate_proof
     // provides defence in depth.
-    format!("{base_name}__v2__{}", hex::encode(&hash[..16]))
+    format!("{base_name}__v3__{}", hex::encode(&hash[..16]))
 }
 
 fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
@@ -278,6 +281,11 @@ pub fn keygen_or_load(
         config.universality,
     );
     keygen_circuit.expose_previous_instances(false);
+    // ETH-40 fix: bind the inner-circuit VK. Must run before
+    // `calculate_params` / `num_instance` so the extra Poseidon gates are
+    // counted in the auto-config and the persisted `num_instance` reflects
+    // the +1 exposed instance.
+    crate::vk_binding::expose_vk_digest(&mut keygen_circuit);
     let calculated = keygen_circuit.calculate_params(Some(10));
     let num_instance = keygen_circuit.num_instance();
 

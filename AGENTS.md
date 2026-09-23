@@ -494,38 +494,79 @@ Two systems, and only one of them runs from GitHub.
 | Pipeline | Trigger | What it does |
 |---|---|---|
 | `hygiene.yaml` | every PR, and pushes to `main` | Three hygiene checks that share a clone and take no secrets by design — the one job that stays safe on a fork's PR. **`gitleaks`**: `gitleaks detect` over the branch's whole history, not the diff, because a key added and removed before merge still has to be rotated. Rules and the shellnet-fixture allowlist live in `.gitleaks.toml`; reviewed historical findings are pinned in `.gitleaksignore`. **`links`**: `lychee` over the Markdown and `Cargo.toml`, config in `lychee.toml`. **`english`**: `scripts/check_english_only.py` fails on a letter outside the Latin script — Cyrillic, CJK and the rest — in any tracked file, so comments and docs stay readable to everyone who touches them next. Unaccented Greek and `µ` pass as notation; intentional non-Latin (a multibyte test fixture, a localised tool's output) is exempted with a `non-english-ok` marker on the offending line or the line above it. Reproduce locally with `make english-check`, which `make pre-push` also runs. A finding in any of the three fails the pipeline. |
+| `solidity.yaml` | every PR, and pushes to `main` | Installs Foundry with `foundryup` on `ubuntu:22.04` and runs `forge build`, `forge fmt --check` and `forge test --no-match-contract Fork` in `contracts/ethereum/`. The mainnet-fork suites need an RPC and are left out; `forge coverage` does not run here either. No secrets. |
+| `an-contracts.yaml` | every PR, and pushes to `main` | Five independent Python steps over `contracts/an/`, each guarding an invariant the TVM compiler does not check. **`voucher-abi`**: `scripts/check_voucher_abi_consistency.py` — the `confirmDeposit` argument list agrees across the `eccUSDCBridge` and `DepositVoucher` sources and both compiled ABIs. **`deposit-vk-blob`**: `scripts/embed_deposit_vk_blob.py --check` — the verifying key embedded in `eccUSDCBridge.sol` matches `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin`. **`zerostate-encoder`**: `scripts/check_zerostate_data_encoder.py` — `BridgeZerostateData.getBridgeData` encodes the tuple `eccUSDCBridge.onCodeUpgrade` decodes. **`zerostate-module`**: the unit tests in `contracts/an/zerostate/test_zerostate_init.py`. **`place-manifest`**: `scripts/check_place_manifest.py` — every tracked file under `contracts/an/` is either listed in `contracts/an/place.json` for acki-nacki to place or parked under `not_placed`, and no destination falls outside the directories acki-nacki reserves for placed files. No secrets. |
 | `verifier_sources.yaml` | PRs and pushes to `main` touching `contracts/ethereum/verifiers/`, the script or the pipeline | Runs on `alpine/curl`, installs `gcompat` because the official `solc-static-linux` 0.8.19 is dynamically linked against glibc, downloads `solc 0.8.19` pinned by SHA-256, and runs `scripts/check_verifier_sources.sh`: every `*AggregatorVerifier.sol` must compile to its `.bin` byte for byte, both halves of each pair must exist, and no `.bin` may exceed EIP-170. It is the only place that link is checked — `aggregate-proof` compares sources, the chain checks bytecode. No secrets. |
+| `release.yaml` | tags `v*` | Builds `ackinacki-bridge` (through the `crates/bridge-prover-libraries` workspace) and `aggregate-proof` (`crates/bridge-evm-aggregator`) in release mode, packs them with `contracts/ethereum/verifiers/*.bin`, `*.sol` and `crates/ackinacki-bridge/config/bridge_config` into `ackinacki-bridge-linux-x86_64.tar.gz`, and attaches it, `SHA256SUMS` and `kzg_bn254_21.srs` to the GitHub release — the three assets `scripts/install.sh` downloads. The ceremony file is carried forward from the previous release, so only the first release needs it uploaded by hand. Builds, tests nothing. Secret `REVIEW_GH_TOKEN`: Contents read and write, the `tag` event ticked, and read access to the private circuits repository cargo fetches. |
 | `request_review.yaml` | every PR | Re-requests review from everyone holding a verdict the new commits made stale, and pings them in Discord. Skips drafts, and skips merges of the base branch into the PR (detected structurally, by a merged-in parent already contained in the base). |
 | `notify_review_submitted.yaml` | cron job `review-submitted` | Tells the PR author in Discord that someone reviewed. Woodpecker has no trigger for a submitted review, so it polls; the window is (start of the last successful cron run, start of this one], read back from Woodpecker's own API, which is why consecutive runs neither repeat a ping nor drop one. |
 
 Secrets are configured per repository in Woodpecker and handed only to the events ticked on them — one
 without the right event arrives as an empty string rather than an error, which is worth remembering
-when a step fails with an unexplained 401. **No Rust or Solidity build, test or lint job runs
-here — the only artefact check is `verifier_sources.yaml`.** Those are the GitLab jobs below, so
-`make check` and `make pre-push` are what stands between a branch and a regression today.
+when a step fails with an unexplained 401.
+
+**No Rust job runs on a PR or on `main`** — no build, test, fmt or clippy; `release.yaml` builds two
+binaries on a tag and tests nothing. Solidity is covered by `solidity.yaml`, less the fork suites and
+`forge coverage`. Everything else — the Rust jobs, `forge coverage`, `cargo audit`, slither — exists
+only as the GitLab jobs below, so `make pre-push` is what stands between a branch and a Rust
+regression today.
 
 ### GitLab (`.gitlab-ci.yml`) — build, test and lint, on the GitLab remote only
+
+Nothing runs these from GitHub. Jobs that run cargo in `crates/bridge-prover-libraries`,
+`crates/bridge-relayer-daemon` or `crates/bridge-evm-aggregator` resolve the private circuits
+dependency and run only on protected refs, where `$GH_READ_TOKEN` exists (`.private_dep_gate`).
 
 | Stage | Jobs |
 |------|------|
 | `setup` | `setup:rust` (`cargo fetch --locked`), `setup:foundry` (npm + `forge install forge-std`) |
-| `build` | `build:rust:debug`, `build:rust:release` (workspace only), **`build:rust:relayer`** (the relayer crate is excluded from the main workspace and has its own `Cargo.lock`; this job catches what `--workspace` skips, added 2026-05-18), `build:solidity` |
-| `test` | `test:rust` (workspace), **`test:rust:relayer`**, `test:solidity` (forge), `test:solidity:coverage`, `lint:rust:fmt`, `lint:rust:clippy`, **`lint:rust:relayer:{fmt,clippy}`**, `lint:solidity:fmt` |
+| `build` | `build:rust:debug`, `build:rust:release` (root workspace only), `build:rust:relayer` and `build:rust:ackinacki-bridge` (both through `crates/bridge-prover-libraries`), `build:rust:aggregator`, `build:solidity` |
+| `test` | `test:rust` (root workspace), `test:rust:relayer`, `test:rust:ackinacki-bridge` (plus the ceremony-free `keys::` tests of `bridge-prover-lib`, selected by name), `test:rust:ackinacki-bridge:{enospc,keycache}` (scheduled; manual on merge requests), `test:rust:aggregator`, `test:light-client:vkblob-header` (rotate and step VkBlob headers against `EthBeaconLightClient.sol`, only when those files change), `test:solidity`, `test:solidity:coverage`, `lint:rust:fmt`, `lint:rust:clippy`, `lint:rust:relayer:{fmt,clippy}`, `lint:rust:ackinacki-bridge:{fmt,clippy}`, `lint:solidity:fmt` |
 | `security` | `security:rust:audit` (`cargo audit` hard-gating; `--locked` cargo-audit install, RUSTSEC fail = pipeline fail; `main` + MR only), `security:solidity:slither` (allow_failure) |
 | `deploy` | `docs:rust`, `docs:solidity`, manual `deploy:testnet`/`deploy:mainnet` placeholders |
 
-`bridge-prover-orchestrator` and `deposit-prover` are **not** yet in CI (they pull halo2 deps that take minutes to build); their `cargo test` happens only locally. Tracking as future A2.
+### What no pipeline runs
 
-### Reproducing CI locally before pushing
+Rust tests run only where someone runs them by hand. `make pre-push` covers the root workspace
+(`acki-nacki-interface`, `deposit-chain-ids`, `eth-frontend`), `bridge-relayer-daemon` and
+`bridge-evm-aggregator`. No pipeline and no `make` target runs the tests of:
 
-Run `make pre-push` before any non-trivial push — it mirrors every job CI runs and catches the two failure modes that the default `make test` doesn't:
+- the other members of `crates/bridge-prover-libraries` — `ackinacki-bridge`, `bridge-prover-lib`,
+  `bridge-gql-fetcher`, `bridge-event-prover-lib`, `bridge-event-witness`. Run them from that
+  directory with `cargo test --locked -p <crate>`. The GitLab jobs cover `ackinacki-bridge` and part
+  of `bridge-prover-lib`, on GitLab only. `bridge-event-halo2-prover`, `bridge-prover-daemon`,
+  `bridge-snark-wrap` and `bridge-verifier-daemon` have no tests.
+- the standalone crates, each run from its own directory with `cargo test`: `deposit-prover`,
+  `eth-light-client-prover`, `deposit-relayer-daemon`, `eth-light-client-relayer`,
+  `bridge-snark-utils`, `frontend`.
 
-1. **`vm.assume` rejection-cap trips** (pipeline #5741, fix `13d59431`): a fuzz test with `vm.assume(seqNo == 0)` rejects 2^64 − 1 of 2^64 inputs, blowing past Foundry's 65 536-rejected-inputs cap. The default `forge test` may happen to seed past it; CI's seed often doesn't. **Lesson**: if the constrained value space has < ~5 % of total inputs, demote to a regular unit test or use `bound(rawVal, lo, hi)` to project the seed into the valid range.
-2. **`Stack too deep` under coverage** (pipeline #5744, fix `b63a4d3`): `forge coverage` disables the optimizer + viaIR for accurate coverage, so functions with > 16 live local stack slots fail to compile in the coverage profile even though `forge build` happily inlines them. **Lesson**: keep deploy-script `run()` lean — use scope blocks `{}` to drop dead locals, extract helpers, or pack multi-arg calls into a memory `struct`.
+### Checking a branch locally before pushing
 
-`make pre-push` runs: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the same for the relayer crate, `forge fmt --check`, `forge test`, **`forge coverage --report summary`** (this is the key one), `cargo test --workspace --locked`, and `cargo test` inside the relayer crate. ~3 min total on a warm cache.
+Run `make pre-push` before any non-trivial push. For Rust it is the only check a branch gets, and it
+catches two Solidity failure modes that a plain `make test` can miss:
 
-3. **Rolling-nightly drift** (fix 2026-08-04): `rustfmt.toml` is mostly nightly-only options (`imports_granularity`, `group_imports`, `format_strings`, `wrap_comments`, …) and CI runs clippy with `-D warnings`, while `.rust_base` used `image: rustlang/rust:nightly` + `rustup default nightly` — i.e. whatever nightly existed that morning. So fmt and clippy verdicts drifted with the calendar rather than with the code: nightly-2026-06-05 and nightly-2026-08-03 disagree about this tree in 65 places. Root `rust-toolchain.toml` now pins `nightly-2026-08-03` (`deposit-prover/` keeps its own `nightly-2026-02-03` for halo2; nearest file wins). **Lesson**: an unpinned nightly plus unstable rustfmt options plus `-D warnings` means CI can go red on a commit nobody touched. When bumping the pin, land the resulting reformat in the same commit. Three known-red lint jobs found while pinning: `lint:rust:fmt` was failing on 3 diffs in `crates/acki-nacki-interface/src/tvm_client.rs` (**fixed**); `lint:rust:relayer:fmt` fails on 40 diffs in `crates/bridge-relayer-daemon`; `lint:solidity:fmt` fails on 16 files including `src/AckiNackiBridge.sol`. The last two are deliberately **not** touched here — PRs #20 and #27 are in flight over exactly those files, and a whole-tree reflow now would bury a security review in mechanical conflicts. Sequence them right after those merge. Also note `crates/deposit-relayer-daemon` has no CI lint job at all (its 46 tests run only locally), and `crates/bridge-relayer-daemon` cannot be tested standalone — see the command list above.
+1. **`vm.assume` rejection-cap trips**: a fuzz test with `vm.assume(seqNo == 0)` rejects 2^64 − 1 of 2^64 inputs, blowing past Foundry's 65 536-rejected-inputs cap. A local `forge test` may happen to seed past it; another run's seed often doesn't. **Lesson**: if the constrained value space has < ~5 % of total inputs, demote to a regular unit test or use `bound(rawVal, lo, hi)` to project the seed into the valid range.
+2. **`Stack too deep` under coverage**: `forge coverage` disables the optimizer + viaIR for accurate coverage, so functions with > 16 live local stack slots fail to compile in the coverage profile even though `forge build` happily inlines them. **Lesson**: keep deploy-script `run()` lean — use scope blocks `{}` to drop dead locals, extract helpers, or pack multi-arg calls into a memory `struct`.
+
+`make pre-push` runs, in order: `make english-check`; `make format-check` (`cargo fmt --all -- --check`
+at the root, `forge fmt --check`); `make lint` (`cargo clippy --all-targets --all-features -- -D warnings`
+at the root); `make relayer-fmt` and `make relayer-clippy`; `forge fmt --check` and `forge test` in
+`contracts/ethereum/`; **`make coverage-solidity`** (`forge coverage --report summary` — the key one);
+`cargo test --workspace --locked`; `make relayer-test`; `make aggregator-test` (a release build, several
+minutes); and an EIP-170 size check of the verifier bytecode whose result is ignored. It does not run the
+`an-contracts.yaml` checks, `scripts/check_verifier_sources.sh` (it needs `solc` 0.8.19), gitleaks or
+lychee, and none of the crates listed under *What no pipeline runs*.
+
+**It does not go green today.** `crates/bridge-relayer-daemon` is not `cargo fmt`-clean, so
+`make relayer-fmt` fails. Past it, `make relayer-clippy` and `make relayer-test` fail to compile:
+the `crates/bridge-prover-libraries` workspace does not build against its pinned circuit revision.
+
+**The nightly is pinned.** `rustfmt.toml` is mostly nightly-only options (`imports_granularity`,
+`group_imports`, `format_strings`, `wrap_comments`, …) and clippy runs with `-D warnings`, so on a
+rolling nightly both verdicts drift with the calendar rather than with the code — nightly-2026-06-05
+and nightly-2026-08-03 already disagree about this tree. Root `rust-toolchain.toml` pins
+`nightly-2026-08-03`; `deposit-prover/` keeps its own `nightly-2026-02-03` for halo2, and the nearest
+file wins. When bumping the pin, land the resulting reformat in the same commit.
 
 ## Integration Status
 

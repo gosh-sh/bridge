@@ -70,13 +70,29 @@ test-coverage: ## Generate test coverage report
 
 # Crates outside the root workspace that are packages of their own. The relayer
 # and the withdrawal CLI are members of crates/bridge-prover-libraries and are
-# formatted and tested through it. `crates/bridge-circuits` is a sub-workspace
-# (its own [workspace] with the gosh-fork halo2 backend); `cargo test` from
-# that dir runs the workspace tests.
+# formatted and tested through it.
+#
+# `crates/bridge-circuits` is a sub-workspace (its own [workspace] with the
+# gosh-fork halo2 backend) and is deliberately NOT listed here. Two reasons:
+#
+#   1. `test-all` iterates STANDALONE_CRATES with plain `cargo test`, but the
+#      K=20 attestation-BLS MockProvers inside `bridge-circuits` need
+#      `RUST_TEST_THREADS=1` to fit in RAM (running them in parallel OOM-kills
+#      the worker — see the header of `.woodpecker/bridge-circuits.yaml`).
+#      Its tests belong to the dedicated CI pipeline, which sets that env var.
+#   2. `format` runs `cargo fmt` in each STANDALONE_CRATES dir, but the
+#      circuit crates are vendored from an upstream gosh-sh repo — their
+#      formatting is owned there, not here (`cargo fmt --check` inside
+#      `crates/bridge-circuits` reports ~267 hunks across ~26 files at the
+#      current tip). Reformatting them locally would obscure future upstream
+#      re-imports.
+#
+# Run its tests explicitly when you touch a circuit:
+#   (cd crates/bridge-circuits && RUST_TEST_THREADS=1 cargo test --workspace)
+# — the .woodpecker/bridge-circuits.yaml pipeline does exactly that per MR.
 STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
 	crates/bridge-evm-aggregator crates/bridge-snark-utils \
-	crates/deposit-relayer-daemon crates/eth-light-client-relayer \
-	crates/bridge-circuits
+	crates/deposit-relayer-daemon crates/eth-light-client-relayer
 
 # Every suite runs even when an earlier one fails; the failures are listed at
 # the end. --locked is passed only where a Cargo.lock is committed, and the

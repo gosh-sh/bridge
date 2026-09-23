@@ -24,6 +24,41 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`aggregate-proof` self-checks the verifier source, so every verifiers
+  directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
+  the verifier it regenerates and compare bytecode, which is why `solc` had
+  to be on every host that proves. It now compares the generated Solidity
+  source with the committed `contracts/ethereum/verifiers/<name>.sol`. The
+  source is fully determined by the aggregator key, so the check catches the
+  same key drift; the refusal still reads `aggregator VK drift`, now names
+  the first differing line, and says that a `snark-verifier` upgrade can
+  cause it too — in that case regenerate both files of each pair.
+  What has to carry the four `*AggregatorVerifier.sol` files:
+    - a source checkout already does;
+    - the release bundle and the relayer image now ship them — upgrade
+      `aggregate-proof`, the relayer image and a `scripts/install.sh` install
+      together, not one at a time;
+    - a self-deployed verifiers directory (`--verifiers-dir` /
+      `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
+      that `export-inner-aggregator` wrote next to its `.bin`.
+  `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
+  rotated Circuit-4 key and compiles to the committed `.bin`. Because a
+  compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
+  source's keccak256, compiling to the identical `.bin` proves a `.sol` is
+  exactly the source of that `.bin` — which also holds for
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 21`,
+  and for `PrimaryAggregatorVerifier.sol` and
+  `FallbackAggregatorVerifier.sol`, whose keys are unchanged and whose
+  sources were not regenerated for this change. What that leaves unconfirmed
+  is only whether the generator at the current `snark-verifier` pin still
+  reproduces those last two sources from their keys — which the relayer's own
+  former bytecode self-check already established on every aggregation it ran
+  before this change. Watch the first `verifyBlock` cycle of each kind after
+  the upgrade in case a future `snark-verifier` bump changes the generated
+  source.
+- **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
+  meaning — a bootstrap escape hatch for a verifier whose source is not
+  committed yet — with no alias for the old spelling.
 - **The Circuit 4 (withdrawal) verification key is rotated.** The inner
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
@@ -74,6 +109,43 @@ assigns it when the release is tagged.
   needs the second call.
 
 ### Added
+
+- **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
+  `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
+  `EthKeccak` library, all v1.4.0, moved here from acki-nacki into
+  `contracts/an/exchange/` with the compiled `.tvc` / `.abi.json` that go
+  into the zerostate, at the state of the `contracts/bridge` branch: the anchor
+  surface (`setLightClientCode`, `deployLightClient`, the light-client writers,
+  `disableOwnerAnchors`), the `ERR_UNKNOWN_BLOCK` gate on `finalizeDeposit`, and
+  `ERR_ZERO_RECIPIENT` on both directions including `initiateWithdrawal`
+  (audit WD-AN-07). The bridge's code hash is `48d5c0ed…`, which is what
+  shellnet runs. acki-nacki no longer
+  keeps a copy: it pins one commit of this repository and places the files
+  into its own tree when a zerostate is generated, so a contract change made
+  here reaches a network only after that pin is moved.
+  `make -C contracts/an/exchange SOLD_0_80=<sold 0.80.0> SOLD_0_81=<sold 0.81.0>`
+  rebuilds them, each contract with the compiler its tracked artefact was built
+  with: `eccUSDCBridge` with 0.80.0, `DepositVoucher` and `EthBeaconLightClient`
+  with 0.81.0. The build stops if either variable is unset or names a compiler
+  of another version, since any other compiler changes the code hash.
+- **CI pipeline `.woodpecker/an-contracts.yaml`** runs
+  `scripts/check_voucher_abi_consistency.py` and
+  `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
+  `main`.
+- **The zerostate setup of the Acki Nacki bridge lives here too.**
+  `contracts/an/zerostate_init.py` builds the data cell, upgrades the premined
+  stub to the bridge's code, seeds the trusted L1 bridge, installs the
+  light-client code and writes the account into the zerostate; acki-nacki
+  places it with the contracts and calls it while generating one. A new setup
+  call, a new parameter or a new storage field is now a change in this
+  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
+  the trusted L1 bridge a generated zerostate starts with, defaulting to
+  `11155111` and `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+  `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
+  the cell — never deployed, executed in `tvm-debugger` — and
+  `scripts/check_zerostate_data_encoder.py`, wired into
+  `.woodpecker/an-contracts.yaml`, fails if it and
+  `eccUSDCBridge.onCodeUpgrade` stop agreeing on the tuple.
 
 - `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
   read-only views of how close an anchor is to eviction from its 128-slot
@@ -172,7 +244,50 @@ assigns it when the release is tagged.
   `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
   `eth-light-client-prover/docs/m_audit_scope.md`.
 
+- **`.woodpecker/verifier_sources.yaml` checks that every committed verifier
+  source compiles to its committed bytecode.** Nothing at run time ties the
+  `.sol` a proof is checked against to the `.bin` the bridge deploys, so this
+  pipeline does: on every pull request and push to `main` that touches
+  `contracts/ethereum/verifiers/`, it downloads `solc 0.8.19` pinned by
+  SHA-256 and runs `scripts/check_verifier_sources.sh`, which fails when a
+  `.sol` does not compile to its `.bin` byte for byte, when either half of a
+  pair is missing, or when a `.bin` exceeds EIP-170. Run it locally with
+  `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
+- **`contracts/an/place.json` says which files acki-nacki places and where.**
+  It lists every file that goes into an Acki Nacki tree with its destination
+  there, and names the ones that stay here — among them this repository's
+  copy of `ISubscriber.sol` (acki-nacki keeps its own original) and
+  `zerostate/BridgeZerostateData.sol`, the encoder source whose compiled
+  artefacts ship without it. acki-nacki now pins only a commit of this
+  repository and follows the manifest, so a new contract or artefact is a
+  change here plus a pin move there, with no file list to keep in step.
+  `scripts/check_place_manifest.py`, wired into `.woodpecker/an-contracts.yaml`,
+  fails when a file under `contracts/an/` appears in neither list, when a
+  destination is not one of the few acki-nacki gives us (`contracts/exchange/`,
+  `contracts/zerostate/`, the two `*_compiled/exchange/` folders and
+  `contracts/scripts/bridge_*.py`, but never
+  `contracts/scripts/bridge_contracts.py`, which is acki-nacki's own module and
+  the one that does the placing), when two files claim one destination, or when
+  the manifest tries to place `ISubscriber.sol` at all — acki-nacki keeps its
+  own original of that interface at the destination our layout would imply, so
+  placing our copy would silently overwrite it. acki-nacki enforces the same
+  destination rule on its side; the manifest is followed, not trusted.
+
 ### Changed
+
+- **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
+  default.** With no arguments it checks the sources in
+  `contracts/an/exchange/` against the compiled ABIs in
+  `contracts/an/0.80.0_compiled/exchange/` and
+  `contracts/an/0.81.0_compiled/exchange/`. It does not check the ABI copies
+  the tooling loads: `crates/bridge-prover-libraries/python/contracts/` was
+  the previous default and is no longer checked, and
+  `crates/ackinacki-bridge/abi/` was never covered. Those copies predate the
+  `chainId` deposit identity and are known to be stale; pass them with
+  `--compiled-bridge` / `--compiled-voucher` to see the drift.
+  `--compiled DIR` is replaced by `--compiled-bridge FILE` and
+  `--compiled-voucher FILE`, because the two artefacts sit in different
+  folders, and the bridge source it reads is `eccUSDCBridge.sol`.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
@@ -256,6 +371,21 @@ assigns it when the release is tagged.
   `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
   witness (real sync committee). Unset committee path still emits a synthetic
   committee for VkBlob-only keygen.
+
+- **The release bundle's `verifiers/` directory includes `*.sol`**, and
+  `scripts/install.sh` installs them and reports a host without
+  `BridgeWithdrawalAggregatorVerifier.sol` as incomplete. Run against a
+  release published before this change, the installer instead warns that
+  the bundle predates verifier sources and reports the verifier files as
+  missing rather than installing an incomplete tree — so
+  `scripts/install.sh` from `main` needs a release built from this change.
+- **Stage 1 of `ackinacki-bridge withdraw` checks
+  `BridgeWithdrawalAggregatorVerifier.sol` in `--verifiers-dir`** against the
+  copy embedded in the build, exactly as it already checks the `.bin`, and
+  `--allow-verifier-drift` now covers both files.
+- **The relayer image's `IMAGE-SHA256SUMS` lists the four verifier `.sol`
+  files** and no longer lists `bin/solc`; `preflight.sh` refuses a verifier
+  lane whose `.sol` is missing.
 
 ### Fixed
 
@@ -376,6 +506,50 @@ assigns it when the release is tagged.
   live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
   uses the same `_piForm` name and body, so the two trees differ only
   structurally.
+- **`scripts/production_preflight.sh` runs its relayer step through the
+  prover workspace.** The step ran `cargo test` inside
+  `crates/bridge-relayer-daemon`, where cargo cannot read the manifest on its
+  own, so the script aborted there after the Foundry gates and never printed
+  `RESULT:`. `scripts/shellnet_e2e.sh` stopped at the same point, because it
+  starts with the preflight. The step now runs the relayer tests from
+  `crates/bridge-prover-libraries`, the way `make relayer-test` does. Fixed the
+  same way: `make relayer-fmt`, which `make pre-push` runs, and the
+  `verify-fixture` step of `scripts/shellnet_e2e.sh`, which could not start the
+  relayer and reported every run as
+  `verify-fixture failed (deploy bridge first or check anchors)`. That step also
+  passes its fixtures directory as an absolute path now: from a relative one the
+  relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
+  looks for legacy Groth16 fixtures instead. The preflight step still fails for
+  as long as that workspace does not build against its pinned circuit revision.
+- **`make deploy-local` runs `script/DeployTestBridge.s.sol`**, the local and
+  testnet smoke-test deployment; the `script/Deploy.s.sol` it named does not
+  exist. It reads `PRIVATE_KEY` from the environment or from
+  `contracts/ethereum/.env`. `make dev-setup` now creates that file from
+  `contracts/ethereum/.env.example` when it is missing, instead of silently
+  failing to copy a root `.env.example` that does not exist. `make audit` runs
+  `cargo audit` only; the `forge audit` it also called is not a Foundry command.
+- **`make setup` (`setup.sh`) no longer runs `forge init --force` in
+  `contracts/ethereum`.** On a fresh clone, where the gitignored `lib/` is
+  absent, it did, and left Foundry's template `src/Counter.sol`,
+  `script/Counter.s.sol`, `test/Counter.t.sol` and a `README.md` in the
+  project, where they were built and tested with it. It now installs the
+  Solidity dependencies the way CI does — `npm install` and `forge-std` — and
+  stops with an error when `npm` is missing, since `poseidon-solidity` comes
+  from npm. It also installs the pinned Rust toolchains from
+  `rust-toolchain.toml` and `deposit-prover/rust-toolchain.toml` instead of
+  switching the global default to the latest nightly, keeps an existing
+  `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
+  `test/integration/` directory or a root `.env.example`; the template for
+  the deploy scripts is `contracts/ethereum/.env.example`.
+- **`deposit-prover/download_trusted_setup.sh` no longer calls the Hermez SRS
+  a test-only fallback.** It told operators that production deposit proofs need
+  an Acki Nacki chain-ceremony SRS in `params/kzg_bn254_18.srs` and that proofs
+  keyed on Hermez are rejected on chain. The reverse is true: the
+  `ZKHALO2VERIFYWITHVK` opcode embeds the Hermez `[s]·G2`, and the deposit
+  prover loads only the Hermez `data/kzg_params_18.srs` this script downloads.
+  The script now checks that file's `[s]·G2` and refuses one from any other
+  ceremony. A failed download is reported as such instead of as a corrupted
+  file — the default source currently answers HTTP 403.
 
 ### Known issues
 
@@ -443,6 +617,24 @@ assigns it when the release is tagged.
   before `provenQueue` landed. The real diff is 206 lines and `provenQueue` is in
   both.
 
+- **`solc 0.8.19` is no longer a prerequisite of `ackinacki-bridge withdraw`
+  or of the relayer.** Stage 1 no longer probes the compiler or its version.
+  `scripts/install.sh` no longer downloads it and `BRIDGE_SOLC_URL` is gone;
+  the closing `export PATH` line is still printed, but only for the CLI. The
+  relayer image no longer contains `/opt/gosh-relayer/bin/solc`, the
+  `solc_bin` build context and `SOLC_BIN_DIR` are gone from
+  `deploy/shellnet-l2/compose.yaml` and `compose.env.example` — delete
+  `SOLC_BIN_DIR` from your `.env` — and the image preflight no longer checks
+  the compiler version. An installed `solc` can stay; nothing on these paths
+  uses it. Regenerating verifiers (`export-inner-aggregator`,
+  `export-spike-artifacts`) still needs `solc 0.8.19`.
+- `make generate-proof`, `make test-integration` and `make generate-verifier`,
+  with `scripts/regenerate_verifier.sh`. They ran a `generate-proof` binary,
+  an `eth-frontend` integration test and a `generate-verifier` binary, none of
+  which exists, so each failed on every run. Production verifiers are
+  regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
+- `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
+  which ran the same missing `generate-proof` binary.
 
 ## [0.2.0] – 2026-09-11
 

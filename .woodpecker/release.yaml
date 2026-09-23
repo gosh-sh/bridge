@@ -12,7 +12,8 @@
 #
 #   ackinacki-bridge     the CLI
 #   aggregate-proof      the prover subprocess the CLI shells out to
-#   verifiers/*.bin      what the proof is self-checked against
+#   verifiers/*.bin      the bytecode stage 1 compares with the deployed verifier
+#   verifiers/*.sol      the source the proof is self-checked against
 #   bridge_config        the profile it writes as <prefix>/profile.release
 #
 # The ceremony file is not built here — it is the Hermez KZG setup, 257 MB and
@@ -67,7 +68,7 @@ steps:
 
         install -m 0755 crates/bridge-prover-libraries/target/release/ackinacki-bridge "$STAGE/"
         install -m 0755 crates/bridge-evm-aggregator/target/release/aggregate-proof "$STAGE/"
-        cp contracts/ethereum/verifiers/*.bin "$STAGE/verifiers/"
+        cp contracts/ethereum/verifiers/*.bin contracts/ethereum/verifiers/*.sol "$STAGE/verifiers/"
         cp crates/ackinacki-bridge/config/bridge_config "$STAGE/"
 
         tar -czf ackinacki-bridge-linux-x86_64.tar.gz -C dist ackinacki-bridge-linux-x86_64

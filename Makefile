@@ -1,5 +1,5 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy \
+        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy aggregator-fmt test-all \
         english-check
 
 # Default target
@@ -43,15 +43,6 @@ build-solidity: ## Build only Solidity contracts
 	@echo "$(BLUE)Building Solidity contracts...$(NC)"
 	@cd contracts/ethereum && forge build
 
-generate-verifier: ## Generate Halo2 Yul verifier and compile to bytecode
-	@echo "$(BLUE)Generating Halo2 verifier...$(NC)"
-	@chmod +x scripts/regenerate_verifier.sh
-	@./scripts/regenerate_verifier.sh
-
-generate-proof: ## Generate a test proof
-	@echo "$(BLUE)Generating test proof...$(NC)"
-	@cargo run --bin generate-proof -- 12345 67890 43981 1000 4660
-
 test: ## Run all tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	@chmod +x test.sh
@@ -77,14 +68,35 @@ test-coverage: ## Generate test coverage report
 	@chmod +x test.sh
 	@./test.sh --coverage
 
-test-integration: ## Run integration tests (requires Anvil to be running)
-	@echo "$(BLUE)Running integration tests...$(NC)"
-	@echo "$(YELLOW)Note: Make sure Anvil is running (run 'make run-local' in another terminal)$(NC)"
-	@cargo test --package eth-frontend --test integration_test -- --ignored
+# Crates outside the root workspace that are packages of their own. The relayer
+# and the withdrawal CLI are members of crates/bridge-prover-libraries and are
+# formatted and tested through it.
+STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
+	crates/bridge-evm-aggregator crates/bridge-snark-utils \
+	crates/deposit-relayer-daemon crates/eth-light-client-relayer
 
-format: ## Format all code (Rust + Solidity)
+# Every suite runs even when an earlier one fails; the failures are listed at
+# the end. --locked is passed only where a Cargo.lock is committed, and the
+# aggregator runs in release as in aggregator-test. #[ignore]d tests stay skipped.
+test-all: ## Run the tests of every Rust crate and the Solidity suite, then list what failed
+	@failed=""; \
+	run() { dir=$$1; shift; echo "$(BLUE)── $$dir: $$*$(NC)"; (cd $$dir && "$$@") || failed="$$failed $$dir"; }; \
+	run . cargo test --workspace --locked; \
+	run crates/bridge-prover-libraries cargo test --workspace --locked; \
+	for d in $(STANDALONE_CRATES); do \
+		flags=""; [ -f $$d/Cargo.lock ] && flags="--locked"; \
+		[ $$d = crates/bridge-evm-aggregator ] && flags="$$flags --release"; \
+		run $$d cargo test $$flags; \
+	done; \
+	run contracts/ethereum forge test; \
+	if [ -n "$$failed" ]; then echo "$(YELLOW)Failed:$$failed$(NC)"; exit 1; fi; \
+	echo "$(GREEN)All test suites passed$(NC)"
+
+format: ## Format all code (every Rust crate + Solidity)
 	@echo "$(BLUE)Formatting code...$(NC)"
 	@cargo fmt --all
+	@cd crates/bridge-prover-libraries && cargo fmt --all
+	@for d in $(STANDALONE_CRATES); do (cd $$d && cargo fmt) || exit 1; done
 	@cd contracts/ethereum && forge fmt
 
 format-check: ## Check code formatting without modifying
@@ -118,9 +130,9 @@ run-local: ## Start local Ethereum node (Anvil)
 	@echo "$(BLUE)Starting local Ethereum node...$(NC)"
 	@anvil
 
-deploy-local: ## Deploy contracts to local network
+deploy-local: ## Deploy a test bridge to Anvil (PRIVATE_KEY from the environment or contracts/ethereum/.env)
 	@echo "$(BLUE)Deploying to local network...$(NC)"
-	@cd contracts/ethereum && forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
+	@cd contracts/ethereum && forge script script/DeployTestBridge.s.sol --rpc-url http://localhost:8545 --broadcast
 
 docs: ## Generate documentation
 	@echo "$(BLUE)Generating documentation...$(NC)"
@@ -130,10 +142,9 @@ docs-solidity: ## Generate Solidity documentation
 	@echo "$(BLUE)Generating Solidity documentation...$(NC)"
 	@cd contracts/ethereum && forge doc
 
-audit: ## Run security audit
+audit: ## Run cargo audit on the root workspace
 	@echo "$(BLUE)Running security audit...$(NC)"
 	@cargo audit
-	@cd contracts/ethereum && forge audit
 
 update: ## Update dependencies
 	@echo "$(BLUE)Updating dependencies...$(NC)"
@@ -143,18 +154,18 @@ update: ## Update dependencies
 # Development helpers
 dev-setup: setup ## Setup development environment
 	@echo "$(BLUE)Setting up development environment...$(NC)"
-	@cp .env.example .env || true
+	@test -f contracts/ethereum/.env || cp contracts/ethereum/.env.example contracts/ethereum/.env
 	@echo "$(GREEN)Development environment ready!$(NC)"
-	@echo "$(YELLOW)Don't forget to configure .env file$(NC)"
+	@echo "$(YELLOW)Don't forget to configure contracts/ethereum/.env$(NC)"
 
 ci: format-check lint test ## Run CI checks locally
 
 # ────────────────────────────────────────────────────────────────────────────
-# Coverage and pre-push targets — mirror what CI runs so red pipelines are
-# easy to reproduce locally.
+# Coverage and pre-push targets. No pipeline on GitHub runs Rust or
+# `forge coverage`, so `make pre-push` is the gate for both; see the CI section
+# of AGENTS.md.
 #
-# Pipelines #5741 + #5744 (2026-05-20) both failed on patterns that pass
-# `forge test` and `cargo test` locally but trip `forge coverage`:
+# Two patterns pass `forge test` and `cargo test` but trip `forge coverage`:
 #   - vm.assume rejection cap (fuzz test rejected > 65 536 inputs);
 #   - Stack-too-deep (forge coverage disables optimizer + viaIR).
 # Run `make pre-push` before pushing any non-trivial Solidity or Rust change
@@ -182,8 +193,11 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike
 	@echo "$(GREEN)Spike artefacts written to contracts/ethereum/test/fixtures/r15_spike/$(NC)"
 
-relayer-fmt: ## Check bridge-relayer-daemon formatting
-	@cd crates/bridge-relayer-daemon && cargo fmt --check
+relayer-fmt: ## Check bridge-relayer-daemon formatting (via bridge-prover-libraries workspace)
+	@cd crates/bridge-prover-libraries && cargo fmt -p bridge-relayer-daemon -- --check
+
+aggregator-fmt: ## Check bridge-evm-aggregator formatting
+	@cd crates/bridge-evm-aggregator && cargo fmt --check
 
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via bridge-prover-libraries workspace)
 	@cd crates/bridge-prover-libraries && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
@@ -201,6 +215,7 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@$(MAKE) format-check
 	@$(MAKE) lint
 	@$(MAKE) relayer-fmt
+	@$(MAKE) aggregator-fmt
 	@$(MAKE) relayer-clippy
 	@cd contracts/ethereum && forge fmt --check
 	@cd contracts/ethereum && forge test

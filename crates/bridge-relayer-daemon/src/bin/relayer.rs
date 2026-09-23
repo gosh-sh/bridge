@@ -224,8 +224,8 @@ enum Cmd {
     /// transcript ([`InProcessCircuit4SnarkProver`], NB-Q9 PR-B; supersedes
     /// the historical `export-c4-poseidon-snark --fixture` subprocess),
     /// aggregates the inner snark (`aggregate-proof`, which self-checks the
-    /// regenerated Yul source == committed `.sol`), cross-checks the calldata binds
-    /// the ten public inputs, and writes a `proof_event` JSON that
+    /// regenerated Yul source == committed `.sol`), cross-checks the calldata
+    /// binds the ten public inputs, and writes a `proof_event` JSON that
     /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
@@ -2146,7 +2146,8 @@ async fn run_daemon_live(
     if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L2) {
         tracing::info!(
             stride = anchor_mode.stride(),
-            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on the first Circuit 2 bundle"
+            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on \
+             the first Circuit 2 bundle"
         );
     }
     let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {

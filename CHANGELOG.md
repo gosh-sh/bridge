@@ -527,6 +527,50 @@ assigns it when the release is tagged.
   live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
   uses the same `_piForm` name and body, so the two trees differ only
   structurally.
+- **`scripts/production_preflight.sh` runs its relayer step through the
+  prover workspace.** The step ran `cargo test` inside
+  `crates/bridge-relayer-daemon`, where cargo cannot read the manifest on its
+  own, so the script aborted there after the Foundry gates and never printed
+  `RESULT:`. `scripts/shellnet_e2e.sh` stopped at the same point, because it
+  starts with the preflight. The step now runs the relayer tests from
+  `crates/bridge-prover-libraries`, the way `make relayer-test` does. Fixed the
+  same way: `make relayer-fmt`, which `make pre-push` runs, and the
+  `verify-fixture` step of `scripts/shellnet_e2e.sh`, which could not start the
+  relayer and reported every run as
+  `verify-fixture failed (deploy bridge first or check anchors)`. That step also
+  passes its fixtures directory as an absolute path now: from a relative one the
+  relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
+  looks for legacy Groth16 fixtures instead. The preflight step still fails for
+  as long as that workspace does not build against its pinned circuit revision.
+- **`make deploy-local` runs `script/DeployTestBridge.s.sol`**, the local and
+  testnet smoke-test deployment; the `script/Deploy.s.sol` it named does not
+  exist. It reads `PRIVATE_KEY` from the environment or from
+  `contracts/ethereum/.env`. `make dev-setup` now creates that file from
+  `contracts/ethereum/.env.example` when it is missing, instead of silently
+  failing to copy a root `.env.example` that does not exist. `make audit` runs
+  `cargo audit` only; the `forge audit` it also called is not a Foundry command.
+- **`make setup` (`setup.sh`) no longer runs `forge init --force` in
+  `contracts/ethereum`.** On a fresh clone, where the gitignored `lib/` is
+  absent, it did, and left Foundry's template `src/Counter.sol`,
+  `script/Counter.s.sol`, `test/Counter.t.sol` and a `README.md` in the
+  project, where they were built and tested with it. It now installs the
+  Solidity dependencies the way CI does — `npm install` and `forge-std` — and
+  stops with an error when `npm` is missing, since `poseidon-solidity` comes
+  from npm. It also installs the pinned Rust toolchains from
+  `rust-toolchain.toml` and `deposit-prover/rust-toolchain.toml` instead of
+  switching the global default to the latest nightly, keeps an existing
+  `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
+  `test/integration/` directory or a root `.env.example`; the template for
+  the deploy scripts is `contracts/ethereum/.env.example`.
+- **`deposit-prover/download_trusted_setup.sh` no longer calls the Hermez SRS
+  a test-only fallback.** It told operators that production deposit proofs need
+  an Acki Nacki chain-ceremony SRS in `params/kzg_bn254_18.srs` and that proofs
+  keyed on Hermez are rejected on chain. The reverse is true: the
+  `ZKHALO2VERIFYWITHVK` opcode embeds the Hermez `[s]·G2`, and the deposit
+  prover loads only the Hermez `data/kzg_params_18.srs` this script downloads.
+  The script now checks that file's `[s]·G2` and refuses one from any other
+  ceremony. A failed download is reported as such instead of as a corrupted
+  file — the default source currently answers HTTP 403.
 
 ### Known issues
 
@@ -605,6 +649,13 @@ assigns it when the release is tagged.
   the compiler version. An installed `solc` can stay; nothing on these paths
   uses it. Regenerating verifiers (`export-inner-aggregator`,
   `export-spike-artifacts`) still needs `solc 0.8.19`.
+- `make generate-proof`, `make test-integration` and `make generate-verifier`,
+  with `scripts/regenerate_verifier.sh`. They ran a `generate-proof` binary,
+  an `eth-frontend` integration test and a `generate-verifier` binary, none of
+  which exists, so each failed on every run. Production verifiers are
+  regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
+- `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
+  which ran the same missing `generate-proof` binary.
 
 ## [0.2.0] – 2026-09-11
 

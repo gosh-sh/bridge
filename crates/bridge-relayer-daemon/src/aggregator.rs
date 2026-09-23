@@ -16,8 +16,8 @@
 //! 2. [`ProofAggregator`] — aggregate that inner snark into EVM calldata
 //!    `instances ‖ proof` ([`SubprocessAggregator`] shells out to
 //!    `bridge-evm-aggregator`'s `aggregate-proof`, which additionally
-//!    self-checks that the regenerated verifier source is byte-identical to
-//!    the committed `.sol` of the deployed verifier).
+//!    self-checks that the regenerated verifier source is byte-identical to the
+//!    committed `.sol` of the deployed verifier).
 //!
 //! [`Circuit4ShplonkPipeline`] composes the two and returns a
 //! [`PartnerWithdrawalProof`] whose `proof_hex` is the aggregator calldata and
@@ -49,8 +49,8 @@ use crate::{
 /// re-exposed inner public inputs (snark-verifier SHPLONK accumulator).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
-/// The committed Circuit-4 withdrawal verifier name (matches the `.sol` / `.bin` pair in
-/// `contracts/ethereum/verifiers/`).
+/// The committed Circuit-4 withdrawal verifier name (matches the `.sol` /
+/// `.bin` pair in `contracts/ethereum/verifiers/`).
 pub const WITHDRAWAL_VERIFIER_NAME: &str = "BridgeWithdrawalAggregatorVerifier";
 
 /// Aggregator binary that turns a Poseidon inner snark into EVM calldata.

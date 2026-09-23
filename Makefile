@@ -1,5 +1,5 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy \
+        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy aggregator-fmt \
         english-check
 
 # Default target
@@ -170,6 +170,9 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 relayer-fmt: ## Check bridge-relayer-daemon formatting (via bridge-prover-libraries workspace)
 	@cd crates/bridge-prover-libraries && cargo fmt -p bridge-relayer-daemon -- --check
 
+aggregator-fmt: ## Check bridge-evm-aggregator formatting
+	@cd crates/bridge-evm-aggregator && cargo fmt --check
+
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via bridge-prover-libraries workspace)
 	@cd crates/bridge-prover-libraries && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
 
@@ -186,6 +189,7 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@$(MAKE) format-check
 	@$(MAKE) lint
 	@$(MAKE) relayer-fmt
+	@$(MAKE) aggregator-fmt
 	@$(MAKE) relayer-clippy
 	@cd contracts/ethereum && forge fmt --check
 	@cd contracts/ethereum && forge test

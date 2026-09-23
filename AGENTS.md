@@ -250,9 +250,9 @@ pipeline and no `make` target runs the tests of:
 ### Before pushing
 
 `make pre-push` runs `make english-check`, `make format-check`, `make lint`, `make relayer-fmt`,
-`make relayer-clippy`, `forge test`, `make coverage-solidity`, `cargo test --workspace --locked`,
-`make relayer-test` and `make aggregator-test`. It does not run the `an-contracts.yaml` checks,
-`scripts/check_verifier_sources.sh`, gitleaks or lychee.
+`make aggregator-fmt`, `make relayer-clippy`, `forge test`, `make coverage-solidity`,
+`cargo test --workspace --locked`, `make relayer-test` and `make aggregator-test`. It does not run
+the `an-contracts.yaml` checks, `scripts/check_verifier_sources.sh`, gitleaks or lychee.
 
 **It does not go green today:** `make relayer-clippy` and `make relayer-test` fail to compile,
 because the `crates/bridge-prover-libraries` workspace does not build against its pinned circuit

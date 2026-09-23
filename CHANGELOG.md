@@ -72,18 +72,36 @@ assigns it when the release is tagged.
   instances; the reference `_calldata.bin` is 3 648 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
-  not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every prover
-  host regenerates its Circuit 4 keys on first use — the bump is what
-  makes the key cache reject an `event_pk.bin` / `event_vk.bin` from the
-  pre-rotation constraint system. Keygen (over the `K = 20` SRS) runs at
-  stage 5 of the next `ackinacki-bridge withdraw`, `relayer
-  withdraw-e2e` or bare CLI proof job, whichever fires first — see
-  `preflight.rs:1595` (`"Circuit-4 keys will be generated on this run"`)
-  for the operator-facing signal. It has nothing to do with `verifyBlock`
-  on the ETH side, which reads only the aggregator VK. To skip the ~2.65
-  GB write and the associated wall time, preseed `--params-dir` with an
-  `event_pk.bin` + `event_vk.bin` pair whose sibling
-  `event_circuit_revision` reads `3`.
+  not decode. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
+  prover host regenerates its Circuit 4 keys on first use — the bump
+  is what makes the key cache reject a pre-rotation
+  `event_pk.bin` / `event_vk.bin`. Keygen (over the `K = 20` SRS) runs
+  at stage 5 of the next Circuit-4 proof job on that host, whichever
+  fires first among the four entrypoints that go through the shared
+  prover library: `ackinacki-bridge withdraw`, `relayer prove-withdraw`,
+  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. On any
+  of them the operator sees the console line
+  `"Circuit-4 keys will be generated on this run"` when a fresh keygen
+  starts. The rotation has nothing to do with `verifyBlock` on the
+  ETH side, which reads only the aggregator VK.
+  `bridge-verifier-daemon` does not run keygen itself: on startup it
+  looks for the event VK and, if absent, exits with
+  `"event VK not found in <params-dir>. Run the event prover
+  (Circuit 4) first to generate keys."` The prover-side warning to
+  watch for on a stale cache is `"cached event keys do not match
+  their manifest, or the manifest could not be read (…); ignoring
+  them. Re-run the prover to regenerate."` — the signal the revision
+  bump landed and the cache is about to be regenerated.
+
+  To skip the ~2.65 GB write and the associated wall time, preseed
+  `--params-dir` with the complete four-file Circuit-4 cache, not
+  just the keys: `event_pk.bin`, `event_vk.bin`,
+  `event_config_params.json` **and** `event_manifest.json`. The
+  revision is a field (`circuit_revision`) inside the manifest —
+  copying only `pk` + `vk` leaves the manifest missing, which trips
+  the warning above and keygen runs regardless. The manifest also
+  records SHA-256 digests of the other three files, so all four have
+  to come from the same successful keygen run on some other host.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at

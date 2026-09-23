@@ -94,7 +94,8 @@ fn build_circuit_2(
         .try_into()
         .expect("layer_hashes_preimage must be LAYER_PREIMAGE_SIZE bytes");
 
-    // Merkle siblings (L1, H_1, H_23) for the L0 leaf.
+    // Merkle siblings (`NUM_MERKLE_SIBLINGS = 4` for the depth-4 block-id
+    // tree) for the L0 leaf.
     let siblings: [[u8; 32]; NUM_MERKLE_SIBLINGS] = td.l0_opening_siblings;
 
     let prev_max_level_layer_hash_fr =

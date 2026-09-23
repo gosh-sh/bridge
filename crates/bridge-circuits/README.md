@@ -233,8 +233,8 @@ Mode is selected by **whether you run the event-emitting orchestrator** after th
 | Repo | Branch |
 |---|---|
 | `gosh-sh/acki-nacki` (chain) | `poseidon_profile_new` (canonical 16-leaf `block_id`; local devnet & shellnet) |
-| Prover daemons | Local sibling `bridge/crates/bridge-prover-libraries/` |
-| Circuits (this crate) | Local sibling `bridge/crates/bridge-circuits/` |
+| Prover daemons | Local sibling `crates/bridge-prover-libraries/` |
+| Circuits (this crate) | Local sibling `crates/bridge-circuits/` |
 
 ### Config (env vars consumed by both daemons)
 

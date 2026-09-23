@@ -1,6 +1,6 @@
 //! exercise the BOC walk + event decode against the first
 //! captured `WithdrawalInitiated` BOC from
-//! `bridge/crates/bridge-circuits/bridge-event-prove-circuit/withdrawals.txt`.
+//! `crates/bridge-circuits/bridge-event-prove-circuit/withdrawals.txt`.
 //!
 //! The fixture is inlined here (rather than read from disk) so the test is
 //! hermetic — no path coupling, no flaky CI if that file is regenerated.

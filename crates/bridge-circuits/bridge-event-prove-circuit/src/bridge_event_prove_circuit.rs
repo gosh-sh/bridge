@@ -126,9 +126,10 @@ pub const MAX_EVENTS_TREE_DEPTH: usize = 8;
 /// Maximum 1-indexed layer number for `PUB_ANCHOR_LAYER`. Must equal the
 /// Solidity `MAX_LAYER_HASHES` in `AckiNackiBridge.sol` (currently 10). Any
 /// change here MUST land together with the on-chain constant — the verifier
-/// range-checks `pub.anchorLayer > MAX_LAYER_HASHES` and reverts, so a
-/// circuit that emits `anchorLayer > 10` would produce proofs the bridge
-/// silently rejects.
+/// range-checks `pub.anchorLayer > MAX_LAYER_HASHES` and reverts with
+/// `InvalidNumLayers(numLayers)`, so a circuit that emits
+/// `anchorLayer > 10` would produce proofs the bridge rejects with that
+/// specific selector (not silently).
 pub const MAX_ANCHOR_LAYER: u8 = 10;
 
 // ───── Public-input layout (instance column 0) ─────────────────────────────
@@ -1251,8 +1252,12 @@ mod tests {
     /// The in-circuit range check on `anchor_layer`
     /// (two 4-bit lookups on `anchor_layer - 1` and `MAX_ANCHOR_LAYER
     /// - anchor_layer`) must satisfy exactly the closed interval
-    /// `1..=MAX_ANCHOR_LAYER` — which the on-chain verifier trusts when
-    /// routing to `layerWindows[anchorLayer]` for the single-window scan.
+    /// `1..=MAX_ANCHOR_LAYER`. The on-chain verifier does not trust the
+    /// circuit alone here: `AckiNackiBridge.withdrawByProof` re-checks the
+    /// same range (`pub.anchorLayer == 0 || pub.anchorLayer >
+    /// MAX_LAYER_HASHES → InvalidNumLayers`) before routing to
+    /// `layerWindows[anchorLayer]`. This test's job is to pin the circuit
+    /// side so the two range checks agree.
     ///
     /// Positive sweep: `{1, 5, MAX_ANCHOR_LAYER}` all `assert_satisfied()`.
     ///
@@ -1584,8 +1589,11 @@ mod tests {
     /// Real (non-mock) prover: keygen once at T=1, then prove for a sweep of
     /// chain lengths and verify each proof.
     ///
-    /// Marked `#[ignore]` because it runs a real halo2 keygen (~7 min at
-    /// `K = 19`, ~1.5 GB PK), which is too heavy for a per-MR CI job. Run
+    /// Marked `#[ignore]` because it runs a real halo2 keygen at `K = 19`,
+    /// which is orders of magnitude heavier than MockProver and too slow
+    /// for a per-MR CI job. Wall-clock and PK size depend on chip params;
+    /// they are not the same as the production wrapper's numbers (which
+    /// runs against a `K = 20` SRS with a correspondingly larger PK). Run
     /// on demand with `cargo test -- --ignored`.
     #[test]
     #[ignore]
@@ -1780,6 +1788,15 @@ mod tests {
     /// Smoke-test the one-shot `build_synthetic_event_keygen_inputs` helper
     /// used by downstream crates (e.g. `bridge-prover-lib::keys`) for keygen.
     /// Just exercises MockProver to confirm the wiring is constraint-clean.
+    ///
+    /// Coverage caveat: the synthetic witness this helper builds uses
+    /// `events_pos = 0` (see `test_helpers::build_synthetic_withdrawal`), so
+    /// a regression that silently replaces the in-circuit nullifier's
+    /// `events_pos` term with a literal `0` would still pass here. That
+    /// specific bug is caught by
+    /// `test_nullifier_distinct_for_same_block_different_events_pos`, which
+    /// runs two proofs against the same block with distinct positions and
+    /// asserts the two `PUB_NULLIFIER` slots differ.
     #[test]
     fn test_build_synthetic_event_keygen_inputs_mock_prover() {
         let (circuit, instances) = build_synthetic_event_keygen_inputs(0xC0FFEE);

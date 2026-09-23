@@ -24,8 +24,9 @@ halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12
 # axiom-eth / snark-verifier-sdk). Two versions coexist "peacefully" only
 # while Cargo.lock happens to hold a compatible commit set — any
 # `cargo update` can re-split them, causing E0277 on `Circuit<Fr>` bounds.
-# Mirrors the [patch] block in
-# `crates/bridge-prover-libraries/Cargo.toml:130-142`.
+# Mirrors the `[patch.crates-io]` (and sibling) tables in
+# `crates/bridge-prover-libraries/Cargo.toml` — see the section starting
+# at `[patch.crates-io]` in that file.
 [patch.crates-io]
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
 halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }

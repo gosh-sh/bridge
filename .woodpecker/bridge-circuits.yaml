@@ -22,12 +22,15 @@
 #
 # `--locked` is NOT passed: `crates/bridge-circuits/Cargo.lock` is
 # gitignored (see `.gitignore`), so a fresh CI clone has no lockfile to
-# lock to. The `[patch.crates-io]` block in the sub-workspace root pins the
-# halo2-axiom backend to a specific git commit (branch = "main"); if
-# upstream halo2-axiom moves, `cargo test` will pick up the new tip on the
-# next CI run. That is deliberate — the sub-workspace tracks the backend
-# used by the production `crates/bridge-prover-libraries` prover, which
-# also resolves to the same tip.
+# lock to. The `[patch.crates-io]` block in the sub-workspace root points
+# `halo2-axiom` at a branch (`branch = "main"`), not a pinned commit, so
+# `cargo test` picks up whatever tip `gosh-sh/halo2-axiom@main` resolves
+# to at fetch time. This is deliberately non-deterministic across CI
+# runs: the sub-workspace tracks the same tip the production
+# `crates/bridge-prover-libraries` prover resolves to, so a green run
+# here is a proxy signal about that prover's build too. If a red run
+# needs reproducing, capture the resolved commits from the failing
+# `cargo tree` output first.
 #
 # All gosh-sh git repos in the dependency graph are public post-vendoring,
 # so cargo fetches every dep anonymously — no GitHub token or url rewrite

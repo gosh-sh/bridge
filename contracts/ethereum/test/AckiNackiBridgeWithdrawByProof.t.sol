@@ -454,8 +454,14 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     ///         at most one payout. Note: distinct AN `WithdrawalInitiated`
     ///         events (even in the same block) do NOT reach this branch,
     ///         because `events_pos` is bound into the Poseidon preimage and
-    ///         gives each event a distinct circuit nullifier
-    ///         (see `test_twoDistinctBurns_sameFields_bothSucceed`).
+    ///         gives each event a distinct circuit nullifier. The
+    ///         `events_pos`-based nullifier disambiguation is witnessed by
+    ///         the Circuit 4 gadget test
+    ///         `test_nullifier_distinct_for_same_block_different_events_pos`
+    ///         in `crates/bridge-circuits/bridge-event-prove-circuit`. The
+    ///         Solidity sibling `test_twoDistinctBurns_sameFields_bothSucceed`
+    ///         uses the mock verifier — see its own NatSpec — and does not
+    ///         itself witness the circuit's events_pos binding.
     function test_sameNullifierPresentedTwice_secondPayoutBlocked() public {
         uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
         uint256 amount = 1 * UsdcTestLib.UNIT;

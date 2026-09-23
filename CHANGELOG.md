@@ -77,13 +77,19 @@ assigns it when the release is tagged.
   prover host regenerates its Circuit 4 keys on first use — the bump
   is what makes the key cache reject a pre-rotation
   `event_pk.bin` / `event_vk.bin`. Keygen (over the `K = 20` SRS) runs
-  at stage 5 of the next Circuit-4 proof job on that host, whichever
-  fires first among the four entrypoints that go through the shared
-  prover library: `ackinacki-bridge withdraw`, `relayer prove-withdraw`,
-  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. On any
-  of them the operator sees the console line
-  `"Circuit-4 keys will be generated on this run"` when a fresh keygen
-  starts. The rotation has nothing to do with `verifyBlock` on the
+  during the next Circuit-4 proof job on that host, whichever fires
+  first among the four entrypoints that go through the shared prover
+  library: `ackinacki-bridge withdraw`, `relayer prove-withdraw`,
+  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. On all
+  four the shared library logs the info line
+  `"running keygen for event circuit (this may take a while)…"` from
+  `bridge-prover-lib/src/keys/event.rs:100` when keygen actually starts.
+  Only `ackinacki-bridge withdraw` also prints the preflight forecast
+  `"Circuit-4 keys will be generated on this run"` (from
+  `crates/ackinacki-bridge/src/preflight.rs:1595`) at its stage-1
+  preflight — that's a prediction, not the keygen start, and the
+  numbered stages are a CLI concept only. The rotation has nothing to
+  do with `verifyBlock` on the
   ETH side, which reads only the aggregator VK.
   `bridge-verifier-daemon` does not run keygen itself: on startup it
   looks for the event VK and, if absent, exits with
@@ -95,14 +101,22 @@ assigns it when the release is tagged.
   bump landed and the cache is about to be regenerated.
 
   To skip the ~2.65 GB write and the associated wall time, preseed
-  `--params-dir` with the complete four-file Circuit-4 cache, not
-  just the keys: `event_pk.bin`, `event_vk.bin`,
+  the params directory with the complete four-file Circuit-4 cache,
+  not just the keys: `event_pk.bin`, `event_vk.bin`,
   `event_config_params.json` **and** `event_manifest.json`. The
-  revision is a field (`circuit_revision`) inside the manifest —
-  copying only `pk` + `vk` leaves the manifest missing, which trips
-  the warning above and keygen runs regardless. The manifest also
-  records SHA-256 digests of the other three files, so all four have
-  to come from the same successful keygen run on some other host.
+  params directory is `--params-dir` for `prove-withdraw-shplonk` /
+  `withdraw-e2e` (and for the CLI's `ackinacki-bridge withdraw`);
+  `relayer prove-withdraw` has no `--params-dir` flag and looks under
+  `<work-dir>/params` instead. The revision is a field
+  (`circuit_revision`) inside the manifest, and `install_cached_keys`
+  will only accept a preseed if the manifest is present, parseable,
+  and its SHA-256 digests match the other three files. Copying only
+  `pk` + `vk` leaves the manifest missing, so `install_cached_keys`
+  silently drops the preseed at `load_config` and keygen runs
+  regardless — no WARN fires in that case. The warning above only
+  fires when a manifest **is** present but its digests do not match
+  the on-disk files (e.g. a partial upload). All four files have to
+  come from the same successful keygen run on some other host.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
@@ -317,13 +331,18 @@ assigns it when the release is tagged.
   `bridge-event-prove-circuit`, `bridge-poseidon`, `bridge-test-data-gen`)
   used to live in gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits, pinned
   by revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
-  which no longer applies). `bridge-prover-libraries`,
-  `bridge-relayer-daemon` and `bridge-snark-utils` now reach the circuit
-  crates via path deps that cross sub-workspace boundaries
-  (`bridge-circuits` is a standalone sub-workspace, excluded from the
-  root workspace so its gosh-fork halo2 backend does not clash with the
-  root's); the external `[patch]` block is gone, and a circuit edit plus
-  its `EVENT_CIRCUIT_REVISION` bump land in the same PR.
+  which no longer applies). The `bridge-prover-libraries` sub-workspace
+  declares the five circuit crates as path deps at its workspace level
+  (`bridge-prover-libraries/Cargo.toml:50-54`), and root-workspace
+  `bridge-snark-utils` declares them the same way; both cross
+  sub-workspace boundaries (`bridge-circuits` is a standalone
+  sub-workspace, excluded from the root workspace so its gosh-fork
+  halo2 backend does not clash with the root's).
+  `bridge-relayer-daemon`'s own `Cargo.toml` has no direct path-dep on
+  any circuit crate — it consumes them transitively through
+  `bridge-event-witness` / `bridge-event-prover-lib`. The external
+  `[patch]` block is gone, and a circuit edit plus its
+  `EVENT_CIRCUIT_REVISION` bump land in the same PR.
   `bridge-evm-aggregator` never depended on these crates and is
   unaffected.
 
@@ -333,6 +352,10 @@ assigns it when the release is tagged.
   The three binaries that actually link `tvm_client` — `ackinacki-bridge`
   (inside `bridge-prover-libraries`), `deposit-relayer-daemon` and
   `eth-light-client-relayer` — all ship the new version.
+  `eth-light-client-relayer` only pulls `tvm_client` in when built
+  with `--features live-submit` (`dep:tvm_client` behind that feature
+  in its `Cargo.toml`); without it the binary compiles without
+  `tvm_client` at all.
   `bridge-relayer-daemon` does not link `tvm_client`, but it does pick
   up the bump: it consumes `tvm_block` transitively through
   `bridge-event-witness`, which pins `tvm_block` at the same tvm-sdk

@@ -9,7 +9,7 @@
 //! This module fingerprints the SRS's `s_g2` point and refuses to proceed
 //! unless the head matches the **Hermez Perpetual Powers of Tau** ceremony
 //! (`928fafb3d0cc…`). Same anchor bytes as the sibling check in
-//! `bridge-prover-lib::keys::common::assert_hermez_ceremony`, so both sides
+//! `bridge-prover-lib::keys::common::assert_hermez_srs`, so both sides
 //! of the bridge trust the same ceremony.
 
 use anyhow::{bail, Result};

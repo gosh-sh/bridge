@@ -521,6 +521,13 @@ assigns it when the release is tagged.
   relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
   looks for legacy Groth16 fixtures instead. The preflight step still fails for
   as long as that workspace does not build against its pinned circuit revision.
+- **`make deploy-local` runs `script/DeployTestBridge.s.sol`**, the local and
+  testnet smoke-test deployment; the `script/Deploy.s.sol` it named does not
+  exist. It reads `PRIVATE_KEY` from the environment or from
+  `contracts/ethereum/.env`. `make dev-setup` now creates that file from
+  `contracts/ethereum/.env.example` when it is missing, instead of silently
+  failing to copy a root `.env.example` that does not exist. `make audit` runs
+  `cargo audit` only; the `forge audit` it also called is not a Foundry command.
 
 ### Known issues
 
@@ -599,6 +606,11 @@ assigns it when the release is tagged.
   the compiler version. An installed `solc` can stay; nothing on these paths
   uses it. Regenerating verifiers (`export-inner-aggregator`,
   `export-spike-artifacts`) still needs `solc 0.8.19`.
+- `make generate-proof`, `make test-integration` and `make generate-verifier`,
+  with `scripts/regenerate_verifier.sh`. They ran a `generate-proof` binary,
+  an `eth-frontend` integration test and a `generate-verifier` binary, none of
+  which exists, so each failed on every run. Production verifiers are
+  regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
 
 ## [0.2.0] – 2026-09-11
 

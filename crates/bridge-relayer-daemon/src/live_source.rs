@@ -107,8 +107,8 @@ impl LiveBlockSource {
     }
 
     async fn do_ack_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
-        let pending = self.pending_bundle.lock().await.take();
-        let Some(b) = pending else {
+        let mut pending = self.pending_bundle.lock().await;
+        let Some(b) = pending.as_ref() else {
             return Err(RelayerError::other("no pending bundle to ack"));
         };
         if b.block_seq_no != seq_no {
@@ -117,6 +117,8 @@ impl LiveBlockSource {
                 b.block_seq_no, seq_no
             )));
         }
+        let b = pending.take().expect("matched pending bundle");
+        drop(pending);
         let mut d = self.driver.lock().await;
         d.ack_bundle(&b).map_err(map_driver_err)?;
         persist_driver(&d, &self.state_paths)?;

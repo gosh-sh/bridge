@@ -127,6 +127,40 @@ pub fn check_chain_monotonicity(
             format!("{:#x}", actual.bk_set_commitment),
         ));
     }
+    // Rotation cursor. First apply may lead `last_seen`; a second
+    // apply while that N is still uncovered is contract-impossible.
+    if actual.last_bk_set_update_seq_no < remembered.last_bk_set_update_seq_no {
+        return Err(drift(
+            "last_bk_set_update_seq_no_rewound",
+            remembered.last_bk_set_update_seq_no.to_string(),
+            actual.last_bk_set_update_seq_no.to_string(),
+        ));
+    }
+    let bk_gap = actual
+        .last_bk_set_update_seq_no
+        .saturating_sub(remembered.last_bk_set_update_seq_no);
+    if bk_gap > max_forward_gap {
+        return Err(drift(
+            "last_bk_set_update_seq_no_jumped",
+            format!(
+                "{} (gap≤{max_forward_gap})",
+                remembered.last_bk_set_update_seq_no
+            ),
+            format!("{} (gap={bk_gap})", actual.last_bk_set_update_seq_no),
+        ));
+    }
+    if actual.last_bk_set_update_seq_no > remembered.last_bk_set_update_seq_no
+        && remembered.last_bk_set_update_seq_no > actual.last_seen_block_seq_no
+    {
+        return Err(drift(
+            "last_bk_set_update_seq_no_uncovered",
+            format!(
+                "previous N={} still ahead of last_seen={}",
+                remembered.last_bk_set_update_seq_no, actual.last_seen_block_seq_no
+            ),
+            actual.last_bk_set_update_seq_no.to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -180,5 +214,42 @@ mod tests {
         };
         let err = check_chain_monotonicity(&remembered, &actual, 2048).unwrap_err();
         assert_eq!(err.field, "last_seen_block_seq_no_rewound");
+    }
+
+    #[test]
+    fn monotonicity_allows_first_rotation_ahead_of_cursor() {
+        let remembered = BridgeOnChainState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: U256::from(1u64),
+            prev_bk_set_commitment: U256::ZERO,
+            prev_max_level_layer_hash: U256::ZERO,
+            last_bk_set_update_seq_no: 0,
+        };
+        let actual = BridgeOnChainState {
+            bk_set_commitment: U256::from(2u64),
+            prev_bk_set_commitment: U256::from(1u64),
+            last_bk_set_update_seq_no: 500,
+            ..remembered.clone()
+        };
+        assert!(check_chain_monotonicity(&remembered, &actual, 2048).is_ok());
+    }
+
+    #[test]
+    fn monotonicity_rejects_second_rotation_while_previous_uncovered() {
+        let remembered = BridgeOnChainState {
+            last_seen_block_seq_no: 0,
+            bk_set_commitment: U256::from(2u64),
+            prev_bk_set_commitment: U256::from(1u64),
+            prev_max_level_layer_hash: U256::ZERO,
+            last_bk_set_update_seq_no: 500,
+        };
+        let actual = BridgeOnChainState {
+            bk_set_commitment: U256::from(3u64),
+            prev_bk_set_commitment: U256::from(2u64),
+            last_bk_set_update_seq_no: 2000,
+            ..remembered.clone()
+        };
+        let err = check_chain_monotonicity(&remembered, &actual, 2048).unwrap_err();
+        assert_eq!(err.field, "last_bk_set_update_seq_no_uncovered");
     }
 }

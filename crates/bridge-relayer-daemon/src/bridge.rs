@@ -711,41 +711,15 @@ where
         match call.send().await {
             Ok(pending) => match pending.get_receipt().await {
                 Ok(receipt) => {
-                    // Inline read (avoid calling BridgeClient::read_state from
-                    // an inherent method — that needs `P: 'static`).
-                    let last = self
-                        .contract
-                        .storedLastSeenBlockSeqNo()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let bk = self
-                        .contract
-                        .storedBkSetCommitment()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let anchor = self
-                        .contract
-                        .storedPrevMaxLevelLayerHash()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let last_bk = self
-                        .contract
-                        .storedLastBkSetUpdateSeqNo()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let prev_bk = self.fetch_prev_bk_set().await?;
+                    let bn = receipt.block_number().ok_or_else(|| {
+                        RelayerError::other("applyBkSetUpdate receipt missing block_number")
+                    })?;
+                    // Same pin as `submit_block`: `latest` on a
+                    // load-balanced RPC can tear the five-slot snapshot
+                    // and poison Check B.
+                    let new_state = self.read_state_at(BlockId::from(bn)).await?;
                     Ok(BkSetUpdateSubmitOutcome::Applied {
-                        new_state: BridgeOnChainState {
-                            last_seen_block_seq_no: last,
-                            bk_set_commitment: bk,
-                            prev_bk_set_commitment: prev_bk,
-                            prev_max_level_layer_hash: anchor,
-                            last_bk_set_update_seq_no: last_bk,
-                        },
+                        new_state,
                         tx_hash: Some(receipt.transaction_hash()),
                     })
                 },
@@ -1433,6 +1407,80 @@ mod tests {
                 )
             },
             _ => panic!("expected revert"),
+        }
+    }
+
+    fn rotation(seq: u64, last_seen: u64, old: U256, new: U256) -> BkSetUpdateData {
+        BkSetUpdateData {
+            fin_type: FinalizationType::Primary,
+            block_id: U256::from(seq),
+            block_seq_no: seq,
+            attestation_last_seen: last_seen,
+            old_commitment_l2: old,
+            new_commitment_l3: new,
+            sibling_h01: [0u8; 32],
+            sibling_h4_7: [0u8; 32],
+            sibling_h8_15: [0u8; 32],
+            attestation_proof: Bytes::from(vec![0u8; 32]),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_second_rotation_reverts_until_previous_is_covered() {
+        let genesis = U256::from(0xBE5E7u64);
+        let next = U256::from(0xC0FFEEu64);
+        let third = U256::from(0xD00Du64);
+        let bridge = MockBridgeClient::with_genesis(genesis, U256::ZERO, always_accept());
+
+        match bridge
+            .submit_bk_set_update(&rotation(100, 0, genesis, next))
+            .await
+            .unwrap()
+        {
+            BkSetUpdateSubmitOutcome::Applied {
+                new_state, ..
+            } => {
+                assert_eq!(new_state.last_bk_set_update_seq_no, 100);
+                assert_eq!(new_state.last_seen_block_seq_no, 0);
+            },
+            other => panic!("first rotation must apply ahead of cursor, got {other:?}"),
+        }
+
+        match bridge
+            .submit_bk_set_update(&rotation(200, 0, next, third))
+            .await
+            .unwrap()
+        {
+            BkSetUpdateSubmitOutcome::Reverted {
+                reason,
+            } => {
+                assert!(reason.contains("VerifyBlockLagBehindRotation"), "{reason}");
+            },
+            other => panic!("second rotation must revert while N1 is uncovered, got {other:?}"),
+        }
+
+        let mut cover = block(100, U256::ZERO);
+        cover.bk_set_commitment = genesis;
+        match bridge.submit_block(&cover).await.unwrap() {
+            SubmitOutcome::Verified {
+                new_state, ..
+            } => {
+                assert_eq!(new_state.last_seen_block_seq_no, 100);
+            },
+            other => panic!("cover verifyBlock failed: {other:?}"),
+        }
+
+        match bridge
+            .submit_bk_set_update(&rotation(200, 0, next, third))
+            .await
+            .unwrap()
+        {
+            BkSetUpdateSubmitOutcome::Applied {
+                new_state, ..
+            } => {
+                assert_eq!(new_state.last_bk_set_update_seq_no, 200);
+            },
+            other => panic!("second rotation must apply after cover, got {other:?}"),
         }
     }
 }

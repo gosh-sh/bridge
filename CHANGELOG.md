@@ -319,6 +319,12 @@ assigns it when the release is tagged.
   (`attestationLastSeen`, strictly less than `blockSeqNo`). Passing the
   live cursor after `verifyBlock(N)` reverts
   `AttestationLastSeenNotBeforeSeqNo`. See Breaking.
+- After `applyBkSetUpdate` the relayer pins the follow-up slot reads to
+  the receipt block, same as `verifyBlock`. An unpinned `latest` on a
+  load-balanced RPC could record a torn snapshot and halt the next tick
+  as chain drift. Check B also rejects a `last_bk` rewind, a jump past
+  `MAX_FORWARD_GAP`, and a second rotation while the previous N is
+  still ahead of `last_seen`.
 - Production `verifyBlock` tests that lack `bound_scenario.json` now
   `vm.skip` instead of returning, so the hole shows up in the forge summary.
 - `DeployRealBridge` on mainnet also requires `altDstChainId` and

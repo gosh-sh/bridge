@@ -107,7 +107,9 @@ make test                  # both test suites
 make check                 # format-check + lint + test
 ```
 
-Run `make check` before pushing.
+Run `make pre-push` before pushing: on top of `make check` it covers the relayer, the aggregator and
+`forge coverage`, none of which any GitHub pipeline runs. The CI section of [AGENTS.md](AGENTS.md)
+lists what it does and does not cover.
 
 The end-user withdrawal CLI is not built from here at all —
 [`crates/ackinacki-bridge/scripts/install.sh`](crates/ackinacki-bridge/scripts/install.sh) downloads

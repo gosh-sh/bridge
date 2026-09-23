@@ -66,10 +66,12 @@ pub struct MockWithdrawalProver {
 }
 
 impl MockWithdrawalProver {
-    /// A valid canned proof: ten ascending public inputs and a SHPLONK-shaped
-    /// proof blob long enough to pass [`PartnerWithdrawalProof::proof_bytes`].
+    /// A valid canned proof: eleven ascending public inputs (matching the
+    /// post-anchorLayer `WITHDRAWAL_PUBLIC_INPUTS = 11` layout) and a
+    /// SHPLONK-shaped proof blob long enough to pass
+    /// [`PartnerWithdrawalProof::proof_bytes`].
     pub fn valid() -> Self {
-        let public_instances_hex = (0u8..10)
+        let public_instances_hex = (0u8..11)
             .map(|i| {
                 let mut le = [0u8; 32];
                 le[0] = i;
@@ -279,7 +281,7 @@ mod tests {
             .await
             .unwrap();
         assert!(proof.self_verified);
-        assert_eq!(proof.public_instances_hex.len(), 10);
+        assert_eq!(proof.public_instances_hex.len(), 11);
         // Canned proof is submit-shaped (SHPLONK aggregator calldata).
         assert!(proof.proof_bytes().is_ok());
         let pi = proof.public_inputs().unwrap();

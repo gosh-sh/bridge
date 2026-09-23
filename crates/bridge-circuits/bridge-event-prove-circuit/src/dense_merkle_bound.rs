@@ -463,10 +463,16 @@ mod tests {
     }
 
     /// Negative: a position witness with a bit flipped inside the active
-    /// range makes the walker take a different path — chunk-decomposition
-    /// bytes derived from the honest orientation don't line up with the
-    /// swapped `(left, right)` from `cond_swap`, so the walker's algebraic
-    /// linking constraints fail before we ever reach the root comparison.
+    /// range does NOT diverge the computed root — the chunk-decomposition
+    /// witnesses are copy-constrained against the honest `(left, right)`
+    /// orientation, so once the walker's `cond_swap` produces the swapped
+    /// orientation, the level-`j` chunk copies fail before any hash is
+    /// re-computed with the swapped inputs. If you deleted the final
+    /// `ctx.constrain_equal(&root_fr, &expected_fr)` line, this test would
+    /// still fail — on the chunk-link copies — and the walker's `root_fr`
+    /// would in fact equal the honest root. The moral: soundness of the
+    /// binding rests on the chunk-decomposition copies, not on the caller
+    /// comparing the walked root to an external value.
     #[test]
     fn test_dense_merkle_bound_negative_flipped_bit_within_active_levels() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xBEEF);
@@ -528,6 +534,15 @@ mod tests {
     /// This is exactly the gap `walk_dense_merkle_bind_pos` closes with its
     /// zero-forcing loop — real circuit code must always call the composed
     /// gadget, never the raw walker.
+    ///
+    /// Note: this test records the raw walker's *weakness* as a **passing**
+    /// assertion (`assert!(run_gadget_raw_walker_no_binding(...))`). If the
+    /// header's future plan — lifting the zero-forcing into
+    /// [`dense_merkle_root_padded_bound`] itself so callers can no longer
+    /// bypass it — ever lands, this test will turn red and should be either
+    /// deleted or inverted to `assert!(!...)`. Until then, the passing
+    /// assertion is the regression witness the composed gadget was built to
+    /// close.
     #[test]
     fn test_dense_merkle_bound_raw_walker_accepts_bit_above_active_levels() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xCAFE);

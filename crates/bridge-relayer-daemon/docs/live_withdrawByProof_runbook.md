@@ -799,19 +799,22 @@ Sepolia revert. The log prints the selector.
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `AttestationProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
+| `WithdrawalProofRejected()` | SHPLONK adapter equality prelude failed | C4 proof public inputs don't match on-chain-stored values. Most common: `acc_fr` drift (see [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet)), or `layer_hashes[1]` mismatch (covering bundle not yet verified — you jumped the gun). |
 | `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender, events_pos)` 7-tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. `events_pos` is bound into the preimage, so two *distinct* `WithdrawalInitiated` events in the same AN block do not collide — this error truly means the same event was replayed. |
-| `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain | Wait for the bundle daemon to submit + confirm the covering bundle, then retry. |
+| `UnknownAnchor(uint256 finalRoot)` | `pub.finalRoot` not present in `_layerWindows[pub.anchorLayer]` | Covering bundle not yet on-chain at the given anchor layer, or the proof was built against a stale/mis-selected anchor. Wait for the bundle daemon to submit + confirm the covering bundle, then retry — or fix the anchor selection upstream. |
+| `InvalidNumLayers(uint256 numLayers)` | `pub.anchorLayer` outside the range the bridge tracks | Wrong anchor layer supplied. Check the witness picked a layer consistent with the bridge's configured layer count. |
 | `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
 **Dry-run trace (any revert):**
 
 ```bash
-# Re-run the exact eth_call with --trace for a decoded reason
+# Re-run the exact eth_call with --trace for a decoded reason.
+# withdrawByProof takes a bytes proof plus a WithdrawalPublicInputs
+# struct of 11 uint256s, encoded as a tuple literal on the CLI.
 cast call $BRIDGE \
-  'withdrawByProof(bytes,uint256[11])' \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
   <calldata_hex_from_log> \
-  '[<pi array from log>]' \
+  '(<11 comma-separated pi values from log>)' \
   --rpc-url $RPC --trace
 ```
 

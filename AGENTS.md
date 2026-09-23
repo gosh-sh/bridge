@@ -222,7 +222,8 @@ them). Every other Rust crate — including the root workspace, `bridge-relayer-
 `bridge-evm-aggregator`, `deposit-prover` and friends — has no PR-triggered pipeline and neither
 do the fork suites or `forge coverage`. Those exist only as GitLab jobs in `.gitlab-ci.yml`, which
 nothing runs from GitHub, so `make pre-push` is what stands between a branch and a Rust regression
-outside `bridge-circuits/`.
+in the three crates it explicitly runs — the root workspace, `bridge-relayer-daemon` and
+`bridge-evm-aggregator`. Everything else (see the next section) is on the person pushing.
 
 ### What no pipeline runs
 
@@ -241,19 +242,27 @@ run one on its own:
 `crates/bridge-circuits` is different: `bridge-circuits.yaml` runs its fast + heavy `#[test]`
 suites automatically on every PR and every push to `main`, so that sub-workspace is *not* in the
 uncovered set above. What still needs a manual run is the `#[ignore]`d `test_real_prover_*` tests
-gated for CI hygiene (tens of minutes and >14 GB RSS each). Trigger them per-crate when the
-corresponding circuit constraints change — from `crates/bridge-circuits/`:
+gated for CI hygiene — trigger them per-crate when the corresponding circuit constraints change,
+from `crates/bridge-circuits/`. Weight varies by circuit and by case:
 
 ```
+# Circuit 4, K=19 real keygen + proof — the lightest of the three (well under
+# the >14 GB weight class of the attestation-BLS cases below); a bare
+# `--ignored` here picks up the single `real_proof_for_fixed_k` test.
 cargo test -p bridge-event-prove-circuit -- --ignored
+
+# Layer-hashes real prover sweep — tens of seconds per proof, aggregator-lite
+# (see the per-test doc-comment); also comfortably under the >14 GB weight
+# class. Bare `--ignored` picks up the single sweep test.
 cargo test -p historical-layer-hashes-movement-checker-circuit -- --ignored
 ```
 
 **Attestation-BLS is a special case.** A bare `cargo test -p attestation-bls-checker-circuit --
---ignored` also picks up `test_real_prover_primary_max_2000`, which — like every other real-prover
-case in that crate — is K=20, but at 2000 signers a single proof runs at ~78 GB RSS (see
-`PARALLEL_BENCHMARK_N14_REPORT.md:39,79`). Do not run it on a workstation without explicit intent.
-Prefer naming the case:
+--ignored` sweeps in every `test_real_prover_primary_max_{300,500,1000,2000}`; every case is K=20,
+and per `PARALLEL_BENCHMARK_N14_REPORT.md:76-79` the first-proof RSS grows steeply with
+`max_signers` (~15.6 GB at 300, ~37.6 GB at 1000, ~77.7 GB at 2000). Do not run the bare set on a
+workstation without explicit intent — the 2000-signer case alone will OOM a 64 GB host. Prefer
+naming the case:
 
 ```
 cargo test -p attestation-bls-checker-circuit -- --ignored \

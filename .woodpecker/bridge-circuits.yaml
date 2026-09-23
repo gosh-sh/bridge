@@ -1,0 +1,55 @@
+# Halo2 circuit tests for `crates/bridge-circuits/`.
+#
+# The MockProver-level gadget and integration tests in the vendored circuit
+# crates — Circuit 4 (bridge-event-prove-circuit), the layer-hashes-movement
+# checker, the BLS attestation checker, cross-circuit block-id parity, and
+# the poseidon reference — used to require read access to a private gosh-sh
+# repo, so they never had a place in this pipeline. Since the vendoring PR
+# they build with only public deps, so a per-MR job is now safe and cheap
+# (~seconds under MockProver at K<=19).
+#
+# `bridge-circuits/` is its own sub-workspace with a distinct halo2 backend
+# (see the header of `crates/bridge-circuits/Cargo.toml` for why the root
+# workspace excludes it). `cd`-then-`cargo test --workspace` from inside is
+# the only way to run its tests without dragging in the alloy/tvm graph.
+#
+# `--ignored` is deliberately NOT passed:
+#   * `test_bridge_event_prove_circuit_real_proof_for_fixed_k` runs a real
+#     halo2 keygen at K=19 (~7 min, ~1.5 GB PK); it belongs to on-demand
+#     runs, not per-MR CI. Trigger it manually with
+#     `cargo test -- --ignored` when a Circuit 4 constraint change lands.
+#
+# `--locked` is also NOT passed: `crates/bridge-circuits/Cargo.lock` is
+# gitignored (see `.gitignore`), so a fresh CI clone has no lockfile to
+# lock to. The `[patch.crates-io]` block in the sub-workspace root pins the
+# halo2-axiom backend deterministically regardless of resolution order.
+#
+# Requires REVIEW_GH_TOKEN: `gosh-sh/gosh-halo2-crypto-lib` and
+# `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381` are still private git
+# dependencies, and cargo cannot fetch them anonymously. The same secret
+# the review and release pipelines already use — Contents: Read is enough.
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+variables:
+  - &rust_image "docker.gosh.sh/rust"
+
+steps:
+  bridge-circuits-tests:
+    image: *rust_image
+    environment:
+      # Keep cargo's registry cache inside the workspace so re-runs on the
+      # same worker reuse the same `$CARGO_HOME/git` checkouts (matches
+      # `release.yaml`'s convention).
+      CARGO_HOME: .cargo_home
+      GH_TOKEN:
+        from_secret: REVIEW_GH_TOKEN
+    commands:
+      # Private gosh-sh git dependencies cannot be fetched anonymously.
+      # A token missing `Contents: Read` on those repos fails here.
+      - git config --global url."https://x-access-token:$GH_TOKEN@github.com/".insteadOf "https://github.com/"
+      - cd crates/bridge-circuits
+      - cargo test --workspace

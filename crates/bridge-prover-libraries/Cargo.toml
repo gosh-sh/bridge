@@ -34,8 +34,8 @@ halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12
 
 # Circuit and crypto libs — path-deps into the sibling `crates/bridge-circuits`
 # sub-workspace. `bridge-parsers` was inlined into
-# `attestation-bls-checker-circuit::attestation_data_parser` (commit 487b8f5),
-# so it's no longer a separate crate. The `test-data-gen/` directory is named
+# `attestation-bls-checker-circuit::attestation_data_parser`, so it's no
+# longer a separate crate. The `test-data-gen/` directory is named
 # `bridge-test-data-gen` at the crate level.
 #
 # `EVENT_CIRCUIT_REVISION` (bridge-prover-lib/src/keys/event.rs) is bumped

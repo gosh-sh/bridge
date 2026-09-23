@@ -448,10 +448,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
     }
 
-    /// @notice On-chain replay guard for identical nullifiers. Since
-    ///         BRIDGE-WD-01 (Circuit 4 revision 3) `events_pos` is bound
-    ///         into the Poseidon preimage, so two *distinct* AN
-    ///         `WithdrawalInitiated` events in the same block now produce
+    /// @notice On-chain replay guard for identical nullifiers. `events_pos`
+    ///         is bound into the Poseidon preimage, so two *distinct* AN
+    ///         `WithdrawalInitiated` events in the same block produce
     ///         distinct circuit nullifiers and neither is stranded. This
     ///         test still asserts the belt-and-suspenders on-chain mapping:
     ///         if the same nullifier is somehow presented twice (e.g. a
@@ -473,9 +472,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(bridge.treasuryBalance(), treasuryBefore - amount, "second amount not paid");
     }
 
-    /// @notice BRIDGE-WD-01 positive: two DIFFERENT nullifiers (as the rev-3
-    ///         circuit now emits when `events_pos` differs) sharing the same
-    ///         block / token / amount / recipient all execute end-to-end.
+    /// @notice Positive: two DIFFERENT nullifiers (as the circuit emits when
+    ///         `events_pos` differs) sharing the same block / token / amount
+    ///         / recipient all execute end-to-end.
     ///         Together with `test_twoIdenticalBurns_shareNullifier_secondPayoutBlocked`
     ///         this pins the mapping-based replay guard as the SOLE nullifier
     ///         gate — no accidental over-guarding on any other pub field.
@@ -716,8 +715,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertTrue(ok, "L3 anchor withdrawal must succeed with matching anchorLayer");
     }
 
-    /// @notice Option A: an L2 `finalRoot` presented with `anchorLayer = 1`
-    ///         must revert even though the hash is in some other window.
+    /// @notice An L2 `finalRoot` presented with `anchorLayer = 1` must
+    ///         revert even though the hash is in some other window.
     function test_withdrawByProof_l2AnchorWithLayer1_reverts() public {
         uint256 l2Anchor =
             Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-seed-layer", uint256(1)))));
@@ -740,7 +739,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
-    /// @notice ETH-15 upper bound: `anchorLayer > MAX_LAYER_HASHES` reverts
+    /// @notice Upper-bound guard: `anchorLayer > MAX_LAYER_HASHES` reverts
     ///         on the contract-side range guard. In-circuit the same value
     ///         is already refused by the two 4-bit lookups on
     ///         `anchor_layer - 1` / `MAX_ANCHOR_LAYER - anchor_layer` — this
@@ -758,7 +757,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
-    /// @notice ETH-15 canonical-Fr guard: a non-canonical `anchorLayer`
+    /// @notice Canonical-Fr guard: a non-canonical `anchorLayer`
     ///         (>= BN254_R) reverts before the range check. The Yul verifier
     ///         reduces PIs mod BN254_R, so treating unreduced words as
     ///         distinct window keys would let a caller alias two
@@ -773,10 +772,10 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
-    /// @notice ETH-15 wrong-layer scan (symmetric to
+    /// @notice Wrong-layer scan (symmetric to
     ///         `test_withdrawByProof_l2AnchorWithLayer1_reverts`): an L1
     ///         `finalRoot` presented with `anchorLayer = 2` must revert
-    ///         `UnknownAnchor`. Guards against Option-A scan drift in either
+    ///         `UnknownAnchor`. Guards against scan drift in either
     ///         direction — the SLOAD budget is O(one window), not O(all
     ///         windows).
     function test_withdrawByProof_l1AnchorWithLayer2_reverts() public {

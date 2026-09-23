@@ -17,13 +17,12 @@
 //!                                  recipientHi, recipientLo,
 //!                                  senderAccFr, eventsPos)
 //!                       `eventsPos` disambiguates two identical
-//!                       `WithdrawalInitiated` events in the same AN block
-//!                       (BRIDGE-WD-01). It is a PRIVATE witness — soundness
-//!                       comes from binding its bit-decomposition to the
-//!                       events-tree merkle path via
+//!                       `WithdrawalInitiated` events in the same AN block.
+//!                       It is a PRIVATE witness — soundness comes from
+//!                       binding its bit-decomposition to the events-tree
+//!                       merkle path via
 //!                       [`dense_merkle_bound::dense_merkle_root_padded_bound`],
-//!                       so the events_pos value hashed into the nullifier
-//!                       IS the position walked in the events tree.
+//!                       so the value hashed IS the position walked.
 //!   9: finalRoot      — Anchor root the proof binds to. The verifier
 //!                       checks `finalRoot` against the layer window named
 //!                       by `anchorLayer` off-circuit. The bridge has no
@@ -31,20 +30,14 @@
 //!                       single anchor root rather than the previous
 //!                       `NUM_LAYER_HASHES`-wide candidate vector with
 //!                       a private index.
-//!  10: anchorLayer    — 1-indexed routing hint the prover chooses. The
-//!                       circuit only range-checks it to
-//!                       `1..=MAX_ANCHOR_LAYER` and forwards it to slot 10
-//!                       — nothing inside the circuit ties it to the walked
-//!                       chain (the dense-chain walk produces `finalRoot`
-//!                       but carries no layer tag). Layer identity is
-//!                       enforced OFF-CIRCUIT: the L1 verifier scans
-//!                       `layerWindows[anchorLayer]` for `finalRoot`
-//!                       (`AckiNackiBridge.sol:1342`, Option A in ETH-15) —
-//!                       a wrong hint just fails window membership. 0 is
-//!                       rejected both on-chain and here (a genuine layer
-//!                       index below 1 is meaningless — the smallest AN
-//!                       layer index is 0, but this PI is 1-indexed to
-//!                       reserve 0 as "invalid/unset").
+//!  10: anchorLayer    — 1-indexed routing hint chosen by the prover.
+//!                       Only range-checked (`1..=MAX_ANCHOR_LAYER`) and
+//!                       forwarded to slot 10; roots inside the walk carry
+//!                       no layer tag. Identity is enforced on-chain by
+//!                       `AckiNackiBridge.sol` scanning
+//!                       `layerWindows[anchorLayer]` for `finalRoot`, so a
+//!                       wrong hint just fails that membership check. 0 is
+//!                       reserved as "invalid/unset".
 //!
 //! Why no `senderDappFr`: the TVM address type (`std_addr$10`, see
 //! `MsgAddrStd { anycast, workchain_id, address }` in
@@ -92,9 +85,9 @@
 //! 11. Verify `root_1 -> final_root` via dense chain (`verify_chain_of_dense_proofs`).
 //! 12. `nullifier = Poseidon(block_id_fr, tokenId, amount, recipientHi,
 //!     recipientLo, senderAccFr, eventsPos)` via `hash_fix_len_array`.
-//!     `eventsPos` (BRIDGE-WD-01) is bound to the events-tree walker's
-//!     direction bits so two identical `WithdrawalInitiated` events in
-//!     one AN block yield distinct nullifiers.
+//!     `eventsPos` is bound to the events-tree walker's direction bits so
+//!     two identical `WithdrawalInitiated` events in one AN block yield
+//!     distinct nullifiers.
 //! 13. Push public instances in the [`PUB_*`] order — leading fields,
 //!     `nullifier`, `final_root`, then `anchorLayer` (1-indexed,
 //!     range-checked `1..=MAX_ANCHOR_LAYER`) — to instance column 0.
@@ -355,11 +348,9 @@ pub struct BridgeEventProveCircuit {
     pub block_merkle_proof_position: usize,
     pub dense_chain: Vec<DenseChainLink>,
     pub num_active_chain_steps: usize,
-    /// 1-indexed layer routing hint the prover picks — exposed as
-    /// `PUB_ANCHOR_LAYER`. Range-checked `1..=MAX_ANCHOR_LAYER` in-circuit;
-    /// binding to the actual `layerWindows[]` mapping happens on-chain
-    /// (`AckiNackiBridge.sol:1342`). Nothing inside the circuit ties this
-    /// value to the walked chain.
+    /// 1-indexed layer routing hint chosen by the prover, exposed as
+    /// `PUB_ANCHOR_LAYER`. Range-checked in-circuit; binding to
+    /// `layerWindows[]` happens on-chain.
     pub anchor_layer: u8,
     pub base_circuit_params: BaseCircuitParams,
     pub base_circuit_builder: RefCell<BaseCircuitBuilder<Fr>>,
@@ -797,7 +788,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 let ev_diff = gate.sub(ctx, max_ev_const, num_events_levels);
                 range.range_check(ctx, ev_diff, 4);
 
-                // === events_pos binding (BRIDGE-WD-01) ===================
+                // === events_pos binding ===================================
                 // `events_pos` feeds the nullifier Poseidon preimage so that
                 // two identical `WithdrawalInitiated` events in one AN block
                 // produce distinct nullifiers. That defense is only sound if
@@ -989,10 +980,10 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 // === Nullifier ============================================
                 //   Poseidon(block_id_fr, tokenId, amount, recipientHi,
                 //            recipientLo, senderAccFr, eventsPos)
-                // `eventsPos` (BRIDGE-WD-01) makes two identical
-                // WithdrawalInitiated events in the same AN block collide-
-                // free at the replay-protection layer. It stays PRIVATE —
-                // soundness comes from binding its bit-decomposition to the
+                // `eventsPos` makes two identical WithdrawalInitiated
+                // events in the same AN block collide-free at the
+                // replay-protection layer. It stays PRIVATE — soundness
+                // comes from binding its bit-decomposition to the
                 // events-tree walker above (`dense_merkle_root_padded_bound`).
                 let nullifier_fr = hasher.hash_fix_len_array(
                     ctx,
@@ -1016,7 +1007,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 // on `anchor_layer - 1` and `MAX_ANCHOR_LAYER - anchor_layer`
                 // (both must be non-negative). Solidity ALSO validates on
                 // deposit at `withdrawByProof:1337-1339` — this in-circuit
-                // check is defense in depth, matching the audit's Option A.
+                // check is defense in depth.
                 let anchor_layer_fr =
                     ctx.load_witness(Fr::from(self.anchor_layer as u64));
                 let one_const = ctx.load_constant(Fr::one());
@@ -1163,11 +1154,12 @@ mod tests {
         );
     }
 
-    /// BRIDGE-WD-01 regression: two identical `WithdrawalInitiated` events at
-    /// different `events_pos` in the *same* AN block must produce distinct
-    /// nullifiers. Pre-fix, both proofs hit the same 6-arg Poseidon preimage
-    /// and their nullifiers collided — the second on-chain payout was
-    /// permanently blocked by `NullifierAlreadyUsed` on the first's slot.
+    /// Two identical `WithdrawalInitiated` events at different `events_pos`
+    /// in the *same* AN block must produce distinct nullifiers. Without the
+    /// `events_pos` field in the nullifier preimage, both proofs would hit
+    /// the same 6-arg Poseidon preimage and their nullifiers would collide —
+    /// the second on-chain payout would be permanently blocked by
+    /// `NullifierAlreadyUsed` on the first's slot.
     ///
     /// We reuse the first captured withdrawal and place its `ext_msg_leaf` at
     /// slots 3 and 7 of a single events tree that also shares its
@@ -1206,7 +1198,8 @@ mod tests {
             poseidon_hash_96_native(&dapp_id, &account_id_b, &w.repr_hash);
 
         // Same ext_msg_leaf at TWO slots — this is precisely the collision
-        // that pre-BRIDGE-WD-01 would have masked at the nullifier level.
+        // that would have been masked at the nullifier level without the
+        // `events_pos` binding.
         let mut events_leaves = vec![[0u8; 32]; NUM_EVENTS_LEAVES];
         for leaf in events_leaves.iter_mut() {
             rng.fill(leaf);
@@ -1271,13 +1264,12 @@ mod tests {
 
         assert_ne!(
             nullifiers[0], nullifiers[1],
-            "BRIDGE-WD-01: two identical WithdrawalInitiated events at \
-             different events_pos in the same AN block must yield distinct \
-             nullifiers"
+            "two identical WithdrawalInitiated events at different \
+             events_pos in the same AN block must yield distinct nullifiers"
         );
     }
 
-    /// ETH-15 regression: the in-circuit range check on `anchor_layer`
+    /// The in-circuit range check on `anchor_layer`
     /// (two 4-bit lookups on `anchor_layer - 1` and `MAX_ANCHOR_LAYER
     /// - anchor_layer`) must satisfy exactly the closed interval
     /// `1..=MAX_ANCHOR_LAYER` — which the on-chain verifier trusts when
@@ -1381,9 +1373,8 @@ mod tests {
             let verdict = prover.verify();
             assert!(
                 verdict.is_err(),
-                "ETH-15: anchor_layer={} (outside 1..={}) must be rejected \
-                 by the in-circuit range check, but MockProver::verify \
-                 returned Ok",
+                "anchor_layer={} (outside 1..={}) must be rejected by the \
+                 in-circuit range check, but MockProver::verify returned Ok",
                 bad_layer,
                 MAX_ANCHOR_LAYER,
             );
@@ -1391,24 +1382,11 @@ mod tests {
         }
     }
 
-    /// ETH-15 plumbing: PI slot 10 is wired to the `anchor_layer` witness
-    /// via a copy constraint on the instance column, so the value the
-    /// on-chain verifier reads from `pub4[10]` is exactly the witness the
-    /// prover ran on. Nothing here binds `anchor_layer` to the walked
-    /// chain — the circuit has no notion of "which layer `final_root`
-    /// belongs to" and can't have one, because roots don't carry layer
-    /// tags inside the walk. Layer identity is enforced OFF-CIRCUIT by
-    /// `AckiNackiBridge.sol:1342` doing
-    /// `final_root ∈ layerWindows[anchor_layer]`; a wrong hint just fails
-    /// that on-chain membership check.
-    ///
-    /// This test is a regression pin for the generic halo2 PI/witness
-    /// equality property, applied to slot 10: we build a valid circuit at
-    /// `anchor_layer = 2` but assemble the instance vector with slot 10 =
-    /// `Fr::from(3)`. `MockProver::verify` must return `Err` (equality
-    /// constraint on the instance column fails). Nothing anchor-specific —
-    /// same shape holds for every PI slot — but worth pinning because slot
-    /// 10 is the value the contract routes on.
+    /// Pin the PI/witness equality on slot 10: build a valid circuit at
+    /// `anchor_layer = 2`, then assemble the instance vector with slot 10
+    /// = `Fr::from(3)`. `MockProver::verify` must return `Err`. Not an
+    /// anchor-specific soundness property — the same shape holds for
+    /// every PI slot — but slot 10 is the value the contract routes on.
     #[test]
     fn test_anchor_layer_pi_witness_mismatch() {
         use rand::rngs::StdRng;
@@ -1459,14 +1437,14 @@ mod tests {
         let verdict = prover.verify();
         assert!(
             verdict.is_err(),
-            "ETH-15: witness anchor_layer={} but PI slot 10 = {} — the copy \
+            "witness anchor_layer={} but PI slot 10 = {} — the copy \
              constraint must reject, but MockProver::verify returned Ok",
             witness_layer,
             pi_layer,
         );
     }
 
-    /// BRIDGE-WD-01 canonical-order guard: the on-chain `PUB_NULLIFIER` slot
+    /// Canonical-order guard: the on-chain `PUB_NULLIFIER` slot
     /// must equal `poseidon_hash([block_id, token_id, amount, recip_hi,
     /// recip_lo, sender_acc, events_pos])` — in that exact order. A silent
     /// reorder inside `nullifier_native` (the wrapper every witness path

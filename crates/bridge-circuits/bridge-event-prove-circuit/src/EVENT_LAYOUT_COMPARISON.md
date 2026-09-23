@@ -93,7 +93,7 @@ and never extracts it as an Fr.
 | Recipient/sender              | inline                     | each its own ref cell (C2, C3)                                                   |
 | SHA-256 chain links           | 1                          | 3 (wrapper→body, body→recipient, body→sender)                                    |
 | Identity binding              | `sk_u` ↔ `sk_u_commit`     | `dappFr` + `accFr` (destination) + `senderAccFr` (source) public                 |
-| Replay binding                | (n/a)                      | `nullifier = Poseidon(block_id, tokenId, amount, recipHi, recipLo, senderAcc, eventsPos)` (BRIDGE-WD-01) |
+| Replay binding                | (n/a)                      | `nullifier = Poseidon(block_id, tokenId, amount, recipHi, recipLo, senderAcc, eventsPos)`                |
 | Anchor binding                | (n/a)                      | multi-layer-hash-choice (see §4.5)                                               |
 
 There is no per-event Poseidon "final commitment" on the bridge side — every

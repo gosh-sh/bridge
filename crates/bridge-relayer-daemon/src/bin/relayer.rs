@@ -1494,7 +1494,7 @@ where
                     amount = %pub_inputs.amount,
                     recipient_hi = %pub_inputs.recipient_hi,
                     recipient_lo = %pub_inputs.recipient_lo,
-                    "nullifier already used on-chain; skipping (benign retry, or BRIDGE-WD-01 same-block duplicate burn — second ECC is stranded until C4 re-keygen)"
+                    "nullifier already used on-chain; skipping (benign retry — the same event was submitted before)"
                 );
                 st.skipped += 1;
                 st.done.insert(proof_path);

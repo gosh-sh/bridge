@@ -146,7 +146,7 @@ The contract:
 
 1. **`verifyBlock`** — accepts a (Circuit 1A/1B + Circuit 2) bundle per thinned key block; verifies each proof; cross-checks shared `block_id` and `bk_set_poseidon_hash`; calls `appendLayer(L, root, blockHeight)` for each layer the bundle publishes; advances `storedLastSeenBlockSeqNo` and `storedLastSeenBlockHeight`. BK-set rotations are applied separately via `applyBkSetUpdate(L2, L3, …)`, which the verifier daemon (and eventually the contract) calls with the two open SHA-256 siblings against an already-verified `block_id` — `storedBkSetCommitment` is rolled forward there, not in `verifyBlock`.
 
-2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 11 public-instance Frs. The contract verifies the SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan (see ETH-15 fix). On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
+2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 11 public-instance Frs. The contract verifies the SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan. On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
 
    ```solidity
    function withdrawByProof(bytes calldata proof4, uint256[11] calldata pub4) external {

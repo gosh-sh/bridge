@@ -475,11 +475,10 @@ pub fn build_dense_chain(
 /// `BridgeEventProveCircuit::synthesize`. Used by tests and downstream
 /// orchestrators to predict the public-instance `PUB_NULLIFIER` value.
 ///
-/// `events_pos` (BRIDGE-WD-01) is appended so two identical
-/// `WithdrawalInitiated` events in the same AN block produce distinct
-/// nullifiers. The value MUST be the same `events_pos` used to build the
-/// events-tree merkle proof (bound to the walker's direction bits inside
-/// the circuit).
+/// `events_pos` is appended so two identical `WithdrawalInitiated` events
+/// in the same AN block produce distinct nullifiers. The value MUST be the
+/// same `events_pos` used to build the events-tree merkle proof (bound to
+/// the walker's direction bits inside the circuit).
 pub fn nullifier_native(
     block_id_fr: Fr,
     token_id: Fr,
@@ -537,9 +536,9 @@ impl LeadingPublicInputs {
 /// `sender_account_id` must match the algebraic decode of the BoC sender
 /// cell (cross-checked in [`extract_withdrawal_fields`]).
 ///
-/// `events_pos` (BRIDGE-WD-01) participates in the nullifier preimage so
-/// two identical `WithdrawalInitiated` events in the same AN block produce
-/// distinct nullifiers. It MUST be the same `events_pos` used to build the
+/// `events_pos` participates in the nullifier preimage so two identical
+/// `WithdrawalInitiated` events in the same AN block produce distinct
+/// nullifiers. It MUST be the same `events_pos` used to build the
 /// events-tree merkle proof passed to the circuit.
 pub fn compute_leading_public_inputs(
     w: &WithdrawalFields,
@@ -580,9 +579,9 @@ pub fn compute_leading_public_inputs(
 /// a single instance vector matching the circuit's `assigned_instances`
 /// order.
 ///
-/// `anchor_layer` (ETH-15) is the 1-indexed layer index the on-chain
-/// verifier uses to route to the correct `anchorRoots[layer]` mapping and
-/// is range-checked `1..=MAX_ANCHOR_LAYER` inside the circuit.
+/// `anchor_layer` is the 1-indexed layer index the on-chain verifier uses
+/// to route to the correct `anchorRoots[layer]` mapping and is
+/// range-checked `1..=MAX_ANCHOR_LAYER` inside the circuit.
 pub fn make_instances(
     leading: LeadingPublicInputs,
     final_root: Fr,

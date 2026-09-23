@@ -9,9 +9,8 @@
 //! freedom to pick any orientation that satisfies the root equation.
 //!
 //! `bridge-event-prove-circuit` folds `events_pos` into the nullifier
-//! Poseidon preimage (BRIDGE-WD-01) so that two identical
-//! `WithdrawalInitiated` events in the same AN block produce distinct
-//! nullifiers. That defense is only sound if the `events_pos` fed into the
+//! Poseidon preimage so that two identical `WithdrawalInitiated` events
+//! in the same AN block produce distinct nullifiers. That defense is only sound if the `events_pos` fed into the
 //! nullifier hash is the same `events_pos` that determines the events-tree
 //! merkle path — otherwise a malicious prover picks any position to
 //! disambiguate the hash and walks the tree along a different path.
@@ -27,9 +26,8 @@
 //! bit convention matches `preprocess_dense_proof_padded`'s
 //! `direction_bit = false` on padded levels.
 //!
-//! Ported verbatim from `dexdo-halo2-kit/dex-halo2-circuit/src/dense_merkle_bound.rs`.
-//! A future PR should lift this into `gosh-dense-balanced-tree` so both
-//! circuits share one implementation.
+//! A future PR should lift this into `gosh-dense-balanced-tree` so all
+//! callers share one implementation.
 
 use gosh_dense_balanced_tree::{bytes_to_fr, cond_swap, DenseTreeProof};
 use halo2_base::gates::{GateInstructions, RangeInstructions};
@@ -125,7 +123,7 @@ pub fn dense_merkle_root_padded_bound(
 }
 
 // ---------------------------------------------------------------------------
-// BRIDGE-WD-01 gadget-level tests
+// Gadget-level tests
 // ---------------------------------------------------------------------------
 //
 // These tests exercise `dense_merkle_root_padded_bound` in isolation — no
@@ -138,10 +136,9 @@ pub fn dense_merkle_root_padded_bound(
 //     tree — same depth-8 tree the events proof walks on chain);
 //   * a flipped bit inside the active range diverges the computed root;
 //   * the gadget ALONE cannot reject a bit set above `num_active_levels`
-//     (this is the BRIDGE-WD-01 gap — `gate.select` discards the walked
-//     path on padded levels, so the extra bit is invisible to the walker
-//     but would still fold into any nullifier hash the caller wires the
-//     same position witness into);
+//     — `gate.select` discards the walked path on padded levels, so the
+//     extra bit is invisible to the walker but would still fold into any
+//     nullifier hash the caller wires the same position witness into;
 //   * the caller-level zero-forcing loop used in
 //     `bridge_event_prove_circuit::synthesize` closes that gap by pinning
 //     `pos_bits[j] == 0` for every padded level.
@@ -252,7 +249,7 @@ mod tests {
     ///   1. loads `leaf`, `num_active`, and `pos_bits_vals` as witnesses;
     ///   2. optionally runs the same zero-forcing loop
     ///      `bridge_event_prove_circuit::synthesize` runs before calling
-    ///      the walker (BRIDGE-WD-01);
+    ///      the walker;
     ///   3. calls `dense_merkle_root_padded_bound`;
     ///   4. constrains the result to equal `expected_root`.
     ///
@@ -387,8 +384,8 @@ mod tests {
     /// `bit = 1` (via [`tamper_level_to_bit_1`]) satisfies every constraint,
     /// so the walker accepts a `pos_witness = p + 2^d`.
     ///
-    /// This is exactly the BRIDGE-WD-01 gap: absent the caller-level
-    /// zero-forcing loop, a malicious prover would witness
+    /// This is exactly the gap that the caller-level zero-forcing loop
+    /// closes: absent that loop, a malicious prover would witness
     /// `events_pos = p + 2^d`, walk the correct path in the events tree,
     /// and hash a DIFFERENT position into the nullifier — collapsing two
     /// distinct events into one nullifier slot and permanently blocking
@@ -408,13 +405,12 @@ mod tests {
             "regression witness: the gadget alone must NOT reject a bit set \
              above `num_active_levels` when the prover supplies matching \
              tampered chunks — that job belongs to the caller-level \
-             zero-forcing loop (see BRIDGE-WD-01 fix in \
-             `bridge_event_prove_circuit::synthesize`)",
+             zero-forcing loop in `bridge_event_prove_circuit::synthesize`",
         );
     }
 
     /// Fix demonstration: same tampered proof + `pos_bits` as the previous
-    /// test, but this time the caller wraps the walker with the BRIDGE-WD-01
+    /// test, but this time the caller wraps the walker with the
     /// zero-forcing loop (`pos_bits[j] * (1 - active_j) == 0`). Bit 5 = 1
     /// on an inactive level trips `assert_is_const(prod, 0)`.
     #[test]
@@ -426,7 +422,7 @@ mod tests {
         bits[5] = 1;
         assert!(
             !run_gadget(&proof, leaf, 3, &bits, root, /* with_zero_forcing */ true),
-            "BRIDGE-WD-01: the caller-level zero-forcing loop must reject any \
+            "the caller-level zero-forcing loop must reject any \
              pos_bits[j]==1 for j >= num_active_levels — otherwise a prover \
              could hash `p + 2^d` into the nullifier while walking `p` in \
              the events tree",

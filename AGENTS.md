@@ -24,6 +24,10 @@ the deposit circuit and its 12 public inputs in [`deposit-prover/README.md`](dep
 the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
+## Issues, branches and pull requests
+
+One Linear issue (or one GitHub issue) → one branch and one pull request → one assignee.
+
 ## Changelog policy
 
 Every branch that is opened as a pull request into `main` must describe its diff

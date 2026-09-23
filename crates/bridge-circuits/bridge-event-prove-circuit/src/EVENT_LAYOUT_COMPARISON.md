@@ -94,7 +94,7 @@ and never extracts it as an Fr.
 | SHA-256 chain links           | 1                          | 3 (wrapper→body, body→recipient, body→sender)                                    |
 | Identity binding              | `sk_u` ↔ `sk_u_commit`     | `dappFr` + `accFr` (destination) + `senderAccFr` (source) public                 |
 | Replay binding                | (n/a)                      | `nullifier = Poseidon(block_id, tokenId, amount, recipHi, recipLo, senderAcc, eventsPos)`                |
-| Anchor binding                | (n/a)                      | multi-layer-hash-choice (see §4.5)                                               |
+| Anchor binding                | (n/a)                      | `finalRoot` + `anchorLayer` exposed as public inputs (see §4.5)                  |
 
 There is no per-event Poseidon "final commitment" on the bridge side — every
 event field is already on-chain on Acki Nacki, so there is no secret to seal.
@@ -169,21 +169,25 @@ final_root    = verify_chain_of_dense_proofs(root_1, dense_chain,
 
 `repr_hash_fr` is the LE-pack of `wrapper_hash` (32 bytes → Fr).
 
-### 4.5 Multi-layer-hash choice
+### 4.5 Anchor binding (`finalRoot` + `anchorLayer`)
 
-The verifier supplies `NUM_LAYER_HASHES = MAX_LAYERS * W` candidate layer
-hashes (W = 8 by default via `w-8` feature, or 128 via `w-128`). The prover
-witnesses a private `hash_choice_index`, range-checks `(NUM_LAYER_HASHES - 1)
-- index` to `HASH_IDX_BITS = ceil(log2(NUM_LAYER_HASHES))` bits, and
-constrains `gate.select_from_idx(layer_hashes, index) == final_root`.
+The circuit walks `verify_chain_of_dense_proofs` to produce `final_root`
+and exposes it directly as `PUB_FINAL_ROOT`. The prover also witnesses a
+`layer_idx` (0-based), adds one to produce the 1-indexed `anchor_layer`,
+range-checks it into `1..=MAX_ANCHOR_LAYER` (=`MAX_LAYER_HASHES = 10` on
+the ETH side), and exposes it as `PUB_ANCHOR_LAYER`.
 
-Result: the verifier learns the proof anchors to *some* known layer hash but
-not *which* one.
+Result: the verifier learns *which* layer the proof anchors to; the ETH
+side then checks `pub.finalRoot ∈ _layerWindows[pub.anchorLayer]`
+(`AckiNackiBridge.sol:1339-1343`), which rejects `UnknownAnchor` before
+crypto. The retired multi-layer-hash-choice scheme (a witnessed
+`hash_choice_index` over `NUM_LAYER_HASHES = MAX_LAYERS * W` candidate
+hashes) has been dropped along with the `w-8`/`w-128` features.
 
 ### 4.6 Public instance layout (column 0, v2)
 
-`NUM_LEADING_PUBLIC_INPUTS = 9` leading slots + `NUM_LAYER_HASHES` candidate
-hashes. Slot indices are exported as `PUB_*` constants.
+`TOTAL_PUBLIC_INPUTS = 11` slots, all Fr values. Slot indices are
+exported as `PUB_*` constants.
 
 ```
 [0]   token_id       BE u32  from body[54..58)
@@ -198,10 +202,10 @@ hashes. Slot indices are exported as `PUB_*` constants.
 [8]   nullifier      Poseidon(block_id_fr, tokenId, amount,
                               recipientHi, recipientLo, senderAccFr,
                               eventsPos)
-[9 .. 9+NUM_LAYER_HASHES] layer hash candidates
+[9]   finalRoot      output of verify_chain_of_dense_proofs (Fr)
+[10]  anchorLayer    1-indexed layer number (range-checked
+                     `1..=MAX_ANCHOR_LAYER`)
 ```
-
-Total: `TOTAL_PUBLIC_INPUTS = 9 + NUM_LAYER_HASHES` Fr values.
 
 ### 4.7 senderAccFr (slot 5) — algebraic decode
 
@@ -243,8 +247,12 @@ appears in the body BOC and can be parsed/bound the same way as
 Single-sponge call (`hash_fix_len_array` over 7 Fr inputs, RATE=2 → 4 absorb
 rounds + squeeze). Native counterpart is `test_helpers::nullifier_native`,
 which delegates to `bridge_poseidon::poseidon_hash_fr` for the same params
-(T=3, R_F=8, R_P=57). MockProver checks instance equality, so test
-`test_nullifier_recomputes_natively` proves the two paths agree.
+(T=3, R_F=8, R_P=57). Circuit-vs-native equality on `PUB_NULLIFIER` is pinned
+by `test_build_synthetic_event_keygen_inputs_mock_prover`, which runs
+MockProver against the synthetic-keygen witness. The much cheaper
+`test_nullifier_recomputes_natively` only asserts that the native path
+produces a non-zero Fr — a sanity check that the hasher was actually
+invoked, not a cross-path equality proof.
 
 The nullifier binds the destination chain side's burn record to:
 - the source block (`block_id_fr`, already a witnessed Fr) — block-level

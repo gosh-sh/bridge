@@ -7,7 +7,10 @@
 //! deterministic in `(SRS, AggregatorConfig, inner-snark shape)` and, under
 //! `VerifierUniversality::Full`, independent of the inner snark's *values* — so
 //! a fresh inner snark yields fresh calldata that the same on-chain verifier
-//! accepts.
+//! accepts. To bind the aggregator to the specific inner VK it was generated
+//! for, the aggregator also exposes the Poseidon digest of the inner-circuit
+//! VK witnesses as the final public instance (slot `12 + NUM_INNER`); the
+//! on-chain adapter compares that slot against its immutable `vkDigest` pin.
 //!
 //! To make that guarantee *self-checking* rather than assumed, this bin
 //! regenerates the verifier's Solidity source for the supplied inner snark and

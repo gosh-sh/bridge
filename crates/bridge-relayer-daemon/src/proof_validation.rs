@@ -6,13 +6,16 @@
 
 use crate::{error::RelayerError, types::FinalizationType};
 
-/// Minimum instance prefix for an attestation SHPLONK bundle (12 acc + 4
-/// inner). Both Circuit 1A (primary) and Circuit 1B (fallback) expose 4 public
-/// inputs.
-pub const SHPLONK_MIN_ATTESTATION_INSTANCES: usize = (12 + 4) * 32;
+/// Minimum instance prefix for an attestation SHPLONK bundle
+/// (12 acc + 4 inner + 1 inner-VK digest). Both Circuit 1A (primary) and
+/// Circuit 1B (fallback) expose 4 public inputs, and the aggregator appends
+/// a Poseidon digest of the inner VK witnesses that the on-chain adapter
+/// checks against its pinned `vkDigest`.
+pub const SHPLONK_MIN_ATTESTATION_INSTANCES: usize = (12 + 4 + 1) * 32;
 
-/// Minimum instance prefix for layer-hashes SHPLONK bundle (12 acc + 14 inner).
-pub const SHPLONK_MIN_LAYER_INSTANCES: usize = (12 + 14) * 32;
+/// Minimum instance prefix for layer-hashes SHPLONK bundle
+/// (12 acc + 14 inner + 1 inner-VK digest).
+pub const SHPLONK_MIN_LAYER_INSTANCES: usize = (12 + 14 + 1) * 32;
 
 pub fn validate_attestation_proof(
     fin_type: FinalizationType,

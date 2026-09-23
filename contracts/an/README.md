@@ -17,6 +17,18 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   bridge address is a constant, and its constructor accepts only the bridge as
   sender.
 
+`finalizeDeposit` is permissionless — the proof is the authorization. It
+rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
+trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
+verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
+and then requires the proven block hash in the anchor set: the proof places the
+event in a block, but cannot show that the block is canonical. Two writers fill
+the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
+until `disableOwnerAnchors()`, which is one-way and needs a light client first;
+the light client adds and ages out hashes with `acceptBlockHashFromLightClient`
+and `forgetBlockHashFromLightClient`. `getAnchorConfig()` returns the light
+client and whether the owner may still write.
+
 | Path | Contents |
 |------|----------|
 | `exchange/` | Sources and a `Makefile` that builds them in place |

@@ -19,7 +19,10 @@ disagree, the code wins.
 Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/) (TVM-based,
 multi-threaded). USDC deposited on Ethereum is proven on Acki Nacki and minted there; Acki Nacki
 state is proven on Ethereum, which pays withdrawals out against it. Both directions use Halo2
-proofs. [`README.md`](README.md) walks through both directions and the repository.
+proofs. [`README.md`](README.md) walks through both directions and the repository. In more depth:
+the deposit circuit and its 12 public inputs in [`deposit-prover/README.md`](deposit-prover/README.md),
+the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
+in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
 ## Changelog policy
 
@@ -136,35 +139,6 @@ those dependency versions.**
 - `crates/deposit-relayer-daemon`, `crates/eth-light-client-relayer`, `crates/bridge-snark-utils` and
   `frontend` are standalone packages excluded by the root `Cargo.toml`.
 
-## How the two directions work
-
-**Ethereum → Acki Nacki (deposit).**
-`AckiNackiBridge.deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)` takes USDC and emits
-`Deposit`. `deposit-prover` proves that event is in a block whose header hashes to the proven block
-hash — receipt MPT, log binding, a keccak coprocessor. Its 12 public inputs are defined once, in
-`deposit-prover/src/circuit_v2.rs::DEPOSIT_PUBLIC_INPUT_LAYOUT`: `depositId`, `sender`, `amount`,
-`contractAddress`, `chainId`, `dappIdHigh`, `dappIdLow`, `anAccountHigh`, `anAccountLow`,
-`blockHashHigh`, `blockHashLow`, `promiseCommit`. On Acki Nacki, `eccUSDCBridge.finalizeDeposit`
-(`contracts/an/exchange/`):
-
-1. requires `(chainId, contractAddress)` to be a trusted L1 bridge (`setTrustedL1Bridge`);
-2. verifies the proof natively with `gosh.zkhalo2VerifyWithVK` (the `ZKHALO2VERIFYWITHVK` opcode,
-   from `tvm-sdk`) against the embedded `VK_BLOB`;
-3. requires the proven block hash in the anchor set. The proof shows the event is in *a* block, not
-   that the block is canonical; anchors are written by the owner (`setAcceptedBlockHash`, until the
-   one-way `disableOwnerAnchors()`) and by the Ethereum beacon light client
-   (`acceptBlockHashFromLightClient`) — see [`docs/eth-light-client.md`](docs/eth-light-client.md);
-4. deploys a `DepositVoucher` from the embedded `_depositVoucherCode`; the voucher is the replay
-   slot, and it calls back `confirmDeposit`, which mints.
-
-**Acki Nacki → Ethereum (state and payout).** `AckiNackiBridge` advances its commitment to AN state
-with `verifyBlock` (Circuit 1A primary or 1B fallback attestation, plus Circuit 2 layer hashes),
-rotates the BK-set commitment with `applyBkSetUpdate`, and pays out with `withdrawByProof` against a
-Circuit 4 proof, nullifier-guarded. Each circuit is verified by a SHPLONK aggregator Yul verifier in
-`contracts/ethereum/verifiers/`. The proofs come from `crates/bridge-prover-libraries` and the
-relayer submits them. Contract detail: [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md);
-custody and accounting: [`docs/EVM-custody-and-accounting.md`](docs/EVM-custody-and-accounting.md).
-
 ## Upstream repositories
 
 Pinned in the `Cargo.toml` files; clone them next to this repository when you need their source.
@@ -176,10 +150,9 @@ Pinned in the `Cargo.toml` files; clone them next to this repository when you ne
 | `acki-nacki` | The node. Pins a commit of this repository and places the files `contracts/an/place.json` lists |
 | `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381`, `gosh-sh/halo2-axiom`, `gosh-sh/gosh-halo2-crypto-lib`, `gosh-sh/axiom-eth`, `gosh-sh/snark-verifier` | The gosh halo2 forks and chips the circuits and provers build on |
 
-Acki Nacki endpoints: shellnet GraphQL is `https://shellnet.ackinacki.org/graphql`, the default of
-every daemon here. REST `/v2/bk_set` and `/v2/bk_set_update` are served by a node directly, on port
-8600 — not by `shellnet.ackinacki.org`, which answers 404 for them. A local cluster runs from
-`../acki-nacki/nock` with `docker-compose`, node 0 at `http://127.0.0.1:11000`.
+Acki Nacki endpoints and ports are in [`docs/eth-light-client.md`](docs/eth-light-client.md). REST
+`/v2/bk_set` and `/v2/bk_set_update` are served only by a node's own API on port 8600;
+`shellnet.ackinacki.org` answers 404 for them.
 
 ## Build and test
 

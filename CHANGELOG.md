@@ -119,13 +119,19 @@ assigns it when the release is tagged.
   `<work-dir>/params` instead. The revision is a field
   (`circuit_revision`) inside the manifest, and `install_cached_keys`
   will only accept a preseed if the manifest is present, parseable,
-  and its SHA-256 digests match the other three files. Copying only
-  `pk` + `vk` leaves the manifest missing, so `install_cached_keys`
-  silently drops the preseed at `load_config` and keygen runs
-  regardless — no WARN fires in that case. The warning above only
-  fires when a manifest **is** present but its digests do not match
-  the on-disk files (e.g. a partial upload). All four files have to
-  come from the same successful keygen run on some other host.
+  in the expected `manifest_format`, carries the current
+  `circuit_revision`, and its SHA-256 digests over `event_vk.bin` and
+  `event_config_params.json` match the on-disk bytes. Copying only
+  `pk` + `vk` leaves `event_config_params.json` missing, so
+  `install_cached_keys` bails at `load_config` and keygen runs
+  regardless — no WARN in that case. The warning above fires whenever
+  the config loaded but the manifest failed any of the checks above,
+  including a stale `circuit_revision` — which is exactly the
+  cache-invalidation path described a paragraph earlier. The PK is
+  deliberately not hashed by `install_cached_keys`, so a corrupted
+  `event_pk.bin` passes preseed silently and only fails later when it
+  is actually used. All four files have to come from the same
+  successful keygen run on some other host.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at

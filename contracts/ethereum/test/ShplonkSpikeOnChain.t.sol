@@ -32,8 +32,7 @@ contract ShplonkSpikeOnChainTest is Test {
 
     function test_spikeVerifier_acceptsExportedCalldata() public {
         if (verifier == address(0)) {
-            emit log("SKIP: spike fixtures missing (run make generate-spike-artifacts)");
-            return;
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
         }
         require(calldata_.length > 0, "empty calldata fixture");
 
@@ -43,7 +42,7 @@ contract ShplonkSpikeOnChainTest is Test {
 
     function test_spikeVerifier_rejectsTamperedCalldata() public {
         if (verifier == address(0)) {
-            return;
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
         }
         bytes memory bad = calldata_;
         if (bad.length > 32) {

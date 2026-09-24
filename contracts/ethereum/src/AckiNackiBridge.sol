@@ -208,8 +208,10 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
 
     /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (10-input
-    ///         layout; production backend: Halo2 SHPLONK aggregator adapter).
+    ///         `IBridgeWithdrawalVerifier` interface (11-input
+    ///         layout — slot 10 is `anchorLayer`, 1-indexed and range-checked
+    ///         in-circuit to `1..=MAX_LAYER_HASHES`; production backend:
+    ///         Halo2 SHPLONK aggregator adapter).
     ///         May be `address(0)` if AN→ETH payout verification is
     ///         disabled at deployment; in that case `withdrawByProof` reverts
     ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock`.
@@ -241,7 +243,7 @@ contract AckiNackiBridge {
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
     ///         recipientLo, senderAccFr, events_pos)` — two identical
     ///         burns in one AN block take different `events_pos` and
-    ///         therefore different nullifiers (BRIDGE-WD-01).
+    ///         therefore different nullifiers.
     ///         The mapping still rejects re-submission of an already-paid
     ///         proof.
     ///         Keys must be canonical Fr (`nullifier < BN254_R`); the SHPLONK
@@ -253,7 +255,7 @@ contract AckiNackiBridge {
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
     ///         Each `withdrawByProof` checks `finalRoot` against the window
-    ///         named by Circuit 4's `anchorLayer` public input (Option A).
+    ///         named by Circuit 4's `anchorLayer` public input.
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
         /// @dev No longer written. `lastHeight` is the on-chain

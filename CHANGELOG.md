@@ -63,11 +63,84 @@ assigns it when the release is tagged.
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
   `1..=10`). `withdrawByProof` scans only that layer's window.
+  Behavioural consequence of the `events_pos` binding: two structurally
+  identical `WithdrawalInitiated` events emitted in the same source
+  block (matching on all four of `tokenId`, `amount`, `recipient` and
+  `sender`) now nullify to distinct values and can both pay out on the
+  ETH side; pre-rotation they would have collided on the second
+  withdraw as a replay.
   The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
   instances; the reference `_calldata.bin` is 3 648 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
-  not decode.
+  not decode. The extra tuple field also **changes the `withdrawByProof`
+  4-byte selector**: from the previous ten-slot `0x6e6f66ad`
+  (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`)
+  to the eleven-slot `0xa9753d18`
+  (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`,
+  verified with `cast sig`). Integrators that hand-craft calldata (`cast call`
+  scripts, custom relayers, front-ends) have to update the tuple
+  signature; a client still emitting the old selector will see the
+  call revert with empty returndata (no fallback and no router
+  string), not a decode error deeper in. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
+  prover host regenerates its Circuit 4 keys on first use — the bump
+  is what makes the key cache reject a pre-rotation
+  `event_pk.bin` / `event_vk.bin`. Keygen (over the `K = 20` SRS) runs
+  during the next Circuit-4 proof job on that host, whichever fires
+  first among the four entrypoints that go through the shared prover
+  library: `ackinacki-bridge withdraw`, `relayer prove-withdraw`,
+  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. In all
+  four the shared library emits an info-level line at
+  `bridge-prover-lib/src/keys/event.rs:100` when keygen actually
+  starts, whose runtime visibility depends on the entrypoint's
+  tracing filter: `relayer prove-withdraw-shplonk` and
+  `relayer withdraw-e2e` default to `info` and print it;
+  `ackinacki-bridge withdraw` defaults to
+  `warn,ackinacki_bridge=info,bridge_relayer_daemon=info`
+  (`crates/ackinacki-bridge/src/main.rs:247`) and so silences the line
+  unless `RUST_LOG` is set; `relayer prove-withdraw` runs the prover
+  as a subprocess (`SubprocessWithdrawalProver`) and buffers its
+  stderr, surfacing it only on failure
+  (`crates/bridge-relayer-daemon/src/withdraw_prover.rs:231-249`).
+  Only `ackinacki-bridge withdraw` also prints the preflight forecast
+  `"Circuit-4 keys will be generated on this run"` (from
+  `crates/ackinacki-bridge/src/preflight.rs:1595`) at its stage-1
+  preflight — that's a prediction, not the keygen start, and the
+  numbered stages are a CLI concept only. The rotation has nothing to
+  do with `verifyBlock` on the
+  ETH side, which reads only the aggregator VK.
+  `bridge-verifier-daemon` does not run keygen itself: on startup it
+  looks for the event VK and, if absent, exits with
+  `"event VK not found in <params-dir>. Run the event prover
+  (Circuit 4) first to generate keys."` The prover-side warning to
+  watch for on a stale cache is `"cached event keys do not match
+  their manifest, or the manifest could not be read (…); ignoring
+  them. Re-run the prover to regenerate."` — the signal the revision
+  bump landed and the cache is about to be regenerated.
+
+  To skip the ~2.65 GB write and the associated wall time, preseed
+  the params directory with the complete four-file Circuit-4 cache,
+  not just the keys: `event_pk.bin`, `event_vk.bin`,
+  `event_config_params.json` **and** `event_manifest.json`. The
+  params directory is `--params-dir` for `prove-withdraw-shplonk` /
+  `withdraw-e2e` (and for the CLI's `ackinacki-bridge withdraw`);
+  `relayer prove-withdraw` has no `--params-dir` flag and looks under
+  `<work-dir>/params` instead. The revision is a field
+  (`circuit_revision`) inside the manifest, and `install_cached_keys`
+  will only accept a preseed if the manifest is present, parseable,
+  in the expected `manifest_format`, carries the current
+  `circuit_revision`, and its SHA-256 digests over `event_vk.bin` and
+  `event_config_params.json` match the on-disk bytes. Copying only
+  `pk` + `vk` leaves `event_config_params.json` missing, so
+  `install_cached_keys` bails at `load_config` and keygen runs
+  regardless — no WARN in that case. The warning above fires whenever
+  the config loaded but the manifest failed any of the checks above,
+  including a stale `circuit_revision` — which is exactly the
+  cache-invalidation path described a paragraph earlier. The PK is
+  deliberately not hashed by `install_cached_keys`, so a corrupted
+  `event_pk.bin` passes preseed silently and only fails later when it
+  is actually used. All four files have to come from the same
+  successful keygen run on some other host.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
@@ -296,6 +369,48 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
+  building the prover or the CLI no longer needs read access to a private
+  repository.** The five crates (`attestation-bls-checker-circuit`,
+  `historical-layer-hashes-movement-checker-circuit`,
+  `bridge-event-prove-circuit`, `bridge-poseidon`, `bridge-test-data-gen`)
+  used to live in gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits, pinned
+  by revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
+  which no longer applies). The `bridge-prover-libraries` sub-workspace
+  declares the five circuit crates as path deps at its workspace level
+  (`bridge-prover-libraries/Cargo.toml:50-54`), and the standalone
+  `crates/bridge-snark-utils` package (also excluded from the root
+  workspace, see the top-level `Cargo.toml` `exclude` list) declares
+  them the same way; both reach across sub-workspace boundaries into
+  `crates/bridge-circuits`, which is itself excluded from the root
+  workspace so its gosh-fork halo2 backend does not clash with the
+  root's.
+  `bridge-relayer-daemon`'s own `Cargo.toml` has no direct path-dep on
+  any circuit crate — it consumes them transitively through
+  `bridge-event-witness` / `bridge-event-prover-lib`. The external
+  `[patch]` block is gone, and a circuit edit plus its
+  `EVENT_CIRCUIT_REVISION` bump land in the same PR.
+  `bridge-evm-aggregator` never depended on these crates and is
+  unaffected.
+
+- **`tvm-sdk` moves from `v3.0.5.an` to `v3.0.6.an`** across the root
+  workspace, `crates/bridge-prover-libraries`,
+  `crates/deposit-relayer-daemon` and `crates/eth-light-client-relayer`.
+  The three binaries that actually link `tvm_client` — `ackinacki-bridge`
+  (inside `bridge-prover-libraries`), `deposit-relayer-daemon` and
+  `eth-light-client-relayer` — all ship the new version.
+  `eth-light-client-relayer` only pulls `tvm_client` in when built
+  with `--features live-submit` (`dep:tvm_client` behind that feature
+  in its `Cargo.toml`); without it the binary compiles without
+  `tvm_client` at all.
+  `bridge-relayer-daemon` does not link `tvm_client`, but it does pick
+  up the bump: it consumes `tvm_block` transitively through
+  `bridge-event-witness`, which pins `tvm_block` at the same tvm-sdk
+  workspace tag. So no line in `bridge-relayer-daemon`'s own manifest
+  changes, but its build now compiles against `tvm_block v3.0.6.an`.
+  `dense-balanced-tree` also moves off a floating branch onto tag
+  `v1.0.0`.
+
 - **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
   default.** With no arguments it checks the sources in
   `contracts/an/exchange/` against the compiled ABIs in
@@ -457,9 +572,6 @@ assigns it when the release is tagged.
 - `verifyBlock` no longer SSTOREs per-slot window heights (~29k gas on a
   ten-layer call). `lastHeight` and `LayerAnchorAppended` remain; the
   relayer paints `HistoryWindow.heights` from those logs on resurrect.
-- Documented that two identical AN burns in one block share a Circuit 4
-  nullifier (`msg_id` is not in the preimage): the second payout is
-  permanently blocked. Closing it needs a Circuit 4 re-keygen.
 - After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
   reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
   (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.

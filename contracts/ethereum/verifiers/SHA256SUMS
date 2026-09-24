@@ -2,10 +2,14 @@
 # Default pairing (ShplonkArtefactPairing.t.sol): all four pairs.
 # 1A/1B bins unchanged vs 2026-08-12; calldata regenerated 2026-09-08 on n14
 # (Hermez PPoT). LayerHashes Yul regenerated at k_outer=21 (23111 B).
-# Circuit 4 Yul regenerated 2026-09-18 (21152 B, 11 inner PIs, 23 instances).
+# Circuit 4 Yul regenerated 2026-09-18 (21152 B, 11 inner PIs, 23 instances);
+# calldata rotated 2026-09-22 after re-running the pipeline against the rev-3
+# circuit (events_pos in Poseidon preimage + anchor_layer range-check). The
+# Yul .bin byte-hashes identically to 2026-09-18 — the deterministic export
+# reproduced the same VK-embedded bytecode — so only _calldata.bin drifted.
 # CREATE extcodehash pins live in ShplonkDeployLib *_YUL_CODEHASH.
 22762e5e8e8aa3781a91114037a319fb9e242b65a97cce5f316b7de39b564b0d  BridgeWithdrawalAggregatorVerifier.bin
-67366f12c34c3f76c52699ce40b6589469dbf073bc2e6d8a729211363603feb4  BridgeWithdrawalAggregatorVerifier_calldata.bin
+36a2088283ba69a1a96c6c2b903a42044190a7325af6386a14746bd6ff4f8ee0  BridgeWithdrawalAggregatorVerifier_calldata.bin
 db36c101ad9edf1e0bcb3456276b78bc9bca177d9016b82cfddcfe34db4131df  FallbackAggregatorVerifier.bin
 32cd3f693cb9e570d0de97c073c75607b6efe063f2f47ae5f33740aa2f57a4c5  FallbackAggregatorVerifier_calldata.bin
 bb34278118a0ce7c193005110dec26d59f85dd46759851114b439d9d127e9dce  LayerHashesAggregatorVerifier.bin

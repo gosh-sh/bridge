@@ -50,7 +50,7 @@ regenerate both files, not to suspect the key. Regeneration compiles the source,
 Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
 is keygen'd at `K=19`; the aggregated Yul is 21 152 B (23 outer instances = 12 KZG accumulator
 limbs + 11 re-exposed Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`).
-Rotated 2026-09-18 for the `events_pos` nullifier preimage and Option A layer pin.
+Rotated 2026-09-18 for the `events_pos` nullifier preimage and the per-layer anchor scan.
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation

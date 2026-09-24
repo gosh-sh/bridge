@@ -80,9 +80,9 @@ assigns it when the release is tagged.
   (`withdrawByProof(bytes,(uint256×11))`, verified with
   `cast sig`). Integrators that hand-craft calldata (`cast call`
   scripts, custom relayers, front-ends) have to update the tuple
-  signature; a client still emitting the old selector will hit
-  `function selector not recognized` at the router, not a decode
-  error deeper in. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
+  signature; a client still emitting the old selector will see the
+  call revert with empty returndata (no fallback and no router
+  string), not a decode error deeper in. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
   prover host regenerates its Circuit 4 keys on first use — the bump
   is what makes the key cache reject a pre-rotation
   `event_pk.bin` / `event_vk.bin`. Keygen (over the `K = 20` SRS) runs
@@ -357,11 +357,13 @@ assigns it when the release is tagged.
   by revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
   which no longer applies). The `bridge-prover-libraries` sub-workspace
   declares the five circuit crates as path deps at its workspace level
-  (`bridge-prover-libraries/Cargo.toml:50-54`), and root-workspace
-  `bridge-snark-utils` declares them the same way; both cross
-  sub-workspace boundaries (`bridge-circuits` is a standalone
-  sub-workspace, excluded from the root workspace so its gosh-fork
-  halo2 backend does not clash with the root's).
+  (`bridge-prover-libraries/Cargo.toml:50-54`), and the standalone
+  `crates/bridge-snark-utils` package (also excluded from the root
+  workspace, see the top-level `Cargo.toml` `exclude` list) declares
+  them the same way; both reach across sub-workspace boundaries into
+  `crates/bridge-circuits`, which is itself excluded from the root
+  workspace so its gosh-fork halo2 backend does not clash with the
+  root's.
   `bridge-relayer-daemon`'s own `Cargo.toml` has no direct path-dep on
   any circuit crate — it consumes them transitively through
   `bridge-event-witness` / `bridge-event-prover-lib`. The external

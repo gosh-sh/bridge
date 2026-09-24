@@ -93,7 +93,12 @@ test-coverage: ## Generate test coverage report
 #
 # Run its tests explicitly when you touch a circuit:
 #   (cd crates/bridge-circuits && RUST_TEST_THREADS=1 cargo test --workspace)
-# — the .woodpecker/bridge-circuits.yaml pipeline does exactly that per MR.
+# — `.woodpecker/bridge-circuits.yaml` covers the same set per MR, though
+# it splits them across two steps: `bridge-circuits-fast` runs
+# `bridge-event-prove-circuit` + `cross-circuit-block-id-test` without
+# the env var (K=19 / K=20 but small enough), and
+# `bridge-circuits-heavy` sets `RUST_TEST_THREADS=1` for the rest (the
+# K=20 attestation-BLS MockProvers are the ones that need it).
 STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
 	crates/bridge-evm-aggregator crates/bridge-snark-utils \
 	crates/deposit-relayer-daemon crates/eth-light-client-relayer
@@ -118,7 +123,7 @@ test-all: ## Run every Rust crate outside crates/bridge-circuits + the Solidity 
 	if [ -n "$$failed" ]; then echo "$(YELLOW)Failed:$$failed$(NC)"; exit 1; fi; \
 	echo "$(GREEN)All test suites passed$(NC)"
 
-format: ## Format all code (every Rust crate + Solidity)
+format: ## Format all Rust crates outside crates/bridge-circuits + the Solidity suite
 	@echo "$(BLUE)Formatting code...$(NC)"
 	@cargo fmt --all
 	@cd crates/bridge-prover-libraries && cargo fmt --all

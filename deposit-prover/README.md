@@ -99,7 +99,7 @@ Run with `cargo run --release --example <name>`. Present under `examples/`:
 | `inspect_snark` | Inspect SNARK proof structure |
 | `parse_proof_detailed` | Parse and display proof components |
 | `downsize_srs` | Reduce an SRS to a smaller degree |
-| `mock_fixture` | Produce a mock fixture |
+| `mock_fixture` | Run one saved witness through `MockProver` (~2 min) — the pre-flight after a constraint change, before paying for keygen; `--mutate header-pad` checks a constraint rejects what it exists for |
 | `generate_verifier` | Generate Solidity verifier bytecode — legacy reference; the AN side verifies natively |
 | `generate_aggregation_verifier` | Generate an aggregation verifier — same caveat |
 | `export_blake2b_proof` | Export a Blake2b-transcript proof |

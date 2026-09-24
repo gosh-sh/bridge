@@ -1,0 +1,6 @@
+# Large / mutable beacon dumps — regenerate with scripts/fetch_lc_fixtures.sh
+*/update_period_*.json
+*/bootstrap.json
+# consensus-spec-tests extraction
+tests/
+*.tar.gz

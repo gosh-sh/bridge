@@ -77,7 +77,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 | Path | What lives there |
 |---|---|
 | `contracts/ethereum/src/` | The bridge, four verifier adapters, the SHPLONK shim, oracles. Solidity 0.8.19, Foundry. |
-| `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, plus reference calldata. The `.bin` is what deploys. |
+| `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, the generated Solidity source (`.sol`) it compiles from, and reference calldata. The `.bin` is what deploys; the `.sol` is what `aggregate-proof` self-checks a proof against. |
 | `contracts/ethereum/script/` | Deploy scripts; `ShplonkDeployLib.sol` wires `.bin` → shim → typed adapter. |
 | `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT, log binding, keccak coprocessor). |
 | `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, drives the prover, submits `finalizeDeposit` on AN. |
@@ -92,7 +92,9 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 **Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`
 and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
 forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `crates/bridge-prover-libraries/`
-(gosh-fork halo2-base), `crates/bridge-snark-utils/`, both relayer daemons, and `frontend/`.
+(gosh-fork halo2-base), `crates/bridge-snark-utils/`, `crates/deposit-relayer-daemon/`, and `frontend/`.
+The AN→ETH relayer `crates/bridge-relayer-daemon/` and the withdrawal CLI `crates/ackinacki-bridge/`
+are symlinked members of `crates/bridge-prover-libraries/` and build only from there.
 
 ---
 
@@ -102,15 +104,18 @@ forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `cr
 make setup                 # toolchains and dependencies
 make build                 # Rust workspace + Solidity
 make test                  # both test suites
+make test-all              # every crate's tests + forge test
 make check                 # format-check + lint + test
 ```
 
-Run `make check` before pushing.
+Run `make pre-push` before pushing: on top of `make check` it covers the relayer, the aggregator and
+`forge coverage`, none of which any GitHub pipeline runs. The CI section of [AGENTS.md](AGENTS.md)
+lists what it does and does not cover.
 
 The end-user withdrawal CLI is not built from here at all —
 [`crates/ackinacki-bridge/scripts/install.sh`](crates/ackinacki-bridge/scripts/install.sh) downloads
-the published binaries (the CLI, the prover subprocess it shells out to, `solc`, and the verifier
-bytecode), so an operator needs neither Rust nor a checkout. Start at
+the published binaries (the CLI, the prover subprocess it shells out to, and the verifier bytecode
+and sources), so an operator needs neither Rust nor a checkout. Start at
 [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md).
 
 Contracts on their own:
@@ -127,11 +132,12 @@ The suite is inventoried per file, with what each one covers, in
 deliberate and worth knowing before you touch them: `optimizer_runs = 1` and `via_ir = true`. The
 bridge sits close to the EIP-170 size limit, and several functions are otherwise stack-too-deep.
 
-Standalone crates build from their own directories:
+Standalone crates build from their own directories; the relayer and the withdrawal CLI from the
+prover workspace they belong to:
 
 ```bash
 cd crates/bridge-prover-libraries && cargo build --release
-cd crates/bridge-relayer-daemon && cargo test
+cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon
 ```
 
 ---

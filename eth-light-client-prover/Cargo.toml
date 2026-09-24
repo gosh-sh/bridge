@@ -1,0 +1,114 @@
+# Standalone package (own [workspace]), like `deposit-prover`: it pulls the
+# heavy gosh halo2 stack (halo2-ecc bls12_381 + gosh-bls-verification) and must
+# not force those deps onto the main Cargo workspace. Excluded from CI's
+# `cargo test --workspace`; built/tested on n14 (see docs/m1_notes.md).
+[workspace]
+
+[package]
+name = "eth-light-client-prover"
+version = "0.1.0"
+edition = "2021"
+authors = ["Acki Nacki Bridge Team"]
+license = "MIT OR Apache-2.0"
+description = "Trustless Ethereum sync-committee light client circuit for the ETH->AN deposit path (M1: BLS core)"
+
+[lib]
+name = "eth_light_client_prover"
+path = "src/lib.rs"
+
+[dependencies]
+# Halo2 backend — the gosh fork that carries the bls12_381 module in halo2-ecc
+# and matches tvm-sdk's `full_dex_and_bridge_test_with_final_halo2_circuit`
+# (so a future VkBlob is verifiable by ZKHALO2VERIFYWITHVK). Same pin as
+# crates/an-bridge-prover/Cargo.toml.
+# `test-utils` gives us `halo2_base::utils::testing::base_test` for the MockProver tests.
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom", "test-utils"] }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
+
+# In-circuit committee BLS aggregate verification (MSM + 2/3 threshold + pairing).
+# We reuse this gadget verbatim; M1 only adds the Ethereum-specific glue
+# (bitmask -> signers_data, POP_ DST hash-to-curve, compressed-G2 sig decode).
+gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+# Pulled now for M2 (in-circuit SSZ SHA-256 merkleization + hash-to-field);
+# unused in M1 code but keeps the dependency graph stable across milestones.
+gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+
+# SNARK verifier — gosh fork, same rev deposit-prover pins (164bd42). Only pulled
+# under the `aggregation` feature (the M6 recursive-rotate RotateAggregationCircuit),
+# so the default crate + its MockProver tests stay lean. Must be the gosh fork so it
+# shares the one gosh halo2-base backend the [patch] block unifies (mixing axiom's
+# v0.1.7 would fork the graph). Features mirror deposit-prover/Cargo.toml.
+snark-verifier = { git = "https://github.com/gosh-sh/snark-verifier", rev = "164bd42e300b382239e63b16532faca539d6b324", default-features = false, features = [
+  "loader_evm",
+  "loader_halo2",
+  "halo2-axiom",
+], optional = true }
+snark-verifier-sdk = { git = "https://github.com/gosh-sh/snark-verifier", rev = "164bd42e300b382239e63b16532faca539d6b324", default-features = false, features = [
+  "loader_evm",
+  "loader_halo2",
+  "halo2-axiom",
+], optional = true }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+# Same major as halo2-base's re-exported num-bigint (0.4) so BigUint types unify.
+num-bigint = "0.4"
+hex = "0.4"
+anyhow = "1.0"
+thiserror = "1.0"
+itertools = "0.13"
+rand = "0.8"
+
+[features]
+# M6 recursive rotate: RotateAggregationCircuit (snark-verify N committee-shard
+# proofs + in-circuit committee re-merkleization/commitment/branch glue).
+aggregation = ["dep:snark-verifier", "dep:snark-verifier-sdk"]
+
+# The N=1 recursive-rotate glue bring-up (needs the `aggregation` feature).
+[[example]]
+name = "aggregate_rotate_glue"
+required-features = ["aggregation"]
+
+[[example]]
+name = "measure_agg_node"
+required-features = ["aggregation"]
+
+[[example]]
+name = "rotate_tree_fold"
+required-features = ["aggregation"]
+
+[[example]]
+name = "rotate_tree_n8"
+required-features = ["aggregation"]
+
+[[example]]
+name = "rotate_decider_check"
+required-features = ["aggregation"]
+
+[dev-dependencies]
+rand_core = "0.6"
+# Serialize the tree-root Snark to disk (reused by the decider reference check
+# `examples/rotate_decider_check.rs` and the future ROTATE_VK_BLOB emit).
+bincode = "1.3"
+# Native Poseidon twin for the M3-rotate commitment tests — same crate + spec
+# (T=3, RATE=2, R_F=8, R_P=57) halo2-base's own hasher compatibility tests use,
+# so `hash_fix_len_array` in-circuit matches `Poseidon::new(8,57).update().squeeze()`.
+pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
+
+# Collapse the halo2 backend to a single instance: any transitive
+# axiom-crypto/halo2-lib or crates.io halo2-axiom reference is redirected to the
+# gosh fork. Mirrors crates/an-bridge-prover/Cargo.toml and deposit-prover.
+[patch.crates-io]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }
+
+[patch."https://github.com/axiom-crypto/halo2-lib.git"]
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
+
+[profile.dev]
+opt-level = 3

@@ -1,0 +1,8 @@
+/target/
+*.srs
+.DS_Store
+tvm-cli
+params/
+test_cache_real_prover/
+n14_logs/
+.temp/

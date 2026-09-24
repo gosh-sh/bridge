@@ -19,10 +19,11 @@ contract ShplonkDeployLibTest is Test {
         try vm.readFileBinary(SPIKE_BIN) returns (bytes memory b) {
             bytecode = b;
         } catch {
-            emit log("SKIP: run make generate-spike-artifacts");
-            return;
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
         }
-        if (bytecode.length == 0) return;
+        if (bytecode.length == 0) {
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
+        }
 
         calldata_ = vm.readFileBinary(SPIKE_CALLDATA);
         require(calldata_.length > 0, "empty spike calldata");
@@ -35,9 +36,11 @@ contract ShplonkDeployLibTest is Test {
 
     function test_shplonkWrapper_rejectsTamperedCalldata() public {
         try vm.readFileBinary(SPIKE_BIN) returns (bytes memory bytecode) {
-            if (bytecode.length == 0) return;
+            if (bytecode.length == 0) {
+                vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
+            }
         } catch {
-            return;
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
         }
 
         bytes memory calldata_ = vm.readFileBinary(SPIKE_CALLDATA);
@@ -49,5 +52,20 @@ contract ShplonkDeployLibTest is Test {
         address wrapper = ShplonkDeployLib.deployShplonkWrapper(yul);
 
         assertFalse(ShplonkHalo2Verifier(wrapper).verify(calldata_));
+    }
+
+    function test_eth6_wrongExtcodehash_reverts() public {
+        bytes32 pin = 0x23e0d1a694c9b7485f81a59eefafa6c0d1865db721133b030ecd6ff86dfe48bb;
+        bytes32 wrong = bytes32(uint256(1));
+        vm.expectRevert(
+            abi.encodeWithSelector(ShplonkDeployLib.YulCodehashMismatch.selector, pin, wrong)
+        );
+        this.deployWithdrawalYulWrongPin();
+    }
+
+    function deployWithdrawalYulWrongPin() external {
+        ShplonkDeployLib.deployYulFromBin(
+            "verifiers/BridgeWithdrawalAggregatorVerifier.bin", bytes32(uint256(1))
+        );
     }
 }

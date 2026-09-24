@@ -232,9 +232,9 @@ pub type DriverResult<T> = Result<T, DriverError>;
 /// CLI knobs, no verifier timeouts — those all live with the caller.
 #[derive(Debug, Clone)]
 pub struct LiveProverConfig {
-    /// Anchor-level mode. See [`crate::AnchorMode`]. Default is
-    /// [`crate::AnchorMode::L1`]; opt in to
-    /// [`crate::AnchorMode::L2`] to switch the driver onto the
+    /// Anchor-level mode. See [`crate::AnchorMode`]. The struct default is
+    /// [`crate::AnchorMode::L1`] (local/CI); shellnet sets
+    /// [`crate::AnchorMode::L2`] via `BRIDGE_ANCHOR_LEVEL=2`, the
     /// supercritical W²-stride schedule described in
     /// `docs/l2_anchoring_proposal.md`.
     ///
@@ -422,6 +422,9 @@ pub struct BundleProofArtifacts {
 pub struct BkUpdateProofArtifacts {
     pub block_seq_no: u64,
     pub block_height: u64,
+    /// Layer cursor baked into the Circuit 1A/1B `lastSeen` instance
+    /// (`BridgeState::stored_last_seen_block_seq_no`). Not the BK-update
+    /// monotonicity cursor. The field name is historical.
     pub last_seen_bk_update_seq_no: u64,
     /// Raw 32-byte BE chain block hash (= SHA-256 root of the 16-leaf
     /// depth-4 `block_merkle_tree_leaves` = Solidity

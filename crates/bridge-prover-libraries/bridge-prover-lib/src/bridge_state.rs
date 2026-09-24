@@ -120,6 +120,30 @@ impl HistoryWindow {
         self.iter_chronological()
             .position(|(_, h)| h == height)
     }
+
+    /// Paint `heights` from a chronological list (oldest first), using the
+    /// same ring layout as [`append`]. The contract no longer stores
+    /// per-slot heights; the relayer reconstructs them from
+    /// `LayerAnchorAppended` logs on resurrect.
+    pub fn apply_chronological_heights(&mut self, oldest_first: &[u64]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            oldest_first.len() == self.data_len,
+            "apply_chronological_heights: got {} heights, window data_len={}",
+            oldest_first.len(),
+            self.data_len,
+        );
+        self.heights.fill(0);
+        let w = self.data.len();
+        let start = if self.data_len < w {
+            0
+        } else {
+            self.write_cursor
+        };
+        for (i, h) in oldest_first.iter().enumerate() {
+            self.heights[(start + i) % w] = *h;
+        }
+        Ok(())
+    }
 }
 
 /// Shared bridge state — full mirror of the contract's `GlobalHistoryData`.
@@ -398,17 +422,17 @@ impl BridgeState {
     /// This is the seed used when the daemon starts against a contract that
     /// some other party has already advanced (e.g. a shared test bridge that
     /// a co-tester has been driving). The four scalar fields plus the
-    /// `MAX_LAYERS` per-layer `HistoryWindow`s are copied verbatim; on-chain
-    /// `heights[i]` slots carry the **block seq_no** used at
-    /// `_appendLayerHashes(..., blockSeqNo)` (Solidity keeps only seq_no,
-    /// not height), so the reconstructed `HistoryWindow.heights[]` and
-    /// `HistoryWindow.last_height` are seq_no values — matching the on-chain
-    /// mirror. The returned state has `initialized = true` iff the contract
-    /// has recorded at least one block (`last_seen_block_seq_no > 0`).
+    /// `MAX_LAYERS` per-layer `HistoryWindow`s are copied; on-chain
+    /// `lastHeight` is seq_no, and per-slot `heights[]` are painted by the
+    /// caller from `LayerAnchorAppended` logs (also seq_no — Solidity never
+    /// stored AN chain-side `height`). The returned state has
+    /// `initialized = true` iff the contract has recorded at least one
+    /// block (`last_seen_block_seq_no > 0`).
     ///
     /// `stored_last_seen_block_height` cannot be recovered from the contract
-    /// — Solidity's `_layerWindows[L].heights[]` mirrors `seq_no`, not the
-    /// AN chain-side per-block `height` — so it is set to zero here.
+    /// — on-chain `lastHeight` / `LayerAnchorAppended.blockHeight` are
+    /// `seq_no`, not the AN chain-side per-block `height` — so it is set
+    /// to zero here.
     pub fn from_contract(
         cfs: EthBridgeContractState,
         window_size: usize,
@@ -581,6 +605,39 @@ mod tests {
         s.append_layer(1, [3u8; 32], 24);
         assert_eq!(s.slot_for_event_height(1, 16), Some(1));
         assert_eq!(s.slot_for_event_height(1, 99), None);
+    }
+
+    #[test]
+    fn apply_chronological_heights_matches_append_ring() {
+        let mut exact_w = HistoryWindow::new(4);
+        exact_w.data_len = 4;
+        exact_w.write_cursor = 0;
+        exact_w
+            .apply_chronological_heights(&[10, 20, 30, 40])
+            .unwrap();
+        let mut fresh = HistoryWindow::new(4);
+        for (i, h) in [10u64, 20, 30, 40].into_iter().enumerate() {
+            let mut hash = [0u8; 32];
+            hash[0] = i as u8;
+            fresh.append(hash, h);
+        }
+        assert_eq!(fresh.heights, exact_w.heights);
+        assert_eq!(fresh.write_cursor, exact_w.write_cursor);
+
+        let mut wrapped = HistoryWindow::new(4);
+        wrapped.data_len = 4;
+        wrapped.write_cursor = 2;
+        wrapped
+            .apply_chronological_heights(&[30, 40, 50, 60])
+            .unwrap();
+        let mut six = HistoryWindow::new(4);
+        for (i, h) in [10u64, 20, 30, 40, 50, 60].into_iter().enumerate() {
+            let mut hash = [0u8; 32];
+            hash[0] = i as u8;
+            six.append(hash, h);
+        }
+        assert_eq!(six.heights, wrapped.heights);
+        assert_eq!(six.write_cursor, wrapped.write_cursor);
     }
 
     #[test]

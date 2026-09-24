@@ -1,0 +1,155 @@
+{
+	"ABI version": 2,
+	"version": "2.4",
+	"header": ["pubkey", "time", "expire"],
+	"functions": [
+		{
+			"name": "constructor",
+			"inputs": [
+				{"name":"pubkey","type":"uint256"},
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"committeePeriod","type":"uint64"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "submitUpdate",
+			"inputs": [
+				{"name":"proof","type":"bytes"},
+				{"name":"publicInputs","type":"bytes"}
+			],
+			"outputs": []
+		},
+        {
+			"name": "submitRotate",
+			"inputs": [
+				{"name":"proof","type":"bytes"},
+				{"name":"publicInputs","type":"bytes"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "submitAncestry",
+			"inputs": [
+				{"name":"headerRlps","type":"bytes[]"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "rePushAnchor",
+			"inputs": [
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "disableOwnerRotation",
+			"inputs": [],
+			"outputs": []
+		},
+		{
+			"name": "reAnchorCommittee",
+			"inputs": [
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"period","type":"uint64"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "updateCode",
+			"inputs": [
+				{"name":"newcode","type":"cell"},
+				{"name":"userCell","type":"cell"}
+			],
+			"outputs": []
+		},
+		{
+			"name": "getHead",
+			"inputs": [],
+			"outputs": [
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"finalizedBeaconRoot","type":"uint256"},
+				{"name":"executionBlockHash","type":"uint256"},
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"updatesApplied","type":"uint64"}
+			]
+		},
+		{
+			"name": "isProvenExecutionBlockHash",
+			"inputs": [
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "slotsPerYear",
+			"inputs": [],
+			"outputs": [
+				{"name":"value0","type":"uint64"}
+			]
+		},
+		{
+			"name": "provenQueueLen",
+			"inputs": [],
+			"outputs": [
+				{"name":"value0","type":"uint64"}
+			]
+		},
+		{
+			"name": "getCommitteeState",
+			"inputs": [],
+			"outputs": [
+				{"name":"currentCommittee","type":"uint256"},
+				{"name":"committeePeriod","type":"uint64"},
+				{"name":"ownerRotationEnabled","type":"bool"},
+				{"name":"reAnchorsApplied","type":"uint64"}
+			]
+		}
+	],
+	"events": [
+		{
+			"name": "CommitteeRotated",
+			"inputs": [
+				{"name":"period","type":"uint64"},
+				{"name":"fromCommitteeCommitment","type":"uint256"},
+				{"name":"toCommitteeCommitment","type":"uint256"}
+			]
+		},
+		{
+			"name": "CommitteeReAnchored",
+			"inputs": [
+				{"name":"period","type":"uint64"},
+				{"name":"fromCommitteeCommitment","type":"uint256"},
+				{"name":"toCommitteeCommitment","type":"uint256"}
+			]
+		},
+		{
+			"name": "AncestryAccepted",
+			"inputs": [
+				{"name":"checkpointHash","type":"uint256"},
+				{"name":"hashesAdded","type":"uint64"}
+			]
+		},
+		{
+			"name": "CheckpointBackfilled",
+			"inputs": [
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"executionBlockHash","type":"uint256"}
+			]
+		},
+		{
+			"name": "AnchorPushBounced",
+			"inputs": []
+		},
+		{
+			"name": "AnchorsExpired",
+			"inputs": [
+				{"name":"count","type":"uint64"}
+			]
+		}
+	],
+	"fields": []
+}

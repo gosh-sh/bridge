@@ -1,0 +1,17 @@
+[package]
+name = "cross-circuit-block-id-test"
+version = "0.1.0"
+edition = "2021"
+
+# Integration-test-only crate. `src/lib.rs` is empty on purpose — the real
+# work lives in `tests/`. Kept as its own workspace member (rather than
+# `dev-dependencies` on an existing circuit crate) so it can pull in *both*
+# Circuit 1 and Circuit 2 without creating dev-dep cycles.
+
+[dev-dependencies]
+attestation-bls-checker-circuit = { path = "../attestation-bls-checker-circuit" }
+historical-layer-hashes-movement-checker-circuit = { path = "../historical-layer-hashes-movement-checker-circuit" }
+bridge-test-data-gen = { path = "../test-data-gen" }
+bridge-poseidon = { path = "../bridge-poseidon" }
+halo2-base = { workspace = true, features = ["test-utils"] }
+gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }

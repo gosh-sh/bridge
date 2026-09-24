@@ -1,0 +1,11 @@
+[package]
+name = "bridge-poseidon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+halo2-base = { workspace = true }
+halo2-ecc = { workspace = true }
+pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
+num-bigint = "0.4"
+gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }

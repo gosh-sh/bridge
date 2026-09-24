@@ -38,7 +38,7 @@ that summary current.
 
 The node maintains, per thread and per layer `L ∈ {0..10}`, a
 fixed-size circular buffer of `W = 128` Poseidon hashes (see
-`GLOBAL_HISTORY_DATA_SPEC.md` in `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` (private repository)).
+`GLOBAL_HISTORY_DATA_SPEC.md` in `crates/bridge-circuits/docs/`).
 Layer 0 holds per-block leaves `Poseidon(block_id ‖ envelope_hash ‖
 ext_out_messages_root)` — appended every finalized block. Layer
 `L ≥ 1` holds the Poseidon-Merkle root of the previous full layer-`L-1`
@@ -130,15 +130,15 @@ wipe must happen on both together, otherwise they diverge silently.
 At ~3 blk/s a key block lands every `W/3 ≈ 43 s`, but Circuit 1A alone
 takes ~5 min and its cost is invariant in `W`. Without help, the prover
 falls behind the chain by ~7×. **Thinning** is the fix: relay only
-*every P-th* key block (`P = 4` here), so each bundle covers `W·P =
-512` source blocks. The work skipped is absorbed by Circuit 2's
+*every P-th* key block (`P = 8` here), so each bundle covers `W·P =
+1024` source blocks. The work skipped is absorbed by Circuit 2's
 dense-Poseidon proof chain — up to `MAX_CHAIN_LEN = 11` links, freely
 interleaving three primitives on the layer trees: *climb* (jump to a
 lower layer at the same window), *forward* (advance one full window at
 the current layer), and *descend* (drop to a higher layer). The producer's
 emission cadence is unchanged — thinning is purely a prover-side
 relay-rate change. See
-`BRIDGE_PROVER_THINNING_SPEC.md` in `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` (private repository)
+`BRIDGE_PROVER_THINNING_SPEC.md` in `crates/bridge-circuits/docs/`
 for the catalogue of chain shapes and slack analysis.
 
 ---
@@ -150,7 +150,7 @@ for the catalogue of chain shapes and slack analysis.
 - **~16 GB RAM** at proof generation.
 - For local devnet only:
   - **Docker / docker compose**.
-  - Sibling checkout of `gosh-sh/acki-nacki` (private repository) on branch `poseidon_dex`.
+  - Sibling checkout of the `acki-nacki` chain repo on branch `poseidon_dex`.
 
 ---
 

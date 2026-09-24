@@ -5,24 +5,47 @@
 //! `bridge-event-prove-circuit::BridgeEventProveCircuit` halo2 circuit
 //!
 //! Two responsibilities:
-//!   1. **Input conversion** — deserialize the witness JSON, hex-decode
-//!      cell records, and assemble a `BridgeEventProveCircuit` instance.
-//!   2. **Public instance derivation** — build the 10-slot vector
-//!      `[token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-//!      sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]` that the
+//!   1. **Input conversion** — deserialize the witness JSON, hex-decode cell
+//!      records, and assemble a `BridgeEventProveCircuit` instance.
+//!   2. **Public instance derivation** — build the 11-slot vector `[token_id,
+//!      amount, recipient_hi, recipient_lo, dst_chain_id, sender_acc_fr,
+//!      dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` that the
 //!      verifier checks.
 //!
 //! ### Anchor binding contract
 //!
 //! The witness's `anchor.layer_hash_hex` becomes the proof's
-//! `PUB_FINAL_ROOT` instance slot. The circuit computes `final_root` by
-//! climbing the supplied dense chain and exposes that value publicly. The verifier simply
-//! checks `final_root` against its current mirror of `layer_windows`
-//! off-circuit.
+//! `PUB_FINAL_ROOT` instance slot, and `anchor.layer_idx + 1` (1-indexed)
+//! becomes `PUB_ANCHOR_LAYER`. The circuit computes `final_root` by
+//! climbing the supplied dense chain and range-checks the layer. The
+//! on-chain adapter checks `final_root` against that layer's window.
 
 use std::convert::TryInto;
 
 use anyhow::{bail, Context, Result};
+use bridge_event_prove_circuit::{
+    boc_helper::BocFlattenData,
+    bridge_event_prove_circuit::{
+        be_bytes_to_fr, BridgeEventProveCircuit, EVENT_AMOUNT_END, EVENT_AMOUNT_START,
+        EVENT_DST_CHAIN_ID_END, EVENT_DST_CHAIN_ID_START, MAX_ANCHOR_LAYER, MAX_EVENTS_TREE_DEPTH,
+        RECIPIENT_HI_END, RECIPIENT_HI_START, RECIPIENT_LO_END, RECIPIENT_LO_START,
+        TOTAL_PUBLIC_INPUTS,
+    },
+    test_helpers::{decode_sender_account_id_from_cell, nullifier_native},
+};
+// Re-export the witness JSON types so the daemon doesn't need to pull
+// `bridge-event-witness` directly.
+pub use bridge_event_witness::schema::{
+    AnchorRef, BlockContext, CellRecord, DenseChainLinkSer, MerkleProofData, PrivateWitness,
+    WithdrawalInitiated, SCHEMA_VERSION,
+};
+use bridge_prover_lib::{
+    keys::EventKeyManager,
+    transcript::{PoseidonWrite, TranscriptKind},
+};
+use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink, MAX_CHAIN_LEN};
+// Re-export so consumers can construct circuit params without an extra dep.
+pub use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::halo2_proofs::{
     halo2curves::bn256::{Bn256, Fr, G1Affine},
     plonk::create_proof,
@@ -31,31 +54,6 @@ use halo2_base::halo2_proofs::{
 };
 use rand::rngs::OsRng;
 use tracing::info;
-use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink, MAX_CHAIN_LEN};
-
-use bridge_prover_lib::keys::EventKeyManager;
-use bridge_prover_lib::transcript::{PoseidonWrite, TranscriptKind};
-
-use bridge_event_prove_circuit::boc_helper::BocFlattenData;
-use bridge_event_prove_circuit::bridge_event_prove_circuit::{
-    be_bytes_to_fr, BridgeEventProveCircuit, EVENT_AMOUNT_END, EVENT_AMOUNT_START,
-    EVENT_DST_CHAIN_ID_END, EVENT_DST_CHAIN_ID_START, MAX_EVENTS_TREE_DEPTH,
-    RECIPIENT_HI_END, RECIPIENT_HI_START, RECIPIENT_LO_END, RECIPIENT_LO_START,
-    TOTAL_PUBLIC_INPUTS,
-};
-use bridge_event_prove_circuit::test_helpers::{
-    decode_sender_account_id_from_cell, nullifier_native,
-};
-
-// Re-export so consumers can construct circuit params without an extra dep.
-pub use halo2_base::gates::circuit::BaseCircuitParams;
-
-// Re-export the witness JSON types so the daemon doesn't need to pull
-// `bridge-event-witness` directly.
-pub use bridge_event_witness::schema::{
-    AnchorRef, BlockContext, CellRecord, DenseChainLinkSer, MerkleProofData,
-    PrivateWitness, WithdrawalInitiated, SCHEMA_VERSION,
-};
 
 /// Conservative base-circuit params for first-cut Circuit 4 work. Mirrors
 /// `bridge-event-prove-circuit::test_helpers::base_circuit_params`. Future
@@ -122,7 +120,8 @@ fn dense_chain_to_native(links: &[DenseChainLinkSer]) -> Result<Vec<DenseChainLi
     }
     let mut out = Vec::with_capacity(MAX_CHAIN_LEN);
     for (i, link) in links.iter().enumerate() {
-        let leaf_native = parse_hex_array::<32>(&format!("dense_chain[{i}].leaf_hex"), &link.leaf_hex)?;
+        let leaf_native =
+            parse_hex_array::<32>(&format!("dense_chain[{i}].leaf_hex"), &link.leaf_hex)?;
         let mut siblings = Vec::with_capacity(link.siblings_hex.len());
         for (j, s) in link.siblings_hex.iter().enumerate() {
             siblings.push(parse_hex_array::<32>(
@@ -185,8 +184,58 @@ pub fn build_proof_inputs(
             events_siblings.len(),
         );
     }
+    // Mirror `BridgeEventProveCircuit::assert_invariants`'s events_pos range
+    // check here so an out-of-range witness surfaces as a decoded error with
+    // context rather than a panic. `assert_invariants` fires from
+    // `BridgeEventProveCircuit::new` further down in this same function
+    // (`build_proof_inputs`), so without this mirror an out-of-range witness
+    // would panic on the caller's thread, not on a worker.
+    //
+    // Shift is safe: we already bounded `events_siblings.len()` by
+    // `MAX_EVENTS_TREE_DEPTH` above, which fits comfortably inside `usize::BITS`.
+    let events_pos_max = 1usize << events_siblings.len();
+    if events_pos >= events_pos_max {
+        bail!(
+            "events_tree_proof position {events_pos} out of range for depth {} (max={events_pos_max})",
+            events_siblings.len(),
+        );
+    }
 
     let (block_siblings, block_pos) = merkle_proof_to_native(block_tree, "block_tree_proof")?;
+    // Same range mirror for the block-tree position; the circuit constructor
+    // does not currently panic on this axis but a future refactor could add
+    // an equivalent bounds check, and reporting here keeps both axes
+    // symmetric under a decoded error path.
+    //
+    // Unlike `events_siblings.len()` above there is no explicit `MAX_*_DEPTH`
+    // cap on `block_siblings.len()` in the circuit, so a pathological witness
+    // could otherwise trip Rust's shift-by-≥-`usize::BITS` handling: a debug
+    // build panics with `attempt to shift left with overflow`; a release
+    // build silently masks the shift amount modulo `usize::BITS`. Take
+    // `siblings.len() == 64` on a 64-bit target — the mask reduces the
+    // shift to `64 % 64 = 0`, so `1usize << 64` evaluates to `1` and
+    // `block_pos_max` becomes `1`. The subsequent `block_pos >= block_pos_max`
+    // check then over-rejects (positions in `1..2^32` — the actual range a
+    // witness can encode, since `MerkleProofData::position` is `u32` — are
+    // turned away instead of accepted for a 64-deep tree) but still lets
+    // `block_pos == 0` through — a pathological deep-tree witness with a
+    // zero position would silently pass this check on release. `checked_shl`
+    // fails closed at that boundary in every profile and stops the
+    // zero-position case too.
+    let block_pos_max = 1usize
+        .checked_shl(block_siblings.len() as u32)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "block_tree_proof depth {} is not representable as a usize width shift",
+                block_siblings.len(),
+            )
+        })?;
+    if block_pos >= block_pos_max {
+        bail!(
+            "block_tree_proof position {block_pos} out of range for depth {} (max={block_pos_max})",
+            block_siblings.len(),
+        );
+    }
 
     let account_dapp_id = parse_hex_array::<32>(
         "block_context.account_dapp_id_hex",
@@ -196,26 +245,42 @@ pub fn build_proof_inputs(
         "block_context.account_id_hex",
         &witness.block_context.account_id_hex,
     )?;
-    let envelope_hash =
-        parse_hex_array::<32>("block_context.envelope_hash_hex", &witness.block_context.envelope_hash_hex)?;
+    let envelope_hash = parse_hex_array::<32>(
+        "block_context.envelope_hash_hex",
+        &witness.block_context.envelope_hash_hex,
+    )?;
     let block_id = parse_hex_array::<32>("block_id_hex", &witness.block_id_hex)?;
 
     let dense_chain = dense_chain_to_native(&anchor.dense_chain)?;
     let num_active_chain_steps = anchor.num_active_chain_steps as usize;
     if num_active_chain_steps > MAX_CHAIN_LEN {
         bail!(
-            "anchor.num_active_chain_steps={num_active_chain_steps} exceeds MAX_CHAIN_LEN ({MAX_CHAIN_LEN})",
+            "anchor.num_active_chain_steps={num_active_chain_steps} exceeds MAX_CHAIN_LEN \
+             ({MAX_CHAIN_LEN})",
         );
     }
 
     let final_root_bytes = parse_hex_array::<32>("anchor.layer_hash_hex", &anchor.layer_hash_hex)?;
     let final_root_fr = bytes_to_fr(&final_root_bytes);
 
-    // 10-slot public-instance layout (see
+    let anchor_layer = anchor
+        .layer_idx
+        .checked_add(1)
+        .filter(|&l| l <= u32::from(MAX_ANCHOR_LAYER))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "anchor.layer_idx={} is not a 0-indexed layer in 0..={MAX_ANCHOR_LAYER}-1",
+                anchor.layer_idx
+            )
+        })?;
+    let anchor_layer_u8 = u8::try_from(anchor_layer).expect("checked against MAX_ANCHOR_LAYER");
+    let anchor_layer_fr = Fr::from(u64::from(anchor_layer));
+
+    // 11-slot public-instance layout (see
     // `bridge-event-prove-circuit::bridge_event_prove_circuit` PUB_* constants):
     //   [0] token_id, [1] amount, [2] recipient_hi, [3] recipient_lo,
     //   [4] dst_chain_id, [5] sender_acc_fr, [6] dapp_fr, [7] acc_fr,
-    //   [8] nullifier, [9] final_root.
+    //   [8] nullifier, [9] final_root, [10] anchor_layer.
     let body = &entries[1].cell_repr_data;
     let recipient_payload = &entries[2].cell_repr_data;
     let sender_payload = &entries[3].cell_repr_data;
@@ -223,10 +288,8 @@ pub fn build_proof_inputs(
     let token_id_fr = derive_token_id_fr(&entries[1])?;
     let amount_fr = be_bytes_to_fr(&body[EVENT_AMOUNT_START..EVENT_AMOUNT_END]);
     let dst_chain_id_fr = be_bytes_to_fr(&body[EVENT_DST_CHAIN_ID_START..EVENT_DST_CHAIN_ID_END]);
-    let recipient_hi_fr =
-        be_bytes_to_fr(&recipient_payload[RECIPIENT_HI_START..RECIPIENT_HI_END]);
-    let recipient_lo_fr =
-        be_bytes_to_fr(&recipient_payload[RECIPIENT_LO_START..RECIPIENT_LO_END]);
+    let recipient_hi_fr = be_bytes_to_fr(&recipient_payload[RECIPIENT_HI_START..RECIPIENT_HI_END]);
+    let recipient_lo_fr = be_bytes_to_fr(&recipient_payload[RECIPIENT_LO_START..RECIPIENT_LO_END]);
     let sender_account_id = decode_sender_account_id_from_cell(sender_payload);
     let sender_acc_fr = bytes_to_fr(&sender_account_id);
     let dapp_fr = bytes_to_fr(&account_dapp_id);
@@ -239,6 +302,7 @@ pub fn build_proof_inputs(
         recipient_hi_fr,
         recipient_lo_fr,
         sender_acc_fr,
+        Fr::from(events_pos as u64),
     );
 
     let mut public_instances = Vec::with_capacity(TOTAL_PUBLIC_INPUTS);
@@ -252,6 +316,7 @@ pub fn build_proof_inputs(
     public_instances.push(acc_fr);
     public_instances.push(nullifier_fr);
     public_instances.push(final_root_fr);
+    public_instances.push(anchor_layer_fr);
 
     let circuit = BridgeEventProveCircuit::new(
         entries,
@@ -265,6 +330,7 @@ pub fn build_proof_inputs(
         block_pos,
         dense_chain,
         num_active_chain_steps,
+        anchor_layer_u8,
         base_circuit_params,
     );
 
@@ -296,10 +362,10 @@ fn derive_token_id_fr(body: &BocFlattenData) -> Result<Fr> {
 /// Output of a Circuit 4 proof generation pass.
 ///
 /// `proof_bytes` is the SHPLONK/Blake2b-encoded proof; `public_instances`
-/// is the 10-slot vector
+/// is the 11-slot vector
 /// `[token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-/// sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root]` — what the
-/// verifier (or the on-chain bridge) checks against.
+/// sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` — what
+/// the verifier (or the on-chain bridge) checks against.
 #[derive(Clone)]
 pub struct EventProofOutput {
     pub proof_bytes: Vec<u8>,
@@ -331,7 +397,10 @@ pub fn generate_event_proof_with_transcript(
 ) -> Result<EventProofOutput> {
     let inputs = build_proof_inputs(witness, event_km.config().clone())
         .context("build_proof_inputs failed (translating witness JSON → circuit)")?;
-    let EventProofInputs { circuit, public_instances } = inputs;
+    let EventProofInputs {
+        circuit,
+        public_instances,
+    } = inputs;
     generate_event_proof_from_circuit_with_transcript(
         event_km,
         circuit,

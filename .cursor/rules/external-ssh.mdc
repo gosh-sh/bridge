@@ -37,8 +37,7 @@ ssh -p 22488 gosh@94.156.178.14   # hostname: n14
 ```bash
 /mnt/data/gosh/acki-nacki/        # AN node cluster (poseidon_dex); docker compose via make run
 /mnt/data/gosh/sergey-bridge/     # prover scratch root
-  acki-nacki-to-eth-bridge-halo2-prover/
-  acki-nacki-to-eth-bridge-halo2-circuits/
+  bridge/                         # crates/bridge-prover-libraries + crates/bridge-circuits
   acki-nacki-bridge/
   params/
   proofs/

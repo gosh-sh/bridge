@@ -55,7 +55,8 @@ pub fn find_next_thinned_key_block(
 mod tests {
     use super::*;
 
-    // W = 128, P = 4 → step = 512 (mirrors the production configuration).
+    // W = 128, P = 4 → step = 512. A smaller stride than production
+    // (`THINNING_FACTOR_P` is 8) so the boundary arithmetic stays readable.
     const W: u64 = 128;
     const P: u64 = 4;
     const STEP: u64 = W * P;

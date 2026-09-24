@@ -10,11 +10,14 @@
 //! accepts.
 //!
 //! To make that guarantee *self-checking* rather than assumed, this bin
-//! regenerates the Yul `.bin` for the supplied inner snark and asserts it is
-//! **byte-identical** to the committed verifier bytecode in
-//! `contracts/ethereum/verifiers/<name>.bin`. If the regenerated VK ever drifts
-//! (wrong inner shape / config / SRS), the produced calldata would be rejected
-//! on-chain — so we refuse to emit it.
+//! regenerates the verifier's Solidity source for the supplied inner snark and
+//! asserts it is **byte-identical** to the committed
+//! `contracts/ethereum/verifiers/<name>.sol`. The source is fully determined by
+//! the aggregator VK, so a drifted VK (wrong inner shape / config / SRS) — whose
+//! calldata the deployed verifier would reject — fails the comparison and we
+//! refuse to emit it. Nothing is compiled here, so no `solc` is needed; that the
+//! committed `.sol` compiles to the deployed `.bin` is checked where verifiers
+//! are regenerated (`scripts/check_verifier_sources.sh`).
 //!
 //! ```bash
 //! cd crates/bridge-evm-aggregator
@@ -28,7 +31,9 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use bridge_evm_aggregator::{
-    aggregator::AggregatorConfig, evm_export::aggregate_and_prove_cached,
+    aggregator::AggregatorConfig,
+    evm_export::aggregate_and_prove_cached,
+    verifier_source::{check_committed_source, SourceCheck},
 };
 use snark_verifier_sdk::Snark;
 
@@ -42,7 +47,7 @@ fn main() -> anyhow::Result<()> {
     let mut verifiers_dir = PathBuf::from("../../contracts/ethereum/verifiers");
     let mut k_outer = None;
     let mut universality = None;
-    let mut allow_bin_drift = false;
+    let mut allow_source_drift = false;
     let mut pk_cache_dir: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
@@ -59,9 +64,9 @@ fn main() -> anyhow::Result<()> {
                     &args.next().ok_or_else(|| anyhow::anyhow!("--universality needs value"))?,
                 )?)
             }
-            // Escape hatch for the very first bootstrap of a verifier whose .bin
-            // is not committed yet. Never use once a verifier is deployed.
-            "--allow-bin-drift" => allow_bin_drift = true,
+            // Escape hatch for the very first bootstrap of a verifier whose
+            // .sol is not committed yet. Never use once a verifier is deployed.
+            "--allow-source-drift" => allow_source_drift = true,
             // Optional persistent outer PK cache. First run against a new
             // (name, k_outer, lookup_bits, universality, inner-shape) slot
             // does full keygen (~3-5 min at K=21); subsequent runs load PK
@@ -76,7 +81,7 @@ fn main() -> anyhow::Result<()> {
                 println!(
                     "aggregate-proof --inner-snark <path> --name <verifier> --out <path>\n\
                      \x20 [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n\
-                     \x20 [--allow-bin-drift] [--pk-cache-dir <dir>]"
+                     \x20 [--allow-source-drift] [--pk-cache-dir <dir>]"
                 );
                 return Ok(());
             }
@@ -106,36 +111,26 @@ fn main() -> anyhow::Result<()> {
     )
     .context("aggregate + evm-proof (aggregate_and_prove_cached)")?;
 
-    // Self-check: regenerated Yul bytecode must match the committed/deployed one.
-    let committed_bin = verifiers_dir.join(format!("{name}.bin"));
-    if committed_bin.exists() {
-        let committed = std::fs::read(&committed_bin)?;
-        if committed != export.verifier_bytecode {
-            let msg = format!(
-                "regenerated {name}.bin ({} B) != committed {} ({} B): aggregator VK drift -- the \
-                 deployed verifier would REJECT this calldata (check inner-snark shape / \
-                 AggregatorConfig / SRS)",
-                export.verifier_bytecode.len(),
-                committed_bin.display(),
-                committed.len(),
-            );
-            if allow_bin_drift {
-                eprintln!("WARNING (--allow-bin-drift): {msg}");
-            } else {
-                anyhow::bail!(msg);
-            }
-        } else {
-            println!(
-                "VK match: regenerated {name}.bin == committed ({} B) [OK]",
-                committed.len()
-            );
+    // Self-check: the regenerated verifier source must match the committed one.
+    match check_committed_source(&verifiers_dir, &name, &export.verifier_source)
+        .with_context(|| format!("read committed {name}.sol in {}", verifiers_dir.display()))?
+    {
+        SourceCheck::Match(len) => {
+            println!("VK match: regenerated {name}.sol == committed ({len} B) [OK]")
         }
-    } else if !allow_bin_drift {
-        anyhow::bail!(
-            "committed verifier {} not found; pass --allow-bin-drift only for first-time \
-             bootstrap of an undeployed verifier",
-            committed_bin.display()
-        );
+        SourceCheck::Drift(msg) if allow_source_drift => {
+            eprintln!("WARNING (--allow-source-drift): {msg}")
+        }
+        SourceCheck::Drift(msg) => anyhow::bail!(msg),
+        SourceCheck::Missing(path) if allow_source_drift => eprintln!(
+            "WARNING (--allow-source-drift): no committed {}; self-check skipped",
+            path.display()
+        ),
+        SourceCheck::Missing(path) => anyhow::bail!(
+            "committed verifier source {} not found; pass --allow-source-drift only for \
+             first-time bootstrap of an undeployed verifier",
+            path.display()
+        ),
     }
 
     if let Some(parent) = out_path.parent() {

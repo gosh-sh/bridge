@@ -17,6 +17,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/UsdcTestLib.sol";
+import "./helpers/Bn254FrLib.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofTest
 /// @notice Circuit 4 (single-final-root) tests — the unified AN→ETH payout
@@ -159,7 +160,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     function _seedFirstBlock() internal returns (uint256 l1Anchor) {
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("wd-seed-layer", i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-seed-layer", i))));
         }
         l1Anchor = layers[0];
 
@@ -203,11 +204,12 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             recipientHi: hi,
             recipientLo: lo,
             dstChainId: block.chainid,
-            senderAccFr: uint256(keccak256("senderAcc")),
+            senderAccFr: Bn254FrLib.toFr(uint256(keccak256("senderAcc"))),
             dappFr: DAPP_FR,
             accFr: ACC_FR,
             nullifier: nullifier,
-            finalRoot: seedAnchor
+            finalRoot: seedAnchor,
+            anchorLayer: 1
         });
     }
 
@@ -237,6 +239,25 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         assertEq(plain.bridgeWithdrawalAccFr(), 0);
     }
 
+    function test_constructor_verifyBlockOnly_succeeds() public {
+        AckiNackiBridge vbOnly = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            VerifyBlockConfigLib.disabledWithdraw()
+        );
+        assertEq(address(vbOnly.primaryVerifier()), address(primaryVerifier));
+        assertEq(address(vbOnly.bridgeWithdrawalVerifier()), address(0));
+    }
+
     function test_constructor_withdrawEnabled_storesVerifierAndIdentity() public view {
         assertEq(address(bridge.bridgeWithdrawalVerifier()), address(withdrawalVerifier));
         assertEq(bridge.bridgeWithdrawalDappFr(), DAPP_FR);
@@ -244,19 +265,58 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     }
 
     function test_constructor_withdrawEnabledWithZeroDappFr_succeeds() public {
-        // Shellnet uses dapp_id=0; accFr must still be non-zero.
+        // Shellnet uses dapp_id=0; accFr must still be non-zero. Withdraw
+        // still requires the verifyBlock triple.
         AckiNackiBridge shellnet = new AckiNackiBridge(
             address(oracle),
             address(usdc),
             address(0),
             address(0),
-            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
             VerifyBlockConfigLib.withWithdraw(
                 IBridgeWithdrawalVerifier(address(withdrawalVerifier)), 0, ACC_FR
             )
         );
         assertEq(shellnet.bridgeWithdrawalDappFr(), 0);
         assertEq(shellnet.bridgeWithdrawalAccFr(), ACC_FR);
+    }
+
+    function test_constructor_withdrawWithoutVerifyBlock_reverts() public {
+        vm.expectRevert(AckiNackiBridge.WithdrawRequiresVerifyBlock.selector);
+        new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.disabled(),
+            VerifyBlockConfigLib.withWithdraw(
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+            )
+        );
+    }
+
+    function test_constructor_partialVerifyBlockWiring_reverts() public {
+        vm.expectRevert(AckiNackiBridge.PartialVerifyBlockWiring.selector);
+        new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(0)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            VerifyBlockConfigLib.disabledWithdraw()
+        );
     }
 
     function test_constructor_withdrawEnabledWithoutAccFr_reverts() public {
@@ -273,6 +333,31 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
     }
 
+    function test_constructor_rejectsNonCanonicalWithdrawIdentity() public {
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdraw(
+            IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+        );
+        bw.accFr = Bn254FrLib.R;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, Bn254FrLib.R)
+        );
+        new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            bw
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Anchor recording
     // ─────────────────────────────────────────────────────────────────────
@@ -284,7 +369,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     function test_verifyBlock_recordsAnchor_andEmitsEvent() public {
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("wd-block2-layer", i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-block2-layer", i))));
         }
         uint256 expectedL1 = layers[0];
 
@@ -319,7 +404,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_happyPath_transfersAndMarksNullifier() public {
         uint256 amount = 2 * UsdcTestLib.UNIT;
-        uint256 nullifier = uint256(keccak256("nul-1"));
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("nul-1")));
         uint256 recipientBalBefore = usdc.balanceOf(RECIPIENT);
         uint256 treasuryBefore = bridge.treasuryBalance();
 
@@ -353,7 +438,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function test_withdrawByProof_replayRejected() public {
-        uint256 nullifier = uint256(keccak256("replay"));
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("replay")));
 
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
 
@@ -361,6 +446,71 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             abi.encodeWithSelector(AckiNackiBridge.NullifierAlreadyUsed.selector, nullifier)
         );
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
+    }
+
+    /// @notice On-chain replay guard for a literal proof/nullifier replay.
+    ///         Two invocations that carry the *same* nullifier value —
+    ///         regardless of what event they claim to attest — must produce
+    ///         at most one payout. Note: distinct AN `WithdrawalInitiated`
+    ///         events (even in the same block) do NOT reach this branch,
+    ///         because `events_pos` is bound into the Poseidon preimage and
+    ///         gives each event a distinct circuit nullifier. The
+    ///         `events_pos`-based nullifier disambiguation is witnessed by
+    ///         the Circuit 4 gadget test
+    ///         `test_nullifier_distinct_for_same_block_different_events_pos`
+    ///         in `crates/bridge-circuits/bridge-event-prove-circuit`. The
+    ///         Solidity sibling `test_twoDistinctBurns_sameFields_bothSucceed`
+    ///         uses the mock verifier — see its own NatSpec — and does not
+    ///         itself witness the circuit's events_pos binding.
+    function test_sameNullifierPresentedTwice_secondPayoutBlocked() public {
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("dup-burn")));
+        uint256 amount = 1 * UsdcTestLib.UNIT;
+        uint256 treasuryBefore = bridge.treasuryBalance();
+
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+        assertEq(bridge.treasuryBalance(), treasuryBefore - amount);
+        assertTrue(bridge.isNullifierUsed(nullifier));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.NullifierAlreadyUsed.selector, nullifier)
+        );
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+        assertEq(bridge.treasuryBalance(), treasuryBefore - amount, "second amount not paid");
+    }
+
+    /// @notice On-chain positive: two distinct nullifier values that agree
+    ///         on every other public input (block / token / amount /
+    ///         recipient) both execute end-to-end. Together with
+    ///         `test_sameNullifierPresentedTwice_secondPayoutBlocked` this
+    ///         pins the mapping-based replay guard as the SOLE nullifier
+    ///         gate — no accidental over-guarding on any other pub field.
+    ///
+    ///         Scope: exercises the on-chain `NullifierAlreadyUsed` mapping
+    ///         only. The mock verifier never inspects `events_pos`, so this
+    ///         test does NOT witness the circuit's `events_pos`-based
+    ///         nullifier disambiguation — that lives in the Circuit 4
+    ///         gadget tests (`bridge-event-prove-circuit`).
+    function test_twoDistinctBurns_sameFields_bothSucceed() public {
+        uint256 amount = 1 * UsdcTestLib.UNIT;
+        uint256 nullifierA = Bn254FrLib.toFr(uint256(keccak256("dup-burn-evt0")));
+        uint256 nullifierB = Bn254FrLib.toFr(uint256(keccak256("dup-burn-evt1")));
+        assertTrue(nullifierA != nullifierB, "test sanity: nullifiers must differ");
+        uint256 treasuryBefore = bridge.treasuryBalance();
+        uint256 recipientBefore = usdc.balanceOf(RECIPIENT);
+
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifierA));
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifierB));
+
+        assertTrue(bridge.isNullifierUsed(nullifierA), "nullifier A marked");
+        assertTrue(bridge.isNullifierUsed(nullifierB), "nullifier B marked");
+        assertEq(
+            bridge.treasuryBalance(),
+            treasuryBefore - 2 * amount,
+            "both amounts debited from treasury"
+        );
+        assertEq(
+            usdc.balanceOf(RECIPIENT), recipientBefore + 2 * amount, "recipient credited twice"
+        );
     }
 
     function test_isNullifierUsed_initiallyFalse() public view {
@@ -373,8 +523,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_wrongDappFr_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("idmismatch1")));
-        pub.dappFr = uint256(keccak256("evilDapp"));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("idmismatch1"))));
+        pub.dappFr = Bn254FrLib.toFr(uint256(keccak256("evilDapp")));
 
         vm.expectRevert(AckiNackiBridge.WithdrawIdentityMismatch.selector);
         bridge.withdrawByProof(_dummyProof(), pub);
@@ -382,8 +532,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_wrongAccFr_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("idmismatch2")));
-        pub.accFr = uint256(keccak256("evilAcc"));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("idmismatch2"))));
+        pub.accFr = Bn254FrLib.toFr(uint256(keccak256("evilAcc")));
 
         vm.expectRevert(AckiNackiBridge.WithdrawIdentityMismatch.selector);
         bridge.withdrawByProof(_dummyProof(), pub);
@@ -391,7 +541,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_wrongDstChainId_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("chainmismatch")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("chainmismatch"))));
         uint256 wrong = pub.dstChainId + 1;
         pub.dstChainId = wrong;
 
@@ -406,8 +556,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     /// @dev Mainnet-destined proof must not replay on Arbitrum (production wiring:
     ///      no `altDstChainId` alias).
     function test_withdrawByProof_mainnetDstChainId_reverts_on_arbitrum() public {
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("arbitrumReplay")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("arbitrumReplay")))
+        );
         pub.dstChainId = MAINNET_CHAIN_ID;
 
         vm.chainId(ARBITRUM_ONE_CHAIN_ID);
@@ -422,7 +573,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     /// @dev Sepolia USDC payout cannot be replayed on Arbitrum: `dstChainId` is
     ///      bound to the chain where the proof was destined.
     function test_withdrawByProof_sepoliaPayoutCannotReplayOnArbitrum() public {
-        uint256 nullifier = uint256(keccak256("sepoliaToArbitrum"));
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("sepoliaToArbitrum")));
         uint256 amount = 1 * UsdcTestLib.UNIT;
 
         vm.chainId(SEPOLIA_CHAIN_ID);
@@ -471,7 +622,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         UsdcTestLib.depositUsdc(vm, usdc, shellnetBridge, funder, 10 * UsdcTestLib.UNIT);
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("shellnet-alias-layer", i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("shellnet-alias-layer", i))));
         }
         shellnetBridge.verifyBlock(
             AckiNackiBridge.FinalizationType.Primary,
@@ -486,7 +637,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("shellnetAlias")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("shellnetAlias"))));
         pub.dappFr = 0;
         pub.dstChainId = SHELLNET_LOGICAL_DST_CHAIN_ID;
         pub.tokenId = SHELLNET_USDC_TOKEN_ID;
@@ -508,7 +659,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_unsupportedTokenId_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("token")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("token"))));
         pub.tokenId = 1;
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnsupportedTokenId.selector, 1));
@@ -517,8 +668,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_unknownAnchor_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("unknownAnchor")));
-        uint256 unknownRoot = uint256(keccak256("not-recorded"));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("unknownAnchor"))));
+        uint256 unknownRoot = Bn254FrLib.toFr(uint256(keccak256("not-recorded")));
         pub.finalRoot = unknownRoot;
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, unknownRoot));
@@ -534,7 +685,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         // Seed block records `layers[0..ACTIVE_LAYERS]` into L1..L3 windows.
         // `_seedFirstBlock` uses `keccak256(abi.encode("wd-seed-layer", i))`;
         // reconstruct the L2 anchor (i=1) and prove against it.
-        uint256 l2Anchor = uint256(keccak256(abi.encode("wd-seed-layer", uint256(1))));
+        uint256 l2Anchor =
+            Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-seed-layer", uint256(1)))));
 
         // Sanity: the seed block did populate the L2 window with this value.
         assertTrue(
@@ -545,36 +697,160 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             "L2 anchor must not appear in L1 window (rules out false positive)"
         );
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("l2-anchor-withdraw")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l2-anchor-withdraw")))
+        );
         pub.finalRoot = l2Anchor;
+        pub.anchorLayer = 2;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
-        assertTrue(ok, "L2 anchor withdrawal must succeed under flat _isKnownAnchor");
+        assertTrue(ok, "L2 anchor withdrawal must succeed with matching anchorLayer");
     }
 
     /// @notice NB-Q1 regression (L3 variant): coverage at the highest active
     ///         layer of the seed block, exercising the loop's upper end.
     function test_withdrawByProof_anchorRecordedInL3Window_isAccepted() public {
-        uint256 l3Anchor = uint256(keccak256(abi.encode("wd-seed-layer", uint256(2))));
+        uint256 l3Anchor =
+            Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-seed-layer", uint256(2)))));
 
         assertTrue(bridge.isKnownLayerAnchor(3, l3Anchor), "L3 seeded");
         assertFalse(bridge.isKnownLayerAnchor(1, l3Anchor), "not in L1");
         assertFalse(bridge.isKnownLayerAnchor(2, l3Anchor), "not in L2");
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("l3-anchor-withdraw")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l3-anchor-withdraw")))
+        );
         pub.finalRoot = l3Anchor;
+        pub.anchorLayer = 3;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
-        assertTrue(ok, "L3 anchor withdrawal must succeed under flat _isKnownAnchor");
+        assertTrue(ok, "L3 anchor withdrawal must succeed with matching anchorLayer");
+    }
+
+    /// @notice An L2 `finalRoot` presented with `anchorLayer = 1` must
+    ///         revert even though the hash is in some other window.
+    function test_withdrawByProof_l2AnchorWithLayer1_reverts() public {
+        uint256 l2Anchor =
+            Bn254FrLib.toFr(uint256(keccak256(abi.encode("wd-seed-layer", uint256(1)))));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l2-as-l1"))));
+        pub.finalRoot = l2Anchor;
+        pub.anchorLayer = 1;
+
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, l2Anchor));
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    function test_withdrawByProof_anchorLayerZero_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-zero"))));
+        pub.anchorLayer = 0;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, uint256(0))
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice Upper-bound guard: `anchorLayer > MAX_LAYER_HASHES` reverts
+    ///         on the contract-side range guard. In-circuit the same value
+    ///         is already refused by the two 4-bit lookups on
+    ///         `anchor_layer - 1` / `MAX_ANCHOR_LAYER - anchor_layer` — this
+    ///         test locks in the belt-and-suspenders on the on-chain side so
+    ///         a future circuit change that weakens the range constraint
+    ///         still cannot route to an unbacked `layerWindows[layer]` slot.
+    function test_withdrawByProof_anchorLayerAboveMax_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-too-high")))
+        );
+        pub.anchorLayer = uint256(bridge.MAX_LAYER_HASHES()) + 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, pub.anchorLayer)
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice Boundary companion to
+    ///         `test_withdrawByProof_anchorLayerAboveMax_reverts`: the exact
+    ///         inclusive edge `anchorLayer == MAX_LAYER_HASHES` must be
+    ///         accepted. Without this test, a slip of the range guard from
+    ///         `> MAX_LAYER_HASHES` to `>= MAX_LAYER_HASHES` would silently
+    ///         pass every other layer test (all use anchorLayer <= 3).
+    function test_withdrawByProof_anchorLayerAtMax_succeeds() public {
+        uint8 maxLayers = uint8(bridge.MAX_LAYER_HASHES());
+
+        // Seed a block that populates every layer window up to MAX_LAYER_HASHES
+        // so `_isKnownLayerAnchor(MAX_LAYER_HASHES, finalRoot)` returns true.
+        uint256[10] memory layers;
+        for (uint256 i = 0; i < maxLayers; i++) {
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("max-layer-seed", i))));
+        }
+        uint256 maxLayerAnchor = layers[maxLayers - 1];
+
+        bridge.verifyBlock(
+            AckiNackiBridge.FinalizationType.Primary,
+            abi.encodePacked(keccak256("max-att")),
+            abi.encodePacked(keccak256("max-lh")),
+            FIRST_BLOCK_ID + 1,
+            BK_SET,
+            FIRST_SEQ_NO + 1,
+            maxLayers,
+            layers,
+            bridge.expectedPrevAnchor(maxLayers)
+        );
+        assertTrue(
+            bridge.isKnownLayerAnchor(maxLayers, maxLayerAnchor),
+            "max-layer window must be seeded before withdraw"
+        );
+
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("max-layer-withdraw")))
+        );
+        pub.finalRoot = maxLayerAnchor;
+        pub.anchorLayer = uint256(maxLayers);
+
+        bool ok = bridge.withdrawByProof(_dummyProof(), pub);
+        assertTrue(ok, "withdrawal at anchorLayer == MAX_LAYER_HASHES must succeed");
+    }
+
+    /// @notice Canonical-Fr guard: a non-canonical `anchorLayer`
+    ///         (>= BN254_R) reverts before the range check. The Yul verifier
+    ///         reduces PIs mod BN254_R, so treating unreduced words as
+    ///         distinct window keys would let a caller alias two
+    ///         `layerWindows[layer]` slots — `_requireCanonicalFr` closes it.
+    function test_withdrawByProof_nonCanonicalAnchorLayer_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-nc"))));
+        pub.anchorLayer = Bn254FrLib.R;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, Bn254FrLib.R)
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice Wrong-layer scan (symmetric to
+    ///         `test_withdrawByProof_l2AnchorWithLayer1_reverts`): an L1
+    ///         `finalRoot` presented with `anchorLayer = 2` must revert
+    ///         `UnknownAnchor`. Guards against scan drift in either
+    ///         direction — the SLOAD budget is O(one window), not O(all
+    ///         windows).
+    function test_withdrawByProof_l1AnchorWithLayer2_reverts() public {
+        assertTrue(bridge.isKnownLayerAnchor(1, seedAnchor), "seed anchor is in L1 window");
+        assertFalse(
+            bridge.isKnownLayerAnchor(2, seedAnchor),
+            "seed anchor absent from L2 (rules out false positive)"
+        );
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("l1-as-l2"))));
+        pub.anchorLayer = 2;
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, seedAnchor));
+        bridge.withdrawByProof(_dummyProof(), pub);
     }
 
     /// @notice NB-Q1 regression: a `finalRoot` that matches no layer window
     ///         still reverts `UnknownAnchor` (flat scan didn't accidentally
     ///         become permissive).
     function test_withdrawByProof_anchorInNoLayerWindow_reverts() public {
-        uint256 stranger = uint256(keccak256("this-anchor-was-never-written"));
+        uint256 stranger = Bn254FrLib.toFr(uint256(keccak256("this-anchor-was-never-written")));
         // Explicit belt-and-suspenders: every layer window must reject it.
         for (uint8 L = 1; L <= 10; L++) {
             assertFalse(
@@ -583,8 +859,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             );
         }
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("stranger-withdraw")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("stranger-withdraw")))
+        );
         pub.finalRoot = stranger;
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, stranger));
@@ -595,7 +872,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         // Submit a second block and prove withdrawal against its L1 root.
         uint256[10] memory layers;
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            layers[i] = uint256(keccak256(abi.encode("later-anchor", i)));
+            layers[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("later-anchor", i))));
         }
         uint256 laterL1 = layers[0];
 
@@ -611,8 +888,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("later-withdraw")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("later-withdraw")))
+        );
         pub.finalRoot = laterL1;
 
         bool ok = bridge.withdrawByProof(_dummyProof(), pub);
@@ -625,7 +903,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_recipientHiOutOfRange_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("hiOOB")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("hiOOB"))));
         pub.recipientHi = uint256(1) << 80; // exactly 1 bit too wide
 
         vm.expectRevert(
@@ -638,7 +916,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_recipientLoOutOfRange_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("loOOB")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("loOOB"))));
         pub.recipientLo = uint256(1) << 80;
 
         vm.expectRevert(
@@ -654,8 +932,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         address weird = address(0xCafEbabEfeedCAFEDeADBeEfcAfeBaBEfeedCAfE);
         (uint256 hi, uint256 lo) = _split(weird);
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("weirdRecipient")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
+            1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("weirdRecipient")))
+        );
         pub.recipientHi = hi;
         pub.recipientLo = lo;
 
@@ -668,7 +947,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         // WD-Q2: address(0) is rejected so a Circuit-4 event binding
         // recipient=0 cannot strand forever against real USDC.
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("zeroAddr")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("zeroAddr"))));
         pub.recipientHi = 0;
         pub.recipientLo = 0;
 
@@ -689,14 +968,16 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
                 AckiNackiBridge.WithdrawTreasuryShortfall.selector, huge, bridge.treasuryBalance()
             )
         );
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(huge, uint256(keccak256("shortfall"))));
+        bridge.withdrawByProof(
+            _dummyProof(), _defaultPub(huge, Bn254FrLib.toFr(uint256(keccak256("shortfall"))))
+        );
     }
 
     function test_withdrawByProof_verifierRejects_revertsAndDoesNotMutateState() public {
         withdrawalVerifier.setShouldAccept(false);
 
         uint256 treasuryBefore = bridge.treasuryBalance();
-        uint256 nullifier = uint256(keccak256("rejected"));
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("rejected")));
 
         vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
         bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, nullifier));
@@ -712,7 +993,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
 
     function test_withdrawByProof_forwardsPublicInputsByteForByte() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(1 * UsdcTestLib.UNIT, uint256(keccak256("strictPub")));
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("strictPub"))));
         withdrawalVerifier.setExpectedPub(pub);
 
         // Exact match → passes.
@@ -722,7 +1003,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         // nullifier is cheapest because the bridge-level replay check is
         // mapping-based, not pub-strict, so it surfaces as a verifier reject).
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory wrong = pub;
-        wrong.nullifier = uint256(keccak256("strictPub-wrong"));
+        wrong.nullifier = Bn254FrLib.toFr(uint256(keccak256("strictPub-wrong")));
 
         vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
         bridge.withdrawByProof(_dummyProof(), wrong);

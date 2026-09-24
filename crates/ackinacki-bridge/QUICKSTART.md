@@ -24,17 +24,16 @@ bash install.sh
 ```
 
 Nothing is compiled: it downloads the CLI, the `aggregate-proof` subprocess
-it shells out to, `solc 0.8.19`, the verifier bytecode the proof is checked
-against, and the Hermez KZG ceremony — about 320 MB in total, most of it the
-ceremony. Neither Rust nor a checkout of the repository is needed. Every
-release asset is verified against the release's `SHA256SUMS` before it is
-written, and `solc` against the version it reports.
+it shells out to, the verifier bytecode and source the proof is checked
+against, and the Hermez KZG ceremony — about 305 MB in total, most of it the
+ceremony. Neither Rust, a Solidity compiler nor a checkout of the repository
+is needed. Every release asset is verified against the release's
+`SHA256SUMS` before it is written.
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it
 prints the two lines that put the install on your `PATH` and name the
-profile — `solc` in particular has to be reachable under its bare name,
-because that is how the aggregator resolves it.
+profile.
 
 `--dry-run` needs none of the prover artifacts. A real withdrawal needs all
 of them, and stage 1 refuses without them — before anything is broadcast.
@@ -87,8 +86,8 @@ chain id, the bridge is deployed with a complete verifier stack, and its
 treasury can pay you.
 
 It does **not** mean a real run will succeed — a dry run has no prover
-plumbing, so it never checks `solc`, the ceremony or the key cache. That is
-what `scripts/install.sh --check` is for.
+plumbing, so it never checks the verifier files, the ceremony or the key
+cache. That is what `scripts/install.sh --check` is for.
 
 Nothing is broadcast and nothing is written to disk, and it never
 prompts — the confirmation belongs to the burn, which a dry run skips.

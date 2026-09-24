@@ -72,9 +72,9 @@ pub struct WithdrawE2EConfig {
     /// `target/release/aggregate-proof`). Forwarded to
     /// [`SubprocessAggregatorConfig`] inside the SHPLONK pipeline.
     pub aggregator_dir: PathBuf,
-    /// Directory of committed verifier `.bin` files — the aggregator's
-    /// byte-identity self-check target
-    /// (`BridgeWithdrawalAggregatorVerifier.bin` in particular).
+    /// Directory of committed verifier files — the aggregator's
+    /// byte-identity self-check compares against the `.sol` sources
+    /// (`BridgeWithdrawalAggregatorVerifier.sol` in particular).
     pub verifiers_dir: PathBuf,
     /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys. Both the
     /// in-process Poseidon C4 prover and the aggregator subprocess read
@@ -340,7 +340,7 @@ async fn prove_and_finalize(
     //      transcript at K=19, writing `circuit4.snark` + `circuit4.instances.bin`
     //      into `snark_dir`.
     //   2. `SubprocessAggregator` shells out to `aggregate-proof --name
-    //      BridgeWithdrawalAggregatorVerifier`, producing the 22-instance SHPLONK
+    //      BridgeWithdrawalAggregatorVerifier`, producing the 23-instance SHPLONK
     //      calldata (`instances ‖ proof`) that matches the deployed Yul verifier
     //      byte-for-byte.
     std::fs::create_dir_all(&cfg.snark_dir)

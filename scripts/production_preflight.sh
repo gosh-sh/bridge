@@ -79,8 +79,10 @@ echo "--- [4/5] Foundry production gate tests ---"
 
 echo "--- [5/5] Relayer unit tests ---"
 (
-  cd crates/bridge-relayer-daemon
-  cargo test --quiet
+  # The relayer builds only as a member of the prover workspace: its manifest
+  # inherits dependencies from it, so cargo cannot run inside the crate itself.
+  cd crates/bridge-prover-libraries
+  cargo test --locked --quiet -p bridge-relayer-daemon
 )
 
 echo "=== Preflight summary ==="

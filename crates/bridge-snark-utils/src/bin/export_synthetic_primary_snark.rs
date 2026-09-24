@@ -5,8 +5,8 @@
 //! Poseidon inner `.snark`, and prints its path. Feed that into
 //! `bridge-evm-aggregator/aggregate-proof --name PrimaryAggregatorVerifier`
 //! (with `PARAMS_DIR` pointed at the same Hermez `params/`) — the aggregator
-//! then byte-compares its regenerated Yul against the committed
-//! `contracts/ethereum/verifiers/PrimaryAggregatorVerifier.bin`. Match ⇒
+//! then byte-compares its regenerated Solidity source against the committed
+//! `contracts/ethereum/verifiers/PrimaryAggregatorVerifier.sol`. Match ⇒
 //! committed verifier was built from Hermez PPoT with the same
 //! snark-verifier-sdk + AggregatorConfig; mismatch ⇒ drift, bisect from there.
 //!
@@ -144,7 +144,7 @@ fn main() -> anyhow::Result<()> {
         instances.len(),
     );
     println!();
-    println!("Next: run the aggregator against Hermez params and byte-compare vs committed .bin");
+    println!("Next: run the aggregator against Hermez params and byte-compare vs committed .sol");
     println!(
         "  cd ../bridge-evm-aggregator && \\\n    PARAMS_DIR={} \\\n    cargo run --release --bin aggregate-proof -- \\\n      --inner-snark {} \\\n      --name PrimaryAggregatorVerifier \\\n      --verifiers-dir ../../contracts/ethereum/verifiers \\\n      --out {}/primary_calldata.bin",
         params_dir.canonicalize().unwrap_or(params_dir.clone()).display(),

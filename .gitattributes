@@ -1,0 +1,2 @@
+# Generated verifiers are pinned byte for byte; do not let git normalize them.
+contracts/ethereum/verifiers/*.sol -text

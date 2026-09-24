@@ -158,6 +158,10 @@ steps:
 
         # Let jq build the payload so that titles and branch names are escaped
         # properly. The next step only has to POST the file.
+        #
+        # flags 4 is SUPPRESS_EMBEDS: without it Discord unfurls the PR link
+        # into a preview card that is taller than the message itself and
+        # repeats what the line already says. The link stays clickable.
         export MENTIONS
         export PR
         gh api graphql -F owner="$CI_REPO_OWNER" -F name="$CI_REPO_NAME" -F pr="$PR" -f query='
@@ -169,7 +173,8 @@ steps:
           {content: ((if env.MENTIONS == "" then "" else env.MENTIONS + " " end)
             + "🔁 **Review re-requested** — new commits in PR #" + env.PR + "\n"
             + .url),
-           allowed_mentions: {parse: ["users"]}}' >discord-payload.json
+           allowed_mentions: {parse: ["users"]},
+           flags: 4}' >discord-payload.json
 
         cat discord-payload.json
 

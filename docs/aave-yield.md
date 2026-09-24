@@ -78,6 +78,22 @@ skimExcessUsdc(max)  →  setAaveEnabled(true)  →  supplyToAave(max)
 To undo it later, use `withdrawFromAave(max)`, not `emergencyWithdrawAll` — the latter also disables
 the module and you would have to re-enable it.
 
+**If `emergencyWithdrawAll` reverts `EmergencyLeftoverAToken`.** AAVE paid some USDC but left
+aUSDC on the bridge (reserve cap / pause). The whole call reverts, so `aaveEnabled` and
+`suppliedPrincipal` are unchanged. Do not harvest from that leftover: zeroing the book first
+is what would have made leftover shares look like yield, which is why the revert exists.
+
+```
+withdrawFromAave(amount)   # repeat until principal is 0 or AAVE stops paying
+setAaveEnabled(false)
+harvestYield(max)          # only if accruedYield() > 0 — yield still in AAVE
+skimExcessUsdc(max)        # liquid surplus, if any
+```
+
+`withdrawFromAave` pulls booked principal only, so leftover yield stays in AAVE and
+`harvestYield` is the right collector for that pocket. `skimExcessUsdc` is for whatever
+already sits on the contract.
+
 **2. Reading a skim revert as "no yield".** If AAVE returned less than the principal — the depeg case
 the emergency exists for — then `excessUsdc()` is zero and the skim reverts. That is the principal
 guard doing its job, and it may be telling you there is a shortfall. Check `totalAssets()` against

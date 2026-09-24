@@ -224,8 +224,8 @@ enum Cmd {
     /// transcript ([`InProcessCircuit4SnarkProver`], NB-Q9 PR-B; supersedes
     /// the historical `export-c4-poseidon-snark --fixture` subprocess),
     /// aggregates the inner snark (`aggregate-proof`, which self-checks the
-    /// regenerated Yul == committed `.bin`), cross-checks the calldata binds
-    /// the ten public inputs, and writes a `proof_event` JSON that
+    /// regenerated Yul source == committed `.sol`), cross-checks the calldata
+    /// binds the eleven public inputs, and writes a `proof_event` JSON that
     /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
@@ -235,8 +235,8 @@ enum Cmd {
         /// `target/release/aggregate-proof`).
         #[arg(long, env = "AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (the aggregator's
-        /// byte-identity self-check target).
+        /// Directory of committed verifier files (the aggregator self-checks
+        /// against the `.sol` sources).
         #[arg(long, default_value = "../../contracts/ethereum/verifiers")]
         verifiers_dir: PathBuf,
         /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys.
@@ -387,8 +387,8 @@ enum Cmd {
         /// aggregated calldata, so `daemon-live` refuses to start without it.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (aggregator
-        /// self-check).
+        /// Directory of committed verifier files: `aggregate-proof` self-checks
+        /// against the `.sol`, and the `.bin` is what deploys on chain.
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
         verifiers_dir: PathBuf,
         /// Persistent outer-PK cache directory for the `aggregate-proof`
@@ -489,8 +489,9 @@ enum Cmd {
         /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK pipeline.
         #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
         aggregator_dir: PathBuf,
-        /// Directory of committed verifier `.bin` files (aggregator's
-        /// byte-identity self-check target).
+        /// Directory of committed verifier files: `aggregate-proof`'s
+        /// byte-identity self-check target is the `.sol`; the `.bin` is what
+        /// deploys on chain.
         #[arg(
             long,
             env = "BRIDGE_VERIFIERS_DIR",
@@ -1487,7 +1488,14 @@ where
         // Idempotency: skip anything already withdrawn on-chain.
         match bridge.is_nullifier_used(pub_inputs.nullifier).await {
             Ok(true) => {
-                info!(proof = %proof_path.display(), nullifier = %pub_inputs.nullifier, "nullifier already used on-chain; skipping");
+                warn!(
+                    proof = %proof_path.display(),
+                    nullifier = %pub_inputs.nullifier,
+                    amount = %pub_inputs.amount,
+                    recipient_hi = %pub_inputs.recipient_hi,
+                    recipient_lo = %pub_inputs.recipient_lo,
+                    "nullifier already used on-chain; skipping (benign retry — the same event was submitted before)"
+                );
                 st.skipped += 1;
                 st.done.insert(proof_path);
                 continue;
@@ -2135,16 +2143,11 @@ async fn run_daemon_live(
         bundle_stride = anchor_mode.stride(),
         "startup: read on-chain state for routing",
     );
-    // Anchor-mode maturity marker (Sergey's PR#35 review fallback for #2).
-    // L2 has shellnet Deploy #12 smoke but no continuous-production stress
-    // run yet — loud on startup so operators know what regime they're in.
     if matches!(anchor_mode, bridge_prover_lib::AnchorMode::L2) {
-        tracing::warn!(
-            "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified cold-start \
-             end-to-end; no continuous multi-day production run yet. See \
-             crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md Case 7 \
-             for the expected log signature (watch for `layers=2` on the first Circuit 2 bundle) \
-             and drift-recovery deltas. Report anomalies against that signature."
+        tracing::info!(
+            stride = anchor_mode.stride(),
+            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on \
+             the first Circuit 2 bundle"
         );
     }
     let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {

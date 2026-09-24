@@ -1,5 +1,5 @@
 # Link checker configuration. Run by the `links` step of
-# `.woodpecker/secrets_scan.yaml`.
+# `.woodpecker/hygiene.yaml`.
 #
 # The point is a public repository whose documentation does not send readers
 # into 404s. It is not a style gate: a link that resolves is a fact about the

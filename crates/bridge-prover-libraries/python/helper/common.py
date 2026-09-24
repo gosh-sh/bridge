@@ -662,17 +662,26 @@ def get_lan_ipv4() -> str:
 
 
 def _lan_ipv4_windows() -> str:
-    out = subprocess.check_output(
-        ["ipconfig"], text=True, encoding="utf-8", errors="ignore"
-    )
+    # Not read out of `ipconfig`. Its field labels are prose written for a
+    # human and translated per install — "IPv4 Address" is what an English
+    # Windows prints and nothing else is guaranteed — so matching on them
+    # works on whichever locales somebody happened to list and fails on the
+    # rest. The routing table answers the same question without any text:
+    # ask which local address would be used to reach a public host. No packet
+    # leaves the machine, because connect() on a UDP socket only fixes the
+    # local end.
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("1.1.1.1", 80))  # Cloudflare DNS, never contacted
+        ip = s.getsockname()[0]
+    except OSError as err:
+        raise RuntimeError(f"LAN IPv4 not found on Windows: {err}") from err
+    finally:
+        s.close()
 
-    for line in out.splitlines():
-        if "IPv4 Address" in line or "IPv4-адрес" in line:
-            ip = line.split(":")[-1].strip()
-            if RFC1918.match(ip):
-                return ip
-
-    raise RuntimeError("LAN IPv4 not found on Windows")
+    if not RFC1918.match(ip):
+        raise RuntimeError(f"LAN IPv4 not found on Windows: {ip} is not private")
+    return ip
 
 
 def _lan_ipv4_macos() -> str:

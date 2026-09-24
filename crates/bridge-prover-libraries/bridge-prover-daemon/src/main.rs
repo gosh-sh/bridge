@@ -96,17 +96,10 @@ async fn main() -> anyhow::Result<()> {
         "W = {}, P = {}, anchor_level = L{}, bundle = {} blocks",
         HISTORY_WINDOW_SIZE, THINNING_FACTOR_P, anchor_mode.level(), bundle_size
     );
-    // Anchor-mode maturity marker (Sergey's PR#35 review fallback for #2).
-    // L1 is the tested-per-fire path; L2 has one shellnet smoke deploy but
-    // no continuous-production stress run yet. Loud on L2 so operators know.
     if matches!(anchor_mode, AnchorMode::L2) {
-        warn!(
-            "L2 anchoring is SMOKE-PENDING: shellnet Deploy #12 (2026-08-18) verified \
-             cold-start end-to-end; no continuous multi-day production run yet. See \
-             crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md \
-             Case 7 for the expected log signature \
-             (watch for `layers=2` on the first Circuit 2 bundle) and drift-recovery \
-             deltas. Report anomalies against that signature."
+        info!(
+            stride = anchor_mode.stride(),
+            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on the first Circuit 2 bundle"
         );
     }
     match explicit_bootstrap_seqno {

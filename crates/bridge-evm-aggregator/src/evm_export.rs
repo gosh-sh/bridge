@@ -11,8 +11,9 @@ use halo2_base::{
         poly::kzg::commitment::ParamsKZG,
     },
 };
+use snark_verifier::loader::evm::compile_solidity;
 use snark_verifier_sdk::{
-    evm::{encode_calldata, gen_evm_proof_shplonk, gen_evm_verifier_shplonk},
+    evm::{encode_calldata, gen_evm_proof_shplonk},
     gen_pk,
     halo2::{aggregation::AggregationCircuit, gen_snark_shplonk},
     CircuitExt, Snark, SHPLONK,
@@ -27,6 +28,7 @@ use crate::{
     eip170,
     multiply::build_multiply_circuit,
     srs_guard::assert_hermez_ceremony,
+    verifier_source::gen_evm_verifier_sol_shplonk,
 };
 
 /// Full M2 spike artefacts: inner multiply proof → aggregator → Yul verifier + EVM calldata.
@@ -59,6 +61,9 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
 
     let export =
         aggregate_and_prove("MultiplierSpikeVerifier", inner_snark, config, Some(workdir))?;
+    let verifier_bytecode = export
+        .verifier_bytecode
+        .expect("an artifacts dir was given, so the verifier was compiled");
     std::fs::write(workdir.join("multiplier_spike_calldata.bin"), &export.evm_calldata)?;
 
     let meta = serde_json::json!({
@@ -68,7 +73,7 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
         "num_accumulator_instances": NUM_ACCUMULATOR_INSTANCES,
         "total_instances": export.total_instances,
         "k_outer": export.k_outer,
-        "verifier_bytes": export.verifier_size,
+        "verifier_bytes": verifier_bytecode.len(),
         "calldata_bytes": export.evm_calldata.len(),
     });
     std::fs::write(
@@ -82,16 +87,20 @@ pub fn export_multiply_spike(workdir: &Path) -> anyhow::Result<SpikeArtifacts> {
         inner_c: c,
         agg_instances: Vec::new(),
         evm_calldata: export.evm_calldata,
-        verifier_bytecode: export.verifier_bytecode,
-        verifier_size: export.verifier_size,
+        verifier_size: verifier_bytecode.len(),
+        verifier_bytecode,
         k_outer: export.k_outer,
     })
 }
 
 /// Result of exporting a real inner [`Snark`] through the aggregator pipeline.
 pub struct AggregatorExportResult {
-    pub verifier_bytecode: Vec<u8>,
-    pub verifier_size: usize,
+    /// Generated Solidity source of the outer verifier — what `aggregate-proof`
+    /// self-checks against the committed `<name>.sol`.
+    pub verifier_source: String,
+    /// Compiled deployment bytecode. `Some` only when an `artifacts_dir` was
+    /// given: that is the regeneration path, and the only one that needs `solc`.
+    pub verifier_bytecode: Option<Vec<u8>>,
     pub k_outer: u32,
     pub total_instances: usize,
     pub evm_calldata: Vec<u8>,
@@ -119,8 +128,12 @@ pub fn aggregate_and_prove(
 /// invariants.
 ///
 /// `pk_cache_dir` is orthogonal to `artifacts_dir`:
-/// - `artifacts_dir` controls whether the deployable `<name>.sol` / `.bin`
-///   are written (verifier-generation path, `export-inner-aggregator`).
+/// - `artifacts_dir` decides whether the verifier is compiled at all. With a
+///   directory, `<name>.sol` and `<name>.bin` are written there and the
+///   bytecode is gated on EIP-170 — the verifier-generation path
+///   (`export-inner-aggregator`), which needs `solc 0.8.19` on `PATH`. Without
+///   one only the source is generated, which is all the runtime self-check in
+///   `aggregate-proof` compares, and no compiler is involved.
 /// - `pk_cache_dir` controls whether the outer PK is persisted for reuse
 ///   across runs (runtime aggregation path, `aggregate-proof`).
 pub fn aggregate_and_prove_cached(
@@ -190,32 +203,33 @@ pub fn aggregate_and_prove_cached(
 
     let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
 
-    let sol_path = if let Some(dir) = artifacts_dir {
-        std::fs::create_dir_all(dir)?;
-        Some(dir.join(format!("{base_name}.sol")))
-    } else {
-        None
+    let verifier_source =
+        gen_evm_verifier_sol_shplonk::<AggregationCircuit>(&params_outer, pk.get_vk(), num_instance);
+    let verifier_bytecode = match artifacts_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)?;
+            // Compile before writing anything: `compile_solidity` shells out
+            // to `solc` and panics if it is missing, and this path is the
+            // only one that still needs it. Writing `.sol` first would leave
+            // a half pair — a fresh source next to a stale `.bin` — for the
+            // CI check that exists to catch exactly that.
+            let bytecode = compile_solidity(&verifier_source);
+            std::fs::write(dir.join(format!("{base_name}.sol")), &verifier_source)?;
+            let bin_path = dir.join(format!("{base_name}.bin"));
+            std::fs::write(&bin_path, &bytecode)?;
+            // After the write, as before: an oversized verifier stays on disk
+            // for inspection.
+            eip170::assert_eip170(&bytecode, &bin_path.display().to_string())?;
+            Some(bytecode)
+        }
+        None => None,
     };
-    let verifier_bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(
-        &params_outer,
-        pk.get_vk(),
-        num_instance,
-        sol_path.as_deref(),
-    );
-    let bin_ref = if let Some(dir) = artifacts_dir {
-        let bin_path = dir.join(format!("{base_name}.bin"));
-        std::fs::write(&bin_path, &verifier_bytecode)?;
-        bin_path.display().to_string()
-    } else {
-        format!("{base_name}.bin")
-    };
-    let verifier_size = eip170::assert_eip170(&verifier_bytecode, &bin_ref)?;
 
     let evm_calldata = encode_calldata(&instances, &evm_proof);
 
     Ok(AggregatorExportResult {
+        verifier_source,
         verifier_bytecode,
-        verifier_size,
         k_outer: config.k_outer,
         total_instances: flat.len(),
         evm_calldata,

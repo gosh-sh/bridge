@@ -222,7 +222,7 @@ where
         let seqno = pending.block_seq_no;
         let last_seen = u32::try_from(pending.last_seen_bk_update_seq_no).map_err(|_| {
             RelayerError::other(format!(
-                "last_seen_bk_update_seq_no {} does not fit u32",
+                "attestation lastSeen (layer cursor) {} does not fit u32",
                 pending.last_seen_bk_update_seq_no
             ))
         })?;

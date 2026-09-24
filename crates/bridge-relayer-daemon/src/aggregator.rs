@@ -16,15 +16,15 @@
 //! 2. [`ProofAggregator`] — aggregate that inner snark into EVM calldata
 //!    `instances ‖ proof` ([`SubprocessAggregator`] shells out to
 //!    `bridge-evm-aggregator`'s `aggregate-proof`, which additionally
-//!    self-checks that the regenerated Yul verifier is byte-identical to the
-//!    committed/deployed `.bin`).
+//!    self-checks that the regenerated verifier source is byte-identical to the
+//!    committed `.sol` of the deployed verifier).
 //!
 //! [`Circuit4ShplonkPipeline`] composes the two and returns a
 //! [`PartnerWithdrawalProof`] whose `proof_hex` is the aggregator calldata and
-//! whose `public_instances_hex` are the ten Circuit-4 public inputs (LE Fr) —
-//! exactly the shape `submit-withdraw` / `daemon-withdraw` / `daemon-bridge`
+//! whose `public_instances_hex` are the eleven Circuit-4 public inputs (LE Fr)
+//! — exactly the shape `submit-withdraw` / `daemon-withdraw` / `daemon-bridge`
 //! already consume. A cross-check ([`calldata_binds_instances`]) proves the
-//! calldata's re-exposed instances match the ten public inputs before the
+//! calldata's re-exposed instances match the eleven public inputs before the
 //! proof is surfaced, so a passing pipeline cannot forward mismatched bytes.
 
 use std::{
@@ -49,8 +49,8 @@ use crate::{
 /// re-exposed inner public inputs (snark-verifier SHPLONK accumulator).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
-/// The committed Circuit-4 withdrawal verifier name (matches the `.bin` in
-/// `contracts/ethereum/verifiers/`).
+/// The committed Circuit-4 withdrawal verifier name (matches the `.sol` /
+/// `.bin` pair in `contracts/ethereum/verifiers/`).
 pub const WITHDRAWAL_VERIFIER_NAME: &str = "BridgeWithdrawalAggregatorVerifier";
 
 /// Aggregator binary that turns a Poseidon inner snark into EVM calldata.
@@ -65,8 +65,8 @@ pub const AGGREGATE_BIN: &str = "aggregate-proof";
 pub struct SnarkArtefacts {
     /// The bincode-serialized snark-verifier `Snark` (aggregator inner input).
     pub snark_path: PathBuf,
-    /// The ten Circuit-4 public instances, 32-byte **little-endian** Fr each
-    /// (`save_instances_binary` layout), i.e. 320 bytes total.
+    /// The eleven Circuit-4 public instances, 32-byte **little-endian** Fr each
+    /// (`save_instances_binary` layout), i.e. 352 bytes total.
     pub instances_path: PathBuf,
 }
 
@@ -97,7 +97,8 @@ pub trait Circuit4SnarkProver: Send + Sync {
 ///   3. Load event PK.
 ///   4. `generate_event_proof_with_transcript(&km, &witness, Poseidon)`.
 ///   5. Native `verify_event_proof_with_transcript` self-check.
-///   6. Save 10-field-element instances as flat LE-Fr bytes (`.instances.bin`).
+///   6. Save 11-field-element instances (10 + `anchorLayer`) as flat LE-Fr
+///      bytes (`.instances.bin`).
 ///   7. `bridge_snark_wrap::wrap_poseidon_snark_in_memory` → serialise
 ///      snark-verifier `Snark` bincode → write `.snark`.
 ///
@@ -201,16 +202,18 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
         let artefacts =
             tokio::task::spawn_blocking(move || -> Result<SnarkArtefacts, RelayerError> {
                 // KeyManager owns four per-circuit sub-managers; the event sub-manager
-                // keygens at K=19 with its own degree-matched SRS.
+                // keygens the event circuit (whose `event_config_params.json` records
+                // k = 19) against the K=20 KZG SRS (`EventKeyManager::KEYGEN_SRS_K`,
+                // matching the event circuit's `vk.domain.k`).
                 let mut km = KeyManager::new(&params_dir);
                 km.ensure_event_keys()
-                    .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e}")))?;
+                    .map_err(|e| RelayerError::other(format!("ensure_event_keys: {e:#}")))?;
 
                 let event_k = km.event_config().k as u32;
                 ensure_srs_for_event(&km, &params_dir, event_k)?;
 
                 km.load_event_pk()
-                    .map_err(|e| RelayerError::other(format!("load_event_pk: {e}")))?;
+                    .map_err(|e| RelayerError::other(format!("load_event_pk: {e:#}")))?;
 
                 let raw = std::fs::read_to_string(&witness_path).map_err(|e| {
                     RelayerError::other(format!("read witness {}: {e}", witness_path.display()))
@@ -224,7 +227,7 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                     &witness,
                     TranscriptKind::Poseidon,
                 )
-                .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e}")))?;
+                .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e:#}")))?;
 
                 // Native Poseidon self-verify — refuse to hand the aggregator an
                 // invalid inner snark (stale event keys are the usual culprit).
@@ -260,7 +263,7 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                     &out.proof_bytes,
                     &out.public_instances,
                 )
-                .map_err(|e| RelayerError::other(format!("wrap Poseidon snark: {e}")))?;
+                .map_err(|e| RelayerError::other(format!("wrap Poseidon snark: {e:#}")))?;
 
                 let snark_path = snark_dir.join(format!("{name}.snark"));
                 std::fs::write(&snark_path, &snark_bytes).map_err(|e| {
@@ -301,8 +304,8 @@ pub struct SubprocessAggregatorConfig {
     /// binary is expected at `<dir>/target/release/aggregate-proof`; if absent
     /// we fall back to `cargo run --release --bin aggregate-proof`.
     pub aggregator_dir: PathBuf,
-    /// Directory of committed verifier `.bin` files (the self-check target).
-    /// Passed as `--verifiers-dir`.
+    /// Directory of committed verifier files; `aggregate-proof` self-checks
+    /// against the `.sol` sources. Passed as `--verifiers-dir`.
     pub verifiers_dir: PathBuf,
     /// Directory holding `kzg_bn254_21.srs` (the outer SRS). Exported as
     /// `PARAMS_DIR` for the subprocess so `gen_srs(21)` finds the ceremony
@@ -505,8 +508,9 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
     }
 
     /// Prove `witness_path` → Poseidon snark → aggregate → calldata, and return
-    /// a [`PartnerWithdrawalProof`] carrying the calldata + ten public inputs.
-    /// `snark_dir` receives the intermediate `<name>.snark` / `.instances.bin`.
+    /// a [`PartnerWithdrawalProof`] carrying the calldata + eleven public
+    /// inputs. `snark_dir` receives the intermediate `<name>.snark` /
+    /// `.instances.bin`.
     pub async fn prove(
         &self,
         witness_path: &Path,
@@ -525,8 +529,9 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
 
         let instances_hex = read_instances_le(&artefacts.instances_path)?;
 
-        // The calldata's re-exposed inner instances (words 12..21, big-endian)
-        // must equal the ten public inputs. If they don't, the on-chain verifier
+        // The calldata's re-exposed inner instances (words 12..22 inclusive,
+        // big-endian) must equal the eleven public inputs. If they don't, the
+        // on-chain verifier
         // would bind different values than the caller passes in
         // `WithdrawalPublicInputs` — refuse to surface such a proof.
         calldata_binds_instances(&calldata, &instances_hex)?;
@@ -560,7 +565,7 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
     Ok(chunks.iter().map(hex::encode).collect())
 }
 
-/// Assert that the aggregator calldata re-exposes exactly the ten Circuit-4
+/// Assert that the aggregator calldata re-exposes exactly the eleven Circuit-4
 /// public inputs: `calldata[(12+i)*32 .. (13+i)*32]` (big-endian EVM word)
 /// numerically equals `instances_hex[i]` (little-endian Fr repr), for all i.
 pub fn calldata_binds_instances(
@@ -603,7 +608,7 @@ pub fn calldata_binds_instances(
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic snark prover for tests: writes an empty `<name>.snark` and a
-/// 320-byte instances file (ten ascending LE Fr) into `snark_dir`.
+/// 352-byte instances file (eleven ascending LE Fr) into `snark_dir`.
 #[derive(Clone, Debug, Default)]
 pub struct MockCircuit4SnarkProver {
     pub fail: bool,
@@ -641,9 +646,16 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
     }
 }
 
-/// Deterministic aggregator for tests: returns 3616-byte calldata whose
-/// re-exposed instance words (12..21) match [`MockCircuit4SnarkProver`]'s ten
-/// ascending LE instances, so [`calldata_binds_instances`] passes.
+/// Deterministic aggregator for tests: returns fixed-size 3616-byte
+/// calldata whose re-exposed instance words (12..=22 inclusive) match
+/// [`MockCircuit4SnarkProver`]'s eleven ascending LE instances, so
+/// [`calldata_binds_instances`] passes. Note the 3616-byte length is
+/// only "big enough" — it does not match the true production Circuit-4
+/// SHPLONK calldata size (3648 B for 11 public inputs; see the
+/// reference `_calldata.bin` in the CHANGELOG). The length is fixed by
+/// [`Self::calldata_binding`]; the constant is unrelated to
+/// `WITHDRAWAL_PUBLIC_INPUTS` and moving to a different instance count
+/// does not require adjusting it.
 #[derive(Clone, Debug, Default)]
 pub struct MockAggregator {
     pub fail: bool,
@@ -651,7 +663,10 @@ pub struct MockAggregator {
 
 impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
-    /// words at positions 12..21), padded to a realistic 3616-byte length.
+    /// words at positions `12..12 + instances_hex.len()`), padded to a
+    /// stand-in 3616-byte length (see the note on [`MockAggregator`] — the
+    /// production Circuit-4 SHPLONK calldata is 3648 B, this is only large
+    /// enough to hold the instance words).
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
         let total_len = 3616;
         let mut cd = vec![0u8; total_len];
@@ -714,7 +729,7 @@ impl ProofAggregator for MockAggregator {
 //      incompatible with the gosh fork the daemon links (mixing them in one
 //      build unit does not compile).
 
-/// Committed R15 aggregator verifier names (match the `.bin` files in
+/// Committed R15 aggregator verifier names (match the `.sol` / `.bin` pairs in
 /// `contracts/ethereum/verifiers/`). Names line up with
 /// `bridge_evm_aggregator::AggregatorConfig::for_verifier_name`.
 pub const PRIMARY_VERIFIER_NAME: &str = "PrimaryAggregatorVerifier";
@@ -1205,9 +1220,15 @@ mod tests {
         // proof_hex is the aggregator calldata (>= SHPLONK min).
         let bytes = proof.proof_bytes().unwrap();
         assert!(bytes.len() >= SHPLONK_MIN_WITHDRAWAL_INSTANCES);
-        // The ten public inputs decode into a well-formed struct.
+        // The eleven public inputs decode into a well-formed struct.
+        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :634-637),
+        // so slot 0 (`token_id`) decodes as 0 and slot 10 (`anchor_layer`) as 10.
+        // Slot 10 is the newest addition; guarding it here means a slot-swap
+        // that reordered the last two instances trips this pipeline test, not
+        // just downstream JSON consumers.
         let pi = proof.public_inputs().unwrap();
-        assert_eq!(pi.token_id, U256::ZERO); // MockCircuit4SnarkProver: instance[0]=0
+        assert_eq!(pi.token_id, U256::ZERO);
+        assert_eq!(pi.anchor_layer, U256::from(10u64));
         std::fs::remove_dir_all(&dir).ok();
     }
 

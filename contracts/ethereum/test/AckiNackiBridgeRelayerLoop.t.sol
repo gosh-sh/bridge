@@ -14,6 +14,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import "./helpers/Bn254FrLib.sol";
 
 /// @title AckiNackiBridgeRelayerLoopTest
 /// @notice Phase 5.1 — On-chain side of the relayer-loop acceptance.
@@ -98,7 +99,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     ///      `prevMaxLevelLayerHash` of block N+1.
     function _layersFor(uint256 blockIdx) internal pure returns (uint256[10] memory arr) {
         for (uint256 i = 0; i < ACTIVE_LAYERS; i++) {
-            arr[i] = uint256(keccak256(abi.encode("layer", blockIdx, i)));
+            arr[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode("layer", blockIdx, i))));
         }
     }
 
@@ -310,7 +311,7 @@ contract AckiNackiBridgeRelayerLoopTest is Test {
     function test_relayerLoop_anchorMismatch_reverts() public {
         _submit(1, AckiNackiBridge.FinalizationType.Primary);
         uint256[10] memory layers2 = _layersFor(2);
-        uint256 wrongAnchor = uint256(keccak256("wrong-anchor"));
+        uint256 wrongAnchor = Bn254FrLib.toFr(uint256(keccak256("wrong-anchor")));
         uint256 storedAnchor = bridge.expectedPrevAnchor(ACTIVE_LAYERS);
         vm.expectRevert(
             abi.encodeWithSelector(

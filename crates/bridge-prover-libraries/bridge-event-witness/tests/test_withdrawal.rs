@@ -1,11 +1,11 @@
 //! exercise the BOC walk + event decode against the first
 //! captured `WithdrawalInitiated` BOC from
-//! `acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit/withdrawals.txt`.
+//! `crates/bridge-circuits/bridge-event-prove-circuit/withdrawals.txt`.
 //!
 //! The fixture is inlined here (rather than read from disk) so the test is
-//! hermetic — no path coupling to a sibling repo, no flaky CI if that file
-//! is regenerated. The constants are pinned and any drift will surface as a
-//! field-level assertion failure.
+//! hermetic — no path coupling, no flaky CI if that file is regenerated.
+//! The constants are pinned and any drift will surface as a field-level
+//! assertion failure.
 
 use bridge_event_witness::schema::SCHEMA_VERSION;
 use bridge_event_witness::{

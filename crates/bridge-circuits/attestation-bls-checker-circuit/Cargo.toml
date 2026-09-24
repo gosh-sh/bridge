@@ -1,0 +1,51 @@
+[package]
+name = "attestation-bls-checker-circuit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
+halo2-base = { workspace = true }
+halo2-ecc = { workspace = true }
+pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
+num-bigint = "0.4"
+bridge-poseidon = { path = "../bridge-poseidon" }
+# Optional, enabled by `bench-bin` for the standalone scaling binaries.
+bridge-test-data-gen = { path = "../test-data-gen", optional = true }
+gosh-zk-snark-halo2-utils = { git = "https://github.com/gosh-sh/gosh-zk-snark-halo2-utils", branch = "bump-halo2-lib-v0.4.1", optional = true }
+# RAM / CPU sampler used only by `primary_real_prover_parallel`.
+sysinfo = { version = "0.30", optional = true }
+rayon = { version = "1", optional = true }
+rand = { version = "0.8", optional = true }
+
+[features]
+default = []
+# Enables `src/bin/primary_real_prover.rs` and
+# `src/bin/primary_real_prover_parallel.rs`. Required because `[[bin]]`
+# targets cannot consume `[dev-dependencies]`.
+bench-bin = [
+    "dep:bridge-test-data-gen",
+    "dep:gosh-zk-snark-halo2-utils",
+    "dep:sysinfo",
+    "dep:rayon",
+    "dep:rand",
+]
+
+[dev-dependencies]
+bridge-test-data-gen = { path = "../test-data-gen" }
+bridge-poseidon = { path = "../bridge-poseidon" }
+gosh-zk-snark-halo2-utils = { git = "https://github.com/gosh-sh/gosh-zk-snark-halo2-utils", branch = "bump-halo2-lib-v0.4.1" }
+halo2-base = { workspace = true, features = ["test-utils"] }
+rand = "0.8"
+serde_json = "1"
+
+[[bin]]
+name = "primary_real_prover"
+path = "src/bin/primary_real_prover.rs"
+required-features = ["bench-bin"]
+
+[[bin]]
+name = "primary_real_prover_parallel"
+path = "src/bin/primary_real_prover_parallel.rs"
+required-features = ["bench-bin"]

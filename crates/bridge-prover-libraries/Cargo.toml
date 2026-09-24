@@ -32,39 +32,26 @@ resolver = "2"
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"] }
 
-# Circuit and crypto libs — track `main`, which now carries the canonical
-# 16-leaf (depth-4) block-id Merkle tree plus the Circuit 1 block_id
-# byte-order fix (formerly on `fix/block_id_16_leafs_and_security_updates`,
-# merged via #5 and the branch purged). On this branch
-# `NUM_MERKLE_SIBLINGS = 4` and Circuit 2's SHA Merkle open reflects the
-# canonical depth-4 layout. `bridge-parsers` was inlined into
-# `attestation-bls-checker-circuit::attestation_data_parser` on the
-# circuits side (commit 487b8f5), so it's no longer a separate crate here.
-#
-# PINNED BY REVISION, not `branch = "main"`, and the pin is load-bearing.
+# Circuit and crypto libs — path-deps into the sibling `crates/bridge-circuits`
+# sub-workspace. `bridge-parsers` was inlined into
+# `attestation-bls-checker-circuit::attestation_data_parser`, so it's no
+# longer a separate crate. The `test-data-gen/` directory is named
+# `bridge-test-data-gen` at the crate level.
 #
 # `EVENT_CIRCUIT_REVISION` (bridge-prover-lib/src/keys/event.rs) is bumped
-# BY HAND when Circuit 4 changes in a way that invalidates cached keys. It
-# is the only thing standing between a moved circuit and a warm verdict
-# over keys built for the old one — and `KeyManagerState::new` checks the
-# manifest format, that revision, and the vk/config digests, every one of
-# which still matches after the circuit moves, because the FILES did not
-# change. The keys are then used to prove, and the proof is rejected at
-# stage 5: after the burn, after the anchor wait.
-#
-# Under `branch = "main"` a single `cargo update` performs that move
-# silently. Under a revision it is an explicit edit to this file, visible
-# in review next to an `EVENT_CIRCUIT_REVISION` that was not bumped.
-#
-# All five crates come from one repository and must name the same revision
-# — cargo refuses two different references to the same git URL. When
-# moving the circuit: change the revision here, bump
-# `EVENT_CIRCUIT_REVISION`, and expect every cached keyset to regenerate.
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", rev = "5356b178cce8ab5a283096032c774533bcab8e28" }
+# BY HAND when a Circuit-4 change in `bridge-circuits/bridge-event-prove-circuit`
+# invalidates cached keys. `KeyManagerState::new` cross-checks manifest format,
+# that revision, and the vk/config digests (see
+# `bridge-prover-lib/src/keys/state.rs:257-261`); the PK is not hashed there
+# and is validated separately by the CLI probe in `preflight.rs`. Without a
+# revision bump, a code change compiles cleanly, keygen is skipped as "warm",
+# and the proof is rejected at verification — after the burn, after the anchor
+# wait. Bump it in the same commit that moves the circuit.
+attestation-bls-checker-circuit = { path = "../bridge-circuits/attestation-bls-checker-circuit" }
+historical-layer-hashes-movement-checker-circuit = { path = "../bridge-circuits/historical-layer-hashes-movement-checker-circuit" }
+bridge-poseidon = { path = "../bridge-circuits/bridge-poseidon" }
+bridge-test-data-gen = { path = "../bridge-circuits/test-data-gen" }
+bridge-event-prove-circuit = { path = "../bridge-circuits/bridge-event-prove-circuit" }
 gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
@@ -78,15 +65,15 @@ pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
 halo2_kzg_srs = { git = "https://github.com/han0110/halo2-kzg-srs" }
 halo2_curves = { git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.3.1", package = "halo2curves" }
 
-# Tag v3.0.5.an supersedes the retired `full_dex_and_bridge_test_with_final_halo2_circuit` branch
+# Tag v3.0.6.an supersedes the retired `full_dex_and_bridge_test_with_final_halo2_circuit` branch
 # (all of that branch's work is embedded in the tag).
-tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", features = ["gosh"] }
-tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an" }
-tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an" }
+tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", features = ["gosh"] }
+tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an" }
+tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an" }
 # tvm_client is needed by ackinacki-bridge (in-library replacement for
 # tvm-cli shell-outs during preflight / burn). Mirrors the root workspace's
 # pin so the whole graph resolves the same tag.
-tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",
 ] }

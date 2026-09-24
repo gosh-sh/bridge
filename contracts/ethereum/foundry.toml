@@ -2,14 +2,17 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-solc_version = "0.8.19"
+solc_version = "0.8.21"
+auto_detect_solc = false # pin 0.8.21 even when pragma is ^0.8.19
+skip = ["*/fixtures/*"] # snark-verifier dumps use exact pragma 0.8.19; tests load sibling .bin
 optimizer = true
 optimizer_runs = 1 # Optimize for deployment size, not runtime gas
 via_ir = true # Required for large contracts to avoid "stack too deep" errors
 remappings = ["poseidon-solidity/=node_modules/poseidon-solidity/"]
-ffi = true
+ffi = false
 fs_permissions = [
-    { access = "read-write", path = "./" },
+    { access = "read", path = "./" },
+    { access = "read-write", path = "./deployment_real.json" },
     { access = "read", path = "../contracts/" },
     { access = "read", path = "../../crates/" },
 ]
@@ -22,7 +25,7 @@ invariant = { runs = 1000 }
 # so the foundry REVM can execute live AAVE bytecode (post-Shanghai opcodes,
 # including PUSH0). The default `paris` profile rejects PUSH0 with an
 # InvalidOpcode revert — see `test/AckiNackiBridgeAaveFork.t.sol` docstring
-# for the diagnosis. Solc 0.8.19 supports `shanghai`, and Ethereum mainnet
+# for the diagnosis. Solc 0.8.21 supports `shanghai`, and Ethereum mainnet
 # has been on Shanghai since April 2023, so this is a safe override.
 #
 # Run with: `FOUNDRY_PROFILE=fork FORK_URL=$RPC forge test --match-contract ...Fork`

@@ -26,8 +26,12 @@ fi
 
 echo "[3/4] Bridge-relayer verify-fixture (SHPLONK calldata auto-detected)"
 if [[ -n "$RPC_URL" && -n "$BRIDGE" ]]; then
-  (cd crates/bridge-relayer-daemon && cargo run --bin relayer -- verify-fixture \
-    --fixtures-dir ../bridge-snark-utils/proofs/bound \
+  # The relayer builds only as a member of the prover workspace; see
+  # production_preflight.sh. The fixtures path is absolute because the relayer
+  # finds contracts/ethereum/verifiers by walking up from it, and a relative
+  # path never reaches the repository root.
+  (cd crates/bridge-prover-libraries && cargo run --locked -p bridge-relayer-daemon --bin relayer -- verify-fixture \
+    --fixtures-dir "${ROOT}/crates/bridge-snark-utils/proofs/bound" \
     --rpc-url "$RPC_URL" --bridge-address "$BRIDGE" --no-simulate) || \
     echo "  verify-fixture failed (deploy bridge first or check anchors)"
 else

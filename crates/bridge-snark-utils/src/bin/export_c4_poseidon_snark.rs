@@ -125,13 +125,23 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&snark_dir)?;
 
     // KeyManager owns four per-circuit sub-managers; the event sub-manager
-    // keygens at K=19 with its own degree-matched SRS.
+    // keygens the event circuit against the K=20 KZG SRS
+    // (`EventKeyManager::KEYGEN_SRS_K`, matching the event circuit's
+    // `vk.domain.k`) even though `event_config_params.json` records k = 19
+    // for the arithmetization. `ensure_srs_for_event` below provisions a
+    // K=19 slice from the same ceremony as a defensive fallback for any
+    // future consumer that keys off `event_config().k`; the current
+    // export path pins `srs_k_override = Some(KEYGEN_SRS_K)` when it
+    // invokes `export_poseidon_snark_with_srs_k` further down, so the
+    // in-line `gen_srs()` re-load reads `kzg_bn254_20.srs` and
+    // `snark-verifier::compile()` sees `params.k == vk.domain.k`.
     let mut km = KeyManager::new(&params_dir);
     km.ensure_event_keys().context("ensure_event_keys failed (keygen)")?;
 
-    // Provision the event-degree SRS (same ceremony as keygen) before the
-    // Snark export re-loads it via gen_srs. Downsized from the fallback
-    // manager's K=21 slice so the K=19 file shares the ceremony's g2/s_g2.
+    // Provision the event-degree (K=19) SRS from the same ceremony as
+    // keygen before the Snark export re-loads it via gen_srs. Downsized
+    // from the fallback manager's K=21 slice so the K=19 file shares the
+    // ceremony's g2/s_g2.
     let event_k = km.event_config().k as u32;
     ensure_srs_for_event(&km, &params_dir, event_k)?;
 

@@ -12,7 +12,8 @@
 #
 #   ackinacki-bridge     the CLI
 #   aggregate-proof      the prover subprocess the CLI shells out to
-#   verifiers/*.bin      what the proof is self-checked against
+#   verifiers/*.bin      the bytecode stage 1 compares with the deployed verifier
+#   verifiers/*.sol      the source the proof is self-checked against
 #   bridge_config        the profile it writes as <prefix>/profile.release
 #
 # The ceremony file is not built here — it is the Hermez KZG setup, 257 MB and
@@ -40,15 +41,9 @@ steps:
     environment:
       # Keep cargo's data inside the workspace so the next step still sees it.
       CARGO_HOME: .cargo_home
-      GH_TOKEN:
-        from_secret: REVIEW_GH_TOKEN
     commands:
-      # One of the ten gosh-sh git dependencies in Cargo.lock —
-      # acki-nacki-to-eth-bridge-halo2-circuits — is a private repository, so
-      # cargo cannot fetch it anonymously. The token must be able to read that
-      # repository too; a token scoped to this one alone fails here, not at the
-      # upload step.
-      - git config --global url."https://x-access-token:$GH_TOKEN@github.com/".insteadOf "https://github.com/"
+      # All gosh-sh git repos in the dependency graph are public
+      # post-vendoring, so no token is required for cargo to fetch them.
       # The CLI builds as a member of the prover workspace — the symlink at
       # crates/bridge-prover-libraries/ackinacki-bridge is what resolves its
       # workspace=true circuit dependencies. A standalone `cargo build` in
@@ -67,7 +62,7 @@ steps:
 
         install -m 0755 crates/bridge-prover-libraries/target/release/ackinacki-bridge "$STAGE/"
         install -m 0755 crates/bridge-evm-aggregator/target/release/aggregate-proof "$STAGE/"
-        cp contracts/ethereum/verifiers/*.bin "$STAGE/verifiers/"
+        cp contracts/ethereum/verifiers/*.bin contracts/ethereum/verifiers/*.sol "$STAGE/verifiers/"
         cp crates/ackinacki-bridge/config/bridge_config "$STAGE/"
 
         tar -czf ackinacki-bridge-linux-x86_64.tar.gz -C dist ackinacki-bridge-linux-x86_64

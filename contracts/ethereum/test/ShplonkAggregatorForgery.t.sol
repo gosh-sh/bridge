@@ -11,7 +11,12 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 /// @title ShplonkAggregatorForgeryTest
 /// @notice Forgery negatives for R15 aggregator adapters (mock SHPLONK = always false).
 contract ShplonkAggregatorForgeryTest is Test {
-    /// @dev Address that always reverts on staticcall — simulates failed crypto.
+    /// @dev Codeless address. A high-level call with a return value reverts via
+    ///         Solidity's `extcodesize` check — not because staticcall always
+    ///         fails. The production adapter uses a low-level staticcall in
+    ///         `ShplonkHalo2Verifier`, where a codeless target would return
+    ///         success; the real guard is the constructor `extcodesize` check
+    ///         (QC-A4-1).
     address internal constant FAILING_SHPLONK = address(0xdead);
 
     function test_withdrawalAggregator_rejectsGroth16StubProof() public {
@@ -29,7 +34,8 @@ contract ShplonkAggregatorForgeryTest is Test {
                 dappFr: 4,
                 accFr: 5,
                 nullifier: 6,
-                finalRoot: 7
+                finalRoot: 7,
+                anchorLayer: 1
             });
 
         // 256-byte legacy Groth16 stub — wrong shape for SHPLONK aggregator calldata.
@@ -58,7 +64,8 @@ contract ShplonkAggregatorForgeryTest is Test {
                 dappFr: 0,
                 accFr: 1,
                 nullifier: 123,
-                finalRoot: 456
+                finalRoot: 456,
+                anchorLayer: 1
             });
 
         assertTrue(mock.verifyWithdrawal(groth16Stub, pub));

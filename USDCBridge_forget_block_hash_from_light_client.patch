@@ -1,0 +1,25 @@
+diff --git a/contracts/exchange/USDCBridge.sol b/contracts/exchange/USDCBridge.sol
+--- a/contracts/exchange/USDCBridge.sol
++++ b/contracts/exchange/USDCBridge.sol
+@@
+         _acceptedBlockHash[chainId][blockHash] = true;
+     }
+ 
++    /// @notice Drops a hash the light client has aged out of its one-year
++    ///         window. Same sender gate as `acceptBlockHashFromLightClient`.
++    ///         Idempotent: deleting an absent key is a no-op, so a replayed
++    ///         forget after a bounce does not revert.
++    /// @param chainId   — EIP-155 chain id of the source L1 the LC follows.
++    /// @param blockHash — the execution block hash to retract from
++    ///                    `_acceptedBlockHash`.
++    function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
++        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
++        tvm.accept();
++        ensureBalance();
++        delete _acceptedBlockHash[chainId][blockHash];
++    }
++
+     /// @notice Sets (or clears, with 0) the trusted `EthBeaconLightClient`
+     ///         allowed to write anchors via `acceptBlockHashFromLightClient`.
+     ///         Must be re-set after any code upgrade (not threaded through the
+     ///         migration cell).

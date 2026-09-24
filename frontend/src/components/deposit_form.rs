@@ -14,20 +14,35 @@ const MAX_USDC_UNITS: u128 = 100 * USDC_UNIT;
 /// Default faucet mint amount (100 USDC).
 const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
 
+/// The `anWorkchain` argument of `deposit`. Kept in the ABI, ignored by Acki
+/// Nacki: the workchain concept is retired there and `dappId` replaced it, so
+/// the recipient always lives in workchain 0 (`eccUSDCBridge.sol`).
+const AN_WORKCHAIN: i8 = 0;
+
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
     pub wallet_connected: bool,
 }
 
-/// Validate an Acki Nacki account: hex (optionally `0x`-prefixed), 1..=64 hex
-/// chars (a 256-bit account id), and non-zero. Returns the normalised hex.
+/// Validate an Acki Nacki account: hex (optionally `0x`-prefixed), exactly 64
+/// hex chars (a 256-bit account id), and non-zero. Returns the normalised hex.
+///
+/// Exactly 64, not "at most": `web3::deposit` left-pads what it is given, so a
+/// pasted Ethereum address (40 hex chars) would become a well-formed non-zero
+/// `bytes32`, pass the contract's `anAccount != 0`, be bound in-circuit, and
+/// credit an account nobody owns. Deposit is one-way, so the length is the only
+/// place that mistake can still be caught.
 fn validate_an_account(raw: &str) -> Result<String, String> {
     let v = raw.trim().trim_start_matches("0x").to_lowercase();
     if v.is_empty() {
         return Err("Acki Nacki account is required".to_string());
     }
-    if v.len() > 64 {
-        return Err("Account must be at most 64 hex chars (256 bits)".to_string());
+    if v.len() != 64 {
+        return Err(format!(
+            "Account must be exactly 64 hex chars (256 bits); got {}. An Ethereum address is 40 \
+             and is not a valid AN recipient.",
+            v.len()
+        ));
     }
     if !v.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("Account must be hex (0-9, a-f)".to_string());
@@ -38,10 +53,45 @@ fn validate_an_account(raw: &str) -> Result<String, String> {
     Ok(v)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{validate_an_account, AN_WORKCHAIN};
+
+    /// The mistake this guard exists for: a pasted Ethereum address is 40 hex
+    /// chars, non-zero, and all-hex, so every other check passes it.
+    #[test]
+    fn eth_address_is_rejected_for_length() {
+        let err = validate_an_account("0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7")
+            .expect_err("40 hex chars must not pass as an AN account");
+        assert!(err.contains("exactly 64"), "{err}");
+    }
+
+    #[test]
+    fn short_and_long_are_rejected() {
+        assert!(validate_an_account(&"a".repeat(63)).is_err());
+        assert!(validate_an_account(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn full_width_account_is_accepted_and_normalised() {
+        let raw = format!("0x{}", "AB".repeat(32));
+        assert_eq!(validate_an_account(&raw).unwrap(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn zero_account_is_rejected_even_at_full_width() {
+        assert!(validate_an_account(&"0".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn workchain_is_pinned_to_zero() {
+        assert_eq!(AN_WORKCHAIN, 0);
+    }
+}
+
 #[function_component(DepositForm)]
 pub fn deposit_form(props: &DepositFormProps) -> Html {
     let amount = use_state(String::new);
-    let an_workchain = use_state(|| "0".to_string());
     let an_account = use_state(String::new);
     let deposit_id = use_state(|| None::<u128>);
     let is_loading = use_state(|| false);
@@ -54,14 +104,6 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
             amount.set(input.value());
-        })
-    };
-
-    let on_workchain_change = {
-        let an_workchain = an_workchain.clone();
-        Callback::from(move |e: Event| {
-            let input: HtmlInputElement = e.target_unchecked_into();
-            an_workchain.set(input.value());
         })
     };
 
@@ -107,7 +149,6 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
     let on_submit = {
         let amount = amount.clone();
-        let an_workchain = an_workchain.clone();
         let an_account = an_account.clone();
         let is_loading = is_loading.clone();
         let deposit_id = deposit_id.clone();
@@ -143,16 +184,11 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 return;
             }
 
-            // Acki Nacki destination: workchain (int8) + account (256-bit).
-            let workchain = match (*an_workchain).trim().parse::<i8>() {
-                Ok(w) => w,
-                Err(_) => {
-                    error_msg.set(Some(
-                        "Workchain must be an integer in -128..=127".to_string(),
-                    ));
-                    return;
-                },
-            };
+            // Acki Nacki destination: the 256-bit account. The ABI still carries
+            // `anWorkchain`, but the workchain concept is retired on AN — the
+            // network ignores the field, so it is pinned to 0 rather than asked
+            // for.
+            let workchain = AN_WORKCHAIN;
             let account = match validate_an_account(&an_account) {
                 Ok(a) => a,
                 Err(err) => {
@@ -286,19 +322,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <input
                             type="text"
                             class="form-input"
-                            style="max-width: 5rem;"
-                            placeholder="0"
-                            value={(*an_workchain).clone()}
-                            onchange={on_workchain_change}
-                            disabled={!props.wallet_connected || *is_loading}
-                        />
-                        <span class="input-suffix">{"workchain"}</span>
-                    </div>
-                    <div class="input-wrapper">
-                        <input
-                            type="text"
-                            class="form-input"
-                            placeholder="0x… (256-bit AN account)"
+                            placeholder="0x… (64 hex chars, 256-bit AN account)"
                             value={(*an_account).clone()}
                             onchange={on_account_change}
                             disabled={!props.wallet_connected || *is_loading}
@@ -306,7 +330,9 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"account"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Your destination on Acki Nacki (workchain id + 256-bit account). An Ethereum address is not a valid AN recipient — the funds are credited to this account."}
+                        {"Your destination on Acki Nacki: exactly 64 hex chars. An Ethereum \
+                          address is 40 chars and is not a valid AN recipient. Check it before \
+                          sending — a deposit to the wrong account is one-way, with no refund."}
                     </div>
                 </div>
 

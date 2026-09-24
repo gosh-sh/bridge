@@ -20,6 +20,755 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`aggregate-proof` self-checks the verifier source, so every verifiers
+  directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
+  the verifier it regenerates and compare bytecode, which is why `solc` had
+  to be on every host that proves. It now compares the generated Solidity
+  source with the committed `contracts/ethereum/verifiers/<name>.sol`. The
+  source is fully determined by the aggregator key, so the check catches the
+  same key drift; the refusal still reads `aggregator VK drift`, now names
+  the first differing line, and says that a `snark-verifier` upgrade can
+  cause it too — in that case regenerate both files of each pair.
+  What has to carry the four `*AggregatorVerifier.sol` files:
+    - a source checkout already does;
+    - the release bundle and the relayer image now ship them — upgrade
+      `aggregate-proof`, the relayer image and a `scripts/install.sh` install
+      together, not one at a time;
+    - a self-deployed verifiers directory (`--verifiers-dir` /
+      `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
+      that `export-inner-aggregator` wrote next to its `.bin`.
+  `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
+  rotated Circuit-4 key and compiles to the committed `.bin`. Because a
+  compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
+  source's keccak256, compiling to the identical `.bin` proves a `.sol` is
+  exactly the source of that `.bin` — which also holds for
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 21`,
+  and for `PrimaryAggregatorVerifier.sol` and
+  `FallbackAggregatorVerifier.sol`, whose keys are unchanged and whose
+  sources were not regenerated for this change. What that leaves unconfirmed
+  is only whether the generator at the current `snark-verifier` pin still
+  reproduces those last two sources from their keys — which the relayer's own
+  former bytecode self-check already established on every aggregation it ran
+  before this change. Watch the first `verifyBlock` cycle of each kind after
+  the upgrade in case a future `snark-verifier` bump changes the generated
+  source.
+- **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
+  meaning — a bootstrap escape hatch for a verifier whose source is not
+  committed yet — with no alias for the old spelling.
+- **The Circuit 4 (withdrawal) verification key is rotated.** The inner
+  Poseidon preimage now includes `events_pos`, and the public-input vector
+  grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
+  `1..=10`). `withdrawByProof` scans only that layer's window.
+  Behavioural consequence of the `events_pos` binding: two structurally
+  identical `WithdrawalInitiated` events emitted in the same source
+  block (matching on all four of `tokenId`, `amount`, `recipient` and
+  `sender`) now nullify to distinct values and can both pay out on the
+  ETH side; pre-rotation they would have collided on the second
+  withdraw as a replay.
+  The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
+  instances; the reference `_calldata.bin` is 3 648 B. Redeploy
+  `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
+  verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
+  not decode. The extra tuple field also **changes the `withdrawByProof`
+  4-byte selector**: from the previous ten-slot `0x6e6f66ad`
+  (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`)
+  to the eleven-slot `0xa9753d18`
+  (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`,
+  verified with `cast sig`). Integrators that hand-craft calldata (`cast call`
+  scripts, custom relayers, front-ends) have to update the tuple
+  signature; a client still emitting the old selector will see the
+  call revert with empty returndata (no fallback and no router
+  string), not a decode error deeper in. `EVENT_CIRCUIT_REVISION` goes from 2 to 3, so every
+  prover host regenerates its Circuit 4 keys on first use — the bump
+  is what makes the key cache reject a pre-rotation
+  `event_pk.bin` / `event_vk.bin`. Keygen (over the `K = 20` SRS) runs
+  during the next Circuit-4 proof job on that host, whichever fires
+  first among the four entrypoints that go through the shared prover
+  library: `ackinacki-bridge withdraw`, `relayer prove-withdraw`,
+  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. In all
+  four the shared library emits an info-level line at
+  `bridge-prover-lib/src/keys/event.rs:100` when keygen actually
+  starts, whose runtime visibility depends on the entrypoint's
+  tracing filter: `relayer prove-withdraw-shplonk` and
+  `relayer withdraw-e2e` default to `info` and print it;
+  `ackinacki-bridge withdraw` defaults to
+  `warn,ackinacki_bridge=info,bridge_relayer_daemon=info`
+  (`crates/ackinacki-bridge/src/main.rs:247`) and so silences the line
+  unless `RUST_LOG` is set; `relayer prove-withdraw` runs the prover
+  as a subprocess (`SubprocessWithdrawalProver`) and buffers its
+  stderr, surfacing it only on failure
+  (`crates/bridge-relayer-daemon/src/withdraw_prover.rs:231-249`).
+  Only `ackinacki-bridge withdraw` also prints the preflight forecast
+  `"Circuit-4 keys will be generated on this run"` (from
+  `crates/ackinacki-bridge/src/preflight.rs:1595`) at its stage-1
+  preflight — that's a prediction, not the keygen start, and the
+  numbered stages are a CLI concept only. The rotation has nothing to
+  do with `verifyBlock` on the
+  ETH side, which reads only the aggregator VK.
+  `bridge-verifier-daemon` does not run keygen itself: on startup it
+  looks for the event VK and, if absent, exits with
+  `"event VK not found in <params-dir>. Run the event prover
+  (Circuit 4) first to generate keys."` The prover-side warning to
+  watch for on a stale cache is `"cached event keys do not match
+  their manifest, or the manifest could not be read (…); ignoring
+  them. Re-run the prover to regenerate."` — the signal the revision
+  bump landed and the cache is about to be regenerated.
+
+  To skip the ~2.65 GB write and the associated wall time, preseed
+  the params directory with the complete four-file Circuit-4 cache,
+  not just the keys: `event_pk.bin`, `event_vk.bin`,
+  `event_config_params.json` **and** `event_manifest.json`. The
+  params directory is `--params-dir` for `prove-withdraw-shplonk` /
+  `withdraw-e2e` (and for the CLI's `ackinacki-bridge withdraw`);
+  `relayer prove-withdraw` has no `--params-dir` flag and looks under
+  `<work-dir>/params` instead. The revision is a field
+  (`circuit_revision`) inside the manifest, and `install_cached_keys`
+  will only accept a preseed if the manifest is present, parseable,
+  in the expected `manifest_format`, carries the current
+  `circuit_revision`, and its SHA-256 digests over `event_vk.bin` and
+  `event_config_params.json` match the on-disk bytes. Copying only
+  `pk` + `vk` leaves `event_config_params.json` missing, so
+  `install_cached_keys` bails at `load_config` and keygen runs
+  regardless — no WARN in that case. The warning above fires whenever
+  the config loaded but the manifest failed any of the checks above,
+  including a stale `circuit_revision` — which is exactly the
+  cache-invalidation path described a paragraph earlier. The PK is
+  deliberately not hashed by `install_cached_keys`, so a corrupted
+  `event_pk.bin` passes preseed silently and only fails later when it
+  is actually used. All four files have to come from the same
+  successful keygen run on some other host.
+
+- **The layer-hashes verification key is rotated. Redeploy that verifier.**
+  `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
+  20 the outer circuit did not fit the 14 inner public inputs. The runtime
+  artefact grows from 19 100 B to 23 111 B, so its address and `extcodehash`
+  change and the pin in `ShplonkDeployLib` moves with it. Proofs produced
+  against the old key do not verify against the new one; a deployment that
+  updates only the bridge will fail every `verifyBlock`. Margin to EIP-170
+  (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
+  warning below.
+
+  The other two keys are **unchanged**: `PrimaryAggregatorVerifier.bin`
+  and `FallbackAggregatorVerifier.bin` are byte-identical to 0.2.0.
+  Primary's and Fallback's `_calldata.bin` fixtures were re-emitted, which
+  is a test-vector refresh and not a rotation.
+
+- Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
+  **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and
+  `WIRE_VERIFY_BLOCK` are `envBool` with no default and `USE_AXIOM_ORACLE`
+  must be true; `altTokenId` must be 0. A Sepolia deploy that relied on
+  `WIRE_VERIFY_BLOCK` defaulting to false now stops. `LAYER_HASHES_VERIFIER`
+  and `WITHDRAWAL_VERIFIER` are still only read by `DeployReuseVerifiersBridge`
+  and `DeployGenesisCursorBridge`, which already refused `chainid == 1`.
+
+- `AckiNackiBridge`'s constructor rejects configurations it used to accept: a
+  zero `genesisBkSetCommitment` (`ZeroBkSetCommitment`) and a non-canonical
+  `genesisBkSetCommitment` or `genesisPrevMaxLevelLayerHash`
+  (`FieldElementOutOfRange`), whenever the verifiers are wired; and a
+  non-canonical Circuit 4 `dappFr` / `accFr` / `altTokenId` whenever
+  withdrawal is wired. These are the values that could never have matched
+  `_expectedPrevAnchor` or a Yul-reduced identity instance — deployments
+  that were already broken from block one — but a script that passed zeros
+  or unreduced words to get through construction will now fail at
+  construction.
+
+- Ownership transfer is two-step. `transferOwnership` records `pendingOwner`
+  and ownership moves only when that address calls `acceptOwnership`. Any
+  runbook or script that assumed `transferOwnership` completes the handover
+  needs the second call.
+
+### Added
+
+- **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
+  read back with `isPaused()`.** While it is paused, the two cross-chain entry
+  points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:
+  `finalizeDeposit` (an inbound L1 deposit, rejected before the proof is even
+  parsed, so a paused bridge spends no gas on verification) and
+  `initiateWithdrawal` (an outbound burn, rejected before `tvm.accept()`, so
+  the attached ECC bounces back to the sender untouched).
+
+  Deliberately narrow — everything else stays available while the bridge is
+  stopped: `confirmDeposit`, so a deposit already proven and vouched is still
+  paid out instead of hanging half-finished; the TIP-3 inbound callback
+  `onTransferReceived` and the owner mints; and every anchor, allowlist and
+  light-client call, so the owner can keep the configuration current during the
+  stop. Pausing is reversible and, like the allowlist and the anchor set, is
+  **not** carried through `onCodeUpgrade`: an upgraded bridge starts unpaused.
+
+  The bridge's code hash moves with this, `48d5c0ed…` → `68b17ae3…`, and the
+  contract reports version `1.5.0`. A network takes it as a fresh zerostate or
+  as an `updateCode` round on the bridge, not as an in-place patch; the voucher
+  and the light client are unchanged and their artefacts are byte-identical.
+
+- **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
+  `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
+  `EthKeccak` library, all v1.4.0, moved here from acki-nacki into
+  `contracts/an/exchange/` with the compiled `.tvc` / `.abi.json` that go
+  into the zerostate, at the state of the `contracts/bridge` branch: the anchor
+  surface (`setLightClientCode`, `deployLightClient`, the light-client writers,
+  `disableOwnerAnchors`), the `ERR_UNKNOWN_BLOCK` gate on `finalizeDeposit`, and
+  `ERR_ZERO_RECIPIENT` on both directions including `initiateWithdrawal`
+  (audit WD-AN-07). The bridge's code hash is `48d5c0ed…`, which is what
+  shellnet runs. acki-nacki no longer
+  keeps a copy: it pins one commit of this repository and places the files
+  into its own tree when a zerostate is generated, so a contract change made
+  here reaches a network only after that pin is moved.
+  `make -C contracts/an/exchange SOLD_0_80=<sold 0.80.0> SOLD_0_81=<sold 0.81.0>`
+  rebuilds them, each contract with the compiler its tracked artefact was built
+  with: `eccUSDCBridge` with 0.80.0, `DepositVoucher` and `EthBeaconLightClient`
+  with 0.81.0. The build stops if either variable is unset or names a compiler
+  of another version, since any other compiler changes the code hash.
+- **CI pipeline `.woodpecker/an-contracts.yaml`** runs
+  `scripts/check_voucher_abi_consistency.py` and
+  `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
+  `main`.
+- **The zerostate setup of the Acki Nacki bridge lives here too.**
+  `contracts/an/zerostate_init.py` builds the data cell, upgrades the premined
+  stub to the bridge's code, seeds the trusted L1 bridge, installs the
+  light-client code and writes the account into the zerostate; acki-nacki
+  places it with the contracts and calls it while generating one. A new setup
+  call, a new parameter or a new storage field is now a change in this
+  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
+  the trusted L1 bridge a generated zerostate starts with, defaulting to
+  `11155111` and `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+  `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
+  the cell — never deployed, executed in `tvm-debugger` — and
+  `scripts/check_zerostate_data_encoder.py`, wired into
+  `.woodpecker/an-contracts.yaml`, fails if it and
+  `eccUSDCBridge.onCodeUpgrade` stop agreeing on the tuple.
+
+- `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
+  read-only views of how close an anchor is to eviction from its 128-slot
+  window. A return of N means the Nth further append overwrites it; 0 means it
+  is not in the window. Intended as the monitoring hook for the withdrawal
+  deadline described under the withdrawal-window item below.
+- `VERIFY_GAS_CAP` (1 500 000) bounds the `staticcall` into every Yul verifier,
+  so a malformed proof cannot burn the whole transaction gas.
+- `YulCodehashMismatch` in `ShplonkDeployLib`: deployment asserts the deployed
+  Yul verifier's `extcodehash` against a pinned value, which is what makes an
+  accidentally-substituted verifier a failed deploy rather than a live one.
+- `TransferAmountMismatch` and `ApproveFailed`: token transfers are measured by
+  `balanceOf` delta and `approve` return values are checked, so a
+  fee-on-transfer or non-standard token fails closed instead of crediting book
+  value that never arrived.
+- `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
+  `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
+  size drift, and warns from 90% of EIP-170 (layer hashes warns today at 94%).
+  Growth now shows up in a diff instead of in a reverted deploy.
+- `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
+  appends, a seq_no jump not mass-evicting earlier anchors,
+  `anchorRemainingAppends` at its edges, and the same nullifier paid
+  against a still-in-window anchor after the original evicted.
+
+- `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
+  reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
+  against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)
+  and runs it in `tvm-cli debug run --tvc`: no network, no keys. Measured with
+  sold 0.81.0 / tvm-cli 3.0.6: the library as deployed on shellnet
+  (`reference/EthKeccak_1.4.0_as_deployed.sol`, code hash `78905cf7...`) throws
+  exit 50 on every input at the first `bc[i] = ...`; the fixed library returns
+  the right digests at 12.93M gas per keccak-f permutation against the 10M
+  per-transaction limit (`acki-nacki/node/blockchain.conf.json` p20/p21), and the
+  642-byte Sepolia header 11683168 (`fixtures/`) runs out of the debugger's
+  16.7M credit. `fetch_headers.py` rebuilds header RLPs from any JSON-RPC the
+  way `header_rlp.rs` does; `emulate_live.sh` replays `submitAncestry` against
+  the live light-client account with `tvm-cli runx`. Second, independent
+  measurement of the ancestry gas wall (gosh-sh/bridge#36).
+- `docs/eth-light-client.md`: design and deployment reference for the beacon
+  light client (components, step update, period rotation, trust switches,
+  deployment topology with ports and endpoints, configuration, operating
+  numbers), with Mermaid diagrams.
+- `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
+  `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
+  (`/eth/v1/config/spec`), picking the `fork_version` active at the update's
+  `signature_slot`, and hands the pair to the prover as `BEACON_FORK_VERSION` /
+  `BEACON_GENESIS_VALIDATORS_ROOT`. Sepolia (and any other network with the
+  mainnet preset) now proves without code changes; the prover still defaults
+  to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
+  The state file is pinned to the first `genesis_validators_root` it sees and
+  refuses a source on another network.
+- `eth-lc-relayer daemon --no-rotate --owner-hop`: on a period jump the
+  daemon proves a step of the new period, advances the committee with the
+  owner key from that proof's commitment (`setCommitteeCommitment`) and
+  submits the same bundle, instead of stopping at `RotateRequired`. Shadow
+  only (refused after `disableOwnerRotation`).
+- `eth-lc-relayer set-committee --bundle-dir …`: owner
+  `setCommitteeCommitment(commitment, period)` from a proven step bundle
+  (public-input word 5), recording the period in the state file. Bootstraps a
+  fresh `EthBeaconLightClient` (weak-subjectivity anchor) and hops periods
+  while `--no-rotate`.
+- `crates/eth-light-client-relayer/deploy/shellnet-shadow/`: operator kit for
+  a shadow instance on shellnet against Sepolia (build, SRS install, contract
+  compile with the Linux `sold` release, giver funding, deploy, status,
+  systemd unit, README).
+- `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
+  Ethereum beacon light-client oracle. Polls `finality_update` **and**
+  `light_client/updates` (current 512-committee), proves a step via
+  `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
+  not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
+  `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
+  `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
+  default, `--no-rotate` opts out). After the first accepted `submitUpdate` the
+  daemon issues `setLightClient` + `disableOwnerAnchors` +
+  `disableOwnerRotation` (`--no-flip-owner` opts out; one-shot:
+  `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
+  `AN_USDC_BRIDGE` / `AN_USDC_ABI_PATH`. tvm-sdk#284 co-deploys with this contract.
+  Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
+  headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
+  proven checkpoint (≤ 31 parents), then pushes those hashes into
+  `  USDCBridge._acceptedBlockHash`. The daemon fetches that chain after every
+  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`) and runs
+  `link_headers` locally; on-chain `submitAncestry` is `--submit-ancestry`
+  (default **off**) because two headers already cost ~130 M gas against the
+  10 M limit. It also calls `rePushAnchor` so a bounce before `setLightClient`
+  is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
+  0x…`. Contracts: `contracts/an/EthKeccak.sol`,
+  `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
+  the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
+  between them is fixes and comments — see Removed). `updateCode` / `onCodeUpgrade` persist the committee, head,
+  proven-hash set and `reAnchorsApplied` across a VkBlob rotation.
+  `reAnchorCommittee` is the logged weak-subjectivity hatch after
+  `disableOwnerRotation` (does not write exec hashes; `getCommitteeState`
+  exposes `reAnchorsApplied`). Shellnet E2E:
+  `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
+  `eth-light-client-prover/docs/m_audit_scope.md`.
+
+- **`.woodpecker/verifier_sources.yaml` checks that every committed verifier
+  source compiles to its committed bytecode.** Nothing at run time ties the
+  `.sol` a proof is checked against to the `.bin` the bridge deploys, so this
+  pipeline does: on every pull request and push to `main` that touches
+  `contracts/ethereum/verifiers/`, it downloads `solc 0.8.19` pinned by
+  SHA-256 and runs `scripts/check_verifier_sources.sh`, which fails when a
+  `.sol` does not compile to its `.bin` byte for byte, when either half of a
+  pair is missing, or when a `.bin` exceeds EIP-170. Run it locally with
+  `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
+- **`contracts/an/place.json` says which files acki-nacki places and where.**
+  It lists every file that goes into an Acki Nacki tree with its destination
+  there, and names the ones that stay here — among them this repository's
+  copy of `ISubscriber.sol` (acki-nacki keeps its own original) and
+  `zerostate/BridgeZerostateData.sol`, the encoder source whose compiled
+  artefacts ship without it. acki-nacki now pins only a commit of this
+  repository and follows the manifest, so a new contract or artefact is a
+  change here plus a pin move there, with no file list to keep in step.
+  `scripts/check_place_manifest.py`, wired into `.woodpecker/an-contracts.yaml`,
+  fails when a file under `contracts/an/` appears in neither list, when a
+  destination is not one of the few acki-nacki gives us (`contracts/exchange/`,
+  `contracts/zerostate/`, the two `*_compiled/exchange/` folders and
+  `contracts/scripts/bridge_*.py`, but never
+  `contracts/scripts/bridge_contracts.py`, which is acki-nacki's own module and
+  the one that does the placing), when two files claim one destination, or when
+  the manifest tries to place `ISubscriber.sol` at all — acki-nacki keeps its
+  own original of that interface at the destination our layout would imply, so
+  placing our copy would silently overwrite it. acki-nacki enforces the same
+  destination rule on its side; the manifest is followed, not trusted.
+
+### Changed
+
+- **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
+  building the prover or the CLI no longer needs read access to a private
+  repository.** The five crates (`attestation-bls-checker-circuit`,
+  `historical-layer-hashes-movement-checker-circuit`,
+  `bridge-event-prove-circuit`, `bridge-poseidon`, `bridge-test-data-gen`)
+  used to live in gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits, pinned
+  by revision (see the 0.2.0 "pinned by revision, not `branch = main`" note,
+  which no longer applies). The `bridge-prover-libraries` sub-workspace
+  declares the five circuit crates as path deps at its workspace level
+  (`bridge-prover-libraries/Cargo.toml:50-54`), and the standalone
+  `crates/bridge-snark-utils` package (also excluded from the root
+  workspace, see the top-level `Cargo.toml` `exclude` list) declares
+  them the same way; both reach across sub-workspace boundaries into
+  `crates/bridge-circuits`, which is itself excluded from the root
+  workspace so its gosh-fork halo2 backend does not clash with the
+  root's.
+  `bridge-relayer-daemon`'s own `Cargo.toml` has no direct path-dep on
+  any circuit crate — it consumes them transitively through
+  `bridge-event-witness` / `bridge-event-prover-lib`. The external
+  `[patch]` block is gone, and a circuit edit plus its
+  `EVENT_CIRCUIT_REVISION` bump land in the same PR.
+  `bridge-evm-aggregator` never depended on these crates and is
+  unaffected.
+
+- **`tvm-sdk` moves from `v3.0.5.an` to `v3.0.6.an`** across the root
+  workspace, `crates/bridge-prover-libraries`,
+  `crates/deposit-relayer-daemon` and `crates/eth-light-client-relayer`.
+  The three binaries that actually link `tvm_client` — `ackinacki-bridge`
+  (inside `bridge-prover-libraries`), `deposit-relayer-daemon` and
+  `eth-light-client-relayer` — all ship the new version.
+  `eth-light-client-relayer` only pulls `tvm_client` in when built
+  with `--features live-submit` (`dep:tvm_client` behind that feature
+  in its `Cargo.toml`); without it the binary compiles without
+  `tvm_client` at all.
+  `bridge-relayer-daemon` does not link `tvm_client`, but it does pick
+  up the bump: it consumes `tvm_block` transitively through
+  `bridge-event-witness`, which pins `tvm_block` at the same tvm-sdk
+  workspace tag. So no line in `bridge-relayer-daemon`'s own manifest
+  changes, but its build now compiles against `tvm_block v3.0.6.an`.
+  `dense-balanced-tree` also moves off a floating branch onto tag
+  `v1.0.0`.
+
+- **`scripts/check_voucher_abi_consistency.py` checks `contracts/an/` by
+  default.** With no arguments it checks the sources in
+  `contracts/an/exchange/` against the compiled ABIs in
+  `contracts/an/0.80.0_compiled/exchange/` and
+  `contracts/an/0.81.0_compiled/exchange/`. It does not check the ABI copies
+  the tooling loads: `crates/bridge-prover-libraries/python/contracts/` was
+  the previous default and is no longer checked, and
+  `crates/ackinacki-bridge/abi/` was never covered. Those copies predate the
+  `chainId` deposit identity and are known to be stale; pass them with
+  `--compiled-bridge` / `--compiled-voucher` to see the drift.
+  `--compiled DIR` is replaced by `--compiled-bridge FILE` and
+  `--compiled-voucher FILE`, because the two artefacts sit in different
+  folders, and the bridge source it reads is `eccUSDCBridge.sol`.
+
+- `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
+  (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
+  unvalidated) are closed by this release, and item 3 now states the real
+  withdrawal boundary instead of calling an evicted anchor "unredeemable".
+- The withdrawal deadline, written down for the first time. Each layer keeps
+  128 anchors, and the witness builder escalates a layer at a time
+  (`--anchor-layer auto`, the relayer default). Because an L(n) anchor is
+  appended only at its own W^n boundary, the window grows with that boundary
+  rather than repeating the one below: L1 = 128 × W·P = 131 072 seq (**≈ 12
+  hours**); L2 = 128 × W² = 2 097 152 seq (**≈ 8 days**). L1→L2 is ×(W/P) =
+  **16**; only L2→L3 and above are ×128. Past the highest active layer a
+  payout is stranded in `treasuryBalance`. Adding a layer rescues only an
+  event whose T_n the chain has not yet passed. No code changed here; the
+  horizon was always this and was documented as 12 hours.
+
+- `scripts/check_english_only.py` treats mathematical letters as notation, like
+  the unaccented Greek it already accepts: the Mathematical Alphanumeric Symbols
+  block (double-struck, bold, italic, script, fraktur), the letterlike
+  double-struck / script / black-letter capitals and superscript Latin letters
+  (`𝔾₂`, `ℤ`, `limbᵢ·(2⁸⁸)ⁱ`). They occur only in formulas, never in another
+  language's prose, so the pairing and light-client notes no longer trip the
+  hygiene pipeline. Cyrillic, accented Greek, CJK and the rest still fail.
+
+- On-chain `submitAncestry` is opt-in (`--submit-ancestry` / `SUBMIT_ANCESTRY`,
+  default **off**). The daemon used to fire a 32-header call every epoch whenever
+  `ETH_RPC_URL` was set; two headers already cost 129.7 M gas against a 10 M
+  limit, so every cycle burned ~0.7 vmshell past `tvm.accept()` on a call that
+  cannot succeed. `ETH_RPC_URL` still attaches the execution RPC: the epoch is
+  fetched and `link_headers` runs locally. Dropping the URL is no longer the
+  only lever, and no longer takes the local check with it. The one-shot
+  `submit-ancestry` subcommand stays, and warns. Measured by @SeHor05 on both
+  `v3.0.6.an` and tvm-sdk#284 (gosh-sh/bridge#36).
+- `EthBeaconLightClient` keeps proven execution hashes for **one year** of
+  Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
+  are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
+  expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
+  `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
+  cannot outlive the oracle. The bridge method is `USDCBridge_forget_block_hash_from_light_client.patch`
+  (same sender gate as `acceptBlockHashFromLightClient`, idempotent `delete`). `updateCode` encoding of the proven set changed
+  (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
+  old `mapping => bool` across this upgrade — redeploy or re-prove from the
+  checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.
+- **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
+  `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
+  carried `32 - len` extra constant-equality cells and the VK depended on the
+  finalized block's `extra_data` length. The fixture VK was emitted over a
+  27-byte mainnet `extra_data`; a 25-byte Sepolia block produced a different
+  VkBlob and would have been rejected by the deployed contract. The chunk is
+  now a zero-padded 32-byte witness (soundness unchanged: the payload root is
+  bound to the signed state by `execution_branch`). Regression test
+  `execution_root_shape_is_independent_of_extra_data_len`. Fixture
+  `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
+  `contracts/an/EthBeaconLightClient.sol` re-emitted. The tvm-sdk
+  opcode fixtures still carry the old blob and need
+  `scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`. Verified on Sepolia: the same blob comes
+  out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
+  18 B of `extra_data`.
+- `crates/eth-light-client-relayer` builds with `--features live-submit`
+  outside the tvm-sdk workspace: the crate manifest now mirrors tvm-sdk's
+  `[patch]` tables (gosh `halo2-axiom` / `halo2-lib` / `axiom-eth` forks);
+  before, cargo resolved two `halo2_axiom` versions and `tvm_vm` failed to
+  compile.
+- `prove-one` and the daemon keep the prover transcript
+  (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
+  stderr tail on failure instead of a bare exit status.
+- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`)
+  and, after the first accepted `submitUpdate`, issues the one-way owner flip
+  (`USDCBridge.setLightClient` + `disableOwnerAnchors`,
+  `EthBeaconLightClient.disableOwnerRotation`). `--no-rotate` / `--no-flip-owner`
+  are the shadow/laptop opt-outs. Relayer keys must be the owner pubkey.
+  `disableOwnerAnchors` succeeds when `_lightClient` is set (not only when an
+  attester quorum exists). With `ETH_RPC_URL` the same tick then `rePushAnchor`s
+  the checkpoint and runs `link_headers` locally. On-chain `submitAncestry`
+  is `--submit-ancestry` (default off). `submitUpdate`
+  late-registers a skipped checkpoint of the current committee (`CheckpointBackfilled`,
+  head not rewound). Sink notify uses `bounce: true`; a drop emits
+  `AnchorPushBounced` and is retried via `rePushAnchor`. `encode_header_rlp`
+  fails closed when `keccak256(rlp)` does not match the node's `block.hash`.
+- `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
+  `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
+  witness (real sync committee). Unset committee path still emits a synthetic
+  committee for VkBlob-only keygen.
+
+- **The release bundle's `verifiers/` directory includes `*.sol`**, and
+  `scripts/install.sh` installs them and reports a host without
+  `BridgeWithdrawalAggregatorVerifier.sol` as incomplete. Run against a
+  release published before this change, the installer instead warns that
+  the bundle predates verifier sources and reports the verifier files as
+  missing rather than installing an incomplete tree — so
+  `scripts/install.sh` from `main` needs a release built from this change.
+- **Stage 1 of `ackinacki-bridge withdraw` checks
+  `BridgeWithdrawalAggregatorVerifier.sol` in `--verifiers-dir`** against the
+  copy embedded in the build, exactly as it already checks the `.bin`, and
+  `--allow-verifier-drift` now covers both files.
+- **The relayer image's `IMAGE-SHA256SUMS` lists the four verifier `.sol`
+  files** and no longer lists `bin/solc`; `preflight.sh` refuses a verifier
+  lane whose `.sol` is missing.
+
+### Fixed
+
+- The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
+  required *at most* 64 hex characters, so a pasted 40-character address was
+  left-padded into a well-formed non-zero `bytes32`, passed the contract's
+  `anAccount != 0`, was bound in-circuit, and credited an account nobody owns —
+  with deposit being one-way, the length check was the last place to catch it.
+  Now exactly 64. The workchain field, which Acki Nacki ignores since `dappId`
+  replaced the concept, is no longer editable and is pinned to 0.
+- `MAX_FORWARD_GAP` was sized when the thinning factor `P` was 4 and the bundle
+  stride 512, where its literal 2048 meant "four bundles". `P` is 8 and the
+  stride 1024, so the same literal had quietly become two bundles, and a sibling
+  relayer that advanced three between ticks would halt this one with
+  `HistoryDrift` for no reason. Now derived from `BUNDLE_STRIDE_L1`, with a
+  const assertion that the three-bundle floor holds at build time. Four
+  restatements of `P = 4` / stride 512 as the current setting corrected
+  (module docs, thinning tests, prover-daemon README, verifyBlock runbook).
+- `covering_bundle_seq_no` treated a burn that landed exactly on a stride
+  boundary as already covered by that boundary's bundle. The proof uses the
+  opposite rule (`l1_anchor_boundaries`: for `e = 1024`, `K = 2048`, because
+  the root at 1024 covers the previous batch), so `wait_for_coverage` returned
+  one bundle too early and `resolve_anchor_layer` probed a height the chain
+  may not have produced yet. 1 in 1024 burns; re-running later worked. Now the
+  strictly-next multiple, matching the proof.
+- `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
+  survives N-1.
+- `applyBkSetUpdate` attestation `lastSeen` is the live layer cursor
+  (`storedLastSeenBlockSeqNo`). The prover was baking the BK-update cursor,
+  so after the first `verifyBlock` every rotation failed
+  `AttestationProofRejected`. Once AN rotated, `verifyBlock` then failed
+  `BkSetCommitmentMismatch` and unwithdrawn anchors aged out. The prover now
+  uses the layer cursor; a test drives `verifyBlock` then `applyBkSetUpdate`
+  with a mock that checks the argument.
+- Production `verifyBlock` tests that lack `bound_scenario.json` now
+  `vm.skip` instead of returning, so the hole shows up in the forge summary.
+- `DeployRealBridge` on mainnet also requires `altDstChainId` and
+  `altDstHostChainId` to be 0, matching the existing `altTokenId` require.
+- Constructor now rejects a non-canonical Circuit 4 `dappFr` / `accFr` /
+  `altTokenId`. A raw word cannot equal a Yul-reduced instance, so the
+  previous values would have made every withdrawal revert permanently.
+- `supplyToAave` books the aUSDC delta, not the USDC sent, so a rounding
+  pool cannot inflate `suppliedPrincipal` above the shares the bridge
+  holds. `emergencyWithdrawAll` keeps `principal - received` when the
+  drain pays short; leftover-aToken still reverts unchanged.
+- `forge` default profile no longer enables `ffi`. Tests only read the
+  tree; write permission is limited to `deployment_real.json`.
+- `verifyBlock` no longer SSTOREs per-slot window heights (~29k gas on a
+  ten-layer call). `lastHeight` and `LayerAnchorAppended` remain; the
+  relayer paints `HistoryWindow.heights` from those logs on resurrect.
+- After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
+  reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
+  (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.
+- GitHub Woodpecker now `forge build` + `fmt --check` +
+  `forge test --no-match-contract Fork` on every PR. Solidity compile
+  used to live only on the GitLab mirror, so a broken head could stay
+  mergeable on GitHub.
+- L2 anchoring is the shellnet operational default (Deploy #12), not
+  smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
+  stays L1 for local/CI.
+- Spec §7.3 states the QC-A2-2 rule: `applyBkSetUpdate` attestation
+  `lastSeen` is the live layer cursor. Re-prove if `verifyBlock` advances
+  between prove and submit.
+
+- The step VkBlob gate only checked that `step_vk_blob.bin` had
+  `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`
+  embedded in `EthBeaconLightClient.sol`, so a re-emit that updated one and
+  not the other was silent. tvm-sdk#284 shipped a step fixture (`bd108c08…`)
+  that shares this contract's first 11 813 bytes and then diverges — same
+  circuit params, different key material — which is why a real step proof
+  from that PR does not verify here. The current key is `2d66c205…` (this
+  fixture and both light-client copies); the SDK copy is the stale pre-
+  `extra_data` rotation. `scripts/check_rotate_vkblob_accumulator.sh` now
+  requires contract `VK_BLOB` == the step fixture (and the sha256 sidecar),
+  and if a sibling `tvm-sdk` tree is present, that fixture too. Rotate already
+  had the equivalent check.
+- `EthKeccak` never computed a hash in the TVM. Three `sold` behaviours, each
+  fatal on the first input: `uint64[5] bc;` declares a **zero-length** array, so
+  the first write of the theta step threw exit 50 (this is what aborted every
+  `submitAncestry` after the encoding fix); `x << n` on a `uint64` is
+  range-checked, so `_rotl` threw exit 4 as soon as a rotation dropped a set bit;
+  and `~` on a `uint64`, plus narrowing a shifted lane with `uint8()`, are
+  refused for the same reason. The array is now allocated explicitly (once, not
+  per round), rotation is done in `uint256` and masked back, `~x` is `x ^
+  MASK64`, and `_squeeze32` masks before narrowing. Nothing about the algorithm
+  changed. Verified by execution rather than inspection, in tvm-debugger 3.0.6
+  against a wrapper contract: keccak256("") and keccak256("abc") match their
+  vectors, a 136-byte input matches `cast keccak` (the multi-block absorb path),
+  and the real 642-byte Sepolia header of block 11683168 hashes to its own block
+  hash `6b83c33d…122f83`. Defects reported by @Skydev0h from shellnet
+  (gosh-sh/bridge#36); `acki-nacki` `contracts/exchange/EthKeccak.sol` is
+  byte-identical to this file modulo its pragma, so `EthKeccak_sold_fixes.patch`
+  carries the same change there — it applies cleanly to the head of
+  gosh-sh/acki-nacki#2618 and moves the light client's code hash from
+  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry still cannot run: see Known
+  issues.
+
+- `submitAncestry` and `rePushAnchor` were rejected by the light client
+  (compute phase, exit 252) because two byte orders were in play. The step
+  circuit splits a hash with `node_hi_lo` — each 16-byte half read
+  little-endian — so `submitUpdate` keys an anchor as
+  `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that word is what the bridge
+  holds and what the deposit public inputs carry. Keccak in the VM returns
+  Ethereum byte order, so `submitAncestry` looked up
+  `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
+  `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong
+  order. `submitAncestry` now re-packs through `_piForm` where hashes meet the
+  store (parent links are still compared in Ethereum order), and the daemon
+  converts with `anchor_key_hex`. Observed on shellnet (2026-09-10); ancestry
+  had never been run live before. No migration: every hash already stored came
+  from `submitUpdate` and is already keyed right.
+  `EthBeaconLightClient_rotate_decider.patch` regenerated. Shellnet runs the
+  bridge-deployed variant of the contract, maintained in `acki-nacki`
+  `contracts/bridge`, which landed its own equivalent fix as `181b0c6a` and is
+  live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
+  uses the same `_piForm` name and body, so the two trees differ only
+  structurally.
+- **`scripts/production_preflight.sh` runs its relayer step through the
+  prover workspace.** The step ran `cargo test` inside
+  `crates/bridge-relayer-daemon`, where cargo cannot read the manifest on its
+  own, so the script aborted there after the Foundry gates and never printed
+  `RESULT:`. `scripts/shellnet_e2e.sh` stopped at the same point, because it
+  starts with the preflight. The step now runs the relayer tests from
+  `crates/bridge-prover-libraries`, the way `make relayer-test` does. Fixed the
+  same way: `make relayer-fmt`, which `make pre-push` runs, and the
+  `verify-fixture` step of `scripts/shellnet_e2e.sh`, which could not start the
+  relayer and reported every run as
+  `verify-fixture failed (deploy bridge first or check anchors)`. That step also
+  passes its fixtures directory as an absolute path now: from a relative one the
+  relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
+  looks for legacy Groth16 fixtures instead. The preflight step still fails for
+  as long as that workspace does not build against its pinned circuit revision.
+- **`make deploy-local` runs `script/DeployTestBridge.s.sol`**, the local and
+  testnet smoke-test deployment; the `script/Deploy.s.sol` it named does not
+  exist. It reads `PRIVATE_KEY` from the environment or from
+  `contracts/ethereum/.env`. `make dev-setup` now creates that file from
+  `contracts/ethereum/.env.example` when it is missing, instead of silently
+  failing to copy a root `.env.example` that does not exist. `make audit` runs
+  `cargo audit` only; the `forge audit` it also called is not a Foundry command.
+- **`make setup` (`setup.sh`) no longer runs `forge init --force` in
+  `contracts/ethereum`.** On a fresh clone, where the gitignored `lib/` is
+  absent, it did, and left Foundry's template `src/Counter.sol`,
+  `script/Counter.s.sol`, `test/Counter.t.sol` and a `README.md` in the
+  project, where they were built and tested with it. It now installs the
+  Solidity dependencies the way CI does — `npm install` and `forge-std` — and
+  stops with an error when `npm` is missing, since `poseidon-solidity` comes
+  from npm. It also installs the pinned Rust toolchains from
+  `rust-toolchain.toml` and `deposit-prover/rust-toolchain.toml` instead of
+  switching the global default to the latest nightly, keeps an existing
+  `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
+  `test/integration/` directory or a root `.env.example`; the template for
+  the deploy scripts is `contracts/ethereum/.env.example`.
+- **`deposit-prover/download_trusted_setup.sh` no longer calls the Hermez SRS
+  a test-only fallback.** It told operators that production deposit proofs need
+  an Acki Nacki chain-ceremony SRS in `params/kzg_bn254_18.srs` and that proofs
+  keyed on Hermez are rejected on chain. The reverse is true: the
+  `ZKHALO2VERIFYWITHVK` opcode embeds the Hermez `[s]·G2`, and the deposit
+  prover loads only the Hermez `data/kzg_params_18.srs` this script downloads.
+  The script now checks that file's `[s]·G2` and refuses one from any other
+  ceremony. A failed download is reported as such instead of as a corrupted
+  file — the default source currently answers HTTP 403.
+
+### Known issues
+
+- **Epoch ancestry cannot run on Acki Nacki**, so the light client anchors only
+  the epoch checkpoint — 1 execution block of 32 — and a deposit in any other
+  block still needs the owner's `setAcceptedBlockHash`. Gas is now the only
+  reason: with the `sold` defects fixed (see below) `EthKeccak` computes the
+  right hashes, but it is software keccak — one permutation is 12.93M gas and
+  the real 642-byte Sepolia header of block 11683168 is 64.68M, against a 10M
+  per-transaction limit (p20/p21). Hashing the empty string is already over the
+  limit, so no input size makes `submitAncestry` callable, and a 32-header walk
+  is ~2e9 gas. Closing this needs a keccak-256 builtin in the node, the way
+  `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
+  Defects found on shellnet 2026-09-11; gas re-measured offline in
+  tvm-debugger 3.0.6 on 2026-09-13; a full 32-header walk measured on a real
+  VM (tvm-debugger from `v3.0.6.an` and tvm-sdk#284) 2026-09-14: 2 headers
+  129.7 M, slope 64.65 M/header, 32 headers OOG at 1e9, ≈2.07 G extrapolated
+  against 10 M `gas_limit`. The daemon therefore does **not** send
+  `submitAncestry` unless `--submit-ancestry` is set; `ETH_RPC_URL` still
+  fetches the epoch and runs `link_headers` locally. `submitUpdate`,
+  `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
+
+- `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
+  message to `addr_none` when no `USDCBridge` was configured: the unset
+  `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
+  action phase aborted with result code 34 and the whole `submitUpdate` was
+  rolled back although the proof had verified. Guard is now
+  `!_usdcBridge.isNone() && _usdcBridge != address(0)` (now in `_notifySink`,
+  so `rePushAnchor` is covered too). Observed on the first shellnet shadow
+  deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
+
+### Removed
+
+- `EthBeaconLightClient_rotate_decider.patch`, and with it the claim that the
+  two light-client copies are kept identical. The patch created
+  `contracts/exchange/EthBeaconLightClient.sol` wholesale from this repo's copy,
+  which stopped being an upgrade once acki-nacki began maintaining its own:
+  applying it would have replaced the deployed constant sink and its constructor
+  sender check with an unset `_usdcBridge` — anchors silently stop reaching the
+  bridge — and added a field to the `updateCode` migration cell that the live
+  `onCodeUpgrade` cannot decode. `scripts/check_eth_beacon_lc_sources.sh`
+  asserted that this patch reproduced our copy verbatim, i.e. it enforced the
+  hazard rather than catching it.
+
+  What actually differs between the two trees is small and deliberate: the sink
+  (constant plus sender check there, settable `_usdcBridge` and the extra
+  migration field here), the version string and the pragma floor. Both carry
+  `_piForm`, `provenQueue` and the rotate decider. So the delivery is now two
+  narrow patches instead of a file — `EthKeccak_sold_fixes.patch` (behaviour)
+  and `EthBeaconLightClient_encoding_and_gas_notes.patch` (comments only, code
+  hash verified unchanged at `78905cf7…9ed532`) — and the gate was rewritten to
+  assert scope: patches stay inside `contracts/exchange/`, carry no sink wiring
+  in either direction, the keccak patch only moves their library toward
+  `contracts/an/EthKeccak.sol`, and the notes patch adds nothing but comments.
+  Verified that the rewritten gate rejects the removed patch. The rotate VkBlob
+  gate now reads the `ROTATE_VK_BLOB` literal from
+  `contracts/an/EthBeaconLightClient.sol` rather than from the patch.
+
+  Correcting myself: I described the drift as "221 lines, dominated by a
+  `provenQueue` that exists in `contracts/exchange` and not in `contracts/an`"
+  ([#36](https://github.com/gosh-sh/bridge/pull/36#issuecomment-5655184319)).
+  That was a diff against the wrong commit — `github/eth-light-client-prover-m6`
+  resolves against the remote named `github` unless spelled
+  `github/github/eth-light-client-prover-m6`, so I had compared an ancestor from
+  before `provenQueue` landed. The real diff is 206 lines and `provenQueue` is in
+  both.
+
+- **`solc 0.8.19` is no longer a prerequisite of `ackinacki-bridge withdraw`
+  or of the relayer.** Stage 1 no longer probes the compiler or its version.
+  `scripts/install.sh` no longer downloads it and `BRIDGE_SOLC_URL` is gone;
+  the closing `export PATH` line is still printed, but only for the CLI. The
+  relayer image no longer contains `/opt/gosh-relayer/bin/solc`, the
+  `solc_bin` build context and `SOLC_BIN_DIR` are gone from
+  `deploy/shellnet-l2/compose.yaml` and `compose.env.example` — delete
+  `SOLC_BIN_DIR` from your `.env` — and the image preflight no longer checks
+  the compiler version. An installed `solc` can stay; nothing on these paths
+  uses it. Regenerating verifiers (`export-inner-aggregator`,
+  `export-spike-artifacts`) still needs `solc 0.8.19`.
+- `make generate-proof`, `make test-integration` and `make generate-verifier`,
+  with `scripts/regenerate_verifier.sh`. They ran a `generate-proof` binary,
+  an `eth-frontend` integration test and a `generate-verifier` binary, none of
+  which exists, so each failed on every run. Production verifiers are
+  regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
+- `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
+  which ran the same missing `generate-proof` binary.
+
 ## [0.2.0] – 2026-09-11
 
 ### Breaking Changes

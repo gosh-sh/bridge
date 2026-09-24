@@ -1,0 +1,29 @@
+{
+  "place": [
+    { "from": "contracts/an/exchange/eccUSDCBridge.sol", "to": "contracts/exchange/eccUSDCBridge.sol" },
+    { "from": "contracts/an/exchange/DepositVoucher.sol", "to": "contracts/exchange/DepositVoucher.sol" },
+    { "from": "contracts/an/exchange/EthBeaconLightClient.sol", "to": "contracts/exchange/EthBeaconLightClient.sol" },
+    { "from": "contracts/an/exchange/EthKeccak.sol", "to": "contracts/exchange/EthKeccak.sol" },
+    { "from": "contracts/an/exchange/modifiers/errors.sol", "to": "contracts/exchange/modifiers/errors.sol" },
+    { "from": "contracts/an/exchange/modifiers/modifiers.sol", "to": "contracts/exchange/modifiers/modifiers.sol" },
+    { "from": "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc", "to": "contracts/0.80.0_compiled/exchange/eccUSDCBridge.tvc" },
+    { "from": "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json", "to": "contracts/0.80.0_compiled/exchange/eccUSDCBridge.abi.json" },
+    { "from": "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc", "to": "contracts/0.81.0_compiled/exchange/DepositVoucher.tvc" },
+    { "from": "contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json", "to": "contracts/0.81.0_compiled/exchange/DepositVoucher.abi.json" },
+    { "from": "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc", "to": "contracts/0.81.0_compiled/exchange/EthBeaconLightClient.tvc" },
+    { "from": "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json", "to": "contracts/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json" },
+    { "from": "contracts/an/zerostate_init.py", "to": "contracts/scripts/bridge_zerostate_init.py" },
+    { "from": "contracts/an/zerostate/BridgeZerostateData.tvc", "to": "contracts/zerostate/BridgeZerostateData.tvc" },
+    { "from": "contracts/an/zerostate/BridgeZerostateData.abi.json", "to": "contracts/zerostate/BridgeZerostateData.abi.json" }
+  ],
+  "not_placed": [
+    "contracts/an/README.md",
+    "contracts/an/EthBeaconLightClient.sol",
+    "contracts/an/EthKeccak.sol",
+    "contracts/an/exchange/Makefile",
+    "contracts/an/zerostate/Makefile",
+    "contracts/an/zerostate/BridgeZerostateData.sol",
+    "contracts/an/zerostate/test_zerostate_init.py",
+    "contracts/an/token/interface/ISubscriber.sol"
+  ]
+}

@@ -1,0 +1,51 @@
+diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
+index 29e73aab3..fd5a283e6 100644
+--- a/contracts/exchange/EthBeaconLightClient.sol
++++ b/contracts/exchange/EthBeaconLightClient.sol
+@@ -387,6 +387,23 @@ contract EthBeaconLightClient {
+     ///         header's keccak256 must equal the previous header's RLP
+     ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
+     ///         Permissionless: the keccak + parent links are the authorization.
++    ///         Parent links are compared in Ethereum byte order — the order
++    ///         `parentHash` is written in — and re-packed by `_piForm` only
++    ///         where they meet the store.
++    ///
++    ///         **Cannot execute on Acki Nacki today, and gas is the only
++    ///         reason left.** `EthKeccak` now computes correctly — the three
++    ///         sold defects that made it throw exit 50 for any input are
++    ///         fixed — but it is software keccak: measured in tvm-debugger
++    ///         3.0.6, one permutation costs 12.93M gas and the real 642-byte
++    ///         Sepolia header at block 11683168 costs 64.68M, against a 10M
++    ///         per-transaction limit (p20/p21). Even the empty string is over
++    ///         it, so no input size makes this callable, and a 32-header walk
++    ///         is ~2e9. `rlpParentHash` is cheap by contrast, 17.2k.
++    ///         Ancestry needs a keccak-256 builtin in the node, or the parent
++    ///         chain proven in-circuit. Until then only the epoch checkpoint is
++    ///         anchored, 1 block of 32. Defects found on shellnet 2026-09-11,
++    ///         gas re-measured offline 2026-09-13; gosh-sh/bridge#36.
+     function submitAncestry(bytes[] headerRlps) public {
+         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
+         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
+@@ -437,6 +454,13 @@ contract EthBeaconLightClient {
+         }
+     }
+ 
++    /// @dev Anchors are keyed the way the step circuit publishes them, not the
++    ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
++    ///      the 32-byte hash little-endian, so `submitUpdate` stores
++    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that is also the word
++    ///      the bridge holds and the deposit public inputs carry. `EthKeccak`
++    ///      returns Ethereum byte order, so every keccak result must be
++    ///      re-packed before it reaches `_provenEthSlot`.
+     function _piForm(uint256 h) private pure returns (uint256) {
+         return (_rev16(h >> 128) << 128) | _rev16(h & ((uint256(1) << 128) - 1));
+     }
+@@ -483,6 +507,8 @@ contract EthBeaconLightClient {
+     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
+     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
+     ///         push that landed before `setLightClient`). Does not re-prove.
++    ///         `blockHash` is the stored anchor key (`_piForm` packing), not
++    ///         the Ethereum byte order a block explorer shows.
+     function rePushAnchor(uint256 blockHash) public {
+         require(_isLive(blockHash), ERR_NOT_PROVEN);
+         tvm.accept();

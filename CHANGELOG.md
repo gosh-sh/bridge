@@ -75,10 +75,10 @@ assigns it when the release is tagged.
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
   not decode. The extra tuple field also **changes the `withdrawByProof`
   4-byte selector**: from the previous ten-slot `0x6e6f66ad`
-  (`withdrawByProof(bytes,(uint256×10))`) to the eleven-slot
-  `0xa9753d18`
-  (`withdrawByProof(bytes,(uint256×11))`, verified with
-  `cast sig`). Integrators that hand-craft calldata (`cast call`
+  (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`)
+  to the eleven-slot `0xa9753d18`
+  (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`,
+  verified with `cast sig`). Integrators that hand-craft calldata (`cast call`
   scripts, custom relayers, front-ends) have to update the tuple
   signature; a client still emitting the old selector will see the
   call revert with empty returndata (no fallback and no router

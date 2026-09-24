@@ -214,11 +214,13 @@ pub(crate) fn walk_dense_merkle_bind_pos(
 //     That is enough to catch a weak attacker who only flips the
 //     `pos_witness` bit. A stronger attacker willing to rebuild the
 //     chunk cells for the flipped orientation would satisfy every
-//     link inside this gadget, and would end up producing a root that
-//     differs from the honest one — this gadget still does not by
-//     itself compare its output to anything, so the test-only
-//     `expected_root` equality inside `run_gadget` is what stops that
-//     stronger attacker in the test. Active-bit binding in production
+//     link inside this gadget and would end up producing a root that
+//     differs from the honest one — no test on this branch exercises
+//     that stronger case, but if it were exercised, this gadget still
+//     does not by itself compare its output to anything, so the
+//     test-only `expected_root` equality inside `run_gadget` would be
+//     what stops it (adding such a chunk-rebuild negative is a natural
+//     follow-up). Active-bit binding in production
 //     rests on the walked root flowing into `final_root` and being
 //     compared against `_layerWindows[anchorLayer]` in `withdrawByProof`
 //     on chain (see the header comment on

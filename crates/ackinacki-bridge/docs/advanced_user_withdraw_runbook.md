@@ -968,7 +968,10 @@ eleven `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
 dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot,
 anchorLayer)` — so the signature is a parenthesised tuple, not
 `uint256[13]`. The selector for the eleven-slot signature is
-`0xa9753d18` (`cast sig 'withdrawByProof(bytes,(uint256×11))'`); the
+`0xa9753d18`, computed with `cast sig` from the fully-expanded
+signature below (`cast` will not parse `×11` shorthand — it needs
+eleven comma-separated `uint256`s inside the tuple, exactly as the
+`cast call` invocation further down spells out); the
 previous ten-slot form was `0x6e6f66ad` and will not decode against the
 current bridge:
 

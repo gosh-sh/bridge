@@ -11,6 +11,11 @@
 # cross-circuit-block-id-test runs Circuit 1 at K=20 (Circuit 1's `K` is
 # re-exported as `C1_K` and passed to `MockProver::run` — see
 # `crates/bridge-circuits/cross-circuit-block-id-test/tests/cross_circuit_block_id.rs`).
+# `historical-layer-hashes-movement-checker-circuit` runs at K=17
+# (`pub const K: u32 = 17` in that crate's `src/lib.rs`) — noticeably
+# lighter than the K=19/K=20 circuits above, though it still runs in
+# the heavy step below with `RUST_TEST_THREADS=1` because it shares
+# the step with the K=20 attestation-BLS MockProvers.
 # Cold runs are dominated by `cargo build` fetching the pinned gosh git
 # deps and compiling the halo2 stack (order of ~2 min on a fresh CI
 # checkout), plus another couple of minutes of MockProver test execution

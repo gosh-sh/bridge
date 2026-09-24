@@ -15,6 +15,12 @@ abstract contract ShplonkAggregatorVerifierBase {
     /// @notice KZG pairing accumulator limb count (snark-verifier-sdk layout).
     uint256 internal constant NUM_ACCUMULATOR_INSTANCES = 12;
 
+    /// @notice BN254 scalar-field modulus `r`. The aggregator's Poseidon
+    ///         digest is always a valid Fr, so any pin at or above `r`
+    ///         cannot match the on-chain slot and would silently reject
+    ///         every proof.
+    uint256 internal constant BN254_FR_MODULUS = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+
     IShplonkHalo2Verifier public immutable shplonkVerifier;
 
     /// @notice Poseidon digest of the inner-circuit VK witnesses. Matches the
@@ -27,10 +33,17 @@ abstract contract ShplonkAggregatorVerifierBase {
     ///         would in fact reject every honest proof — the guard catches
     ///         an unset constructor argument, not a matching zero digest.
     error InvalidVkDigest();
+    /// @notice Reject a pin `>= r` at deploy time. A valid Fr digest is
+    ///         strictly less than `r`, so a pin above `r` cannot match any
+    ///         real aggregator output and would silently reject every proof.
+    ///         Catches an operator who passed a raw 32-byte hash or a
+    ///         chain-id-derived value in place of a real Fr digest.
+    error VkDigestExceedsFieldModulus();
 
     constructor(address _shplonkVerifier, bytes32 _vkDigest) {
         if (_shplonkVerifier == address(0)) revert InvalidVerifierAddress();
         if (_vkDigest == bytes32(0)) revert InvalidVkDigest();
+        if (uint256(_vkDigest) >= BN254_FR_MODULUS) revert VkDigestExceedsFieldModulus();
         shplonkVerifier = IShplonkHalo2Verifier(_shplonkVerifier);
         vkDigest = _vkDigest;
     }

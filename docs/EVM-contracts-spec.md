@@ -712,7 +712,7 @@ was written in, so the suite was read, not executed).
 | `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
 | `ShplonkAggregatorForgery.t.sol` (3) | Groth16-stub proof rejected by the SHPLONK path. |
-| `ShplonkAggregatorVkBinding.t.sol` (9) | Inner-VK Poseidon digest binding: mutated-digest calldata rejected by all four adapters; unmodified calldata rejected when the adapter is deployed with a wrong `vkDigest`; `bytes32(0)` constructor argument rejected with `InvalidVkDigest`. |
+| `ShplonkAggregatorVkBinding.t.sol` (13) | Inner-VK Poseidon digest binding: mutated-digest calldata rejected by all four adapters; unmodified calldata rejected when the adapter is deployed with a wrong `vkDigest`; `bytes32(0)` constructor argument rejected with `InvalidVkDigest`; pin at or above the BN254 scalar-field modulus rejected with `VkDigestExceedsFieldModulus` (guards an operator who passes a raw hash or chain-id value); calldata one word short of the trailing digest slot rejected without reverting inside `_readInstance` (withdrawal + primary adapters). |
 | `ShplonkDeployLib.t.sol`, `ShplonkSpikeOnChain.t.sol` (4) | Wrapper accepts/rejects spike calldata (`test/fixtures/r15_spike/`, **not** production verifiers). |
 | `AxiomBlockHeaderOracle.t.sol` (16) | Oracle recent/historical/future paths. |
 | `Halo2PoseidonVerifier.t.sol` (7) | Standalone DarkDEX Poseidon Halo2 verifier bytecode — unrelated to the bridge's live path. |

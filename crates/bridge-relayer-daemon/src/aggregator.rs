@@ -49,6 +49,17 @@ use crate::{
 /// re-exposed inner public inputs (snark-verifier SHPLONK accumulator).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
+/// BN254 scalar field modulus `r`. Fr encodings must be strictly less. A
+/// Poseidon digest emitted by the aggregator (word 23 of the calldata) is
+/// always a valid Fr, so any word we read there that is `>= r` cannot have
+/// come from the aggregator and is rejected before we forward the proof.
+pub const BN254_FR_MODULUS: U256 = U256::from_limbs([
+    0x43e1_f593_f000_0001,
+    0x2833_e848_79b9_7091,
+    0xb850_45b6_8181_585d,
+    0x3064_4e72_e131_a029,
+]);
+
 /// The committed Circuit-4 withdrawal verifier name (matches the `.sol` /
 /// `.bin` pair in `contracts/ethereum/verifiers/`).
 pub const WITHDRAWAL_VERIFIER_NAME: &str = "BridgeWithdrawalAggregatorVerifier";
@@ -530,11 +541,15 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
         let instances_hex = read_instances_le(&artefacts.instances_path)?;
 
         // The calldata's re-exposed inner instances (words 12..22 inclusive,
-        // big-endian) must equal the eleven public inputs. If they don't, the
-        // on-chain verifier
-        // would bind different values than the caller passes in
-        // `WithdrawalPublicInputs` — refuse to surface such a proof.
-        calldata_binds_instances(&calldata, &instances_hex)?;
+        // big-endian) must equal the eleven public inputs, and the trailing
+        // digest slot (word 23) must be a non-zero, in-field Fr. If either
+        // fails, the on-chain verifier would either bind different values
+        // than the caller passes in `WithdrawalPublicInputs` or reject the
+        // digest against the adapter's immutable pin — refuse to surface
+        // such a proof. `None` here: the pipeline does not have the on-chain
+        // adapter's `vkDigest` handy; the preflight/verify-fixture path is
+        // the caller that can pass `Some`.
+        calldata_binds_instances(&calldata, &instances_hex, None)?;
 
         Ok(PartnerWithdrawalProof {
             seq_no,
@@ -568,9 +583,25 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
 /// Assert that the aggregator calldata re-exposes exactly the eleven Circuit-4
 /// public inputs: `calldata[(12+i)*32 .. (13+i)*32]` (big-endian EVM word)
 /// numerically equals `instances_hex[i]` (little-endian Fr repr), for all i.
+///
+/// Also validates the trailing inner-VK digest slot (word 23, i.e.
+/// `12 + WITHDRAWAL_PUBLIC_INPUTS`):
+///   * the word must be non-zero — a Poseidon digest over Fr is not zero in
+///     practice, so a zero here means the aggregator did not emit a digest
+///     (older Yul without the binding, or a corrupted payload);
+///   * the word must be strictly less than the BN254 scalar-field modulus `r`
+///     — the aggregator always emits a valid Fr, so a value `>= r` cannot
+///     match any deploy-time `vkDigest` pin and is rejected here rather than
+///     failing silently on-chain.
+///
+/// If `expected_vk_digest_hex` is `Some(hex)`, word 23 must equal the given
+/// LE-Fr hex value exactly (used by preflight paths that already know the
+/// adapter's on-chain `vkDigest`; the runtime pipeline that has no such value
+/// passes `None` and only gets the two sanity checks above).
 pub fn calldata_binds_instances(
     calldata: &[u8],
     instances_hex: &[String],
+    expected_vk_digest_hex: Option<&str>,
 ) -> Result<(), RelayerError> {
     if calldata.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
         return Err(RelayerError::other(format!(
@@ -598,6 +629,34 @@ pub fn calldata_binds_instances(
             return Err(RelayerError::other(format!(
                 "calldata instance[{i}] ({from_calldata}) != public input[{i}] ({from_instance}) \
                  — aggregator calldata does not bind the declared public inputs"
+            )));
+        }
+    }
+
+    // Word 23: inner-VK digest slot. Sanity-check even without an expected
+    // pin, so a stale-Yul or corrupted payload never reaches submit.
+    let digest_off = (NUM_ACCUMULATOR_INSTANCES + WITHDRAWAL_PUBLIC_INPUTS) * 32;
+    let digest_word = &calldata[digest_off..digest_off + 32];
+    let digest = U256::from_be_slice(digest_word);
+    if digest == U256::ZERO {
+        return Err(RelayerError::other(
+            "calldata vk_digest slot (word 23) is zero — aggregator did not emit an inner-VK \
+             digest; regenerate the aggregator Yul + calldata",
+        ));
+    }
+    if digest >= BN254_FR_MODULUS {
+        return Err(RelayerError::other(format!(
+            "calldata vk_digest slot (word 23) = {digest} is >= BN254 field modulus r — not a \
+             valid Fr; the aggregator cannot have produced this word"
+        )));
+    }
+    if let Some(expected_hex) = expected_vk_digest_hex {
+        let expected = fr_hex_to_u256(expected_hex)?;
+        if digest != expected {
+            return Err(RelayerError::other(format!(
+                "calldata vk_digest slot (word 23) = {digest} != expected on-chain vkDigest = \
+                 {expected} — the aggregator was built against a different inner VK than the \
+                 deployed adapter pins"
             )));
         }
     }
@@ -667,7 +726,10 @@ impl MockAggregator {
     /// words at positions `12..12 + instances_hex.len()`), padded to a
     /// stand-in 3616-byte length (see the note on [`MockAggregator`] — the
     /// production Circuit-4 SHPLONK calldata is 3680 B, this is only large
-    /// enough to hold the instance words).
+    /// enough to hold the instance words). The trailing digest slot at
+    /// `12 + instances_hex.len()` is populated with [`Self::MOCK_VK_DIGEST`]
+    /// so that [`calldata_binds_instances`]'s non-zero + in-field checks
+    /// pass.
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
         let total_len = 3616;
         let mut cd = vec![0u8; total_len];
@@ -677,8 +739,20 @@ impl MockAggregator {
             let off = (NUM_ACCUMULATOR_INSTANCES + i) * 32;
             cd[off..off + 32].copy_from_slice(&be);
         }
+        // Digest slot: a stand-in, non-zero, in-field value.
+        let digest_off = (NUM_ACCUMULATOR_INSTANCES + instances_hex.len()) * 32;
+        if digest_off + 32 <= cd.len() {
+            cd[digest_off..digest_off + 32]
+                .copy_from_slice(&Self::MOCK_VK_DIGEST.to_be_bytes::<32>());
+        }
         cd
     }
+
+    /// Stand-in inner-VK digest used by [`Self::calldata_binding`]. Chosen
+    /// arbitrarily; it just has to be a non-zero Fr less than
+    /// [`BN254_FR_MODULUS`] so the mock passes the same word-23 checks the
+    /// production pipeline enforces.
+    pub const MOCK_VK_DIGEST: U256 = U256::from_limbs([0x0123_4567_89ab_cdef, 0, 0, 0]);
 }
 
 #[async_trait]
@@ -1191,16 +1265,61 @@ mod tests {
             })
             .collect();
         let cd = MockAggregator::calldata_binding(&instances);
-        assert!(calldata_binds_instances(&cd, &instances).is_ok());
+        assert!(calldata_binds_instances(&cd, &instances, None).is_ok());
 
         // Corrupt one bound word → mismatch detected.
         let mut bad = cd.clone();
         let off = (NUM_ACCUMULATOR_INSTANCES + 3) * 32;
         bad[off + 31] ^= 0xFF;
-        assert!(calldata_binds_instances(&bad, &instances).is_err());
+        assert!(calldata_binds_instances(&bad, &instances, None).is_err());
 
         // Too-short calldata → error.
-        assert!(calldata_binds_instances(&[0u8; 100], &instances).is_err());
+        assert!(calldata_binds_instances(&[0u8; 100], &instances, None).is_err());
+    }
+
+    /// Word 23 (the inner-VK digest slot) must be non-zero and in-field, and
+    /// — when an expected digest is supplied — must match it exactly. Guards
+    /// against a stale-Yul aggregator that forgot to emit the digest, a
+    /// corrupted payload that landed a non-Fr word there, and a same-shape
+    /// inner-VK rotation whose digest no longer matches the on-chain pin.
+    #[test]
+    fn calldata_binds_validates_vk_digest_slot() {
+        let instances: Vec<String> = (0..WITHDRAWAL_PUBLIC_INPUTS as u8)
+            .map(|i| {
+                let mut le = [0u8; 32];
+                le[0] = i + 1;
+                hex::encode(le)
+            })
+            .collect();
+        let cd = MockAggregator::calldata_binding(&instances);
+        let digest_off = (NUM_ACCUMULATOR_INSTANCES + WITHDRAWAL_PUBLIC_INPUTS) * 32;
+
+        // Zero digest → error.
+        let mut zeroed = cd.clone();
+        zeroed[digest_off..digest_off + 32].fill(0);
+        assert!(calldata_binds_instances(&zeroed, &instances, None).is_err());
+
+        // Word >= r (all 0xff) → error.
+        let mut oversize = cd.clone();
+        oversize[digest_off..digest_off + 32].fill(0xff);
+        assert!(calldata_binds_instances(&oversize, &instances, None).is_err());
+
+        // Exact-match against expected digest.
+        let mock_digest_le: String =
+            hex::encode(MockAggregator::MOCK_VK_DIGEST.to_le_bytes::<32>());
+        assert!(
+            calldata_binds_instances(&cd, &instances, Some(&mock_digest_le)).is_ok(),
+            "matching expected digest must pass"
+        );
+
+        // Wrong expected digest → error.
+        let wrong_le = hex::encode(
+            (MockAggregator::MOCK_VK_DIGEST ^ U256::from(1u64)).to_le_bytes::<32>(),
+        );
+        assert!(
+            calldata_binds_instances(&cd, &instances, Some(&wrong_le)).is_err(),
+            "mismatched expected digest must fail"
+        );
     }
 
     #[tokio::test]

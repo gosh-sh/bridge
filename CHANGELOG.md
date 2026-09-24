@@ -155,7 +155,10 @@ assigns it when the release is tagged.
   `WITHDRAWAL_VERIFIER` — do not pass pre-rotation adapters there.
 
   Each adapter constructor is `(address _shplonkVerifier, bytes32 _vkDigest)`,
-  rejects a zero digest with `InvalidVkDigest()`, and exposes `vkDigest()`.
+  rejects a zero digest with `InvalidVkDigest()`, rejects a pin at or above
+  the BN254 scalar-field modulus `r` with `VkDigestExceedsFieldModulus()`
+  (guards an operator who passes a raw 32-byte hash or a chain-id value in
+  place of a real Fr digest), and exposes `vkDigest()`.
   `verifyPrimaryAttestation` and `verifyFallbackAttestation` compare word
   16, `verifyLayerHashesMovement` word 26, `verifyWithdrawal` word 23,
   then delegate to Yul. A pin is word `12 + N` of the matching

@@ -57,6 +57,7 @@ use halo2_base::{
         poly::kzg::commitment::ParamsKZG,
     },
 };
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use snark_verifier_sdk::{
@@ -229,7 +230,8 @@ pub fn keygen_or_load(
 ) -> anyhow::Result<CachedKeygen> {
     let slots = match cache_dir {
         Some(dir) => {
-            std::fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create cache dir {}", dir.display()))?;
             let stem = cache_stem(base_name, &config, agg_params, inner_snark);
             Some(slot_paths(dir, &stem))
         }
@@ -241,8 +243,10 @@ pub fn keygen_or_load(
     // ------------------------------------------------------------------
     if let Some(s) = slots.as_ref() {
         if s.pk.exists() && s.meta.exists() {
-            let meta_text = std::fs::read_to_string(&s.meta)?;
-            let meta: CachedMeta = serde_json::from_str(&meta_text)?;
+            let meta_text = std::fs::read_to_string(&s.meta)
+                .with_context(|| format!("read cache meta {}", s.meta.display()))?;
+            let meta: CachedMeta = serde_json::from_str(&meta_text)
+                .with_context(|| format!("parse cache meta {}", s.meta.display()))?;
             let calculated: AggregationConfigParams = meta.calculated.into();
 
             // Build a "post-keygen shape" circuit so `circuit.params()`
@@ -312,7 +316,10 @@ pub fn keygen_or_load(
             calculated: calculated.into(),
             num_instance: num_instance.clone(),
         };
-        std::fs::write(&s.meta, serde_json::to_string_pretty(&meta)?)?;
+        let meta_text = serde_json::to_string_pretty(&meta)
+            .context("serialize cache meta")?;
+        std::fs::write(&s.meta, meta_text)
+            .with_context(|| format!("write cache meta {}", s.meta.display()))?;
         tracing::info!(
             target: "bridge_evm_aggregator::cache",
             stem = %s.pk.file_stem().and_then(|s| s.to_str()).unwrap_or(""),

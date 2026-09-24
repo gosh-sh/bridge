@@ -89,4 +89,25 @@ mod tests {
         assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 300]).is_err());
         assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 256]).is_err());
     }
+
+    /// Exact boundary: exactly `SHPLONK_MIN_ATTESTATION_INSTANCES` bytes must
+    /// pass; one byte short must fail. Pins the off-by-one after any future
+    /// layout change (e.g. a re-exposed public input added or removed).
+    #[test]
+    fn attestation_exact_boundary() {
+        let one_short = vec![0u8; SHPLONK_MIN_ATTESTATION_INSTANCES - 1];
+        let at_min = vec![0u8; SHPLONK_MIN_ATTESTATION_INSTANCES];
+        assert!(validate_attestation_proof(FinalizationType::Primary, &one_short).is_err());
+        assert!(validate_attestation_proof(FinalizationType::Primary, &at_min).is_ok());
+        assert!(validate_attestation_proof(FinalizationType::Fallback, &one_short).is_err());
+        assert!(validate_attestation_proof(FinalizationType::Fallback, &at_min).is_ok());
+    }
+
+    #[test]
+    fn layer_hashes_exact_boundary() {
+        let one_short = vec![0u8; SHPLONK_MIN_LAYER_INSTANCES - 1];
+        let at_min = vec![0u8; SHPLONK_MIN_LAYER_INSTANCES];
+        assert!(validate_layer_hashes_proof(&one_short).is_err());
+        assert!(validate_layer_hashes_proof(&at_min).is_ok());
+    }
 }

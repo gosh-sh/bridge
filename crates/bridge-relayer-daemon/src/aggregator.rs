@@ -647,7 +647,7 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
 }
 
 /// Deterministic aggregator for tests: returns fixed-size 3616-byte
-/// calldata whose re-exposed instance words (12..22) match
+/// calldata whose re-exposed instance words (12..=22 inclusive) match
 /// [`MockCircuit4SnarkProver`]'s eleven ascending LE instances, so
 /// [`calldata_binds_instances`] passes. Note the 3616-byte length is
 /// only "big enough" — it does not match the true production Circuit-4

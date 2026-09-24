@@ -15,8 +15,9 @@ import "../script/ShplonkDeployLib.sol";
 ///         withdraw path is cryptographically real, not a mock.
 /// @dev Mirrors `AckiNackiBridgeProductionVerifyBlockTest` (which covers 1A/1B/2).
 ///      The 11 Circuit-4 public inputs are re-exposed inside the calldata at
-///      instance slots [12..22], so we extract `WithdrawalPublicInputs` directly
-///      from the calldata rather than a sidecar file.
+///      instance slots 12..=22 (indices 12,13,…,22 inclusive — eleven
+///      slots), so we extract `WithdrawalPublicInputs` directly from the
+///      calldata rather than a sidecar file.
 contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     string internal constant WITHDRAWAL_BIN = "verifiers/BridgeWithdrawalAggregatorVerifier.bin";
     string internal constant WITHDRAWAL_CALLDATA_DEFAULT =

@@ -399,6 +399,23 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
+  proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
+  exponential backoff.** With the aggregator now binding the inner-circuit
+  VK on-chain, a proof built against a rotated (or wrong) inner key makes
+  the adapter's runtime digest guard return `false`, and the bridge reverts
+  `WithdrawalProofRejected()` — every retry has the same fate. The scan
+  loop now classifies the 4-byte revert selector: `WithdrawalProofRejected`,
+  `WithdrawIdentityMismatch`, `DstChainIdMismatch`, `UnsupportedTokenId`,
+  `RecipientHalfOutOfRange`, `InvalidRecipient`, `FieldElementOutOfRange`,
+  `InvalidNumLayers` and `NullifierAlreadyUsed` are treated as permanent
+  (proof is marked done, counted under `skipped`, and the scan continues to
+  the next file); `UnknownAnchor` and `WithdrawTreasuryShortfall` stay on
+  the backoff path, as do RPC-side failures and post-send confirmation
+  errors. The `submit-withdraw` and `withdraw-e2e` CLI subcommands now
+  label the revert as `(permanent)` or `(transient)` in the failure
+  message.
+
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
   building the prover or the CLI no longer needs read access to a private
   repository.** The five crates (`attestation-bls-checker-circuit`,

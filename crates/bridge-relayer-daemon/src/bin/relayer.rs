@@ -1544,6 +1544,20 @@ where
             },
             WithdrawSubmitOutcome::Reverted {
                 reason,
+                permanent: true,
+            } => {
+                // Proof-intrinsic revert (e.g. `WithdrawalProofRejected`,
+                // which includes the wrong-inner-VK path where the
+                // aggregator's digest guard makes the adapter return
+                // `false`). Retrying is a waste of gas and holds up
+                // every proof behind it, so park the file.
+                warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted permanently; parking proof");
+                st.skipped += 1;
+                st.done.insert(proof_path);
+            },
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+                permanent: false,
             } => {
                 warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
                 had_transient_failure = true;
@@ -1797,8 +1811,10 @@ async fn submit_withdraw(
         } => info!(?tx_hash, "withdrawByProof paid out"),
         WithdrawSubmitOutcome::Reverted {
             reason,
+            permanent,
         } => {
-            anyhow::bail!("withdrawByProof reverted: {reason}");
+            let kind = if permanent { "permanent" } else { "transient" };
+            anyhow::bail!("withdrawByProof reverted ({kind}): {reason}");
         },
     }
     Ok(())
@@ -1918,7 +1934,11 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         } => info!(?tx_hash, "withdrawByProof paid out"),
         WithdrawSubmitOutcome::Reverted {
             reason,
-        } => anyhow::bail!("withdrawByProof reverted: {reason}"),
+            permanent,
+        } => {
+            let kind = if permanent { "permanent" } else { "transient" };
+            anyhow::bail!("withdrawByProof reverted ({kind}): {reason}");
+        },
     }
     Ok(())
 }

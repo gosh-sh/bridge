@@ -36,8 +36,8 @@ pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 11;
 /// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
 /// prefix is 12 KZG accumulator limbs + the 11 re-exposed Circuit-4 public
 /// inputs + 1 inner-VK Poseidon digest slot, each a 32-byte field element
-/// (the outer proof bytes follow). Matches `BridgeWithdrawalAggregatorVerifier`'s
-/// 24-instance layout.
+/// (the outer proof bytes follow). Matches
+/// `BridgeWithdrawalAggregatorVerifier`'s 24-instance layout.
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS + 1) * 32;
 
 /// Parsed `proof_event_*.json` from

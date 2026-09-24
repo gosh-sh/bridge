@@ -589,10 +589,10 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
 ///   * the word must be non-zero — a Poseidon digest over Fr is not zero in
 ///     practice, so a zero here means the aggregator did not emit a digest
 ///     (older Yul without the binding, or a corrupted payload);
-///   * the word must be strictly less than the BN254 scalar-field modulus `r`
-///     — the aggregator always emits a valid Fr, so a value `>= r` cannot
-///     match any deploy-time `vkDigest` pin and is rejected here rather than
-///     failing silently on-chain.
+///   * the word must be strictly less than the BN254 scalar-field modulus `r` —
+///     the aggregator always emits a valid Fr, so a value `>= r` cannot match
+///     any deploy-time `vkDigest` pin and is rejected here rather than failing
+///     silently on-chain.
 ///
 /// If `expected_vk_digest_hex` is `Some(hex)`, word 23 must equal the given
 /// LE-Fr hex value exactly (used by preflight paths that already know the
@@ -1313,9 +1313,8 @@ mod tests {
         );
 
         // Wrong expected digest → error.
-        let wrong_le = hex::encode(
-            (MockAggregator::MOCK_VK_DIGEST ^ U256::from(1u64)).to_le_bytes::<32>(),
-        );
+        let wrong_le =
+            hex::encode((MockAggregator::MOCK_VK_DIGEST ^ U256::from(1u64)).to_le_bytes::<32>());
         assert!(
             calldata_binds_instances(&cd, &instances, Some(&wrong_le)).is_err(),
             "mismatched expected digest must fail"

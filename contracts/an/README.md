@@ -1,12 +1,14 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/`, all at version 1.4.0:
+`exchange/` — `eccUSDCBridge` at version 1.5.0, the other two at 1.4.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
-  USDC on `initiateWithdrawal`.
+  USDC on `initiateWithdrawal`. The owner can stop both of those with
+  `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until it is
+  lifted; nothing else the bridge does is affected.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
   from the deposit identity; a second finalization of the same deposit collides
   with it and does not mint again.

@@ -40,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.4.0";
+    string constant version = "1.5.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -129,6 +129,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // bootstrapping; `disableOwnerAnchors()` clears it permanently, which is
     // the step that turns "the owner key" into "the light-client proof".
     bool _ownerAnchorsEnabled = true;
+
+    // Owner-operated stop of the cross-chain lane: `finalizeDeposit` and
+    // `initiateWithdrawal` refuse while it is set. Like `_trustedL1Bridge` and
+    // `_acceptedBlockHash` it is NOT carried through `onCodeUpgrade` (the tuple
+    // shape stays fixed across code generations), so an upgraded bridge starts
+    // unpaused — with an empty allowlist and empty anchors, which hold deposits
+    // anyway until the owner re-seeds them.
+    bool _paused;
 
     // ZK verifying key (VkBlob) for the FINAL ETH-deposit circuit
     // (receipt-proof of an L1 deposit event, 12 public inputs — chainId added
@@ -369,6 +377,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @param dstChainId — opaque destination chain identifier (passed through to event)
     /// @param recipient  — destination-chain recipient bytes (≤64 bytes)
     function initiateWithdrawal(uint256 dstChainId, bytes recipient) public {
+        require(!_paused, ERR_PAUSED);
         tvm.accept();
         ensureBalance();
         require(recipient.length > 0, ERR_RECIPIENT_EMPTY);
@@ -520,6 +529,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _ownerAnchorsEnabled = false;
     }
 
+    /// @notice Stops and resumes the cross-chain lane: while paused,
+    ///         `finalizeDeposit` and `initiateWithdrawal` throw
+    ///         `ERR_PAUSED` (231) before doing any work. Reversible, and
+    ///         deliberately narrow — the TIP-3 inbound callback, the owner
+    ///         mints, `confirmDeposit` and every anchor and allowlist call stay
+    ///         available, so a deposit already proven can still be paid out and
+    ///         the owner can keep the bridge's configuration current while it
+    ///         is stopped.
+    function setPaused(bool paused) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        _paused = paused;
+    }
+
     /// @notice Admits a block hash the light client proved final on the source
     ///         chain. Authorized solely by being the light client this bridge
     ///         — no human asserts canonicality, the proof does.
@@ -549,6 +571,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return (_lightClient, _ownerAnchorsEnabled);
     }
 
+    /// @notice Whether the cross-chain lane is stopped by the owner.
+    function isPaused() external view returns (bool) {
+        return _paused;
+    }
+
     /// @notice Finalizes an L1 deposit proven by the final ETH-deposit halo2
     ///         circuit (receipt-proof of the L1 deposit event). The relayer
     ///         passes the proof and its public-inputs blob verbatim; we verify
@@ -568,6 +595,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///                         see `_parsePublicInputs`.
     function finalizeDeposit(bytes proof, bytes publicInputs) public view {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
+        require(!_paused, ERR_PAUSED);
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
         // The proof binds (chainId, contractAddr) to the L1 event; the allowlist

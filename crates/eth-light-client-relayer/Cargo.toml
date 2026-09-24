@@ -26,7 +26,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 rlp = "0.5"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 acki-nacki-interface = { path = "../acki-nacki-interface" }
-tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",
 ], optional = true }
@@ -36,7 +36,7 @@ tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an"
 # with a git dependency; without them cargo also pulls crates.io `halo2-axiom`
 # and upstream `axiom-crypto/halo2-lib`, and `tvm_vm` fails with
 # "EthCircuitImpl: Circuit<Fr> is not satisfied (multiple versions of
-# halo2_axiom)". Mirror of tvm-sdk `v3.0.5.an` root `Cargo.toml`.
+# halo2_axiom)". Mirror of tvm-sdk `v3.0.6.an` root `Cargo.toml`.
 [patch.crates-io]
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
 halo2-axiom = { git = "https://github.com/gosh-sh/halo2-axiom", branch = "main" }

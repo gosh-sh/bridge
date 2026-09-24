@@ -183,3 +183,99 @@ fn dense_chain_wrong_length_errors() {
     let err = must_err(&w, "undersized dense_chain");
     assert!(format!("{err}").contains("MAX_CHAIN_LEN"));
 }
+
+/// `events_tree_proof.position` is bounded by `1 << siblings.len()`. The
+/// fixture uses 7 siblings, so `position = 128` is one past the max and
+/// must be caught by the mirrored range check in `build_proof_inputs`.
+#[test]
+fn events_tree_position_out_of_range_errors() {
+    let mut w = populated_witness();
+    let proof = w.events_tree_proof.as_mut().unwrap();
+    proof.position = 1u32 << proof.siblings_hex.len();
+    let err = must_err(&w, "events_tree_proof position out of range");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("events_tree_proof position") && msg.contains("out of range"),
+        "unexpected error message: {msg}"
+    );
+}
+
+/// Same axis for `block_tree_proof`: 8 siblings, so `position = 256` is
+/// one past the max and must be rejected symmetrically.
+#[test]
+fn block_tree_position_out_of_range_errors() {
+    let mut w = populated_witness();
+    let proof = w.block_tree_proof.as_mut().unwrap();
+    proof.position = 1u32 << proof.siblings_hex.len();
+    let err = must_err(&w, "block_tree_proof position out of range");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("block_tree_proof position") && msg.contains("out of range"),
+        "unexpected error message: {msg}"
+    );
+}
+
+/// The `checked_shl` guard on `block_siblings.len()`: a witness with a
+/// depth of exactly `usize::BITS` (or more) is what the guard catches.
+/// Without it a debug build panics with `attempt to shift left with
+/// overflow` and a release build masks the shift amount modulo
+/// `usize::BITS`, so `1usize << 64` collapses to `1` and
+/// `block_pos_max` becomes `1`. The `block_pos >= block_pos_max` check
+/// then over-rejects (every `block_pos >= 1` is turned away), but a
+/// `block_pos == 0` witness with a 64-deep sibling list slips through
+/// silently — that is the single case the explicit closed-form
+/// `checked_shl` error message stops. The test therefore uses
+/// `position = 0` to prove the guard fires even on the case the naive
+/// shift-mask semantics would accept.
+#[test]
+fn block_tree_pathological_depth_errors_via_checked_shl() {
+    let mut w = populated_witness();
+    let proof = w.block_tree_proof.as_mut().unwrap();
+    proof.siblings_hex = (0..usize::BITS as usize)
+        .map(|i| hex::encode([(i & 0xff) as u8; 32]))
+        .collect();
+    // Any `position` — including 0 — must be rejected because we cannot
+    // even compute `block_pos_max` for a depth this big.
+    proof.position = 0;
+    let err = must_err(&w, "block_tree_proof pathological depth");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not representable as a usize width shift"),
+        "unexpected error message: {msg}"
+    );
+}
+
+/// Boundary sanity: with the fixture's 8-sibling block-tree proof, the
+/// maximum in-range `position` is `(1 << 8) - 1 == 255`, and it must be
+/// accepted. This asserts the accepted range still reaches its top —
+/// i.e. it catches a future *tightening* that lowers the accepted max
+/// below `(1<<depth) - 1` (for example turning `>= max` into
+/// `>= max - 1`, or adding a `+ 1` on the position side that shifts
+/// everything down). It does NOT catch a *loosening* that flips `>=`
+/// to `>` — that swap accepts one position past the legitimate top and
+/// still accepts everything below, so the max-1 witness stays green.
+#[test]
+fn block_tree_position_at_max_minus_one_is_accepted() {
+    let mut w = populated_witness();
+    let proof = w.block_tree_proof.as_mut().unwrap();
+    let depth = proof.siblings_hex.len();
+    proof.position = (1u32 << depth) - 1;
+    build_proof_inputs(&w, default_event_circuit_params())
+        .expect("boundary block_tree position (1<<depth)-1 must be accepted");
+}
+
+/// Mirror of `block_tree_position_at_max_minus_one_is_accepted` on the
+/// events axis: the fixture uses 7 siblings, so `position = (1 << 7) - 1
+/// == 127` is the top of the accepted range. The events-axis check goes
+/// through the circuit's own `MAX_EVENTS_TREE_DEPTH` guard rather than the
+/// prover's `checked_shl` shim, so the same "tightening" mutation would
+/// survive without this positive test.
+#[test]
+fn events_tree_position_at_max_minus_one_is_accepted() {
+    let mut w = populated_witness();
+    let proof = w.events_tree_proof.as_mut().unwrap();
+    let depth = proof.siblings_hex.len();
+    proof.position = (1u32 << depth) - 1;
+    build_proof_inputs(&w, default_event_circuit_params())
+        .expect("boundary events_tree position (1<<depth)-1 must be accepted");
+}

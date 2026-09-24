@@ -959,14 +959,21 @@ up, so all three are spelled out here:
    `DIR/proof_event_NNNNNN.json` (`NNNNNN` = the zero-padded anchor
    seq_no). A re-run without it re-proves, deterministically.
 2. **Its keys are `proof_hex` and `public_instances_hex`** — an array of
-   ten 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
-3. **Those ten are little-endian Fr**, and `uint256` on the wire is
+   eleven 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
+3. **Those eleven are little-endian Fr**, and `uint256` on the wire is
    big-endian, so each one must be byte-reversed before `cast` sees it.
 
 `pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
-ten `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
-dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot)` — so the
-signature is a parenthesised tuple, not `uint256[13]`:
+eleven `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
+dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot,
+anchorLayer)` — so the signature is a parenthesised tuple, not
+`uint256[13]`. The selector for the eleven-slot signature is
+`0xa9753d18`, computed with `cast sig` from the fully-expanded
+signature below (`cast` will not parse `×11` shorthand — it needs
+eleven comma-separated `uint256`s inside the tuple, exactly as the
+`cast call` invocation further down spells out); the
+previous ten-slot form was `0x6e6f66ad` and will not decode against the
+current bridge:
 
 ```bash
 # $PROVER_OUT_DIR is yours to set — the CLI reads the directory from
@@ -975,14 +982,14 @@ P="$PROVER_OUT_DIR/proof_event_$(printf '%06d' "$SEQ").json"
 
 PROOF=0x$(jq -r '.proof_hex' "$P" | sed 's/^0[xX]//')
 # ltrimstr + scan/reverse turns each LE Fr into the BE uint256 the ABI
-# expects; join wraps the ten into the tuple literal cast wants.
+# expects; join wraps the eleven into the tuple literal cast wants.
 PI=$(jq -r '
   def be: sub("^0[xX]";"") | [scan("..")] | reverse | add;
   "(" + ([.public_instances_hex[] | "0x" + be] | join(",")) + ")"
 ' "$P")
 
 cast call "$BRIDGE_ADDRESS" \
-  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
   "$PROOF" "$PI" \
   --rpc-url "$RPC_URL" --trace
 ```

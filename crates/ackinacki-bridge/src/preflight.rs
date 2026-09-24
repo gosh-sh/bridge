@@ -174,7 +174,7 @@ pub async fn run(
     }
 
     // 3+4+5. run_tvm(getCustodians) → parse → count == 1 → pubkey match.
-    // Encode+run_tvm needs the legacy `0:<acc>` form — tvm-sdk v3.0.5.an's
+    // Encode+run_tvm needs the legacy `0:<acc>` form — tvm-sdk v3.0.6.an's
     // ABI message encoder rejects the v3 `dapp_id::acc_id` shape here (works
     // for `get_account` above and for tvm-cli `--addr`, but not for the
     // `address` field on `ParamsOfEncodeMessage`). See memory

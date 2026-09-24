@@ -1,0 +1,5 @@
+/target
+params/*.bin
+params/*.json
+params/*_proof_*.bin
+params/*_instances_*.bin

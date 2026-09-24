@@ -71,14 +71,45 @@ test-coverage: ## Generate test coverage report
 # Crates outside the root workspace that are packages of their own. The relayer
 # and the withdrawal CLI are members of crates/bridge-prover-libraries and are
 # formatted and tested through it.
+#
+# `crates/bridge-circuits` is a sub-workspace (its own [workspace] with the
+# gosh-fork halo2 backend) and is deliberately NOT listed here. Two reasons:
+#
+#   1. `test-all` iterates STANDALONE_CRATES with plain `cargo test`, but the
+#      K=20 attestation-BLS MockProvers inside `bridge-circuits` need
+#      `RUST_TEST_THREADS=1` to fit in RAM (running them in parallel OOM-kills
+#      the worker — see the header of `.woodpecker/bridge-circuits.yaml`).
+#      Its tests belong to the dedicated CI pipeline, which sets that env var.
+#   2. `format` runs `cargo fmt` in each STANDALONE_CRATES dir, but
+#      `crates/bridge-circuits` was vendored from
+#      `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` without a rustfmt
+#      pass, and its files have never been run through this repo's nightly
+#      rustfmt with our `rustfmt.toml`. `cargo fmt --check` inside
+#      `crates/bridge-circuits` currently reports hundreds of hunks across
+#      dozens of files. Reformatting is deferred: nothing in this repository
+#      fetches the upstream any more (see AGENTS.md Upstream repositories),
+#      but leaving the diff intact keeps `git diff` against the pre-vendor
+#      import manageable while it is still recent.
+#
+# Run its tests explicitly when you touch a circuit:
+#   (cd crates/bridge-circuits && RUST_TEST_THREADS=1 cargo test --workspace)
+# — `.woodpecker/bridge-circuits.yaml` covers the same set per MR, though
+# it splits them across two steps: `bridge-circuits-fast` runs
+# `bridge-event-prove-circuit` + `cross-circuit-block-id-test` without
+# the env var (K=19 / K=20 but small enough), and
+# `bridge-circuits-heavy` sets `RUST_TEST_THREADS=1` for the rest (the
+# K=20 attestation-BLS MockProvers are the ones that need it).
 STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
 	crates/bridge-evm-aggregator crates/bridge-snark-utils \
 	crates/deposit-relayer-daemon crates/eth-light-client-relayer
 
 # Every suite runs even when an earlier one fails; the failures are listed at
 # the end. --locked is passed only where a Cargo.lock is committed, and the
-# aggregator runs in release as in aggregator-test. #[ignore]d tests stay skipped.
-test-all: ## Run the tests of every Rust crate and the Solidity suite, then list what failed
+# aggregator runs in release as in aggregator-test. #[ignore]d tests stay
+# skipped. `crates/bridge-circuits` is deliberately excluded (see the
+# STANDALONE_CRATES comment above); its tests run under
+# `.woodpecker/bridge-circuits.yaml`.
+test-all: ## Run every Rust crate outside crates/bridge-circuits + the Solidity suite, then list what failed
 	@failed=""; \
 	run() { dir=$$1; shift; echo "$(BLUE)── $$dir: $$*$(NC)"; (cd $$dir && "$$@") || failed="$$failed $$dir"; }; \
 	run . cargo test --workspace --locked; \
@@ -92,7 +123,7 @@ test-all: ## Run the tests of every Rust crate and the Solidity suite, then list
 	if [ -n "$$failed" ]; then echo "$(YELLOW)Failed:$$failed$(NC)"; exit 1; fi; \
 	echo "$(GREEN)All test suites passed$(NC)"
 
-format: ## Format all code (every Rust crate + Solidity)
+format: ## Format all Rust crates outside crates/bridge-circuits + the Solidity suite
 	@echo "$(BLUE)Formatting code...$(NC)"
 	@cargo fmt --all
 	@cd crates/bridge-prover-libraries && cargo fmt --all
@@ -106,7 +137,14 @@ format-check: ## Check code formatting without modifying
 
 lint: ## Run linters (clippy for Rust)
 	@echo "$(BLUE)Running linters...$(NC)"
-	@cargo clippy --all-targets --all-features -- -D warnings
+	# NB: `--all-features` is deliberately NOT passed. Enabling
+	# `acki-nacki-interface`'s `tvm-sdk` feature pulls `tvm_client` +
+	# `tvm_vm`, which pulls `halo2-axiom` from crates.io while other
+	# graphs in this repo pull `halo2-axiom` via a gosh git checkout;
+	# clippy then errors on the two `Circuit<F>` trait impls. Default
+	# features are what `pre-push` and the root `cargo test --workspace
+	# --locked` build, so they are what we lint against.
+	@cargo clippy --all-targets -- -D warnings
 
 check: format-check lint test ## Run all checks (format, lint, test)
 
@@ -161,9 +199,20 @@ dev-setup: setup ## Setup development environment
 ci: format-check lint test ## Run CI checks locally
 
 # ────────────────────────────────────────────────────────────────────────────
-# Coverage and pre-push targets. No pipeline on GitHub runs Rust or
-# `forge coverage`, so `make pre-push` is the gate for both; see the CI section
-# of AGENTS.md.
+# Coverage and pre-push targets. No pipeline on GitHub runs `forge coverage`,
+# and the only Rust pipeline (`bridge-circuits.yaml`) only covers
+# `crates/bridge-circuits/`; every other Rust crate — the root workspace,
+# `bridge-relayer-daemon`, `bridge-evm-aggregator`, `deposit-prover`, etc. —
+# has no PR-triggered CI. `make pre-push` is the gate for `forge coverage`
+# and for the three Rust units it explicitly runs: the root workspace
+# (`cargo test --workspace --locked`), `bridge-relayer-daemon` (via
+# `relayer-test`) and `bridge-evm-aggregator` (via `aggregator-test`).
+# Everything else — `deposit-prover`, `eth-light-client-prover`, the other
+# members of `crates/bridge-prover-libraries`, `deposit-relayer-daemon`,
+# `eth-light-client-relayer`, `bridge-snark-utils`, `frontend` — is NOT
+# tested by `make pre-push`. Run `make test-all`, or the per-crate command
+# in the "What no pipeline runs" section of AGENTS.md, when a change reaches
+# one of them.
 #
 # Two patterns pass `forge test` and `cargo test` but trip `forge coverage`:
 #   - vm.assume rejection cap (fuzz test rejected > 65 536 inputs);

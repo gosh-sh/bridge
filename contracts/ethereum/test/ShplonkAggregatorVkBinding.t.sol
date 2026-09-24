@@ -43,9 +43,11 @@ contract ShplonkAggregatorVkBindingTest is Test {
 
     function test_withdrawal_mutatedVkDigest_rejected() public {
         uint256 numInner = 11;
-        bytes memory cd = vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
-        IBridgeWithdrawalVerifier v =
-            ShplonkDeployLib.deployWithdrawalAdapter("verifiers/BridgeWithdrawalAggregatorVerifier.bin");
+        bytes memory cd =
+            vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
+        IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
+            "verifiers/BridgeWithdrawalAggregatorVerifier.bin"
+        );
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
         pub.tokenId = _word(cd, ACC + 0);
         pub.amount = _word(cd, ACC + 1);
@@ -69,14 +71,17 @@ contract ShplonkAggregatorVkBindingTest is Test {
     }
 
     function test_withdrawal_wrongPin_unmodifiedCalldata_rejected() public {
-        bytes memory cd = vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
+        bytes memory cd =
+            vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
         address w = ShplonkDeployLib.deployShplonkWrapper(
             ShplonkDeployLib.deployYulFromBin(
-                "verifiers/BridgeWithdrawalAggregatorVerifier.bin", ShplonkDeployLib.WITHDRAWAL_YUL_CODEHASH
+                "verifiers/BridgeWithdrawalAggregatorVerifier.bin",
+                ShplonkDeployLib.WITHDRAWAL_YUL_CODEHASH
             )
         );
-        BridgeWithdrawalAggregatorVerifier bad =
-            new BridgeWithdrawalAggregatorVerifier(w, bytes32(uint256(ShplonkDeployLib.WITHDRAWAL_VK_DIGEST) ^ 1));
+        BridgeWithdrawalAggregatorVerifier bad = new BridgeWithdrawalAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.WITHDRAWAL_VK_DIGEST) ^ 1)
+        );
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
         pub.tokenId = _word(cd, ACC + 0);
         pub.amount = _word(cd, ACC + 1);
@@ -95,13 +100,16 @@ contract ShplonkAggregatorVkBindingTest is Test {
     function test_primary_mutatedVkDigest_rejected() public {
         uint256 numInner = 4;
         bytes memory cd = vm.readFileBinary("verifiers/PrimaryAggregatorVerifier_calldata.bin");
-        IPrimaryVerifier v = ShplonkDeployLib.deployPrimaryAdapter("verifiers/PrimaryAggregatorVerifier.bin");
+        IPrimaryVerifier v =
+            ShplonkDeployLib.deployPrimaryAdapter("verifiers/PrimaryAggregatorVerifier.bin");
 
         bytes32 original = bytes32(_word(cd, ACC + numInner));
         _setWord(cd, ACC + numInner, bytes32(uint256(original) ^ uint256(1)));
 
         assertFalse(
-            v.verifyPrimaryAttestation(cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)),
+            v.verifyPrimaryAttestation(
+                cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
+            ),
             "digest mismatch must be rejected"
         );
     }
@@ -113,8 +121,9 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 "verifiers/PrimaryAggregatorVerifier.bin", ShplonkDeployLib.PRIMARY_YUL_CODEHASH
             )
         );
-        PrimaryAggregatorVerifier bad =
-            new PrimaryAggregatorVerifier(w, bytes32(uint256(ShplonkDeployLib.PRIMARY_VK_DIGEST) ^ 1));
+        PrimaryAggregatorVerifier bad = new PrimaryAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.PRIMARY_VK_DIGEST) ^ 1)
+        );
         assertFalse(
             bad.verifyPrimaryAttestation(
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
@@ -126,13 +135,16 @@ contract ShplonkAggregatorVkBindingTest is Test {
     function test_fallback_mutatedVkDigest_rejected() public {
         uint256 numInner = 4;
         bytes memory cd = vm.readFileBinary("verifiers/FallbackAggregatorVerifier_calldata.bin");
-        IFallbackVerifier v = ShplonkDeployLib.deployFallbackAdapter("verifiers/FallbackAggregatorVerifier.bin");
+        IFallbackVerifier v =
+            ShplonkDeployLib.deployFallbackAdapter("verifiers/FallbackAggregatorVerifier.bin");
 
         bytes32 original = bytes32(_word(cd, ACC + numInner));
         _setWord(cd, ACC + numInner, bytes32(uint256(original) ^ uint256(1)));
 
         assertFalse(
-            v.verifyFallbackAttestation(cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)),
+            v.verifyFallbackAttestation(
+                cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
+            ),
             "digest mismatch must be rejected"
         );
     }
@@ -144,8 +156,9 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 "verifiers/FallbackAggregatorVerifier.bin", ShplonkDeployLib.FALLBACK_YUL_CODEHASH
             )
         );
-        FallbackAggregatorVerifier bad =
-            new FallbackAggregatorVerifier(w, bytes32(uint256(ShplonkDeployLib.FALLBACK_VK_DIGEST) ^ 1));
+        FallbackAggregatorVerifier bad = new FallbackAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.FALLBACK_VK_DIGEST) ^ 1)
+        );
         assertFalse(
             bad.verifyFallbackAttestation(
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
@@ -157,8 +170,9 @@ contract ShplonkAggregatorVkBindingTest is Test {
     function test_layerHashes_mutatedVkDigest_rejected() public {
         uint256 numInner = 14;
         bytes memory cd = vm.readFileBinary("verifiers/LayerHashesAggregatorVerifier_calldata.bin");
-        ILayerHashesMovementVerifier v =
-            ShplonkDeployLib.deployLayerHashesAdapter("verifiers/LayerHashesAggregatorVerifier.bin");
+        ILayerHashesMovementVerifier v = ShplonkDeployLib.deployLayerHashesAdapter(
+            "verifiers/LayerHashesAggregatorVerifier.bin"
+        );
         uint256[10] memory hashes;
         for (uint256 i = 0; i < 10; i++) {
             hashes[i] = _word(cd, ACC + 3 + i);
@@ -169,7 +183,12 @@ contract ShplonkAggregatorVkBindingTest is Test {
 
         assertFalse(
             v.verifyLayerHashesMovement(
-                cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), hashes, _word(cd, ACC + 13)
+                cd,
+                _word(cd, ACC),
+                _word(cd, ACC + 1),
+                _word(cd, ACC + 2),
+                hashes,
+                _word(cd, ACC + 13)
             ),
             "digest mismatch must be rejected"
         );
@@ -179,18 +198,25 @@ contract ShplonkAggregatorVkBindingTest is Test {
         bytes memory cd = vm.readFileBinary("verifiers/LayerHashesAggregatorVerifier_calldata.bin");
         address w = ShplonkDeployLib.deployShplonkWrapper(
             ShplonkDeployLib.deployYulFromBin(
-                "verifiers/LayerHashesAggregatorVerifier.bin", ShplonkDeployLib.LAYER_HASHES_YUL_CODEHASH
+                "verifiers/LayerHashesAggregatorVerifier.bin",
+                ShplonkDeployLib.LAYER_HASHES_YUL_CODEHASH
             )
         );
-        LayerHashesAggregatorVerifier bad =
-            new LayerHashesAggregatorVerifier(w, bytes32(uint256(ShplonkDeployLib.LAYER_HASHES_VK_DIGEST) ^ 1));
+        LayerHashesAggregatorVerifier bad = new LayerHashesAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.LAYER_HASHES_VK_DIGEST) ^ 1)
+        );
         uint256[10] memory hashes;
         for (uint256 i = 0; i < 10; i++) {
             hashes[i] = _word(cd, ACC + 3 + i);
         }
         assertFalse(
             bad.verifyLayerHashesMovement(
-                cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), hashes, _word(cd, ACC + 13)
+                cd,
+                _word(cd, ACC),
+                _word(cd, ACC + 1),
+                _word(cd, ACC + 2),
+                hashes,
+                _word(cd, ACC + 13)
             ),
             "wrong pin must reject unmodified calldata"
         );
@@ -210,7 +236,8 @@ contract ShplonkAggregatorVkBindingTest is Test {
     ///      without this guard the deploy would succeed and every proof
     ///      would then silently revert on the digest slot mismatch.
     function test_base_vkDigestAtModulus_rejected() public {
-        bytes32 atModulus = bytes32(uint256(0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001));
+        bytes32 atModulus =
+            bytes32(uint256(0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001));
         vm.expectRevert(ShplonkAggregatorVerifierBase.VkDigestExceedsFieldModulus.selector);
         new BridgeWithdrawalAggregatorVerifier(address(uint160(1)), atModulus);
     }
@@ -225,18 +252,21 @@ contract ShplonkAggregatorVkBindingTest is Test {
     ///      `proof.length < (NUM_ACCUMULATOR_INSTANCES + NUM_INNER + 1) * 32`
     ///      guard must return false without reverting inside `_readInstance`.
     function test_withdrawal_calldataShortOfDigestSlot_rejected() public {
-        IBridgeWithdrawalVerifier v =
-            ShplonkDeployLib.deployWithdrawalAdapter("verifiers/BridgeWithdrawalAggregatorVerifier.bin");
+        IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
+            "verifiers/BridgeWithdrawalAggregatorVerifier.bin"
+        );
         // (12 accumulator + 11 inner) * 32 = 736 B. No digest word.
         bytes memory tooShort = new bytes((12 + 11) * 32);
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
         assertFalse(
-            v.verifyWithdrawal(tooShort, pub), "calldata one word short of the digest slot must reject, not revert"
+            v.verifyWithdrawal(tooShort, pub),
+            "calldata one word short of the digest slot must reject, not revert"
         );
     }
 
     function test_primary_calldataShortOfDigestSlot_rejected() public {
-        IPrimaryVerifier v = ShplonkDeployLib.deployPrimaryAdapter("verifiers/PrimaryAggregatorVerifier.bin");
+        IPrimaryVerifier v =
+            ShplonkDeployLib.deployPrimaryAdapter("verifiers/PrimaryAggregatorVerifier.bin");
         // (12 accumulator + 4 inner) * 32 = 512 B. No digest word.
         bytes memory tooShort = new bytes((12 + 4) * 32);
         assertFalse(

@@ -19,7 +19,8 @@ abstract contract ShplonkAggregatorVerifierBase {
     ///         digest is always a valid Fr, so any pin at or above `r`
     ///         cannot match the on-chain slot and would silently reject
     ///         every proof.
-    uint256 internal constant BN254_FR_MODULUS = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+    uint256 internal constant BN254_FR_MODULUS =
+        0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
 
     IShplonkHalo2Verifier public immutable shplonkVerifier;
 

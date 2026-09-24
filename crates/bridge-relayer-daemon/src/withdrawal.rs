@@ -257,13 +257,14 @@ mod tests {
         let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
         let pi = p.public_inputs().unwrap();
         assert_eq!(pi.token_id, U256::from(3u64));
-        // Slot 10 (`anchor_layer`) is the newest addition in the R6 layout
-        // and lives in the very last public-instance entry. Guarding it
-        // explicitly so a future off-by-one that swapped the last two
-        // slots (or dropped `anchor_layer` entirely) trips this test
-        // immediately — the on-chain revert path is `WithdrawIdentityMismatch`
-        // / `InvalidNumLayers`, so a mutation here would break every
-        // withdraw with a misleading error.
+        // Slot 10 (`anchor_layer`) is the last public-instance entry.
+        // Guarding it explicitly so a future off-by-one that dropped
+        // `anchor_layer` entirely — leaving `finalRoot` in the last
+        // position — trips this test immediately. The on-chain revert
+        // for a mis-slotted `anchor_layer` is `InvalidNumLayers` /
+        // `UnknownAnchor` (see AckiNackiBridge.sol), so a decoder
+        // mutation here would break every withdraw with a misleading
+        // error.
         assert_eq!(pi.anchor_layer, U256::from(1u64));
     }
 

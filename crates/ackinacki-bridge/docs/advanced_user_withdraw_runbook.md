@@ -969,7 +969,7 @@ dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot,
 anchorLayer)` — so the signature is a parenthesised tuple, not
 `uint256[13]`. The selector for the eleven-slot signature is
 `0xa9753d18` (`cast sig 'withdrawByProof(bytes,(uint256×11))'`); the
-pre-R6 ten-slot form was `0x6e6f66ad` and will not decode against the
+previous ten-slot form was `0x6e6f66ad` and will not decode against the
 current bridge:
 
 ```bash

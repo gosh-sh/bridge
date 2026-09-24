@@ -74,7 +74,7 @@ assigns it when the release is tagged.
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
   not decode. The extra tuple field also **changes the `withdrawByProof`
-  4-byte selector**: from the pre-R6 ten-slot `0x6e6f66ad`
+  4-byte selector**: from the previous ten-slot `0x6e6f66ad`
   (`withdrawByProof(bytes,(uint256×10))`) to the eleven-slot
   `0xa9753d18`
   (`withdrawByProof(bytes,(uint256×11))`, verified with

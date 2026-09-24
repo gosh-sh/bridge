@@ -137,7 +137,14 @@ format-check: ## Check code formatting without modifying
 
 lint: ## Run linters (clippy for Rust)
 	@echo "$(BLUE)Running linters...$(NC)"
-	@cargo clippy --all-targets --all-features -- -D warnings
+	# NB: `--all-features` is deliberately NOT passed. Enabling
+	# `acki-nacki-interface`'s `tvm-sdk` feature pulls `tvm_client` +
+	# `tvm_vm`, which pulls `halo2-axiom` from crates.io while other
+	# graphs in this repo pull `halo2-axiom` via a gosh git checkout;
+	# clippy then errors on the two `Circuit<F>` trait impls. Default
+	# features are what `pre-push` and the root `cargo test --workspace
+	# --locked` build, so they are what we lint against.
+	@cargo clippy --all-targets -- -D warnings
 
 check: format-check lint test ## Run all checks (format, lint, test)
 

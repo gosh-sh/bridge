@@ -246,22 +246,31 @@ gated for CI hygiene — trigger them per-crate when the corresponding circuit c
 from `crates/bridge-circuits/`. Weight varies by circuit and by case:
 
 ```
-# Circuit 4, K=19 real keygen + proof — the lightest of the three (well under
-# the >14 GB weight class of the attestation-BLS cases below); a bare
-# `--ignored` here picks up the single `real_proof_for_fixed_k` test.
-cargo test -p bridge-event-prove-circuit -- --ignored
-
-# Layer-hashes real prover sweep — tens of seconds per proof, aggregator-lite
-# (see the per-test doc-comment); also comfortably under the >14 GB weight
-# class. Bare `--ignored` picks up the single sweep test.
+# Layer-hashes real prover sweep at K=17 — tens of seconds per proof,
+# aggregator-lite (see the per-test doc-comment); comfortably under the
+# >14 GB weight class of the attestation-BLS cases below. Bare
+# `--ignored` picks up the single sweep test.
 cargo test -p historical-layer-hashes-movement-checker-circuit -- --ignored
+
+# Circuit 4, K=19 real keygen + proof — heavier than the K=17 layer-hashes
+# sweep above, still well under the >14 GB weight class of attestation-BLS.
+# A bare `--ignored` here picks up the single `real_proof_for_fixed_k` test.
+cargo test -p bridge-event-prove-circuit -- --ignored
 ```
 
 **Attestation-BLS is a special case.** A bare `cargo test -p attestation-bls-checker-circuit --
---ignored` sweeps in every `test_real_prover_primary_max_{300,500,1000,2000}`; every case is K=20,
-and per `PARALLEL_BENCHMARK_N14_REPORT.md:76-79` the first-proof RSS grows steeply with
-`max_signers` (~15.6 GB at 300, ~37.6 GB at 1000, ~77.7 GB at 2000). Do not run the bare set on a
-workstation without explicit intent — the 2000-signer case alone will OOM a 64 GB host. Prefer
+--ignored` sweeps in every ignored test in that crate — not just the
+four `test_real_prover_primary_max_{300,500,1000,2000}` cases, but also
+`test_primary_attestation_bls_checker_mock_scaling` (K-varying scaling
+sweep across 500/700/1000/2000-signer MockProver runs, several GB and
+~7 min),
+`test_real_prover_primary_multi_bk_set` (K=20 real prover across four
+bk-set sizes), and `test_real_prover_fallback_multi_bk_set` (K=20 real
+prover on the fallback circuit). Every real-prover case is K=20, and per
+`PARALLEL_BENCHMARK_N14_REPORT.md:76-79` the first-proof RSS grows
+steeply with `max_signers` (~15.6 GB at 300, ~37.6 GB at 1000, ~77.7 GB
+at 2000). Do not run the bare set on a workstation without explicit
+intent — the 2000-signer case alone will OOM a 64 GB host. Prefer
 naming the case:
 
 ```

@@ -92,7 +92,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
         );
     }
 
-    /// Tampering a byte in the proof region (past the 23 instance words) makes the
+    /// Tampering a byte in the proof region (past the 24 instance words) makes the
     /// SHPLONK pairing fail -> the Yul verifier reverts.
     function test_productionWithdrawal_tamperedProof_reverts() public {
         require(_artefactsPresent(), "C4 verifier artefacts required");

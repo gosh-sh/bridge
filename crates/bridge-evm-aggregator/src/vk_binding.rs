@@ -1,4 +1,4 @@
-//! Bind the inner-circuit verification key inside the aggregator (ETH-40 fix).
+//! Bind the inner-circuit verification key inside the aggregator.
 //!
 //! # Why this exists
 //!
@@ -24,14 +24,19 @@
 //! Hash the inner-VK witnesses inside the aggregator and expose the digest
 //! as an additional public instance (the last element of instance column 0,
 //! placed after the KZG accumulator and any re-exposed inner instances).
-//! On-chain adapters carry an `immutable bytes32 VK_DIGEST` set at deploy
+//! On-chain adapters carry an `immutable bytes32 vkDigest` set at deploy
 //! time from [`expected_vk_digest`] and reject proofs whose exposed digest
 //! doesn't match.
 //!
 //! Compared to `VerifierUniversality::None` (bake VK as circuit constants),
-//! this keeps the outer Yul verifier universal by shape — future rotations
-//! of the inner circuit that preserve shape can reuse the deployed Yul and
-//! only redeploy the adapter with a fresh `VK_DIGEST`.
+//! this keeps the outer Yul verifier universal by shape. A same-shape
+//! rotation of the inner circuit (identical column counts and gate/lookup
+//! arity, different constraints) still requires an `AckiNackiBridge`
+//! redeploy — the four verifier slots are `immutable` — but the deployed
+//! Yul does not have to be regenerated: only the adapter carries a fresh
+//! `vkDigest`. Under `VerifierUniversality::PreprocessedAsWitness` (the
+//! Fallback adapter) a change of inner `k` also changes the Yul, so that
+//! case still needs a full aggregator regeneration.
 //!
 //! # Hash choice
 //!
@@ -86,11 +91,16 @@ pub const NUM_VK_BINDING_INSTANCES: usize = 1;
 /// `_readInstance(proof, 12 + N)` check.
 ///
 /// Digest preimage per inner snark:
-///   * `preprocessed_witnesses.preprocessed` — 12 preprocessed EC-point
-///     coordinates flattened to Fr limbs (~96 elements) plus optional
-///     `transcript_initial_state` (1 element)
+///   * `preprocessed_witnesses.preprocessed` — one Fr per limb of every
+///     preprocessed commitment the aggregator loads (fixed / selector /
+///     permutation columns). The exact count is the inner circuit's
+///     preprocessed-column count × 2 (x, y) × non-native-field limbs, plus
+///     the `transcript_initial_state` element that snark-verifier appends
+///     — always present on this path, not optional. Circuit 4 (11 inner
+///     PIs, ~19 preprocessed commitments at K=19) and Circuit 1A/1B are
+///     both larger than a hundred elements.
 ///   * `preprocessed_witnesses.k` — witness under `Full`, loaded constant
-///     otherwise (uniform code path either way)
+///     otherwise (uniform code path either way).
 pub fn expose_vk_digest(agg: &mut AggregationCircuit) {
     // Flatten every inner snark's VK witnesses first — this borrows `agg`
     // immutably. The aggregator currently aggregates exactly one inner snark,
@@ -124,17 +134,19 @@ pub fn expose_vk_digest(agg: &mut AggregationCircuit) {
 /// Compute the exact VK-digest value the aggregator will emit for a given
 /// inner snark, without generating a proving key or a proof.
 ///
-/// Deterministic in `inner_snark.protocol` and `config` (via the shape params
-/// that flow into the outer circuit). Deploy pipelines call this to derive
-/// the `_vkDigest` constructor argument for the adapter Solidity contracts.
+/// Deterministic in `inner_snark.protocol` (the inner VK — the preprocessed
+/// commitments and `transcript_initial_state`), `agg_params` (via the SRS
+/// `k` under `Full`), and `config.universality`. Independent of
+/// `config.k_outer` / `lookup_bits_outer` — those only shape the outer
+/// circuit and do not enter the digest preimage.
 ///
 /// # Cost
 ///
-/// Runs a keygen-stage synthesis of the aggregator circuit: reads the inner
-/// proof, populates witness values, and stops at
-/// `assigned_instances[0].last()`. No FFTs, no PK generation, no proof — so
-/// seconds-to-tens-of-seconds even at K=22, not the minutes a real keygen
-/// takes.
+/// Runs a keygen-stage synthesis of the aggregator circuit: builds the
+/// aggregation circuit, calls `expose_previous_instances` and
+/// `expose_vk_digest`, then reads `assigned_instances[0].last().value()`.
+/// No `calculate_params`, no FFTs, no PK generation, no proof — cost is
+/// dominated by the aggregation-circuit synthesis itself.
 pub fn expected_vk_digest(
     agg_params: &ParamsKZG<Bn256>,
     inner_snark: &Snark,
@@ -171,15 +183,14 @@ pub fn expected_vk_digest(
 ///
 /// Layout: `[accumulator (12) | previous_instances (num_prev) | vk_digest (1)]`,
 /// so the digest sits at `NUM_ACCUMULATOR_INSTANCES + num_prev`. Adapters
-/// know `num_prev` at compile time (= their `NUM_INNER`).
+/// know `num_prev` at compile time (= their `NUM_INNER`). Consumed by the
+/// round-trip test and re-exportable for any future in-workspace caller
+/// that needs to reason about the layout; downstream crates that cannot
+/// pull `bridge-evm-aggregator` (halo2 backend clash — see the workspace
+/// note in `AGENTS.md`) must replicate this arithmetic and are expected
+/// to stay in step with the constant here.
 pub const fn vk_digest_index(num_prev_instances: usize) -> usize {
     NUM_ACCUMULATOR_INSTANCES + num_prev_instances
-}
-
-/// Total public-instance count the aggregator emits for a given inner-instance
-/// arity. Adapters use this when validating calldata size.
-pub const fn total_instances(num_prev_instances: usize) -> usize {
-    NUM_ACCUMULATOR_INSTANCES + num_prev_instances + NUM_VK_BINDING_INSTANCES
 }
 
 #[cfg(test)]
@@ -189,28 +200,46 @@ mod tests {
     /// Locks the layout the on-chain adapters rely on: accumulator first
     /// (12 limbs), then the re-exposed inner PIs, then exactly one VK digest
     /// at the tail. Adapters read the digest at [`vk_digest_index`] and
-    /// verify the outer proof carries [`total_instances`] scalars in
-    /// column 0.
+    /// verify the outer proof carries `NUM_ACCUMULATOR_INSTANCES +
+    /// num_prev + NUM_VK_BINDING_INSTANCES` scalars in column 0.
     #[test]
     fn digest_lands_after_accumulator_and_previous_instances() {
         // Circuit 4: 11 inner PIs (see BridgeWithdrawalAggregatorVerifier).
         assert_eq!(vk_digest_index(11), 23);
-        assert_eq!(total_instances(11), 24);
         // Circuit 2: 14 inner PIs.
         assert_eq!(vk_digest_index(14), 26);
-        assert_eq!(total_instances(14), 27);
         // Boundary: no inner PIs re-exposed.
         assert_eq!(vk_digest_index(0), NUM_ACCUMULATOR_INSTANCES);
-        assert_eq!(total_instances(0), NUM_ACCUMULATOR_INSTANCES + 1);
     }
 
     /// Poseidon parameters must match snark-verifier-sdk's transcript spec
     /// verbatim. If the sdk ever bumps its constants, the in-circuit hasher
     /// here would silently diverge from the transcript Poseidon — likely
     /// harmless (both are independent uses) but confusing and worth
-    /// catching. Pinning them explicitly documents the intent.
+    /// catching.
+    ///
+    /// The sdk keeps its `T`/`RATE`/`R_F`/`R_P`/`SECURE_MDS` private, but
+    /// exports `POSEIDON_SPEC` as a public `OptimizedPoseidonSpec<Fr, T,
+    /// RATE>`. We pin `T` and `RATE` at the type level via an explicit
+    /// annotation, and cross-check `R_F` (via `.r_f()`) and `R_P` (via the
+    /// length of the partial-round constants) against the live sdk spec —
+    /// so a future sdk bump of any of those fails this test.
     #[test]
     fn poseidon_spec_matches_snark_verifier_sdk_transcript() {
+        use snark_verifier_sdk::halo2::POSEIDON_SPEC;
+
+        // Type-level pin: fails to compile if the sdk changes T or RATE.
+        let sdk: &OptimizedPoseidonSpec<Fr, VK_DIGEST_T, VK_DIGEST_RATE> = &POSEIDON_SPEC;
+
+        assert_eq!(sdk.r_f(), VK_DIGEST_R_F, "R_F drifted from snark-verifier-sdk");
+        assert_eq!(
+            sdk.constants().partial().len(),
+            VK_DIGEST_R_P,
+            "R_P drifted from snark-verifier-sdk"
+        );
+
+        // Local sanity pins for the literals so the test also documents
+        // intent independent of the sdk cross-check.
         assert_eq!(VK_DIGEST_T, 3);
         assert_eq!(VK_DIGEST_RATE, 2);
         assert_eq!(VK_DIGEST_R_F, 8);

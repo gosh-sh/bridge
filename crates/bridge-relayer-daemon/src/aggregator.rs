@@ -652,11 +652,11 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
 /// [`MockCircuit4SnarkProver`]'s eleven ascending LE instances, so
 /// [`calldata_binds_instances`] passes. Note the 3616-byte length is
 /// only "big enough" — it does not match the true production Circuit-4
-/// SHPLONK calldata size (3648 B for 11 public inputs; see the
-/// reference `_calldata.bin` in the CHANGELOG). The length is fixed by
-/// [`Self::calldata_binding`]; the constant is unrelated to
-/// `WITHDRAWAL_PUBLIC_INPUTS` and moving to a different instance count
-/// does not require adjusting it.
+/// SHPLONK calldata size (3680 B for 11 public inputs + 1 inner-VK
+/// digest word; see the reference `_calldata.bin` in the CHANGELOG).
+/// The length is fixed by [`Self::calldata_binding`]; the constant is
+/// unrelated to `WITHDRAWAL_PUBLIC_INPUTS` and moving to a different
+/// instance count does not require adjusting it.
 #[derive(Clone, Debug, Default)]
 pub struct MockAggregator {
     pub fail: bool,
@@ -666,7 +666,7 @@ impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
     /// words at positions `12..12 + instances_hex.len()`), padded to a
     /// stand-in 3616-byte length (see the note on [`MockAggregator`] — the
-    /// production Circuit-4 SHPLONK calldata is 3648 B, this is only large
+    /// production Circuit-4 SHPLONK calldata is 3680 B, this is only large
     /// enough to hold the instance words).
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
         let total_len = 3616;

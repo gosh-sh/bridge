@@ -44,11 +44,15 @@ regenerate both files, not to suspect the key. Regeneration compiles the source,
 `solc 0.8.19` on `PATH`.
 
 Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
-is keygen'd at `K=19`; the aggregated Yul is 21 314 B (24 outer instances = 12 KZG accumulator
-limbs + 11 re-exposed Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`, plus
-1 Poseidon digest of the inner VK witnesses that the on-chain adapter pins against its immutable
-`vkDigest`). Rotated 2026-09-23 for the inner-VK-digest binding (previous rotation 2026-09-18
-for the `events_pos` nullifier preimage and the per-layer anchor scan).
+is keygen'd on the shared `K=20` ceremony SRS (see
+`crates/bridge-prover-libraries/bridge-prover-lib/src/keys/event.rs:76`) even though the circuit
+itself fits at `K=19` — halo2-axiom bakes `params.k()` into `vk.domain`, so the value that lands
+in the inner `k` witness (and, transitively, in the `vkDigest` Poseidon preimage) is `20`. The
+aggregated Yul is 21 314 B (24 outer instances = 12 KZG accumulator limbs + 11 re-exposed
+Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`, plus 1 Poseidon digest of
+the inner VK witnesses that the on-chain adapter pins against its immutable `vkDigest`). Rotated
+2026-09-23 for the inner-VK-digest binding (previous rotation 2026-09-18 for the `events_pos`
+nullifier preimage and the per-layer anchor scan).
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation

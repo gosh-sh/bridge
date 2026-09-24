@@ -22,8 +22,10 @@ abstract contract ShplonkAggregatorVerifierBase {
     bytes32 public immutable vkDigest;
 
     error InvalidVerifierAddress();
-    /// @notice Reject `bytes32(0)` at deploy time: a zero digest would silently
-    ///         admit any inner circuit whose emitted slot happens to be zero.
+    /// @notice Reject `bytes32(0)` at deploy time. A Poseidon output over
+    ///         BN254's scalar field is not zero in practice, so a zero pin
+    ///         would in fact reject every honest proof — the guard catches
+    ///         an unset constructor argument, not a matching zero digest.
     error InvalidVkDigest();
 
     constructor(address _shplonkVerifier, bytes32 _vkDigest) {

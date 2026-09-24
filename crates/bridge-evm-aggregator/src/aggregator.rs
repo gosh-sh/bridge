@@ -194,10 +194,10 @@ pub fn aggregate_inner_cached(
         config.universality,
     );
     prover_circuit.expose_previous_instances(false);
-    // ETH-40 fix: bind the inner-circuit VK by exposing its Poseidon digest
-    // as the last public instance. Must run after `expose_previous_instances`
-    // so the digest lands at the tail of the instance column (matches the
-    // layout `keygen_or_load` accounts for and `expected_vk_digest` computes).
+    // Bind the inner-circuit VK by exposing its Poseidon digest as the last
+    // public instance. Must run after `expose_previous_instances` so the
+    // digest lands at the tail of the instance column (matches the layout
+    // `keygen_or_load` accounts for and `expected_vk_digest` computes).
     crate::vk_binding::expose_vk_digest(&mut prover_circuit);
     let prover_circuit = prover_circuit.use_break_points(break_points);
 

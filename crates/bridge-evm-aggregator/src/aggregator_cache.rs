@@ -26,16 +26,24 @@
 //!
 //! Format tag `v3` in the stem gates against silent breakage if the hash
 //! preimage layout ever changes; bump to `v4` to invalidate all v3 slots.
-//! History: bumped v2→v3 when the ETH-40 fix added `expose_vk_digest`
-//! inside the keygen circuit — the outer PK, `calculated` params, and
-//! `num_instance` all changed, so pre-v3 cache slots must not be reused.
 //!
-//! History: v1 used a 64-bit `SipHash` of the protocol bytes alone plus
-//! trusted `base_name`; the SRS was **not** in the key. That meant a
-//! re-bootstrapped SRS or an unlucky hash collision under the same
-//! `base_name` could silently serve stale keys. The `bin/aggregate_proof.rs`
-//! byte-drift check would catch it before on-chain use, but the cache-side
-//! precondition is now enforced properly.
+//! History:
+//!
+//! - v1 used a 64-bit `SipHash` of the protocol bytes alone plus trusted
+//!   `base_name`; the SRS was **not** in the key. That meant a
+//!   re-bootstrapped SRS or an unlucky hash collision under the same
+//!   `base_name` could silently serve stale keys. The `bin/aggregate_proof.rs`
+//!   byte-drift check would catch it before on-chain use, but the cache-side
+//!   precondition is now enforced properly.
+//! - v1→v2 widened the content hash to include the SRS `s_g2` head so a
+//!   re-bootstrapped SRS never shares a slot with the old one.
+//! - v2→v3 was bumped when `expose_vk_digest` was added inside the keygen
+//!   circuit. The hash preimage layout itself did not change, but the outer
+//!   PK, `calculated` params, and `num_instance` all did — so pre-v3 cache
+//!   slots produce a Yul verifier that no longer matches the on-chain
+//!   adapters and must not be reused. The content hash cannot notice this
+//!   because it is computed from the inner-snark protocol, not the outer
+//!   circuit synthesis; the stem tag is the guard.
 
 use std::{
     path::{Path, PathBuf},
@@ -281,10 +289,10 @@ pub fn keygen_or_load(
         config.universality,
     );
     keygen_circuit.expose_previous_instances(false);
-    // ETH-40 fix: bind the inner-circuit VK. Must run before
-    // `calculate_params` / `num_instance` so the extra Poseidon gates are
-    // counted in the auto-config and the persisted `num_instance` reflects
-    // the +1 exposed instance.
+    // Bind the inner-circuit VK. Must run before `calculate_params` /
+    // `num_instance` so the extra Poseidon gates are counted in the
+    // auto-config and the persisted `num_instance` reflects the +1
+    // exposed instance.
     crate::vk_binding::expose_vk_digest(&mut keygen_circuit);
     let calculated = keygen_circuit.calculate_params(Some(10));
     let num_instance = keygen_circuit.num_instance();

@@ -1,11 +1,11 @@
 # Pin of committed SHPLONK runtime + smoke calldata.
 # Default pairing (ShplonkArtefactPairing.t.sol): all four pairs.
-# All four verifiers regenerated 2026-09-23 to bind the inner-circuit VK
-# (ETH-40): the aggregator emits one extra public instance (Poseidon digest
-# of the inner VK witnesses) at the tail of instance column 0. Each Yul .bin
-# now expects 12 + N_inner + 1 scalars in calldata, and the compiled bytecode
+# All four verifiers regenerated 2026-09-23 to bind the inner-circuit VK:
+# the aggregator emits one extra public instance (Poseidon digest of the
+# inner VK witnesses) at the tail of instance column 0. Each Yul .bin now
+# expects 12 + N_inner + 1 scalars in calldata, and the compiled bytecode
 # hashes change vs. the 2026-09-22 pins. Adapter contracts add a
-# `bytes32 immutable VK_DIGEST` and reject any proof whose exposed digest
+# `bytes32 immutable vkDigest` and reject any proof whose exposed digest
 # doesn't match.
 # CREATE extcodehash pins live in ShplonkDeployLib *_YUL_CODEHASH.
 bfa8c4f4f7ebfc300e12d062cc1e0958a06422ebaa2942ff970e6d577a02392f  BridgeWithdrawalAggregatorVerifier.bin

@@ -77,8 +77,9 @@ fn aggregator_round_trip() {
         Fr::from(77u64),
         "re-exposed inner public input must be a*b == 77",
     );
-    // ETH-40 binding: the digest sits at the tail of the instance column and
-    // must equal the value the native helper predicts for this inner snark.
+    // VK-digest binding: the digest sits at the tail of the instance column
+    // and must equal the value the native helper predicts for this inner
+    // snark.
     let expected_digest =
         expected_vk_digest(&params_outer, &inner_snark, AggregatorConfig::default());
     let digest_slot = vk_digest_index(INNER_NUM_INSTANCES);

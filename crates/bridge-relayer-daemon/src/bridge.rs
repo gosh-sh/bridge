@@ -514,6 +514,13 @@ mod sol_bindings {
         #[allow(missing_docs)]
         contract ShplonkAdapter {
             function shplonkVerifier() external view returns (address);
+            /// Poseidon digest of the inner-circuit VK the adapter's
+            /// constructor pinned. Compared to calldata word `12 + N` by
+            /// every runtime verify call in `ShplonkAggregatorVerifierBase`;
+            /// preflight reads it so a wrong pin is refused before the
+            /// (irreversible) AN-side burn instead of surfacing as a
+            /// post-burn `WithdrawalProofRejected` revert.
+            function vkDigest() external view returns (bytes32);
         }
 
         #[sol(rpc)]
@@ -779,6 +786,17 @@ where
         let w = sol_bindings::ShplonkWrapper::new(wrapper, self.contract.provider());
         let yul = w.yulVerifier().call().await.map_err(map_contract_err)?;
         Ok((wrapper, yul))
+    }
+
+    /// Read the adapter's `vkDigest()` immutable — the Poseidon digest of the
+    /// inner-circuit VK its constructor was pinned to. The runtime verify
+    /// path in `ShplonkAggregatorVerifierBase` compares this to calldata
+    /// word `12 + N`, so preflight can refuse a wrong pin before the
+    /// (irreversible) AN-side burn instead of surfacing as a post-burn
+    /// `WithdrawalProofRejected` revert.
+    pub async fn adapter_vk_digest(&self, adapter: Address) -> Result<B256, RelayerError> {
+        let a = sol_bindings::ShplonkAdapter::new(adapter, self.contract.provider());
+        a.vkDigest().call().await.map_err(map_contract_err)
     }
 
     /// Read the four top-level anchor slots pinned to a specific block.

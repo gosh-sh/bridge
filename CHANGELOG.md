@@ -416,6 +416,20 @@ assigns it when the release is tagged.
   label the revert as `(permanent)` or `(transient)` in the failure
   message.
 
+- **`ackinacki-bridge withdraw` preflight now reads the withdrawal
+  adapter's `vkDigest()` and compares it with word 23 of the reference
+  `BridgeWithdrawalAggregatorVerifier_calldata.bin`.** A mismatch or an
+  adapter that predates the inner-VK binding (`vkDigest()` reverts) is
+  refused before the AN-side burn, exit `2` (`PreflightRefused`), with
+  the `cast call <adapter> "vkDigest()(bytes32)"` remedy. Without the
+  check the failure surfaces post-burn and post-anchor-wait as
+  `WithdrawalProofRejected`. The check runs only when `--verifiers-dir`
+  is passed (which is when the deployed-bytecode compare already runs);
+  without it the run still passes the earlier stages and now warns that
+  the digest pin was not compared. A `_calldata.bin` too short for word
+  23 is refused with an upgrade hint rather than treated as a zero
+  digest.
+
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
   building the prover or the CLI no longer needs read access to a private
   repository.** The five crates (`attestation-bls-checker-circuit`,

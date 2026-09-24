@@ -1703,6 +1703,22 @@ fn available_bytes(path: &Path) -> Option<u64> {
 /// bridge.
 pub(crate) const WITHDRAW_VERIFIER_BIN: &str = "BridgeWithdrawalAggregatorVerifier.bin";
 
+/// The reference SHPLONK calldata blob generated alongside the verifier by
+/// `export-inner-aggregator`. Word 23 (0-indexed) is the Poseidon digest of
+/// the inner-circuit VK — the same value the adapter's `vkDigest()`
+/// immutable is pinned to. Preflight compares the two so a wrong pin
+/// (adapter constructed with the wrong digest for this verifier) is
+/// refused before the AN-side burn.
+pub(crate) const WITHDRAW_VERIFIER_CALLDATA_BIN: &str =
+    "BridgeWithdrawalAggregatorVerifier_calldata.bin";
+
+/// Byte offset of the withdrawal-adapter VK digest inside
+/// `WITHDRAW_VERIFIER_CALLDATA_BIN`: 12 KZG accumulator limbs + 11
+/// re-exposed Circuit-4 public inputs, each a 32-byte field element.
+/// Matches `ShplonkAggregatorVerifierBase`'s runtime check position for
+/// the withdrawal adapter (word `12 + N` with N=11).
+const WITHDRAW_VK_DIGEST_OFFSET: usize = (12 + 11) * 32;
+
 /// The verifier source `aggregate-proof` self-checks its output against; it
 /// joins `{name}.sol` onto `--verifiers-dir`.
 pub(crate) const WITHDRAW_VERIFIER_SOL: &str = "BridgeWithdrawalAggregatorVerifier.sol";
@@ -1787,6 +1803,36 @@ pub fn expected_verifier_runtime(bin: &[u8]) -> CliResult<&[u8]> {
             ),
             source: None,
         })
+}
+
+/// Extract the withdrawal-adapter VK digest from the reference
+/// `_calldata.bin`. Layout is `12 KZG accumulator limbs + 11 re-exposed
+/// Circuit-4 public inputs + digest + proof`, each field element 32 bytes
+/// (big-endian, Solidity ABI); the digest lives at word 23.
+///
+/// A too-short file means the operator pointed `--verifiers-dir` at a
+/// pre-binding build — refuse loudly rather than paper over it with a
+/// zero digest (which would compare unequal to any real pin and read as
+/// "the adapter is misdeployed" instead of "your local file is stale").
+pub fn expected_withdraw_vk_digest(
+    calldata: &[u8],
+    path: &Path,
+) -> CliResult<alloy::primitives::B256> {
+    let end = WITHDRAW_VK_DIGEST_OFFSET + 32;
+    let slice = calldata
+        .get(WITHDRAW_VK_DIGEST_OFFSET..end)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "{} is {} bytes — too short for the withdrawal-adapter VK digest at word 23 \
+                 (needs at least {end} bytes). Regenerate it with `aggregate-proof \
+                 export-inner-aggregator`, or upgrade `--verifiers-dir` to a build that ships the \
+                 inner-VK binding.",
+                path.display(),
+                calldata.len(),
+            ),
+            source: None,
+        })?;
+    Ok(alloy::primitives::B256::from_slice(slice))
 }
 
 /// The `(dappFr, accFr)` pair a proof for this bridge account will carry.
@@ -1963,6 +2009,49 @@ pub async fn check_bridge_deploy(
                         WITHDRAW_VERIFIER_BIN,
                         on_chain.len(),
                         expected.len(),
+                    ),
+                    source: None,
+                });
+            }
+
+            // 3b. The Yul verifier can be right and the adapter's `vkDigest`
+            //     pin still wrong — the adapter is a separate deploy whose
+            //     constructor takes `(shplonkVerifier, _vkDigest)`. A pin
+            //     that doesn't match this build's inner-circuit VK is a
+            //     post-burn `WithdrawalProofRejected` (see A.4 in the
+            //     relayer withdraw loop for the runtime consequence). The
+            //     reference digest lives at word 23 of the same
+            //     `_calldata.bin` `export-inner-aggregator` shipped with
+            //     the verifier above, so the check is a byte compare
+            //     against one file plus one `eth_call`.
+            let calldata_path = dir.join(WITHDRAW_VERIFIER_CALLDATA_BIN);
+            let calldata = std::fs::read(&calldata_path).map_err(|e| CliError::Preflight {
+                reason: format!("--verifiers-dir: read {}: {e}", calldata_path.display()),
+                source: None,
+            })?;
+            let expected_digest = expected_withdraw_vk_digest(&calldata, &calldata_path)?;
+            let on_chain_digest =
+                client
+                    .adapter_vk_digest(adapter)
+                    .await
+                    .map_err(|e| CliError::Preflight {
+                        reason: format!(
+                            "withdrawal verifier adapter {adapter}: vkDigest() failed: {e}. The \
+                             adapter predates the inner-VK binding — redeploy it against this \
+                             `aggregate-proof` build."
+                        ),
+                        source: Some(anyhow::Error::new(e)),
+                    })?;
+            if on_chain_digest != expected_digest {
+                return Err(CliError::Preflight {
+                    reason: format!(
+                        "withdrawal verifier adapter {adapter}: vkDigest pin {on_chain_digest} \
+                         does not match this build ({expected_digest}). Every withdrawByProof \
+                         from this build would revert WithdrawalProofRejected on submit, after \
+                         the burn and the ~91 min anchor wait.\n\x20 Confirm the pin with `cast \
+                         call {adapter} \"vkDigest()(bytes32)\"`. If it is genuinely stale, \
+                         redeploy the adapter with the digest from word 23 of {}.",
+                        WITHDRAW_VERIFIER_CALLDATA_BIN,
                     ),
                     source: None,
                 });
@@ -2312,6 +2401,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn expected_withdraw_vk_digest_reads_word_23() {
+        // The offset is derived twice: once as `(12 + N) * 32` in the
+        // helper, once here as the same expression, so a wrong N on
+        // either side is caught. A boundary case (exactly 24 words)
+        // must succeed; one byte shy must refuse and name the artefact.
+        let mut ok = vec![0u8; (12 + 11 + 1) * 32];
+        // Distinguishable byte pattern at word 23.
+        let want = [0xCDu8; 32];
+        ok[(12 + 11) * 32..(12 + 11 + 1) * 32].copy_from_slice(&want);
+        let got =
+            expected_withdraw_vk_digest(&ok, Path::new("test.bin")).expect("word 23 is present");
+        assert_eq!(got.as_slice(), &want[..]);
+
+        // One byte short of the digest's tail.
+        let short = vec![0u8; (12 + 11 + 1) * 32 - 1];
+        let err = expected_withdraw_vk_digest(&short, Path::new("stale.bin"))
+            .expect_err("a `_calldata.bin` too short for word 23 must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("stale.bin"), "must name the artefact: {msg}");
+        assert!(msg.contains("word 23"), "must say which word: {msg}");
+    }
+
+    #[test]
     fn identity_frs_match_the_prover() {
         // Same conversion the prover uses for public inputs [6] and [7]
         // (`bridge-event-prover-lib/src/prover.rs:232-233`). If this drifts,
@@ -2351,6 +2463,7 @@ pub(crate) mod tests {
     pub(crate) const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
     const SEL_SHPLONK: &str = "66dbcfb5"; // shplonkVerifier()
     const SEL_YUL: &str = "c74e1862"; // yulVerifier()
+    const SEL_VK_DIGEST: &str = "648a89ea"; // vkDigest()
 
     /// A 32-byte zero word — what a getter returns when its slot is unset.
     const ZERO_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -2568,6 +2681,10 @@ pub(crate) mod tests {
             (SEL_DAPP_FR, ZERO_WORD.to_string()),
             (SEL_ACC_FR, ZERO_WORD.to_string()),
             (SEL_TREASURY, MAX_WORD.to_string()),
+            // Matches the zero digest tests write into their tempdir's
+            // `_calldata.bin` (24 words of `0x00`). Callers overriding
+            // this pair must override both sides.
+            (SEL_VK_DIGEST, ZERO_WORD.to_string()),
         ]);
         for (k, v) in overrides {
             m.insert(k, v.clone());
@@ -3228,6 +3345,14 @@ pub(crate) mod tests {
         let mut bin = vec![0u8; 32];
         bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
+        // Step 3b now also reads the reference calldata for the
+        // vkDigest word. All-zero pin here matches the ZERO_WORD default
+        // in `full_walk`; the mismatch case has its own test below.
+        std::fs::write(
+            dir.path().join(WITHDRAW_VERIFIER_CALLDATA_BIN),
+            vec![0u8; (12 + 11 + 1) * 32],
+        )
+        .unwrap();
 
         let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
         check_bridge_deploy(
@@ -3239,6 +3364,85 @@ pub(crate) mod tests {
         )
         .await
         .expect("the deployed runtime equals the committed one past its CREATE prelude");
+    }
+
+    #[tokio::test]
+    async fn a_mismatched_adapter_vk_digest_pin_is_refused() {
+        // Step 3b: the Yul verifier can be right and the adapter's
+        // `vkDigest` immutable still pinned to a different circuit's
+        // digest. On-chain that reads as `WithdrawalProofRejected` on
+        // every submit, AFTER the burn and the ~91 min anchor wait —
+        // the whole point of adding the check.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut bin = vec![0u8; 32];
+        bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
+        std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
+        // Reference calldata carries a non-zero digest at word 23; the
+        // mock's default vkDigest answer is ZERO_WORD, so they diverge.
+        let mut calldata = vec![0u8; (12 + 11 + 1) * 32];
+        calldata[(12 + 11) * 32..(12 + 11 + 1) * 32].copy_from_slice(&[0xAAu8; 32]);
+        std::fs::write(dir.path().join(WITHDRAW_VERIFIER_CALLDATA_BIN), &calldata).unwrap();
+
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            Some(dir.path()),
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("a wrong vkDigest pin reverts every withdrawByProof this build submits");
+        let msg = format!("{err}");
+        assert!(msg.contains("vkDigest"), "must name the pin: {msg}");
+        assert!(
+            msg.contains("WithdrawalProofRejected"),
+            "must name the on-chain revert: {msg}"
+        );
+        assert!(
+            msg.contains("after the burn"),
+            "must say when the failure would otherwise land: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_calldata_file_is_refused() {
+        // A pre-binding `_calldata.bin` (older `export-inner-aggregator`
+        // build with no vkDigest word) is refused loudly. Silently
+        // treating a short file as "zero digest" would let a build that
+        // predates the binding compare as OK against any adapter and
+        // undo A.1's entire point.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut bin = vec![0u8; 32];
+        bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
+        std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
+        // 23 words is exactly one short — the pre-binding layout was
+        // 12 accumulator + 11 PIs and no digest at the tail.
+        std::fs::write(
+            dir.path().join(WITHDRAW_VERIFIER_CALLDATA_BIN),
+            vec![0u8; (12 + 11) * 32],
+        )
+        .unwrap();
+
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            Some(dir.path()),
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("a `_calldata.bin` too short for word 23 must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(WITHDRAW_VERIFIER_CALLDATA_BIN),
+            "must name the artefact: {msg}"
+        );
+        assert!(
+            msg.contains("word 23"),
+            "must say which word is missing: {msg}"
+        );
     }
 
     #[tokio::test]

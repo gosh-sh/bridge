@@ -1112,6 +1112,7 @@ pub async fn run(
         },
         WithdrawSubmitOutcome::Reverted {
             reason,
+            permanent: _,
         } => {
             // Keep the record so a follow-up run resumes here instead of
             // burning again. The proof itself is NOT kept: it is

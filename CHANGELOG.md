@@ -89,10 +89,19 @@ assigns it when the release is tagged.
   during the next Circuit-4 proof job on that host, whichever fires
   first among the four entrypoints that go through the shared prover
   library: `ackinacki-bridge withdraw`, `relayer prove-withdraw`,
-  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. On all
-  four the shared library logs the info line
-  `"running keygen for event circuit (this may take a while)…"` from
-  `bridge-prover-lib/src/keys/event.rs:100` when keygen actually starts.
+  `relayer prove-withdraw-shplonk`, and `relayer withdraw-e2e`. In all
+  four the shared library emits an info-level line at
+  `bridge-prover-lib/src/keys/event.rs:100` when keygen actually
+  starts, whose runtime visibility depends on the entrypoint's
+  tracing filter: `relayer prove-withdraw-shplonk` and
+  `relayer withdraw-e2e` default to `info` and print it;
+  `ackinacki-bridge withdraw` defaults to
+  `warn,ackinacki_bridge=info,bridge_relayer_daemon=info`
+  (`crates/ackinacki-bridge/src/main.rs:247`) and so silences the line
+  unless `RUST_LOG` is set; `relayer prove-withdraw` runs the prover
+  as a subprocess (`SubprocessWithdrawalProver`) and buffers its
+  stderr, surfacing it only on failure
+  (`crates/bridge-relayer-daemon/src/withdraw_prover.rs:231-249`).
   Only `ackinacki-bridge withdraw` also prints the preflight forecast
   `"Circuit-4 keys will be generated on this run"` (from
   `crates/ackinacki-bridge/src/preflight.rs:1595`) at its stage-1

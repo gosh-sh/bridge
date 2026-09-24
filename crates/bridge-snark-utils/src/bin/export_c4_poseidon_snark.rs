@@ -128,11 +128,13 @@ fn main() -> anyhow::Result<()> {
     // keygens the event circuit against the K=20 KZG SRS
     // (`EventKeyManager::KEYGEN_SRS_K`, matching the event circuit's
     // `vk.domain.k`) even though `event_config_params.json` records k = 19
-    // for the arithmetization. Down below, `ensure_srs_for_event`
-    // provisions a K=19 slice (from the same ceremony) for the Snark
-    // export path — the export re-loads via `gen_srs(event_config().k)`
-    // and later overrides to K=20 via `export_poseidon_snark_with_srs_k`
-    // so `snark-verifier::compile()` sees `params.k == vk.domain.k`.
+    // for the arithmetization. `ensure_srs_for_event` below provisions a
+    // K=19 slice from the same ceremony as a defensive fallback for any
+    // future consumer that keys off `event_config().k`; the current
+    // export path pins `srs_k_override = Some(KEYGEN_SRS_K)` when it
+    // invokes `export_poseidon_snark_with_srs_k` further down, so the
+    // in-line `gen_srs()` re-load reads `kzg_bn254_20.srs` and
+    // `snark-verifier::compile()` sees `params.k == vk.domain.k`.
     let mut km = KeyManager::new(&params_dir);
     km.ensure_event_keys().context("ensure_event_keys failed (keygen)")?;
 

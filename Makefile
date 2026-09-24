@@ -82,9 +82,9 @@ test-coverage: ## Generate test coverage report
 #      Its tests belong to the dedicated CI pipeline, which sets that env var.
 #   2. `format` runs `cargo fmt` in each STANDALONE_CRATES dir, but
 #      `crates/bridge-circuits` was vendored from
-#      `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` at 0.3.0 without a
-#      rustfmt pass, and its files have never been run through this repo's
-#      nightly rustfmt with our `rustfmt.toml`. `cargo fmt --check` inside
+#      `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` without a rustfmt
+#      pass, and its files have never been run through this repo's nightly
+#      rustfmt with our `rustfmt.toml`. `cargo fmt --check` inside
 #      `crates/bridge-circuits` currently reports hundreds of hunks across
 #      dozens of files. Reformatting is deferred: nothing in this repository
 #      fetches the upstream any more (see AGENTS.md Upstream repositories),

@@ -121,7 +121,7 @@ crates/
   bridge-evm-aggregator/   SHPLONK aggregator: export-inner-aggregator writes the production
                            verifiers, aggregate-proof is the prover subprocess the CLI shells out to
   bridge-circuits/         AN→ETH halo2 circuits (1A/1B, 2, 4, poseidon reference, test-data-gen),
-                           vendored 0.3.0 from gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits;
+                           vendored from gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits;
                            its own sub-workspace with a distinct halo2 backend
 frontend/                  WASM deposit UI (Yew)
 scripts/                   operational scripts; CI checks live here too
@@ -154,7 +154,7 @@ Pinned in the `Cargo.toml` files; clone them next to this repository when you ne
 
 | Repository | Role |
 |---|---|
-| `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` | The AN→ETH circuits (1A/1B, 2, 4). Vendored under `crates/bridge-circuits/` as of 0.3.0 — nothing in this repository fetches it any more; a clone of the upstream repo is only useful if you want its issue tracker or its pre-vendor history |
+| `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` | The AN→ETH circuits (1A/1B, 2, 4). Vendored under `crates/bridge-circuits/` — nothing in this repository fetches it any more; a clone of the upstream repo is only useful if you want its issue tracker or its pre-vendor history |
 | `tvmlabs/tvm-sdk` | TVM SDK, including the `ZKHALO2VERIFYWITHVK` opcode the AN side verifies deposits with |
 | `acki-nacki` | The node. Pins a commit of this repository and places the files `contracts/an/place.json` lists |
 | `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381`, `gosh-sh/halo2-axiom`, `gosh-sh/gosh-halo2-crypto-lib`, `gosh-sh/axiom-eth`, `gosh-sh/snark-verifier` | The gosh halo2 forks and chips the circuits and provers build on |
@@ -216,8 +216,8 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 Each pipeline's header comment has the detail. A secret reaches only the events ticked on it, and a
 missing one arrives as an empty string rather than an error.
 
-**The only Rust job that runs on a PR or on `main` is `bridge-circuits.yaml`** (added with the
-0.3.0 vendoring — previously the circuits lived in a private repo, so no CI here could reach
+**The only Rust job that runs on a PR or on `main` is `bridge-circuits.yaml`** (added when the
+circuits were vendored — previously they lived in a private repo, so no CI here could reach
 them). Every other Rust crate — including the root workspace, `bridge-relayer-daemon`,
 `bridge-evm-aggregator`, `deposit-prover` and friends — has no PR-triggered pipeline and neither
 do the fork suites or `forge coverage`. Those exist only as GitLab jobs in `.gitlab-ci.yml`, which
@@ -282,8 +282,8 @@ the `an-contracts.yaml` checks, `scripts/check_verifier_sources.sh`, gitleaks or
 `clippy::useless_conversion` (`useless u8::from(ev.layer)`) that the `-D warnings` gate turns into
 an error. The prior wording of this paragraph blamed a pinned circuit revision that the workspace
 could not build against; that claim was accurate when the circuits lived in a private git repo,
-but it is no longer — since the 0.3.0 vendoring, `crates/bridge-prover-libraries` reaches its
-circuit deps by path (see [Cargo workspaces](#cargo-workspaces) above), and the build failures
+but it is no longer — since the circuits were vendored, `crates/bridge-prover-libraries` reaches
+its circuit deps by path (see [Cargo workspaces](#cargo-workspaces) above), and the build failures
 that remain are the fmt drift and the one clippy warning above, not a revision mismatch.
 
 `forge coverage` is there for two failure modes a plain `forge test` can miss. A fuzz test whose

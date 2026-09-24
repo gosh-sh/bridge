@@ -13,7 +13,8 @@ not, so the fresh bridge re-embedded the previous 6-argument voucher. Nothing in
 the toolchain noticed; a day went into the diagnosis.
 
     scripts/check_voucher_abi_consistency.py
-    scripts/check_voucher_abi_consistency.py --source DIR --compiled DIR
+    scripts/check_voucher_abi_consistency.py --source DIR \
+        --compiled-bridge FILE --compiled-voucher FILE
 
 Exits non-zero listing every disagreement. Run it after touching either
 contract, and before deploying whatever is in the compiled directory.
@@ -26,8 +27,9 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = REPO.parent / "acki-nacki/contracts/exchange"
-DEFAULT_COMPILED = REPO / "crates/bridge-prover-libraries/python/contracts"
+DEFAULT_SOURCE = REPO / "contracts/an/exchange"
+DEFAULT_COMPILED_BRIDGE = REPO / "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
+DEFAULT_COMPILED_VOUCHER = REPO / "contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json"
 
 # The voucher constructor's leading parameters are the deposit identity plus the
 # payout; `confirmDeposit` must accept the same list, in the same order.
@@ -92,10 +94,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", type=pathlib.Path, default=DEFAULT_SOURCE)
     ap.add_argument(
-        "--compiled",
+        "--compiled-bridge",
         type=pathlib.Path,
-        default=DEFAULT_COMPILED,
-        help="directory holding USDCBridge.abi.json + DepositVoucher.abi.json",
+        default=DEFAULT_COMPILED_BRIDGE,
+        help="compiled eccUSDCBridge.abi.json",
+    )
+    ap.add_argument(
+        "--compiled-voucher",
+        type=pathlib.Path,
+        default=DEFAULT_COMPILED_VOUCHER,
+        help="compiled DepositVoucher.abi.json",
     )
     ap.add_argument(
         "--source-only",
@@ -104,7 +112,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    bridge_src = args.source / "USDCBridge.sol"
+    bridge_src = args.source / "eccUSDCBridge.sol"
     voucher_src = args.source / "DepositVoucher.sol"
     for path in (bridge_src, voucher_src):
         if not path.is_file():
@@ -117,7 +125,7 @@ def main() -> int:
     problems: list[str] = []
     print(f"source {args.source}")
     print(f"  DepositVoucher.constructor  {render(src_ctor)}")
-    print(f"  USDCBridge.confirmDeposit   {render(src_confirm)}")
+    print(f"  eccUSDCBridge.confirmDeposit   {render(src_confirm)}")
     print(f"  new DepositVoucher(...)     {deploy_arity} args")
 
     compare(
@@ -133,17 +141,20 @@ def main() -> int:
         )
 
     if not args.source_only:
-        bridge_abi = args.compiled / "USDCBridge.abi.json"
-        voucher_abi = args.compiled / "DepositVoucher.abi.json"
+        bridge_abi = args.compiled_bridge
+        voucher_abi = args.compiled_voucher
         for path in (bridge_abi, voucher_abi):
             if not path.is_file():
-                raise SystemExit(f"{path}: not found (pass --compiled or --source-only)")
+                raise SystemExit(
+                    f"{path}: not found (pass --compiled-bridge/--compiled-voucher or --source-only)"
+                )
 
         abi_ctor = abi_signature(voucher_abi, "constructor")
         abi_confirm = abi_signature(bridge_abi, "confirmDeposit")
-        print(f"compiled {args.compiled}")
+        print(f"compiled {bridge_abi}")
+        print(f"         {voucher_abi}")
         print(f"  DepositVoucher.constructor  {render(abi_ctor)}")
-        print(f"  USDCBridge.confirmDeposit   {render(abi_confirm)}")
+        print(f"  eccUSDCBridge.confirmDeposit   {render(abi_confirm)}")
 
         # The pairwise check is what would have caught 2026-07-02 on its own.
         compare(

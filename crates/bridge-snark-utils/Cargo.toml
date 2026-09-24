@@ -12,12 +12,14 @@ edition = "2021"
 description = "Offline utilities for the AN→ETH bridge Halo2 proving pipeline: bound test-data proof export, Poseidon-transcript Snark wrapping, and synthetic-primary generation. Shares halo2-snark / VkBlob helpers with deposit-prover."
 
 [dependencies]
-# Partner circuits / parsers / test-data-gen — fetched from public GitHub.
-attestation-bls-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-poseidon = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-bridge-event-prove-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
-historical-layer-hashes-movement-checker-circuit = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+# Circuits / parsers / test-data-gen — path-deps into the sibling
+# `crates/bridge-circuits` sub-workspace (same source that
+# `bridge-prover-libraries` resolves to; must stay in lockstep).
+attestation-bls-checker-circuit = { path = "../bridge-circuits/attestation-bls-checker-circuit" }
+bridge-poseidon = { path = "../bridge-circuits/bridge-poseidon" }
+bridge-test-data-gen = { path = "../bridge-circuits/test-data-gen" }
+bridge-event-prove-circuit = { path = "../bridge-circuits/bridge-event-prove-circuit" }
+historical-layer-hashes-movement-checker-circuit = { path = "../bridge-circuits/historical-layer-hashes-movement-checker-circuit" }
 gosh-dense-balanced-tree = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 sha2 = "0.10"
 hex = "0.4"
@@ -62,7 +64,7 @@ snark-verifier-sdk = { git = "https://github.com/axiom-crypto/snark-verifier.git
 
 [dev-dependencies]
 # Already available via [dependencies] above; integration tests need them re-listed.
-bridge-test-data-gen = { git = "https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits", branch = "main" }
+bridge-test-data-gen = { path = "../bridge-circuits/test-data-gen" }
 
 [[bin]]
 name = "export-bound-block-proofs"
@@ -85,17 +87,10 @@ name = "export-synthetic-primary-snark"
 path = "src/bin/export_synthetic_primary_snark.rs"
 
 # ---------------------------------------------------------------------------
-# Patches: redirect every TRANSITIVE git dependency to a local sibling path.
-# The partner crates declare these via git URLs in their Cargo.toml; without
-# these patches Cargo would try to fetch from private GitHub repos.
+# Patches: redirect TRANSITIVE git dependencies to local sibling paths.
+# The circuit crates themselves are now direct path-deps above; these
+# patches cover transitive pulls from gosh-halo2 / dense-balanced-tree.
 # ---------------------------------------------------------------------------
-
-[patch."https://github.com/gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits"]
-attestation-bls-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/attestation-bls-checker-circuit" }
-bridge-poseidon = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-poseidon" }
-bridge-test-data-gen = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/test-data-gen" }
-bridge-event-prove-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/bridge-event-prove-circuit" }
-historical-layer-hashes-movement-checker-circuit = { path = "../../../acki-nacki-to-eth-bridge-halo2-circuits/historical-layer-hashes-movement-checker-circuit" }
 
 [patch."https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381"]
 halo2-base = { path = "../../../halo2-lib-zkevm-sha256-and-bls12-381/halo2-base" }

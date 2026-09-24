@@ -72,9 +72,9 @@ pub struct WithdrawE2EConfig {
     /// `target/release/aggregate-proof`). Forwarded to
     /// [`SubprocessAggregatorConfig`] inside the SHPLONK pipeline.
     pub aggregator_dir: PathBuf,
-    /// Directory of committed verifier `.bin` files — the aggregator's
-    /// byte-identity self-check target
-    /// (`BridgeWithdrawalAggregatorVerifier.bin` in particular).
+    /// Directory of committed verifier files — the aggregator's
+    /// byte-identity self-check compares against the `.sol` sources
+    /// (`BridgeWithdrawalAggregatorVerifier.sol` in particular).
     pub verifiers_dir: PathBuf,
     /// Directory holding `kzg_bn254_*.srs` + Circuit-4 keys. Both the
     /// in-process Poseidon C4 prover and the aggregator subprocess read

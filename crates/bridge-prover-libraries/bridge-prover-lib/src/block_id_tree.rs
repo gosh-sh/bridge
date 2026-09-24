@@ -1,6 +1,6 @@
 //! 16-leaf, depth-4 SHA-256 Merkle tree for the canonical `block_id`
 //! (acki-nacki `poseidon_profile_new`, see
-//! `acki-nacki-to-eth-bridge-halo2-circuits/GLOBAL_HISTORY_DATA_SPEC_MULTITHREAD.md`).
+//! `crates/bridge-circuits/docs/GLOBAL_HISTORY_DATA_SPEC.md`).
 //!
 //! Reconstructs the `block_id` and extracts the Merkle siblings needed to open
 //! two leaf views:

@@ -46,16 +46,16 @@ cargo build --release --locked --bin aggregate-proof
 The image also requires:
 
 - Foundry `cast`;
-- official Linux `solc 0.8.19+commit.7dd6d404` (the Docker build verifies its
-  published SHA-256);
-- the four generated `contracts/ethereum/verifiers/*AggregatorVerifier.bin`
-  files;
+- the four generated `contracts/ethereum/verifiers/*AggregatorVerifier.bin` files **and** the
+  `*AggregatorVerifier.sol` sources beside them;
 - Hermez SRS files for **K=17,19,20,21,22** and the primary/fallback/layer
   inner PK/VK/config files. K=22 is required by the layer outer aggregator;
   omitting it can fall back to an incompatible locally generated SRS.
 
-`aggregate-proof` invokes `solc` at runtime, so merely having Solidity
-bytecode in the image is not enough.
+`aggregate-proof` self-checks every proof by regenerating the verifier's Solidity source and
+comparing it with the committed `.sol`; it compiles nothing, so the image carries no `solc`. The
+`.bin` files are still needed: `preflight.sh` compares each with the runtime code deployed on chain.
+Both halves of every pair are listed in the image's `IMAGE-SHA256SUMS`.
 
 ## Persistent layout
 
@@ -128,6 +128,76 @@ real inner proof, so the first live boundary may take longer and write roughly
 After the first confirmed `verifyBlock`, require local/on-chain cursor
 equality, then perform one controlled stop/start. Startup must select
 `WarmResume`, retain `anchor_level=2`, and must not repeat the transaction.
+
+## Upgrade a running instance
+
+Preflight pins the source commit and the SHA-256 of both binaries, so the order
+below is load-bearing: sources, then a target-OS build, then the env values,
+then the image. Nothing here touches `params/`, `pk_cache/` or either state
+file, so the daemon resumes warm.
+
+```bash
+# 1. sources — preflight refuses a different commit or a dirty tree
+git fetch origin && git checkout <new-commit>
+
+# 2. build on the target OS; binaries from a newer glibc host will not start
+cd crates/bridge-prover-libraries
+cargo build --release --locked -p bridge-relayer-daemon --bin relayer
+cd ../bridge-evm-aggregator
+cargo build --release --locked --bin aggregate-proof
+
+# 3. the hashes preflight will demand
+sha256sum ../bridge-prover-libraries/target/release/relayer target/release/aggregate-proof
+```
+
+Update, in the env files kept outside Git: `EXPECTED_BRIDGE_COMMIT` (in `.env`
+and in the runtime env — preflight reads both), `EXPECTED_RELAYER_SHA256`,
+`EXPECTED_AGGREGATE_PROOF_SHA256`, and `RELAYER_IMAGE` for the new tag. Then
+rebuild and restart with the same verification the first install uses:
+
+```bash
+sudo docker compose build --pull=false relayer
+sudo docker run --rm --network none --read-only \
+  --user "${RELAYER_UID:-998}:${RELAYER_GID:-998}" \
+  --entrypoint /opt/gosh-relayer/bin/relayer \
+  "$(sudo docker compose images -q relayer)" --help >/dev/null
+sudo docker compose run --rm preflight
+sudo docker compose up -d relayer
+```
+
+Preflight refuses an `aggregate-proof` whose `--help` does not mention
+`--allow-source-drift` — that binary predates the verifier-source self-check and
+would look for `solc`, which the image no longer carries — and it refuses a
+verifier lane whose `.sol` is missing next to its `.bin`.
+
+**Watch the first `verifyBlock` after any upgrade that moves the aggregator,
+`snark-verifier` or a verifier pair.** That cycle is where the 1A/1B/2 sources
+are compared for real; the withdrawal verifier is only exercised when an event
+arrives.
+
+```bash
+sudo docker compose logs -f --tail 200 relayer \
+  | grep -E 'VK match|aggregator VK drift|verifyBlock'
+```
+
+`aggregator VK drift` stops the daemon before it submits anything — no funds
+move, and the message names the first differing line and both possible causes.
+Regenerate that verifier's pair from the checkout (regeneration compiles, so it
+needs `solc 0.8.19` on the host, not in the image), commit both files, and
+restart the upgrade from step 1:
+
+```bash
+cd crates/bridge-evm-aggregator
+cargo run --release --locked --bin export-inner-aggregator -- \
+  --inner-snark <inner.snark> --name <VerifierName> \
+  --out-dir ../../contracts/ethereum/verifiers
+SOLC=solc ../../scripts/check_verifier_sources.sh ../../contracts/ethereum/verifiers
+```
+
+To roll back, point `RELAYER_IMAGE` at the previous tag and `docker compose up
+-d relayer`. An older image carries its own verifier copies and its own `solc`,
+so a verifiers directory that has gained `.sol` files does not disturb it;
+restore the matching `EXPECTED_*` values in the same step.
 
 ## Operate
 

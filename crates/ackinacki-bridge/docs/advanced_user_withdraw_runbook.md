@@ -189,39 +189,18 @@ cargo build --release -p ackinacki-bridge
 cd ../../bridge-evm-aggregator
 cargo build --release --bin aggregate-proof
 #   -> ./target/release/aggregate-proof
-
-# 3. solc 0.8.19 — `aggregate-proof` shells out to it at RUN time, so
-#    this is a runtime dependency of every real withdrawal, not a build
-#    tool. Stage 5 generates the Yul verifier from the aggregator VK,
-#    compiles it with `solc --bin -`, and self-checks the bytecode
-#    against the committed BridgeWithdrawalAggregatorVerifier.bin.
-#    The version is pinned: another one emits different bytecode and
-#    fails that comparison.
-mkdir -p ~/.local/bin
-curl -L -o ~/.local/bin/solc \
-  https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
-chmod +x ~/.local/bin/solc
-solc --version | grep Version
-#   -> Version: 0.8.19+commit.7dd6d404.Linux.g++
 ```
 
-`~/.local/bin` must be on `PATH`: the aggregator resolves the bare name
-`solc`, not a configurable path. Note that "the CLI's ONLY subprocess"
-above is true of the CLI, not of the tree below it — `aggregate-proof`
-spawns `solc` in turn, which is exactly the dependency that used to go
-unchecked.
-
-**Steps 2 and 3 are mandatory, not optimisations.** Preflight refuses to
+**Step 2 is mandatory, not an optimisation.** Preflight refuses to
 proceed unless `target/release/aggregate-proof` exists and answers
 `--help`, and it will not accept the `cargo run --release` fallback the
 runtime would otherwise take: verifying that path means paying for a
 cold build inside a check whose whole point is to be instant, and "the
 crate looks present" is not verification. A missing or unrunnable
 aggregator therefore costs one command now instead of the burn plus up
-to 91 minutes of anchor wait later. Preflight checks `solc` and its
-version in the same place and for the same reason.
+to 91 minutes of anchor wait later.
 
-Both checks live on the **real** run's stage 1. `--dry-run` has no submit
+The check lives on the **real** run's stage 1. `--dry-run` has no submit
 plumbing and never proves, so it skips the prover-artifact checks
 entirely — a clean dry run is not evidence that stage 5 can finish.
 
@@ -335,18 +314,18 @@ Step 0** — and are not repeated here; follow them, then come back.
 ### Running your own verifier: `--allow-verifier-drift`
 
 The CLI pins the SHPLONK verifier it was built against and refuses a
-`BridgeWithdrawalAggregatorVerifier.bin` that does not match it byte for
-byte. That is right for the pinned shellnet deploy: a mismatched
+`BridgeWithdrawalAggregatorVerifier.bin` or `.sol` that does not match it
+byte for byte. That is right for the pinned shellnet deploy: a mismatched
 verifier means `aggregate-proof` produces calldata your bridge will
 reject, and without the check you find out in stage 5 — after the burn.
 
 If you ran your own `deploy_bridge_bundle.sh`, your verifier is
 legitimately different, and `--allow-verifier-drift` is how you say so.
-It suppresses **only** the byte-comparison against the pinned artifact.
+It suppresses **only** the byte-comparisons against the pinned artifacts.
 It does not weaken any other check, and it does not make a wrong
 verifier work.
 
-Before you pass it, three things must be true, and only you can
+Before you pass it, four things must be true, and only you can
 establish them:
 
 1. `BRIDGE_VERIFIERS_DIR` points at the `verifiers/` directory produced
@@ -370,11 +349,22 @@ establish them:
    runs (`verify_verifier_lane`), and the CLI's own
    `check_bridge_deploy` runs it for you on every withdraw — the flag
    does **not** turn that off.
-3. The proving keys in `--params-dir` were generated for that same
+3. The `.sol` in that directory is the source that `.bin` was compiled
+   from. `aggregate-proof` compares every proof against the `.sol` and
+   nothing on the withdrawal path compiles it, so a `.bin` from one
+   regeneration and a `.sol` from another pass every local check and
+   fail on chain. `export-inner-aggregator` writes both from one run;
+   check the pair with the same script CI runs (it needs `solc 0.8.19`,
+   which you have if you regenerated the verifier):
+
+   ```bash
+   SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh "$BRIDGE_VERIFIERS_DIR"
+   ```
+4. The proving keys in `--params-dir` were generated for that same
    circuit. A verifier from one deploy and a pk cache from another
    produce a proof that verifies locally and reverts on chain.
 
-If you cannot satisfy (2), the flag is not the fix — re-deploy or
+If you cannot satisfy (2) or (3), the flag is not the fix — re-deploy or
 re-fetch your artifacts.
 
 ### Step L2 — Treasury seed
@@ -975,8 +965,15 @@ up, so all three are spelled out here:
 
 `pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
 eleven `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
-dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot, anchorLayer)` — so the
-signature is a parenthesised tuple, not `uint256[11]`:
+dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot,
+anchorLayer)` — so the signature is a parenthesised tuple, not
+`uint256[11]`. The selector for the eleven-slot signature is
+`0xa9753d18`, computed with `cast sig` from the fully-expanded
+signature below (`cast` will not parse `×11` shorthand — it needs
+eleven comma-separated `uint256`s inside the tuple, exactly as the
+`cast call` invocation further down spells out); the
+previous ten-slot form was `0x6e6f66ad` and will not decode against the
+current bridge:
 
 ```bash
 # $PROVER_OUT_DIR is yours to set — the CLI reads the directory from
@@ -1277,7 +1274,7 @@ crates/bridge-evm-aggregator/                  ← SHPLONK aggregator source (BR
 └── target/release/
     └── aggregate-proof                        ← the CLI's only subprocess
 
-contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — precomputed inner verifier keys
+contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — verifier bytecode (.bin) and source (.sol)
 ```
 
 **Never persisted anywhere the CLI writes:**

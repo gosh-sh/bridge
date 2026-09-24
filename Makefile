@@ -1,5 +1,5 @@
 .PHONY: help setup build test clean format lint check install run-local deploy docs \
-        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy \
+        coverage-solidity pre-push production-preflight relayer-test relayer-fmt relayer-clippy aggregator-fmt test-all \
         english-check
 
 # Default target
@@ -43,15 +43,6 @@ build-solidity: ## Build only Solidity contracts
 	@echo "$(BLUE)Building Solidity contracts...$(NC)"
 	@cd contracts/ethereum && forge build
 
-generate-verifier: ## Generate Halo2 Yul verifier and compile to bytecode
-	@echo "$(BLUE)Generating Halo2 verifier...$(NC)"
-	@chmod +x scripts/regenerate_verifier.sh
-	@./scripts/regenerate_verifier.sh
-
-generate-proof: ## Generate a test proof
-	@echo "$(BLUE)Generating test proof...$(NC)"
-	@cargo run --bin generate-proof -- 12345 67890 43981 1000 4660
-
 test: ## Run all tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	@chmod +x test.sh
@@ -77,14 +68,66 @@ test-coverage: ## Generate test coverage report
 	@chmod +x test.sh
 	@./test.sh --coverage
 
-test-integration: ## Run integration tests (requires Anvil to be running)
-	@echo "$(BLUE)Running integration tests...$(NC)"
-	@echo "$(YELLOW)Note: Make sure Anvil is running (run 'make run-local' in another terminal)$(NC)"
-	@cargo test --package eth-frontend --test integration_test -- --ignored
+# Crates outside the root workspace that are packages of their own. The relayer
+# and the withdrawal CLI are members of crates/bridge-prover-libraries and are
+# formatted and tested through it.
+#
+# `crates/bridge-circuits` is a sub-workspace (its own [workspace] with the
+# gosh-fork halo2 backend) and is deliberately NOT listed here. Two reasons:
+#
+#   1. `test-all` iterates STANDALONE_CRATES with plain `cargo test`, but the
+#      K=20 attestation-BLS MockProvers inside `bridge-circuits` need
+#      `RUST_TEST_THREADS=1` to fit in RAM (running them in parallel OOM-kills
+#      the worker — see the header of `.woodpecker/bridge-circuits.yaml`).
+#      Its tests belong to the dedicated CI pipeline, which sets that env var.
+#   2. `format` runs `cargo fmt` in each STANDALONE_CRATES dir, but
+#      `crates/bridge-circuits` was vendored from
+#      `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` without a rustfmt
+#      pass, and its files have never been run through this repo's nightly
+#      rustfmt with our `rustfmt.toml`. `cargo fmt --check` inside
+#      `crates/bridge-circuits` currently reports hundreds of hunks across
+#      dozens of files. Reformatting is deferred: nothing in this repository
+#      fetches the upstream any more (see AGENTS.md Upstream repositories),
+#      but leaving the diff intact keeps `git diff` against the pre-vendor
+#      import manageable while it is still recent.
+#
+# Run its tests explicitly when you touch a circuit:
+#   (cd crates/bridge-circuits && RUST_TEST_THREADS=1 cargo test --workspace)
+# — `.woodpecker/bridge-circuits.yaml` covers the same set per MR, though
+# it splits them across two steps: `bridge-circuits-fast` runs
+# `bridge-event-prove-circuit` + `cross-circuit-block-id-test` without
+# the env var (K=19 / K=20 but small enough), and
+# `bridge-circuits-heavy` sets `RUST_TEST_THREADS=1` for the rest (the
+# K=20 attestation-BLS MockProvers are the ones that need it).
+STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
+	crates/bridge-evm-aggregator crates/bridge-snark-utils \
+	crates/deposit-relayer-daemon crates/eth-light-client-relayer
 
-format: ## Format all code (Rust + Solidity)
+# Every suite runs even when an earlier one fails; the failures are listed at
+# the end. --locked is passed only where a Cargo.lock is committed, and the
+# aggregator runs in release as in aggregator-test. #[ignore]d tests stay
+# skipped. `crates/bridge-circuits` is deliberately excluded (see the
+# STANDALONE_CRATES comment above); its tests run under
+# `.woodpecker/bridge-circuits.yaml`.
+test-all: ## Run every Rust crate outside crates/bridge-circuits + the Solidity suite, then list what failed
+	@failed=""; \
+	run() { dir=$$1; shift; echo "$(BLUE)── $$dir: $$*$(NC)"; (cd $$dir && "$$@") || failed="$$failed $$dir"; }; \
+	run . cargo test --workspace --locked; \
+	run crates/bridge-prover-libraries cargo test --workspace --locked; \
+	for d in $(STANDALONE_CRATES); do \
+		flags=""; [ -f $$d/Cargo.lock ] && flags="--locked"; \
+		[ $$d = crates/bridge-evm-aggregator ] && flags="$$flags --release"; \
+		run $$d cargo test $$flags; \
+	done; \
+	run contracts/ethereum forge test; \
+	if [ -n "$$failed" ]; then echo "$(YELLOW)Failed:$$failed$(NC)"; exit 1; fi; \
+	echo "$(GREEN)All test suites passed$(NC)"
+
+format: ## Format all Rust crates outside crates/bridge-circuits + the Solidity suite
 	@echo "$(BLUE)Formatting code...$(NC)"
 	@cargo fmt --all
+	@cd crates/bridge-prover-libraries && cargo fmt --all
+	@for d in $(STANDALONE_CRATES); do (cd $$d && cargo fmt) || exit 1; done
 	@cd contracts/ethereum && forge fmt
 
 format-check: ## Check code formatting without modifying
@@ -94,7 +137,14 @@ format-check: ## Check code formatting without modifying
 
 lint: ## Run linters (clippy for Rust)
 	@echo "$(BLUE)Running linters...$(NC)"
-	@cargo clippy --all-targets --all-features -- -D warnings
+	# NB: `--all-features` is deliberately NOT passed. Enabling
+	# `acki-nacki-interface`'s `tvm-sdk` feature pulls `tvm_client` +
+	# `tvm_vm`, which pulls `halo2-axiom` from crates.io while other
+	# graphs in this repo pull `halo2-axiom` via a gosh git checkout;
+	# clippy then errors on the two `Circuit<F>` trait impls. Default
+	# features are what `pre-push` and the root `cargo test --workspace
+	# --locked` build, so they are what we lint against.
+	@cargo clippy --all-targets -- -D warnings
 
 check: format-check lint test ## Run all checks (format, lint, test)
 
@@ -118,9 +168,9 @@ run-local: ## Start local Ethereum node (Anvil)
 	@echo "$(BLUE)Starting local Ethereum node...$(NC)"
 	@anvil
 
-deploy-local: ## Deploy contracts to local network
+deploy-local: ## Deploy a test bridge to Anvil (PRIVATE_KEY from the environment or contracts/ethereum/.env)
 	@echo "$(BLUE)Deploying to local network...$(NC)"
-	@cd contracts/ethereum && forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
+	@cd contracts/ethereum && forge script script/DeployTestBridge.s.sol --rpc-url http://localhost:8545 --broadcast
 
 docs: ## Generate documentation
 	@echo "$(BLUE)Generating documentation...$(NC)"
@@ -130,10 +180,9 @@ docs-solidity: ## Generate Solidity documentation
 	@echo "$(BLUE)Generating Solidity documentation...$(NC)"
 	@cd contracts/ethereum && forge doc
 
-audit: ## Run security audit
+audit: ## Run cargo audit on the root workspace
 	@echo "$(BLUE)Running security audit...$(NC)"
 	@cargo audit
-	@cd contracts/ethereum && forge audit
 
 update: ## Update dependencies
 	@echo "$(BLUE)Updating dependencies...$(NC)"
@@ -143,18 +192,29 @@ update: ## Update dependencies
 # Development helpers
 dev-setup: setup ## Setup development environment
 	@echo "$(BLUE)Setting up development environment...$(NC)"
-	@cp .env.example .env || true
+	@test -f contracts/ethereum/.env || cp contracts/ethereum/.env.example contracts/ethereum/.env
 	@echo "$(GREEN)Development environment ready!$(NC)"
-	@echo "$(YELLOW)Don't forget to configure .env file$(NC)"
+	@echo "$(YELLOW)Don't forget to configure contracts/ethereum/.env$(NC)"
 
 ci: format-check lint test ## Run CI checks locally
 
 # ────────────────────────────────────────────────────────────────────────────
-# Coverage and pre-push targets — mirror what CI runs so red pipelines are
-# easy to reproduce locally.
+# Coverage and pre-push targets. No pipeline on GitHub runs `forge coverage`,
+# and the only Rust pipeline (`bridge-circuits.yaml`) only covers
+# `crates/bridge-circuits/`; every other Rust crate — the root workspace,
+# `bridge-relayer-daemon`, `bridge-evm-aggregator`, `deposit-prover`, etc. —
+# has no PR-triggered CI. `make pre-push` is the gate for `forge coverage`
+# and for the three Rust units it explicitly runs: the root workspace
+# (`cargo test --workspace --locked`), `bridge-relayer-daemon` (via
+# `relayer-test`) and `bridge-evm-aggregator` (via `aggregator-test`).
+# Everything else — `deposit-prover`, `eth-light-client-prover`, the other
+# members of `crates/bridge-prover-libraries`, `deposit-relayer-daemon`,
+# `eth-light-client-relayer`, `bridge-snark-utils`, `frontend` — is NOT
+# tested by `make pre-push`. Run `make test-all`, or the per-crate command
+# in the "What no pipeline runs" section of AGENTS.md, when a change reaches
+# one of them.
 #
-# Pipelines #5741 + #5744 (2026-05-20) both failed on patterns that pass
-# `forge test` and `cargo test` locally but trip `forge coverage`:
+# Two patterns pass `forge test` and `cargo test` but trip `forge coverage`:
 #   - vm.assume rejection cap (fuzz test rejected > 65 536 inputs);
 #   - Stack-too-deep (forge coverage disables optimizer + viaIR).
 # Run `make pre-push` before pushing any non-trivial Solidity or Rust change
@@ -182,8 +242,11 @@ generate-spike-artifacts: ## Export M2 multiply-spike verifier + calldata for Fo
 	@./scripts/check_eip170_verifier_bins.sh contracts/ethereum/test/fixtures/r15_spike
 	@echo "$(GREEN)Spike artefacts written to contracts/ethereum/test/fixtures/r15_spike/$(NC)"
 
-relayer-fmt: ## Check bridge-relayer-daemon formatting
-	@cd crates/bridge-relayer-daemon && cargo fmt --check
+relayer-fmt: ## Check bridge-relayer-daemon formatting (via bridge-prover-libraries workspace)
+	@cd crates/bridge-prover-libraries && cargo fmt -p bridge-relayer-daemon -- --check
+
+aggregator-fmt: ## Check bridge-evm-aggregator formatting
+	@cd crates/bridge-evm-aggregator && cargo fmt --check
 
 relayer-clippy: ## Run clippy on bridge-relayer-daemon (via bridge-prover-libraries workspace)
 	@cd crates/bridge-prover-libraries && cargo clippy -p bridge-relayer-daemon --all-targets --no-deps -- -D warnings
@@ -201,6 +264,7 @@ pre-push: ## Mirror CI: format-check + clippy + tests + Solidity coverage. Run b
 	@$(MAKE) format-check
 	@$(MAKE) lint
 	@$(MAKE) relayer-fmt
+	@$(MAKE) aggregator-fmt
 	@$(MAKE) relayer-clippy
 	@cd contracts/ethereum && forge fmt --check
 	@cd contracts/ethereum && forge test

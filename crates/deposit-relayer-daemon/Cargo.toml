@@ -34,7 +34,7 @@ fs2 = "0.4"
 acki-nacki-interface = { path = "../acki-nacki-interface", features = ["tvm-sdk"] }
 # Deposit-source allowlist, shared verbatim with `deposit-prover`.
 deposit-chain-ids = { path = "../deposit-chain-ids" }
-tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",
 ] }

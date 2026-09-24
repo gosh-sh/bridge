@@ -41,3 +41,4 @@ pub mod eip170;
 pub mod evm_export;
 pub mod multiply;
 pub mod srs_guard;
+pub mod verifier_source;

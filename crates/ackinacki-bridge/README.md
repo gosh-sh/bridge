@@ -155,7 +155,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
-| `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Precomputed inner verifier keys |
+| `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain) and `.sol` (the proof self-check) |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
 | `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize) |
 | `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
@@ -344,42 +344,6 @@ case above, and `blocked` means a directory is sitting where a key file
 belongs — usually a bind mount whose host path does not exist. `--repair`
 refuses `blocked` without touching anything; remove the directory by hand.
 
-### Step 0b — Install `solc 0.8.19` (one-off, ~1 min)
-
-`aggregate-proof` shells out to `solc` **at run time**, on every real
-withdrawal. Stage 5 generates the Yul verifier from the aggregator's
-verifying key, compiles it with `solc --bin -`, and compares the bytecode
-byte for byte against the committed
-`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin`. That
-self-check is what tells you the proof you are about to submit matches the
-verifier deployed on the bridge — so having the Solidity bytecode on disk is
-not enough; the compiler itself has to be there.
-
-The version is pinned, because a different one emits different bytecode and
-fails that comparison:
-
-```bash
-mkdir -p ~/.local/bin
-curl -L -o ~/.local/bin/solc \
-  https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
-chmod +x ~/.local/bin/solc
-solc --version | grep Version      # Version: 0.8.19+commit.7dd6d404.Linux.g++
-```
-
-`~/.local/bin` has to be on `PATH` — the aggregator resolves the bare name
-`solc`, not a path you configure.
-
-Stage 1 of a **real** run checks this and refuses before anything is
-broadcast. A `--dry-run` does **not**: it has no submit plumbing and never
-proves, so it skips every prover-artifact check — the ceremony, the
-verifier `.bin`, `aggregate-proof` and this compiler alike. A clean dry run
-therefore says nothing about whether stage 5 can finish, which is why this
-step is a step rather than something the tooling catches for you.
-
-Without that stage-1 check the failure is an `ENOENT` panic inside a
-subprocess at stage 5 — after the irreversible burn and after up to ~91 min
-of waiting for the covering bundle.
-
 ### Step 1 — Create + fund a Sepolia burner wallet
 
 The CLI signs `withdrawByProof` with an EVM key you provide. Never
@@ -495,10 +459,11 @@ bridge deploy, not about your multisig.
 
 What it does **not** do: compose or sign the burn, capture, prove, or run
 the `dry_run_withdraw` eth_call. It also does not check the prover
-artifacts — the ceremony, the verifier `.bin`, `aggregate-proof`, the key
-cache or disk headroom — because those are gated on the submit-only flags
-a dry run does not require. Pass `--verifiers-dir` and the deployed-verifier
-bytecode comparison joins in; otherwise it is skipped with a warning.
+artifacts — the ceremony, the verifier `.bin` and `.sol`, `aggregate-proof`,
+the key cache or disk headroom — because those are gated on the submit-only
+flags a dry run does not require. Pass `--verifiers-dir` and the
+deployed-verifier bytecode comparison joins in; otherwise it is skipped
+with a warning.
 
 So a clean dry run means "nothing about either chain is misconfigured",
 not "the real run will succeed".
@@ -989,7 +954,7 @@ $HOME/.bridge-withdraw-state/                  ← default idempotency state dir
 ../bridge-evm-aggregator/                      ← BRIDGE_AGGREGATOR_DIR — SHPLONK aggregator source
 └── target/release/aggregate-proof             ← the CLI's only subprocess
 
-../../contracts/ethereum/verifiers/            ← BRIDGE_VERIFIERS_DIR — precomputed inner verifier keys
+../../contracts/ethereum/verifiers/            ← BRIDGE_VERIFIERS_DIR — verifier bytecode (.bin) and source (.sol)
 ```
 
 **Safe to prune between demos.** `work_dir/`, `proofs/` — regeneration

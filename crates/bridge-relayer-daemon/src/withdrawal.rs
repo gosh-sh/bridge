@@ -259,21 +259,24 @@ mod tests {
         assert_eq!(pi.token_id, U256::from(3u64));
         // Slot 10 (`anchor_layer`) is the last public-instance entry.
         // Guarding it explicitly so a future off-by-one that dropped
-        // `anchor_layer` entirely — leaving `finalRoot` in the last
-        // position — trips this test immediately. The on-chain revert
-        // for a mis-slotted `anchor_layer` is `InvalidNumLayers` /
-        // `UnknownAnchor` (see AckiNackiBridge.sol), so a decoder
-        // mutation here would break every withdraw with a misleading
-        // error.
+        // `anchor_layer` entirely — or swapped slots 9 and 10 — trips
+        // this test immediately. If a decoder mutation put `finalRoot`
+        // (a ~256-bit hash) into `anchor_layer`, the on-chain revert
+        // would almost always be `InvalidNumLayers` at
+        // `AckiNackiBridge.sol:1339-1340` (bounded by
+        // `MAX_LAYER_HASHES`), and in the rare small-value case would
+        // fall through to `UnknownAnchor` at :1342-1343 — either way
+        // masking the real bug as a chain-side error.
         assert_eq!(pi.anchor_layer, U256::from(1u64));
     }
 
-    /// Negative: a `proof_event_*.json` carrying 12 public instances
-    /// (one too many for the current layout) must fail
-    /// `public_inputs()` — silent truncation would let a payload with an
-    /// extra field sneak through, and any decoder that ignored the
-    /// trailing entry would still match the first 11 slots. Guards
-    /// against a future layout bump that forgets to update
+    /// Negative: a `proof_event_*.json` carrying
+    /// `WITHDRAWAL_PUBLIC_INPUTS + 1` public instances (one too many for
+    /// the current layout) must fail `public_inputs()` — silent
+    /// truncation would let a payload with an extra field sneak through,
+    /// and any decoder that ignored the trailing entry would still match
+    /// the first `WITHDRAWAL_PUBLIC_INPUTS` slots. Guards against a
+    /// future layout bump that forgets to update
     /// `WITHDRAWAL_PUBLIC_INPUTS` on the consumer side.
     #[test]
     fn public_inputs_rejects_wrong_instance_count() {
@@ -286,8 +289,12 @@ mod tests {
             public_instances_hex: hexes.clone(),
             self_verified: false,
         };
-        assert!(p.public_inputs().is_err(), "12 instances must not decode");
-        // And 10 (one short) also fails.
+        assert!(
+            p.public_inputs().is_err(),
+            "{} instances must not decode",
+            WITHDRAWAL_PUBLIC_INPUTS + 1
+        );
+        // And `WITHDRAWAL_PUBLIC_INPUTS - 1` (one short) also fails.
         hexes.pop();
         hexes.pop();
         let p_short = PartnerWithdrawalProof {
@@ -298,7 +305,8 @@ mod tests {
         };
         assert!(
             p_short.public_inputs().is_err(),
-            "10 instances must not decode either"
+            "{} instances must not decode either",
+            WITHDRAWAL_PUBLIC_INPUTS - 1
         );
     }
 

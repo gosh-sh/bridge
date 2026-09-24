@@ -485,15 +485,15 @@ contract's fallback entrypoint via `staticcall`.
 
 | `.bin` (creation bytecode) | Circuit | Inner PIs | Size (B) | Reference calldata (B) |
 |---|---|---:|---:|---:|
-| `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 494 | 3 840 |
-| `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 493 | 3 840 |
-| `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 23 111 | 4 160 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 (inner K=19) | 11 | 21 152 | 3 648 |
+| `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 655 | 3 872 |
+| `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 655 | 3 872 |
+| `LayerHashesAggregatorVerifier.bin` | 2 (k_outer=22) | 14 | 19 263 | 3 104 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 | 11 | 21 314 | 3 680 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
-output exceeds ~28 KB (`verifiers/README.md:16-20`). 
+output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`). 
 
 `verifiers/*.sol` are the generated `Halo2Verifier` sources (a single `fallback(bytes) → bytes` with
 inline assembly) kept for reference; deployment always goes through `create` on the `.bin`

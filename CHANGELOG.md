@@ -46,7 +46,7 @@ assigns it when the release is tagged.
   compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
   source's keccak256, compiling to the identical `.bin` proves a `.sol` is
   exactly the source of that `.bin` — which also holds for
-  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 21`,
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 22`,
   and for `PrimaryAggregatorVerifier.sol` and
   `FallbackAggregatorVerifier.sol`, whose keys are unchanged and whose
   sources were not regenerated for this change. What that leaves unconfirmed
@@ -143,47 +143,45 @@ assigns it when the release is tagged.
   successful keygen run on some other host.
 
 - **All four SHPLONK aggregator adapters bind on-chain to the inner-circuit
-  VK.** `ShplonkAggregatorVerifierBase`'s constructor now takes a
-  `bytes32 vkDigest` (the Poseidon digest of the inner-circuit VK witnesses)
-  alongside the Yul verifier address, rejecting `bytes32(0)`, and every
-  adapter's `verifyX(...)` compares the aggregator's tail public instance
-  at slot `12 + NUM_INNER` against that pin before delegating to the Yul.
-  Calldata is one 32-byte word longer (`instances (12 acc + N inner + 1
-  digest) ‖ snark_proof`), so `BridgeWithdrawalAggregatorVerifier`
-  further grows from 21 152 B / 23 instances to 21 314 B / 24 instances
-  and its `_calldata.bin` from 3 648 B to 3 680 B on top of the Circuit-4
-  rotation above. All four `.bin` verifiers rotated as a consequence and
-  their addresses / `extcodehash` change: `PrimaryAggregatorVerifier` and
-  `FallbackAggregatorVerifier` were not rotated in prior entries but are
-  rotated here; `LayerHashesAggregatorVerifier` and
-  `BridgeWithdrawalAggregatorVerifier` rotate again on top of their entries
-  above. `ShplonkDeployLib` carries the new per-adapter `*_VK_DIGEST` and
-  `*_YUL_CODEHASH` constants and wires them into `deployPrimaryAdapter`
-  etc., so a script that already uses the deploy library needs no change
-  beyond redeploying — re-derive the digest constants from
-  `bridge_evm_aggregator::vk_binding::expected_vk_digest` whenever an
-  inner snark is rotated. Daemon-side minimum-length constants
-  (`SHPLONK_MIN_ATTESTATION_INSTANCES`, `SHPLONK_MIN_LAYER_INSTANCES`,
-  `SHPLONK_MIN_WITHDRAWAL_INSTANCES`) are bumped by one 32-byte word to
-  match; a relayer built against the pre-rotation constants rejects the
-  new calldata as too short.
+  VK.** Upgrade `aggregate-proof`, the relayer and `contracts/ethereum/verifiers/`
+  together with the contracts. Calldata from an old `aggregate-proof` has
+  no digest slot, and every new adapter rejects it
+  (`AttestationProofRejected` / `LayerHashesProofRejected` /
+  `WithdrawalProofRejected`). `AckiNackiBridge` has to be redeployed:
+  `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` and
+  `bridgeWithdrawalVerifier` are `immutable`. `DeployReuseVerifiersBridge`
+  and `DeployGenesisCursorBridge` take adapter addresses from
+  `PRIMARY_VERIFIER` / `FALLBACK_VERIFIER` / `LAYER_HASHES_VERIFIER` /
+  `WITHDRAWAL_VERIFIER` — do not pass pre-rotation adapters there.
+
+  Each adapter constructor is `(address _shplonkVerifier, bytes32 _vkDigest)`,
+  rejects a zero digest with `InvalidVkDigest()`, and exposes `vkDigest()`.
+  `verifyPrimaryAttestation` and `verifyFallbackAttestation` compare word
+  16, `verifyLayerHashesMovement` word 26, `verifyWithdrawal` word 23,
+  then delegate to Yul. A pin is word `12 + N` of the matching
+  `<name>_calldata.bin` (big-endian `bytes32`); after deploy check with
+  `cast call <adapter> "vkDigest()(bytes32)"`. The library helper
+  `bridge_evm_aggregator::vk_binding::expected_vk_digest` has no CLI.
+
+  Against 0.2.0 the artefacts are: Primary 21 494 → 21 655 B / calldata
+  3 872 B; Fallback 21 493 → 21 655 B / 3 872 B; LayerHashes 19 100 →
+  19 263 B / 3 072 → 3 104 B (`k_outer` stays 22); Withdrawal 21 152 →
+  21 314 B / 3 648 → 3 680 B. Primary and Fallback are the tightest at
+  88% of EIP-170. The aggregator cache stem moved `__v2__` → `__v3__`:
+  the first run re-keygens every outer PK; old slots stay on disk until
+  deleted. The Primary / Fallback / LayerHashes `_calldata.bin` is for a
+  different block (`numLayers` 3 → 5); a locally generated
+  `bound_scenario.json` for `verify-fixture` is stale.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
-  `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
-  20 the outer circuit did not fit the 14 inner public inputs. The runtime
-  artefact grows from 19 100 B to 23 111 B, so its address and `extcodehash`
-  change and the pin in `ShplonkDeployLib` moves with it. Proofs produced
-  against the old key do not verify against the new one; a deployment that
-  updates only the bridge will fail every `verifyBlock`. Margin to EIP-170
-  (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
-  warning below.
-
-  The other two keys — `PrimaryAggregatorVerifier.bin` and
-  `FallbackAggregatorVerifier.bin` — are also rotated by the aggregator
-  inner-VK-digest binding described below (they were byte-identical to
-  0.2.0 through the layer-hashes rotation, but that binding gives every
-  aggregator a fresh key). See that entry for the per-adapter deploy
-  constants.
+  Against 0.2.0 `LayerHashesAggregatorVerifier` stays at `k_outer = 22`.
+  The runtime artefact grows from 19 100 B to 19 263 B and its
+  `_calldata.bin` from 3 072 B to 3 104 B (the extra digest word).
+  Address and `extcodehash` change with the pin in `ShplonkDeployLib`.
+  Proofs against the old key do not verify; a deployment that updates
+  only the bridge will fail every `verifyBlock`. Margin to EIP-170
+  (24 576 B) is 5 313 B. Primary and Fallback at 21 655 B (88%) are
+  now the tightest of the four — see the warning below.
 
 - Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
   **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and
@@ -264,7 +262,8 @@ assigns it when the release is tagged.
   value that never arrived.
 - `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
   `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
-  size drift, and warns from 90% of EIP-170 (layer hashes warns today at 94%).
+  size drift, and warns from 90% of EIP-170 (none warn today; Primary and
+  Fallback sit at 88%, layer hashes at 78%).
   Growth now shows up in a diff instead of in a reverted deploy.
 - `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
   appends, a seq_no jump not mass-evicting earlier anchors,

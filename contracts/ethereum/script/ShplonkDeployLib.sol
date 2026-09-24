@@ -45,8 +45,8 @@ library ShplonkDeployLib {
 
     /// @dev Poseidon digest of the inner-circuit VK witnesses, in the exact
     ///      32-byte layout the aggregator emits at instance slot `12 + NUM_INNER`.
-    ///      Adapters pin it as `bytes32 vkDigest` and revert if a proof carries
-    ///      any other value at that slot.
+    ///      Adapters pin it as `bytes32 vkDigest` and return `false` if a
+    ///      proof carries any other value at that slot.
     bytes32 internal constant PRIMARY_VK_DIGEST =
         0x2a3a839de41b08a38496074a2b4f04e02daa45bb093ffeb54edf09fef18db89a;
     bytes32 internal constant FALLBACK_VK_DIGEST =
@@ -110,17 +110,14 @@ library ShplonkDeployLib {
 
     function deployPrimaryAdapter(string memory binPath) internal returns (IPrimaryVerifier) {
         address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, PRIMARY_YUL_CODEHASH));
-        return IPrimaryVerifier(
-            address(new PrimaryAggregatorVerifier(wrapper, PRIMARY_VK_DIGEST))
-        );
+        return IPrimaryVerifier(address(new PrimaryAggregatorVerifier(wrapper, PRIMARY_VK_DIGEST)));
     }
 
     /// @notice Circuit 1B fallback attestation — SHPLONK aggregator (K=21 inner).
     function deployFallbackAdapter(string memory binPath) internal returns (IFallbackVerifier) {
         address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, FALLBACK_YUL_CODEHASH));
-        return IFallbackVerifier(
-            address(new FallbackAggregatorVerifier(wrapper, FALLBACK_VK_DIGEST))
-        );
+        return
+            IFallbackVerifier(address(new FallbackAggregatorVerifier(wrapper, FALLBACK_VK_DIGEST)));
     }
 
     function deployLayerHashesAdapter(string memory binPath)

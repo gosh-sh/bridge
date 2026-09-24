@@ -48,7 +48,8 @@ contract ShplonkAggregatorForgeryTest is Test {
     }
 
     function test_primaryAggregator_rejectsShortCalldata() public {
-        PrimaryAggregatorVerifier v = new PrimaryAggregatorVerifier(FAILING_SHPLONK, DUMMY_VK_DIGEST);
+        PrimaryAggregatorVerifier v =
+            new PrimaryAggregatorVerifier(FAILING_SHPLONK, DUMMY_VK_DIGEST);
         assertFalse(v.verifyPrimaryAttestation(hex"00", 1, 2, 3, 4));
     }
 

@@ -8,18 +8,19 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/ShplonkAggregatorVerifierBase.sol";
+import "../src/PrimaryAggregatorVerifier.sol";
+import "../src/FallbackAggregatorVerifier.sol";
+import "../src/LayerHashesAggregatorVerifier.sol";
 import "../src/BridgeWithdrawalAggregatorVerifier.sol";
 import "../script/ShplonkDeployLib.sol";
 
 /// @title ShplonkAggregatorVkBindingTest
-/// @notice Shape-preserving impostor negatives for the inner-VK Poseidon digest
-///         binding. For each of the four adapters we take the committed
-///         `_calldata.bin`, replace the tail digest slot with a different
-///         (still non-zero) 32-byte word, and confirm that the adapter's
-///         `verifyX(...)` returns `false`. The calldata length and every
-///         re-exposed inner instance are preserved, so this exercises the
-///         `vkDigest` check specifically — not the length gate, the inner
-///         PI checks, or the underlying Yul verify.
+/// @notice Inner-VK Poseidon digest binding. Flipping a bit in the
+///         calldata digest slot also changes a public instance, so the
+///         Yul verifier rejects that mutant on its own. The tests that
+///         actually pin the adapter check feed the *unmodified*
+///         committed `_calldata.bin` to an adapter constructed with a
+///         wrong `vkDigest`.
 contract ShplonkAggregatorVkBindingTest is Test {
     uint256 internal constant ACC = 12;
 
@@ -66,9 +67,34 @@ contract ShplonkAggregatorVkBindingTest is Test {
         assertTrue(mutated != bytes32(0), "mutated must be non-zero");
         _setWord(cd, ACC + numInner, mutated);
 
-        assertFalse(
-            v.verifyWithdrawal(cd, pub), "digest mismatch must be rejected before Yul delegation"
+        assertFalse(v.verifyWithdrawal(cd, pub), "digest mismatch must be rejected");
+    }
+
+    function test_withdrawal_wrongPin_unmodifiedCalldata_rejected() public {
+        bytes memory cd =
+            vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
+        address w = ShplonkDeployLib.deployShplonkWrapper(
+            ShplonkDeployLib.deployYulFromBin(
+                "verifiers/BridgeWithdrawalAggregatorVerifier.bin",
+                ShplonkDeployLib.WITHDRAWAL_YUL_CODEHASH
+            )
         );
+        BridgeWithdrawalAggregatorVerifier bad = new BridgeWithdrawalAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.WITHDRAWAL_VK_DIGEST) ^ 1)
+        );
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
+        pub.tokenId = _word(cd, ACC + 0);
+        pub.amount = _word(cd, ACC + 1);
+        pub.recipientHi = _word(cd, ACC + 2);
+        pub.recipientLo = _word(cd, ACC + 3);
+        pub.dstChainId = _word(cd, ACC + 4);
+        pub.senderAccFr = _word(cd, ACC + 5);
+        pub.dappFr = _word(cd, ACC + 6);
+        pub.accFr = _word(cd, ACC + 7);
+        pub.nullifier = _word(cd, ACC + 8);
+        pub.finalRoot = _word(cd, ACC + 9);
+        pub.anchorLayer = _word(cd, ACC + 10);
+        assertFalse(bad.verifyWithdrawal(cd, pub), "wrong pin must reject unmodified calldata");
     }
 
     function test_primary_mutatedVkDigest_rejected() public {
@@ -88,6 +114,24 @@ contract ShplonkAggregatorVkBindingTest is Test {
         );
     }
 
+    function test_primary_wrongPin_unmodifiedCalldata_rejected() public {
+        bytes memory cd = vm.readFileBinary("verifiers/PrimaryAggregatorVerifier_calldata.bin");
+        address w = ShplonkDeployLib.deployShplonkWrapper(
+            ShplonkDeployLib.deployYulFromBin(
+                "verifiers/PrimaryAggregatorVerifier.bin", ShplonkDeployLib.PRIMARY_YUL_CODEHASH
+            )
+        );
+        PrimaryAggregatorVerifier bad = new PrimaryAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.PRIMARY_VK_DIGEST) ^ 1)
+        );
+        assertFalse(
+            bad.verifyPrimaryAttestation(
+                cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
+            ),
+            "wrong pin must reject unmodified calldata"
+        );
+    }
+
     function test_fallback_mutatedVkDigest_rejected() public {
         uint256 numInner = 4;
         bytes memory cd = vm.readFileBinary("verifiers/FallbackAggregatorVerifier_calldata.bin");
@@ -102,6 +146,24 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
             ),
             "digest mismatch must be rejected"
+        );
+    }
+
+    function test_fallback_wrongPin_unmodifiedCalldata_rejected() public {
+        bytes memory cd = vm.readFileBinary("verifiers/FallbackAggregatorVerifier_calldata.bin");
+        address w = ShplonkDeployLib.deployShplonkWrapper(
+            ShplonkDeployLib.deployYulFromBin(
+                "verifiers/FallbackAggregatorVerifier.bin", ShplonkDeployLib.FALLBACK_YUL_CODEHASH
+            )
+        );
+        FallbackAggregatorVerifier bad = new FallbackAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.FALLBACK_VK_DIGEST) ^ 1)
+        );
+        assertFalse(
+            bad.verifyFallbackAttestation(
+                cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
+            ),
+            "wrong pin must reject unmodified calldata"
         );
     }
 
@@ -132,10 +194,39 @@ contract ShplonkAggregatorVkBindingTest is Test {
         );
     }
 
+    function test_layerHashes_wrongPin_unmodifiedCalldata_rejected() public {
+        bytes memory cd = vm.readFileBinary("verifiers/LayerHashesAggregatorVerifier_calldata.bin");
+        address w = ShplonkDeployLib.deployShplonkWrapper(
+            ShplonkDeployLib.deployYulFromBin(
+                "verifiers/LayerHashesAggregatorVerifier.bin",
+                ShplonkDeployLib.LAYER_HASHES_YUL_CODEHASH
+            )
+        );
+        LayerHashesAggregatorVerifier bad = new LayerHashesAggregatorVerifier(
+            w, bytes32(uint256(ShplonkDeployLib.LAYER_HASHES_VK_DIGEST) ^ 1)
+        );
+        uint256[10] memory hashes;
+        for (uint256 i = 0; i < 10; i++) {
+            hashes[i] = _word(cd, ACC + 3 + i);
+        }
+        assertFalse(
+            bad.verifyLayerHashesMovement(
+                cd,
+                _word(cd, ACC),
+                _word(cd, ACC + 1),
+                _word(cd, ACC + 2),
+                hashes,
+                _word(cd, ACC + 13)
+            ),
+            "wrong pin must reject unmodified calldata"
+        );
+    }
+
     /// @dev The base constructor must refuse `bytes32(0)` for the digest.
     function test_base_zeroVkDigest_rejected() public {
         vm.expectRevert(ShplonkAggregatorVerifierBase.InvalidVkDigest.selector);
-        // Any non-zero verifier address suffices — the digest check fires first.
+        // The digest check runs first; any non-zero verifier address
+        // is enough to reach it.
         new BridgeWithdrawalAggregatorVerifier(address(uint160(1)), bytes32(0));
     }
 }

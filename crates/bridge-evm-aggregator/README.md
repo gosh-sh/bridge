@@ -36,7 +36,7 @@ regenerate both files of every pair.
 | **Re-expose inner SNARK public inputs as aggregator instances** | ✅ 2026-05-29 | `expose_previous_instances(false)` on **both** keygen + prover circuits, called **before** `calculate_params` so the auto-tuner sizes `num_advice` for the added copy constraints (this ordering is what previously misfired as `NOT ENOUGH ADVICE COLUMNS`). No hand-pinned `num_advice` needed at K=21. |
 | Aggregator instance shape = `[acc_0..acc_11, inner_pi_0.., vk_digest]` (12 KZG accumulator limbs **+ re-exposed inner PIs + inner-VK Poseidon digest**) | ✅ | round-trip asserts `len == 12 + INNER_NUM_INSTANCES + 1` (= 14 for the spike), `instances[0][12] == 77` (the inner `a*b`), and `instances[0][13] == expected_vk_digest(...)` |
 | Emit Yul EVM verifier source + raw deployment bytecode | ✅ | `target/spike/AggregatorVerifierSpike.{sol,bin}` |
-| Bytecode under EIP-170 24 576 B runtime limit | ✅ | **13 172 bytes (12.9 KB)** with 13 instances (was 13 009 B at 12 instances) |
+| Bytecode under EIP-170 24 576 B runtime limit | ✅ | The 13 172 B figure predates the digest instance. The ignored round-trip prints the current size. |
 | Solidity source compiles with `solc 0.8.19` (exact pragma pin emitted by snark-verifier) | ✅ | `compile_solidity` (`solc --bin -`) succeeds; validated 2026-05-29 |
 | Foundry on-chain harness (deploy bytecode, call fallback with `instances ‖ proof`) | ⏸ M6/M7 | Needs Foundry + a persisted EVM proof/instances vector. Deploy from `AggregatorVerifierSpike.bin` via `vm.readFileBinary` (same workaround the legacy `Halo2Verifier.sol` uses to dodge the solc-optimizer inline-assembly stub). |
 
@@ -51,7 +51,7 @@ test-only.
 **That future has since arrived.** Circuit 4 landed: the inner event snark is produced by
 `export-c4-poseidon-snark` in `bridge-snark-utils`, aggregated by this crate's
 `export-inner-aggregator`, and the result is committed as
-`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 314 B, inner `K=19`), which
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 314 B, inner `K=20`), which
 `AckiNackiBridge.withdrawByProof` calls through its adapter. The same pipeline produces the 1A, 1B
 and Circuit-2 verifiers. So the milestone text below (M4 → M7) is a historical record of a plan that
 has since been executed, not a description of pending work.

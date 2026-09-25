@@ -40,8 +40,7 @@ use tracing::info;
 use crate::{
     error::RelayerError,
     withdrawal::{
-        fr_hex_to_u256, PartnerWithdrawalProof, SHPLONK_MIN_WITHDRAWAL_INSTANCES,
-        WITHDRAWAL_PUBLIC_INPUTS,
+        fr_hex_to_u256, PartnerWithdrawalProof, WITHDRAWAL_CALLDATA_LEN, WITHDRAWAL_PUBLIC_INPUTS,
     },
 };
 
@@ -542,13 +541,13 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
 
         // The calldata's re-exposed inner instances (words 12..22 inclusive,
         // big-endian) must equal the eleven public inputs, and the trailing
-        // digest slot (word 23) must be a non-zero, in-field Fr. If either
-        // fails, the on-chain verifier would either bind different values
-        // than the caller passes in `WithdrawalPublicInputs` or reject the
-        // digest against the adapter's immutable pin — refuse to surface
-        // such a proof. `None` here: the pipeline does not have the on-chain
-        // adapter's `vkDigest` handy; the preflight/verify-fixture path is
-        // the caller that can pass `Some`.
+        // digest slot (word 23) must be a non-zero, in-field Fr, and the
+        // blob must be exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes. A
+        // pre-binding blob is 3 648 B and its word 23 is a G1 coordinate,
+        // which still passes a zero / `< r` check. `None` skips the pin
+        // compare: the only `Some` callers are tests, and that hex is a
+        // little-endian Fr, not the big-endian `bytes32` `vkDigest()`
+        // returns. The CLI compares those bytes itself before the dry-run.
         calldata_binds_instances(&calldata, &instances_hex, None)?;
 
         Ok(PartnerWithdrawalProof {
@@ -586,31 +585,30 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
 ///
 /// Also validates the trailing inner-VK digest slot (word 23, i.e.
 /// `12 + WITHDRAWAL_PUBLIC_INPUTS`):
-///   * the word must be non-zero — a Poseidon digest over Fr is not zero in
-///     practice, so a zero here means the aggregator did not emit a digest
-///     (older Yul without the binding, or a corrupted payload);
-///   * the word must be strictly less than the BN254 scalar-field modulus `r` —
-///     the aggregator always emits a valid Fr, so a value `>= r` cannot match
-///     any deploy-time `vkDigest` pin and is rejected here rather than failing
-///     silently on-chain.
+///   * the blob must be exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes. A
+///     pre-binding withdrawal blob is 3 648 B; its word 23 is the first word of
+///     the outer proof (a G1 coordinate, below `r`), so a zero / `< r` check
+///     does not tell it from this build;
+///   * the word must be non-zero and strictly less than the BN254 scalar-field
+///     modulus `r`.
 ///
-/// If `expected_vk_digest_hex` is `Some(hex)`, word 23 must equal the given
-/// LE-Fr hex value exactly (used by preflight paths that already know the
-/// adapter's on-chain `vkDigest`; the runtime pipeline that has no such value
-/// passes `None` and only gets the two sanity checks above).
+/// If `expected_vk_digest_hex` is `Some(hex)`, word 23 must equal that
+/// little-endian Fr. Tests are the only callers of `Some`. An on-chain
+/// `vkDigest()` is a big-endian `bytes32`; do not pass it here without
+/// reversing the limbs.
 pub fn calldata_binds_instances(
     calldata: &[u8],
     instances_hex: &[String],
     expected_vk_digest_hex: Option<&str>,
 ) -> Result<(), RelayerError> {
-    if calldata.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
+    if calldata.len() != WITHDRAWAL_CALLDATA_LEN {
         return Err(RelayerError::other(format!(
-            "aggregator calldata is {} bytes; need >= {} to hold {} accumulator limbs + {} inputs \
-             + 1 inner-VK digest",
+            "aggregator calldata is {} bytes; this build's withdrawal artefact is exactly {} \
+             bytes (24 instance words + the outer proof). {} bytes is the pre-binding blob, whose \
+             word 23 is a proof coordinate rather than the inner-VK digest",
             calldata.len(),
-            SHPLONK_MIN_WITHDRAWAL_INSTANCES,
-            NUM_ACCUMULATOR_INSTANCES,
-            WITHDRAWAL_PUBLIC_INPUTS
+            WITHDRAWAL_CALLDATA_LEN,
+            3_648
         )));
     }
     if instances_hex.len() != WITHDRAWAL_PUBLIC_INPUTS {
@@ -706,16 +704,12 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
     }
 }
 
-/// Deterministic aggregator for tests: returns fixed-size 3616-byte
-/// calldata whose re-exposed instance words (12..=22 inclusive) match
+/// Deterministic aggregator for tests: returns a [`WITHDRAWAL_CALLDATA_LEN`]
+/// byte blob whose re-exposed instance words (12..=22 inclusive) match
 /// [`MockCircuit4SnarkProver`]'s eleven ascending LE instances, so
-/// [`calldata_binds_instances`] passes. Note the 3616-byte length is
-/// only "big enough" — it does not match the true production Circuit-4
-/// SHPLONK calldata size (3680 B for 11 public inputs + 1 inner-VK
-/// digest word; see the reference `_calldata.bin` in the CHANGELOG).
-/// The length is fixed by [`Self::calldata_binding`]; the constant is
-/// unrelated to `WITHDRAWAL_PUBLIC_INPUTS` and moving to a different
-/// instance count does not require adjusting it.
+/// [`calldata_binds_instances`] passes. The length is the production
+/// Circuit-4 size, not a shorter stand-in: a 3 648 B pre-binding blob
+/// must fail the exact-length check.
 #[derive(Clone, Debug, Default)]
 pub struct MockAggregator {
     pub fail: bool,
@@ -723,15 +717,13 @@ pub struct MockAggregator {
 
 impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
-    /// words at positions `12..12 + instances_hex.len()`), padded to a
-    /// stand-in 3616-byte length (see the note on [`MockAggregator`] — the
-    /// production Circuit-4 SHPLONK calldata is 3680 B, this is only large
-    /// enough to hold the instance words). The trailing digest slot at
+    /// words at positions `12..12 + instances_hex.len()`), padded to
+    /// [`WITHDRAWAL_CALLDATA_LEN`]. The trailing digest slot at
     /// `12 + instances_hex.len()` is populated with [`Self::MOCK_VK_DIGEST`]
     /// so that [`calldata_binds_instances`]'s non-zero + in-field checks
     /// pass.
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
-        let total_len = 3616;
+        let total_len = WITHDRAWAL_CALLDATA_LEN;
         let mut cd = vec![0u8; total_len];
         for (i, inst) in instances_hex.iter().enumerate() {
             let val = fr_hex_to_u256(inst).unwrap_or(U256::ZERO);
@@ -1273,8 +1265,10 @@ mod tests {
         bad[off + 31] ^= 0xFF;
         assert!(calldata_binds_instances(&bad, &instances, None).is_err());
 
-        // Too-short calldata → error.
+        // Too-short calldata → error. 3 648 B is the pre-binding withdrawal
+        // blob: longer than the instance prefix, still not this build.
         assert!(calldata_binds_instances(&[0u8; 100], &instances, None).is_err());
+        assert!(calldata_binds_instances(&[0u8; 3_648], &instances, None).is_err());
     }
 
     /// Word 23 (the inner-VK digest slot) must be non-zero and in-field, and
@@ -1303,6 +1297,17 @@ mod tests {
         let mut oversize = cd.clone();
         oversize[digest_off..digest_off + 32].fill(0xff);
         assert!(calldata_binds_instances(&oversize, &instances, None).is_err());
+
+        // Word == r rejects; word == r − 1 accepts. `>=` flipped to `>` would
+        // still reject 0xff and would miss this boundary. Limb order is the
+        // big-endian word the aggregator writes.
+        let mut at_r = cd.clone();
+        at_r[digest_off..digest_off + 32].copy_from_slice(&BN254_FR_MODULUS.to_be_bytes::<32>());
+        assert!(calldata_binds_instances(&at_r, &instances, None).is_err());
+        let mut below_r = cd.clone();
+        below_r[digest_off..digest_off + 32]
+            .copy_from_slice(&(BN254_FR_MODULUS - U256::from(1u64)).to_be_bytes::<32>());
+        assert!(calldata_binds_instances(&below_r, &instances, None).is_ok());
 
         // Exact-match against expected digest.
         let mock_digest_le: String =
@@ -1338,7 +1343,7 @@ mod tests {
         assert_eq!(proof.public_instances_hex.len(), WITHDRAWAL_PUBLIC_INPUTS);
         // proof_hex is the aggregator calldata (>= SHPLONK min).
         let bytes = proof.proof_bytes().unwrap();
-        assert!(bytes.len() >= SHPLONK_MIN_WITHDRAWAL_INSTANCES);
+        assert_eq!(bytes.len(), WITHDRAWAL_CALLDATA_LEN);
         // The eleven public inputs decode into a well-formed struct.
         // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :634-637),
         // so slot 0 (`token_id`) decodes as 0 and slot 10 (`anchor_layer`) as 10.
@@ -1370,7 +1375,7 @@ mod tests {
     #[tokio::test]
     async fn mock_c12_pipeline_attestation_returns_aggregated_calldata() {
         // MockSnarkWrapper writes a placeholder snark tempfile; MockAggregator
-        // ignores the file bytes and synthesizes 3616-byte calldata. Verifies
+        // ignores the file bytes and synthesizes a 3680-byte calldata. Verifies
         // the full wrap → aggregate wiring end-to-end without needing a real
         // params_dir on disk.
         let pipeline =
@@ -1386,7 +1391,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cd.len(), 3616);
+        assert_eq!(cd.len(), WITHDRAWAL_CALLDATA_LEN);
     }
 
     #[tokio::test]
@@ -1404,7 +1409,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cd.len(), 3616);
+        assert_eq!(cd.len(), WITHDRAWAL_CALLDATA_LEN);
     }
 
     #[tokio::test]

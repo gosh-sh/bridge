@@ -40,15 +40,19 @@ assigns it when the release is tagged.
       together, not one at a time;
     - a self-deployed verifiers directory (`--verifiers-dir` /
       `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
-      that `export-inner-aggregator` wrote next to its `.bin`.
-  All four `*AggregatorVerifier.sol` files were regenerated for this release
-  (the inner-VK binding described below adds a public instance to every
-  aggregator, which rotates every outer key); each compiles to the committed
-  `.bin`. Because a compiled `.bin` ends with `solc`'s CBOR metadata, whose
-  hash commits to the source's keccak256, compiling to the identical `.bin`
-  proves a `.sol` is exactly the source of that `.bin`. Watch the first
-  `verifyBlock` cycle of each kind after the upgrade in case a future
-  `snark-verifier` bump changes the generated source.
+      that `export-inner-aggregator` wrote next to its `.bin`, and
+      `BridgeWithdrawalAggregatorVerifier_calldata.bin` (word 23 is the
+      withdrawal adapter's `vkDigest` pin). `scripts/install.sh` treats
+      that `_calldata.bin` as part of a complete verifiers directory.
+  `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
+  rotated Circuit-4 key and compiles to the committed `.bin`. Because a
+  compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
+  source's keccak256, compiling to the identical `.bin` proves a `.sol` is
+  exactly the source of that `.bin` — which also holds for
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 22`,
+  and for `PrimaryAggregatorVerifier.sol` and
+  `FallbackAggregatorVerifier.sol`, regenerated in `6360455` with the
+  other two. All four sources match the `.bin` files in this tree.
 - **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
   meaning — a bootstrap escape hatch for a verifier whose source is not
   committed yet — with no alias for the old spelling.
@@ -62,14 +66,11 @@ assigns it when the release is tagged.
   `sender`) now nullify to distinct values and can both pay out on the
   ETH side; pre-rotation they would have collided on the second
   withdraw as a replay.
-  The rotation alone lifts the aggregated Yul from 20 990 B / 22 instances
-  to 21 152 B / 23 instances; combined with the inner-VK binding below,
-  which adds a 24th instance, the runtime settles at 21 314 B / 24
-  instances and the reference `_calldata.bin` at 3 680 B — the composite
-  figure the `Against 0.2.0` block further down repeats for every adapter.
-  Redeploy `BridgeWithdrawalAggregatorVerifier`; proofs against the old
-  key do not verify, and a `WithdrawalPublicInputs` struct without
-  `anchorLayer` will not decode. The extra tuple field also **changes the `withdrawByProof`
+  The aggregated Yul is 21 314 B / 24 instances; the reference
+  `_calldata.bin` is 3 680 B. Redeploy
+  `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
+  verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
+  not decode. The extra tuple field also **changes the `withdrawByProof`
   4-byte selector**: from the previous ten-slot `0x6e6f66ad`
   (`withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))`)
   to the eleven-slot `0xa9753d18`
@@ -139,11 +140,11 @@ assigns it when the release is tagged.
   successful keygen run on some other host.
 
 - **All four SHPLONK aggregator adapters bind on-chain to the inner-circuit
-  VK.** Upgrade `aggregate-proof`, the relayer, `ackinacki-bridge` (via
-  `scripts/install.sh`, so its preflight also picks up the new digest check
-  described under _Changed_) and `contracts/ethereum/verifiers/` — including
-  the `_calldata.bin` files, whose word `12 + N` is the pin the adapter reads
-  — together with the contracts. Calldata from an old `aggregate-proof` has
+  VK.** Upgrade `aggregate-proof`, the relayer, `ackinacki-bridge` (a
+  `scripts/install.sh` install) and `contracts/ethereum/verifiers/`
+  together with the contracts. The CLI reads
+  `BridgeWithdrawalAggregatorVerifier_calldata.bin` from `--verifiers-dir`
+  as well as the `.bin` and `.sol`. Calldata from an old `aggregate-proof` has
   no digest slot, and every new adapter rejects it
   (`AttestationProofRejected` / `LayerHashesProofRejected` /
   `WithdrawalProofRejected`). `AckiNackiBridge` has to be redeployed:
@@ -156,9 +157,9 @@ assigns it when the release is tagged.
   Each adapter constructor is `(address _shplonkVerifier, bytes32 _vkDigest)`,
   rejects a zero digest with `InvalidVkDigest()`, rejects a pin at or above
   the BN254 scalar-field modulus `r` with `VkDigestExceedsFieldModulus()`
-  (guards an operator who passes a raw 32-byte hash — roughly half of
-  keccak256 outputs exceed `r` — in place of a real Fr digest), and exposes
-  `vkDigest()`.
+  (guards an operator who passes a raw 32-byte hash in place of a real Fr
+  digest; a chain id is far below `r` and is not what this guard catches —
+  it rejects about 81% of random 32-byte values), and exposes `vkDigest()`.
   `verifyPrimaryAttestation` and `verifyFallbackAttestation` compare word
   16, `verifyLayerHashesMovement` word 26, `verifyWithdrawal` word 23,
   then delegate to Yul. A pin is word `12 + N` of the matching
@@ -167,14 +168,12 @@ assigns it when the release is tagged.
   `bridge_evm_aggregator::vk_binding::expected_vk_digest` has no CLI.
 
   Against 0.2.0 the artefacts are: Primary 21 494 → 21 655 B / calldata
-  3 872 B; Fallback 21 493 → 21 655 B / 3 872 B; LayerHashes 19 100 →
-  19 263 B / 3 072 → 3 104 B (`k_outer` stays 22); Withdrawal 20 990 →
-  21 314 B / 3 616 → 3 680 B (Circuit-4 rotation + binding compose). Primary and Fallback are the tightest at
-  88% of EIP-170. The aggregator cache stem moved `__v2__` → `__v3__`:
-  the first run re-keygens every outer PK; old slots stay on disk until
-  deleted. The Primary / Fallback / LayerHashes `_calldata.bin` is for a
-  different block (`numLayers` 3 → 5); a locally generated
-  `bound_scenario.json` for `verify-fixture` is stale.
+  3 840 → 3 872 B; Fallback 21 493 → 21 655 B / 3 840 → 3 872 B;
+  LayerHashes 19 100 → 19 263 B / 3 072 → 3 104 B (`k_outer` stays 22);
+  Withdrawal 20 990 → 21 314 B / 3 616 → 3 680 B. Primary and Fallback are
+  the tightest at 88% of EIP-170. The aggregator cache stem moved
+  `__v2__` → `__v3__`: the first run re-keygens every outer PK; old slots
+  stay on disk until deleted. `numLayers` was already 5 at 0.2.0.
 
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   Against 0.2.0 `LayerHashesAggregatorVerifier` stays at `k_outer = 22`.
@@ -184,7 +183,7 @@ assigns it when the release is tagged.
   Proofs against the old key do not verify; a deployment that updates
   only the bridge will fail every `verifyBlock`. Margin to EIP-170
   (24 576 B) is 5 313 B. Primary and Fallback at 21 655 B (88%) are
-  now the tightest of the four — see the warning below.
+  the tightest of the four.
 
 - Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
   **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and
@@ -409,13 +408,14 @@ assigns it when the release is tagged.
   `WithdrawIdentityMismatch`, `DstChainIdMismatch`, `UnsupportedTokenId`,
   `RecipientHalfOutOfRange`, `InvalidRecipient`, `FieldElementOutOfRange`,
   `InvalidNumLayers` and `NullifierAlreadyUsed` are treated as permanent
-  (proof is added to the daemon's in-process `WithdrawScanState.done` set so
-  re-scanning the proofs directory skips it cheaply for the rest of this
-  process lifetime, counted under `skipped`, and the scan continues to the
-  next file — a restart re-encounters the file and re-classifies it, with
-  the on-chain `isNullifierUsed` check as the durable idempotency source);
-  `UnknownAnchor` and `WithdrawTreasuryShortfall` stay on the backoff path,
-  as do RPC-side failures and post-send confirmation errors. The `submit-withdraw` and `withdraw-e2e` CLI subcommands now
+  (the path is recorded in an in-memory set, counted under
+  `parked_permanent`, and the scan continues to the next file). A restart
+  retries the file. A rewrite of the same path is retried in-process when
+  its length or mtime changes. `skipped_already_used` is only an
+  already-used nullifier, and that log carries the nullifier, amount and
+  recipient; a parked proof logs those fields on its own line. `UnknownAnchor` and `WithdrawTreasuryShortfall` stay on
+  the backoff path, as do RPC-side failures and post-send confirmation
+  errors. The `submit-withdraw` and `withdraw-e2e` CLI subcommands now
   label the revert as `(permanent)` or `(transient)` in the failure
   message.
 
@@ -428,10 +428,10 @@ assigns it when the release is tagged.
   check the failure surfaces post-burn and post-anchor-wait as
   `WithdrawalProofRejected`. The check runs only when `--verifiers-dir`
   is passed (which is when the deployed-bytecode compare already runs);
-  without it the run still passes the earlier stages and now warns that
-  the digest pin was not compared. A `_calldata.bin` too short for word
-  23 is refused with an upgrade hint rather than treated as a zero
-  digest.
+  without it the run still passes the earlier stages and warns that both
+  the bytecode check and the digest pin compare were skipped. A
+  `_calldata.bin` that is not exactly 3 680 B is refused. 3 648 B is the
+  pre-binding blob.
 
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
   building the prover or the CLI no longer needs read access to a private

@@ -24,9 +24,9 @@
 //! Hash the inner-VK witnesses inside the aggregator and expose the digest
 //! as an additional public instance (the last element of instance column 0,
 //! placed after the KZG accumulator and any re-exposed inner instances).
-//! On-chain adapters carry an `immutable bytes32 vkDigest` set at deploy
-//! time from [`expected_vk_digest`] and reject proofs whose exposed digest
-//! doesn't match.
+//! On-chain adapters carry an `immutable bytes32 vkDigest`. The value is
+//! word `12 + N` of the matching `<name>_calldata.bin`, copied into the
+//! deploy library. Adapters reject proofs whose exposed digest doesn't match.
 //!
 //! Compared to `VerifierUniversality::None` (bake VK as circuit constants),
 //! this keeps the outer Yul verifier universal by shape. A same-shape
@@ -94,11 +94,12 @@ pub const NUM_VK_BINDING_INSTANCES: usize = 1;
 ///   * `preprocessed_witnesses.preprocessed` — one Fr per limb of every
 ///     preprocessed commitment the aggregator loads (fixed / selector /
 ///     permutation columns). The exact count is the inner circuit's
-///     preprocessed-column count × 2 (x, y) × non-native-field limbs, plus
-///     the `transcript_initial_state` element that snark-verifier appends
-///     — always present on this path, not optional. Circuit 4 (11 inner
-///     PIs, ~19 preprocessed commitments at K=19) and Circuit 1A/1B are
-///     both larger than a hundred elements.
+///     preprocessed-column count × 2 (x, y) × non-native-field limbs, plus the
+///     `transcript_initial_state` element that snark-verifier appends — always
+///     present on this path, not optional. Circuit 4 has 11 inner PIs and is
+///     built on the K=20 SRS. The preprocessed-column count is that circuit's,
+///     not a fixed "~19 at K=19". Circuit 1A/1B preimages are both larger than
+///     a hundred elements.
 ///   * `preprocessed_witnesses.k` — witness under `Full`, loaded constant
 ///     otherwise (uniform code path either way).
 pub fn expose_vk_digest(agg: &mut AggregationCircuit) {
@@ -108,7 +109,12 @@ pub fn expose_vk_digest(agg: &mut AggregationCircuit) {
     let inputs: Vec<AssignedValue<Fr>> = agg
         .preprocessed()
         .iter()
-        .flat_map(|pw| pw.preprocessed.iter().chain(std::iter::once(&pw.k)).copied())
+        .flat_map(|pw| {
+            pw.preprocessed
+                .iter()
+                .chain(std::iter::once(&pw.k))
+                .copied()
+        })
         .collect();
     assert!(
         !inputs.is_empty(),
@@ -134,11 +140,11 @@ pub fn expose_vk_digest(agg: &mut AggregationCircuit) {
 /// Compute the exact VK-digest value the aggregator will emit for a given
 /// inner snark, without generating a proving key or a proof.
 ///
-/// Deterministic in `inner_snark.protocol` (the inner VK — the preprocessed
-/// commitments and `transcript_initial_state`), `agg_params` (via the SRS
-/// `k` under `Full`), and `config.universality`. Independent of
-/// `config.k_outer` / `lookup_bits_outer` — those only shape the outer
-/// circuit and do not enter the digest preimage.
+/// Deterministic in the inner protocol: preprocessed commitment limbs,
+/// `transcript_initial_state`, and `domain.k`. `agg_params` does not enter
+/// the preimage. `config.universality` decides whether those elements are
+/// witnesses or constants; it does not change the digest. Independent of
+/// `config.k_outer` / `lookup_bits_outer`.
 ///
 /// # Cost
 ///
@@ -170,9 +176,7 @@ pub fn expected_vk_digest(
     circuit.expose_previous_instances(false);
     expose_vk_digest(&mut circuit);
 
-    *circuit
-        .builder
-        .assigned_instances[0]
+    *circuit.builder.assigned_instances[0]
         .last()
         .expect("expose_vk_digest pushes at least one instance")
         .value()
@@ -181,10 +185,10 @@ pub fn expected_vk_digest(
 /// Index (within the aggregator's single public-instance column) at which
 /// on-chain adapters read the VK digest.
 ///
-/// Layout: `[accumulator (12) | previous_instances (num_prev) | vk_digest (1)]`,
-/// so the digest sits at `NUM_ACCUMULATOR_INSTANCES + num_prev`. Adapters
-/// know `num_prev` at compile time (= their `NUM_INNER`). Consumed by the
-/// round-trip test and re-exportable for any future in-workspace caller
+/// Layout: `[accumulator (12) | previous_instances (num_prev) | vk_digest
+/// (1)]`, so the digest sits at `NUM_ACCUMULATOR_INSTANCES + num_prev`.
+/// Adapters know `num_prev` at compile time (= their `NUM_INNER`). Consumed by
+/// the round-trip test and re-exportable for any future in-workspace caller
 /// that needs to reason about the layout; downstream crates that cannot
 /// pull `bridge-evm-aggregator` (halo2 backend clash — see the workspace
 /// note in `AGENTS.md`) must replicate this arithmetic and are expected
@@ -231,7 +235,11 @@ mod tests {
         // Type-level pin: fails to compile if the sdk changes T or RATE.
         let sdk: &OptimizedPoseidonSpec<Fr, VK_DIGEST_T, VK_DIGEST_RATE> = &POSEIDON_SPEC;
 
-        assert_eq!(sdk.r_f(), VK_DIGEST_R_F, "R_F drifted from snark-verifier-sdk");
+        assert_eq!(
+            sdk.r_f(),
+            VK_DIGEST_R_F,
+            "R_F drifted from snark-verifier-sdk"
+        );
         assert_eq!(
             sdk.constants().partial().len(),
             VK_DIGEST_R_P,

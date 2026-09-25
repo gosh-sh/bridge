@@ -10,17 +10,16 @@ import "../script/ShplonkDeployLib.sol";
 ///         equal the value the aggregator actually emits at instance slot
 ///         `12 + NUM_INNER` for the real inner circuit — otherwise the
 ///         adapter constructor accepts a pin no real proof of this build
-///         carries, and every honest proof would revert with
-///         `WrongVkDigest`.
+///         carries, and every honest proof would make the adapter return
+///         false (`WithdrawalProofRejected` on the bridge).
 ///
 ///         The `<name>_calldata.bin` files under `contracts/ethereum/verifiers/`
-///         are the output of a real inner keygen + SHPLONK aggregation +
-///         prove run against the committed inner snark, so word K of the
-///         calldata carries the exact Poseidon digest a live prover would
-///         emit. Comparing that word against the pasted constant catches a
-///         typo, a swap between circuits, or a stale pin left behind after
-///         a partial regeneration — the class of mistake `WithdrawalYulCodehash`
-///         guards against for the Yul side.
+///         are the committed aggregator calldata, so word `12 + N` is the
+///         digest that calldata carries. Comparing that word against the pasted
+///         constant catches a typo, a swap between circuits, or a stale pin
+///         left behind after a partial regeneration — the class of mistake
+///         `WITHDRAWAL_YUL_CODEHASH` / `YulCodehashMismatch` guards against
+///         for the Yul side. No inner snark file is committed here.
 ///
 ///         Runs in `.woodpecker/solidity.yaml`'s `forge test` step. Cheap
 ///         (no keygen, no proof — just a file read and one `assertEq`).
@@ -37,7 +36,8 @@ contract ShplonkVkDigestPinDerivationTest is Test {
         }
     }
 
-    /// @dev Circuit 1A: 4 re-exposed inner PIs (bkSetHashHi/Lo, blockIdHi/Lo).
+    /// @dev Circuit 1A: 4 re-exposed inner PIs
+    ///      (`blockId`, `bkSetCommitment`, `blockSeqNo`, `lastSeenBlockSeqNo`).
     function test_primary_pinnedDigestMatchesCalldata() public view {
         bytes memory cd = vm.readFileBinary("verifiers/PrimaryAggregatorVerifier_calldata.bin");
         require(cd.length > 0, "missing PrimaryAggregatorVerifier_calldata.bin");
@@ -59,8 +59,8 @@ contract ShplonkVkDigestPinDerivationTest is Test {
         );
     }
 
-    /// @dev Circuit 2 layer-hashes movement: 14 inner PIs (3 preamble + 10
-    ///      layer hashes + 1 trailing anchor layer).
+    /// @dev Circuit 2 layer-hashes movement: 14 inner PIs. Word 25
+    ///      (`ACC + 13`) is `prevMaxLevelLayerHash`. Word 26 is the digest.
     function test_layerHashes_pinnedDigestMatchesCalldata() public view {
         bytes memory cd = vm.readFileBinary("verifiers/LayerHashesAggregatorVerifier_calldata.bin");
         require(cd.length > 0, "missing LayerHashesAggregatorVerifier_calldata.bin");

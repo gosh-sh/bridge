@@ -63,4 +63,5 @@ pub use withdraw_prover::{
 };
 pub use withdrawal::{
     discover_event_proofs, is_event_proof_file, PartnerWithdrawalProof, WithdrawalPublicInputs,
+    WITHDRAWAL_CALLDATA_LEN,
 };

@@ -40,6 +40,11 @@ pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 11;
 /// `BridgeWithdrawalAggregatorVerifier`'s 24-instance layout.
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS + 1) * 32;
 
+/// Byte length of a Circuit-4 SHPLONK calldata blob after the inner-VK
+/// binding: 24 instance words plus the outer proof. The pre-binding blob
+/// was 3 648 B; anything else is not this build's withdrawal artefact.
+pub const WITHDRAWAL_CALLDATA_LEN: usize = 3_680;
+
 /// Parsed `proof_event_*.json` from
 #[derive(Clone, Debug, Deserialize)]
 pub struct PartnerWithdrawalProof {

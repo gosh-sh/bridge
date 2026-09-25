@@ -37,8 +37,8 @@ abstract contract ShplonkAggregatorVerifierBase {
     /// @notice Reject a pin `>= r` at deploy time. A valid Fr digest is
     ///         strictly less than `r`, so a pin above `r` cannot match any
     ///         real aggregator output and would silently reject every proof.
-    ///         Catches an operator who passed a raw 32-byte hash or a
-    ///         chain-id-derived value in place of a real Fr digest.
+    ///         Catches an operator who passed a raw 32-byte hash in place of
+    ///         a real Fr digest. A chain id is far below `r` and passes.
     error VkDigestExceedsFieldModulus();
 
     constructor(address _shplonkVerifier, bytes32 _vkDigest) {

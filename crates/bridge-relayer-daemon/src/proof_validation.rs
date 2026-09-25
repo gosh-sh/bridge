@@ -82,9 +82,9 @@ mod tests {
 
     #[test]
     fn attestation_rejects_short_blob() {
-        // Below SHPLONK_MIN_ATTESTATION_INSTANCES (=544). Post-NB-Q7 there is
-        // no 256-byte back-compat lane — the retired Groth16 shape now fails
-        // the same short-blob gate as any other undersized input.
+        // Below SHPLONK_MIN_ATTESTATION_INSTANCES (=544). There is no
+        // 256-byte back-compat lane — an undersized input fails the same
+        // short-blob gate.
         assert!(validate_attestation_proof(FinalizationType::Fallback, &[0u8; 300]).is_err());
         assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 300]).is_err());
         assert!(validate_attestation_proof(FinalizationType::Primary, &[0u8; 256]).is_err());

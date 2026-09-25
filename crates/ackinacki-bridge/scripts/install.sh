@@ -85,6 +85,7 @@ SRS="$PARAMS/$CEREMONY"
 PROFILE="$PREFIX/bridge_config"
 WITHDRAW_VERIFIER="$VERIFIERS/BridgeWithdrawalAggregatorVerifier.bin"
 WITHDRAW_VERIFIER_SOL="$VERIFIERS/BridgeWithdrawalAggregatorVerifier.sol"
+WITHDRAW_VERIFIER_CALLDATA="$VERIFIERS/BridgeWithdrawalAggregatorVerifier_calldata.bin"
 
 # `-x` is a permission bit, not a promise that the file runs. These are
 # binaries built somewhere else: the usual way they fail is the dynamic
@@ -111,7 +112,9 @@ can_run() {   # can_run <binary> <arg...>
 
 have_cli()       { can_run "$CLI_BIN" --version; }
 have_agg()       { can_run "$AGG_BIN" --help; }
-have_verifiers() { [ -s "$WITHDRAW_VERIFIER" ] && [ -s "$WITHDRAW_VERIFIER_SOL" ]; }
+have_verifiers() {
+  [ -s "$WITHDRAW_VERIFIER" ] && [ -s "$WITHDRAW_VERIFIER_SOL" ] && [ -s "$WITHDRAW_VERIFIER_CALLDATA" ]
+}
 have_ceremony()  { [ -s "$SRS" ]; }
 have_profile()   { [ -s "$PROFILE" ]; }
 
@@ -285,7 +288,7 @@ if ! have_agg; then
   if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
   missing=$((missing + 1))
 fi
-have_verifiers || { gap "$WITHDRAW_VERIFIER and $WITHDRAW_VERIFIER_SOL"; missing=$((missing + 1)); }
+have_verifiers || { gap "$WITHDRAW_VERIFIER, $WITHDRAW_VERIFIER_SOL and $WITHDRAW_VERIFIER_CALLDATA"; missing=$((missing + 1)); }
 have_ceremony  || { gap "$SRS"; missing=$((missing + 1)); }
 have_profile   || { gap "$PROFILE"; missing=$((missing + 1)); }
 

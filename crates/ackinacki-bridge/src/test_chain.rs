@@ -334,8 +334,8 @@ fn content_length(head: &str) -> usize {
 ///
 /// * `GET /graphql?query={info…}` — endpoint resolution
 ///   (`tvm_client/src/net/endpoint.rs`, `QUERY_INFO`).
-/// * `GET /v2/account?address=0:…` — `get_account`'s pre-1.0.0 form
-///   (`tvm_client/src/account/mod.rs`).
+/// * `GET /v2/account?account_id=0:…` — `get_account` on tvm-sdk 3.0.6. The
+///   pre-1.0.0 query used `address=` and is still accepted.
 /// * `POST /graphql` — everything `bridge_gql_fetcher::GqlClient` asks, which
 ///   for preflight is the USDCBridge account's `info`.
 /// * `POST /v2/messages` — `send_message` (`tvm_client/src/net/server_link.rs`,
@@ -373,8 +373,6 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
         // reading the right account from a run reading any other:
         // measured, with a `--from` pointing at an account the node had
         // never heard of and the suite green.
-        // tvm-sdk 3.0.6 switched from `address=` to `account_id=`; accept
-        // both so the fake node keeps answering across SDK versions.
         let asked = request_line
             .split_once("account_id=")
             .or_else(|| request_line.split_once("address="))
@@ -581,16 +579,11 @@ impl FakeWorld {
             &verifier,
         )
         .unwrap();
-        // Preflight step 3b now reads the SHPLONK calldata and compares
-        // its word 23 (the pinned inner-VK digest) against the adapter's
-        // `vkDigest()` return value. 768 bytes zero-filled clears the
-        // `WITHDRAW_VK_DIGEST_OFFSET + 32 = 768` length gate; word 23 is
-        // then zero, which matches `mock_rpc`'s default `ZERO_WORD` answer
-        // for `vkDigest()`. Any different padding (or a different word 23)
-        // would trip 3b before the run reached the ceremony.
+        // 3 680 B, word 23 zero. `full_walk`'s vkDigest answer is the zero
+        // word, so step 3b matches and the run continues to the ceremony.
         std::fs::write(
             path.join("BridgeWithdrawalAggregatorVerifier_calldata.bin"),
-            vec![0u8; 768],
+            vec![0u8; bridge_relayer_daemon::withdrawal::WITHDRAWAL_CALLDATA_LEN],
         )
         .unwrap();
         let args = self.args.as_mut().expect("the arguments are still here");
@@ -792,7 +785,7 @@ mod tests {
         // whole of preflight green, because the fake answered with the
         // only account it had.
         let (fixture, _) = one_account_node().await;
-        let line = format!("GET /v2/account?address=0:{} HTTP/1.1", "ab".repeat(32));
+        let line = format!("GET /v2/account?account_id=0:{} HTTP/1.1", "ab".repeat(32));
         answer(&fixture, &line, "");
     }
 

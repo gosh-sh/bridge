@@ -156,10 +156,7 @@ pub trait BridgeClient: Send + Sync {
 /// hits `EthBridgeClient` directly via the blanket impl below.
 #[async_trait]
 pub trait WithdrawBridge: Send + Sync {
-    async fn is_nullifier_used(
-        &self,
-        nullifier: U256,
-    ) -> Result<bool, RelayerError>;
+    async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError>;
     async fn dry_run_withdraw(
         &self,
         proof: &alloy::primitives::Bytes,
@@ -178,10 +175,7 @@ where
     P: Provider<N> + Clone + Send + Sync + 'static,
     N: Network,
 {
-    async fn is_nullifier_used(
-        &self,
-        nullifier: U256,
-    ) -> Result<bool, RelayerError> {
+    async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
         EthBridgeClient::is_nullifier_used(self, nullifier).await
     }
 

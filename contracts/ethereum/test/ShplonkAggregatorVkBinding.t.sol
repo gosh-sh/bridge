@@ -79,9 +79,8 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 ShplonkDeployLib.WITHDRAWAL_YUL_CODEHASH
             )
         );
-        BridgeWithdrawalAggregatorVerifier bad = new BridgeWithdrawalAggregatorVerifier(
-            w, bytes32(uint256(ShplonkDeployLib.WITHDRAWAL_VK_DIGEST) ^ 1)
-        );
+        BridgeWithdrawalAggregatorVerifier bad =
+            new BridgeWithdrawalAggregatorVerifier(w, bytes32(uint256(_word(cd, ACC + 11)) ^ 1));
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
         pub.tokenId = _word(cd, ACC + 0);
         pub.amount = _word(cd, ACC + 1);
@@ -121,9 +120,8 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 "verifiers/PrimaryAggregatorVerifier.bin", ShplonkDeployLib.PRIMARY_YUL_CODEHASH
             )
         );
-        PrimaryAggregatorVerifier bad = new PrimaryAggregatorVerifier(
-            w, bytes32(uint256(ShplonkDeployLib.PRIMARY_VK_DIGEST) ^ 1)
-        );
+        PrimaryAggregatorVerifier bad =
+            new PrimaryAggregatorVerifier(w, bytes32(uint256(_word(cd, ACC + 4)) ^ 1));
         assertFalse(
             bad.verifyPrimaryAttestation(
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
@@ -156,9 +154,8 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 "verifiers/FallbackAggregatorVerifier.bin", ShplonkDeployLib.FALLBACK_YUL_CODEHASH
             )
         );
-        FallbackAggregatorVerifier bad = new FallbackAggregatorVerifier(
-            w, bytes32(uint256(ShplonkDeployLib.FALLBACK_VK_DIGEST) ^ 1)
-        );
+        FallbackAggregatorVerifier bad =
+            new FallbackAggregatorVerifier(w, bytes32(uint256(_word(cd, ACC + 4)) ^ 1));
         assertFalse(
             bad.verifyFallbackAttestation(
                 cd, _word(cd, ACC), _word(cd, ACC + 1), _word(cd, ACC + 2), _word(cd, ACC + 3)
@@ -202,9 +199,8 @@ contract ShplonkAggregatorVkBindingTest is Test {
                 ShplonkDeployLib.LAYER_HASHES_YUL_CODEHASH
             )
         );
-        LayerHashesAggregatorVerifier bad = new LayerHashesAggregatorVerifier(
-            w, bytes32(uint256(ShplonkDeployLib.LAYER_HASHES_VK_DIGEST) ^ 1)
-        );
+        LayerHashesAggregatorVerifier bad =
+            new LayerHashesAggregatorVerifier(w, bytes32(uint256(_word(cd, ACC + 14)) ^ 1));
         uint256[10] memory hashes;
         for (uint256 i = 0; i < 10; i++) {
             hashes[i] = _word(cd, ACC + 3 + i);
@@ -225,16 +221,15 @@ contract ShplonkAggregatorVkBindingTest is Test {
     /// @dev The base constructor must refuse `bytes32(0)` for the digest.
     function test_base_zeroVkDigest_rejected() public {
         vm.expectRevert(ShplonkAggregatorVerifierBase.InvalidVkDigest.selector);
-        // The digest check runs first; any non-zero verifier address
-        // is enough to reach it.
+        // The address check runs first; any non-zero verifier address
+        // is enough to reach the zero-digest check.
         new BridgeWithdrawalAggregatorVerifier(address(uint160(1)), bytes32(0));
     }
 
     /// @dev The base constructor must refuse a `_vkDigest` that is not a
-    ///      valid Fr (>= r). Catches an operator who passes a raw 32-byte
-    ///      hash or chain-id-derived value instead of a real Fr digest;
-    ///      without this guard the deploy would succeed and every proof
-    ///      would then silently revert on the digest slot mismatch.
+    ///      valid Fr (`>= r`). Catches an operator who passes a raw 32-byte
+    ///      hash instead of a real Fr digest. A chain id is far below `r`
+    ///      and is not what this guard catches.
     function test_base_vkDigestAtModulus_rejected() public {
         bytes32 atModulus =
             bytes32(uint256(0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001));
@@ -273,6 +268,36 @@ contract ShplonkAggregatorVkBindingTest is Test {
             v.verifyPrimaryAttestation(tooShort, 0, 0, 0, 0),
             "calldata one word short of the digest slot must reject, not revert"
         );
+    }
+
+    function test_fallback_calldataShortOfDigestSlot_rejected() public {
+        IFallbackVerifier v =
+            ShplonkDeployLib.deployFallbackAdapter("verifiers/FallbackAggregatorVerifier.bin");
+        bytes memory tooShort = new bytes((12 + 4) * 32);
+        assertFalse(
+            v.verifyFallbackAttestation(tooShort, 0, 0, 0, 0),
+            "calldata one word short of the digest slot must reject, not revert"
+        );
+    }
+
+    function test_layerHashes_calldataShortOfDigestSlot_rejected() public {
+        ILayerHashesMovementVerifier v = ShplonkDeployLib.deployLayerHashesAdapter(
+            "verifiers/LayerHashesAggregatorVerifier.bin"
+        );
+        bytes memory tooShort = new bytes((12 + 14) * 32);
+        uint256[10] memory hashes;
+        assertFalse(
+            v.verifyLayerHashesMovement(tooShort, 0, 0, 0, hashes, 0),
+            "calldata one word short of the digest slot must reject, not revert"
+        );
+    }
+
+    function test_base_vkDigestJustBelowModulus_accepted() public {
+        bytes32 justBelow =
+            bytes32(uint256(0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000));
+        BridgeWithdrawalAggregatorVerifier v =
+            new BridgeWithdrawalAggregatorVerifier(address(uint160(1)), justBelow);
+        assertEq(v.vkDigest(), justBelow);
     }
 }
 

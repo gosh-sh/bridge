@@ -646,16 +646,12 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
     }
 }
 
-/// Deterministic aggregator for tests: returns fixed-size 3616-byte
-/// calldata whose re-exposed instance words (12..=22 inclusive) match
+/// Deterministic aggregator for tests: returns 3648-byte calldata whose
+/// re-exposed instance words (12..=22 inclusive) match
 /// [`MockCircuit4SnarkProver`]'s eleven ascending LE instances, so
-/// [`calldata_binds_instances`] passes. Note the 3616-byte length is
-/// only "big enough" — it does not match the true production Circuit-4
-/// SHPLONK calldata size (3648 B for 11 public inputs; see the
-/// reference `_calldata.bin` in the CHANGELOG). The length is fixed by
-/// [`Self::calldata_binding`]; the constant is unrelated to
-/// `WITHDRAWAL_PUBLIC_INPUTS` and moving to a different instance count
-/// does not require adjusting it.
+/// [`calldata_binds_instances`] passes. The 3648 B length matches the
+/// committed Circuit 4 `_calldata.bin` reference for the 11-input,
+/// 23-instance layout.
 #[derive(Clone, Debug, Default)]
 pub struct MockAggregator {
     pub fail: bool,
@@ -663,12 +659,10 @@ pub struct MockAggregator {
 
 impl MockAggregator {
     /// Build calldata that binds the given LE-instance hex strings (big-endian
-    /// words at positions `12..12 + instances_hex.len()`), padded to a
-    /// stand-in 3616-byte length (see the note on [`MockAggregator`] — the
-    /// production Circuit-4 SHPLONK calldata is 3648 B, this is only large
-    /// enough to hold the instance words).
+    /// words at positions `12..12 + instances_hex.len()`), padded to the
+    /// committed Circuit 4 `_calldata.bin` length (3648 B).
     pub fn calldata_binding(instances_hex: &[String]) -> Vec<u8> {
-        let total_len = 3616;
+        let total_len = 3648;
         let mut cd = vec![0u8; total_len];
         for (i, inst) in instances_hex.iter().enumerate() {
             let val = fr_hex_to_u256(inst).unwrap_or(U256::ZERO);
@@ -1221,7 +1215,7 @@ mod tests {
         let bytes = proof.proof_bytes().unwrap();
         assert!(bytes.len() >= SHPLONK_MIN_WITHDRAWAL_INSTANCES);
         // The eleven public inputs decode into a well-formed struct.
-        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :634-637),
+        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :636-640),
         // so slot 0 (`token_id`) decodes as 0 and slot 10 (`anchor_layer`) as 10.
         // Slot 10 is the newest addition; guarding it here means a slot-swap
         // that reordered the last two instances trips this pipeline test, not
@@ -1251,7 +1245,7 @@ mod tests {
     #[tokio::test]
     async fn mock_c12_pipeline_attestation_returns_aggregated_calldata() {
         // MockSnarkWrapper writes a placeholder snark tempfile; MockAggregator
-        // ignores the file bytes and synthesizes 3616-byte calldata. Verifies
+        // ignores the file bytes and synthesizes 3648-byte calldata. Verifies
         // the full wrap → aggregate wiring end-to-end without needing a real
         // params_dir on disk.
         let pipeline =
@@ -1267,7 +1261,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cd.len(), 3616);
+        assert_eq!(cd.len(), 3648);
     }
 
     #[tokio::test]
@@ -1285,7 +1279,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cd.len(), 3616);
+        assert_eq!(cd.len(), 3648);
     }
 
     #[tokio::test]

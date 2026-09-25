@@ -518,9 +518,9 @@ mod tests {
             .unwrap()
             .expect("fetch must return Some");
 
-        // MockAggregator returns 3616 bytes; sentinel proofs were 8 bytes.
-        assert_eq!(out.attestation_proof.len(), 3616);
-        assert_eq!(out.layer_hashes_proof.len(), 3616);
+        // MockAggregator returns 3648 bytes; sentinel proofs were 8 bytes.
+        assert_eq!(out.attestation_proof.len(), 3648);
+        assert_eq!(out.layer_hashes_proof.len(), 3648);
         // Identity fields must survive unmodified.
         assert_eq!(out.block_seq_no, 100);
         assert_eq!(out.fin_type, FinalizationType::Primary);
@@ -563,7 +563,7 @@ mod tests {
             .await
             .unwrap()
             .expect("fetch_bk_update must return Some");
-        assert_eq!(out.attestation_proof.len(), 3616);
+        assert_eq!(out.attestation_proof.len(), 3648);
         assert_eq!(out.block_seq_no, 300);
         assert_eq!(out.fin_type, FinalizationType::Primary);
 

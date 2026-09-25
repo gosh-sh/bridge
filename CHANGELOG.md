@@ -161,6 +161,13 @@ assigns it when the release is tagged.
   is actually used. All four files have to come from the same
   successful keygen run on some other host.
 
+- `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
+  greater than 10, the same error `getLayerWindow` already uses.
+  `InvalidNumLayers` stays on `verifyBlock` and on the layer-window
+  views (`layerWindowLen`, `layerWindowWriteCursor`,
+  `anchorRemainingAppends`). A caller that caught `InvalidNumLayers` on
+  a bad withdrawal layer will need to catch `LayerOutOfRange` instead.
+
 - **The layer-hashes verification key is rotated. Redeploy that verifier.**
   `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
   20 the outer circuit did not fit the 14 inner public inputs. The runtime

@@ -2036,9 +2036,13 @@ pub async fn check_bridge_deploy(
                     .await
                     .map_err(|e| CliError::Preflight {
                         reason: format!(
-                            "withdrawal verifier adapter {adapter}: vkDigest() failed: {e}. The \
-                             adapter predates the inner-VK binding — redeploy it against this \
-                             `aggregate-proof` build."
+                            "withdrawal verifier adapter {adapter}: vkDigest() failed: {e}. \
+                             If the call reverted (empty returndata / no fallback), the adapter \
+                             predates the inner-VK binding and has to be replaced by a fresh \
+                             deploy against this `aggregate-proof` build — the pin is set in \
+                             the constructor and stored `immutable`, so a plain redeploy is the \
+                             remedy, not a re-init. If it is a transport-level failure (RPC \
+                             unreachable, timeout), retry against a working `--rpc-url`."
                         ),
                         source: Some(anyhow::Error::new(e)),
                     })?;

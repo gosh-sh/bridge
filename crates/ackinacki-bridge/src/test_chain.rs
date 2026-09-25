@@ -373,8 +373,11 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
         // reading the right account from a run reading any other:
         // measured, with a `--from` pointing at an account the node had
         // never heard of and the suite green.
+        // tvm-sdk 3.0.6 switched from `address=` to `account_id=`; accept
+        // both so the fake node keeps answering across SDK versions.
         let asked = request_line
-            .split_once("address=")
+            .split_once("account_id=")
+            .or_else(|| request_line.split_once("address="))
             .map(|(_, rest)| rest)
             .and_then(|rest| rest.split([' ', '&']).next())
             .unwrap_or_default();
@@ -576,6 +579,18 @@ impl FakeWorld {
         std::fs::write(
             path.join("BridgeWithdrawalAggregatorVerifier.bin"),
             &verifier,
+        )
+        .unwrap();
+        // Preflight step 3b now reads the SHPLONK calldata and compares
+        // its word 23 (the pinned inner-VK digest) against the adapter's
+        // `vkDigest()` return value. 768 bytes zero-filled clears the
+        // `WITHDRAW_VK_DIGEST_OFFSET + 32 = 768` length gate; word 23 is
+        // then zero, which matches `mock_rpc`'s default `ZERO_WORD` answer
+        // for `vkDigest()`. Any different padding (or a different word 23)
+        // would trip 3b before the run reached the ceremony.
+        std::fs::write(
+            path.join("BridgeWithdrawalAggregatorVerifier_calldata.bin"),
+            vec![0u8; 768],
         )
         .unwrap();
         let args = self.args.as_mut().expect("the arguments are still here");

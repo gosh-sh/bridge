@@ -31,7 +31,7 @@ use std::{
 };
 
 use alloy::{
-    network::{EthereumWallet, Network},
+    network::EthereumWallet,
     primitives::Address,
     providers::{Provider, ProviderBuilder},
     signers::{local::PrivateKeySigner, Signer},
@@ -44,8 +44,8 @@ use bridge_relayer_daemon::{
     FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
     ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
     SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawE2EConfig, WithdrawRevertKind,
-    WithdrawSubmitOutcome, WithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge, WithdrawE2EConfig,
+    WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -1450,15 +1450,14 @@ async fn shutdown_signal() {
 /// that fail the SHPLONK aggregator shape gate) park the proof in `st.done`
 /// and the scan drains the rest of the directory. Lower-level infra failures
 /// (RPC down during dry-run/submit) propagate as `Err`.
-async fn withdraw_scan_once<P, N>(
-    bridge: &EthBridgeClient<P, N>,
+async fn withdraw_scan_once<B>(
+    bridge: &B,
     proofs_dir: &Path,
     dry_run: bool,
     st: &mut WithdrawScanState,
 ) -> anyhow::Result<bool>
 where
-    P: Provider<N> + Clone,
-    N: Network,
+    B: WithdrawBridge + ?Sized,
 {
     let mut had_transient_failure = false;
     let proofs = match discover_event_proofs(proofs_dir) {
@@ -2480,4 +2479,199 @@ fn init_tracing() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .try_init();
+}
+
+#[cfg(test)]
+mod withdraw_scan_tests {
+    //! Park-arm coverage for [`withdraw_scan_once`]. The classifier + counter
+    //! split shipped with the SF-2 change is otherwise only exercised end-to-end
+    //! on shellnet; a mock `WithdrawBridge` lets the dry-run park branch fire
+    //! deterministically without standing up an EVM RPC or a real bridge.
+    //!
+    //! Kept in the bin file rather than a `tests/` integration target so the
+    //! test can call the private `withdraw_scan_once` directly (making its
+    //! generic over `WithdrawBridge` the only production-facing change).
+    use super::*;
+    use async_trait::async_trait;
+    use bridge_relayer_daemon::{
+        withdrawal::{SHPLONK_MIN_WITHDRAWAL_INSTANCES, WITHDRAWAL_PUBLIC_INPUTS},
+        WithdrawalPublicInputs,
+    };
+    use std::sync::Mutex;
+
+    /// Configurable mock. Every knob defaults to the benign case so a test
+    /// only overrides what it wants to observe. `dry_run_reason` steers the
+    /// classifier: any string containing a permanent selector hex takes the
+    /// park branch; a non-selector string falls back to the transient
+    /// backoff branch.
+    #[derive(Default)]
+    struct StubBridge {
+        nullifier_used: bool,
+        dry_run_reason: Option<String>,
+        submit_reason: Option<(String, bool)>,
+        calls: Mutex<Calls>,
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        is_used: usize,
+        dry_run: usize,
+        submit: usize,
+    }
+
+    #[async_trait]
+    impl bridge_relayer_daemon::WithdrawBridge for StubBridge {
+        async fn is_nullifier_used(
+            &self,
+            _n: alloy::primitives::U256,
+        ) -> Result<bool, RelayerError> {
+            self.calls.lock().unwrap().is_used += 1;
+            Ok(self.nullifier_used)
+        }
+
+        async fn dry_run_withdraw(
+            &self,
+            _p: &alloy::primitives::Bytes,
+            _pi: &WithdrawalPublicInputs,
+        ) -> Result<DryRunOutcome, RelayerError> {
+            self.calls.lock().unwrap().dry_run += 1;
+            match &self.dry_run_reason {
+                None => Ok(DryRunOutcome::WouldSucceed),
+                Some(reason) => Ok(DryRunOutcome::WouldRevert {
+                    reason: reason.clone(),
+                }),
+            }
+        }
+
+        async fn submit_withdraw(
+            &self,
+            _p: &alloy::primitives::Bytes,
+            _pi: &WithdrawalPublicInputs,
+        ) -> Result<WithdrawSubmitOutcome, RelayerError> {
+            self.calls.lock().unwrap().submit += 1;
+            match &self.submit_reason {
+                None => Ok(WithdrawSubmitOutcome::Paid {
+                    tx_hash: alloy::primitives::B256::ZERO,
+                }),
+                Some((reason, permanent)) => Ok(WithdrawSubmitOutcome::Reverted {
+                    reason: reason.clone(),
+                    permanent: *permanent,
+                }),
+            }
+        }
+    }
+
+    /// Write a `proof_event_<seq>.json` under `dir` whose payload parses
+    /// into a valid [`PartnerWithdrawalProof`] with a
+    /// SHPLONK-sized `proof_bytes()` (so the scan never bails out on the
+    /// shape gate before the classifier arm can fire) and returns its path.
+    fn write_valid_proof_fixture(dir: &Path, seq: u32) -> PathBuf {
+        let proof_hex = hex::encode(vec![0xABu8; SHPLONK_MIN_WITHDRAWAL_INSTANCES + 3200]);
+        let insts: Vec<String> = (0..WITHDRAWAL_PUBLIC_INPUTS)
+            .map(|i| format!("{:02x}{}", (i + 1) as u8, "00".repeat(31)))
+            .collect();
+        let json = format!(
+            r#"{{"proof_hex":"{proof_hex}","public_instances_hex":[{}]}}"#,
+            insts.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(","),
+        );
+        let path = dir.join(format!("proof_event_{seq:06}.json"));
+        std::fs::write(&path, json).unwrap();
+        path
+    }
+
+    /// Selector hex for `WithdrawalProofRejected()` — the on-chain error a
+    /// wrong-inner-VK-digest proof reverts with (`AckiNackiBridge.sol`
+    /// declaration; the aggregator's runtime guard makes `verifyWithdrawal`
+    /// return `false`, and the bridge translates that to
+    /// `WithdrawalProofRejected`). Computed dynamically via
+    /// `keccak256("WithdrawalProofRejected()")[..4]` so a future rename on
+    /// the Solidity side would fail the sanity assertion below rather than
+    /// silently pass the reason through as `Transient`.
+    fn permanent_selector_hex() -> String {
+        let s = alloy::primitives::keccak256(b"WithdrawalProofRejected()");
+        format!("0x{}", hex::encode(&s.0[..4]))
+    }
+
+    #[tokio::test]
+    async fn dry_run_permanent_revert_parks_proof() {
+        // Build a permanent-selector reason string and confirm the
+        // classifier agrees, so the assertion below actually measures the
+        // park arm rather than the transient backoff.
+        let reason = format!("execution reverted, data: {}", permanent_selector_hex());
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent,
+            "test guard: reason must classify as permanent for the park arm to fire"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proof_path = write_valid_proof_fixture(tmp.path(), 0);
+
+        let bridge = StubBridge {
+            dry_run_reason: Some(reason),
+            ..Default::default()
+        };
+        let mut st = WithdrawScanState::default();
+
+        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st).await.unwrap();
+
+        assert!(!transient, "permanent revert must not report a transient failure");
+        assert_eq!(st.parked_permanent, 1, "one proof parked");
+        assert_eq!(st.paid, 0);
+        assert_eq!(st.skipped_already_used, 0);
+        assert!(st.done.contains(&proof_path), "proof must be recorded as handled");
+
+        let calls = bridge.calls.lock().unwrap();
+        assert_eq!(calls.is_used, 1, "nullifier check ran once");
+        assert_eq!(calls.dry_run, 1, "dry-run ran once");
+        assert_eq!(calls.submit, 0, "submit must not run in dry-run mode");
+    }
+
+    #[tokio::test]
+    async fn dry_run_transient_revert_backs_off_without_parking() {
+        // A reason with no known selector defaults to transient — the scan
+        // must report a transient failure (so the daemon backs off) and
+        // leave the proof untouched for the next scan.
+        let tmp = tempfile::tempdir().unwrap();
+        let proof_path = write_valid_proof_fixture(tmp.path(), 1);
+
+        let bridge = StubBridge {
+            dry_run_reason: Some("execution reverted: nonce too low".into()),
+            ..Default::default()
+        };
+        let mut st = WithdrawScanState::default();
+
+        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st).await.unwrap();
+
+        assert!(transient, "transient revert must report a transient failure");
+        assert_eq!(st.parked_permanent, 0, "transient revert must not park");
+        assert_eq!(st.paid, 0);
+        assert!(!st.done.contains(&proof_path), "proof must remain retryable");
+    }
+
+    #[tokio::test]
+    async fn already_used_nullifier_is_skipped_not_parked() {
+        // Guards the split: `skipped_already_used` must move, not
+        // `parked_permanent`, so operator dashboards don't mistake benign
+        // idempotency for a rise in proof-intrinsic reverts.
+        let tmp = tempfile::tempdir().unwrap();
+        let proof_path = write_valid_proof_fixture(tmp.path(), 2);
+
+        let bridge = StubBridge {
+            nullifier_used: true,
+            ..Default::default()
+        };
+        let mut st = WithdrawScanState::default();
+
+        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st).await.unwrap();
+
+        assert!(!transient);
+        assert_eq!(st.skipped_already_used, 1);
+        assert_eq!(st.parked_permanent, 0);
+        assert_eq!(st.paid, 0);
+        assert!(st.done.contains(&proof_path));
+
+        let calls = bridge.calls.lock().unwrap();
+        assert_eq!(calls.dry_run, 0, "already-used proof must short-circuit before dry-run");
+    }
 }

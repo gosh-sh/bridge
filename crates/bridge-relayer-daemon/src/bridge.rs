@@ -149,6 +149,59 @@ pub trait BridgeClient: Send + Sync {
     async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError>;
 }
 
+/// The subset of `EthBridgeClient` the withdraw-scan loop calls. Extracted
+/// as its own trait (rather than added to `BridgeClient`) so tests can
+/// exercise the classifier/park branch of `withdraw_scan_once` without
+/// standing up a mock of the full verifyBlock state machine. Production
+/// hits `EthBridgeClient` directly via the blanket impl below.
+#[async_trait]
+pub trait WithdrawBridge: Send + Sync {
+    async fn is_nullifier_used(
+        &self,
+        nullifier: U256,
+    ) -> Result<bool, RelayerError>;
+    async fn dry_run_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<DryRunOutcome, RelayerError>;
+    async fn submit_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<WithdrawSubmitOutcome, RelayerError>;
+}
+
+#[async_trait]
+impl<P, N> WithdrawBridge for EthBridgeClient<P, N>
+where
+    P: Provider<N> + Clone + Send + Sync + 'static,
+    N: Network,
+{
+    async fn is_nullifier_used(
+        &self,
+        nullifier: U256,
+    ) -> Result<bool, RelayerError> {
+        EthBridgeClient::is_nullifier_used(self, nullifier).await
+    }
+
+    async fn dry_run_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<DryRunOutcome, RelayerError> {
+        EthBridgeClient::dry_run_withdraw(self, proof, pub_inputs).await
+    }
+
+    async fn submit_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<WithdrawSubmitOutcome, RelayerError> {
+        EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // MockBridgeClient — in-memory mirror of AckiNackiBridge state machine
 // ─────────────────────────────────────────────────────────────────────

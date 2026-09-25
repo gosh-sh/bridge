@@ -91,6 +91,7 @@ this doc extends.
   - [Case 3b — On-chain `withdrawByProof` revert](#case-3b--on-chain-withdrawbyproof-revert)
   - [Case 3c — USDCBridge key drift (burn side)](#case-3c--usdcbridge-key-drift-burn-side)
   - [Case 3d — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty)
+  - [Case 3e — Anchor eviction deadline — `--anchor-layer` runway is finite](#case-3e--anchor-eviction-deadline----anchor-layer-runway-is-finite)
 - [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
@@ -948,6 +949,108 @@ against the empty treasury it will submit successfully now.
 you're good for the demo cycle. Excess USDC in the treasury is not lost:
 it stays available for future withdraws, and can optionally be swept to
 AAVE via `supplyToAave()` for yield.
+
+---
+
+### Case 3e — Anchor eviction deadline — `--anchor-layer` runway is finite
+
+**Symptom.** Dry-run reverts with `UnknownAnchor(finalRoot)`, or a
+long-parked witness starts failing where it succeeded hours (L1 deploy)
+or days (L2 deploy) earlier. `--anchor-layer auto` cycles through
+`1 → 2 → …` and each level fails the same way.
+
+**Why this happens.** Each layer window in `AckiNackiBridge` holds
+exactly `HISTORY_PROOF_WINDOW = 128` anchors (`AckiNackiBridge.sol:94`).
+Every successful `verifyBlock` calls `_appendLayerHashes`
+(`AckiNackiBridge.sol:1028-1039`), which iterates `L = 1..numLayers` and
+appends the block's non-zero layer hash to each `_layerWindows[L]`. Once
+a layer window fills, each further append evicts its oldest entry. The
+eviction *is* the deadline: proofs whose `finalRoot` maps to an evicted
+anchor revert `UnknownAnchor`.
+
+**Wall-clock deadlines** (chain ≈ 3 seq/s, `W = 128`, `P = 8`):
+
+| Deploy | Bundle stride | Per-layer append cadence | Full window (128 appends) |
+|---|---|---|---|
+| L1 (`BRIDGE_ANCHOR_LEVEL=1`) | 1024 seq / ~5.7 min | L1 every bundle; L2 every 16th | L1 = **~12 h**, L2 = **~8 d** |
+| L2 (`BRIDGE_ANCHOR_LEVEL=2`, shellnet) | 16384 seq / ~91 min | L1 *and* L2 every bundle (`numLayers=2` always) | L1 = **~8 d**, L2 = **~8 d** |
+
+**The L2-deploy sharp edge.** Under shellnet's pinned
+`BRIDGE_ANCHOR_LEVEL=2` (enforced at
+`deploy/shellnet-l2/scripts/preflight.sh:104`) every `verifyBlock`
+carries `numLayers = 2`, so both the L1 and the L2 window advance one
+slot per L2 bundle. Their windows fill at the same rate, so
+`--anchor-layer auto`'s L1→L2 fallback buys **no additional runway on
+L2 deploys** — a covering bundle's L1 anchor and L2 anchor become
+evicted at essentially the same wall-clock moment. On L1 deploys the
+escalation is real: L2 fills 16× slower than L1, matching the spec's
+`× (W/P) = 16` step (`docs/EVM-contracts-spec.md:778`).
+
+**Monitoring recipe.** The view
+`anchorRemainingAppends(uint8 layer, uint256 anchor)` at
+`AckiNackiBridge.sol:1195-1207` returns `N` = "the Nth further append
+will evict this anchor" (survives `N-1`). `0` = not in window (already
+evicted, or never seen). Poll it for every in-flight event whose
+covering bundle has landed but has not yet been withdrawn:
+
+```bash
+# Anchor + layer are exactly what the witness carries into Circuit 4.
+ANCHOR=$(jq -r '.public_instances.final_root'  work_dir/witness_event_<seq>.json)
+LAYER=$(jq  -r '.public_instances.anchor_layer' work_dir/witness_event_<seq>.json)
+
+cast call $BRIDGE_ADDRESS \
+  'anchorRemainingAppends(uint8,uint256)(uint256)' $LAYER $ANCHOR \
+  --rpc-url $RPC_URL
+```
+
+**Alert threshold.** Fire when `remaining ≤ 32` (25 % of the window).
+Wall-clock runway at that trigger, again at ~3 seq/s:
+
+| Anchor being watched | Deploy | Runway when alert fires |
+|---|---|---|
+| L1 anchor | L1 | 32 × 1024 seq → **~3 h** |
+| L2 anchor | L1 | 32 × 16384 seq → **~48 h** |
+| L1 anchor | L2 (shellnet) | 32 × 16384 seq → **~48 h** |
+| L2 anchor | L2 (shellnet) | 32 × 16384 seq → **~48 h** |
+
+The 25 % choice gives one full `withdraw-e2e` cycle (~17 min L1 fast,
+~106 min L2 worst) plus overhead. Tighten to `≤ 8` if the operator polls
+hourly and reacts within one poll; loosen to `≤ 64` if the polling
+cadence is daily.
+
+**Fix — on alert.**
+
+1. **L1 deploy, L1 anchor at risk.** Re-invoke `withdraw-e2e` on the
+   same event with `--anchor-layer 2`. The L2 anchor is appended 16×
+   slower and — as long as the L2 slot is still present — carries
+   roughly the residual L2 lifetime (up to ~8 d).
+
+2. **L1 deploy, L2 anchor at risk.** No further escalation is currently
+   wired: the CLI accepts `--anchor-layer n` for arbitrary `n ≥ 1`
+   (`bin/relayer.rs:1928-1940`), but circuit and on-chain support beyond
+   L2 is not deployed. Prove and submit immediately, or escalate to the
+   on-call before the ~8 d deadline passes.
+
+3. **L2 deploy (shellnet).** Escalation is a no-op (see the sharp edge
+   above). Prove and submit within the ~8 d window; there is no fallback
+   layer. Missing the deadline strands the payout: the nullifier
+   `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)`
+   (`docs/EVM-contracts-spec.md:779-780`) takes no root as input, so a
+   fresh submission with the same components still targets the same
+   evicted anchor and reverts.
+
+**Owner-side recovery.** Funds stranded in `treasuryBalance` are not
+lost to the ledger — they remain usable for other users' withdrawals.
+Recovering the specific stranded payout requires an owner action; there
+is no self-serve path.
+
+**Ownership.** No automated pager is wired for this alert. The operator
+running `withdraw-e2e` for a given deploy owns polling their own
+in-flight events until the withdrawal lands.
+
+**Related.** Spec trade-off 3 (`docs/EVM-contracts-spec.md:766-788`)
+documents the eviction model and window formulas; issue #74 (ETH-03/18)
+tracks this operator-facing alert rule.
 
 ---
 

@@ -457,7 +457,7 @@ struct PartnerBkUpdateRequest {
     #[serde(default, rename = "block_height")]
     _block_height: u64,
     #[serde(default, rename = "last_seen_bk_update_seqno")]
-    _last_seen_bk_update_seqno: u32,
+    last_seen_bk_update_seqno: u32,
     block_id_hex: String,
     #[serde(default = "default_attestation_primary")]
     attestation_circuit: String,
@@ -553,6 +553,7 @@ impl BkUpdateProofsSource {
             // against inside `applyBkSetUpdate`.
             block_id: hash_hex_to_block_id_fr(&req.block_id_hex)?,
             block_seq_no: seq_no,
+            attestation_last_seen: req.last_seen_bk_update_seqno as u64,
             old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
             new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,
             sibling_h01: hex32_to_array(&req.merkle_sibling_h01_hex, "merkle_sibling_h01")?,
@@ -797,6 +798,7 @@ mod tests {
         let src = BkUpdateProofsSource::new(dir.path());
         let u = src.fetch_bk_update(24).await.unwrap().unwrap();
         assert_eq!(u.block_seq_no, 24);
+        assert_eq!(u.attestation_last_seen, 0);
         assert_eq!(u.fin_type, FinalizationType::Primary);
         assert_eq!(u.attestation_proof.len(), 2048);
         assert_eq!(u.sibling_h01[0], 0xaa);

@@ -203,6 +203,10 @@ pub struct EthBridgeContractState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: [u8; 32],
     pub last_bk_set_update_seq_no: u64,
+    /// LE mirror of `storedPrevBkSetCommitment`. Zero until the first
+    /// on-chain rotation. Startup uses it to recognise the hold window
+    /// (local still on the outgoing set, chain already on the new one).
+    pub prev_bk_set_commitment: [u8; 32],
     /// LE mirror of the contract's `immutable storedPrevMaxLevelLayerHash`
     /// (constructor-set from `genesisPrevMaxLevelLayerHash`, never mutated).
     /// Used by `startup_decide` as a bridge-identity check. Not read by
@@ -530,6 +534,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: std::array::from_fn(|_| empty_win.clone()),
         }
@@ -790,6 +795,7 @@ mod tests {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
             bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
@@ -859,6 +865,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
@@ -885,6 +892,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };
@@ -917,6 +925,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows: arr,
         };

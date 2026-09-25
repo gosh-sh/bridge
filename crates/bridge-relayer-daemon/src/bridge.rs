@@ -73,6 +73,11 @@ use crate::{
 pub struct BridgeOnChainState {
     pub last_seen_block_seq_no: u64,
     pub bk_set_commitment: U256,
+    /// Outgoing BK-set after `applyBkSetUpdate(N)`. `verifyBlock` accepts
+    /// this for `blockSeqNo <= last_bk_set_update_seq_no`. Zero until the
+    /// first rotation. `serde(default)` keeps old `state.json` readable.
+    #[serde(default)]
+    pub prev_bk_set_commitment: U256,
     /// Storage v2.0 (2026-08-04): mirrors the on-chain **immutable**
     /// `storedPrevMaxLevelLayerHash()` getter — a constant genesis seed
     /// set by the constructor, never mutated by `verifyBlock`. This
@@ -85,6 +90,17 @@ pub struct BridgeOnChainState {
     /// Highest seq_no applied via `applyBkSetUpdate` (0 if none yet).
     #[serde(default)]
     pub last_bk_set_update_seq_no: u64,
+}
+
+impl BridgeOnChainState {
+    /// Same rule as `AckiNackiBridge._expectedBkSetFor`.
+    pub fn expected_bk_set_for(&self, block_seq_no: u64) -> U256 {
+        if self.last_bk_set_update_seq_no != 0 && block_seq_no <= self.last_bk_set_update_seq_no {
+            self.prev_bk_set_commitment
+        } else {
+            self.bk_set_commitment
+        }
+    }
 }
 
 /// Width of the on-chain per-layer rolling window
@@ -170,6 +186,7 @@ pub struct MockBridgeClient {
 struct MockBridgeInner {
     last_seen_block_seq_no: u64,
     bk_set_commitment: U256,
+    prev_bk_set_commitment: U256,
     last_bk_set_update_seq_no: u64,
     /// Storage v2.0 (2026-08-04): immutable genesis seed set by
     /// [`MockBridgeClient::with_genesis`]. Corresponds to the on-chain
@@ -198,6 +215,7 @@ impl MockBridgeClient {
             inner: Mutex::new(MockBridgeInner {
                 last_seen_block_seq_no: 0,
                 bk_set_commitment,
+                prev_bk_set_commitment: U256::ZERO,
                 last_bk_set_update_seq_no: 0,
                 genesis_prev_max_level_layer_hash: prev_max_level_layer_hash,
                 latest_per_layer: [U256::ZERO; MAX_LAYER_HASHES],
@@ -245,6 +263,7 @@ impl BridgeClient for MockBridgeClient {
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: inner.last_seen_block_seq_no,
             bk_set_commitment: inner.bk_set_commitment,
+            prev_bk_set_commitment: inner.prev_bk_set_commitment,
             // Storage v2.0: `prev_max_level_layer_hash` is the *immutable
             // genesis seed* mirror of `storedPrevMaxLevelLayerHash()`.
             // For the per-layer anchor query used by the pre-submit drift
@@ -266,11 +285,18 @@ impl BridgeClient for MockBridgeClient {
 
         let mut inner = self.inner.lock().expect("poisoned lock");
 
-        if block.bk_set_commitment != inner.bk_set_commitment {
+        let expected_bk = if inner.last_bk_set_update_seq_no != 0
+            && block.block_seq_no <= inner.last_bk_set_update_seq_no
+        {
+            inner.prev_bk_set_commitment
+        } else {
+            inner.bk_set_commitment
+        };
+        if block.bk_set_commitment != expected_bk {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
                     "BkSetCommitmentMismatch(supplied={:#x}, stored={:#x})",
-                    block.bk_set_commitment, inner.bk_set_commitment
+                    block.bk_set_commitment, expected_bk
                 ),
             });
         }
@@ -314,13 +340,27 @@ impl BridgeClient for MockBridgeClient {
         }
         inner.accepted_log.push(block.clone());
 
+        let new_state = BridgeOnChainState {
+            last_seen_block_seq_no: inner.last_seen_block_seq_no,
+            bk_set_commitment: inner.bk_set_commitment,
+            prev_bk_set_commitment: inner.prev_bk_set_commitment,
+            prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
+            last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
+        };
+        // Same post-submit check as `EthBridgeClient`: the current
+        // commitment is the new set after `applyBkSetUpdate(N)`, so
+        // compare against `_expectedBkSetFor`.
+        if new_state.expected_bk_set_for(block.block_seq_no) != block.bk_set_commitment {
+            return Ok(SubmitOutcome::Reverted {
+                reason: format!(
+                    "post-submit drift: expected_bk_set_for({}) != submitted",
+                    block.block_seq_no
+                ),
+            });
+        }
+
         Ok(SubmitOutcome::Verified {
-            new_state: BridgeOnChainState {
-                last_seen_block_seq_no: inner.last_seen_block_seq_no,
-                bk_set_commitment: inner.bk_set_commitment,
-                prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
-                last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
-            },
+            new_state,
             tx_hash: None,
         })
     }
@@ -346,12 +386,30 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
+        if inner.last_bk_set_update_seq_no > inner.last_seen_block_seq_no {
+            return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!(
+                    "VerifyBlockLagBehindRotation(rotation={}, last_seen={})",
+                    inner.last_bk_set_update_seq_no, inner.last_seen_block_seq_no
+                ),
+            });
+        }
+        if update.attestation_last_seen >= update.block_seq_no {
+            return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!(
+                    "AttestationLastSeenNotBeforeSeqNo(last_seen={}, seq={})",
+                    update.attestation_last_seen, update.block_seq_no
+                ),
+            });
+        }
+        inner.prev_bk_set_commitment = inner.bk_set_commitment;
         inner.bk_set_commitment = update.new_commitment_l3;
         inner.last_bk_set_update_seq_no = update.block_seq_no;
         Ok(BkSetUpdateSubmitOutcome::Applied {
             new_state: BridgeOnChainState {
                 last_seen_block_seq_no: inner.last_seen_block_seq_no,
                 bk_set_commitment: inner.bk_set_commitment,
+                prev_bk_set_commitment: inner.prev_bk_set_commitment,
                 prev_max_level_layer_hash: inner.genesis_prev_max_level_layer_hash,
                 last_bk_set_update_seq_no: inner.last_bk_set_update_seq_no,
             },
@@ -393,6 +451,7 @@ mod sol_bindings {
                 bytes calldata attestationProof,
                 uint256 blockId,
                 uint64 blockSeqNo,
+                uint64 attestationLastSeen,
                 uint256 oldCommitmentL2,
                 uint256 newCommitmentL3,
                 bytes32 siblingH01,
@@ -402,6 +461,7 @@ mod sol_bindings {
 
             function storedLastSeenBlockSeqNo() external view returns (uint64);
             function storedBkSetCommitment() external view returns (uint256);
+            function storedPrevBkSetCommitment() external view returns (uint256);
             function storedLastBkSetUpdateSeqNo() external view returns (uint64);
             /// Storage v2.0 (2026-08-04): immutable genesis seed. Retained
             /// so historical indexers reading the constructor value keep
@@ -533,6 +593,14 @@ where
         self.address
     }
 
+    async fn fetch_prev_bk_set(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .storedPrevBkSetCommitment()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
     /// Direct access to the underlying contract (escape hatch for
     /// tests that want to attach event-stream subscriptions etc.).
     pub fn contract(&self) -> &AckiNackiBridge::AckiNackiBridgeInstance<P, N> {
@@ -633,6 +701,7 @@ where
             update.attestation_proof.clone(),
             update.block_id,
             update.block_seq_no,
+            update.attestation_last_seen,
             update.old_commitment_l2,
             update.new_commitment_l3,
             B256::from(update.sibling_h01),
@@ -642,39 +711,15 @@ where
         match call.send().await {
             Ok(pending) => match pending.get_receipt().await {
                 Ok(receipt) => {
-                    // Inline read (avoid calling BridgeClient::read_state from
-                    // an inherent method — that needs `P: 'static`).
-                    let last = self
-                        .contract
-                        .storedLastSeenBlockSeqNo()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let bk = self
-                        .contract
-                        .storedBkSetCommitment()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let anchor = self
-                        .contract
-                        .storedPrevMaxLevelLayerHash()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
-                    let last_bk = self
-                        .contract
-                        .storedLastBkSetUpdateSeqNo()
-                        .call()
-                        .await
-                        .map_err(map_contract_err)?;
+                    let bn = receipt.block_number().ok_or_else(|| {
+                        RelayerError::other("applyBkSetUpdate receipt missing block_number")
+                    })?;
+                    // Same pin as `submit_block`: `latest` on a
+                    // load-balanced RPC can tear the five-slot snapshot
+                    // and poison Check B.
+                    let new_state = self.read_state_at(BlockId::from(bn)).await?;
                     Ok(BkSetUpdateSubmitOutcome::Applied {
-                        new_state: BridgeOnChainState {
-                            last_seen_block_seq_no: last,
-                            bk_set_commitment: bk,
-                            prev_max_level_layer_hash: anchor,
-                            last_bk_set_update_seq_no: last_bk,
-                        },
+                        new_state,
                         tx_hash: Some(receipt.transaction_hash()),
                     })
                 },
@@ -786,9 +831,17 @@ where
             .call()
             .await
             .map_err(map_contract_err)?;
+        let prev_bk = self
+            .contract
+            .storedPrevBkSetCommitment()
+            .block(at)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk,
+            prev_bk_set_commitment: prev_bk,
             prev_max_level_layer_hash: anchor,
             last_bk_set_update_seq_no: last_bk,
         })
@@ -883,10 +936,12 @@ where
                 RelayerError::Other("read_full_state: expected 10 layer windows".into())
             })?;
 
+        let prev_bk = self.fetch_prev_bk_set().await?;
         Ok(EthBridgeContractState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk.to_le_bytes::<32>(),
             last_bk_set_update_seq_no: last_bk,
+            prev_bk_set_commitment: prev_bk.to_le_bytes::<32>(),
             genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
             layer_windows,
         })
@@ -1017,9 +1072,11 @@ where
             .call()
             .await
             .map_err(map_contract_err)?;
+        let prev_bk = self.fetch_prev_bk_set().await?;
         Ok(BridgeOnChainState {
             last_seen_block_seq_no: last,
             bk_set_commitment: bk,
+            prev_bk_set_commitment: prev_bk,
             prev_max_level_layer_hash: anchor,
             last_bk_set_update_seq_no: last_bk,
         })
@@ -1174,11 +1231,12 @@ where
                 ),
             });
         }
-        if new_state.bk_set_commitment != block.bk_set_commitment {
+        let expected_bk = new_state.expected_bk_set_for(block.block_seq_no);
+        if expected_bk != block.bk_set_commitment {
             return Ok(SubmitOutcome::Reverted {
                 reason: format!(
-                    "post-submit drift: chain bk_set_commitment={} != submitted={}",
-                    new_state.bk_set_commitment, block.bk_set_commitment
+                    "post-submit drift: expected_bk_set_for({})={} != submitted={}",
+                    block.block_seq_no, expected_bk, block.bk_set_commitment
                 ),
             });
         }
@@ -1349,6 +1407,80 @@ mod tests {
                 )
             },
             _ => panic!("expected revert"),
+        }
+    }
+
+    fn rotation(seq: u64, last_seen: u64, old: U256, new: U256) -> BkSetUpdateData {
+        BkSetUpdateData {
+            fin_type: FinalizationType::Primary,
+            block_id: U256::from(seq),
+            block_seq_no: seq,
+            attestation_last_seen: last_seen,
+            old_commitment_l2: old,
+            new_commitment_l3: new,
+            sibling_h01: [0u8; 32],
+            sibling_h4_7: [0u8; 32],
+            sibling_h8_15: [0u8; 32],
+            attestation_proof: Bytes::from(vec![0u8; 32]),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_second_rotation_reverts_until_previous_is_covered() {
+        let genesis = U256::from(0xBE5E7u64);
+        let next = U256::from(0xC0FFEEu64);
+        let third = U256::from(0xD00Du64);
+        let bridge = MockBridgeClient::with_genesis(genesis, U256::ZERO, always_accept());
+
+        match bridge
+            .submit_bk_set_update(&rotation(100, 0, genesis, next))
+            .await
+            .unwrap()
+        {
+            BkSetUpdateSubmitOutcome::Applied {
+                new_state, ..
+            } => {
+                assert_eq!(new_state.last_bk_set_update_seq_no, 100);
+                assert_eq!(new_state.last_seen_block_seq_no, 0);
+            },
+            other => panic!("first rotation must apply ahead of cursor, got {other:?}"),
+        }
+
+        match bridge
+            .submit_bk_set_update(&rotation(200, 0, next, third))
+            .await
+            .unwrap()
+        {
+            BkSetUpdateSubmitOutcome::Reverted {
+                reason,
+            } => {
+                assert!(reason.contains("VerifyBlockLagBehindRotation"), "{reason}");
+            },
+            other => panic!("second rotation must revert while N1 is uncovered, got {other:?}"),
+        }
+
+        let mut cover = block(100, U256::ZERO);
+        cover.bk_set_commitment = genesis;
+        match bridge.submit_block(&cover).await.unwrap() {
+            SubmitOutcome::Verified {
+                new_state, ..
+            } => {
+                assert_eq!(new_state.last_seen_block_seq_no, 100);
+            },
+            other => panic!("cover verifyBlock failed: {other:?}"),
+        }
+
+        match bridge
+            .submit_bk_set_update(&rotation(200, 0, next, third))
+            .await
+            .unwrap()
+        {
+            BkSetUpdateSubmitOutcome::Applied {
+                new_state, ..
+            } => {
+                assert_eq!(new_state.last_bk_set_update_seq_no, 200);
+            },
+            other => panic!("second rotation must apply after cover, got {other:?}"),
         }
     }
 }

@@ -1,10 +1,13 @@
 //! Live AN→ETH block / BK-update source over `bridge_prover_lib::live_driver`.
 //!
 //! Wraps [`LiveProverDriver`] behind [`BlockSource`] + [`BkUpdateSource`] with
-//! **ack-after-submit** semantics: `fetch` / `fetch_bk_update` stash a pending
-//! payload; [`Relayer::tick`](crate::relayer::Relayer::tick) calls
-//! [`LiveBlockSource::ack_last_bundle`] / [`ack_last_bk_update`] only after the
-//! ETH bridge accepts the tx. See Alina's live-integration plan §4.2 / §5.
+//! **ack-after-submit** for bundles: `fetch` stashes a pending payload;
+//! [`Relayer::tick`](crate::relayer::Relayer::tick) calls
+//! [`LiveBlockSource::ack_last_bundle`] only after ETH `verifyBlock`
+//! accepts the tx. Rotation acks are deferred until the next bundle
+//! target is above N, so [`ack_last_bk_update`] may run many ticks after
+//! `applyBkSetUpdate` (and is a no-op if that N is already in the
+//! driver). See Alina's live-integration plan §4.2 / §5.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -95,14 +98,17 @@ impl LiveBlockSource {
         self.do_ack_bundle(seq_no).await
     }
 
-    /// Advance the driver cursor after ETH `applyBkSetUpdate` succeeded.
+    /// Advance the driver after the next bundle target is above N.
+    /// Takes the pending update only on an exact seq match. If the
+    /// driver already has `stored_last_bk_set_update_seq_no >= seq_no`,
+    /// the ack is a no-op and a different pending N is left in place.
     pub async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
         self.do_ack_bk_update(seq_no).await
     }
 
     async fn do_ack_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
-        let pending = self.pending_bundle.lock().await.take();
-        let Some(b) = pending else {
+        let mut pending = self.pending_bundle.lock().await;
+        let Some(b) = pending.as_ref() else {
             return Err(RelayerError::other("no pending bundle to ack"));
         };
         if b.block_seq_no != seq_no {
@@ -111,6 +117,8 @@ impl LiveBlockSource {
                 b.block_seq_no, seq_no
             )));
         }
+        let b = pending.take().expect("matched pending bundle");
+        drop(pending);
         let mut d = self.driver.lock().await;
         d.ack_bundle(&b).map_err(map_driver_err)?;
         persist_driver(&d, &self.state_paths)?;
@@ -118,16 +126,19 @@ impl LiveBlockSource {
     }
 
     async fn do_ack_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
-        let pending = self.pending_bk_update.lock().await.take();
-        let Some(u) = pending else {
-            return Err(RelayerError::other("no pending bk-update to ack"));
-        };
-        if u.block_seq_no != seq_no {
-            return Err(RelayerError::other(format!(
-                "pending bk-update seq_no {} != ack seq_no {}",
-                u.block_seq_no, seq_no
-            )));
+        {
+            let d = self.driver.lock().await;
+            if d.snapshot_state().stored_last_bk_set_update_seq_no >= seq_no {
+                return Ok(());
+            }
         }
+        let mut pending = self.pending_bk_update.lock().await;
+        let matches = pending.as_ref().is_some_and(|u| u.block_seq_no == seq_no);
+        if !matches {
+            return Ok(());
+        }
+        let u = pending.take().expect("matched pending");
+        drop(pending);
         let mut d = self.driver.lock().await;
         d.ack_bk_update(&u).map_err(map_driver_err)?;
         persist_driver(&d, &self.state_paths)?;
@@ -235,16 +246,15 @@ impl BlockSource for LiveBlockSource {
 impl BkUpdateSource for LiveBlockSource {
     async fn fetch_bk_update(&self, target: u64) -> Result<Option<BkSetUpdateData>, RelayerError> {
         {
-            let mut pending = self.pending_bk_update.lock().await;
+            let pending = self.pending_bk_update.lock().await;
             if let Some(p) = pending.as_ref() {
                 if p.block_seq_no >= target {
                     return Ok(Some(BkSetUpdateData::from(p)));
                 }
-                warn!(
-                    pending_seq_no = p.block_seq_no,
-                    target, "stale pending bk-update; dropping without ack — driver will re-poll",
-                );
-                *pending = None;
+                // Already applied on-chain (target is last_bk+1) and
+                // waiting for the next bundle to pass N before we ack
+                // the prover. Keep the artifacts.
+                return Ok(None);
             }
         }
 
@@ -256,12 +266,10 @@ impl BkUpdateSource for LiveBlockSource {
             | LiveBkUpdateEvent::Nothing => Ok(None),
             LiveBkUpdateEvent::BkUpdate(u) => {
                 if u.block_seq_no < target {
-                    warn!(
-                        driver_seq_no = u.block_seq_no,
-                        target, "driver produced pre-target bk-update — acking + dropping",
-                    );
-                    d.ack_bk_update(&u).map_err(map_driver_err)?;
-                    persist_driver(&d, &self.state_paths)?;
+                    // Re-discovered after a restart, or applied on-chain
+                    // while the prover is still on the outgoing set.
+                    // Do not rotate the prover here.
+                    *self.pending_bk_update.lock().await = Some(u);
                     return Ok(None);
                 }
                 let data = BkSetUpdateData::from(&u);

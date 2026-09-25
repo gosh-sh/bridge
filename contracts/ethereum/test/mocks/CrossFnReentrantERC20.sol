@@ -41,6 +41,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
     // applyBkSetUpdate reenter bundle
     uint256 internal bkBlockId;
     uint64 internal bkSeqNo;
+    uint64 internal bkLastSeen;
     uint256 internal bkOldL2;
     uint256 internal bkNewL3;
     bytes32 internal bkSib01;
@@ -99,6 +100,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
         target = CrossFnTarget.ApplyBkSetUpdate;
         bkBlockId = blockId;
         bkSeqNo = seqNo;
+        bkLastSeen = 0;
         bkOldL2 = oldL2;
         bkNewL3 = newL3;
         bkSib01 = sib01;
@@ -165,6 +167,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
                 hex"00",
                 bkBlockId,
                 bkSeqNo,
+                bkLastSeen,
                 bkOldL2,
                 bkNewL3,
                 bkSib01,

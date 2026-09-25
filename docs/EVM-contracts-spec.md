@@ -1,13 +1,12 @@
 # Ethereum Contracts — Implementation Specification
 
 **Status:** as-implemented (descriptive, not aspirational).
-**Derived from:** the Solidity sources under `contracts/ethereum/` at commit `a69ba36`
-(`Withdraw e2e refactor + final fixes`), `2026-08-18`.
-Last functional change to `src/AckiNackiBridge.sol`: `2026-08-06`.
-**Re-anchoring note:** §1–§13 and §15–§16 were originally derived at commit `a7a1130` (`2026-08-13`).
-`a69ba36` touched **no file under `contracts/ethereum/`** — `git diff --stat a7a1130 a69ba36 -- contracts/ethereum`
-is empty — so every `file:line` citation below still resolves unchanged. Only §12.2/§12.3
-(deploy-time genesis alignment) and §14 (off-chain surface) were updated for it.
+**Derived from:** the Solidity sources under `contracts/ethereum/` at commit `4021c68`
+(`Merge branch 'main' into pruvendo/eth-39-withdraw`), `2026-09-25`. All `file:line`
+citations below are re-anchored to that commit — the two-line-number-bases split that
+previous revisions of this document carried is gone. When editing the spec, either
+re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
+
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -90,16 +89,16 @@ flowchart TB
 Two independent directions:
 
 * **ETH → AN (deposit).** Purely an event emission on this side (`AckiNackiBridge.deposit`,
-  `src/AckiNackiBridge.sol:578`). No Ethereum-side proof verification is involved; the event's log
+  `src/AckiNackiBridge.sol:672`). No Ethereum-side proof verification is involved; the event's log
   is proven off-chain and consumed natively by the AN `USDCBridge`. The bridge keeps custody of the
   USDC.
-* **AN → ETH (state attestation + payout).** `verifyBlock` (`:650`) advances a rolling commitment to
-  AN state from two cross-bound ZK proofs; `withdrawByProof` (`:1130`) pays out USDC against a
+* **AN → ETH (state attestation + payout).** `verifyBlock` (`:739`) advances a rolling commitment to
+  AN state from two cross-bound ZK proofs; `withdrawByProof` (`:1295`) pays out USDC against a
   Circuit-4 proof anchored into state that `verifyBlock` already recorded. `applyBkSetUpdate`
-  (`:799`) rotates the AN validator-set (BK-set) commitment.
+  (`:898`) rotates the AN validator-set (BK-set) commitment.
 
-There is **no** `withdraw(depositId, …)` refund path; it was retired (contract header comment,
-`:19-25`).
+There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface consists solely of
+`withdrawByProof`, described in §7.2.
 
 ---
 
@@ -107,16 +106,16 @@ There is **no** `withdraw(depositId, …)` refund path; it was retired (contract
 
 | Constant | Value | Line | Meaning |
 |---|---|---:|---|
-| `USDC_UNIT` | `10**6` | 56 | USDC has 6 decimals. Declared, not used internally. |
-| `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 61 | Per-tx deposit cap. Chosen so the amount fits the AN `USDCBridge` mint path (`fr[2]` as `uint64`), **not** as a TVL limit. |
-| `BPS_DENOMINATOR` | `10_000` | 64 | Basis-point denominator. |
-| `MAX_LIQUID_RESERVE_BPS` | `5_000` | 67 | Liquid reserve is capped at 50 %. |
-| `MAX_LAYER_HASHES` | `10` | 71 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
-| `HISTORY_PROOF_WINDOW` | `128` | 74 | Rolling-window depth **per layer**. |
-| `BN254_R` | `0x30644e72…f0000001` | 78 | BN254 scalar field order; used only by `applyBkSetUpdate` to reduce a SHA-256 root into `Fr`. |
-| `RECIPIENT_HALF_MASK` | `(1 << 80) - 1` | 1088 | 10-byte half of a split-α recipient address. |
+| `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
+| `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | Per-tx deposit cap. Chosen so the amount fits the AN `USDCBridge` mint path (`fr[2]` as `uint64`), **not** as a TVL limit. |
+| `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
+| `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
+| `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
+| `HISTORY_PROOF_WINDOW` | `128` | 80 | Rolling-window depth **per layer**. |
+| `BN254_R` | `0x30644e72…f0000001` | 84 | BN254 scalar field order; used only by `applyBkSetUpdate` to reduce a SHA-256 root into `Fr`. |
+| `RECIPIENT_HALF_MASK` | `(1 << 80) - 1` | 1253 | 10-byte half of a split-α recipient address. |
 
-`enum FinalizationType { Primary, Fallback }` (`:84`) mirrors the AN attestation circuit's binary
+`enum FinalizationType { Primary, Fallback }` (`:90`) mirrors the AN attestation circuit's binary
 split (≥ 2/3 quorum vs > 1/2 split).
 
 ---
@@ -130,37 +129,37 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
-| 0 | 0 | `depositCounter` | `uint256` | 94 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 98 | `deposit` (+), `withdrawByProof` (−) |
-| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 104 | constructor only |
-| 2 | 20 | `aaveEnabled` | `bool` | 120 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 123 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
-| 4 | 0 | `liquidReserveBps` | `uint256` | 128 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 131 | constructor, `transferOwnership` |
-| 6 | 0 | `yieldRecipient` | `address` | 134 | constructor, `setYieldRecipient` |
-| 7 | 0 | `_reentrancyStatus` | `uint256` | 139 | `nonReentrant` |
-| 8 | 0 | `storedBkSetCommitment` | `uint256` | 167 | constructor, `applyBkSetUpdate` |
-| 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 172 | `applyBkSetUpdate` |
-| 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 176 | constructor, `verifyBlock` |
-| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 238 | `withdrawByProof` |
-| 11 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 260 | `_appendLayer` |
+| 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
+| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
+| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
+| 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
+| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
+| 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
+| 5 | 0 | `owner` | `address` | 137 | constructor, `transferOwnership` |
+| 6 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient` |
+| 7 | 0 | `_reentrancyStatus` | `uint256` | 148 | `nonReentrant` |
+| 8 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
+| 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 181 | `applyBkSetUpdate` |
+| 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 185 | constructor, `verifyBlock` |
+| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 254 | `withdrawByProof` |
+| 11 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 273 | `_appendLayer` |
 
-`blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:525`) and never
-read anywhere in `src/`. It is retained for a future burn-proof flow (`:100-104`).
+`blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
+read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
 
 ### 4.2 Immutables (no storage)
 
 | Var | Type | Line | Notes |
 |---|---|---:|---|
-| `usdc` | `IERC20` | 111 | Deposit/payout token. Must be non-zero. |
-| `aavePool`, `aUSDC` | `IAavePool`, `IERC20` | 114, 117 | Both zero ⇒ AAVE disabled; exactly one zero ⇒ constructor reverts. |
-| `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` | interfaces | 150, 156, 162 | Any zero ⇒ `verifyBlock` disabled. |
+| `usdc` | `IERC20` | 117 | Deposit/payout token. Must be non-zero. |
+| `aavePool`, `aUSDC` | `IAavePool`, `IERC20` | 120, 123 | Both zero ⇒ AAVE disabled; exactly one zero ⇒ constructor reverts. |
+| `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` | interfaces | 159, 165, 171 | Any zero ⇒ `verifyBlock` disabled. |
 | `storedPrevMaxLevelLayerHash` | `uint256` | 204 | **Genesis seed only** since storage v2.0 (2026-08-04). Read exclusively by `_expectedPrevAnchor` when no layer window is populated (`:1118`). |
-| `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 208 | Zero ⇒ `withdrawByProof` disabled. |
-| `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 216, 219 | AN-side bridge identity the C4 proof must bind to. |
-| `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId`, `bridgeWithdrawalAltTokenId` | `uint256` | 222, 226, 229 | Shellnet/testnet aliases (§7.2). |
+| `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
+| `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
+| `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId`, `bridgeWithdrawalAltTokenId` | `uint256` | 232, 236, 239 | Shellnet/testnet aliases (§7.2). |
 
-### 4.3 `HistoryWindow` (`:252-258`)
+### 4.3 `HistoryWindow` (`:259-271`)
 
 ```solidity
 struct HistoryWindow {
@@ -177,7 +176,7 @@ One window per layer `L ∈ [1, 10]`, in `_layerWindows`. `heights` is ABI-stabl
 per-slot seq_nos are in `LayerAnchorAppended`. The relayer paints `heights` from
 those logs on resurrect. This is the **authoritative** AN-state store;
 the flat `storedNumLayers` / `storedLayerHashes[10]` cache was removed in storage v2.0 along with the
-per-block `storedPrevMaxLevelLayerHash` SSTORE (`:629-633`, ≈ 32 k gas/call saved).
+per-block `storedPrevMaxLevelLayerHash` SSTORE (`:846-852`, ≈ 32 k gas/call saved).
 
 ---
 
@@ -191,40 +190,40 @@ constructor(
     address _aUSDC,               // 0 ⇒ AAVE disabled
     VerifyBlockConfig memory _vb,
     BridgeWithdrawConfig memory _bw
-)                                                        // :509-561
+)                                                        // :572-644
 ```
 
-`VerifyBlockConfig` (`:435-456`): `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier`,
+`VerifyBlockConfig` (`:495-516`): `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier`,
 `genesisBkSetCommitment`, `genesisPrevMaxLevelLayerHash`, `genesisLastSeenBlockSeqNo`.
 
-`BridgeWithdrawConfig` (`:465-487`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
+`BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
 `altDstHostChainId`, `altTokenId`.
 
 Validation performed (and *not* performed):
 
 | Check | Line | Behaviour |
 |---|---:|---|
-| `_blockHeaderOracle != 0` | 517 | else `InvalidOracle` |
-| `_usdc != 0` | 518 | else `InvalidUsdc` |
-| AAVE pair is all-or-nothing | 521-523 | else `InvalidAaveAddress` |
-| C4 verifier set ⇒ `accFr != 0` | 542-546 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:504-506` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
+| `_blockHeaderOracle != 0` | 580 | else `InvalidOracle` |
+| `_usdc != 0` | 581 | else `InvalidUsdc` |
+| AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
+| C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
-| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:122`). |
-| verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:662-667`). |
+| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:141`). |
+| verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
 `liquidReserveBps = 1_000` (10 %), reentrancy guard armed, `OwnershipTransferred(0, msg.sender)`
-emitted (`:554-560`).
+emitted (`:637-643`).
 
 ---
 
 ## 6. ETH → AN: deposits
 
 ```solidity
-function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant  // :578
+function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant  // :672
 ```
 
-Sequence (`:582-592`):
+Sequence (`:673-681`):
 
 1. `amount != 0` else `InvalidAmount`.
 2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`.
@@ -270,40 +269,40 @@ function verifyBlock(
     uint8   numLayers,
     uint256[10] calldata layerHashes,
     uint256 prevMaxLevelLayerHash
-) external nonReentrant                                   // :650-758
+) external nonReentrant                                   // :739-857
 ```
 
 Permissionless. Order of operations is deliberately cheap-checks-first, then crypto, then effects:
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | all three verifier slots non-zero | 662 | `VerifyBlockDisabled` |
-| 2 | `1 ≤ numLayers ≤ 10` | 670 | `InvalidNumLayers` |
-| 3 | `layerHashes[i] == 0` for `i ≥ numLayers` | 673 | `LayerHashTailNonZero(i)` |
-| 4 | `layerHashes[i] != 0` for `i < numLayers` | 678 | `LayerHashActiveZero(i)` (QC-A2-3: a zero active slot would let `_appendLayerHashes` skip a layer and desync the windows) |
-| 5 | `bkSetCommitment == storedBkSetCommitment` | 683 | `BkSetCommitmentMismatch` |
-| 6 | `blockSeqNo > storedLastSeenBlockSeqNo` | 686 | `BlockSeqNoNotMonotonic` |
-| 7 | `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` | 698-703 | `PrevAnchorMismatch` |
-| 8 | attestation proof accepted (1A or 1B per `finType`) | 713-733 | `AttestationProofRejected` |
-| 9 | layer-hash proof accepted | 735-745 | `LayerHashesProofRejected` |
+| 1 | all three verifier slots non-zero | 750 | `VerifyBlockDisabled` |
+| 2 | `1 ≤ numLayers ≤ 10` | 759 | `InvalidNumLayers` |
+| 3 | `layerHashes[i] == 0` for `i ≥ numLayers` | 762 | `LayerHashTailNonZero(i)` |
+| 4 | `layerHashes[i] != 0` for `i < numLayers` | 767 | `LayerHashActiveZero(i)` (QC-A2-3: a zero active slot would let `_appendLayerHashes` skip a layer and desync the windows) |
+| 5 | `bkSetCommitment == storedBkSetCommitment` | 777 | `BkSetCommitmentMismatch` |
+| 6 | `blockSeqNo > storedLastSeenBlockSeqNo` | 785 | `BlockSeqNoNotMonotonic` |
+| 7 | `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` | 797-802 | `PrevAnchorMismatch` |
+| 8 | attestation proof accepted (1A or 1B per `finType`) | 812-832 | `AttestationProofRejected` |
+| 9 | layer-hash proof accepted | 834-844 | `LayerHashesProofRejected` |
 
 The attestation call passes the **pre-update** `storedLastSeenBlockSeqNo` as the circuit's
-`lastSeenBlockSeqNo` public input (`:721`, `:729`) — that is what binds the submitted block to the
+`lastSeenBlockSeqNo` public input (`:820`, `:828`) — that is what binds the submitted block to the
 contract's current cursor inside the proof, in addition to check 6.
 
 Cross-circuit binding: the same `blockId` and `bkSetCommitment` values are forwarded to both
 verifiers, and each adapter compares them byte-for-byte against instances read out of its own proof
 (§8.1). Two proofs about different AN blocks therefore cannot both pass with one argument set.
 
-Effects, in CEI order (`:754-757`):
+Effects, in CEI order (`:853-856`):
 
 * `storedLastSeenBlockSeqNo = blockSeqNo`;
 * `_appendLayerHashes(numLayers, layerHashes, blockSeqNo)` — for `L = 1..numLayers`, append
-  `layerHashes[L-1]` into window `L` (`:902-913`);
+  `layerHashes[L-1]` into window `L` (`:1028-1039`);
 * `emit BlockVerified(blockId, blockSeqNo, finType, numLayers)` plus one
-  `LayerAnchorAppended(L, hash, height)` per appended layer (`:933`).
+  `LayerAnchorAppended(L, hash, height)` per appended layer (`:1058`).
 
-`_appendLayer` (`:916-934`) additionally enforces `1 ≤ layer ≤ 10` (`LayerOutOfRange`) and
+`_appendLayer` (`:1042-1059`) additionally enforces `1 ≤ layer ≤ 10` (`LayerOutOfRange`) and
 `blockHeight >= w.lastHeight` (`NonMonotonicLayerHeight`, non-strict), then writes at `writeCursor`,
 advances the cursor mod 128, saturates `dataLen` at 128, and records `lastHeight`.
 
@@ -311,7 +310,7 @@ The contract does **not** require `blockSeqNo == storedLastSeenBlockSeqNo + 1`; 
 (covered by `test_relayerLoop_seqNoFastForward_isPermittedByContract`). Continuity is the prover's
 and relayer's responsibility.
 
-#### Chain anchor: `_expectedPrevAnchor` (`:990-997`)
+#### Chain anchor: `_expectedPrevAnchor` (`:1115-1122`)
 
 ```
 t = _highestActiveLayer()                  // highest L with dataLen > 0, else 0
@@ -324,7 +323,7 @@ This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
 (`crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs`). A flat
 `layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between consecutive
 key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
-`expectedPrevAnchor(numLayers)` (`:1004`) rather than reconstructing the anchor themselves.
+`expectedPrevAnchor(numLayers)` (`:1129`) rather than reconstructing the anchor themselves.
 
 ### 7.2 `withdrawByProof` — pay out a proven AN withdrawal
 
@@ -332,34 +331,35 @@ key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must re
 function withdrawByProof(
     bytes calldata proof,
     IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-) external nonReentrant returns (bool success)            // :1130-1215
+) external nonReentrant returns (bool success)            // :1295-1383
 ```
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
 
-Public inputs (`src/IBridgeWithdrawalVerifier.sol:30-56`), slots `[0..9]` in circuit order:
+Public inputs (`src/IBridgeWithdrawalVerifier.sol:33-65`), slots `[0..10]` in circuit order:
 `tokenId, amount, recipientHi, recipientLo, dstChainId, senderAccFr, dappFr, accFr, nullifier,
-finalRoot`.
+finalRoot, anchorLayer`.
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | C4 verifier wired | 1134 | `WithdrawByProofDisabled` |
-| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1139 | `WithdrawIdentityMismatch` |
-| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1142-1149 | `DstChainIdMismatch` |
-| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1150-1154 | `UnsupportedTokenId` |
-| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1155-1160 | `RecipientHalfOutOfRange` |
-| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1163 | `InvalidRecipient` |
-| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1167 | `NullifierAlreadyUsed` |
-| 8 | `_isKnownAnchor(pub.finalRoot)` | 1176 | `UnknownAnchor` |
-| 9 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1184 | `WithdrawalProofRejected` |
-| 10 | `pub.amount ≤ treasuryBalance` | 1188 | `WithdrawTreasuryShortfall` |
+| 1 | C4 verifier wired | 1299 | `WithdrawByProofDisabled` |
+| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1304 | `WithdrawIdentityMismatch` |
+| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1307-1314 | `DstChainIdMismatch` |
+| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1315-1319 | `UnsupportedTokenId` |
+| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1320-1325 | `RecipientHalfOutOfRange` |
+| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1328 | `InvalidRecipient` |
+| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1338 | `NullifierAlreadyUsed` |
+| 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1341-1345 | `LayerOutOfRange` |
+| 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
+| 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
+| 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
 
-Effects then interactions (`:1192-1213`): mark the nullifier used, `treasuryBalance -= amount`;
+Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
 then, if liquid USDC < `amount` and `suppliedPrincipal > 0`, pull `min(shortfall, suppliedPrincipal)`
 back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
 
-Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1227-1231`).
+Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1430-1434`).
 
 **Anchor semantics.** `_isKnownLayerAnchor` (`src/AckiNackiBridge.sol`) scans
 only the window named by Circuit 4's 1-indexed `anchorLayer` public input
@@ -371,8 +371,10 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
 (or its scoped alias), so the same proof cannot be replayed on a second deployment. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
-on a deployment whose host chain is not the configured one. The Circuit 4 preimage does not bind
-`msg_id`, so two identical burns in one AN block share a nullifier (trade-off 12).
+on a deployment whose host chain is not the configured one. The rotated
+Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
+nullifier, so two identical burns in one AN block mint distinct
+nullifiers (trade-off 12).
 
 ### 7.3 `applyBkSetUpdate` — rotate the BK-set commitment
 
@@ -382,23 +384,24 @@ function applyBkSetUpdate(
     bytes calldata attestationProof,
     uint256 blockId,
     uint64  blockSeqNo,
+    uint64  attestationLastSeen,
     uint256 oldCommitmentL2,
     uint256 newCommitmentL3,
     bytes32 siblingH01,
     bytes32 siblingH4_7,
     bytes32 siblingH8_15
-) external nonReentrant                                   // :799-878
+) external nonReentrant                                   // :898-1004
 ```
 
-Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:810`, note
+Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:909`, note
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
 
-1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment` (`:814`).
-2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` (`:817`) — an
+1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment` (`:913`).
+2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` (`:916`) — an
    **independent** cursor from `storedLastSeenBlockSeqNo`.
 3. Attestation proof verified with `(blockId, oldCommitmentL2, blockSeqNo, storedLastSeenBlockSeqNo)`
-   (`:821-839`).
-4. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:854-859`):
+   (`:947-965`).
+4. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:980-985`):
 
    ```
    h23   = SHA256( LE32(oldCommitmentL2) ‖ LE32(newCommitmentL3) )
@@ -408,32 +411,39 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
    require( root mod BN254_R == blockId )      // else BkUpdateMerkleMismatch
    ```
 
-   The two commitments are byte-reversed to little-endian first (`_frToLeBytes`, `:891-898`) because
+   The two commitments are byte-reversed to little-endian first (`_frToLeBytes`, `:1017-1024`) because
    the AN side hashes canonical `Fr::to_repr()`; the siblings are opaque SHA-256 outputs and are not
-   reversed. The `% BN254_R` reduction (`:869`) reconciles the raw SHA-256 root with the canonical
+   reversed. The `% BN254_R` reduction (`:995`) reconciles the raw SHA-256 root with the canonical
    `Fr` image that the attestation adapter compares against — without it roughly four rotations in
    five would be unsatisfiable by any argument.
 
 5. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
-   `emit BkSetUpdated(old, new, blockSeqNo)` (`:874-877`).
+   `emit BkSetUpdated(old, new, blockSeqNo)` (`:1000-1003`).
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
-**Operator rule.** Attestation `lastSeen` is the live layer cursor
-`storedLastSeenBlockSeqNo`. `storedLastBkSetUpdateSeqNo` is monotonicity
-only — a rotation proof baked against that cursor fails after the first
-`verifyBlock`. If `verifyBlock` advances between prove and submit, re-prove;
-do not treat `AttestationProofRejected` as a consensus bug.
+**Operator rule.** Attestation `lastSeen` is the word the Circuit 1A/1B
+proof was baked against (`block_seq_no > last_seen`). That is the layer
+cursor at prove time, typically the previous key block — not
+`storedLastSeenBlockSeqNo` after `verifyBlock(N)`, which equals N and
+makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` selects
+the set and gates the next rotation. Relayers apply a rotation as soon
+as the previous one is covered; `verifyBlock` accepts the outgoing set
+for `seqNo <= N`. AN must announce a rotation at bundle target N
+*before* that bundle is proven: a proof that already baked
+`last_seen = N` cannot satisfy `attestationLastSeen < N`. Two
+rotations with no bundle target in `[N1, N2]` (inclusive) stall
+permanently.
 
 ### 7.4 Read surface for AN state
 
 | View | Line | Returns |
 |---|---:|---|
-| `expectedPrevAnchor(uint8 numLayers)` | 1004 | The anchor the next `verifyBlock` will require. |
-| `getLatestPerLayer()` | 1054 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
-| `isKnownAnchor(uint256)` | 1069 | Flat membership across all 10 windows (same predicate `withdrawByProof` uses). |
-| `isKnownLayerAnchor(uint8, uint256)` | 1074 | Membership in one window. |
-| `isNullifierUsed(uint256)` | 1220 | Replay pre-check for relayers. |
+| `expectedPrevAnchor(uint8 numLayers)` | 1129 | The anchor the next `verifyBlock` will require. |
+| `getLatestPerLayer()` | 1156 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
+| `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
+| `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
+| `isNullifierUsed(uint256)` | 1388 | Replay pre-check for relayers. |
 
 ---
 
@@ -472,7 +482,7 @@ adapter:
 | `BridgeWithdrawalAggregatorVerifier` | 11 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer` |
 
 All four are `view` and return `bool` — reverts inside the Yul verifier surface as `false`
-because `ShplonkHalo2Verifier.verify` captures only the `staticcall` success flag (`:29`).
+because `ShplonkHalo2Verifier.verify` captures only the `staticcall` success flag (`:37`).
 
 ### 8.2 `ShplonkHalo2Verifier`
 
@@ -497,7 +507,7 @@ output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`).
 
 `verifiers/*.sol` are the generated `Halo2Verifier` sources (a single `fallback(bytes) → bytes` with
 inline assembly) kept for reference; deployment always goes through `create` on the `.bin`
-(`script/ShplonkDeployLib.sol:56-63`) because Foundry's optimizer settings can otherwise perturb the
+(`script/ShplonkDeployLib.sol:76-89`) because Foundry's optimizer settings can otherwise perturb the
 generated assembly.
 
 ---
@@ -535,23 +545,23 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 
 | Function | Line | Behaviour |
 |---|---:|---|
-| `supplyToAave(amount)` | 1240 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal += toSupply`. |
-| `withdrawFromAave(amount)` | 1258 | Pull back up to `suppliedPrincipal` preemptively. |
-| `emergencyWithdrawAll()` | 1477 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
-| `harvestYield(amount)` | 1497 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. |
-| `skimExcessUsdc(amount)` | 1525 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
-| `setAaveEnabled(bool)` | 1328 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
-| `setLiquidReserveBps(bps)` | 1335 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
-| `setYieldRecipient(addr)` | 1341 | Non-zero. |
-| `transferOwnership(addr)` | 1347 | Non-zero; single-step. |
+| `supplyToAave(amount)` | 1443 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal += toSupply`. |
+| `withdrawFromAave(amount)` | 1464 | Pull back up to `suppliedPrincipal` preemptively. |
+| `emergencyWithdrawAll()` | 1481 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
+| `harvestYield(amount)` | 1504 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. |
+| `skimExcessUsdc(amount)` | 1532 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
+| `setAaveEnabled(bool)` | 1544 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
+| `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
+| `setYieldRecipient(addr)` | 1557 | Non-zero. |
+| `transferOwnership(addr)` | 1565 | Non-zero; single-step. |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
-floored at 0 (`:1358`). `_pullFromAave(amount)` withdraws `min(amount, suppliedPrincipal)`, requires
+floored at 0 (`:1593`). `_pullFromAave(amount)` withdraws `min(amount, suppliedPrincipal)`, requires
 the *received* delta to cover both `toPull` and `amount` (`AaveWithdrawFailed`), and decrements
-`suppliedPrincipal` (`:1366-1380`).
+`suppliedPrincipal` (`:1601-1618`).
 
 Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal` floored at 0,
-`totalAssets()` = liquid USDC + aUSDC (`:1387-1402`).
+`totalAssets()` = liquid USDC + aUSDC (`:1625-1640`).
 
 ### 10.1 Access-control matrix
 
@@ -581,7 +591,7 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 
 Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnabledSet`,
 `LiquidReserveBpsSet`, `OwnershipTransferred`, `YieldRecipientSet`, `EmergencyWithdrawAll`,
-`ExcessUsdcSkimmed` (`:280-290`).
+`ExcessUsdcSkimmed` (`:294-306`).
 
 ### 11.2 Selectors
 
@@ -589,7 +599,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 |---|---|
 | `0xa41d0229` | `deposit(uint256,int8,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
-| `0x2a2c14a0` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
+| `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
 | `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
 | `0x6e55e4eb` | `expectedPrevAnchor(uint8)` |
 | `0x22c341e9` | `getLatestPerLayer()` |
@@ -614,11 +624,11 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `LayerHashTailNonZero`, `LayerHashActiveZero`, `LayerOutOfRange`, `NonMonotonicLayerHeight`.
 
 `applyBkSetUpdate`: `BkUpdateDisabled`, `StaleBkSetCommitment`, `BkUpdateSeqNoNotMonotonic`,
-`BkUpdateMerkleMismatch`.
+`BkUpdateMerkleMismatch`, `VerifyBlockLagBehindRotation`, `AttestationLastSeenNotBeforeSeqNo`.
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
-`InvalidBridgeWithdrawalIdentity`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
+`LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
 `WithdrawTreasuryShortfall`.
 
 ---
@@ -629,8 +639,8 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:127-128`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:234`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:56-59`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). |
+| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
@@ -644,7 +654,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle`, else mock. |
 | `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:132`, unconditional). On mainnet the value is `envBool` with no default (`:129`); on other nets it used to default false and no longer may. |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned**. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
@@ -686,7 +696,7 @@ of a deployment, and this document describes the code.
 
 `solc 0.8.19`, `optimizer = true`, `optimizer_runs = 1` (optimising for deployment size),
 `via_ir = true` (required — several functions are otherwise stack-too-deep; `verifyBlock` scopes
-locals explicitly at `:698` and `:713` to stay under 16 live slots so `forge coverage`, which runs
+locals explicitly at `:797` and `:812` to stay under 16 live slots so `forge coverage`, which runs
 without the optimizer, can still compile it). `ffi = true`. Profiles: `ci` (5000 fuzz runs),
 `fork` (`evm_version = "shanghai"`, needed for live AAVE bytecode with PUSH0).
 
@@ -704,7 +714,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
-| `AckiNackiBridgeWithdrawByProof.t.sol` (31) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, same-block duplicate-burn pin, treasury shortfall, byte-for-byte PI forwarding. |
+| `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
 | `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
@@ -755,9 +765,9 @@ Read off the code, without a formal audit claim.
 
 **Enforced invariants**
 
-1. Reentrancy: every state-mutating external entrypoint is `nonReentrant` (`:419-424`).
+1. Reentrancy: every state-mutating external entrypoint is `nonReentrant` (`:479-484`).
 2. CEI: `withdrawByProof` marks the nullifier and decrements `treasuryBalance` *before* the AAVE pull
-   and the USDC transfer (`:1192-1209`); `verifyBlock` commits state only after both verifiers pass.
+   and the USDC transfer (`:1363-1381`); `verifyBlock` commits state only after both verifiers pass.
 3. Monotonicity: `blockSeqNo` strictly increases per `verifyBlock`; the BK-update cursor increases
    strictly and independently; per-layer window heights are non-decreasing.
 4. Cross-circuit binding: shared `blockId` / `bkSetCommitment` are compared instance-by-instance
@@ -783,14 +793,15 @@ Read off the code, without a formal audit claim.
    window below it. L1 window = 128 × W·P = 131 072 seq (**≈ 12 hours** at ~3 seq/s); L2 =
    128 × W² = 2 097 152 seq (**≈ 8 days**). The L1→L2 step is ×(W/P) = **16**, not ×128; only
    L2→L3 and above are ×W. L3 ≈ 2.8 years. Escalation cannot double-pay, because the nullifier
-   is `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` and takes no root as input.
+   is `Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` on
+   the rotated key and takes no root as input.
 
    So the operational boundary on the pinned shellnet deploy (L1+L2 active) is **≈ 8 days
    unwithdrawn**. Past L(max) a payout is stranded in `treasuryBalance`. Adding a layer
    rescues only an event whose T_n the chain has not yet passed; a T_n that went by before
    that layer was relayed is never appended. Tests: `test/WithdrawAnchorEviction.t.sol` (eviction at 128,
    a seq_no jump not mass-evicting, re-proving against a still-in-window anchor) and
-   `AckiNackiBridgeWithdrawByProof.t.sol:593-659` (L2 and L3 anchors accepted, no-window
+   `AckiNackiBridgeWithdrawByProof.t.sol:684-866` (L2 and L3 anchors accepted, no-window
    rejected).
 
    The 8-day L2 figure assumes AN reports `numLayers = 1` on non-boundary
@@ -801,14 +812,14 @@ Read off the code, without a formal audit claim.
 4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
    the AAVE side has an emergency lever.
 5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed.**
-   Transfer is two-step: `transferOwnership` records `pendingOwner` (`:143`) and only
-   `acceptOwnership` (`:1551`), called by that address, moves `owner`. A mistyped address can never
+   Transfer is two-step: `transferOwnership` records `pendingOwner` (`:140`) and only
+   `acceptOwnership` (`:1576`), called by that address, moves `owner`. A mistyped address can never
    accept, so the mistake is recoverable by overwriting `pendingOwner`.
 6. ~~*`approve` return value ignored* in `supplyToAave`; `deposit` books the requested amount, not
    the observed delta.~~ **Closed.** `supplyToAave` reverts `ApproveFailed` on a falsy return
-   (`:1436`, error at `:387`), and the transfer paths measure `balanceOf` before and after and
-   revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1387-1393`,
-   error at `:364`). A fee-on-transfer or rebasing token now fails closed instead of crediting
+   (`:1452`, error at `:384`), and the transfer paths measure `balanceOf` before and after and
+   revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1403-1425`,
+   error at `:361`). A fee-on-transfer or rebasing token now fails closed instead of crediting
    book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
    lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
@@ -819,7 +830,7 @@ Read off the code, without a formal audit claim.
    reads.
 10. ~~*Genesis parameters are unvalidated on-chain.*~~ **Partly closed.** With the
     verifiers wired the constructor now rejects a zero `genesisBkSetCommitment`
-    (`ZeroBkSetCommitment`, `:603`) and a non-canonical `genesisBkSetCommitment` or
+    (`ZeroBkSetCommitment`, `:619`) and a non-canonical `genesisBkSetCommitment` or
     `genesisPrevMaxLevelLayerHash` (`FieldElementOutOfRange`) — the same invariant
     `applyBkSetUpdate` enforces, so a value that could never match `_expectedPrevAnchor` can no
     longer be deployed. Zero stays legal for the prev anchor, since a first block may genuinely
@@ -827,11 +838,12 @@ Read off the code, without a formal audit claim.
     only the deploy script can catch a wrong one.
 11. *`GenesisCursorBridge`* (in `script/DeployGenesisCursorBridge.s.sol`) can seed the cursor
     arbitrarily. It is explicitly test-only, but it lives in the same tree as production scripts.
-12. ~~*Duplicate burns in one AN block share a Circuit 4 nullifier.*~~ **Closed.**
-    The preimage is now `Poseidon(block_id_fr, tokenId, amount, recipientHi,
-    recipientLo, senderAccFr, events_pos)`. Two identical `initiateWithdrawal`
-    calls in the same block occupy different events-tree leaves, so they
-    mint distinct nullifiers. The circuit binds `events_pos` to the Merkle
+12. ~~*Duplicate burns in one AN block share a Circuit 4 nullifier.*~~ **Closed
+    on the rotated key.** The preimage is now
+    `Poseidon(block_id_fr, tokenId, amount, recipientHi, recipientLo,
+    senderAccFr, events_pos)`. Two identical `initiateWithdrawal` calls in
+    the same block occupy different events-tree leaves, so they mint
+    distinct nullifiers. The circuit binds `events_pos` to the Merkle
     direction bits (heap-index reconstruction), so a custom prover cannot
     vary a fake position to double-spend one event.
 

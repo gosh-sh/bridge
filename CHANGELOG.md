@@ -24,6 +24,25 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
+  (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
+  `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,
+  then run the relayer only against that deployment — the new
+  `storedPrevBkSetCommitment()` getter is not on the live contract, so
+  every tick, `verify-fixture` and `verify-prover-proof` fail there.
+  Circuit 1A/1B proves `block_seq_no > last_seen`; pass the word baked
+  into the proof, not the live cursor after `verifyBlock(N)`. Old
+  nine-argument calldata does not decode.
+
+- `applyBkSetUpdate(N)` no longer waits for `verifyBlock` to cover N.
+  It stores the outgoing set in `storedPrevBkSetCommitment` and
+  `verifyBlock` accepts that set for `blockSeqNo <= N`. A second
+  rotation is blocked until the layer cursor covers the previous N
+  (`VerifyBlockLagBehindRotation`; the first field is that previous N,
+  not the seq being applied). Off-boundary rotations can apply as soon
+  as they are discovered. Two rotations with no bundle target in
+  `[N1, N2]` (inclusive) stall permanently and stop `verifyBlock` too.
+
 - **`aggregate-proof` self-checks the verifier source, so every verifiers
   directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
   the verifier it regenerates and compare bytecode, which is why `solc` had
@@ -153,6 +172,13 @@ assigns it when the release is tagged.
   and `DeployGenesisCursorBridge` take adapter addresses from
   `PRIMARY_VERIFIER` / `FALLBACK_VERIFIER` / `LAYER_HASHES_VERIFIER` /
   `WITHDRAWAL_VERIFIER` — do not pass pre-rotation adapters there.
+
+- `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
+  greater than 10, the same error `getLayerWindow` already uses.
+  `InvalidNumLayers` stays on `verifyBlock` and on the layer-window
+  views (`layerWindowLen`, `layerWindowWriteCursor`,
+  `anchorRemainingAppends`). A caller that caught `InvalidNumLayers` on
+  a bad withdrawal layer will need to catch `LayerOutOfRange` instead.
 
   Each adapter constructor is `(address _shplonkVerifier, bytes32 _vkDigest)`,
   rejects a zero digest with `InvalidVkDigest()`, rejects a pin at or above
@@ -433,6 +459,19 @@ assigns it when the release is tagged.
   `_calldata.bin` that is not exactly 3 680 B is refused. 3 648 B is the
   pre-binding blob.
 
+- The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
+  rotation is covered, even if the layer cursor is still behind this N.
+  It only defers a second rotation, and it does not abort the tick.
+  After an apply, `daemon-live` does **not** ack the live prover until
+  the next bundle target (the driver's stride: 1024 at L1, 16384 at L2)
+  is above N, so the outgoing set can still sign `verifyBlock` for
+  `seqNo <= N`. `daemon-bridge` does not apply rotations. Two rotations
+  with no bundle target in `[N1, N2]` (inclusive) cannot land: only one
+  outgoing set is stored, and the stall is permanent. AN must announce
+  a rotation before the bundle at the same seq is proven — a bundle at
+  N acked first bakes `last_seen = N` and the rotation becomes
+  unsatisfiable.
+
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
   building the prover or the CLI no longer needs read access to a private
   repository.** The five crates (`attestation-bls-checker-circuit`,
@@ -613,13 +652,16 @@ assigns it when the release is tagged.
   strictly-next multiple, matching the proof.
 - `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
   survives N-1.
-- `applyBkSetUpdate` attestation `lastSeen` is the live layer cursor
-  (`storedLastSeenBlockSeqNo`). The prover was baking the BK-update cursor,
-  so after the first `verifyBlock` every rotation failed
-  `AttestationProofRejected`. Once AN rotated, `verifyBlock` then failed
-  `BkSetCommitmentMismatch` and unwithdrawn anchors aged out. The prover now
-  uses the layer cursor; a test drives `verifyBlock` then `applyBkSetUpdate`
-  with a mock that checks the argument.
+- `applyBkSetUpdate` attestation `lastSeen` is the prove-time cursor
+  (`attestationLastSeen`, strictly less than `blockSeqNo`). Passing the
+  live cursor after `verifyBlock(N)` reverts
+  `AttestationLastSeenNotBeforeSeqNo`. See Breaking.
+- After `applyBkSetUpdate` the relayer pins the follow-up slot reads to
+  the receipt block, same as `verifyBlock`. An unpinned `latest` on a
+  load-balanced RPC could record a torn snapshot and halt the next tick
+  as chain drift. Check B also rejects a `last_bk` rewind, a jump past
+  `MAX_FORWARD_GAP`, and a second rotation while the previous N is
+  still ahead of `last_seen`.
 - Production `verifyBlock` tests that lack `bound_scenario.json` now
   `vm.skip` instead of returning, so the hole shows up in the forge summary.
 - `DeployRealBridge` on mainnet also requires `altDstChainId` and
@@ -646,9 +688,9 @@ assigns it when the release is tagged.
 - L2 anchoring is the shellnet operational default (Deploy #12), not
   smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
   stays L1 for local/CI.
-- Spec §7.3 states the QC-A2-2 rule: `applyBkSetUpdate` attestation
-  `lastSeen` is the live layer cursor. Re-prove if `verifyBlock` advances
-  between prove and submit.
+- Spec §7.3: `applyBkSetUpdate` attestation `lastSeen` is the prove-time
+  cursor. `storedLastBkSetUpdateSeqNo` selects the set and gates the
+  next rotation.
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`

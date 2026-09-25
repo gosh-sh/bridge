@@ -1345,7 +1345,7 @@ mod tests {
         let bytes = proof.proof_bytes().unwrap();
         assert_eq!(bytes.len(), WITHDRAWAL_CALLDATA_LEN);
         // The eleven public inputs decode into a well-formed struct.
-        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :634-637),
+        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :636-640),
         // so slot 0 (`token_id`) decodes as 0 and slot 10 (`anchor_layer`) as 10.
         // Slot 10 is the newest addition; guarding it here means a slot-swap
         // that reordered the last two instances trips this pipeline test, not

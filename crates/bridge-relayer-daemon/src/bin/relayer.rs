@@ -1108,16 +1108,17 @@ async fn verify_fixture(
     let mut ok = true;
     let mut diagnostics: Vec<String> = Vec::new();
 
-    if block.bk_set_commitment != on_chain.bk_set_commitment {
+    let expected_bk = on_chain.expected_bk_set_for(block.block_seq_no);
+    if block.bk_set_commitment != expected_bk {
         ok = false;
         diagnostics.push(format!(
-            "BkSetCommitment MISMATCH: fixture = {:#x}, on-chain = {:#x}",
-            block.bk_set_commitment, on_chain.bk_set_commitment
+            "BkSetCommitment MISMATCH: fixture = {:#x}, expected = {:#x}",
+            block.bk_set_commitment, expected_bk
         ));
     } else {
         info!(
             bk_set_commitment = ?block.bk_set_commitment,
-            "BkSetCommitment matches on-chain",
+            "BkSetCommitment matches expected set for this seq_no",
         );
     }
 
@@ -1272,11 +1273,12 @@ async fn verify_prover_proof(
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let on_chain = bridge.read_state().await?;
 
-    if block.bk_set_commitment != on_chain.bk_set_commitment {
+    let expected_bk = on_chain.expected_bk_set_for(block.block_seq_no);
+    if block.bk_set_commitment != expected_bk {
         anyhow::bail!(
-            "bk_set mismatch: proof={} chain={}",
+            "bk_set mismatch: proof={} expected={}",
             block.bk_set_commitment,
-            on_chain.bk_set_commitment
+            expected_bk
         );
     }
     if block.block_seq_no <= on_chain.last_seen_block_seq_no {
@@ -2359,7 +2361,8 @@ async fn run_daemon_live(
         // state — see the top-of-decide gate in `startup_decide.rs`.
     }
 
-    let cfg = RelayerConfig::new(&state_path);
+    let mut cfg = RelayerConfig::new(&state_path);
+    cfg.bundle_stride = anchor_mode.stride();
 
     // Wrap the live source so the two proof-byte fields in AnBlockData carry
     // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.

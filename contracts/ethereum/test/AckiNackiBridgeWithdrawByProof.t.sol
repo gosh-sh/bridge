@@ -52,8 +52,8 @@ import "./helpers/Bn254FrLib.sol";
 /// 7. **Recipient split validation**: `recipientHi` or `recipientLo`
 ///    exceeding 80 bits reverts with `RecipientHalfOutOfRange`. Valid splits
 ///    round-trip cleanly through `_reconstructRecipient`.
-/// 8. **Anchor unknown**: a proof referencing a `finalRoot` not in
-///    `_knownAnchors` reverts with `UnknownAnchor`.
+/// 8. **Anchor unknown**: a proof whose `finalRoot` is not in the
+///    window named by `anchorLayer` reverts with `UnknownAnchor`.
 /// 9. **Treasury shortfall**: amount > treasuryBalance reverts with
 ///    `WithdrawTreasuryShortfall`.
 /// 10. **Unsupported tokenId**: any `tokenId != 0` reverts (Phase B is
@@ -96,7 +96,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     /// @dev Sample funder for deposits.
     address internal funder = address(0xF00D);
 
-    /// @dev Anchor recorded into `_knownAnchors` via `setUp`'s seed
+    /// @dev Anchor recorded into layer 1's window via `setUp`'s seed
     ///      `verifyBlock`. Used as `pub.finalRoot` for happy-path tests.
     uint256 internal seedAnchor;
 
@@ -745,9 +745,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-zero"))));
         pub.anchorLayer = 0;
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, uint256(0))
-        );
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(0)));
         bridge.withdrawByProof(_dummyProof(), pub);
     }
 
@@ -758,13 +756,27 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     ///         test locks in the belt-and-suspenders on the on-chain side so
     ///         a future circuit change that weakens the range constraint
     ///         still cannot route to an unbacked `layerWindows[layer]` slot.
+    ///         The revert is `LayerOutOfRange` (not `InvalidNumLayers`),
+    ///         with the argument saturated at `uint8` per the contract's cast.
     function test_withdrawByProof_anchorLayerAboveMax_reverts() public {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _defaultPub(
             1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-too-high")))
         );
         pub.anchorLayer = uint256(bridge.MAX_LAYER_HASHES()) + 1;
         vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.InvalidNumLayers.selector, pub.anchorLayer)
+            abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(pub.anchorLayer))
+        );
+        bridge.withdrawByProof(_dummyProof(), pub);
+    }
+
+    /// @notice `anchorLayer` above `uint8` max saturates the error argument
+    ///         at 255 rather than wrapping.
+    function test_withdrawByProof_anchorLayerAboveUint8_reverts() public {
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(1 * UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("layer-256"))));
+        pub.anchorLayer = 256;
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(255))
         );
         bridge.withdrawByProof(_dummyProof(), pub);
     }

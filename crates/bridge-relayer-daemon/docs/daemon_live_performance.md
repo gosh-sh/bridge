@@ -54,7 +54,7 @@ or `BRIDGE_PK_CACHE_DIR=<path>` in the env. The daemon forwards it to the
   ENOSPC mid-write leaves a truncated `.pk` without a `.meta.json`
   companion; every subsequent bundle then panics with
   `UnexpectedEof: failed to fill whole buffer` inside `snark-verifier-sdk`.
-  Recovery: `rm <name>__v2__*.pk` for the affected slot; the next bundle
+  Recovery: `rm <name>__v3__*.pk` for the affected slot; the next bundle
   re-keygens.
 - **Slot key** is content-addressed by `(base_name, config, agg_params,
   inner_snark)`. Regenerating any verifier under a new `AggregatorConfig`

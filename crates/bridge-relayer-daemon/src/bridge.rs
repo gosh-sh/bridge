@@ -165,6 +165,53 @@ pub trait BridgeClient: Send + Sync {
     async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError>;
 }
 
+/// The subset of `EthBridgeClient` the withdraw-scan loop calls. Extracted
+/// as its own trait (rather than added to `BridgeClient`) so tests can
+/// exercise the classifier/park branch of `withdraw_scan_once` without
+/// standing up a mock of the full verifyBlock state machine. Production
+/// hits `EthBridgeClient` directly via the blanket impl below.
+#[async_trait]
+pub trait WithdrawBridge: Send + Sync {
+    async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError>;
+    async fn dry_run_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<DryRunOutcome, RelayerError>;
+    async fn submit_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<WithdrawSubmitOutcome, RelayerError>;
+}
+
+#[async_trait]
+impl<P, N> WithdrawBridge for EthBridgeClient<P, N>
+where
+    P: Provider<N> + Clone + Send + Sync + 'static,
+    N: Network,
+{
+    async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
+        EthBridgeClient::is_nullifier_used(self, nullifier).await
+    }
+
+    async fn dry_run_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<DryRunOutcome, RelayerError> {
+        EthBridgeClient::dry_run_withdraw(self, proof, pub_inputs).await
+    }
+
+    async fn submit_withdraw(
+        &self,
+        proof: &alloy::primitives::Bytes,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> Result<WithdrawSubmitOutcome, RelayerError> {
+        EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // MockBridgeClient — in-memory mirror of AckiNackiBridge state machine
 // ─────────────────────────────────────────────────────────────────────
@@ -525,6 +572,25 @@ mod sol_bindings {
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
 
+            /// Custom errors `AckiNackiBridge.withdrawByProof` can revert with.
+            /// Listed here so the sol! macro emits `SELECTOR` constants — the
+            /// relayer withdraw scan uses them to distinguish permanent
+            /// (proof-intrinsic) reverts from transient ones (e.g. anchor
+            /// not yet registered by the verifyBlock lane) so a permanently
+            /// bad proof does not hold up the whole queue.
+            error WithdrawByProofDisabled();
+            error WithdrawalProofRejected();
+            error NullifierAlreadyUsed(uint256 nullifier);
+            error FieldElementOutOfRange(uint256 value);
+            error DstChainIdMismatch(uint256 supplied, uint256 expected);
+            error RecipientHalfOutOfRange(uint256 value);
+            error WithdrawIdentityMismatch();
+            error UnknownAnchor(uint256 finalRoot);
+            error InvalidNumLayers(uint256 anchorLayer);
+            error UnsupportedTokenId(uint256 tokenId);
+            error InvalidRecipient();
+            error WithdrawTreasuryShortfall(uint256 requested, uint256 available);
+
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
@@ -555,6 +621,13 @@ mod sol_bindings {
         #[allow(missing_docs)]
         contract ShplonkAdapter {
             function shplonkVerifier() external view returns (address);
+            /// Poseidon digest of the inner-circuit VK the adapter's
+            /// constructor pinned. Compared to calldata word `12 + N` by
+            /// every runtime verify call in `ShplonkAggregatorVerifierBase`;
+            /// preflight reads it so a wrong pin is refused before the
+            /// (irreversible) AN-side burn instead of surfacing as a
+            /// post-burn `WithdrawalProofRejected` revert.
+            function vkDigest() external view returns (bytes32);
         }
 
         #[sol(rpc)]
@@ -674,13 +747,26 @@ where
                 Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
                     tx_hash: receipt.transaction_hash(),
                 }),
-                Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
-                    reason: format!("tx confirmation error: {e}"),
-                }),
+                Err(e) => {
+                    // Post-send confirmation failures (RPC dropped, receipt
+                    // wait timed out) are transient by nature — the tx
+                    // may still land or the RPC may recover — so we do
+                    // not park the proof here.
+                    let reason = format!("tx confirmation error: {e}");
+                    Ok(WithdrawSubmitOutcome::Reverted {
+                        reason,
+                        permanent: false,
+                    })
+                },
             },
-            Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
-                reason: format!("withdrawByProof send failed: {e}"),
-            }),
+            Err(e) => {
+                let reason = format!("withdrawByProof send failed: {e}");
+                let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
+                Ok(WithdrawSubmitOutcome::Reverted {
+                    reason,
+                    permanent,
+                })
+            },
         }
     }
 
@@ -792,6 +878,17 @@ where
         let w = sol_bindings::ShplonkWrapper::new(wrapper, self.contract.provider());
         let yul = w.yulVerifier().call().await.map_err(map_contract_err)?;
         Ok((wrapper, yul))
+    }
+
+    /// Read the adapter's `vkDigest()` immutable — the Poseidon digest of the
+    /// inner-circuit VK its constructor was pinned to. The runtime verify
+    /// path in `ShplonkAggregatorVerifierBase` compares this to calldata
+    /// word `12 + N`, so preflight can refuse a wrong pin before the
+    /// (irreversible) AN-side burn instead of surfacing as a post-burn
+    /// `WithdrawalProofRejected` revert.
+    pub async fn adapter_vk_digest(&self, adapter: Address) -> Result<B256, RelayerError> {
+        let a = sol_bindings::ShplonkAdapter::new(adapter, self.contract.provider());
+        a.vkDigest().call().await.map_err(map_contract_err)
     }
 
     /// Read the four top-level anchor slots pinned to a specific block.
@@ -1007,8 +1104,69 @@ where
 /// Outcome of [`EthBridgeClient::submit_withdraw`].
 #[derive(Clone, Debug)]
 pub enum WithdrawSubmitOutcome {
-    Paid { tx_hash: B256 },
-    Reverted { reason: String },
+    Paid {
+        tx_hash: B256,
+    },
+    /// `withdrawByProof` reverted. `permanent = true` means the revert is
+    /// intrinsic to the proof (e.g. `WithdrawalProofRejected` — includes
+    /// the wrong-VK-digest path where the aggregator's inner-VK guard
+    /// makes the adapter return `false`; `WithdrawIdentityMismatch`;
+    /// `DstChainIdMismatch`) so the withdraw scan parks the
+    /// `proof_event_*.json` instead of holding the queue up on
+    /// exponential backoff. `permanent = false` covers transient reverts
+    /// like `UnknownAnchor` (verifyBlock lane hasn't landed the anchor
+    /// yet) and `WithdrawTreasuryShortfall`, plus every alloy-side
+    /// non-revert error (RPC, gas, nonce) — those still retry with
+    /// backoff.
+    Reverted {
+        reason: String,
+        permanent: bool,
+    },
+}
+
+/// Classify a `withdrawByProof` revert reason as permanent (proof-intrinsic;
+/// park the `proof_event_*.json`) or transient (retry with backoff).
+///
+/// The `reason` is the stringified [`alloy::contract::Error`] chain the
+/// production wrapper produces via `format!("{e}")`. Alloy renders unknown
+/// custom-error reverts as `... 0x<selector><args>`, so a substring match
+/// on the 4-byte selector hex is enough to identify each Solidity error we
+/// declared in the sol! block above. Errors that could go either way
+/// (e.g. anything the RPC returned as a plain string) default to
+/// transient — the daemon's existing backoff was the pre-classification
+/// behaviour and remains a safe fallback.
+pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
+    use alloy::sol_types::SolError;
+    let permanent_selectors: [[u8; 4]; 9] = [
+        AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
+        AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
+        AckiNackiBridge::DstChainIdMismatch::SELECTOR,
+        AckiNackiBridge::UnsupportedTokenId::SELECTOR,
+        AckiNackiBridge::RecipientHalfOutOfRange::SELECTOR,
+        AckiNackiBridge::InvalidRecipient::SELECTOR,
+        AckiNackiBridge::FieldElementOutOfRange::SELECTOR,
+        AckiNackiBridge::InvalidNumLayers::SELECTOR,
+        AckiNackiBridge::NullifierAlreadyUsed::SELECTOR,
+    ];
+    let lowered = reason.to_ascii_lowercase();
+    for sel in permanent_selectors {
+        // Alloy renders selectors with an `0x` prefix; the substring form
+        // works whether the error chain is `revert data: 0x…`, an
+        // `execution reverted: 0x…` wrap, or a decoded `<Name>()` form
+        // (name lookup would still contain the hex on unknown-ABI paths).
+        let hex = format!("0x{}", hex::encode(sel));
+        if lowered.contains(&hex) {
+            return WithdrawRevertKind::Permanent;
+        }
+    }
+    WithdrawRevertKind::Transient
+}
+
+/// See [`classify_withdraw_revert`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WithdrawRevertKind {
+    Permanent,
+    Transient,
 }
 
 /// Outcome of [`EthBridgeClient::submit_bk_set_update`].
@@ -1408,6 +1566,92 @@ mod tests {
             },
             _ => panic!("expected revert"),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Withdraw revert classification (see `classify_withdraw_revert`).
+    //
+    // The reason strings below imitate the shape alloy's `contract::Error`
+    // Display produces for an unknown-ABI custom-error revert — a suffix
+    // like `... 0x<selector><args>`. The classifier substring-matches on
+    // the selector hex so it doesn't rely on the alloy prose staying
+    // stable across versions.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn selector_hex_of<E: alloy::sol_types::SolError>() -> String {
+        format!("0x{}", hex::encode(E::SELECTOR))
+    }
+
+    #[test]
+    fn classify_withdrawal_proof_rejected_is_permanent() {
+        // The wrong-inner-VK path: adapter's runtime digest guard makes
+        // `verifyWithdrawal` return `false`, so the bridge reverts
+        // `WithdrawalProofRejected()`. Must be classified permanent so
+        // the withdraw scan parks the proof.
+        let reason = format!(
+            "withdrawByProof send failed: server returned an error response: error code 3: \
+             execution reverted, data: \"{}\"",
+            selector_hex_of::<AckiNackiBridge::WithdrawalProofRejected>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent,
+        );
+    }
+
+    #[test]
+    fn classify_withdraw_identity_mismatch_is_permanent() {
+        let reason = format!(
+            "revert data: {}",
+            selector_hex_of::<AckiNackiBridge::WithdrawIdentityMismatch>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent,
+        );
+    }
+
+    #[test]
+    fn classify_unknown_anchor_is_transient() {
+        // `UnknownAnchor` means the verifyBlock lane hasn't registered
+        // the proof's `finalRoot` yet — a retry after the anchor lands
+        // will succeed, so the daemon must keep this on the backoff
+        // path (not park the file).
+        let reason = format!(
+            "execution reverted, data: \
+             {}0000000000000000000000000000000000000000000000000000000000000042",
+            selector_hex_of::<AckiNackiBridge::UnknownAnchor>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient,
+        );
+    }
+
+    #[test]
+    fn classify_treasury_shortfall_is_transient() {
+        let reason = format!(
+            "execution reverted: {}",
+            selector_hex_of::<AckiNackiBridge::WithdrawTreasuryShortfall>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient,
+        );
+    }
+
+    #[test]
+    fn classify_rpc_error_defaults_to_transient() {
+        // No selector visible => not a proof-intrinsic failure; keep the
+        // pre-classification behaviour (backoff-and-retry).
+        assert_eq!(
+            classify_withdraw_revert("nonce too low"),
+            WithdrawRevertKind::Transient,
+        );
+        assert_eq!(
+            classify_withdraw_revert("tx confirmation error: dropped from mempool"),
+            WithdrawRevertKind::Transient,
+        );
     }
 
     fn rotation(seq: u64, last_seen: u64, old: U256, new: U256) -> BkSetUpdateData {

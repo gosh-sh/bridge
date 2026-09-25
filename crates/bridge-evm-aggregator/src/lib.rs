@@ -22,9 +22,11 @@
 //! 3. [`aggregator::aggregate`] — wraps the inner SNARK in
 //!    `snark_verifier_sdk::halo2::aggregation::AggregationCircuit` and proves
 //!    it (also SHPLONK, also Poseidon transcript). The aggregator's single
-//!    instance column is `[KZG accumulator (12 limbs) ‖ re-exposed inner public
-//!    inputs]` — the inner PIs are surfaced via `expose_previous_instances` so
-//!    the on-chain verifier (and the bridge contract) can read them.
+//!    instance column is `[KZG accumulator (12 limbs) ‖ re-exposed inner
+//!    public inputs ‖ inner-VK Poseidon digest (1)]` — the inner PIs are
+//!    surfaced via `expose_previous_instances` so the on-chain verifier
+//!    (and the bridge contract) can read them; the trailing digest binds
+//!    the aggregator to a specific inner VK (see [`vk_binding`]).
 //!
 //! 4. [`aggregator::generate_yul_verifier`] — calls
 //!    `snark_verifier_sdk::evm::gen_evm_verifier_shplonk` to emit a Yul
@@ -42,3 +44,4 @@ pub mod evm_export;
 pub mod multiply;
 pub mod srs_guard;
 pub mod verifier_source;
+pub mod vk_binding;

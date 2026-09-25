@@ -12,8 +12,8 @@ MAX=24576
 # Warn well before the cliff. A verifier past EIP-170 does not fail
 # loudly — `CREATE` returns the zero address and `deployYulFromBin` reverts
 # `YulDeployFailed` — so the useful signal is growth, not the breach. Layer
-# hashes sits at 94% after the k_outer=21 regen while the other three keep
-# triple the margin.
+# hashes sits at 78% (k_outer=22); Primary and Fallback at 88% are the
+# tightest.
 WARN_PCT=90
 
 if [[ ! -f "${SUMS}" ]]; then

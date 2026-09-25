@@ -16,7 +16,7 @@
 //! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~800 MB @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
 //!
-//! Slot stem: `<base_name>__v2__<content_hash:hex[..32]>`. `base_name` is
+//! Slot stem: `<base_name>__v3__<content_hash:hex[..32]>`. `base_name` is
 //! a human-readable label only — it is **not** trusted for correctness. Two
 //! callers using the same `base_name` with distinct inner VKs, distinct
 //! aggregator configs, or a distinct SRS produce distinct content hashes, so
@@ -24,15 +24,26 @@
 //! content share a slot even under different names (deemed acceptable — this
 //! is the classical cache-dedup property).
 //!
-//! Format tag `v2` in the stem gates against silent breakage if the hash
-//! preimage layout ever changes; bump to `v3` to invalidate all v2 slots.
+//! Format tag `v3` in the stem gates against silent breakage if the hash
+//! preimage layout ever changes; bump to `v4` to invalidate all v3 slots.
 //!
-//! History: v1 used a 64-bit `SipHash` of the protocol bytes alone plus
-//! trusted `base_name`; the SRS was **not** in the key. That meant a
-//! re-bootstrapped SRS or an unlucky hash collision under the same
-//! `base_name` could silently serve stale keys. The `bin/aggregate_proof.rs`
-//! byte-drift check would catch it before on-chain use, but the cache-side
-//! precondition is now enforced properly.
+//! History:
+//!
+//! - v1 used a 64-bit `SipHash` of the protocol bytes alone plus trusted
+//!   `base_name`; the SRS was **not** in the key. That meant a
+//!   re-bootstrapped SRS or an unlucky hash collision under the same
+//!   `base_name` could silently serve stale keys. The `bin/aggregate_proof.rs`
+//!   byte-drift check would catch it before on-chain use, but the cache-side
+//!   precondition is now enforced properly.
+//! - v1→v2 widened the content hash to include the SRS `s_g2` head so a
+//!   re-bootstrapped SRS never shares a slot with the old one.
+//! - v2→v3 was bumped when `expose_vk_digest` was added inside the keygen
+//!   circuit. The hash preimage layout itself did not change, but the outer
+//!   PK, `calculated` params, and `num_instance` all did — so pre-v3 cache
+//!   slots produce a Yul verifier that no longer matches the on-chain
+//!   adapters and must not be reused. The content hash cannot notice this
+//!   because it is computed from the inner-snark protocol, not the outer
+//!   circuit synthesis; the stem tag is the guard.
 
 use std::{
     path::{Path, PathBuf},
@@ -46,6 +57,7 @@ use halo2_base::{
         poly::kzg::commitment::ParamsKZG,
     },
 };
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use snark_verifier_sdk::{
@@ -149,7 +161,7 @@ fn snark_protocol_bytes(inner_snark: &Snark) -> Vec<u8> {
 ///
 /// Preimage layout (all little-endian):
 /// ```text
-///   b"bridge-evm-aggregator-cache-v2"
+///   b"bridge-evm-aggregator-cache-v3"
 ///   u32(k_outer) || u32(lookup_bits_outer) || u8(universality)
 ///   u32(s_g2_len)     || s_g2_bytes
 ///   u32(protocol_len) || protocol_bytes
@@ -160,7 +172,7 @@ fn content_hash(
     protocol_bytes: &[u8],
 ) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"bridge-evm-aggregator-cache-v2");
+    h.update(b"bridge-evm-aggregator-cache-v3");
     h.update((config.k_outer as u32).to_le_bytes());
     h.update((config.lookup_bits_outer as u32).to_le_bytes());
     h.update([universality_byte(config.universality)]);
@@ -171,7 +183,7 @@ fn content_hash(
     h.finalize().into()
 }
 
-/// Deterministic slot stem: `<base_name>__v2__<content_hash[..32]>`.
+/// Deterministic slot stem: `<base_name>__v3__<content_hash[..32]>`.
 ///
 /// `base_name` is a human-readable label only. Correctness is enforced by the
 /// content hash — see module-level docs.
@@ -189,7 +201,7 @@ pub fn cache_stem(
     // 128 bits of the 256-bit digest keeps filenames short; a full collision
     // there is still infeasible and the byte-drift check in aggregate_proof
     // provides defence in depth.
-    format!("{base_name}__v2__{}", hex::encode(&hash[..16]))
+    format!("{base_name}__v3__{}", hex::encode(&hash[..16]))
 }
 
 fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
@@ -218,7 +230,8 @@ pub fn keygen_or_load(
 ) -> anyhow::Result<CachedKeygen> {
     let slots = match cache_dir {
         Some(dir) => {
-            std::fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create cache dir {}", dir.display()))?;
             let stem = cache_stem(base_name, &config, agg_params, inner_snark);
             Some(slot_paths(dir, &stem))
         }
@@ -230,8 +243,10 @@ pub fn keygen_or_load(
     // ------------------------------------------------------------------
     if let Some(s) = slots.as_ref() {
         if s.pk.exists() && s.meta.exists() {
-            let meta_text = std::fs::read_to_string(&s.meta)?;
-            let meta: CachedMeta = serde_json::from_str(&meta_text)?;
+            let meta_text = std::fs::read_to_string(&s.meta)
+                .with_context(|| format!("read cache meta {}", s.meta.display()))?;
+            let meta: CachedMeta = serde_json::from_str(&meta_text)
+                .with_context(|| format!("parse cache meta {}", s.meta.display()))?;
             let calculated: AggregationConfigParams = meta.calculated.into();
 
             // Build a "post-keygen shape" circuit so `circuit.params()`
@@ -278,6 +293,11 @@ pub fn keygen_or_load(
         config.universality,
     );
     keygen_circuit.expose_previous_instances(false);
+    // Bind the inner-circuit VK. Must run before `calculate_params` /
+    // `num_instance` so the extra Poseidon gates are counted in the
+    // auto-config and the persisted `num_instance` reflects the +1
+    // exposed instance.
+    crate::vk_binding::expose_vk_digest(&mut keygen_circuit);
     let calculated = keygen_circuit.calculate_params(Some(10));
     let num_instance = keygen_circuit.num_instance();
 
@@ -296,7 +316,10 @@ pub fn keygen_or_load(
             calculated: calculated.into(),
             num_instance: num_instance.clone(),
         };
-        std::fs::write(&s.meta, serde_json::to_string_pretty(&meta)?)?;
+        let meta_text = serde_json::to_string_pretty(&meta)
+            .context("serialize cache meta")?;
+        std::fs::write(&s.meta, meta_text)
+            .with_context(|| format!("write cache meta {}", s.meta.display()))?;
         tracing::info!(
             target: "bridge_evm_aggregator::cache",
             stem = %s.pk.file_stem().and_then(|s| s.to_str()).unwrap_or(""),

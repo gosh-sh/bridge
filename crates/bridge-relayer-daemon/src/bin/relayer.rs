@@ -38,14 +38,14 @@ use alloy::{
 };
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    check_startup_drift, discover_event_proofs, run_withdraw_e2e_once, BackoffConfig,
-    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
-    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    check_startup_drift, classify_withdraw_revert, discover_event_proofs, run_withdraw_e2e_once,
+    BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource,
+    BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
     FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
-    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerMetrics, StatePaths,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
     SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawE2EConfig, WithdrawSubmitOutcome,
-    WithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawE2EConfig, WithdrawRevertKind,
+    WithdrawSubmitOutcome, WithdrawalProver,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -1397,11 +1397,21 @@ async fn prove_withdraw_shplonk(
 /// handled this process lifetime (paid, already-used, or permanently
 /// rejected) so re-scanning the directory is cheap; on-chain
 /// `isNullifierUsed` is the durable idempotency source across restarts.
+///
+/// `skipped_already_used` and `parked_permanent` used to be a single
+/// `skipped` counter, but the two events are operationally very
+/// different: `already_used` is the benign restart / duplicate-source
+/// case and should trend up gently with real traffic, while
+/// `parked_permanent` means a proof-intrinsic revert (bad VK digest,
+/// identity mismatch, chain-id drift, nullifier collision on-chain, …)
+/// and every increment is worth a look. Merging them hid a rise in the
+/// second under noise from the first.
 #[derive(Default)]
 struct WithdrawScanState {
     done: HashSet<PathBuf>,
     paid: u64,
-    skipped: u64,
+    skipped_already_used: u64,
+    parked_permanent: u64,
 }
 
 /// SIGINT (+ SIGTERM on Unix) shutdown future shared by the long-running
@@ -1496,7 +1506,7 @@ where
                     recipient_lo = %pub_inputs.recipient_lo,
                     "nullifier already used on-chain; skipping (benign retry — the same event was submitted before)"
                 );
-                st.skipped += 1;
+                st.skipped_already_used += 1;
                 st.done.insert(proof_path);
                 continue;
             },
@@ -1526,9 +1536,34 @@ where
                 DryRunOutcome::WouldRevert {
                     reason,
                 } => {
-                    warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
-                    had_transient_failure = true;
-                    break;
+                    // Classify the eth_call revert the same way we do a
+                    // real submit. Without this, a proof that would
+                    // permanently revert (bad digest pin, identity
+                    // mismatch, etc.) would hold up the queue on
+                    // exponential backoff during a dry run — the only
+                    // difference from the submit path being that no gas
+                    // was spent. Parking here matches submit-path
+                    // behaviour and drains the rest of the directory.
+                    match classify_withdraw_revert(&reason) {
+                        WithdrawRevertKind::Permanent => {
+                            warn!(
+                                proof = %proof_path.display(),
+                                %reason,
+                                nullifier = %pub_inputs.nullifier,
+                                amount = %pub_inputs.amount,
+                                recipient_hi = %pub_inputs.recipient_hi,
+                                recipient_lo = %pub_inputs.recipient_lo,
+                                "dry-run reverted permanently; parking proof"
+                            );
+                            st.parked_permanent += 1;
+                            st.done.insert(proof_path);
+                        },
+                        WithdrawRevertKind::Transient => {
+                            warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
+                            had_transient_failure = true;
+                            break;
+                        },
+                    }
                 },
             }
             continue;
@@ -1550,9 +1585,20 @@ where
                 // which includes the wrong-inner-VK path where the
                 // aggregator's digest guard makes the adapter return
                 // `false`). Retrying is a waste of gas and holds up
-                // every proof behind it, so park the file.
-                warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted permanently; parking proof");
-                st.skipped += 1;
+                // every proof behind it, so park the file. Log the same
+                // pub_inputs context the already-used arm above carries,
+                // so operators can correlate a park with the AN-side
+                // event without opening the proof file.
+                warn!(
+                    proof = %proof_path.display(),
+                    %reason,
+                    nullifier = %pub_inputs.nullifier,
+                    amount = %pub_inputs.amount,
+                    recipient_hi = %pub_inputs.recipient_hi,
+                    recipient_lo = %pub_inputs.recipient_lo,
+                    "withdrawByProof reverted permanently; parking proof (proof-intrinsic — every retry would revert the same way)"
+                );
+                st.parked_permanent += 1;
                 st.done.insert(proof_path);
             },
             WithdrawSubmitOutcome::Reverted {
@@ -1613,7 +1659,8 @@ async fn run_withdraw_daemon(
 
         info!(
             paid = st.paid,
-            skipped = st.skipped,
+            skipped_already_used = st.skipped_already_used,
+            parked_permanent = st.parked_permanent,
             "daemon-withdraw scan complete"
         );
 
@@ -1630,7 +1677,12 @@ async fn run_withdraw_daemon(
 
         tokio::select! {
             _ = &mut shutdown => {
-                info!(paid = st.paid, skipped = st.skipped, "daemon-withdraw stopped");
+                info!(
+                    paid = st.paid,
+                    skipped_already_used = st.skipped_already_used,
+                    parked_permanent = st.parked_permanent,
+                    "daemon-withdraw stopped"
+                );
                 return Ok(());
             },
             _ = tokio::time::sleep(sleep_for) => {},
@@ -1727,6 +1779,22 @@ async fn run_bridge_daemon(
                 had_transient = true;
             },
             Err(e) => {
+                // `RelayerError::Stuck` means the same seqNo has been
+                // rejected past the abort threshold — retrying is what
+                // the abort is designed to stop. Hard-abort here so
+                // daemon-bridge behaves the same way `run_prover_daemon`
+                // (see `daemon.rs:309-318`) does when it hits Stuck on
+                // its own tick loop; without this the Leg-2 withdraw
+                // scan would keep draining the queue against a bridge
+                // whose anchor is stuck, and the operator would only
+                // notice through a rising `parked_permanent` counter or
+                // the anchor timestamp going stale on chain. Everything
+                // else — RPC blips, transient Reverted, decode noise —
+                // stays on the backoff path.
+                if matches!(e, RelayerError::Stuck { .. }) {
+                    error!(error = ?e, "daemon-bridge: verifyBlock stuck — hard aborting");
+                    return Err(e.into());
+                }
                 warn!(?e, "daemon-bridge: verifyBlock tick failed; backing off");
                 had_transient = true;
             },
@@ -1742,7 +1810,8 @@ async fn run_bridge_daemon(
         }
         info!(
             paid = wd_state.paid,
-            skipped = wd_state.skipped,
+            skipped_already_used = wd_state.skipped_already_used,
+            parked_permanent = wd_state.parked_permanent,
             "daemon-bridge: withdraw scan complete"
         );
 
@@ -1761,7 +1830,8 @@ async fn run_bridge_daemon(
             _ = &mut shutdown => {
                 info!(
                     paid = wd_state.paid,
-                    skipped = wd_state.skipped,
+                    skipped_already_used = wd_state.skipped_already_used,
+                    parked_permanent = wd_state.parked_permanent,
                     "daemon-bridge stopped"
                 );
                 return Ok(());

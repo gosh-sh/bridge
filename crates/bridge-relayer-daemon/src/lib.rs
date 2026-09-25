@@ -32,8 +32,9 @@ pub use aggregator::{
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
-    BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,
-    MockBridgeClient, SubmitOutcome, WithdrawSubmitOutcome,
+    classify_withdraw_revert, BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState,
+    DryRunOutcome, EthBridgeClient, MockBridgeClient, SubmitOutcome, WithdrawRevertKind,
+    WithdrawSubmitOutcome,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,

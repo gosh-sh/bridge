@@ -787,6 +787,17 @@ Read off the code, without a formal audit claim.
    `AckiNackiBridgeWithdrawByProof.t.sol:593-659` (L2 and L3 anchors accepted, no-window
    rejected).
 
+   *Deploy-mode caveat.* The `× (W/P) = 16` escalation gain assumes an L1 deploy where the
+   daemon submits `verifyBlock` on every L1 boundary and only a subset of those blocks
+   (`numLayers ≥ 2`) also carry an L2 hash. On an L2-only deploy — such as the shellnet
+   pin enforced by `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh:104`
+   (`BRIDGE_ANCHOR_LEVEL=2`) — every submitted block has `numLayers = 2`, so
+   `_appendLayerHashes` advances both the L1 and the L2 window one slot per L2 bundle.
+   Both windows then evict on the same wall-clock schedule (~8 days at 3 seq/s), and
+   `--anchor-layer auto`'s L1→L2 fallback buys no additional runway. Operator alerting for
+   this case lives in `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md`
+   (Case 3e).
+
    The 8-day L2 figure assumes AN reports `numLayers = 1` on non-boundary
    bundles. The contract appends one slot per reported layer on every
    successful `verifyBlock`, with no dedup. If AN started reporting

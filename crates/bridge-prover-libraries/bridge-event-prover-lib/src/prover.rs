@@ -184,8 +184,58 @@ pub fn build_proof_inputs(
             events_siblings.len(),
         );
     }
+    // Mirror `BridgeEventProveCircuit::assert_invariants`'s events_pos range
+    // check here so an out-of-range witness surfaces as a decoded error with
+    // context rather than a panic. `assert_invariants` fires from
+    // `BridgeEventProveCircuit::new` further down in this same function
+    // (`build_proof_inputs`), so without this mirror an out-of-range witness
+    // would panic on the caller's thread, not on a worker.
+    //
+    // Shift is safe: we already bounded `events_siblings.len()` by
+    // `MAX_EVENTS_TREE_DEPTH` above, which fits comfortably inside `usize::BITS`.
+    let events_pos_max = 1usize << events_siblings.len();
+    if events_pos >= events_pos_max {
+        bail!(
+            "events_tree_proof position {events_pos} out of range for depth {} (max={events_pos_max})",
+            events_siblings.len(),
+        );
+    }
 
     let (block_siblings, block_pos) = merkle_proof_to_native(block_tree, "block_tree_proof")?;
+    // Same range mirror for the block-tree position; the circuit constructor
+    // does not currently panic on this axis but a future refactor could add
+    // an equivalent bounds check, and reporting here keeps both axes
+    // symmetric under a decoded error path.
+    //
+    // Unlike `events_siblings.len()` above there is no explicit `MAX_*_DEPTH`
+    // cap on `block_siblings.len()` in the circuit, so a pathological witness
+    // could otherwise trip Rust's shift-by-≥-`usize::BITS` handling: a debug
+    // build panics with `attempt to shift left with overflow`; a release
+    // build silently masks the shift amount modulo `usize::BITS`. Take
+    // `siblings.len() == 64` on a 64-bit target — the mask reduces the
+    // shift to `64 % 64 = 0`, so `1usize << 64` evaluates to `1` and
+    // `block_pos_max` becomes `1`. The subsequent `block_pos >= block_pos_max`
+    // check then over-rejects (positions in `1..2^32` — the actual range a
+    // witness can encode, since `MerkleProofData::position` is `u32` — are
+    // turned away instead of accepted for a 64-deep tree) but still lets
+    // `block_pos == 0` through — a pathological deep-tree witness with a
+    // zero position would silently pass this check on release. `checked_shl`
+    // fails closed at that boundary in every profile and stops the
+    // zero-position case too.
+    let block_pos_max = 1usize
+        .checked_shl(block_siblings.len() as u32)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "block_tree_proof depth {} is not representable as a usize width shift",
+                block_siblings.len(),
+            )
+        })?;
+    if block_pos >= block_pos_max {
+        bail!(
+            "block_tree_proof position {block_pos} out of range for depth {} (max={block_pos_max})",
+            block_siblings.len(),
+        );
+    }
 
     let account_dapp_id = parse_hex_array::<32>(
         "block_context.account_dapp_id_hex",

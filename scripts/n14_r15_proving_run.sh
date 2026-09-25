@@ -25,8 +25,6 @@ REMOTE_GOSH="$(dirname "${REMOTE_ROOT}")"
 SIBLING_REPOS=(
   halo2-lib-zkevm-sha256-and-bls12-381
   gosh-halo2-crypto-lib
-  acki-nacki-to-eth-bridge-halo2-circuits
-  acki-nacki-to-eth-bridge-halo2-prover
   bk-set-stub
 )
 

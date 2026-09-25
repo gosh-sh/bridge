@@ -51,7 +51,7 @@ interface IBridgeWithdrawalVerifier {
         ///         tokenId, amount, recipientHi, recipientLo, senderAccFr,
         ///         events_pos)`. `events_pos` is the events-tree leaf
         ///         index, so two identical burns in one AN block no longer
-        ///         share a nullifier (BRIDGE-WD-01).
+        ///         share a nullifier.
         uint256 nullifier;
         /// @notice The dense-chain anchor the proof binds to. The bridge
         ///         checks `finalRoot` against the window named by

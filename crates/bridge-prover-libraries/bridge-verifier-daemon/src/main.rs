@@ -1222,8 +1222,8 @@ fn process_event_proof(
 
     // ---- Anchor check (the "current bridge state" gate) ----
     //
-    // Option A: `final_root` (slot 9) must sit in the window named by
-    // 1-indexed `anchor_layer` (slot 10). Mirrors
+    // `final_root` (slot 9) must sit in the window named by 1-indexed
+    // `anchor_layer` (slot 10). Mirrors
     // `AckiNackiBridge._isKnownLayerAnchor`.
     let layer_repr: [u8; 32] = instances[10].to_repr();
     let layer_canonical = layer_repr[1..].iter().all(|&b| b == 0);

@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Every path below is relative to the repository root.
+cd "$(dirname "$0")"
+
 echo "=== Acki Nacki Bridge Setup Script ==="
 echo ""
 
@@ -43,14 +46,12 @@ else
     print_info "Rust is already installed: $(rustc --version)"
 fi
 
-# Update to latest nightly
-print_info "Updating to latest Rust nightly..."
-rustup default nightly
-rustup update
-
-# Add required components
-print_info "Adding Rust components..."
-rustup component add rustfmt clippy
+# Install the pinned toolchains with their components: rust-toolchain.toml at
+# the root, and deposit-prover's own, older pin. The global default toolchain
+# is left alone.
+print_info "Installing the pinned Rust toolchains..."
+rustup toolchain install
+(cd deposit-prover && rustup toolchain install)
 
 # 2. Check and install Foundry (for Solidity development)
 print_info "Checking Foundry installation..."
@@ -74,62 +75,34 @@ fi
 print_info "Updating Foundry..."
 foundryup
 
-# 3. Install Solidity compiler (solc)
+# 3. Solidity compiler (solc)
 print_info "Checking solc installation..."
 if ! command -v solc &> /dev/null; then
-    print_warn "solc not found. Installing via Foundry..."
-    # Foundry's forge will handle solc installation
+    print_warn "solc not found. forge downloads the compiler it builds with; only regenerating"
+    print_warn "verifiers and scripts/check_verifier_sources.sh need solc 0.8.19 on PATH."
 else
     print_info "solc is already installed: $(solc --version | grep Version)"
 fi
 
-# 4. Check Node.js (optional, for some tooling)
+# 4. Node.js: contracts/ethereum takes poseidon-solidity from npm
 print_info "Checking Node.js installation..."
-if ! command -v node &> /dev/null; then
-    print_warn "Node.js not found. It's optional but recommended for some tooling."
-    print_warn "Install from: https://nodejs.org/"
-else
-    print_info "Node.js is already installed: $(node --version)"
+if ! command -v npm &> /dev/null; then
+    print_error "npm not found. contracts/ethereum needs it for poseidon-solidity."
+    print_error "Install Node.js from: https://nodejs.org/"
+    exit 1
 fi
+print_info "Node.js is already installed: $(node --version)"
 
-# 5. Initialize Foundry project for Ethereum contracts
-print_info "Initializing Foundry project for Ethereum contracts..."
-cd contracts/ethereum
+# 5. Solidity dependencies — the same two steps as .woodpecker/solidity.yaml.
+# Both land in gitignored directories; nothing tracked is touched.
+print_info "Installing Solidity dependencies..."
+(
+    cd contracts/ethereum
+    npm install
+    test -d lib/forge-std || forge install --no-git foundry-rs/forge-std
+)
 
-if [ ! -d "lib" ]; then
-    forge init --no-git --force .
-    print_info "Foundry project initialized"
-else
-    print_info "Foundry project already initialized"
-fi
-
-# Install OpenZeppelin contracts
-print_info "Installing OpenZeppelin contracts..."
-if [ ! -d "lib/openzeppelin-contracts" ]; then
-    forge install OpenZeppelin/openzeppelin-contracts --no-git
-else
-    print_info "OpenZeppelin contracts already installed"
-fi
-
-# Install forge-std (should be there from init, but ensure it's updated)
-print_info "Ensuring forge-std is installed..."
-if [ ! -d "lib/forge-std" ]; then
-    forge install foundry-rs/forge-std --no-git
-else
-    cd lib/forge-std && git pull origin master || true
-    cd ../..
-fi
-
-cd ../..
-
-# 6. Create necessary directories
-print_info "Creating project directories..."
-mkdir -p crates/{eth-frontend,crypto,merkle-tree,zk-proofs,acki-nacki-interface}/src
-mkdir -p contracts/ethereum/{src,test,script}
-mkdir -p test/integration
-mkdir -p docs
-
-# 7. Build Rust workspace to download dependencies
+# 6. Build Rust workspace to download dependencies
 print_info "Building Rust workspace (this may take a while on first run)..."
 cargo fetch
 
@@ -140,7 +113,7 @@ else
     print_warn "Rust workspace has some issues, but dependencies are fetched"
 fi
 
-# 8. Install additional tools
+# 7. Install additional tools
 print_info "Installing additional Rust tools..."
 
 # cargo-nextest for better testing
@@ -167,8 +140,10 @@ else
     print_info "cargo-audit already installed"
 fi
 
-# 9. Setup git hooks (optional)
-if [ -d ".git" ]; then
+# 8. Setup git hooks (optional); an existing pre-commit hook is kept
+if [ -d ".git" ] && [ -e ".git/hooks/pre-commit" ]; then
+    print_warn "Keeping the existing .git/hooks/pre-commit"
+elif [ -d ".git" ]; then
     print_info "Setting up git hooks..."
     mkdir -p .git/hooks
     
@@ -208,28 +183,7 @@ EOF
     print_info "Git hooks installed"
 fi
 
-# 10. Create .env.example file
-print_info "Creating .env.example file..."
-cat > .env.example << 'EOF'
-# Ethereum Configuration
-ETH_RPC_URL=http://localhost:8545
-ETH_CHAIN_ID=1337
-ETH_PRIVATE_KEY=
-
-# Contract Addresses (will be filled after deployment)
-BRIDGE_CONTRACT_ADDRESS=
-
-# Acki Nacki Configuration (placeholder)
-ACKI_NACKI_RPC_URL=
-ACKI_NACKI_CONTRACT_ADDRESS=
-
-# Logging
-RUST_LOG=info
-EOF
-
-print_info ".env.example created"
-
-# 11. Print summary
+# 9. Print summary
 echo ""
 echo "========================================="
 print_info "Setup completed successfully!"
@@ -242,11 +196,12 @@ echo "  - Forge: $(forge --version | head -n 1)"
 echo "  - Anvil: $(anvil --version)"
 echo ""
 echo "Next steps:"
-echo "  1. Copy .env.example to .env and configure your settings"
+echo "  1. Copy contracts/ethereum/.env.example to contracts/ethereum/.env and configure it"
 echo "  2. Run './build.sh' to build the entire project"
 echo "  3. Run './build.sh --test' to build and run all tests"
 echo "  4. Run 'anvil' in a separate terminal to start a local Ethereum node"
-echo "  5. Run integration tests with 'cargo test --package eth-frontend --test integration_test -- --ignored'"
+echo "  5. Run 'make deploy-local' to deploy a test bridge to it"
+echo "  6. Run 'make pre-push' before pushing"
 echo ""
 echo "Development commands:"
 echo "  - 'cargo watch -x check' - Auto-rebuild on changes"

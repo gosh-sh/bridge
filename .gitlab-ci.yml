@@ -14,11 +14,10 @@ variables:
   # Disable TLS verification for self-signed certificates
   GIT_SSL_NO_VERIFY: "true"
   CI_SERVER_TLS_CA_FILE: ""
-  # Resolve cargo git deps via the system git CLI so the github.com
-  # url.insteadOf rewrite (with $GH_READ_TOKEN) in .rust_base is honoured.
-  # Needed by the crates/bridge-prover-libraries + crates/bridge-evm-aggregator
-  # jobs, which pull the private gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits
-  # dependency (the other three gosh-sh halo2 repos are public).
+  # Resolve cargo git deps via the system git CLI. All gosh-sh git repos in
+  # the dependency graph are public post-vendoring, so no token is needed to
+  # fetch them, but keeping the system git CLI in place preserves the
+  # familiar `~/.gitconfig` behaviour for any future auth needs.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 # Cache configuration
@@ -52,32 +51,13 @@ default:
   before_script:
     # Configure git to use CI_JOB_TOKEN for GitLab authentication
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@vcs.modus-ponens.com/".insteadOf "https://vcs.modus-ponens.com/"
-    # Authenticate to github.com for the ONE private cargo git dependency
-    # (gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits). $GH_READ_TOKEN is a
-    # masked+protected CI/CD variable; it is only present on protected refs
-    # (main/tags), so the private-dep jobs are gated on it via `rules` and skip
-    # cleanly on MR/branch pipelines where it is absent.
-    - if [ -n "$GH_READ_TOKEN" ]; then git config --global url."https://${GH_READ_TOKEN}@github.com/".insteadOf "https://github.com/"; fi
+    # All gosh-sh git repos in the dependency graph are public post-vendoring,
+    # so no github.com token is required to fetch cargo git deps.
     # Ensure we're using nightly toolchain
     - rustup default nightly
     - rustc --version
     - cargo --version
     - rustup component add rustfmt clippy
-
-# Gate for every job that resolves the private circuits dependency
-# (gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits — the other three gosh-sh
-# halo2 repos are public). $GH_READ_TOKEN is a masked+protected CI/CD variable,
-# so it exists only on protected refs (main/tags): there these jobs run, and on
-# MR/branch pipelines they skip cleanly instead of hard-failing the clone.
-#
-# Anything that runs cargo inside crates/bridge-prover-libraries,
-# crates/bridge-relayer-daemon or crates/bridge-evm-aggregator belongs here,
-# including `cargo fmt -p …`, which resolves the graph via `cargo metadata`.
-# Keep the gate consistent across a `needs:` edge — a job that needs a gated
-# job and is not gated itself makes the whole pipeline fail to generate.
-.private_dep_gate:
-  rules:
-    - if: '$GH_READ_TOKEN'
 
 # Base job for Foundry
 .foundry_base:
@@ -164,7 +144,7 @@ build:rust:release:
 # `cd crates/bridge-relayer-daemon && cargo …` cannot resolve workspace=true
 # circuit deps. Without this job, relayer regressions ship to main silently.
 build:rust:relayer:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: build
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
@@ -179,7 +159,7 @@ build:rust:relayer:
 # bridge-evm-aggregator is excluded from the workspace (axiom halo2-lib vs gosh
 # fork in the orchestrator). Dedicated build/test keeps R15 regressions visible.
 build:rust:aggregator:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: build
   cache:
     key: rust-aggregator-$CI_COMMIT_REF_SLUG
@@ -257,7 +237,7 @@ test:rust:
 # `#[ignore]`-gated live tests (e.g. `tests/live_bk_set_sentry.rs`) stay
 # skipped; this job runs the unit + non-live integration tests.
 test:rust:relayer:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
@@ -276,7 +256,7 @@ test:rust:relayer:
 # the end-user CLI's tests never run in CI — which is how the NODE-3913
 # conformance gaps reached main.
 build:rust:ackinacki-bridge:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: build
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
@@ -289,7 +269,7 @@ build:rust:ackinacki-bridge:
     - cargo build --locked -p ackinacki-bridge --all-targets
 
 test:rust:ackinacki-bridge:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   variables:
     # Serial. Parts of this suite are process-level and race against each other
@@ -413,13 +393,6 @@ test:rust:ackinacki-bridge:enospc:
   tags:
     - privileged
   rules:
-    # This job `needs: build:rust:ackinacki-bridge`, which is gated on
-    # $GH_READ_TOKEN. A `needs` edge to a job that is not in the pipeline is
-    # not a skip — the pipeline fails to generate at all, so the same gate has
-    # to be repeated here. It cannot come from `.private_dep_gate`: job-level
-    # `rules` replace extended ones rather than merging with them.
-    - if: $GH_READ_TOKEN == null
-      when: never
     # Gated on an explicit variable, not merely on the pipeline source. A
     # job whose tag no runner carries does not fail — it sits `pending` and
     # the scheduled pipeline never completes. Until someone provisions the
@@ -461,11 +434,6 @@ test:rust:ackinacki-bridge:keycache:
   extends: .rust_base
   stage: test
   rules:
-    # Runs cargo inside crates/bridge-prover-libraries, so it needs the private
-    # circuits dependency like the rest of that group. Repeated here rather than
-    # extended, because job-level `rules` replace extended ones.
-    - if: $GH_READ_TOKEN == null
-      when: never
     # Scheduled runs, plus an opt-in button on an MR so a branch touching
     # the prover keys can be checked before merge instead of after.
     #
@@ -671,7 +639,7 @@ test:rust:ackinacki-bridge:keycache:
       cargo test --locked -p bridge-prover-lib keys:: -- --include-ignored --test-threads=1
 
 test:rust:aggregator:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   cache:
     key: rust-aggregator-$CI_COMMIT_REF_SLUG
@@ -756,7 +724,7 @@ lint:rust:clippy:
 # Same gap-coverage rationale as `build:rust:relayer`: clippy/fmt on the
 # workspace skip the excluded relayer crate.
 lint:rust:relayer:fmt:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   script:
     # bridge-relayer-daemon is a symlink member of the crates/bridge-prover-libraries
@@ -769,7 +737,7 @@ lint:rust:relayer:fmt:
   allow_failure: false
 
 lint:rust:relayer:clippy:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG
@@ -789,7 +757,7 @@ lint:rust:relayer:clippy:
 # the series that fixed them, because a gate nobody can pass is a gate
 # people learn to ignore.
 lint:rust:ackinacki-bridge:fmt:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   script:
     # `-p`, not `--all`: the crate is reached through a symlink into the
@@ -800,7 +768,7 @@ lint:rust:ackinacki-bridge:fmt:
   allow_failure: false
 
 lint:rust:ackinacki-bridge:clippy:
-  extends: [.rust_base, .private_dep_gate]
+  extends: .rust_base
   stage: test
   cache:
     key: rust-relayer-$CI_COMMIT_REF_SLUG

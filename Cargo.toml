@@ -18,9 +18,12 @@ exclude = [
     # Sub-workspace migrated from gosh-sh/acki-nacki-to-eth-bridge-halo2-prover
     # 2026-06-18. Uses gosh-fork halo2-base (bump-halo2-lib-v0.4.1); cannot
     # coexist with the root workspace's halo2 backend. Build standalone via
-    # `cd crates/an-bridge-prover && cargo build`.
-    "crates/an-bridge-prover",
+    # `cd crates/bridge-prover-libraries && cargo build`.
     "crates/bridge-prover-libraries",
+    # Sub-workspace: same gosh-fork halo2 backend as bridge-prover-libraries,
+    # same reason for the exclude. Build standalone via
+    # `cd crates/bridge-circuits && cargo build`.
+    "crates/bridge-circuits",
 ]
 
 [workspace.package]
@@ -80,7 +83,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 hex = "0.4"
 bytes = "1.9"
 
-tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.5.an", default-features = false, features = [
+tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",
 ] }

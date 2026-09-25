@@ -45,6 +45,9 @@ verify_verifier_lane() {
   require_code "$yul" "$label Yul verifier"
 
   [[ -s "$BRIDGE_VERIFIERS_DIR/$bin_name" ]] || die "missing verifier bin $bin_name"
+  # aggregate-proof self-checks every proof against the source, not the bin.
+  [[ -s "$BRIDGE_VERIFIERS_DIR/${bin_name%.bin}.sol" ]] ||
+    die "missing verifier source ${bin_name%.bin}.sol"
   on_chain=$(cast code "$yul" --rpc-url "$RPC_URL" | lower)
   # gen_evm_verifier_shplonk emits a 32-byte CREATE prelude followed by the
   # runtime payload. ShplonkDeployLib deploys the full bin; eth_getCode returns
@@ -127,9 +130,6 @@ if [[ "$runtime_layout" == compose ]]; then
     cd "$BRIDGE_REPO_DIR"
     sha256sum --check --strict IMAGE-SHA256SUMS
   )
-  solc_version=$(solc --version | awk '/^Version:/{print $2}')
-  [[ "$solc_version" == 0.8.19+commit.7dd6d404.Linux.g++ ]] ||
-    die "image solc version mismatch: $solc_version"
   ok "immutable image artifacts pinned at source $actual_commit"
 else
   actual_commit=$(git -c safe.directory="$BRIDGE_REPO_DIR" -C "$BRIDGE_REPO_DIR" rev-parse HEAD)
@@ -144,6 +144,8 @@ fi
 [[ -x "$RELAYER_BINARY" ]] || die "relayer binary is missing"
 aggregator_binary=$BRIDGE_AGGREGATOR_DIR/target/release/aggregate-proof
 [[ -x "$aggregator_binary" ]] || die "aggregate-proof binary is missing"
+"$aggregator_binary" --help | grep -q -- --allow-source-drift ||
+  die "aggregate-proof predates the verifier source self-check; rebuild it"
 "$RELAYER_BINARY" --help >/dev/null || die "relayer cannot execute on this OS"
 actual_relayer_hash=$(sha256sum "$RELAYER_BINARY" | awk '{print $1}')
 actual_aggregator_hash=$(sha256sum "$aggregator_binary" | awk '{print $1}')

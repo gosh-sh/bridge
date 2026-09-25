@@ -82,10 +82,17 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         return ShplonkDeployLib.deployVerifyBlockProduction(PRIMARY_BIN, FALLBACK_BIN, LAYER_BIN);
     }
 
+    /// Skip this test (not setUp) so a missing fixture shows as four
+    /// skipped cases with a reason, not one anonymous `setUp` skip.
+    function _skipIfNoArtefacts() internal {
+        if (!_artefactsPresent()) {
+            vm.skip(true, "bound_scenario.json + verifier calldata not in repo");
+        }
+    }
+
     function setUp() public {
         if (!_artefactsPresent()) {
-            emit log("SKIP: bound_scenario.json + verifier calldata not in repo");
-            vm.skip(true);
+            return;
         }
         scenario = _loadScenario();
 
@@ -113,9 +120,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function test_productionPrimaryAttestation_isolated() public {
-        if (!_artefactsPresent()) {
-            vm.skip(true);
-        }
+        _skipIfNoArtefacts();
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);
         assertTrue(
@@ -128,9 +133,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function test_productionFallbackAttestation_isolated() public {
-        if (!_artefactsPresent()) {
-            vm.skip(true);
-        }
+        _skipIfNoArtefacts();
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         bytes memory proofFallback = vm.readFileBinary(FALLBACK_CALLDATA);
         assertTrue(
@@ -166,9 +169,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     /// 1A + Circuit 2). Exercises the cross-circuit `block_id` / `bkSetCommitment`
     /// binding on-chain — green since the bound-witness fix.
     function test_productionVerifyBlock_boundCalldata_advancesState() public {
-        if (!_artefactsPresent()) {
-            vm.skip(true);
-        }
+        _skipIfNoArtefacts();
 
         ShplonkDeployLib.VerifyBlockVerifiers memory v = _deployTriple();
         assertTrue(_layerProofVerifies(v), "layer-hashes SHPLONK pairing must be green");
@@ -210,9 +211,7 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
     }
 
     function test_productionVerifyBlock_tamperedCalldata_reverts() public {
-        if (!_artefactsPresent()) {
-            vm.skip(true);
-        }
+        _skipIfNoArtefacts();
 
         bytes memory proofPrimary = vm.readFileBinary(PRIMARY_CALLDATA);
         bytes memory proofLayer = vm.readFileBinary(LAYER_CALLDATA);

@@ -1339,8 +1339,8 @@ Scope of *this* deployment (dismisses several open questions upfront):
    its key/RPC credentials only in root-owned env files outside the clone.
    Never reuse the tracked development burner for a server.
 3. **SRS + toolchain** — provision K=17,19,20,21,22, generate the inner
-   PK/VK/config set, install `solc 0.8.19`, then seal and hash the static
-   artifact manifest. Keep the outer `pk_cache` writable on a bind mount.
+   PK/VK/config set, then seal and hash the static artifact manifest. Keep
+   the outer `pk_cache` writable on a bind mount.
 4. **Deploy the bundle** — load deployment values from the external env and
    run the helper once from `crates/bridge-prover-libraries/`:
    ```bash

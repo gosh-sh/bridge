@@ -19,10 +19,11 @@ contract ShplonkDeployLibTest is Test {
         try vm.readFileBinary(SPIKE_BIN) returns (bytes memory b) {
             bytecode = b;
         } catch {
-            emit log("SKIP: run make generate-spike-artifacts");
-            return;
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
         }
-        if (bytecode.length == 0) return;
+        if (bytecode.length == 0) {
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
+        }
 
         calldata_ = vm.readFileBinary(SPIKE_CALLDATA);
         require(calldata_.length > 0, "empty spike calldata");
@@ -35,9 +36,11 @@ contract ShplonkDeployLibTest is Test {
 
     function test_shplonkWrapper_rejectsTamperedCalldata() public {
         try vm.readFileBinary(SPIKE_BIN) returns (bytes memory bytecode) {
-            if (bytecode.length == 0) return;
+            if (bytecode.length == 0) {
+                vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
+            }
         } catch {
-            return;
+            vm.skip(true, "spike fixtures missing (run make generate-spike-artifacts)");
         }
 
         bytes memory calldata_ = vm.readFileBinary(SPIKE_CALLDATA);

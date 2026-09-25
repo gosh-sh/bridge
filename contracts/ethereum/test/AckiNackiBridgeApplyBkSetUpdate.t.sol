@@ -114,6 +114,7 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
             hex"00",
             expectedRoot,
             SEQ,
+            0,
             L2,
             L3,
             h01,
@@ -261,45 +262,54 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ + 1);
     }
 
-    /// @notice After `verifyBlock` the two cursors diverge. The attestation
-    ///         `lastSeen` argument must be the live layer cursor, not the
-    ///         BK-update monotonicity cursor. The mock asserts the value.
-    function test_applyBkSetUpdate_afterVerifyBlock_usesLayerCursor() public {
-        // Prime the layer cursor to exactly SEQ so the ordering invariant
-        // (BRIDGE-ETH-WD-2, `blockSeqNo <= storedLastSeenBlockSeqNo`) holds
-        // at the equality boundary. The two cursors still diverge —
-        // BK-update cursor is 0, layer cursor is SEQ — which is what this
-        // test pins.
+    /// @notice After `verifyBlock(N)` the live cursor is N. Circuit 1A/1B
+    ///         requires `last_seen < block_seq_no`, so the rotation proof
+    ///         was baked against the previous cursor (0 here), not the
+    ///         live one. The mock asserts the value the contract forwards.
+    function test_applyBkSetUpdate_afterVerifyBlock_usesBakedLastSeen() public {
+        // Prime the layer cursor to SEQ. Apply after verifyBlock still
+        // works; lastSeen is not the attestation instance.
         _submitLayerBundle(SEQ);
         assertEq(bridge.storedLastSeenBlockSeqNo(), SEQ);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), 0);
 
-        primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastSeenBlockSeqNo());
+        primary.setExpectedLastSeenBlockSeqNo(0);
         _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
 
         assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), SEQ);
         assertEq(
             bridge.storedLastSeenBlockSeqNo(), SEQ, "rotation does not advance the layer cursor"
         );
     }
 
-    /// @notice Baking the BK-update cursor (0 here) after a `verifyBlock`
-    ///         must fail the same way a real adapter would.
-    function test_applyBkSetUpdate_afterVerifyBlock_rejectsBkUpdateCursor() public {
-        // Prime the layer cursor to SEQ so this test isolates the mock's
-        // `lastSeen` mismatch — otherwise the BRIDGE-ETH-WD-2 ordering guard
-        // would fire first with `VerifyBlockLagBehindRotation` instead of
-        // reaching the attestation adapter.
+    /// @notice Apply first. `verifyBlock(N)` still accepts the outgoing set.
+    function test_applyBkSetUpdate_beforeVerifyBlock_storesPrev() public {
+        _apply(_merkleRoot(L2, L3), SEQ, L2, L3);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
+        assertEq(bridge.storedBkSetCommitment(), L3);
+        _submitLayerBundle(SEQ);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), SEQ);
+    }
+
+    /// @notice Passing the live cursor after `verifyBlock(N)` as
+    ///         `attestationLastSeen` is `last_seen == blockSeqNo` and is
+    ///         rejected before the adapter (Circuit 1A/1B is unsatisfiable).
+    function test_applyBkSetUpdate_rejectsLiveCursorAsLastSeen() public {
         _submitLayerBundle(SEQ);
         uint256 blockId = _merkleRoot(L2, L3);
-        primary.setExpectedLastSeenBlockSeqNo(bridge.storedLastBkSetUpdateSeqNo());
 
-        vm.expectRevert(AckiNackiBridge.AttestationProofRejected.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.AttestationLastSeenNotBeforeSeqNo.selector, SEQ, SEQ
+            )
+        );
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
             hex"00",
             blockId,
+            SEQ,
             SEQ,
             L2,
             L3,
@@ -309,10 +319,9 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         );
     }
 
-    /// @dev Fast-forward `storedLastSeenBlockSeqNo` to `target` so a subsequent
-    ///      `applyBkSetUpdate(target)` satisfies the BRIDGE-ETH-WD-2 ordering
-    ///      invariant. Wraps `_submitLayerBundle` so tests read like
-    ///      "prime cursor, then apply".
+    /// @dev Fast-forward `storedLastSeenBlockSeqNo` to `target`. The first
+    ///      rotation no longer requires this; tests still use it to show
+    ///      apply-after-verifyBlock and baked lastSeen.
     function _primeLayerCursor(uint64 target) internal {
         _submitLayerBundle(target);
     }
@@ -334,11 +343,22 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
     }
 
     function _apply(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
+        _applyWithLastSeen(blockId, seqNo, 0, oldL2, newL3);
+    }
+
+    function _applyWithLastSeen(
+        uint256 blockId,
+        uint64 seqNo,
+        uint64 lastSeen,
+        uint256 oldL2,
+        uint256 newL3
+    ) internal {
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Primary,
             hex"00",
             blockId,
             seqNo,
+            lastSeen,
             oldL2,
             newL3,
             SIB_H01,

@@ -16,16 +16,12 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeApplyBkSetUpdateOrderingTest
-/// @notice BRIDGE-ETH-WD-2 — `applyBkSetUpdate(N)` must not proceed unless
-///         `verifyBlock` has already covered block `N`
-///         (`blockSeqNo <= storedLastSeenBlockSeqNo`). Without this invariant,
-///         a permissionless caller — buggy relayer, hostile actor
-///         front-running the honest relayer at a bundle-boundary rotation —
-///         can flip `storedBkSetCommitment` OLD → NEW while block `N`'s
-///         attestation is still signed by OLD keys, permanently bricking
-///         `verifyBlock(N)` and stranding every future block anchored through
-///         `N`'s layers. No admin recovery exists (immutable verifiers, no
-///         pause, no state-reset), so the guard has to live on-chain.
+/// @notice After `applyBkSetUpdate(N)`, `verifyBlock` accepts the previous
+///         BK-set for `blockSeqNo <= N`. The first rotation may land
+///         before the layer cursor covers N (off-boundary rotations have
+///         no bundle at N). A second rotation is blocked until
+///         `storedLastSeenBlockSeqNo >=` the previous N — only one
+///         outgoing set is stored.
 ///
 /// @dev The pre-existing `AckiNackiBridgeApplyBkSetUpdate.t.sol` covers the
 ///      other rotation invariants (canonicity, Merkle fold, monotonicity, ...).
@@ -86,42 +82,28 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     // Case 1 — direct rotation ahead of a fresh layer cursor
     // -----------------------------------------------------------------
 
-    /// @notice Fresh deploy, `storedLastSeenBlockSeqNo == 0`. Any rotation
-    ///         with `blockSeqNo > 0` must revert `VerifyBlockLagBehindRotation`
-    ///         and leave every rotation-side state field untouched.
-    function test_applyBkSetUpdate_revertsWhenAheadOfLayerCursor_primary() public {
+    /// @notice Fresh deploy, `storedLastSeenBlockSeqNo == 0`. The first
+    ///         rotation may apply; `verifyBlock(N)` then still binds to OLD.
+    function test_applyBkSetUpdate_aheadOfLayerCursor_primary_thenVerifyOld() public {
         _assertPristine();
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
 
-        // Hoist the SHA-256 precompile fold out of the `vm.expectRevert`
-        // window — otherwise the first precompile staticcall from
-        // `_merkleRoot` is what `expectRevert` observes, and it returns
-        // successfully, so the assertion fails before `applyBkSetUpdate` runs.
-        uint256 root = _merkleRoot(L2, L3);
+        assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 0, "rotation must not advance the layer cursor");
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, N, uint64(0)
-            )
-        );
-        _applyPrimary(root, N, L2, L3);
-
-        _assertPristine();
+        _primeLayerCursor(N, L2);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), N);
     }
 
     /// @notice Symmetric on the Fallback path.
-    function test_applyBkSetUpdate_revertsWhenAheadOfLayerCursor_fallback() public {
+    function test_applyBkSetUpdate_aheadOfLayerCursor_fallback_thenVerifyOld() public {
         _assertPristine();
-
-        uint256 root = _merkleRoot(L2, L3);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, N, uint64(0)
-            )
-        );
-        _applyFallback(root, N, L2, L3);
-
-        _assertPristine();
+        _applyFallback(_merkleRoot(L2, L3), N, L2, L3);
+        _primeLayerCursor(N, L2);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), N);
+        assertEq(bridge.storedBkSetCommitment(), L3);
     }
 
     // -----------------------------------------------------------------
@@ -132,7 +114,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     ///         path lands here: `verifyBlock(N)` sets `storedLastSeen == N`,
     ///         then `applyBkSetUpdate(N)` must proceed.
     function test_applyBkSetUpdate_atLayerCursor_succeeds() public {
-        _primeLayerCursor(N);
+        _primeLayerCursor(N, L2);
         assertEq(bridge.storedLastSeenBlockSeqNo(), N, "layer cursor at N");
 
         vm.expectEmit(true, true, true, true);
@@ -151,7 +133,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     /// @notice Correct order: `verifyBlock(N)` first, then `applyBkSetUpdate(N)`.
     ///         Both succeed; both cursors advance to `N`.
     function test_applyBkSetUpdate_combinedBlock_correctOrder_succeeds() public {
-        _primeLayerCursor(N);
+        _primeLayerCursor(N, L2);
 
         uint256 root = _merkleRoot(L2, L3);
         vm.expectEmit(true, true, true, true);
@@ -159,94 +141,126 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         _applyPrimary(root, N, L2, L3);
 
         assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
         assertEq(bridge.storedLastSeenBlockSeqNo(), N);
     }
 
-    /// @notice Wrong order: `applyBkSetUpdate(N)` first, on a fresh layer
-    ///         cursor. Must revert `VerifyBlockLagBehindRotation`, leave every
-    ///         rotation-side field untouched, and let the caller recover with
-    ///         `verifyBlock(N)` then `applyBkSetUpdate(N)`. This is the
-    ///         "state-invariant under adversarial ordering" property.
-    function test_applyBkSetUpdate_combinedBlock_wrongOrder_stateInvariant() public {
+    /// @notice Apply first, then `verifyBlock(N)` under OLD. The rotation
+    ///         block is signed by the outgoing set; accepting the previous
+    ///         commitment is what makes apply-ahead safe.
+    function test_applyBkSetUpdate_thenVerifyBlock_acceptsPrevCommitment() public {
         _assertPristine();
-
-        uint256 root = _merkleRoot(L2, L3);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, N, uint64(0)
-            )
-        );
-        _applyPrimary(root, N, L2, L3);
-
-        // No state change from the reverted rotation.
-        _assertPristine();
-
-        // Recovery: verifyBlock(N) under OLD succeeds — the guard did not
-        // touch `storedBkSetCommitment`, so the attestation still binds to
-        // OLD as it must.
-        _primeLayerCursor(N);
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        _primeLayerCursor(N, L2);
         assertEq(bridge.storedLastSeenBlockSeqNo(), N);
-        assertEq(
-            bridge.storedBkSetCommitment(), L2, "OLD commitment survived the reverted rotation"
-        );
-
-        // Now the rotation goes through.
-        vm.expectEmit(true, true, true, true);
-        emit BkSetUpdated(L2, L3, N);
-        _applyPrimary(root, N, L2, L3);
-
         assertEq(bridge.storedBkSetCommitment(), L3);
-        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
     }
 
     // -----------------------------------------------------------------
     // Case 4 — adversarial spam
     // -----------------------------------------------------------------
 
-    /// @notice A hostile actor spamming rotations ahead of the layer cursor
-    ///         must not brick anything. Every call reverts, storage stays
-    ///         pristine, and an honest `verifyBlock` → `applyBkSetUpdate`
-    ///         still succeeds afterwards.
-    function test_applyBkSetUpdate_spamAheadOfLayer_allRevert() public {
-        uint256 rootFuture = _merkleRoot(L2, L3);
+    /// @notice A second rotation while the layer cursor is still behind the
+    ///         first N reverts and leaves the first rotation in place.
+    function test_applyBkSetUpdate_secondRotation_revertsUntilPreviousCovered() public {
+        uint256 root = _merkleRoot(L2, L3);
+        _applyPrimary(root, N, L2, L3);
 
-        for (uint64 i = 1; i <= 32; i++) {
-            vm.expectRevert(
-                abi.encodeWithSelector(
-                    AckiNackiBridge.VerifyBlockLagBehindRotation.selector, i, uint64(0)
-                )
-            );
-            _applyPrimary(rootFuture, i, L2, L3);
-        }
-        _assertPristine();
+        uint256 l4 = 0xC0DE;
+        uint256 root2 = _merkleRoot(L3, l4);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, N, uint64(0)
+            )
+        );
+        _applyPrimary(root2, N + 3, L3, l4);
 
-        // Honest recovery still works — state was never mutated.
-        _primeLayerCursor(N);
-        _applyPrimary(rootFuture, N, L2, L3);
-        assertEq(bridge.storedBkSetCommitment(), L3);
+        assertEq(bridge.storedBkSetCommitment(), L3, "first rotation kept");
+        assertEq(bridge.storedPrevBkSetCommitment(), L2);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
+
+        _primeLayerCursor(N, L2);
+        _applyPrimary(root2, N + 3, L3, l4);
+        assertEq(bridge.storedBkSetCommitment(), l4);
+        assertEq(bridge.storedPrevBkSetCommitment(), L3);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N + 3);
+    }
+
+    /// @notice Lower edge of the second-rotation guard: cursor = N1 − 1
+    ///         still reverts, and the first field is the previous N.
+    function test_applyBkSetUpdate_secondRotation_revertsAtCursorN1MinusOne() public {
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        _primeLayerCursor(N - 1, L2);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), N - 1);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
+
+        uint256 l4 = 0xC0DE;
+        uint256 root2 = _merkleRoot(L3, l4);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, uint64(N), uint64(N - 1)
+            )
+        );
+        bridge.applyBkSetUpdate(
+            AckiNackiBridge.FinalizationType.Primary,
+            hex"00",
+            root2,
+            N + 3,
+            0,
+            L3,
+            l4,
+            SIB_H01,
+            SIB_H4_7,
+            SIB_H8_15
+        );
+    }
+
+    /// @notice Fallback path forwards a non-zero baked `lastSeen`.
+    function test_applyBkSetUpdate_fallback_forwardsBakedLastSeen() public {
+        fallbackVerifier.setExpectedLastSeenBlockSeqNo(3);
+        _applyFallbackWithLastSeen(_merkleRoot(L2, L3), N, 3, L2, L3);
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), N);
     }
 
-    /// @notice Adversarial spam with a rotation `blockSeqNo` strictly ahead of
-    ///         a partially-advanced layer cursor. The guard fires on every
-    ///         call and reports the *current* cursor value in the error data,
-    ///         not a stale one.
-    function test_applyBkSetUpdate_spamStrictlyAheadOfLayer_reportsLiveCursor() public {
-        _primeLayerCursor(N);
+    /// @notice After the cursor covers the first rotation, a further
+    ///         rotation may apply even if it is ahead of the cursor.
+    function test_applyBkSetUpdate_secondRotation_afterCover_mayLeadCursor() public {
+        _primeLayerCursor(N, L2);
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
 
-        uint256 root = _merkleRoot(L2, L3);
-        uint64 target = N + 3;
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.VerifyBlockLagBehindRotation.selector, target, N)
-        );
-        _applyPrimary(root, target, L2, L3);
-
-        // Storage untouched.
-        assertEq(bridge.storedBkSetCommitment(), L2);
-        assertEq(bridge.storedLastBkSetUpdateSeqNo(), 0);
+        uint256 l4 = 0xC0DE;
+        _applyPrimary(_merkleRoot(L3, l4), N + 3, L3, l4);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), N + 3);
         assertEq(bridge.storedLastSeenBlockSeqNo(), N);
+        _primeLayerCursor(N + 1, L3);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), N + 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Case 5 — `_expectedBkSetFor` negatives
+    // -----------------------------------------------------------------
+
+    /// @notice After apply(N) a later block signed by the outgoing set
+    ///         reverts. This is the point of rotating.
+    function test_verifyBlock_afterRotation_rejectsPrevCommitmentPastN() public {
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        uint256 anchor = bridge.expectedPrevAnchor(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.BkSetCommitmentMismatch.selector, L2, L3)
+        );
+        _verify(N + 1, L2, anchor);
+    }
+
+    /// @notice At or below N the new set is not yet the signer.
+    function test_verifyBlock_afterRotation_rejectsNewCommitmentAtOrBeforeN() public {
+        _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
+        uint256 anchor = bridge.expectedPrevAnchor(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.BkSetCommitmentMismatch.selector, L3, L2)
+        );
+        _verify(N, L3, anchor);
     }
 
     // -----------------------------------------------------------------
@@ -266,7 +280,11 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     ///      `verifyBlock` submission. `verifyBlock`'s only monotonicity
     ///      requirement is strict-greater, so any positive `target` works from
     ///      a fresh state.
-    function _primeLayerCursor(uint64 target) internal {
+    function _primeLayerCursor(uint64 target, uint256 bkSet) internal {
+        _verify(target, bkSet, bridge.expectedPrevAnchor(1));
+    }
+
+    function _verify(uint64 target, uint256 bkSet, uint256 prevAnchor) internal {
         uint256[10] memory layers;
         layers[0] = 1;
         bridge.verifyBlock(
@@ -274,11 +292,11 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
             hex"00",
             hex"00",
             1,
-            L2,
+            bkSet,
             target,
             1,
             layers,
-            bridge.expectedPrevAnchor(1)
+            prevAnchor
         );
     }
 
@@ -288,6 +306,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
             hex"00",
             blockId,
             seqNo,
+            0,
             oldL2,
             newL3,
             SIB_H01,
@@ -297,11 +316,22 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     }
 
     function _applyFallback(uint256 blockId, uint64 seqNo, uint256 oldL2, uint256 newL3) internal {
+        _applyFallbackWithLastSeen(blockId, seqNo, 0, oldL2, newL3);
+    }
+
+    function _applyFallbackWithLastSeen(
+        uint256 blockId,
+        uint64 seqNo,
+        uint64 lastSeen,
+        uint256 oldL2,
+        uint256 newL3
+    ) internal {
         bridge.applyBkSetUpdate(
             AckiNackiBridge.FinalizationType.Fallback,
             hex"00",
             blockId,
             seqNo,
+            lastSeen,
             oldL2,
             newL3,
             SIB_H01,

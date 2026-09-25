@@ -399,6 +399,7 @@ mod tests {
             // Tests want soft-retry semantics: mock bridge tests exercise
             // long revert streaks and would trip the abort gate.
             max_attempts_abort: u32::MAX,
+            bundle_stride: bridge_prover_lib::BUNDLE_STRIDE_L1,
         };
         Relayer::new(
             cfg,

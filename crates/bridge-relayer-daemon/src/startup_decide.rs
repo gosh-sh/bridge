@@ -76,6 +76,14 @@ pub struct DecideInputs<'a> {
     pub anchor_level: u8,
 }
 
+/// Chain rotated at N and the local prover has not acked: it still
+/// holds `storedPrevBkSetCommitment` and a smaller `last_bk`.
+fn hold_window_unacked(local: &BridgeState, chain: &EthBridgeContractState) -> bool {
+    chain.last_bk_set_update_seq_no > local.stored_last_bk_set_update_seq_no
+        && chain.last_bk_set_update_seq_no != 0
+        && local.stored_bk_set_commitment == chain.prev_bk_set_commitment
+}
+
 /// Chronological equivalence check for local vs chain layer windows.
 ///
 /// **Endianness.** Both sides are LE (`Fr::to_repr()`). `read_full_state`
@@ -361,6 +369,12 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     }
 
     if local_seq < chain_seq {
+        if hold_window_unacked(local, chain) {
+            // Chain applied N; local still holds the outgoing set and
+            // has not acked. Catch up with that set — do not resurrect
+            // into the new commitment (that would desync prover_bk_set).
+            return StartupDecision::WarmResume;
+        }
         // Someone else advanced the contract while our local state was
         // idle. Resurrect from the chain snapshot.
         return match BridgeState::from_contract(chain.clone(), window_size, anchor_level) {
@@ -382,6 +396,9 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     // per the convention in `history_consistency.rs:59` and memory
     // `bridge_genesis_anchor_endianness.md`.
     let chain_commit = chain.bk_set_commitment;
+    if hold_window_unacked(local, chain) {
+        return StartupDecision::WarmResume;
+    }
     if local_commit != chain_commit {
         return StartupDecision::Stop {
             reason: format!(
@@ -435,6 +452,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
@@ -451,6 +469,7 @@ mod tests {
             last_seen_block_seq_no: s.stored_last_seen_block_seq_no,
             bk_set_commitment: s.stored_bk_set_commitment,
             last_bk_set_update_seq_no: s.stored_last_bk_set_update_seq_no,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         }
@@ -461,6 +480,27 @@ mod tests {
         s.initialize_bk_set_commitment([7u8; 32]).unwrap();
         s.append_bundle(&[([0x11; 32], 1)], seq_no, seq_no).unwrap();
         s
+    }
+
+    #[test]
+    fn warm_resume_when_chain_rotated_and_local_still_on_prev() {
+        let mut local = advanced_state(8);
+        local.stored_last_bk_set_update_seq_no = 0;
+        let old = local.stored_bk_set_commitment;
+        let mut chain = snapshot_as_chain(&local);
+        chain.bk_set_commitment = [0xABu8; 32];
+        chain.prev_bk_set_commitment = old;
+        chain.last_bk_set_update_seq_no = 12;
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 1,
+        }) {
+            StartupDecision::WarmResume => {},
+            d => panic!("expected WarmResume in hold window, got {d:?}"),
+        }
     }
 
     #[test]
@@ -763,6 +803,7 @@ mod tests {
             last_seen_block_seq_no: 0,
             bk_set_commitment: [0u8; 32],
             last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0u8; 32],
             genesis_prev_max_level_layer_hash: [0u8; 32],
             layer_windows,
         };

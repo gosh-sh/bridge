@@ -187,11 +187,10 @@ pub(super) async fn drive_next_bk_update(
     // the single-PK memory envelope. Pick the Fiat–Shamir flavour from the
     // driver config so a Poseidon-configured driver emits aggregator-ready
     // bytes here — same one-flavour-per-poll discipline as the bundle path.
-    // The attestation `lastSeen` instance is the live layer cursor — the
-    // same word `applyBkSetUpdate` (and `verifyBlock`) pass the adapter.
-    // `stored_last_bk_set_update_seq_no` is monotonicity-only; baking it
-    // here makes every rotation after the first `verifyBlock` fail
-    // `AttestationProofRejected` (QC-A2-2).
+    // The attestation `lastSeen` instance is the driver's layer cursor
+    // at prove time. The caller forwards that word as
+    // `attestationLastSeen`; `applyBkSetUpdate` does not substitute
+    // `storedLastSeenBlockSeqNo`.
     let last_seen_for_upd = driver.state().stored_last_seen_block_seq_no as u32;
     let transcript = driver.cfg().transcript;
     let t_upd_proof = Instant::now();

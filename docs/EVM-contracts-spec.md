@@ -136,14 +136,16 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | 2 | 20 | `aaveEnabled` | `bool` | 120 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
 | 3 | 0 | `suppliedPrincipal` | `uint256` | 123 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
 | 4 | 0 | `liquidReserveBps` | `uint256` | 128 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 131 | constructor, `transferOwnership` |
-| 6 | 0 | `yieldRecipient` | `address` | 134 | constructor, `setYieldRecipient` |
-| 7 | 0 | `_reentrancyStatus` | `uint256` | 139 | `nonReentrant` |
-| 8 | 0 | `storedBkSetCommitment` | `uint256` | 167 | constructor, `applyBkSetUpdate` |
-| 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 172 | `applyBkSetUpdate` |
-| 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 176 | constructor, `verifyBlock` |
-| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 238 | `withdrawByProof` |
-| 11 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 260 | `_appendLayer` |
+| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
+| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
+| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient` |
+| 8 | 0 | `_reentrancyStatus` | `uint256` | 148 | `nonReentrant` |
+| 9 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
+| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 181 | `applyBkSetUpdate` |
+| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 185 | constructor, `verifyBlock` |
+| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 192 | `applyBkSetUpdate`; `verifyBlock` for `seqNo <= last update` |
+| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 259 | `withdrawByProof` |
+| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 278 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:525`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:100-104`).
@@ -281,7 +283,7 @@ Permissionless. Order of operations is deliberately cheap-checks-first, then cry
 | 2 | `1 ≤ numLayers ≤ 10` | 670 | `InvalidNumLayers` |
 | 3 | `layerHashes[i] == 0` for `i ≥ numLayers` | 673 | `LayerHashTailNonZero(i)` |
 | 4 | `layerHashes[i] != 0` for `i < numLayers` | 678 | `LayerHashActiveZero(i)` (QC-A2-3: a zero active slot would let `_appendLayerHashes` skip a layer and desync the windows) |
-| 5 | `bkSetCommitment == storedBkSetCommitment` | 683 | `BkSetCommitmentMismatch` |
+| 5 | `bkSetCommitment == _expectedBkSetFor(blockSeqNo)` | — | `BkSetCommitmentMismatch` (previous set for `seqNo <= last update`) |
 | 6 | `blockSeqNo > storedLastSeenBlockSeqNo` | 686 | `BlockSeqNoNotMonotonic` |
 | 7 | `prevMaxLevelLayerHash == _expectedPrevAnchor(numLayers)` | 698-703 | `PrevAnchorMismatch` |
 | 8 | attestation proof accepted (1A or 1B per `finType`) | 713-733 | `AttestationProofRejected` |
@@ -382,23 +384,32 @@ function applyBkSetUpdate(
     bytes calldata attestationProof,
     uint256 blockId,
     uint64  blockSeqNo,
+    uint64  attestationLastSeen,
     uint256 oldCommitmentL2,
     uint256 newCommitmentL3,
     bytes32 siblingH01,
     bytes32 siblingH4_7,
     bytes32 siblingH8_15
-) external nonReentrant                                   // :799-878
+) external nonReentrant
 ```
 
-Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:810`, note
+Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (note
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
 
-1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment` (`:814`).
-2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic` (`:817`) — an
-   **independent** cursor from `storedLastSeenBlockSeqNo`.
-3. Attestation proof verified with `(blockId, oldCommitmentL2, blockSeqNo, storedLastSeenBlockSeqNo)`
-   (`:821-839`).
-4. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:854-859`):
+1. `oldCommitmentL2 == storedBkSetCommitment` else `StaleBkSetCommitment`.
+2. `blockSeqNo > storedLastBkSetUpdateSeqNo` else `BkUpdateSeqNoNotMonotonic`.
+   That cursor also selects the set `verifyBlock` accepts and gates the
+   next rotation.
+3. `storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo` else
+   `VerifyBlockLagBehindRotation` (the previous rotation must already be
+   covered). The first rotation always proceeds. After apply, `verifyBlock`
+   accepts `storedPrevBkSetCommitment` for `blockSeqNo <= N`, so an
+   off-boundary N is not a deadlock.
+4. `attestationLastSeen < blockSeqNo` else `AttestationLastSeenNotBeforeSeqNo`.
+   Circuit 1A/1B range-checks the same inequality; after `verifyBlock(N)` the
+   live cursor is N and cannot be this argument.
+5. Attestation proof verified with `(blockId, oldCommitmentL2, blockSeqNo, attestationLastSeen)`.
+6. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3:
 
    ```
    h23   = SHA256( LE32(oldCommitmentL2) ‖ LE32(newCommitmentL3) )
@@ -414,16 +425,25 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
    `Fr` image that the attestation adapter compares against — without it roughly four rotations in
    five would be unsatisfiable by any argument.
 
-5. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
-   `emit BkSetUpdated(old, new, blockSeqNo)` (`:874-877`).
+7. Effects: `storedPrevBkSetCommitment = storedBkSetCommitment`,
+   `storedBkSetCommitment = newCommitmentL3`,
+   `storedLastBkSetUpdateSeqNo = blockSeqNo`,
+   `emit BkSetUpdated(old, new, blockSeqNo)`.
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
-**Operator rule.** Attestation `lastSeen` is the live layer cursor
-`storedLastSeenBlockSeqNo`. `storedLastBkSetUpdateSeqNo` is monotonicity
-only — a rotation proof baked against that cursor fails after the first
-`verifyBlock`. If `verifyBlock` advances between prove and submit, re-prove;
-do not treat `AttestationProofRejected` as a consensus bug.
+**Operator rule.** Attestation `lastSeen` is the word the Circuit 1A/1B
+proof was baked against (`block_seq_no > last_seen`). That is the layer
+cursor at prove time, typically the previous key block — not
+`storedLastSeenBlockSeqNo` after `verifyBlock(N)`, which equals N and
+makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` selects
+the set and gates the next rotation. Relayers apply a rotation as soon
+as the previous one is covered; `verifyBlock` accepts the outgoing set
+for `seqNo <= N`. AN must announce a rotation at bundle target N
+*before* that bundle is proven: a proof that already baked
+`last_seen = N` cannot satisfy `attestationLastSeen < N`. Two
+rotations with no bundle target in `[N1, N2]` (inclusive) stall
+permanently.
 
 ### 7.4 Read surface for AN state
 
@@ -585,7 +605,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 |---|---|
 | `0xa41d0229` | `deposit(uint256,int8,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
-| `0x2a2c14a0` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
+| `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
 | `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
 | `0x6e55e4eb` | `expectedPrevAnchor(uint8)` |
 | `0x22c341e9` | `getLatestPerLayer()` |
@@ -610,7 +630,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `LayerHashTailNonZero`, `LayerHashActiveZero`, `LayerOutOfRange`, `NonMonotonicLayerHeight`.
 
 `applyBkSetUpdate`: `BkUpdateDisabled`, `StaleBkSetCommitment`, `BkUpdateSeqNoNotMonotonic`,
-`BkUpdateMerkleMismatch`.
+`BkUpdateMerkleMismatch`, `VerifyBlockLagBehindRotation`, `AttestationLastSeenNotBeforeSeqNo`.
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,

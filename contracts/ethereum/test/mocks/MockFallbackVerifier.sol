@@ -30,6 +30,14 @@ contract MockFallbackVerifier is IFallbackVerifier {
         shouldAccept = v;
     }
 
+    uint256 public expectedLastSeenBlockSeqNo;
+    bool public checkExpectedLastSeen;
+
+    function setExpectedLastSeenBlockSeqNo(uint256 v) external {
+        expectedLastSeenBlockSeqNo = v;
+        checkExpectedLastSeen = true;
+    }
+
     function verifyFallbackAttestation(
         bytes calldata, /* proof */
         uint256 blockId,
@@ -38,6 +46,9 @@ contract MockFallbackVerifier is IFallbackVerifier {
         uint256 lastSeenBlockSeqNo
     ) external view returns (bool) {
         if (!shouldAccept) return false;
+        if (checkExpectedLastSeen && lastSeenBlockSeqNo != expectedLastSeenBlockSeqNo) {
+            return false;
+        }
         return blockId < R && bkSetCommitment < R && blockSeqNo < R && lastSeenBlockSeqNo < R;
     }
 }

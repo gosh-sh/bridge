@@ -764,9 +764,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
         pub.anchorLayer = uint256(bridge.MAX_LAYER_HASHES()) + 1;
         vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.LayerOutOfRange.selector, uint8(pub.anchorLayer)
-            )
+            abi.encodeWithSelector(AckiNackiBridge.LayerOutOfRange.selector, uint8(pub.anchorLayer))
         );
         bridge.withdrawByProof(_dummyProof(), pub);
     }

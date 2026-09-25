@@ -13,11 +13,9 @@
 //! with the same shape but different constraints produce different VKs — and
 //! the aggregator accepts a proof from either.
 //!
-//! In practice this means an attacker who takes the public Circuit 4 source,
-//! deletes copy-constraints that bind Merkle path ↔ nullifier ↔ `finalRoot`,
-//! and keeps the same gate/selector layout produces a shape-preserving
-//! impostor whose aggregated proof passes `withdrawByProof`. Same defect
-//! affects `verifyBlock` and `applyBkSetUpdate`.
+//! Without this, the on-chain check pins only the inner circuit's shape,
+//! not its VK — a shape-preserving inner variant would be accepted by
+//! `withdrawByProof`, `verifyBlock` and `applyBkSetUpdate` alike.
 //!
 //! # The fix
 //!

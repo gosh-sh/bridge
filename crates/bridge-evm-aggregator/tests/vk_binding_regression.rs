@@ -11,8 +11,8 @@
 //! to (say) `std::iter::once(&pw.k)`, both sides would still agree on the
 //! degraded value and every existing test would stay green — while the
 //! on-chain adapter's `vkDigest` guard would degenerate into "any inner
-//! circuit of the same `k` passes". That is the ETH-40 defect the binding
-//! is meant to close, so it has to be locked by tests that compare digests
+//! circuit of the same `k` passes". That is the defect the binding is
+//! meant to close, so it has to be locked by tests that compare digests
 //! *across* different inner circuits of the same shape.
 //!
 //! The `ShplonkVkDigestPinDerivation.t.sol` Foundry test cannot help either
@@ -81,7 +81,7 @@ use snark_verifier_sdk::{
 /// polynomial expressions and selector patterns match). The only difference
 /// is an extra witness cell copy-constrained to `c_w`, which adds one edge
 /// to snark-verifier's permutation graph and so moves the preprocessed
-/// permutation commitments. That is exactly the class of change the ETH-40
+/// permutation commitments. That is exactly the class of change the VK
 /// binding is required to detect.
 ///
 /// Runtime-consistent: `c_copy` is loaded with the value of `c_w`, so the
@@ -221,8 +221,8 @@ fn digest_binds_preprocessed_full() {
          BaseCircuitParams, identical gate arity, identical instance count) must produce \
          a DIFFERENT digest under VerifierUniversality::Full. If this fails, the \
          `pw.preprocessed` limbs have been dropped from `expose_vk_digest`'s preimage — \
-         the ETH-40 vulnerability is back: any inner circuit of the same shape passes \
-         `withdrawByProof`.",
+         the VK-binding guard is back to shape-only: any inner circuit of the same shape \
+         passes `withdrawByProof`.",
     );
 }
 

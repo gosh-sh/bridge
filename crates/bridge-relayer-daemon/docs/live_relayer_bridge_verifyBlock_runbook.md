@@ -14,9 +14,13 @@ history stays live and never falls behind.
 
 **Scope of this runbook.** Bundle-only path: Circuit 1A/1B (attestation) +
 Circuit 2 (layer hashes), aggregated by SHPLONK, submitted via
-`verifyBlock`. For now here **we do not deal with** BK-set updates. We
-assume testing on shellnet, where by default the BK set is fixed from
-genesis.
+`verifyBlock`. The daemon itself handles BK-set rotations end-to-end
+(ETH-36 two-slot model: `applyBkSetUpdate` may apply N ahead of the
+layer cursor, `verifyBlock` accepts `storedPrevBkSetCommitment` for
+`seqNo <= N`, and the prover ack is deferred until the next bundle
+target passes N — see the Breaking Changes entry in `CHANGELOG.md`).
+This runbook does not exercise that path: shellnet keeps its BK set
+fixed from genesis, so a rotation never fires under it.
 
 Recall that **Shellnet was restarted at this commit cf664666badf2f12bf0ecc20846ac14b8bcb4e9d**.
 

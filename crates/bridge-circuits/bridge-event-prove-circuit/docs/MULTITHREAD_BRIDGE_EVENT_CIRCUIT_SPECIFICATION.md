@@ -4,7 +4,7 @@ Target embodiment: `bridge/crates/bridge-circuits/bridge-event-prove-circuit` (A
 
 This document describes the cryptographic mechanism for proving, in zero knowledge, that a `WithdrawalInitiated` event in **any thread t** of Acki Nacki can be anchored, via cross-thread chaining when `t ≠ 0`, against a layer-N batch root recorded in the Ethereum-side `AckiNackiBridge` per-layer window, and how the bridge Circuit 4 embodies that mechanism.
 
-**Companion spec.** The DEX voucher circuit solves the same problem, minus its extra anonymity requirements. Read [`dexdo-halo2-kit/MULTITHREAD_DEX_CIRCUIT_SPECIFICATION.md`](../../../../../dexdo-halo2-kit/MULTITHREAD_DEX_CIRCUIT_SPECIFICATION.md) first for the shared primitives (block-id tree, L7 walk, layer-N batch tree, dense-chain ladder). This document tracks only the **bridge-specific deltas**, most of which flow from a single design choice: **the bridge has no anonymity requirement**, so it drops salting / position tags / uniformity padding and glues snarks by clear block-ids.
+This document tracks only the **bridge-specific deltas**, most of which flow from a single design choice: **the bridge has no anonymity requirement**, so it drops salting / position tags / uniformity padding (like it was done in DEX) and glues snarks by clear block-ids.
 
 ## 0. Terminology
 

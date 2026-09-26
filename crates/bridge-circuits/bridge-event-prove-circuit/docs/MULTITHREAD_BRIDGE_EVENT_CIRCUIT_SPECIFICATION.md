@@ -69,8 +69,6 @@ The bridge repo pins the canonical block-id construction in [`crates/bridge-circ
 
 Opening L7 for a hop costs 4 SHA-256 compressions the same way; all four siblings (`L6, h45, h0..3, h8..15`) are live witnesses. `h8..15` is opaque in the hop context (no L8 re-derivation needed inside a hop — hops don't bind L8).
 
-Discrepancy note: `BLOCK_ID_ALG_NEW.md:42` still describes L8 as "SHA-256 root". That row was accurate at commit `36cd98721` (2026-07-07); the AN node has since switched L8 to a Poseidon dense-Merkle (matching this circuit's `walk_dense_merkle_bind_pos` at `bridge_event_prove_circuit.rs:810`, and matching DEX §2.4). Treat DEX §2.4 as the source of truth pending a doc refresh on the bridge side.
-
 ---
 
 ## 3. Per-thread layer-N batch tree (thread 0 only)

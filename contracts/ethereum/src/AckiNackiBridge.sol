@@ -8,6 +8,8 @@ import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
+import "./IBridgeWithdrawalFinalVerifier.sol";
+import "./IBridgeMultiHopVerifier.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -78,6 +80,12 @@ contract AckiNackiBridge {
     ///      obligated actor. Fast-forward of `blockSeqNo` does **not** skip
     ///      extra slots — one call still writes one slot.
     uint256 public constant HISTORY_PROOF_WINDOW = 128;
+
+    /// @notice Maximum number of `BridgeMultiHopProof` snarks per
+    ///         `withdrawByProofBundle` call. Mirrors
+    ///         `bridge_event_prove_circuit::multi_hop_witness::N_BUNDLE_MAX`
+    ///         (prototype `L_MAX = 20`, `H_HOPS_PER_PROOF = 1` → 20).
+    uint256 public constant N_BUNDLE_MAX = 20;
 
     /// @notice BN254 scalar field order — the modulus every circuit public
     ///         input lives in.
@@ -246,6 +254,20 @@ contract AckiNackiBridge {
 
     /// @notice See `BridgeWithdrawConfig.altTokenId`.
     uint256 public immutable bridgeWithdrawalAltTokenId;
+
+    /// @notice Multi-thread FinalProof (13-instance) verifier used by
+    ///         `withdrawByProofBundle`. `address(0)` disables the bundle
+    ///         entry-point (it reverts with `WithdrawByProofBundleDisabled`).
+    ///         Independent of the legacy 11-instance `bridgeWithdrawalVerifier`
+    ///         which continues to serve `withdrawByProof`.
+    IBridgeWithdrawalFinalVerifier public immutable bridgeWithdrawalFinalVerifier;
+
+    /// @notice `BridgeMultiHopProof` (2-instance) verifier for the L7
+    ///         cross-thread hop chain. `address(0)` disables the bundle
+    ///         entry-point (same-thread `hopPublicInputs.length == 0`
+    ///         bundles also require it to be set — an intentional coupling
+    ///         so bundle acceptance is all-or-nothing).
+    IBridgeMultiHopVerifier public immutable bridgeMultiHopVerifier;
 
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4 nullifier is
@@ -440,6 +462,21 @@ contract AckiNackiBridge {
     ///         `last_seen == blockSeqNo` and is unsatisfiable.
     error AttestationLastSeenNotBeforeSeqNo(uint64 lastSeen, uint64 blockSeqNo);
 
+    // withdrawByProofBundle (BridgeEventFinalProof + BridgeMultiHopProof) errors
+    error WithdrawByProofBundleDisabled();
+    error PartialBundleWiring();
+    error BundleRequiresLegacyWithdrawal();
+    error HopBundleLengthOverflow(uint256 got, uint256 max);
+    error HopPublicInputsHopProofsLengthMismatch(uint256 hopPublicInputs, uint256 hopProofs);
+    error FinalPublicInputsBadLength(uint256 got, uint256 expected);
+    error HopPublicInputsBadLength(uint256 at, uint256 got, uint256 expected);
+    error SameThreadEndpointsMismatch();
+    error SameThreadRequiresEmptyHopChain(uint256 hopCount);
+    error HopChainHeadMismatch();
+    error HopChainTailMismatch();
+    error AdjacentHopBlockIdMismatch(uint256 at);
+    error MultiHopProofRejected(uint256 at);
+
     // withdrawByProof (Circuit 4) errors
     error WithdrawByProofDisabled();
     error WithdrawalProofRejected();
@@ -566,6 +603,14 @@ contract AckiNackiBridge {
         ///         (see `DeployRealBridge`); not enforced here because
         ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
         uint256 altTokenId;
+        /// @notice Multi-thread FinalProof (13-instance) verifier. Zero
+        ///         disables `withdrawByProofBundle`. When non-zero,
+        ///         `multiHopVerifier` must also be non-zero — bundle
+        ///         acceptance is wired all-or-nothing.
+        IBridgeWithdrawalFinalVerifier withdrawalFinalVerifier;
+        /// @notice `BridgeMultiHopProof` (2-instance) verifier. See
+        ///         `withdrawalFinalVerifier` — the pair is wired together.
+        IBridgeMultiHopVerifier multiHopVerifier;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -581,11 +626,14 @@ contract AckiNackiBridge {
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
-    /// @param _bw                 Circuit 4 wiring. Pass
-    ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
-    ///                            to disable. When `bridgeWithdrawalVerifier`
-    ///                            is non-zero, both `dappFr` and `accFr`
-    ///                            must be non-zero.
+    /// @param _bw                 Circuit 4 wiring. Zero-init every field to
+    ///                            disable the withdraw-by-proof surface. When
+    ///                            `bridgeWithdrawalVerifier` is non-zero both
+    ///                            `dappFr` and `accFr` must be non-zero;
+    ///                            `withdrawalFinalVerifier` and `multiHopVerifier`
+    ///                            must be set together (both non-zero or both
+    ///                            zero) and, when non-zero, require the legacy
+    ///                            `bridgeWithdrawalVerifier` to be set too.
     /// @dev Pass address(0) for `_aavePool`/`_aUSDC` to disable AAVE.
     ///      `_usdc` must always be non-zero — deposits pull USDC via `transferFrom`.
     constructor(
@@ -626,6 +674,21 @@ contract AckiNackiBridge {
                 _requireCanonicalFr(_bw.accFr);
                 _requireCanonicalFr(_bw.altTokenId);
             }
+            // Bundle acceptance is all-or-nothing: both new verifiers must
+            // be wired together, and only alongside the identity/verifyBlock
+            // set the legacy `bridgeWithdrawalVerifier` already gates.
+            {
+                bool wf = address(_bw.withdrawalFinalVerifier) != address(0);
+                bool mh = address(_bw.multiHopVerifier) != address(0);
+                if (wf != mh) revert PartialBundleWiring();
+                if (wf) {
+                    if (address(_bw.bridgeWithdrawalVerifier) == address(0)) {
+                        // Sharing the identity/anchor plumbing with the
+                        // legacy path keeps both entry-points consistent.
+                        revert BundleRequiresLegacyWithdrawal();
+                    }
+                }
+            }
             // Genesis anchors enter the same slots `applyBkSetUpdate`
             // guards, so they answer to the same invariant. Without this a
             // non-canonical `genesisPrevMaxLevelLayerHash` is self-contradictory:
@@ -652,6 +715,8 @@ contract AckiNackiBridge {
         bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
         bridgeWithdrawalAltDstHostChainId = _bw.altDstHostChainId;
         bridgeWithdrawalAltTokenId = _bw.altTokenId;
+        bridgeWithdrawalFinalVerifier = _bw.withdrawalFinalVerifier;
+        bridgeMultiHopVerifier = _bw.multiHopVerifier;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -1405,6 +1470,217 @@ contract AckiNackiBridge {
         // ---- Interactions ----
         // Top up liquid USDC from AAVE if the contract's plain USDC balance
         // is below the requested amount.
+        uint256 liquid = usdc.balanceOf(address(this));
+        if (liquid < pub.amount && suppliedPrincipal > 0) {
+            uint256 shortfall = pub.amount - liquid;
+            uint256 toPull = shortfall > suppliedPrincipal ? suppliedPrincipal : shortfall;
+            _pullFromAave(toPull);
+        }
+
+        address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
+        _pushExactUsdc(recipient, pub.amount);
+
+        emit WithdrawalByProofExecuted(
+            pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
+        );
+        return true;
+    }
+
+    /// @notice `BridgeEventFinalProof` public-input vector length (13).
+    uint256 private constant FINAL_PI_LEN = 13;
+    /// @notice `BridgeMultiHopProof` public-input vector length (2).
+    uint256 private constant MULTI_HOP_PI_LEN = 2;
+    /// @notice `xBlockId` offset in the FinalProof PI vector.
+    uint256 private constant PUB_X_BLOCK_ID = 11;
+    /// @notice `yBlockId` offset in the FinalProof PI vector.
+    uint256 private constant PUB_Y_BLOCK_ID = 12;
+    /// @notice `hopStartBlockId` offset in each MultiHop PI vector.
+    uint256 private constant HOP_START = 0;
+    /// @notice `hopEndBlockId` offset in each MultiHop PI vector.
+    uint256 private constant HOP_END = 1;
+
+    /// @notice Pay out a withdrawal proven by a `BridgeEventFinalProof`
+    ///         plus zero or more `BridgeMultiHopProof` snarks (cross-thread).
+    ///
+    ///         Same-thread claims pass `hopPublicInputs.length == 0` and the
+    ///         FinalProof must satisfy `xBlockId == yBlockId`. Cross-thread
+    ///         claims pass a hop chain of length up to `N_BUNDLE_MAX` where
+    ///         `xBlockId == hopPublicInputs[0][HOP_START]`,
+    ///         `hopPublicInputs[i][HOP_END] == hopPublicInputs[i+1][HOP_START]`
+    ///         for every adjacent pair, and
+    ///         `hopPublicInputs[last][HOP_END] == yBlockId`.
+    ///
+    /// @dev Mirrors `bridge_event_prove_circuit::bundle_verifier::verify_bundle`
+    ///      step-for-step. Also runs the same identity / dst-chain / replay /
+    ///      recipient-shape / canonical-Fr / anchor-window checks that
+    ///      `withdrawByProof` runs against the legacy 11-input proof.
+    ///
+    /// @param finalPublicInputs 13 slots matching
+    ///        `IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs`
+    ///        field order.
+    /// @param finalProof SHPLONK proof bytes for the FinalProof snark.
+    /// @param hopPublicInputs Zero or more 2-slot vectors, one per hop
+    ///        snark, in hop-chain order (head first). Length capped at
+    ///        `N_BUNDLE_MAX`.
+    /// @param hopProofs One SHPLONK proof per hop snark, same length as
+    ///        `hopPublicInputs`.
+    /// @return success `true` on successful payout; reverts on any failure.
+    function withdrawByProofBundle(
+        uint256[] calldata finalPublicInputs,
+        bytes calldata finalProof,
+        uint256[][] calldata hopPublicInputs,
+        bytes[] calldata hopProofs
+    ) external nonReentrant returns (bool success) {
+        if (address(bridgeWithdrawalFinalVerifier) == address(0)
+            || address(bridgeMultiHopVerifier) == address(0)) {
+            revert WithdrawByProofBundleDisabled();
+        }
+
+        // ---- Structural sanity ---------------------------------------------
+        if (finalPublicInputs.length != FINAL_PI_LEN) {
+            revert FinalPublicInputsBadLength(finalPublicInputs.length, FINAL_PI_LEN);
+        }
+        if (hopPublicInputs.length != hopProofs.length) {
+            revert HopPublicInputsHopProofsLengthMismatch(
+                hopPublicInputs.length, hopProofs.length
+            );
+        }
+        if (hopPublicInputs.length > N_BUNDLE_MAX) {
+            revert HopBundleLengthOverflow(hopPublicInputs.length, N_BUNDLE_MAX);
+        }
+        for (uint256 i = 0; i < hopPublicInputs.length; i++) {
+            if (hopPublicInputs[i].length != MULTI_HOP_PI_LEN) {
+                revert HopPublicInputsBadLength(
+                    i, hopPublicInputs[i].length, MULTI_HOP_PI_LEN
+                );
+            }
+        }
+
+        // Adapt calldata to the struct the FinalProof verifier expects. All
+        // slots are copied through untouched; the identity/anchor checks
+        // below still key off the same fields as the legacy path.
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs({
+                tokenId:     finalPublicInputs[0],
+                amount:      finalPublicInputs[1],
+                recipientHi: finalPublicInputs[2],
+                recipientLo: finalPublicInputs[3],
+                dstChainId:  finalPublicInputs[4],
+                senderAccFr: finalPublicInputs[5],
+                dappFr:      finalPublicInputs[6],
+                accFr:       finalPublicInputs[7],
+                nullifier:   finalPublicInputs[8],
+                finalRoot:   finalPublicInputs[9],
+                anchorLayer: finalPublicInputs[10],
+                xBlockId:    finalPublicInputs[PUB_X_BLOCK_ID],
+                yBlockId:    finalPublicInputs[PUB_Y_BLOCK_ID]
+            });
+
+        // ---- Identity, chain, replay, shape (same as withdrawByProof) ------
+        if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
+            revert WithdrawIdentityMismatch();
+        }
+        bool dstOk = pub.dstChainId == block.chainid
+            || (bridgeWithdrawalAltDstChainId != 0
+                && bridgeWithdrawalAltDstHostChainId != 0
+                && block.chainid == bridgeWithdrawalAltDstHostChainId
+                && pub.dstChainId == bridgeWithdrawalAltDstChainId);
+        if (!dstOk) {
+            revert DstChainIdMismatch(pub.dstChainId, block.chainid);
+        }
+        bool tokenOk = pub.tokenId == 0
+            || (bridgeWithdrawalAltTokenId != 0 && pub.tokenId == bridgeWithdrawalAltTokenId);
+        if (!tokenOk) {
+            revert UnsupportedTokenId(pub.tokenId);
+        }
+        if (pub.recipientHi > RECIPIENT_HALF_MASK) {
+            revert RecipientHalfOutOfRange(pub.recipientHi);
+        }
+        if (pub.recipientLo > RECIPIENT_HALF_MASK) {
+            revert RecipientHalfOutOfRange(pub.recipientLo);
+        }
+        if (_reconstructRecipient(pub.recipientHi, pub.recipientLo) == address(0)) {
+            revert InvalidRecipient();
+        }
+        _requireCanonicalFr(pub.nullifier);
+        _requireCanonicalFr(pub.finalRoot);
+        _requireCanonicalFr(pub.anchorLayer);
+        _requireCanonicalFr(pub.xBlockId);
+        _requireCanonicalFr(pub.yBlockId);
+        bytes32 nullifierKey = bytes32(pub.nullifier);
+        if (_nullifiers[nullifierKey]) {
+            revert NullifierAlreadyUsed(pub.nullifier);
+        }
+        if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
+            revert LayerOutOfRange(pub.anchorLayer > type(uint8).max
+                    ? type(uint8).max
+                    : uint8(pub.anchorLayer));
+        }
+        if (!_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)) {
+            revert UnknownAnchor(pub.finalRoot);
+        }
+
+        // ---- Bundle-continuity gate (mirrors bundle_verifier::verify_bundle)
+        uint256 hopCount = hopPublicInputs.length;
+        if (hopCount == 0) {
+            if (pub.xBlockId != pub.yBlockId) {
+                revert SameThreadEndpointsMismatch();
+            }
+        } else {
+            // A cross-thread bundle used to prove a same-thread event is a
+            // shape violation: the two acceptance branches are mutually
+            // exclusive by `xBlockId == yBlockId`. Enforce it before touching
+            // any hop slot so a caller can't smuggle stale hop proofs into a
+            // same-thread claim.
+            if (pub.xBlockId == pub.yBlockId) {
+                revert SameThreadRequiresEmptyHopChain(hopCount);
+            }
+            // Canonicity of every hop endpoint — same rationale as
+            // `_requireCanonicalFr(pub.finalRoot)` above: the Yul verifier
+            // reduces mod BN254_R, and downstream equality checks must match
+            // that image.
+            for (uint256 i = 0; i < hopCount; i++) {
+                _requireCanonicalFr(hopPublicInputs[i][HOP_START]);
+                _requireCanonicalFr(hopPublicInputs[i][HOP_END]);
+            }
+            if (pub.xBlockId != hopPublicInputs[0][HOP_START]) {
+                revert HopChainHeadMismatch();
+            }
+            for (uint256 i = 0; i + 1 < hopCount; i++) {
+                if (hopPublicInputs[i][HOP_END] != hopPublicInputs[i + 1][HOP_START]) {
+                    revert AdjacentHopBlockIdMismatch(i);
+                }
+            }
+            if (hopPublicInputs[hopCount - 1][HOP_END] != pub.yBlockId) {
+                revert HopChainTailMismatch();
+            }
+        }
+
+        // ---- Crypto: verify the FinalProof, then every hop snark -----------
+        if (!bridgeWithdrawalFinalVerifier.verifyWithdrawalFinal(finalProof, pub)) {
+            revert WithdrawalProofRejected();
+        }
+        for (uint256 i = 0; i < hopCount; i++) {
+            IBridgeMultiHopVerifier.MultiHopPublicInputs memory hop =
+                IBridgeMultiHopVerifier.MultiHopPublicInputs({
+                    hopStartBlockId: hopPublicInputs[i][HOP_START],
+                    hopEndBlockId:   hopPublicInputs[i][HOP_END]
+                });
+            if (!bridgeMultiHopVerifier.verifyMultiHop(hopProofs[i], hop)) {
+                revert MultiHopProofRejected(i);
+            }
+        }
+
+        // ---- Treasury check ------------------------------------------------
+        if (pub.amount > treasuryBalance) {
+            revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
+        }
+
+        // ---- Effects (CEI) -------------------------------------------------
+        _nullifiers[nullifierKey] = true;
+        treasuryBalance -= pub.amount;
+
+        // ---- Interactions --------------------------------------------------
         uint256 liquid = usdc.balanceOf(address(this));
         if (liquid < pub.amount && suppliedPrincipal > 0) {
             uint256 shortfall = pub.amount - liquid;

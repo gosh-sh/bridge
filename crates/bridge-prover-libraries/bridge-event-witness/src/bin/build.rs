@@ -8,52 +8,48 @@
 //!
 //! ### Fields the enrichment library fills in
 //!
-//! * `events_tree_proof` — Poseidon Merkle proof from
-//!   `ext_msg_leaf = Poseidon96(dapp || account || repr_hash)` up to the
-//!   block's `ext_out_messages_root`. Built from the same
-//!   `tracked_ext_out_messages` map the node uses (see
-//!   `history_proof::dense_merkle_proof` in the acki-nacki node).
+//! * `events_tree_proof` — Poseidon Merkle proof from `ext_msg_leaf =
+//!   Poseidon96(dapp || account || repr_hash)` up to the block's
+//!   `ext_out_messages_root`. Built from the same `tracked_ext_out_messages`
+//!   map the node uses (see `history_proof::dense_merkle_proof` in the
+//!   acki-nacki node).
 //!
-//! * `block_tree_proof` — Poseidon Merkle proof from
-//!   `block_leaf = Poseidon96(block_id || envelope_hash || ext_out_root)`
-//!   up to `root_1` (the L1 window root the verifier mirrors). L1 tree
-//!   shape: `2 + W` leaves
-//!   `[higher_layer_root, prev_same_layer_root, block_leaf_0, ..., block_leaf_{W-1}]`
-//!   padded to the next power of 2 (W=128 → 130 leaves → 256 padded →
-//!   8-deep proofs). Matches `real_chain_builder::build_layer1_tree`.
+//! * `block_tree_proof` — Poseidon Merkle proof from `block_leaf =
+//!   Poseidon96(block_id || envelope_hash || ext_out_root)` up to `root_1` (the
+//!   L1 window root the verifier mirrors). L1 tree shape: `2 + W` leaves
+//!   `[higher_layer_root, prev_same_layer_root, block_leaf_0, ...,
+//!   block_leaf_{W-1}]` padded to the next power of 2 (W=128 → 130 leaves → 256
+//!   padded → 8-deep proofs). Matches `real_chain_builder::build_layer1_tree`.
 //!
 //! * `anchor` — references the L(target_layer) hash the verifier mirrors.
-//!   Carries the chosen layer hash (published by the circuit as
-//!   `PUB_FINAL_ROOT = R_L@K_L`, `L = target_layer`) plus `dense_chain`.
-//!   Shape depends on `L`:
-//!   * `L = 1`: horizontal walk from
-//!     `H_e = ⌊event_seq/W⌋·W + W` (KB emitting the event batch's L1
-//!     root; see `l1_anchor_boundaries`) to the thinned L1 KB
-//!     `K = ⌊event_seq/(W·P)⌋·(W·P) + (W·P)` the verifier mirrors, with
+//!   Carries the chosen layer hash (published by the circuit as `PUB_FINAL_ROOT
+//!   = R_L@K_L`, `L = target_layer`) plus `dense_chain`. Shape depends on `L`:
+//!   * `L = 1`: horizontal walk from `H_e = ⌊event_seq/W⌋·W + W` (KB emitting
+//!     the event batch's L1 root; see `l1_anchor_boundaries`) to the thinned L1
+//!     KB `K = ⌊event_seq/(W·P)⌋·(W·P) + (W·P)` the verifier mirrors, with
 //!     `hops = (K − H_e)/W ∈ {0, …, P−1}` rungs each opening slot 1
 //!     (`prev_same_layer_root`) of the next L1 tree.
-//!   * `L = n ≥ 2`: vertical stack of `n − 1` new-layer rungs L1→…→L(n)
-//!     landing at `T_n = ⌊event_seq/W^n⌋·W^n + W^n` (see
-//!     `l_n_anchor_boundaries`). Each rung opens the previous-layer root
-//!     at data-leaf position `2 + (W − 1 − k_m)` of the next-layer tree
-//!     (chronological order per `HistoryBlockData::calculate_root_hash`).
+//!   * `L = n ≥ 2`: vertical stack of `n − 1` new-layer rungs L1→…→L(n) landing
+//!     at `T_n = ⌊event_seq/W^n⌋·W^n + W^n` (see `l_n_anchor_boundaries`). Each
+//!     rung opens the previous-layer root at data-leaf position `2 + (W − 1 −
+//!     k_m)` of the next-layer tree (chronological order per
+//!     `HistoryBlockData::calculate_root_hash`).
 //!   Unused chain slots are inactive padding at the chosen layer hash.
 //!
 //! ### `--anchor-layer` semantics
 //!
-//! * `1` (**strict**, this CLI's compile-time default) — target L1. Wait
-//!   budget ≤ `W·P − 1` blocks (W=128, P=8 → ≤ 1023). Operational default
-//!   on shellnet/mainnet is L2 via `BRIDGE_ANCHOR_LEVEL=2`, not this flag.
-//! * `n ∈ {2, …, MAX_LAYERS}` (**strict**) — target L(n). Wait budget
-//!   ≤ `W^n − 1` blocks (L2 ≈ 2 h at shellnet cadence; L3 ≈ 12 d).
-//!   Requires `--i-know-the-wait` to guard against surprise multi-hour
-//!   waits.
-//! * `auto` — target L1 whenever the verifier still holds an L1 slot for
-//!   the event's `K`. If L1 rolled out (event too old for the L1 rolling
-//!   window), escalate through `L2, L3, …, L(num_active_layers)` and take
-//!   the first layer whose window still covers `T_n`. Implies
-//!   `--i-know-the-wait`. Fails if every active layer rolled out, or if
-//!   L1 rolled out and `num_active_layers < 2`.
+//! * `1` (**strict**, this CLI's compile-time default) — target L1. Wait budget
+//!   ≤ `W·P − 1` blocks (W=128, P=8 → ≤ 1023). Operational default on
+//!   shellnet/mainnet is L2 via `BRIDGE_ANCHOR_LEVEL=2`, not this flag.
+//! * `n ∈ {2, …, MAX_LAYERS}` (**strict**) — target L(n). Wait budget ≤ `W^n −
+//!   1` blocks (L2 ≈ 2 h at shellnet cadence; L3 ≈ 12 d). Requires
+//!   `--i-know-the-wait` to guard against surprise multi-hour waits.
+//! * `auto` — target L1 whenever the verifier still holds an L1 slot for the
+//!   event's `K`. If L1 rolled out (event too old for the L1 rolling window),
+//!   escalate through `L2, L3, …, L(num_active_layers)` and take the first
+//!   layer whose window still covers `T_n`. Implies `--i-know-the-wait`. Fails
+//!   if every active layer rolled out, or if L1 rolled out and
+//!   `num_active_layers < 2`.
 //!
 //! Strict mode fails cleanly if the chosen KB has rolled out of
 //! `state.layer_windows[L−1]` (no silent un-anchored witness).
@@ -72,18 +68,17 @@
 //! Exit 0 on success. One-line JSON summary on the last non-empty stdout
 //! line (dex-tooling style); logging on stderr.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
-use tracing::{error, info};
-
+use bridge_event_witness::{
+    enrich::{enrich_witness, AnchorLayerMode, HISTORY_WINDOW_SIZE},
+    schema::PrivateWitness,
+};
 use bridge_gql_fetcher::gql_client;
 use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
-
-use bridge_event_witness::enrich::{enrich_witness, AnchorLayerMode, HISTORY_WINDOW_SIZE};
-use bridge_event_witness::schema::PrivateWitness;
+use serde::Serialize;
+use tracing::{error, info};
 
 /// Default path of the bridge-state JSON file the witness builder reads.
 /// We default to `prover_state.json` because the standalone CI orchestrator
@@ -136,15 +131,15 @@ impl CliArgs {
                 "--partial-witness" => {
                     let v = args.next().context("--partial-witness needs a path")?;
                     partial_witness = Some(PathBuf::from(v));
-                }
+                },
                 "--state" => {
                     let v = args.next().context("--state needs a path")?;
                     bridge_state = Some(PathBuf::from(v));
-                }
+                },
                 "--gql-endpoint" => {
                     let v = args.next().context("--gql-endpoint needs a URL")?;
                     gql_endpoint = Some(v);
-                }
+                },
                 "--anchor-layer" => {
                     let v = args.next().context("--anchor-layer needs 1, 2, or auto")?;
                     let mode = if v.eq_ignore_ascii_case("auto") {
@@ -156,23 +151,23 @@ impl CliArgs {
                         AnchorLayerMode::Explicit(n)
                     };
                     anchor_mode_arg = Some(mode);
-                }
+                },
                 "--layer-idx" => {
                     let v = args.next().context("--layer-idx needs a u32")?;
                     layer_idx_0indexed =
                         Some(v.parse::<u32>().context("--layer-idx must be a u32")?);
-                }
+                },
                 "--i-know-the-wait" => {
                     i_know_the_wait = true;
-                }
+                },
                 "--out" => {
                     let v = args.next().context("--out needs a path")?;
                     out = Some(PathBuf::from(v));
-                }
+                },
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
-                }
+                },
                 other => bail!("unknown argument: {other}"),
             }
         }
@@ -187,8 +182,8 @@ impl CliArgs {
         // `--anchor-layer auto`.
         let anchor_mode: AnchorLayerMode = match (anchor_mode_arg, layer_idx_0indexed) {
             (Some(AnchorLayerMode::Auto), Some(_)) => bail!(
-                "--anchor-layer auto cannot be combined with --layer-idx. \
-                 Auto mode picks the layer at runtime; --layer-idx forces a specific one."
+                "--anchor-layer auto cannot be combined with --layer-idx. Auto mode picks the \
+                 layer at runtime; --layer-idx forces a specific one."
             ),
             (Some(AnchorLayerMode::Explicit(a)), Some(b)) => {
                 let from_idx = (b as u8)
@@ -196,27 +191,31 @@ impl CliArgs {
                     .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?;
                 if a != from_idx {
                     bail!(
-                        "--anchor-layer {} and --layer-idx {} disagree ({} vs {}). \
-                         Pass only one, or make them consistent.",
-                        a, b, a, from_idx,
+                        "--anchor-layer {} and --layer-idx {} disagree ({} vs {}). Pass only one, \
+                         or make them consistent.",
+                        a,
+                        b,
+                        a,
+                        from_idx,
                     );
                 }
                 AnchorLayerMode::Explicit(a)
-            }
+            },
             (Some(mode), None) => mode,
             (None, Some(b)) => {
                 let n = (b as u8)
                     .checked_add(1)
                     .ok_or_else(|| anyhow::anyhow!("--layer-idx {} overflows u8", b))?;
                 AnchorLayerMode::Explicit(n)
-            }
+            },
             (None, None) => AnchorLayerMode::Explicit(1),
         };
         if let AnchorLayerMode::Explicit(n) = anchor_mode {
             if n < 1 || n as usize > MAX_LAYERS {
                 bail!(
                     "--anchor-layer must be in 1..={} (MAX_LAYERS) or 'auto'. Got {}.",
-                    MAX_LAYERS, n,
+                    MAX_LAYERS,
+                    n,
                 );
             }
         }
@@ -234,27 +233,45 @@ impl CliArgs {
 
 fn print_help() {
     eprintln!(
-        "Usage: bridge-event-witness-builder \
-         --partial-witness <path> --out <path> \
-         [--state <path>] [--gql-endpoint <url>] \
-         [--anchor-layer <1..=MAX_LAYERS|auto>] [--layer-idx <u32>] [--i-know-the-wait]"
+        "Usage: bridge-event-witness-builder --partial-witness <path> --out <path> [--state \
+         <path>] [--gql-endpoint <url>] [--anchor-layer <1..=MAX_LAYERS|auto>] [--layer-idx \
+         <u32>] [--i-know-the-wait]"
     );
     eprintln!();
-    eprintln!("  --partial-witness <path>  PrivateWitness JSON from bridge-event-private-witness-export.");
+    eprintln!(
+        "  --partial-witness <path>  PrivateWitness JSON from bridge-event-private-witness-export."
+    );
     eprintln!("  --out <path>              Output path for the enriched PrivateWitness JSON.");
-    eprintln!("  --state <path>            BridgeState JSON path. Default: {}", DEFAULT_STATE);
-    eprintln!("  --gql-endpoint <url>      Default: {}", DEFAULT_GQL_ENDPOINT);
+    eprintln!(
+        "  --state <path>            BridgeState JSON path. Default: {}",
+        DEFAULT_STATE
+    );
+    eprintln!(
+        "  --gql-endpoint <url>      Default: {}",
+        DEFAULT_GQL_ENDPOINT
+    );
     eprintln!("  --anchor-layer <arg>      1 = L1 anchor (default, strict),");
-    eprintln!("                            n = L(n) anchor for 2 ≤ n ≤ {} (strict),", MAX_LAYERS);
-    eprintln!("                            auto = try L1, escalate through L2..L(num_active_layers)");
+    eprintln!(
+        "                            n = L(n) anchor for 2 ≤ n ≤ {} (strict),",
+        MAX_LAYERS
+    );
+    eprintln!(
+        "                            auto = try L1, escalate through L2..L(num_active_layers)"
+    );
     eprintln!("                                   until a layer's window still covers the event.");
     eprintln!("                            Wait budget: L(n) ≤ W^n − 1 blocks");
     eprintln!("                            (L1 ≈ 4 min, L2 ≈ 2 h, L3 ≈ ~12 d on shellnet).");
     eprintln!("  --layer-idx <u32>         0-indexed alias for explicit --anchor-layer");
     eprintln!("                            (0 = L1, 1 = L2, …). Not accepted with 'auto'.");
-    eprintln!("                            Kept for backwards compat with existing Python drivers.");
-    eprintln!("  --i-know-the-wait         Bypass the wait-time guard on impractical anchor layers.");
-    eprintln!("                            Required for explicit --anchor-layer ≥ 2 (up to W^n − 1");
+    eprintln!(
+        "                            Kept for backwards compat with existing Python drivers."
+    );
+    eprintln!(
+        "  --i-know-the-wait         Bypass the wait-time guard on impractical anchor layers."
+    );
+    eprintln!(
+        "                            Required for explicit --anchor-layer ≥ 2 (up to W^n − 1"
+    );
     eprintln!("                            blocks of verifier catch-up).");
     eprintln!("                            Not required with 'auto' — escalation is opt-in.");
     eprintln!();
@@ -298,7 +315,7 @@ fn main() -> ExitCode {
         Err(e) => {
             error!("failed to build tokio runtime: {e:#}");
             return ExitCode::FAILURE;
-        }
+        },
     };
 
     match rt.block_on(run()) {
@@ -306,7 +323,7 @@ fn main() -> ExitCode {
         Err(e) => {
             error!("bridge-event-witness-builder failed: {e:#}");
             ExitCode::FAILURE
-        }
+        },
     }
 }
 

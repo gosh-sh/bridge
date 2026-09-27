@@ -1,31 +1,31 @@
-//! Wrap a Poseidon-transcript Halo2 SHPLONK proof + partner VK into snark-verifier [`Snark`].
+//! Wrap a Poseidon-transcript Halo2 SHPLONK proof + partner VK into
+//! snark-verifier [`Snark`].
 //!
-//! Must live in this crate (gosh `halo2-base` / `BaseCircuitBuilder` VK serde). The
-//! standalone `bridge-evm-aggregator` tree uses axiom `halo2-lib` and cannot read
-//! partner `*_vk.bin` files ("unexpected version byte").
+//! Must live in this crate (gosh `halo2-base` / `BaseCircuitBuilder` VK serde).
+//! The standalone `bridge-evm-aggregator` tree uses axiom `halo2-lib` and
+//! cannot read partner `*_vk.bin` files ("unexpected version byte").
 
-use std::{
-    fs::File,
-    io::BufReader,
-    path::Path,
-};
+use std::{fs::File, io::BufReader, path::Path};
 
 use anyhow::Context;
 use halo2_base::{
     gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
     halo2_proofs::{
-        halo2curves::bn256::{Fr, G1Affine},
+        halo2curves::{
+            bn256::{Fr, G1Affine},
+            ff::PrimeField,
+        },
         plonk::VerifyingKey,
         SerdeFormat,
     },
 };
-use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 use snark_verifier::system::halo2::{compile, Config};
 use snark_verifier_sdk::Snark;
 
 const SERDE_FMT: SerdeFormat = SerdeFormat::RawBytesUnchecked;
 
-/// Load partner-style VK + config and emit bincode [`Snark`] for the aggregator.
+/// Load partner-style VK + config and emit bincode [`Snark`] for the
+/// aggregator.
 pub fn export_poseidon_snark(
     vk_path: &Path,
     config_path: &Path,
@@ -94,8 +94,12 @@ pub fn export_poseidon_snark_with_srs_k(
 fn load_vk(path: &Path, config: &BaseCircuitParams) -> anyhow::Result<VerifyingKey<G1Affine>> {
     let file = File::open(path).with_context(|| format!("open vk {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    VerifyingKey::<G1Affine>::read::<_, BaseCircuitBuilder<Fr>>(&mut reader, SERDE_FMT, config.clone())
-        .map_err(|e| anyhow::anyhow!("vk read {}: {e}", path.display()))
+    VerifyingKey::<G1Affine>::read::<_, BaseCircuitBuilder<Fr>>(
+        &mut reader,
+        SERDE_FMT,
+        config.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("vk read {}: {e}", path.display()))
 }
 
 /// Deserialize instances from a flat 32-byte LE file.

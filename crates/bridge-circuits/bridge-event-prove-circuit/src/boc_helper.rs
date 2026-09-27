@@ -5,15 +5,12 @@
 //! DAG in BFS order, deduplicating by `repr_hash`. The circuit consumes
 //! the flat `BocFlattenData` entries this module produces.
 
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
-use tvm_types::cell::DEPTH_SIZE;
-use tvm_types::cell::SHA256_SIZE;
-use tvm_types::Cell;
-use tvm_types::CellType;
-use tvm_types::LevelMask;
-use tvm_types::Result;
+use tvm_types::{
+    cell::{DEPTH_SIZE, SHA256_SIZE},
+    Cell, CellType, LevelMask, Result,
+};
 
 /// Flat representation of a single cell from a serialized BOC tree.
 #[derive(Debug, Clone)]

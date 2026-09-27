@@ -82,8 +82,8 @@ Bridge deltas from DEX file set:
    - `MultiHopProofWitness.salt_commitment: Fr` → **delete outright**
    - `MultiHopProofWitness.bundle_index: u32` → **delete outright**
 3. Keep every constant *identically named and identically valued*:
-   - `BLOCK_MERKLE_LEAF_COUNT = 16`, `BLOCK_MERKLE_DEPTH = 4`, `MAX_HISTORY_PROOF_LAYERS = 10`, `HISTORY_PROOF_WINDOW_SIZE = 128`, `H_HOPS_PER_PROOF = 5`, `MAX_PROOF_BLOCK_REFS = 256`, `MAX_PROOF_BLOCK_REFS_DEPTH = 8`, `REFERENCED_PARENT_BLOCK_TAG`, `REFERENCED_REF_BLOCK_TAG`.
-   - `N_BUNDLE` — **rename** to `N_BUNDLE_MAX` and set to `4` for the prototype (matches spec §0). Add a doc-comment pointing at production target 60.
+   - `BLOCK_MERKLE_LEAF_COUNT = 16`, `BLOCK_MERKLE_DEPTH = 4`, `MAX_HISTORY_PROOF_LAYERS = 10`, `HISTORY_PROOF_WINDOW_SIZE = 128`, `H_HOPS_PER_PROOF = 1` (dropped from DEX's 5 — see `MULTITHREAD_BRIDGE_EVENT_CIRCUIT_SPECIFICATION.md` §5.H), `MAX_PROOF_BLOCK_REFS = 256`, `MAX_PROOF_BLOCK_REFS_DEPTH = 8`, `REFERENCED_PARENT_BLOCK_TAG`, `REFERENCED_REF_BLOCK_TAG`.
+   - `N_BUNDLE` — **rename** to `N_BUNDLE_MAX` and set to `20` for the prototype (`L_MAX = 20`, `H = 1`; matches spec §0). Add a doc-comment pointing at production target 300.
 4. Keep every native helper *unchanged*: `poseidon_bytes_flat_native`, `ref_leaf_hash_native`, `ref_inner_combine_native`, `proof_block_refs_root_native`, `proof_block_ref_inner_path_native`, `verify_proof_block_ref_inner_path`, `block_merkle_root`, `block_merkle_leaf_proof`, `verify_block_merkle_leaf_proof`, `refs_tree_depth_native`, `assert_ref_index_is_cross_thread`.
 5. Add `pub mod multi_hop_witness;` to `src/lib.rs`.
 6. Port the DEX unit tests **verbatim** — they test native helpers that we did not modify, so they must remain green.

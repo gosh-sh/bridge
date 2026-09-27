@@ -8,7 +8,8 @@ use bridge_prover_lib::{
     keys::KeyManager,
     layer_prover::generate_layer_proof_with_input_and_transcript as generate_layer_hashes_proof_with_transcript,
     prover::{
-        generate_fallback_proof_with_transcript, generate_primary_proof_with_transcript, ProofOutput,
+        generate_fallback_proof_with_transcript, generate_primary_proof_with_transcript,
+        ProofOutput,
     },
     transcript::TranscriptKind,
     verifier::{verify_fallback_proof_with_transcript, verify_layer_proof_with_transcript},
@@ -40,9 +41,11 @@ struct CircuitExport<'a> {
     vk_key: &'a str,
     config_key: &'a str,
     /// SRS degree override for the snark-verifier compile step. `None` = use
-    /// `config.k`. Required for `layer_hashes`, whose VK was keygen'd at K=20
-    /// even though `config.k = 17` (see
-    /// `LayerHashesKeyManager::KEYGEN_SRS_K`).
+    /// `config.k`. All circuits now keygen at their arithmetic K
+    /// (`LayerHashesKeyManager::KEYGEN_SRS_K == DEFAULT_K == 17`), so
+    /// `srs_k_override = None` is correct across the board; the field is
+    /// retained so a future oversized-ceremony circuit can opt in without
+    /// touching this struct.
     srs_k_override: Option<u32>,
 }
 
@@ -63,7 +66,7 @@ const CIRCUITS: &[CircuitExport<'static>] = &[
         name: "layer_hashes",
         vk_key: "layer_hashes_vk.bin",
         config_key: "layer_hashes_config_params.json",
-        srs_k_override: Some(20),
+        srs_k_override: None,
     },
 ];
 
@@ -142,7 +145,10 @@ fn main() -> anyhow::Result<()> {
             &attestation_instances(&fallback),
             TranscriptKind::Poseidon,
         );
-        println!("SELF_VERIFY fallback (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
+        println!(
+            "SELF_VERIFY fallback (Poseidon native): {}",
+            if ok { "PASS" } else { "FAIL" }
+        );
         anyhow::ensure!(
             ok,
             "fallback Poseidon inner snark failed native verification — refusing to export an \
@@ -159,8 +165,9 @@ fn main() -> anyhow::Result<()> {
         // If this PASSES while Poseidon FAILS → transcript-specific bug.
         // If this also FAILS → the bound witness/keygen is the problem (not the
         // transcript and not the snark-verifier aggregator).
-        use bridge_prover_lib::layer_prover::generate_layer_proof_with_input;
-        use bridge_prover_lib::verifier::verify_layer_proof;
+        use bridge_prover_lib::{
+            layer_prover::generate_layer_proof_with_input, verifier::verify_layer_proof,
+        };
         let blake = generate_layer_proof_with_input(&km, compose_layer_hashes_input(&bound))?;
         let ok_blake = verify_layer_proof(&km, &blake.proof_bytes, &blake.instances);
         println!(
@@ -182,21 +189,32 @@ fn main() -> anyhow::Result<()> {
             &layer.instances,
             TranscriptKind::Poseidon,
         );
-        println!("SELF_VERIFY layer_hashes (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
+        println!(
+            "SELF_VERIFY layer_hashes (Poseidon native): {}",
+            if ok { "PASS" } else { "FAIL" }
+        );
         anyhow::ensure!(
             ok,
             "layer-hashes Poseidon inner snark failed native verification — refusing to export an \
-             invalid snark. This is almost always stale/mismatched layer keys: \
-             `ensure_keys` short-circuits on cached vk/pk, so a bound witness regenerated after \
-             the keys is proved against the wrong VK. Delete params/layer_hashes_{{vk,pk}}.bin + \
+             invalid snark. This is almost always stale/mismatched layer keys: `ensure_keys` \
+             short-circuits on cached vk/pk, so a bound witness regenerated after the keys is \
+             proved against the wrong VK. Delete params/layer_hashes_{{vk,pk}}.bin + \
              layer_hashes_config_params.json and re-run to keygen against the current witness."
         );
     }
     km.unload_layer_pk();
 
     let outputs: [(&str, &PathBuf, Vec<_>); 3] = [
-        ("primary", &primary_proof_path, attestation_instances(&primary).to_vec()),
-        ("fallback", &fallback_proof_path, attestation_instances(&fallback).to_vec()),
+        (
+            "primary",
+            &primary_proof_path,
+            attestation_instances(&primary).to_vec(),
+        ),
+        (
+            "fallback",
+            &fallback_proof_path,
+            attestation_instances(&fallback).to_vec(),
+        ),
         ("layer_hashes", &layer_proof_path, layer.instances.to_vec()),
     ];
 

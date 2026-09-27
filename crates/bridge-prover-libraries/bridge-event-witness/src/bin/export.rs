@@ -11,11 +11,8 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use bridge_event_witness::{export_from_event_boc_base64, BlockContextInput};
 use clap::Parser;
-
-use bridge_event_witness::{
-    export_from_event_boc_base64, BlockContextInput,
-};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,7 +24,8 @@ struct Args {
     #[arg(long)]
     event_boc_b64: String,
 
-    /// Hex-encoded block id (64 chars, no leading 0x). Block containing the event.
+    /// Hex-encoded block id (64 chars, no leading 0x). Block containing the
+    /// event.
     #[arg(long)]
     block_id: String,
 
@@ -66,8 +64,7 @@ fn parse_hex32(label: &str, s: &str) -> Result<[u8; 32]> {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -81,11 +78,10 @@ fn main() -> Result<()> {
         envelope_hash: parse_hex32("--envelope-hash", &args.envelope_hash)?,
     };
 
-    let witness = export_from_event_boc_base64(&args.event_boc_b64, &ctx)
-        .context("export failed")?;
+    let witness =
+        export_from_event_boc_base64(&args.event_boc_b64, &ctx).context("export failed")?;
 
-    let json = serde_json::to_string_pretty(&witness)
-        .context("witness serialization failed")?;
+    let json = serde_json::to_string_pretty(&witness).context("witness serialization failed")?;
     std::fs::write(&args.out, json)
         .with_context(|| format!("failed to write {}", args.out.display()))?;
 

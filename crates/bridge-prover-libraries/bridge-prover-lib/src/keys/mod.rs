@@ -22,23 +22,28 @@ pub use state::{
 pub mod event;
 pub mod fallback;
 pub mod layer;
+pub mod multi_hop;
 pub mod primary;
+
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 pub use event::EventKeyManager;
 pub use fallback::FallbackKeyManager;
+pub use multi_hop::MultiHopKeyManager;
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::G1Affine,
+        plonk::{ProvingKey, VerifyingKey},
+    },
+};
 pub use layer::LayerHashesKeyManager;
 pub use primary::{
-    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers,
-    circuit_num_limbs, circuit_num_unusable_rows, PrimaryKeyManager,
-};
-
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::G1Affine,
-    plonk::{ProvingKey, VerifyingKey},
+    circuit_k, circuit_limb_bits, circuit_lookup_bits, circuit_max_signers, circuit_num_limbs,
+    circuit_num_unusable_rows, PrimaryKeyManager,
 };
 
 /// Facade that owns all four per-circuit managers.
@@ -78,10 +83,7 @@ impl KeyManager {
 
     // ---- Circuit 1a (Primary Attestation) forwarders ----
 
-    pub fn ensure_primary_keys(
-        &mut self,
-        bk_set: &HashMap<u16, Vec<u8>>,
-    ) -> anyhow::Result<()> {
+    pub fn ensure_primary_keys(&mut self, bk_set: &HashMap<u16, Vec<u8>>) -> anyhow::Result<()> {
         self.primary.ensure_keys(bk_set)
     }
     pub fn primary_vk(&self) -> &VerifyingKey<G1Affine> {
@@ -102,10 +104,7 @@ impl KeyManager {
 
     // ---- Circuit 1b (Fallback Attestation) forwarders ----
 
-    pub fn ensure_fallback_keys(
-        &mut self,
-        bk_set: &HashMap<u16, Vec<u8>>,
-    ) -> anyhow::Result<()> {
+    pub fn ensure_fallback_keys(&mut self, bk_set: &HashMap<u16, Vec<u8>>) -> anyhow::Result<()> {
         self.fallback.ensure_keys(bk_set)
     }
     pub fn fallback_vk(&self) -> &VerifyingKey<G1Affine> {

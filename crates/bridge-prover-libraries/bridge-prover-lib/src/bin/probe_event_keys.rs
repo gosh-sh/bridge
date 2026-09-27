@@ -26,10 +26,10 @@ fn main() -> Result<()> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--params-dir" => {
-                params_dir = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| anyhow::anyhow!("--params-dir needs a path"))?,
-                ))
+                params_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("--params-dir needs a path")
+                    })?))
             },
             "--repair" => repair = true,
             "-h" | "--help" => {
@@ -69,13 +69,17 @@ fn main() -> Result<()> {
 
     match probe_event_key_cache(&dir) {
         KeyCacheState::Warm => println!("warm: keys are usable"),
-        KeyCacheState::Cold { why } => println!("cold: {why}"),
+        KeyCacheState::Cold {
+            why,
+        } => println!("cold: {why}"),
         // Before `--repair` is even consulted, and before a single file is
         // removed. This arm exists because the alternative — discovering it
         // inside the deletion loop — means the operator has already been
         // told "pass --repair to clear it" by the arm below and has already
         // watched some files disappear before the refusal.
-        KeyCacheState::Blocked { why } => {
+        KeyCacheState::Blocked {
+            why,
+        } => {
             println!("blocked: {why}");
             // "nothing was changed" has to stay literally true, so this
             // arm refuses ahead of the temp-file sweep below as well as
@@ -90,7 +94,9 @@ fn main() -> Result<()> {
             }
             bail!("this is not something --repair can clear; nothing was changed");
         },
-        KeyCacheState::Corrupt { why } => {
+        KeyCacheState::Corrupt {
+            why,
+        } => {
             println!("corrupt: {why}");
             if !repair {
                 // Non-zero so a caller without --repair notices.
@@ -134,7 +140,9 @@ fn main() -> Result<()> {
             // files are gone, and "I deleted some files" is not the same
             // claim as "the cache is now cold".
             match probe_event_key_cache(&dir) {
-                KeyCacheState::Cold { .. } => {
+                KeyCacheState::Cold {
+                    ..
+                } => {
                     println!("repaired: cache cleared; the next run regenerates it")
                 },
                 other => bail!("repair did not take effect: {other:?}"),

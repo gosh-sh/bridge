@@ -23,10 +23,12 @@ pragma solidity ^0.8.19;
 ///                 address sender
 ///             );
 ///
-///         The `WithdrawalPublicInputs` struct below mirrors slots [0..10] of
-///         the Halo2 circuit's 11-element public-input vector byte-for-byte.
+///         The `WithdrawalPublicInputs` struct below mirrors slots [0..12] of
+///         the multi-thread Halo2 circuit's 13-element public-input vector
+///         byte-for-byte (`BridgeEventFinalProof`; the legacy single-thread
+///         circuit with 11 inputs was removed).
 interface IBridgeWithdrawalVerifier {
-    /// @notice Public-input slots [0..10] of the Circuit 4 proof.
+    /// @notice Public-input slots [0..12] of the Circuit 4 proof.
     /// @dev Field order matches the Halo2 circuit's public-input layout
     ///      byte-for-byte. The on-chain adapter forwards this struct
     ///      verbatim to `verifyProof`.
@@ -47,11 +49,11 @@ interface IBridgeWithdrawalVerifier {
         uint256 dappFr;
         /// @notice Bridge account identifier on AN side (immutable per deployment).
         uint256 accFr;
-        /// @notice Replay-protection nullifier — `Poseidon(block_id_fr,
+        /// @notice Replay-protection nullifier — `Poseidon(x_block_id_fr,
         ///         tokenId, amount, recipientHi, recipientLo, senderAccFr,
         ///         events_pos)`. `events_pos` is the events-tree leaf
         ///         index, so two identical burns in one AN block no longer
-        ///         share a nullifier.
+        ///         share a nullifier. Binds to the source (X) block.
         uint256 nullifier;
         /// @notice The dense-chain anchor the proof binds to. The bridge
         ///         checks `finalRoot` against the window named by
@@ -62,6 +64,16 @@ interface IBridgeWithdrawalVerifier {
         /// @notice 1-indexed layer window (`1..=MAX_LAYER_HASHES`) the
         ///         contract scans for `finalRoot`. Range-checked in-circuit.
         uint256 anchorLayer;
+        /// @notice Fr-encoding of the X-block's `block_id` — the block that
+        ///         contains the `WithdrawalInitiated` event (i.e. the
+        ///         *source* block).
+        uint256 xBlockId;
+        /// @notice Fr-encoding of the Y-block's `block_id` — the anchor
+        ///         block (potentially on a different thread reached via a
+        ///         hop-chain snark bundle). For same-thread claims equals
+        ///         `xBlockId`, enforced in-circuit by an `is_same_thread`
+        ///         selector.
+        uint256 yBlockId;
     }
 
     /// @notice Verify a Circuit 4 (single-final-root) proof.

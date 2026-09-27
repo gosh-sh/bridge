@@ -1,25 +1,31 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
+use attestation_bls_checker_circuit::{
+    attestation_data_parser::{attestation_data_offset, compute_block_id_fr, parse_num_signers},
+    fallback_circuit::FallbackAttestationBlsCheckerCircuit,
+    primary_circuit::PrimaryAttestationBlsCheckerCircuit,
+};
+use bridge_poseidon::compute_bk_set_poseidon;
 use halo2_base::halo2_proofs::{
     dev::MockProver,
     halo2curves::bn256::{Bn256, Fr, G1Affine},
     plonk::{create_proof, Circuit, ProvingKey},
-    poly::kzg::{commitment::{KZGCommitmentScheme, ParamsKZG}, multiopen::ProverSHPLONK},
-    transcript::{Blake2bWrite, Challenge255, EncodedChallenge, TranscriptWrite, TranscriptWriterBuffer},
+    poly::kzg::{
+        commitment::{KZGCommitmentScheme, ParamsKZG},
+        multiopen::ProverSHPLONK,
+    },
+    transcript::{
+        Blake2bWrite, Challenge255, EncodedChallenge, TranscriptWrite, TranscriptWriterBuffer,
+    },
 };
 use rand::rngs::OsRng;
 use tracing::{info, warn};
 
-use attestation_bls_checker_circuit::primary_circuit::PrimaryAttestationBlsCheckerCircuit;
-use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
-use attestation_bls_checker_circuit::attestation_data_parser::{
-    attestation_data_offset, compute_block_id_fr, parse_num_signers,
+use crate::{
+    keys::{self, KeyManager},
+    transcript::{PoseidonWrite, TranscriptKind},
 };
-
-use crate::keys::{self, KeyManager};
-use bridge_poseidon::compute_bk_set_poseidon;
-use crate::transcript::{PoseidonWrite, TranscriptKind};
 
 /// Output of a proof generation.
 #[derive(Debug, Clone)]
@@ -60,8 +66,8 @@ pub fn generate_primary_proof(
 ///   pipeline, `crates/bridge-evm-aggregator/`). Produces the same proof bytes
 ///   as `snark-verifier-sdk`'s `PoseidonTranscript<NativeLoader, _>`, so the
 ///   proof can be fed into a downstream `AggregationCircuit` without
-///   re-proving. Proofs in this flavour MUST NOT be shipped to the AN side;
-///   the opcode rejects them.
+///   re-proving. Proofs in this flavour MUST NOT be shipped to the AN side; the
+///   opcode rejects them.
 pub fn generate_primary_proof_with_transcript(
     key_manager: &KeyManager,
     attestation_bytes: &[u8],
@@ -81,7 +87,10 @@ pub fn generate_primary_proof_with_transcript(
 
     info!(
         "generating primary proof: block_seq_no={}, last_seen={}, bk_set_size={}, transcript={:?}",
-        block_seq_no, last_seen_block_seqno, bk_set.len(), transcript
+        block_seq_no,
+        last_seen_block_seqno,
+        bk_set.len(),
+        transcript
     );
 
     // Build circuit.
@@ -99,13 +108,21 @@ pub fn generate_primary_proof_with_transcript(
     circuit.override_base_circuit_params(key_manager.primary_config().clone());
 
     // Generate proof.
-    let instances = vec![block_id_fr, bk_set_commitment_fr, block_seq_no_fr, last_seen_fr];
+    let instances = vec![
+        block_id_fr,
+        bk_set_commitment_fr,
+        block_seq_no_fr,
+        last_seen_fr,
+    ];
 
-    // Optional MockProver diagnostic. Gated by env to keep normal runs fast (k=20 is
-    // very slow under MockProver). Set BRIDGE_MOCK_PROVE=1 to enable.
+    // Optional MockProver diagnostic. Gated by env to keep normal runs fast (k=20
+    // is very slow under MockProver). Set BRIDGE_MOCK_PROVE=1 to enable.
     if std::env::var("BRIDGE_MOCK_PROVE").ok().as_deref() == Some("1") {
         let k = keys::circuit_k();
-        info!("BRIDGE_MOCK_PROVE=1: running MockProver at k={} (this can take minutes)...", k);
+        info!(
+            "BRIDGE_MOCK_PROVE=1: running MockProver at k={} (this can take minutes)...",
+            k
+        );
         let t = std::time::Instant::now();
         match MockProver::run(k, &circuit, vec![instances.clone()]) {
             Ok(prover) => match prover.verify() {
@@ -122,7 +139,7 @@ pub fn generate_primary_proof_with_transcript(
                     if failures.len() > 10 {
                         warn!("  ... ({} more failures suppressed)", failures.len() - 10);
                     }
-                }
+                },
             },
             Err(e) => warn!("MockProver::run errored: {:?}", e),
         }
@@ -152,8 +169,10 @@ pub fn generate_primary_proof_with_transcript(
 /// to pick which transcript.
 ///
 /// Consumes both attestations from the fallback evidence pair:
-///   * `attestation_primary_bytes`  — PRIMARY-type prefinalization (>N/2 signers)
-///   * `attestation_fallback_bytes` — FALLBACK-type target proof  (>N/2 signers)
+///   * `attestation_primary_bytes`  — PRIMARY-type prefinalization (>N/2
+///     signers)
+///   * `attestation_fallback_bytes` — FALLBACK-type target proof  (>N/2
+///     signers)
 ///
 /// Both share the same `block_id`; that equality is enforced in-circuit by
 /// `FallbackAttestationBlsCheckerCircuit`. The public-instance shape is
@@ -202,8 +221,11 @@ pub fn generate_fallback_proof_with_transcript(
     info!(
         "generating fallback proof: block_seq_no={}, last_seen={}, bk_set_size={}, \
          primary_sig_len={}, fallback_sig_len={}, transcript={:?}",
-        block_seq_no, last_seen_block_seqno, bk_set.len(),
-        attestation_primary_bytes.len(), attestation_fallback_bytes.len(),
+        block_seq_no,
+        last_seen_block_seqno,
+        bk_set.len(),
+        attestation_primary_bytes.len(),
+        attestation_fallback_bytes.len(),
         transcript,
     );
 
@@ -221,22 +243,33 @@ pub fn generate_fallback_proof_with_transcript(
     );
     circuit.override_base_circuit_params(key_manager.fallback_config().clone());
 
-    let instances = vec![block_id_fr, bk_set_commitment_fr, block_seq_no_fr, last_seen_fr];
+    let instances = vec![
+        block_id_fr,
+        bk_set_commitment_fr,
+        block_seq_no_fr,
+        last_seen_fr,
+    ];
 
     if std::env::var("BRIDGE_MOCK_PROVE").ok().as_deref() == Some("1") {
         let k = keys::circuit_k();
-        info!("BRIDGE_MOCK_PROVE=1: running MockProver (fallback) at k={}...", k);
+        info!(
+            "BRIDGE_MOCK_PROVE=1: running MockProver (fallback) at k={}...",
+            k
+        );
         let t = std::time::Instant::now();
         match MockProver::run(k, &circuit, vec![instances.clone()]) {
             Ok(prover) => match prover.verify() {
                 Ok(()) => info!("MockProver (fallback) verify OK ({:?})", t.elapsed()),
                 Err(failures) => {
-                    warn!("MockProver (fallback) verify FAILED ({:?}): {} failure(s)",
-                          t.elapsed(), failures.len());
+                    warn!(
+                        "MockProver (fallback) verify FAILED ({:?}): {} failure(s)",
+                        t.elapsed(),
+                        failures.len()
+                    );
                     for (i, f) in failures.iter().take(10).enumerate() {
                         warn!("  failure[{}]: {:?}", i, f);
                     }
-                }
+                },
             },
             Err(e) => warn!("MockProver::run errored: {:?}", e),
         }
@@ -283,14 +316,7 @@ where
     C: Circuit<Fr>,
 {
     let instance_refs: &[&[Fr]] = &[instances];
-    create_proof::<
-        KZGCommitmentScheme<Bn256>,
-        ProverSHPLONK<'_, Bn256>,
-        E,
-        _,
-        T,
-        _,
-    >(
+    create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<'_, Bn256>, E, _, T, _>(
         srs,
         pk,
         &[circuit],

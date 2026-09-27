@@ -14,6 +14,7 @@ when Circuit 4 grew an 11th public input, see below), so re-measure rather than 
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 493 B | OK (K=21 inner) |
 | `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 23 111 B | OK (k_outer=21) |
 | `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 11 | 21 152 B | OK (K=19 inner) |
+| `BridgeMultiHopAggregatorVerifier.bin` | multi-hop (cross-thread) | 2 | *pending regen* | *pending regen* |
 
 Layer hashes grew because the aggregator was re-keygen'd at `k_outer=21`: at `k_outer=20` the
 outer circuit did not fit the 14 inner public inputs. The margin to EIP-170 is 1 465 B, the
@@ -101,6 +102,31 @@ The synthetic reference witness only pins the **circuit shape** (VK): real withd
 proofs generated from live Acki Nacki blocks verify against the emitted verifier
 byte-for-byte, since a SHPLONK verifier is bound to the VK, not the witness.
 
+## Generate SHPLONK `.sol` + `.bin` (multi-hop cross-thread)
+
+`BridgeMultiHopAggregatorVerifier` is wired on the adapter and
+`ShplonkDeployLib.multiHopBinPath()` / `deployMultiHopAdapter()` sides. The
+inner-snark exporter and aggregator preset (`aggregator.rs`, `K_outer=21`,
+`Full` universality) are in place; regenerating the pair is now a two-step
+run, symmetric with Circuit 4:
+
+```bash
+cd crates/bridge-snark-utils
+cargo run --release --bin export-multi-hop-poseidon-snark -- \
+  --params-dir ../../params --snark-dir ../../proofs/bound/poseidon-snark
+
+cd ../bridge-evm-aggregator
+cargo run --release --bin export-inner-aggregator -- \
+  --inner-snark ../../proofs/bound/poseidon-snark/multi_hop.snark \
+  --out-dir ../../contracts/ethereum/verifiers \
+  --name BridgeMultiHopAggregatorVerifier
+```
+
+After the run: populate `MULTI_HOP_YUL_CODEHASH` in
+`script/ShplonkDeployLib.sol`, add the `.bin` and `_calldata.bin` rows to
+`SHA256SUMS` and `SIZES`, and replace the `*pending regen*` cells in the
+size table above with the measured values — all in the same commit.
+
 Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c && ./scripts/n14_r15_proving_run.sh pull-artifacts`.
 
 ```bash
@@ -109,7 +135,7 @@ Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c &
 SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh contracts/ethereum/verifiers
 ```
 
-Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`.
+Override SHPLONK paths via env: `SHPLONK_BIN_PRIMARY`, `SHPLONK_BIN_FALLBACK`, `SHPLONK_BIN_LAYER_HASHES`, `SHPLONK_BIN_WITHDRAWAL`, `SHPLONK_BIN_MULTI_HOP`.
 
 Hashes are pinned in `SHA256SUMS`. Gate: `./scripts/check_shplonk_artefacts.sh` then `forge test --match-contract ShplonkArtefactPairing` (all four pairs). CREATE `extcodehash` pins are in `ShplonkDeployLib`.
 

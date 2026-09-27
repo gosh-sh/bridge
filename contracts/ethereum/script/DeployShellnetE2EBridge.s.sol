@@ -8,6 +8,8 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
@@ -145,7 +147,9 @@ contract DeployShellnetE2EBridge is Script {
                 accFr: wd.accFr,
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
-                altTokenId: wd.altTokenId
+                altTokenId: wd.altTokenId,
+                withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+                multiHopVerifier: IBridgeMultiHopVerifier(address(0))
             })
         );
     }

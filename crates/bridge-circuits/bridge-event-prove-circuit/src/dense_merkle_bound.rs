@@ -1,4 +1,5 @@
-//! Bound-direction-bit variant of `gosh_dense_balanced_tree::dense_merkle_root_circuit_padded`.
+//! Bound-direction-bit variant of
+//! `gosh_dense_balanced_tree::dense_merkle_root_circuit_padded`.
 //!
 //! # Why this module exists
 //!
@@ -10,12 +11,12 @@
 //!
 //! `bridge-event-prove-circuit` folds `events_pos` into the nullifier
 //! Poseidon preimage so that two identical `WithdrawalInitiated` events
-//! in the same AN block produce distinct nullifiers. That defense is only sound if the `events_pos` fed into the
-//! nullifier hash is the same `events_pos` that determines the events-tree
-//! merkle path — otherwise a malicious prover picks any position to
-//! disambiguate the hash and walks the tree along a different path.
-//! Binding requires the walker's direction bits to come from the
-//! bit-decomposition of the assigned `events_pos` witness.
+//! in the same AN block produce distinct nullifiers. That defense is only sound
+//! if the `events_pos` fed into the nullifier hash is the same `events_pos`
+//! that determines the events-tree merkle path — otherwise a malicious prover
+//! picks any position to disambiguate the hash and walks the tree along a
+//! different path. Binding requires the walker's direction bits to come from
+//! the bit-decomposition of the assigned `events_pos` witness.
 //!
 //! [`dense_merkle_root_padded_bound`] is byte-for-byte identical to the
 //! upstream walker except the direction bit at level `j` is
@@ -29,23 +30,25 @@
 //! callers share one implementation.
 
 use gosh_dense_balanced_tree::{bytes_to_fr, cond_swap, DenseTreeProof};
-use halo2_base::gates::{GateInstructions, RangeInstructions};
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::poseidon::hasher::PoseidonHasher;
-use halo2_base::{AssignedValue, Context, QuantumCell};
+use halo2_base::{
+    gates::{GateInstructions, RangeInstructions},
+    halo2_proofs::halo2curves::bn256::Fr,
+    poseidon::hasher::PoseidonHasher,
+    AssignedValue, Context, QuantumCell,
+};
 
 use crate::poseidon::{RATE, T};
 
 /// In-circuit dense-merkle walk with direction bits bound to an external
 /// position witness.
 ///
-/// Mirrors upstream `gosh_dense_balanced_tree::dense_merkle_root_circuit_padded`
-/// verbatim except for one change: at each level `j`, the direction bit is
-/// **`pos_bits[j]`** — the caller-supplied bit-decomposition of the position
-/// witness — instead of a fresh unconstrained witness loaded from
-/// `level.direction_bit` and merely `assert_bit`-checked. Semantics are
-/// identical when the caller passes bits that match the preprocessed
-/// `direction_bit`s.
+/// Mirrors upstream
+/// `gosh_dense_balanced_tree::dense_merkle_root_circuit_padded` verbatim except
+/// for one change: at each level `j`, the direction bit is **`pos_bits[j]`** —
+/// the caller-supplied bit-decomposition of the position witness — instead of a
+/// fresh unconstrained witness loaded from `level.direction_bit` and merely
+/// `assert_bit`-checked. Semantics are identical when the caller passes bits
+/// that match the preprocessed `direction_bit`s.
 ///
 /// Preconditions the caller MUST enforce:
 /// * `pos_bits.len() == proof.levels.len()`.
@@ -55,8 +58,8 @@ use crate::poseidon::{RATE, T};
 ///   caller is binding (satisfied by `gate.num_to_bits`).
 /// * For every `j ≥ num_active_levels`, `pos_bits[j] == 0`. This aligns the
 ///   bound direction bit with the preprocessor's `direction_bit = false`
-///   convention on padded levels, so the chunk-decomposition constraints
-///   inside the walk hold uniformly across active/inactive levels.
+///   convention on padded levels, so the chunk-decomposition constraints inside
+///   the walk hold uniformly across active/inactive levels.
 fn dense_merkle_root_padded_bound(
     ctx: &mut Context<Fr>,
     range: &impl RangeInstructions<Fr>,
@@ -202,52 +205,52 @@ pub(crate) fn walk_dense_merkle_bind_pos(
 // directly at the binding rather than any of the surrounding pipeline.
 // They cover:
 //
-//   * positive walks at bit patterns today's fixtures never touch
-//     (pos = 255 at max depth; pos = 129 on a 130-leaf non-power-of-two
-//     tree — same depth-8 tree the events proof walks on chain);
-//   * a wrong position witness whose bit pattern differs inside the
-//     active range makes the walker take a different path. In the
-//     test as written the chunk cells are still those the preprocessor
-//     built for the honest orientation, so what fires on the reject is
-//     the walker's level-`j` chunk-link constraint (the algebraic tie
-//     between `chunk0/chunk1/chunk2` and the swapped `left || right`).
-//     That is enough to catch a weak attacker who only flips the
-//     `pos_witness` bit. A stronger attacker willing to rebuild the
-//     chunk cells for the flipped orientation would satisfy every
-//     link inside this gadget and would end up producing a root that
-//     differs from the honest one — no test on this branch exercises
-//     that stronger case, but if it were exercised, this gadget still
-//     does not by itself compare its output to anything, so the
-//     test-only `expected_root` equality inside `run_gadget` would be
-//     what stops it (adding such a chunk-rebuild negative is a natural
-//     follow-up). Active-bit binding in production
-//     rests on the walked root flowing into `final_root` and being
-//     compared against `_layerWindows[anchorLayer]` in `withdrawByProof`
-//     on chain (see the header comment on
+//   * positive walks at bit patterns today's fixtures never touch (pos = 255 at
+//     max depth; pos = 129 on a 130-leaf non-power-of-two tree — same depth-8
+//     tree the events proof walks on chain);
+//   * a wrong position witness whose bit pattern differs inside the active
+//     range makes the walker take a different path. In the test as written the
+//     chunk cells are still those the preprocessor built for the honest
+//     orientation, so what fires on the reject is the walker's level-`j`
+//     chunk-link constraint (the algebraic tie between `chunk0/chunk1/chunk2`
+//     and the swapped `left || right`). That is enough to catch a weak attacker
+//     who only flips the `pos_witness` bit. A stronger attacker willing to
+//     rebuild the chunk cells for the flipped orientation would satisfy every
+//     link inside this gadget and would end up producing a root that differs
+//     from the honest one — no test on this branch exercises that stronger
+//     case, but if it were exercised, this gadget still does not by itself
+//     compare its output to anything, so the test-only `expected_root` equality
+//     inside `run_gadget` would be what stops it (adding such a chunk-rebuild
+//     negative is a natural follow-up). Active-bit binding in production rests
+//     on the walked root flowing into `final_root` and being compared against
+//     `_layerWindows[anchorLayer]` in `withdrawByProof` on chain (see the
+//     header comment on
 //     [`test_dense_merkle_bound_negative_flipped_bit_within_active_levels`],
 //     which spells out both the weak- and strong-attacker paths);
-//   * `walk_dense_merkle_bind_pos` rejects a position with a bit set
-//     above `num_active_levels` (the zero-forcing loop trips) —
-//     including the boundary case `j == num_active_levels`;
-//   * regression witness: the raw walker
-//     [`dense_merkle_root_padded_bound`] ALONE (without the composed
-//     gadget's zero-forcing) cannot reject a bit set above
-//     `num_active_levels` — that job belongs to the composed gadget, and
-//     is why real circuit code must never call the raw walker directly.
+//   * `walk_dense_merkle_bind_pos` rejects a position with a bit set above
+//     `num_active_levels` (the zero-forcing loop trips) — including the
+//     boundary case `j == num_active_levels`;
+//   * regression witness: the raw walker [`dense_merkle_root_padded_bound`]
+//     ALONE (without the composed gadget's zero-forcing) cannot reject a bit
+//     set above `num_active_levels` — that job belongs to the composed gadget,
+//     and is why real circuit code must never call the raw walker directly.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use dense_balanced_tree::{
         dense_merkle_proof, dense_merkle_root, PoseidonHasher as DensePoseidonHasher,
     };
     use gosh_dense_balanced_tree::{bytes_to_fr, preprocess_dense_proof_padded};
-    use halo2_base::gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams};
-    use halo2_base::gates::{GateInstructions, RangeChip, RangeInstructions};
-    use halo2_base::halo2_proofs::dev::MockProver;
-    use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-    use halo2_base::poseidon::hasher::{spec::OptimizedPoseidonSpec, PoseidonHasher};
-    use halo2_base::AssignedValue;
+    use halo2_base::{
+        gates::{
+            circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
+            GateInstructions, RangeChip, RangeInstructions,
+        },
+        halo2_proofs::{dev::MockProver, halo2curves::bn256::Fr},
+        poseidon::hasher::{spec::OptimizedPoseidonSpec, PoseidonHasher},
+        AssignedValue,
+    };
 
+    use super::*;
     use crate::poseidon::{RATE, R_F, R_P, T};
 
     // Small circuit — no SHA-256, no dense-chain — so K=11 with `lookup_bits=10`
@@ -321,13 +324,8 @@ mod tests {
 
     /// Build a random `num_leaves`-leaf tree (the library pads to the next
     /// power of two internally) and return `(leaf@pos, siblings, root)`.
-    fn build_tree(
-        num_leaves: usize,
-        pos: usize,
-        seed: u64,
-    ) -> ([u8; 32], Vec<[u8; 32]>, [u8; 32]) {
-        use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+    fn build_tree(num_leaves: usize, pos: usize, seed: u64) -> ([u8; 32], Vec<[u8; 32]>, [u8; 32]) {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
 
         let mut leaves = vec![[0u8; 32]; num_leaves];
         let mut rng = StdRng::seed_from_u64(seed);
@@ -342,10 +340,10 @@ mod tests {
 
     /// Instantiate a tiny circuit that:
     ///   1. loads `leaf`, `num_active`, and `pos_witness` as witnesses;
-    ///   2. calls the composed [`walk_dense_merkle_bind_pos`] — the same
-    ///      entry point `bridge_event_prove_circuit::synthesize` uses, so
-    ///      any bit-binding regression in this test is a regression in
-    ///      real circuit code;
+    ///   2. calls the composed [`walk_dense_merkle_bind_pos`] — the same entry
+    ///      point `bridge_event_final_proof::synthesize` uses, so any
+    ///      bit-binding regression in this test is a regression in real circuit
+    ///      code;
     ///   3. constrains the resulting root to equal `expected_root`.
     ///
     /// Returns `true` iff `MockProver::verify()` accepts.
@@ -357,8 +355,7 @@ mod tests {
         expected_root: [u8; 32],
     ) -> bool {
         let mut builder = BaseCircuitBuilder::<Fr>::new(false).use_params(base_params());
-        let range =
-            RangeChip::<Fr>::new(LOOKUP_BITS, builder.lookup_manager().clone());
+        let range = RangeChip::<Fr>::new(LOOKUP_BITS, builder.lookup_manager().clone());
 
         {
             let ctx = builder.main(0);
@@ -410,8 +407,7 @@ mod tests {
         assert_eq!(pos_bits_vals.len(), proof.levels.len());
 
         let mut builder = BaseCircuitBuilder::<Fr>::new(false).use_params(base_params());
-        let range =
-            RangeChip::<Fr>::new(LOOKUP_BITS, builder.lookup_manager().clone());
+        let range = RangeChip::<Fr>::new(LOOKUP_BITS, builder.lookup_manager().clone());
 
         {
             let ctx = builder.main(0);
@@ -504,8 +500,8 @@ mod tests {
         // the active range [0..3], so zero-forcing does NOT catch it.
         assert!(
             !run_gadget(&proof, leaf, 3, 7, root),
-            "supplying a pos_witness whose bit pattern differs inside the \
-             active range must desynchronize the walked path",
+            "supplying a pos_witness whose bit pattern differs inside the active range must \
+             desynchronize the walked path",
         );
     }
 
@@ -519,7 +515,8 @@ mod tests {
     /// orientation there — otherwise the padded level's honest chunks
     /// (built for `bit = 0`) fail on their own and the test would still
     /// pass even if the zero-forcing loop were removed. The paired raw-
-    /// walker test [`test_dense_merkle_bound_raw_walker_accepts_bit_above_active_levels`]
+    /// walker test
+    /// [`test_dense_merkle_bound_raw_walker_accepts_bit_above_active_levels`]
     /// confirms the tampered proof satisfies the walker without the loop,
     /// so the constraint that actually rejects this test is the loop.
     #[test]
@@ -532,9 +529,9 @@ mod tests {
         tamper_level_to_bit_1(&mut proof, 5, root);
         assert!(
             !run_gadget(&proof, leaf, 3, 5 + (1 << 5), root),
-            "the composed gadget must reject any pos_witness bit set above \
-             num_active_levels — otherwise a prover could hash `p + 2^d` \
-             into the nullifier while walking `p` in the events tree",
+            "the composed gadget must reject any pos_witness bit set above num_active_levels — \
+             otherwise a prover could hash `p + 2^d` into the nullifier while walking `p` in the \
+             events tree",
         );
     }
 
@@ -560,8 +557,8 @@ mod tests {
         tamper_level_to_bit_1(&mut proof, 3, root);
         assert!(
             !run_gadget(&proof, leaf, 3, 5 + (1 << 3), root),
-            "the composed gadget must reject a bit set at the boundary \
-             j == num_active_levels (not just strictly above it)",
+            "the composed gadget must reject a bit set at the boundary j == num_active_levels \
+             (not just strictly above it)",
         );
     }
 
@@ -604,9 +601,9 @@ mod tests {
         bits[5] = 1; // bit 5 sits above active levels 0..3
         assert!(
             run_gadget_raw_walker_no_binding(&proof, leaf, 3, &bits, root),
-            "regression witness: the raw walker must NOT reject a bit set \
-             above `num_active_levels` when the prover supplies matching \
-             tampered chunks — that job belongs to the composed gadget",
+            "regression witness: the raw walker must NOT reject a bit set above \
+             `num_active_levels` when the prover supplies matching tampered chunks — that job \
+             belongs to the composed gadget",
         );
     }
 
@@ -631,10 +628,9 @@ mod tests {
         bits[3] = 1; // boundary bit — exactly at num_active_levels
         assert!(
             run_gadget_raw_walker_no_binding(&proof, leaf, 3, &bits, root),
-            "regression witness: the raw walker must NOT reject a bit set \
-             at the boundary `j == num_active_levels` when the prover \
-             supplies matching tampered chunks — that job belongs to the \
-             composed gadget's `is_less_than(j, num_active_levels)` guard",
+            "regression witness: the raw walker must NOT reject a bit set at the boundary `j == \
+             num_active_levels` when the prover supplies matching tampered chunks — that job \
+             belongs to the composed gadget's `is_less_than(j, num_active_levels)` guard",
         );
     }
 }

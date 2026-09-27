@@ -1,8 +1,8 @@
-//! Integration test: generate and verify a real halo2 proof from live node attestation.
-//! Requires: /tmp/live_attestation.hex + ./bk_set.json + running node for fresh attestation
+//! Integration test: generate and verify a real halo2 proof from live node
+//! attestation. Requires: /tmp/live_attestation.hex + ./bk_set.json + running
+//! node for fresh attestation
 
-use std::path::Path;
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 #[test]
 fn test_live_proof_generation_and_verification() {
@@ -46,7 +46,9 @@ fn test_live_proof_generation_and_verification() {
     println!("\nStep 1: Loading keys...");
     let t = Instant::now();
     let mut key_manager = bridge_prover_lib::keys::KeyManager::new(Path::new(params_dir));
-    key_manager.ensure_primary_keys(&bk_set).expect("keygen failed");
+    key_manager
+        .ensure_primary_keys(&bk_set)
+        .expect("keygen failed");
     println!("[timing] key loading/generation: {:?}", t.elapsed());
 
     // 4. Generate proof.
@@ -65,7 +67,10 @@ fn test_live_proof_generation_and_verification() {
     println!("  proof size: {} bytes", proof_output.proof_bytes.len());
     println!("  block_seq_no: {}", proof_output.block_seq_no);
     println!("  block_id: {:?}", proof_output.block_id_fr);
-    println!("  bk_set_commitment: {:?}", proof_output.bk_set_commitment_fr);
+    println!(
+        "  bk_set_commitment: {:?}",
+        proof_output.bk_set_commitment_fr
+    );
 
     // 5. Verify proof.
     println!("\nStep 3: Verifying proof...");
@@ -85,7 +90,10 @@ fn test_live_proof_generation_and_verification() {
     println!("[timing] verification: {:?}", verify_time);
     println!("Verified: {}", verified);
 
-    assert!(verified, "Proof verification FAILED on live attestation data!");
+    assert!(
+        verified,
+        "Proof verification FAILED on live attestation data!"
+    );
 
     println!("\n=== TOTAL: {:?} ===", t_total.elapsed());
     println!("LIVE PROOF GENERATION AND VERIFICATION: PASSED!");

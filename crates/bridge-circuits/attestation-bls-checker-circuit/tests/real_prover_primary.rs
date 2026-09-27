@@ -27,29 +27,32 @@
 //! cargo test -p attestation-bls-checker-circuit --test real_prover_primary -- --ignored --nocapture
 //! ```
 
-use std::path::Path;
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use attestation_bls_checker_circuit::{
     primary_circuit::PrimaryAttestationBlsCheckerCircuit,
-    test_instances::expected_public_instances,
-    K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
+    test_instances::expected_public_instances, K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
 };
 use bridge_poseidon::{LIMB_BITS, MAX_SIGNERS, NUM_LIMBS};
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use gosh_zk_snark_halo2_utils::{
+    io::{
+        read_vk_from_path, save_bytes, save_config_params, save_pk_to_path, save_vk_to_path,
+        try_read_config_params,
+    },
+    proof::Proof,
 };
-use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
-use halo2_base::utils::fs::gen_srs;
-
-use gosh_zk_snark_halo2_utils::io::{
-    read_vk_from_path, save_bytes, save_config_params, save_pk_to_path, save_vk_to_path,
-    try_read_config_params,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::{
+            bn256::{Bn256, Fr, G1Affine},
+            ff::PrimeField,
+        },
+        plonk::{keygen_pk, keygen_vk, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
+    utils::fs::gen_srs,
 };
-use gosh_zk_snark_halo2_utils::proof::Proof;
 
 const ARTIFACT_DIR: &str = "params";
 
@@ -61,18 +64,12 @@ fn build_circuit_for_bk_set(
     bk_set_size: usize,
     max_signers: usize,
     shared_params: Option<&BaseCircuitParams>,
-) -> (
-    PrimaryAttestationBlsCheckerCircuit<Fr>,
-    Vec<Fr>,
-) {
+) -> (PrimaryAttestationBlsCheckerCircuit<Fr>, Vec<Fr>) {
     let test_data = bridge_test_data_gen::generator::generate_test_data_all_sign(bk_set_size)
         .expect("generate_test_data_all_sign failed");
 
-    let (last_seen_block_seqno, instances) = expected_public_instances(
-        &test_data.attestation_bytes,
-        &test_data.bk_set,
-        max_signers,
-    );
+    let (last_seen_block_seqno, instances) =
+        expected_public_instances(&test_data.attestation_bytes, &test_data.bk_set, max_signers);
 
     let mut circuit = PrimaryAttestationBlsCheckerCircuit::<Fr>::new(
         test_data.attestation_bytes,
@@ -103,7 +100,10 @@ fn keygen_and_cache(
     pk_path: &str,
     config_path: &str,
 ) -> (VerifyingKey<G1Affine>, BaseCircuitParams) {
-    println!("  Cache miss — running keygen (reference BK set size = {})", ref_bk_set_size);
+    println!(
+        "  Cache miss — running keygen (reference BK set size = {})",
+        ref_bk_set_size
+    );
     let t = Instant::now();
     let (ref_circuit, _) = build_circuit_for_bk_set(ref_bk_set_size, max_signers, None);
     let base_params = ref_circuit.params.base_circuit_params.clone();
@@ -138,8 +138,10 @@ fn keygen_and_cache(
 fn run_primary_real_prover_case(max_signers: usize, bk_set_sizes: &[usize]) {
     let vk_path = format!("{}/primary_max{}_vk.bin", ARTIFACT_DIR, max_signers);
     let pk_path = format!("{}/primary_max{}_pk.bin", ARTIFACT_DIR, max_signers);
-    let config_path =
-        format!("{}/primary_max{}_config_params.json", ARTIFACT_DIR, max_signers);
+    let config_path = format!(
+        "{}/primary_max{}_config_params.json",
+        ARTIFACT_DIR, max_signers
+    );
 
     println!("\n{}", "=".repeat(60));
     println!(
@@ -187,7 +189,10 @@ fn run_primary_real_prover_case(max_signers: usize, bk_set_sizes: &[usize]) {
     // ── Step 3: Prove + verify for each BK set size ──────────────
     for &bk_set_size in bk_set_sizes {
         println!("\n{}", "=".repeat(60));
-        println!("BK set size = {} (max_signers = {})", bk_set_size, max_signers);
+        println!(
+            "BK set size = {} (max_signers = {})",
+            bk_set_size, max_signers
+        );
         println!("{}", "=".repeat(60));
 
         let t = Instant::now();
@@ -222,7 +227,11 @@ fn run_primary_real_prover_case(max_signers: usize, bk_set_sizes: &[usize]) {
             let t = Instant::now();
             let valid = proof.verify_with_vk(&vk, &params, &inst_refs);
             verify_times.push(t.elapsed());
-            assert!(valid, "Proof verification failed for bk_set_size={}", bk_set_size);
+            assert!(
+                valid,
+                "Proof verification failed for bk_set_size={}",
+                bk_set_size
+            );
         }
         let avg_verify = verify_times.iter().sum::<std::time::Duration>() / 5;
         println!("[timing] verification (avg of 5): {:?}", avg_verify);

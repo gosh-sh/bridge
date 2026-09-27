@@ -178,10 +178,7 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
         // Mirror the on-disk VK + config the KeyManager just wrote (same bytes
         // the tvm-sdk ABI tests reassemble into a VkBlob).
         let params = params_dir();
-        for name in [
-            "fallback_vk.bin",
-            "fallback_config_params.json",
-        ] {
+        for name in ["fallback_vk.bin", "fallback_config_params.json"] {
             std::fs::copy(params.join(name), dir.join(name))
                 .unwrap_or_else(|e| panic!("copy {name}: {e}"));
         }
@@ -204,7 +201,9 @@ fn halo2_tvm_operands_round_trip_fallback_circuit() {
 }
 
 fn extract_block_seq_no(attestation_bytes: &[u8]) -> u32 {
-    use attestation_bls_checker_circuit::attestation_data_parser::{attestation_data_offset, parse_num_signers};
+    use attestation_bls_checker_circuit::attestation_data_parser::{
+        attestation_data_offset, parse_num_signers,
+    };
     const BLOCK_SEQ_NO_REL_OFFSET: usize = 80;
 
     let num_signers = parse_num_signers(attestation_bytes);

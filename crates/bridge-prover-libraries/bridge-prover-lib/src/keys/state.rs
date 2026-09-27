@@ -7,15 +7,19 @@
 //! carry their circuit-specific bits (witness construction inside
 //! `ensure_keys`, degree constants, and any extra accessors).
 
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::Context;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, Circuit, ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{keygen_pk, keygen_vk, Circuit, ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
 };
 use tracing::{info, warn};
 
@@ -191,9 +195,12 @@ pub(crate) struct KeyManagerState {
 
 impl KeyManagerState {
     /// Construct: load SRS at `srs_k` (may exceed circuit `k` when the
-    /// ceremony was oversized — see `LayerHashesKeyManager::KEYGEN_SRS_K`
-    /// / `EventKeyManager::KEYGEN_SRS_K`), best-effort load any cached
-    /// config/VK from disk; log if PK file is present (loaded on demand).
+    /// ceremony is intentionally oversized — historically this was the case
+    /// for layer/event to preserve partner-PK compatibility; both now match
+    /// their circuit K, but the `srs_k >= k` invariant is kept so a future
+    /// circuit can opt in without touching this constructor), best-effort
+    /// load any cached config/VK from disk; log if PK file is present
+    /// (loaded on demand).
     ///
     /// `expected_revision` is a constructor parameter rather than a setter
     /// because a setter would make "constructed but not yet told its
@@ -348,8 +355,8 @@ impl KeyManagerState {
     ///
     /// - a proving key present but not deserialisable (`Corrupt`);
     /// - a proving key whose digest disagrees with the manifest (`Corrupt`);
-    /// - a directory at `event_pk.bin`, for which `Path::exists` answers
-    ///   `true` (`Blocked`).
+    /// - a directory at `event_pk.bin`, for which `Path::exists` answers `true`
+    ///   (`Blocked`).
     ///
     /// A manifest that will not parse is deliberately NOT in that list, and
     /// this predicate does not get it wrong: `new` refuses to install the VK

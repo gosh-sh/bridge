@@ -1,28 +1,29 @@
-pub mod paths;
-pub mod poseidon_dense;
-pub mod keys;
-pub mod transcript;
-pub mod prover;
-pub mod verifier;
-pub mod ipc;
-pub mod bridge_state;
-pub mod prover_bk_set;
-pub mod bootstrap;
 pub mod bk_set_bootstrap;
 pub mod block_id_tree;
+pub mod bootstrap;
+pub mod bridge_state;
 pub mod chain_proof_builder;
-pub mod real_chain_builder;
+pub mod ipc;
+pub mod keys;
 pub mod layer_prover;
 pub mod live_driver;
+pub mod paths;
+pub mod poseidon_dense;
+pub mod prover;
+pub mod prover_bk_set;
+pub mod real_chain_builder;
+pub mod transcript;
+pub mod verifier;
 
 // Re-export commonly used types.
 pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
-/// Prover-side thinning factor `P`: the prover only emits a (Circuit 1 + Circuit 2)
-/// bundle every `P`-th master key block instead of every key block. See
-/// `crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`.
+/// Prover-side thinning factor `P`: the prover only emits a (Circuit 1 +
+/// Circuit 2) bundle every `P`-th master key block instead of every key block.
+/// See `crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`.
 ///
-/// Hard constraints (checked at runtime by `chain_proof_builder::build_chain_proofs`):
+/// Hard constraints (checked at runtime by
+/// `chain_proof_builder::build_chain_proofs`):
 ///   * `P <= MAX_CHAIN_LEN = 11` (from `gosh-dense-balanced-tree`)
 ///   * `P` must divide `W = crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE`
 ///     so the on-chain `layerWindows[L≥2]` cadence is unchanged.
@@ -60,8 +61,7 @@ pub const BUNDLE_STRIDE_L1: u64 =
 ///
 /// See `docs/l2_anchoring_proposal.md` for the rate model and
 /// `docs/l2_anchoring_implementation_plan.md` for wiring details.
-pub const BUNDLE_STRIDE_L2: u64 =
-    (crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64).pow(2);
+pub const BUNDLE_STRIDE_L2: u64 = (crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64).pow(2);
 
 /// Anchor level selector for the prover pipeline. L1 is the current default;
 /// L2 is the opt-in supercritical mode (see [`BUNDLE_STRIDE_L2`]).
@@ -141,12 +141,15 @@ impl AnchorMode {
     pub fn verify_state_level(self, state_level: u8) -> Result<(), AnchorLevelMismatch> {
         let cfg_level = self.level();
         let mismatch = match (state_level, cfg_level) {
-            (0, 1) => false,     // legacy state file → L1 backward compat
-            (0, _) => true,      // legacy state file → non-L1 requires explicit migration
-            (s, c) => s != c,    // explicit mismatch either direction
+            (0, 1) => false,  // legacy state file → L1 backward compat
+            (0, _) => true,   // legacy state file → non-L1 requires explicit migration
+            (s, c) => s != c, // explicit mismatch either direction
         };
         if mismatch {
-            Err(AnchorLevelMismatch { state_level, cfg_level })
+            Err(AnchorLevelMismatch {
+                state_level,
+                cfg_level,
+            })
         } else {
             Ok(())
         }
@@ -213,8 +216,8 @@ mod anchor_mode_tests {
         // (cfg, state_level, expect_ok)
         let cases: &[(AnchorMode, u8, bool)] = &[
             // Legacy-state (v4 schema, anchor_level absent → 0).
-            (AnchorMode::L1, 0, true),   // legacy → L1 backward compat
-            (AnchorMode::L2, 0, false),  // legacy → L2 requires migration
+            (AnchorMode::L1, 0, true),  // legacy → L1 backward compat
+            (AnchorMode::L2, 0, false), // legacy → L2 requires migration
             // Steady state.
             (AnchorMode::L1, 1, true),
             (AnchorMode::L2, 2, true),

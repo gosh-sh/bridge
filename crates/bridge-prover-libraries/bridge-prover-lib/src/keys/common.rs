@@ -10,22 +10,24 @@
 //! monolithic `KeyManager`, so cached artefacts on disk continue to load
 //! after the refactor with no migration.
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
-
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::{
-        bn256::{Bn256, Fr, G1Affine},
-        serde::SerdeObject,
+use halo2_base::{
+    gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
+    halo2_proofs::{
+        halo2curves::{
+            bn256::{Bn256, Fr, G1Affine},
+            serde::SerdeObject,
+        },
+        plonk::{ProvingKey, VerifyingKey},
+        poly::{commitment::Params, kzg::commitment::ParamsKZG},
+        SerdeFormat,
     },
-    plonk::{ProvingKey, VerifyingKey},
-    poly::{commitment::Params, kzg::commitment::ParamsKZG},
-    SerdeFormat,
 };
 use tracing::{info, warn};
 
@@ -43,10 +45,7 @@ pub(crate) fn config_path(params_dir: &Path, prefix: &str) -> PathBuf {
     params_dir.join(format!("{}_config_params.json", prefix))
 }
 
-pub(crate) fn load_config(
-    params_dir: &Path,
-    prefix: &str,
-) -> anyhow::Result<BaseCircuitParams> {
+pub(crate) fn load_config(params_dir: &Path, prefix: &str) -> anyhow::Result<BaseCircuitParams> {
     let data = std::fs::read_to_string(config_path(params_dir, prefix))?;
     Ok(serde_json::from_str(&data)?)
 }
@@ -557,11 +556,11 @@ pub fn leaked_keygen_temp_files(params_dir: &Path) -> Vec<LeakedTemp> {
 
 /// Load a KZG SRS whose `params.k()` is exactly `k`.
 /// Resolution order:
-/// 1. Fast path: `kzg_bn254_{k}.srs` exists and its header matches `k` →
-///    verify Hermez provenance and return.
-/// 2. Otherwise scan `params_dir` for the largest `kzg_bn254_*.srs` with
-///    header degree ≥ `k`, downsize, and write to the exact path so the
-///    next load hits the fast path.
+/// 1. Fast path: `kzg_bn254_{k}.srs` exists and its header matches `k` → verify
+///    Hermez provenance and return.
+/// 2. Otherwise scan `params_dir` for the largest `kzg_bn254_*.srs` with header
+///    degree ≥ `k`, downsize, and write to the exact path so the next load hits
+///    the fast path.
 pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
     let exact_path = params_dir.join(format!("kzg_bn254_{k}.srs"));
 
@@ -636,10 +635,7 @@ pub(crate) fn load_srs(params_dir: &Path, k: u32) -> ParamsKZG<Bn256> {
 ///
 /// Returns the params rather than just the degree so that the one
 /// deserialisation serves both callers.
-fn resolve_ceremony(
-    params_dir: &Path,
-    min_k: u32,
-) -> anyhow::Result<(PathBuf, ParamsKZG<Bn256>)> {
+fn resolve_ceremony(params_dir: &Path, min_k: u32) -> anyhow::Result<(PathBuf, ParamsKZG<Bn256>)> {
     let exact = params_dir.join(format!("kzg_bn254_{min_k}.srs"));
     // Whether the exact file is worth reading a SECOND time.
     //
@@ -755,12 +751,10 @@ pub fn assert_hermez_srs(srs: &ParamsKZG<Bn256>) -> anyhow::Result<()> {
     let head = &buf[..HERMEZ_S_G2_HEAD.len()];
     if head != HERMEZ_S_G2_HEAD {
         anyhow::bail!(
-            "SRS (k={}) is NOT Hermez Perpetual Powers of Tau \
-             (s_g2 head {:02x?}, expected {:02x?}). PARAMS_DIR likely lacks \
-             kzg_bn254_{}.srs and `gen_srs` silently generated a toxic-waste \
-             SRS whose tau is known to the local process — every proof \
-             produced with it is forgeable. Bootstrap via \
-             `bootstrap_hermez_srs`. REFUSING to proceed.",
+            "SRS (k={}) is NOT Hermez Perpetual Powers of Tau (s_g2 head {:02x?}, expected \
+             {:02x?}). PARAMS_DIR likely lacks kzg_bn254_{}.srs and `gen_srs` silently generated \
+             a toxic-waste SRS whose tau is known to the local process — every proof produced \
+             with it is forgeable. Bootstrap via `bootstrap_hermez_srs`. REFUSING to proceed.",
             srs.k(),
             head,
             HERMEZ_S_G2_HEAD,
@@ -885,8 +879,9 @@ fn find_largest_ceremony_ge(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     /// Smallest Hermez ceremony actually kept under
     /// `crates/bridge-prover-libraries/params/` (see repo layout). Larger than
@@ -920,11 +915,18 @@ mod tests {
     fn load_srs_downsizes_from_parent_ceremony_when_exact_missing() {
         let src = fixture_srs(FIXTURE_SRC_K);
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::copy(&src, tmp.path().join(format!("kzg_bn254_{FIXTURE_SRC_K}.srs"))).unwrap();
+        std::fs::copy(
+            &src,
+            tmp.path().join(format!("kzg_bn254_{FIXTURE_SRC_K}.srs")),
+        )
+        .unwrap();
 
         let srs = load_srs(tmp.path(), FIXTURE_DST_K);
         assert_eq!(srs.k(), FIXTURE_DST_K);
-        assert!(tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs")).exists());
+        assert!(tmp
+            .path()
+            .join(format!("kzg_bn254_{FIXTURE_DST_K}.srs"))
+            .exists());
 
         // Same toxic waste as the parent ceremony.
         let parent = read_srs_file(&src).unwrap();
@@ -937,7 +939,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Partner-style footgun: FIXTURE_SRC_K bytes living under the
         // FIXTURE_DST_K filename.
-        std::fs::copy(&src, tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs"))).unwrap();
+        std::fs::copy(
+            &src,
+            tmp.path().join(format!("kzg_bn254_{FIXTURE_DST_K}.srs")),
+        )
+        .unwrap();
 
         let srs = load_srs(tmp.path(), FIXTURE_DST_K);
         assert_eq!(srs.k(), FIXTURE_DST_K);
@@ -982,7 +988,6 @@ mod tests {
             "attributed to the file that caused it: {msg}",
         );
     }
-
 
     #[test]
     fn leak_sweep_names_only_our_own_litter() {

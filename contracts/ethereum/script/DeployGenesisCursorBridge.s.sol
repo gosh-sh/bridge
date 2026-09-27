@@ -8,6 +8,8 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 
 /// @title GenesisCursorBridge
 /// @notice Thin test/E2E subclass of `AckiNackiBridge` that lets a deployment
@@ -70,7 +72,9 @@ contract DeployGenesisCursorBridge is Script {
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
-            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
+            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)),
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
         });
 
         uint64 genesisLastSeen = uint64(vm.envUint("GENESIS_LAST_SEEN_BLOCK_SEQ_NO"));

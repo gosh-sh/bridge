@@ -8,9 +8,12 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "../src/PrimaryAggregatorVerifier.sol";
 import "../src/LayerHashesAggregatorVerifier.sol";
 import "../src/BridgeWithdrawalAggregatorVerifier.sol";
+import "../src/BridgeMultiHopAggregatorVerifier.sol";
 import "../src/FallbackAggregatorVerifier.sol";
 
 /// @title ShplonkDeployLib
@@ -39,6 +42,12 @@ library ShplonkDeployLib {
         0xd6f78f3b014cf94b0fbc8d60e409955adf86c7f2274c84ce19b745f5bb92525e;
     bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
         0x23e0d1a694c9b7485f81a59eefafa6c0d1865db721133b030ecd6ff86dfe48bb;
+    /// @dev Multi-hop verifier codehash is unset until the Yul artefact is
+    ///      first generated on n14 (see `contracts/ethereum/verifiers/README.md`).
+    ///      `deployYulFromBin(path, bytes32(0))` skips the check for spike/pre-
+    ///      keygen deploys; regenerate + update this constant in the same
+    ///      commit as the artefact bump.
+    bytes32 internal constant MULTI_HOP_YUL_CODEHASH = bytes32(0);
 
     struct VerifyBlockVerifiers {
         IPrimaryVerifier primary;
@@ -64,6 +73,12 @@ library ShplonkDeployLib {
     function withdrawalBinPath() internal view returns (string memory) {
         return VM.envOr(
             "SHPLONK_BIN_WITHDRAWAL", string("verifiers/BridgeWithdrawalAggregatorVerifier.bin")
+        );
+    }
+
+    function multiHopBinPath() internal view returns (string memory) {
+        return VM.envOr(
+            "SHPLONK_BIN_MULTI_HOP", string("verifiers/BridgeMultiHopAggregatorVerifier.bin")
         );
     }
 
@@ -117,6 +132,20 @@ library ShplonkDeployLib {
     {
         address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, WITHDRAWAL_YUL_CODEHASH));
         return IBridgeWithdrawalVerifier(address(new BridgeWithdrawalAggregatorVerifier(wrapper)));
+    }
+
+    /// @notice Multi-thread cross-thread hop-chain adapter for
+    ///         `withdrawByProofBundle`. Companion to the withdrawal-final
+    ///         adapter — deploy both together whenever bundle wiring is
+    ///         enabled on `AckiNackiBridge`. `MULTI_HOP_YUL_CODEHASH` is
+    ///         still zero pending the first n14 keygen run; the check is
+    ///         skipped until it is populated.
+    function deployMultiHopAdapter(string memory binPath)
+        internal
+        returns (IBridgeMultiHopVerifier)
+    {
+        address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, MULTI_HOP_YUL_CODEHASH));
+        return IBridgeMultiHopVerifier(address(new BridgeMultiHopAggregatorVerifier(wrapper)));
     }
 
     /// @notice Production verifyBlock triple — SHPLONK aggregators for 1A, 1B, and 2.

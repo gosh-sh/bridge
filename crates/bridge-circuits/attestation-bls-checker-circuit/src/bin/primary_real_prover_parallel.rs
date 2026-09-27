@@ -44,39 +44,44 @@
 //! so the run survives an SSH disconnect — `tail -F` the log later. Default
 //! filename embeds `max_signers` and `parallelism` so sweeps don't collide.
 
-use std::env;
-use std::fs::{File, OpenOptions};
-use std::io::Write as _;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    env,
+    fs::{File, OpenOptions},
+    io::Write as _,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use attestation_bls_checker_circuit::{
     primary_circuit::PrimaryAttestationBlsCheckerCircuit,
-    test_instances::expected_public_instances,
-    K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
+    test_instances::expected_public_instances, K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
 };
 use bridge_poseidon::{LIMB_BITS, NUM_LIMBS};
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{create_proof, keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
-    poly::kzg::{
-        commitment::{KZGCommitmentScheme, ParamsKZG},
-        multiopen::ProverSHPLONK,
+use gosh_zk_snark_halo2_utils::{
+    io::{
+        read_pk_from_path, read_vk_from_path, save_config_params, save_pk_to_path, save_vk_to_path,
+        try_read_config_params,
     },
-    transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
+    proof::Proof,
 };
-use halo2_base::utils::fs::gen_srs;
-
-use gosh_zk_snark_halo2_utils::io::{
-    read_pk_from_path, read_vk_from_path, save_config_params, save_pk_to_path,
-    save_vk_to_path, try_read_config_params,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{create_proof, keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
+        poly::kzg::{
+            commitment::{KZGCommitmentScheme, ParamsKZG},
+            multiopen::ProverSHPLONK,
+        },
+        transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
+    },
+    utils::fs::gen_srs,
 };
-use gosh_zk_snark_halo2_utils::proof::Proof;
-
 use rand::rngs::OsRng;
 
 // ---------------------------------------------------------------------------
@@ -195,7 +200,7 @@ fn parse_args() -> Args {
                     .parse()
                     .expect("--max-signers <usize>");
                 i += 2;
-            }
+            },
             "--parallelism" => {
                 a.parallelism = raw
                     .get(i + 1)
@@ -206,15 +211,15 @@ fn parse_args() -> Args {
                     .parse()
                     .expect("--parallelism <usize>");
                 i += 2;
-            }
+            },
             "--baseline" => {
                 a.baseline = true;
                 i += 1;
-            }
+            },
             "--warmup" => {
                 a.warmup = true;
                 i += 1;
-            }
+            },
             "--rayon-threads" => {
                 a.rayon_threads = Some(
                     raw.get(i + 1)
@@ -226,15 +231,15 @@ fn parse_args() -> Args {
                         .expect("--rayon-threads <usize>"),
                 );
                 i += 2;
-            }
+            },
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
-            }
+            },
             other => {
                 print_help();
                 panic!("Unknown argument: {}", other);
-            }
+            },
         }
     }
     assert!(a.parallelism >= 1, "--parallelism must be ≥ 1");
@@ -249,7 +254,8 @@ fn parse_args() -> Args {
 struct ResourceStats {
     /// Peak RSS observed in bytes.
     peak_rss: AtomicU64,
-    /// Peak per-process CPU% (sum across cores, e.g. 800 = 8 fully loaded cores).
+    /// Peak per-process CPU% (sum across cores, e.g. 800 = 8 fully loaded
+    /// cores).
     peak_cpu_percent_x10: AtomicU64,
     /// Running average accumulator: sum and count for cpu%.
     cpu_sum_x10: AtomicU64,
@@ -261,8 +267,7 @@ impl ResourceStats {
         let peak = self.peak_rss.load(Ordering::Relaxed);
         let peak_cpu = self.peak_cpu_percent_x10.load(Ordering::Relaxed) as f64 / 10.0;
         let count = self.cpu_samples.load(Ordering::Relaxed).max(1);
-        let avg_cpu =
-            (self.cpu_sum_x10.load(Ordering::Relaxed) as f64 / 10.0) / count as f64;
+        let avg_cpu = (self.cpu_sum_x10.load(Ordering::Relaxed) as f64 / 10.0) / count as f64;
         (peak, peak_cpu, avg_cpu)
     }
 
@@ -274,10 +279,7 @@ impl ResourceStats {
     }
 }
 
-fn spawn_sampler(
-    stop: Arc<AtomicBool>,
-    stats: Arc<ResourceStats>,
-) -> thread::JoinHandle<()> {
+fn spawn_sampler(stop: Arc<AtomicBool>, stats: Arc<ResourceStats>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         use sysinfo::{Pid, System};
 
@@ -327,11 +329,8 @@ fn build_circuit_for_bk_set(
     let test_data = bridge_test_data_gen::generator::generate_test_data_all_sign(bk_set_size)
         .expect("generate_test_data_all_sign failed");
 
-    let (last_seen_block_seqno, instances) = expected_public_instances(
-        &test_data.attestation_bytes,
-        &test_data.bk_set,
-        max_signers,
-    );
+    let (last_seen_block_seqno, instances) =
+        expected_public_instances(&test_data.attestation_bytes, &test_data.bk_set, max_signers);
 
     let mut circuit = PrimaryAttestationBlsCheckerCircuit::<Fr>::new(
         test_data.attestation_bytes,
@@ -394,8 +393,15 @@ fn keygen_and_cache(
     vk_path: &str,
     pk_path: &str,
     config_path: &str,
-) -> (VerifyingKey<G1Affine>, ProvingKey<G1Affine>, BaseCircuitParams) {
-    logln!("  Cache miss — running keygen (bk_set_size = {})", max_signers);
+) -> (
+    VerifyingKey<G1Affine>,
+    ProvingKey<G1Affine>,
+    BaseCircuitParams,
+) {
+    logln!(
+        "  Cache miss — running keygen (bk_set_size = {})",
+        max_signers
+    );
     let t = Instant::now();
     let (ref_circuit, _) = build_circuit_for_bk_set(max_signers, max_signers, None);
     let base_params = ref_circuit.params.base_circuit_params.clone();
@@ -423,11 +429,17 @@ fn load_or_keygen(
     params: &ParamsKZG<Bn256>,
     max_signers: usize,
     artifact_dir: &str,
-) -> (VerifyingKey<G1Affine>, ProvingKey<G1Affine>, BaseCircuitParams) {
+) -> (
+    VerifyingKey<G1Affine>,
+    ProvingKey<G1Affine>,
+    BaseCircuitParams,
+) {
     let vk_path = format!("{}/primary_max{}_vk.bin", artifact_dir, max_signers);
     let pk_path = format!("{}/primary_max{}_pk.bin", artifact_dir, max_signers);
-    let config_path =
-        format!("{}/primary_max{}_config_params.json", artifact_dir, max_signers);
+    let config_path = format!(
+        "{}/primary_max{}_config_params.json",
+        artifact_dir, max_signers
+    );
 
     let cached = try_read_config_params(&config_path);
     if let Some(cfg) = cached {
@@ -505,8 +517,7 @@ fn run_sequential(
     let mut per_worker = Vec::with_capacity(n);
     for i in 0..n {
         let t = Instant::now();
-        let (c, p, v, sz) =
-            prove_and_verify_one(params, pk, vk, base_params, max_signers);
+        let (c, p, v, sz) = prove_and_verify_one(params, pk, vk, base_params, max_signers);
         logln!(
             "  [seq {}/{}] construct={:?} prove={:?} verify={:?} proof={}B (wall {:?})",
             i + 1,
@@ -551,13 +562,8 @@ fn run_parallel(
                 let base_params = base_params.clone();
                 s.spawn(move || {
                     let t = Instant::now();
-                    let (c, p, v, sz) = prove_and_verify_one(
-                        &params,
-                        &pk,
-                        &vk,
-                        &base_params,
-                        max_signers,
-                    );
+                    let (c, p, v, sz) =
+                        prove_and_verify_one(&params, &pk, &vk, &base_params, max_signers);
                     let wall = t.elapsed();
                     logln!(
                         "  [par {}/{}] construct={:?} prove={:?} verify={:?} proof={}B (wall {:?})",
@@ -601,8 +607,7 @@ fn report_phase(s: &PhaseSummary) {
     let avg_prove = if s.per_worker.is_empty() {
         Duration::ZERO
     } else {
-        s.per_worker.iter().map(|(_, p, _, _)| *p).sum::<Duration>()
-            / s.per_worker.len() as u32
+        s.per_worker.iter().map(|(_, p, _, _)| *p).sum::<Duration>() / s.per_worker.len() as u32
     };
     logln!("workers:               {}", s.per_worker.len());
     logln!("total wall:            {:?}", s.total);
@@ -661,24 +666,23 @@ fn print_extrapolation(
         };
         logln!(
             "Cost-amplification (par_extra / seq_extra): {:.2}× for {}× concurrency",
-            amp, parallelism
+            amp,
+            parallelism
         );
 
         let speedup = seq.total.as_secs_f64() / par.total.as_secs_f64();
         let eff = speedup / parallelism as f64;
         logln!(
             "Throughput speedup: {:.2}× (efficiency {:.2})",
-            speedup, eff
+            speedup,
+            eff
         );
         logln!(
             "Per-proof cores used (sequential phase): ≈ {:.1}",
             seq.avg_cpu_pct / 100.0
         );
     } else {
-        logln!(
-            "  (run with --baseline to also report sequential timing and \
-             per-proof RAM delta)"
-        );
+        logln!("  (run with --baseline to also report sequential timing and per-proof RAM delta)");
     }
 
     logln!(
@@ -687,17 +691,18 @@ fn print_extrapolation(
         par.peak_cpu_pct / 100.0,
     );
     logln!(
-        "Detected logical cores: {} — if parallel avg-CPU > {} cores, \
-         this host's rayon pool is the bottleneck.",
-        detected_cores, detected_cores
+        "Detected logical cores: {} — if parallel avg-CPU > {} cores, this host's rayon pool is \
+         the bottleneck.",
+        detected_cores,
+        detected_cores
     );
 
     // Hard "fits-in-RAM" projection. RSS-overhead per concurrent proof is
     // taken from the parallel phase (more conservative since rayon scratch
     // peaks higher under contention).
     logln!(
-        "\nProjected max concurrent proofs at max_signers = {} on other hosts \
-         (RAM-bound; CPU may still cap throughput sooner):",
+        "\nProjected max concurrent proofs at max_signers = {} on other hosts (RAM-bound; CPU may \
+         still cap throughput sooner):",
         max_signers
     );
     let cores_per_proof = (par.avg_cpu_pct / 100.0) / parallelism as f64;
@@ -716,9 +721,9 @@ fn print_extrapolation(
         logln!("  {:>4} GB | {:>4}", ram_gb, n_ram);
     }
     logln!(
-        "\nThe true sustainable N on another host is min(fits-N, target_cores / cores_per_proof).\n\
-         If `cores_per_proof` is close to the number of logical cores, the host is\n\
-         already CPU-saturated by a single proof — extra concurrency won't help.",
+        "\nThe true sustainable N on another host is min(fits-N, target_cores / \
+         cores_per_proof).\nIf `cores_per_proof` is close to the number of logical cores, the \
+         host is\nalready CPU-saturated by a single proof — extra concurrency won't help.",
     );
 }
 
@@ -742,7 +747,8 @@ fn main() {
     std::fs::create_dir_all(&args.artifact_dir)
         .unwrap_or_else(|e| panic!("Failed to create ARTIFACT_DIR: {}", e));
 
-    // ── Open log file (default name embeds ms + parallelism so sweeps don't collide)
+    // ── Open log file (default name embeds ms + parallelism so sweeps don't
+    // collide)
     let log_path = env::var("LOG_FILE").unwrap_or_else(|_| {
         format!(
             "{}/primary_real_prover_parallel_ms{}_p{}.log",
@@ -870,5 +876,4 @@ fn main() {
         args.parallelism,
         detected_cores,
     );
-
 }

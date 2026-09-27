@@ -6,9 +6,7 @@ use anyhow::{bail, Context};
 use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
 use tracing::{debug, info};
 
-use crate::gql_client::{
-    BkSetUpdateWithAttestations, GqlClient, GRAPHQL_SIGNED_INT_MAX,
-};
+use crate::gql_client::{BkSetUpdateWithAttestations, GqlClient, GRAPHQL_SIGNED_INT_MAX};
 
 /// Page size for `next_update_after` cursor walk. Sized to match
 /// `BK_SET_AT_HEIGHT_PAGE_SIZE`: near-head callers (prover caught up to
@@ -42,10 +40,10 @@ const NEXT_UPDATE_PAGE_SIZE: u32 = 500;
 ///
 /// # Cost
 ///
-/// Round trips = `ceil(events_past_cursor_up_to_first_hit / NEXT_UPDATE_PAGE_SIZE)`.
-/// On a chain where the prover is caught up to head this is O(1). On a
-/// long-lagging prover it degrades linearly but is bounded by the
-/// hard 10_000-page ceiling.
+/// Round trips = `ceil(events_past_cursor_up_to_first_hit /
+/// NEXT_UPDATE_PAGE_SIZE)`. On a chain where the prover is caught up to head
+/// this is O(1). On a long-lagging prover it degrades linearly but is bounded
+/// by the hard 10_000-page ceiling.
 ///
 /// The returned struct includes `block_id`, `height`, and the raw
 /// `bk_set_update_hex` blob; the caller parses the latter via
@@ -87,8 +85,8 @@ pub async fn next_update_after(
         }
         if pages > 10_000 {
             bail!(
-                "next_update_after: refusing to paginate past 10_000 pages \
-                 (likely a server-side pagination bug) at cursor {:?}",
+                "next_update_after: refusing to paginate past 10_000 pages (likely a server-side \
+                 pagination bug) at cursor {:?}",
                 after,
             );
         }
@@ -126,9 +124,8 @@ pub(crate) fn assert_ascending_by_height(
         if let Some(h) = u.height {
             if h < *last_height_seen {
                 bail!(
-                    "bkSetUpdates page returned non-ascending height: \
-                     saw {} after {} — next_update_after early-return \
-                     assumption violated (schema drift?)",
+                    "bkSetUpdates page returned non-ascending height: saw {} after {} — \
+                     next_update_after early-return assumption violated (schema drift?)",
                     h,
                     *last_height_seen,
                 );
@@ -221,8 +218,8 @@ pub async fn bk_set_at_height(
         }
         if pages > 10_000 {
             bail!(
-                "bk_set_at_height: refusing to paginate past 10_000 pages \
-                 (likely a server-side pagination bug) at cursor {:?}",
+                "bk_set_at_height: refusing to paginate past 10_000 pages (likely a server-side \
+                 pagination bug) at cursor {:?}",
                 cursor
             );
         }
@@ -278,12 +275,12 @@ pub fn fold_bk_updates(
                 BK_CHANGE_ADDED => {
                     base.insert(signer_idx, pk);
                     adds += 1;
-                }
+                },
                 BK_CHANGE_REMOVED => {
                     base.remove(&signer_idx);
                     removes += 1;
-                }
-                _ => {} // FutureAdd/VersionChange etc. — no effect on active set
+                },
+                _ => {}, // FutureAdd/VersionChange etc. — no effect on active set
             }
         }
     }
@@ -297,8 +294,8 @@ pub fn fold_bk_updates(
 
     if base.is_empty() {
         bail!(
-            "fold_bk_updates: result is empty after {} adds / {} removes — \
-             genesis anchor or update log is inconsistent",
+            "fold_bk_updates: result is empty after {} adds / {} removes — genesis anchor or \
+             update log is inconsistent",
             adds,
             removes
         );
@@ -327,12 +324,12 @@ pub const BK_CHANGE_VARIANT_REMOVED: u32 = BK_CHANGE_REMOVED;
 /// ```
 ///
 /// * Keys parse as `u16` — the string wrapper is just JSON's map-key
-///   constraint, values are the raw signer indices used everywhere else
-///   in the pipeline.
+///   constraint, values are the raw signer indices used everywhere else in the
+///   pipeline.
 /// * Values may be **48-byte compressed** (canonical) or **96-byte
-///   uncompressed**; both encodings are accepted and [`normalize_bk_set_pubkeys`]
-///   collapses uncompressed keys to the compressed form before returning.
-///   Any other length errors.
+///   uncompressed**; both encodings are accepted and
+///   [`normalize_bk_set_pubkeys`] collapses uncompressed keys to the compressed
+///   form before returning. Any other length errors.
 ///
 /// This is the format both `bridge-prover-daemon` and `bridge-relayer-daemon`
 /// consume via `bridge_prover_lib::bk_set_bootstrap::load_bk_set`; the
@@ -393,7 +390,7 @@ pub fn normalize_bk_set_pubkeys(
                     }
                 };
                 pt.to_compressed_be().to_vec()
-            }
+            },
             other => bail!(
                 "unexpected pubkey size {} for signer {} (expected 48 or 96)",
                 other,
@@ -411,7 +408,8 @@ const BK_CHANGE_REMOVED: u32 = 1;
 
 /// Parse a bk_set_update blob by scanning for pubkey markers.
 ///
-/// Scans for the `u64(96)` pubkey length marker preceded by variant + signer_index.
+/// Scans for the `u64(96)` pubkey length marker preceded by variant +
+/// signer_index.
 fn parse_bk_set_changes(blob: &[u8]) -> Vec<(u32, u16, Vec<u8>)> {
     let mut results = Vec::new();
     if blob.len() < 16 {
@@ -440,7 +438,8 @@ mod fold_tests {
     use super::*;
 
     /// Build a synthetic bk_set_update blob in AN's on-wire format:
-    /// `[num_changes u64 LE] [variant u32 LE, signer_idx u16 LE, pk_len u64 LE = 96, 96-byte pk]*`
+    /// `[num_changes u64 LE] [variant u32 LE, signer_idx u16 LE, pk_len u64 LE
+    /// = 96, 96-byte pk]*`
     fn encode_changes(changes: &[(u32, u16, [u8; 96])]) -> String {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(changes.len() as u64).to_le_bytes());
@@ -458,8 +457,10 @@ mod fold_tests {
     /// pubkeys — matching how real BK signers differ. All results decompress
     /// cleanly under `normalize_bk_set_pubkeys`.
     fn uncompressed_pk(seed: u64) -> [u8; 96] {
-        use halo2_base::halo2_proofs::halo2curves::bls12_381::{Fr as BlsScalar, G1Affine, G1};
-        use halo2_base::halo2_proofs::halo2curves::group::Curve;
+        use halo2_base::halo2_proofs::halo2curves::{
+            bls12_381::{Fr as BlsScalar, G1Affine, G1},
+            group::Curve,
+        };
         let s = BlsScalar::from(seed.max(1));
         let p: G1Affine = (G1::generator() * s).to_affine();
         p.to_uncompressed_be()
@@ -554,11 +555,11 @@ mod fold_tests {
         let pk0 = uncompressed_pk(1);
         let mut genesis = HashMap::new();
         genesis.insert(0u16, pk0.to_vec());
-        let events = vec![synthetic_event(
-            100,
-            "a",
-            &[(BK_CHANGE_REMOVED, 0u16, [0u8; 96])],
-        )];
+        let events = vec![synthetic_event(100, "a", &[(
+            BK_CHANGE_REMOVED,
+            0u16,
+            [0u8; 96],
+        )])];
         let err = fold_bk_updates(genesis, &events).expect_err("empty result must fail");
         let msg = err.to_string();
         assert!(msg.contains("empty"), "expected 'empty' in error: {msg}");
@@ -689,10 +690,7 @@ mod pagination_tests {
         // Same-height events can legitimately appear on the same page
         // (same block emits multiple rotation deltas); `<` — not `<=` —
         // must be the rejection criterion.
-        let page = vec![
-            mk_event(Some(500), "a"),
-            mk_event(Some(500), "b"),
-        ];
+        let page = vec![mk_event(Some(500), "a"), mk_event(Some(500), "b")];
         let mut last = 0;
         assert_ascending_by_height(&page, &mut last).unwrap();
         assert_eq!(last, 500);
@@ -702,7 +700,8 @@ mod pagination_tests {
 #[cfg(test)]
 mod live_tests {
     //! Live-network tests — ignored by default. Run with:
-    //!   cargo test -p bridge-prover-lib --release -- --ignored next_update_after
+    //!   cargo test -p bridge-prover-lib --release -- --ignored
+    //! next_update_after
     use super::*;
 
     const SHELLNET: &str = "https://shellnet.ackinacki.org/graphql";
@@ -735,7 +734,8 @@ mod live_tests {
     #[ignore]
     async fn next_update_after_handles_cursor_inside_burst() {
         let client = crate::gql_client::create_client(SHELLNET).unwrap();
-        // Cursor exactly at 2584711 should skip past it and return 2584894 (next in burst 1).
+        // Cursor exactly at 2584711 should skip past it and return 2584894 (next in
+        // burst 1).
         let r = next_update_after(&client, 2_584_711).await.unwrap();
         let u = r.expect("next event after 2584711 must exist");
         assert_eq!(u.height, Some(2_584_894));

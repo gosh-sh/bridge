@@ -1,9 +1,13 @@
 //! Circuit 4 (Event Prove — `WithdrawalInitiated`) key manager.
 //!
 //! Uses the deterministic synthetic-witness path from
-//! `bridge_event_prove_circuit::test_helpers::build_synthetic_event_keygen_inputs`;
+//! `bridge_event_prove_circuit::test_helpers::build_synthetic_final_proof_keygen_inputs`;
 //! the produced circuit's constraint system is independent of witness
 //! values, so the VK/PK shape is stable across machines and CI runs.
+//!
+//! Post-migration this drives the multi-thread `BridgeEventFinalProof`
+//! (13 public inputs) — the legacy single-thread event-prove circuit was
+//! removed. See `MULTITHREAD_MIGRATION_PLAN.md` for context.
 //!
 //! Lifecycle (SRS load, cache-hit check, keygen timing/logging, save-and-set,
 //! on-demand PK load/unload, accessor plumbing) is delegated to the shared
@@ -12,12 +16,14 @@
 
 use std::path::Path;
 
-use bridge_event_prove_circuit::test_helpers::build_synthetic_event_keygen_inputs;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, G1Affine},
-    plonk::{ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use bridge_event_prove_circuit::test_helpers::build_synthetic_final_proof_keygen_inputs;
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, G1Affine},
+        plonk::{ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
 };
 use tracing::info;
 
@@ -53,7 +59,11 @@ pub(super) const PREFIX: &str = "event";
 ///
 /// Distinct from `MANIFEST_FORMAT`: this describes the CIRCUIT the keys
 /// were built for, that one describes the FILE that says so.
-pub(super) const EVENT_CIRCUIT_REVISION: u32 = 3;
+///
+/// Rev 5: `KEYGEN_SRS_K` dropped 20 → 19 to match the circuit's actual K.
+/// Old K=20 PKs on disk are invalidated and force fresh keygen at K=19
+/// (~2× smaller). See `KEYGEN_SRS_K` doc-comment for the rationale.
+pub(super) const EVENT_CIRCUIT_REVISION: u32 = 5;
 
 /// Deterministic seed for the synthetic-witness keygen path. Any seed
 /// produces the same VK/PK shape.
@@ -69,11 +79,18 @@ impl EventKeyManager {
     /// `event_prover::default_event_circuit_params`.
     pub const DEFAULT_K: u32 = 19;
 
-    /// SRS degree used at keygen / prove / verify. Same rationale as
-    /// [`super::LayerHashesKeyManager::KEYGEN_SRS_K`]: halo2-axiom bakes
-    /// `params.k()` into `vk.domain`, and partner event PKs were keygen'd
-    /// against the shared K=20 ceremony.
-    pub const KEYGEN_SRS_K: u32 = 20;
+    /// SRS degree used at keygen / prove / verify. Matches the circuit's
+    /// arithmetic K so `vk.domain.k == 19` — halo2-axiom bakes `params.k()`
+    /// into `vk.domain`, so an oversized SRS (K=20) would produce a
+    /// K=20-domain PK even though the circuit only uses 2^19 rows.
+    ///
+    /// Historical note: this was K=20 for partner-shipped PK compatibility;
+    /// dropping to K=19 rotates the VK (breaking change — the deployed
+    /// `BridgeWithdrawalAggregatorVerifier` Yul must be redeployed against
+    /// the new inner VK). The outer SHPLONK aggregator reads inner domain
+    /// from the VK at compile time, so no inner-K pinning outside this
+    /// constant.
+    pub const KEYGEN_SRS_K: u32 = 19;
 
     pub fn new(params_dir: &Path) -> Self {
         Self::new_with_k(params_dir, Self::DEFAULT_K)
@@ -82,13 +99,7 @@ impl EventKeyManager {
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
         let srs_k = Self::KEYGEN_SRS_K.max(k);
         Self {
-            state: KeyManagerState::new(
-                params_dir,
-                PREFIX,
-                k,
-                srs_k,
-                Some(EVENT_CIRCUIT_REVISION),
-            ),
+            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k, Some(EVENT_CIRCUIT_REVISION)),
         }
     }
 
@@ -99,7 +110,7 @@ impl EventKeyManager {
         }
         info!("running keygen for event circuit (this may take a while)...");
 
-        let (circuit, _instances) = build_synthetic_event_keygen_inputs(EVENT_KEYGEN_SEED);
+        let (circuit, _instances) = build_synthetic_final_proof_keygen_inputs(EVENT_KEYGEN_SEED);
         let base_params = circuit.base_circuit_params.clone();
 
         self.state.run_keygen(&circuit, base_params)?;

@@ -209,7 +209,9 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: seedAnchor,
-            anchorLayer: 1
+            anchorLayer: 1,
+            xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
+            yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
         });
     }
 

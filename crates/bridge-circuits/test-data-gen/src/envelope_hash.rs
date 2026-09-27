@@ -5,17 +5,15 @@
 //! [`crate::layer_hashes::l0_opening_siblings`]; see
 //! `GLOBAL_HISTORY_DATA_SPEC_MULTITHREAD.md` for the leaf layout.
 
-use sha2::{Digest, Sha256};
-
-// Re-export Poseidon functions and constants from bridge-poseidon (single source of truth).
+// Re-export Poseidon functions and constants from bridge-poseidon (single
+// source of truth).
 pub use bridge_poseidon::{
-    poseidon_hash_bytes, poseidon_hash_fr, poseidon_hash_fr_to_bytes,
-    compute_bk_set_poseidon, compute_bk_set_poseidon_padded_to,
-    decompose_pubkey_x_to_limbs,
-    POSEIDON_T, POSEIDON_RATE, POSEIDON_R_F, POSEIDON_R_P,
-    LIMB_BITS, NUM_LIMBS, MAX_SIGNERS, PADDING_SIGNER_INDEX,
-    MAX_LAYERS, LAYER_PREIMAGE_SIZE,
+    compute_bk_set_poseidon, compute_bk_set_poseidon_padded_to, decompose_pubkey_x_to_limbs,
+    poseidon_hash_bytes, poseidon_hash_fr, poseidon_hash_fr_to_bytes, LAYER_PREIMAGE_SIZE,
+    LIMB_BITS, MAX_LAYERS, MAX_SIGNERS, NUM_LIMBS, PADDING_SIGNER_INDEX, POSEIDON_RATE,
+    POSEIDON_R_F, POSEIDON_R_P, POSEIDON_T,
 };
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // SHA-256 helpers
@@ -74,8 +72,9 @@ pub fn build_layer_hashes_preimage(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
+
+    use super::*;
 
     #[test]
     fn test_sha256_combine() {
@@ -134,7 +133,10 @@ mod tests {
         let pk_bytes = pk.to_bytes();
         let limbs = decompose_pubkey_x_to_limbs(&pk_bytes);
         let non_zero_count = limbs.iter().filter(|l| **l != Fr::zero()).count();
-        assert!(non_zero_count >= 2, "Expected at least 2 non-zero limbs for a real pubkey");
+        assert!(
+            non_zero_count >= 2,
+            "Expected at least 2 non-zero limbs for a real pubkey"
+        );
     }
 
     #[test]

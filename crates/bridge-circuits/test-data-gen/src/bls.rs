@@ -1,7 +1,6 @@
 use std::fmt;
 
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 pub const DST: [u8; 43] = *b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
@@ -96,10 +95,9 @@ pub fn verify<TData: Serialize>(
     let agg_pk = gosh_blst::min_pk::AggregatePublicKey::aggregate(&flattened, false)
         .map_err(|e| anyhow::anyhow!("Pubkey aggregation failed: {e:?}"))?;
     let buffer = bincode::serialize(data)?;
-    let result =
-        signature
-            .0
-            .verify(false, &buffer, &DST, &[], &agg_pk.to_public_key(), false);
+    let result = signature
+        .0
+        .verify(false, &buffer, &DST, &[], &agg_pk.to_public_key(), false);
     Ok(result == gosh_blst::BLST_ERROR::BLST_SUCCESS)
 }
 

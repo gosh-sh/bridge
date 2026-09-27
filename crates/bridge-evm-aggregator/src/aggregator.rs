@@ -108,6 +108,19 @@ impl AggregatorConfig {
                 lookup_bits_outer: 20,
                 universality: VerifierUniversality::Full,
             },
+            // `BridgeMultiHopProof` at H_HOPS_PER_PROOF=1 re-exposes 2 inner
+            // PIs (hopStartBlockId, hopEndBlockId), so 12 accumulator + 2
+            // inner = 14 outer instances. Inner shape (K=17, ~25 advice cols,
+            // 8 SHA compressions) matches `LayerHashesAggregatorVerifier`'s
+            // cell budget, but with only 2 PIs vs 14 the outer YUL predicts
+            // ~21 KB at k_outer=21 (well under EIP-170). H=2 forced
+            // k_outer=22 to fit 50 inner cols — H=1 reverts to k_outer=21.
+            // See `bridge-circuits/docs/CIRCUIT_COMPLEXITY_COMPARISON.md` §5.
+            "BridgeMultiHopAggregatorVerifier" => Self {
+                k_outer: 21,
+                lookup_bits_outer: 20,
+                universality: VerifierUniversality::Full,
+            },
             _ => Self::for_inner_instances(4),
         };
         if let Some(k) = k_outer {

@@ -1,11 +1,11 @@
 //! Fetch attestations for a target block via GraphQL `Block.attestations[]`.
 //!
-//! The v3 gql-server exposes `Block.attestations[]` as a consumer-oriented view: the
-//! resolver filters entries so each block's array contains attestations whose
-//! inner `AttestationData.block_id` matches that block's own id — i.e. "the
-//! attestation that signed THIS block". Behind the scenes the row still lives
-//! in a later block's `common_section.block_attestations()`, but the GQL view
-//! hides that and we just query block N directly.
+//! The v3 gql-server exposes `Block.attestations[]` as a consumer-oriented
+//! view: the resolver filters entries so each block's array contains
+//! attestations whose inner `AttestationData.block_id` matches that block's own
+//! id — i.e. "the attestation that signed THIS block". Behind the scenes the
+//! row still lives in a later block's `common_section.block_attestations()`,
+//! but the GQL view hides that and we just query block N directly.
 
 use std::collections::HashMap;
 
@@ -17,8 +17,8 @@ use crate::gql_client::GqlClient;
 #[derive(Debug, Clone)]
 pub struct ParsedAttestation {
     /// Laid out exactly as `bincode(Envelope<AttestationData>)` so
-    /// `attestation_bls_checker_circuit::attestation_data_parser` and `prover.rs`
-    /// can index it with their fixed offsets.
+    /// `attestation_bls_checker_circuit::attestation_data_parser` and
+    /// `prover.rs` can index it with their fixed offsets.
     pub raw_bytes: Vec<u8>,
     pub parent_block_id: [u8; 32],
     pub block_id: [u8; 32],
@@ -32,16 +32,19 @@ pub struct ParsedAttestation {
 ///
 /// Acki Nacki finalization is a two-path protocol:
 ///   * **Primary path** — reached ≥2N/3 signers within the `β`-block deadline.
-///     `Block.attestations[]` contains exactly one entry of `target_type=PRIMARY`.
+///     `Block.attestations[]` contains exactly one entry of
+///     `target_type=PRIMARY`.
 ///   * **Fallback path** — primary deadline passed without ≥2N/3; the chain
 ///     then collects a `PRIMARY`-type prefinalization proof at `β` plus a
-///     `FALLBACK`-type target proof at `2β`, each ≥N/2+1 signers, both over
-///     the same `block_id`. The block is only fallback-finalized when both
+///     `FALLBACK`-type target proof at `2β`, each ≥N/2+1 signers, both over the
+///     same `block_id`. The block is only fallback-finalized when both
 ///     attestations exist.
 ///
 /// Mapping to bridge circuits:
-///   * `Primary`  → Circuit 1A (`PrimaryAttestationBlsCheckerCircuit`,  threshold ≥2N/3)
-///   * `Fallback` → Circuit 1B (`FallbackAttestationBlsCheckerCircuit`, threshold > N/2)
+///   * `Primary`  → Circuit 1A (`PrimaryAttestationBlsCheckerCircuit`,
+///     threshold ≥2N/3)
+///   * `Fallback` → Circuit 1B (`FallbackAttestationBlsCheckerCircuit`,
+///     threshold > N/2)
 ///
 /// Both circuits produce a proof over the same 4 public instances
 /// `[block_id, bk_set_poseidon, block_seq_no, last_seen]` — only the
@@ -49,7 +52,8 @@ pub struct ParsedAttestation {
 #[derive(Debug, Clone)]
 pub enum AttestationEvidence {
     Primary(ParsedAttestation),
-    /// Pair of attestations (PRIMARY prefinalization + FALLBACK target) over the same `block_id`. 
+    /// Pair of attestations (PRIMARY prefinalization + FALLBACK target) over
+    /// the same `block_id`.
     Fallback {
         primary: ParsedAttestation,
         fallback: ParsedAttestation,
@@ -60,14 +64,18 @@ impl AttestationEvidence {
     pub fn path(&self) -> &'static str {
         match self {
             AttestationEvidence::Primary(_) => "primary",
-            AttestationEvidence::Fallback { .. } => "fallback",
+            AttestationEvidence::Fallback {
+                ..
+            } => "fallback",
         }
     }
 
     pub fn block_id(&self) -> [u8; 32] {
         match self {
             AttestationEvidence::Primary(p) => p.block_id,
-            AttestationEvidence::Fallback { primary, .. } => primary.block_id,
+            AttestationEvidence::Fallback {
+                primary, ..
+            } => primary.block_id,
         }
     }
 
@@ -78,12 +86,15 @@ impl AttestationEvidence {
     pub fn signer_indices(&self) -> std::collections::HashSet<u16> {
         match self {
             AttestationEvidence::Primary(p) => p.signature_occurrences.keys().copied().collect(),
-            AttestationEvidence::Fallback { primary, fallback } => {
+            AttestationEvidence::Fallback {
+                primary,
+                fallback,
+            } => {
                 let mut s: std::collections::HashSet<u16> =
                     primary.signature_occurrences.keys().copied().collect();
                 s.extend(fallback.signature_occurrences.keys().copied());
                 s
-            }
+            },
         }
     }
 }
@@ -124,14 +135,14 @@ pub async fn fetch_attestation_evidence(
                 p.signature_occurrences.len()
             );
             Ok(AttestationEvidence::Primary(p))
-        }
+        },
         (1, 1) => {
             let primary = primaries.into_iter().next().unwrap();
             let fallback = fallbacks.into_iter().next().unwrap();
             anyhow::ensure!(
                 primary.block_id == fallback.block_id,
-                "block {target_seq_no}: fallback pair block_id mismatch \
-                 (primary={:?}, fallback={:?})",
+                "block {target_seq_no}: fallback pair block_id mismatch (primary={:?}, \
+                 fallback={:?})",
                 hex::encode(primary.block_id),
                 hex::encode(fallback.block_id),
             );
@@ -141,11 +152,14 @@ pub async fn fetch_attestation_evidence(
                 primary.signature_occurrences.len(),
                 fallback.signature_occurrences.len(),
             );
-            Ok(AttestationEvidence::Fallback { primary, fallback })
-        }
+            Ok(AttestationEvidence::Fallback {
+                primary,
+                fallback,
+            })
+        },
         (np, nf) => anyhow::bail!(
-            "block {target_seq_no}: unexpected attestations shape \
-             (primaries={np}, fallbacks={nf}); expected [PRIMARY] or [PRIMARY, FALLBACK]"
+            "block {target_seq_no}: unexpected attestations shape (primaries={np}, \
+             fallbacks={nf}); expected [PRIMARY] or [PRIMARY, FALLBACK]"
         ),
     }
 }
@@ -155,7 +169,11 @@ pub async fn fetch_attestation_evidence(
 /// the attestation-data section begins at `208 + num_signers*4` and the
 /// `block_seq_no` u32 sits at relative offset `80` within that section.
 fn patch_seq_no_in_raw_bytes(att: &mut ParsedAttestation, seq_no: u32) {
-    let num_signers: usize = att.signature_occurrences.values().map(|c| *c as usize).sum();
+    let num_signers: usize = att
+        .signature_occurrences
+        .values()
+        .map(|c| *c as usize)
+        .sum();
     let data_offset = 208 + num_signers * 4;
     let seq_off = data_offset + 80;
     if seq_off + 4 <= att.raw_bytes.len() {

@@ -308,7 +308,9 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             accFr: 0xAC0F4CEDEADBEEF1,
             nullifier: nullifier,
             finalRoot: finalRoot,
-            anchorLayer: 1
+            anchorLayer: 1,
+            xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
+            yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
         });
     }
 

@@ -6,8 +6,8 @@
 //! `bridge-snark-utils::halo2_tvm_bundle`). The numeric values
 //! MUST stay stable across releases:
 //!
-//! * `0` = Blake2b — the AN-side default and the only variant accepted by
-//!   the `ZKHALO2VERIFYWITHVK` opcode.
+//! * `0` = Blake2b — the AN-side default and the only variant accepted by the
+//!   `ZKHALO2VERIFYWITHVK` opcode.
 //! * `1` = reserved for Keccak (`EvmTranscript`) — not yet implemented.
 //! * `2` = Poseidon — added 2026-05-27 for the R15 ETH-side aggregator
 //!   pipeline. Inner SNARKs fed to `snark-verifier-sdk::AggregationCircuit`

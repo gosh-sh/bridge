@@ -8,6 +8,8 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 
 /// @title DeployReuseVerifiersBridge
 /// @notice Deploy a fresh AckiNackiBridge that REUSES already-deployed Sepolia
@@ -42,7 +44,9 @@ contract DeployReuseVerifiersBridge is Script {
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
-            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
+            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)),
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
         });
 
         vm.startBroadcast(pk);

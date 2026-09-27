@@ -3,6 +3,8 @@
 # these figures drift, so a regeneration shows its growth in the diff.
 21152  BridgeWithdrawalAggregatorVerifier.bin
 3648  BridgeWithdrawalAggregatorVerifier_calldata.bin
+23722  BridgeMultiHopAggregatorVerifier.bin
+4448  BridgeMultiHopAggregatorVerifier_calldata.bin
 21493  FallbackAggregatorVerifier.bin
 3840  FallbackAggregatorVerifier_calldata.bin
 23111  LayerHashesAggregatorVerifier.bin

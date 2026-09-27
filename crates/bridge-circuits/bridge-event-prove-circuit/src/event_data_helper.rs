@@ -12,8 +12,7 @@
 //!   line 7: event_block_id (hex, 64 chars)
 //!   line 8: <blank>
 
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 /// One captured `WithdrawalInitiated` event, as recorded by the generator.
 pub struct WithdrawalRecord {
@@ -28,8 +27,7 @@ pub struct WithdrawalRecord {
 
 /// Parse `withdrawals.txt`. Lenient about trailing blank lines.
 pub fn read_withdrawals_from_file(path: impl AsRef<Path>) -> Vec<WithdrawalRecord> {
-    let content =
-        fs::read_to_string(path).expect("failed to read withdrawals fixture file");
+    let content = fs::read_to_string(path).expect("failed to read withdrawals fixture file");
     let lines: Vec<&str> = content.lines().collect();
 
     let mut records = Vec::new();

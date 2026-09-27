@@ -10,16 +10,17 @@
 //! [`super::state::KeyManagerState`]. Only the circuit-specific
 //! reference-witness construction lives here.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Context;
 use attestation_bls_checker_circuit::primary_circuit::PrimaryAttestationBlsCheckerCircuit;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
 };
 use tracing::info;
 
@@ -69,9 +70,8 @@ impl PrimaryKeyManager {
         }
         info!("running keygen for primary circuit (this may take ~60s)...");
 
-        let test_data =
-            bridge_test_data_gen::generator::generate_test_data_all_sign(bk_set.len())
-                .context("failed to generate reference test data for keygen")?;
+        let test_data = bridge_test_data_gen::generator::generate_test_data_all_sign(bk_set.len())
+            .context("failed to generate reference test data for keygen")?;
 
         let last_seen: u32 = 0;
         let circuit = PrimaryAttestationBlsCheckerCircuit::<Fr>::new(

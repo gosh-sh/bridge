@@ -4,12 +4,13 @@
 //! aggregator pipeline. The sibling of `export-c4-poseidon-snark`, for the
 //! attestation/layer leg instead of the withdrawal leg.
 //!
-//! **All the real work reuses Alina's `bridge-prover-lib` public API** — the same
-//! functions `bridge-prover-daemon` drives. The daemon proves Blake2b (the AN-VM
-//! `ZKHALO2VERIFYWITHVK` flavour); the ETH aggregator only consumes Poseidon, so
-//! this binary re-proves the same live witness with `TranscriptKind::Poseidon`
-//! (the `our_side_reprove` architecture). No mock, no synthetic data: the witness
-//! is fetched live from an Acki Nacki GraphQL endpoint.
+//! **All the real work reuses Alina's `bridge-prover-lib` public API** — the
+//! same functions `bridge-prover-daemon` drives. The daemon proves Blake2b (the
+//! AN-VM `ZKHALO2VERIFYWITHVK` flavour); the ETH aggregator only consumes
+//! Poseidon, so this binary re-proves the same live witness with
+//! `TranscriptKind::Poseidon` (the `our_side_reprove` architecture). No mock,
+//! no synthetic data: the witness is fetched live from an Acki Nacki GraphQL
+//! endpoint.
 //!
 //! ```bash
 //! cd crates/bridge-snark-utils
@@ -47,19 +48,15 @@ use bridge_gql_fetcher::{
 };
 use bridge_poseidon::compute_bk_set_poseidon;
 use bridge_prover_lib::{
-    block_id_tree,
-    bridge_state::BridgeState,
-    layer_prover,
-    poseidon_dense::HISTORY_PROOF_WINDOW_SIZE,
-    prover, real_chain_builder,
-    keys::KeyManager,
-    transcript::TranscriptKind,
-    verifier, Fr,
+    block_id_tree, bridge_state::BridgeState, keys::KeyManager, layer_prover,
+    poseidon_dense::HISTORY_PROOF_WINDOW_SIZE, prover, real_chain_builder,
+    transcript::TranscriptKind, verifier, Fr,
 };
-use bridge_snark_utils::{halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary};
+use bridge_snark_utils::{
+    halo2_snark::export_poseidon_snark_with_srs_k, proof_export::save_instances_binary,
+};
 use clap::{Parser, ValueEnum};
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-use halo2_base::halo2_proofs::poly::commitment::Params;
+use halo2_base::halo2_proofs::{halo2curves::group::ff::PrimeField, poly::commitment::Params};
 
 /// Which `verifyBlock` circuit to re-prove.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -86,14 +83,16 @@ struct Args {
     /// Target key-block sequence number.
     #[arg(long)]
     seqno: u64,
-    /// Which circuit to prove. `auto` classifies attestation evidence (1A vs 1B).
+    /// Which circuit to prove. `auto` classifies attestation evidence (1A vs
+    /// 1B).
     #[arg(long, value_enum, default_value_t = CircuitSel::Auto)]
     circuit: CircuitSel,
-    /// `last_seen_block_seqno` public input for the attestation circuits (1A/1B).
+    /// `last_seen_block_seqno` public input for the attestation circuits
+    /// (1A/1B).
     #[arg(long, default_value_t = 0)]
     last_seen: u32,
-    /// Daemon `state.json` (required for `--circuit layer`): the persisted chain
-    /// anchor `real_chain_builder::build_real_chain` walks back from.
+    /// Daemon `state.json` (required for `--circuit layer`): the persisted
+    /// chain anchor `real_chain_builder::build_real_chain` walks back from.
     #[arg(long)]
     state: Option<PathBuf>,
     /// Optional BK-set JSON fallback if the endpoint doesn't expose the set.
@@ -109,10 +108,11 @@ struct Args {
     name: Option<String>,
     /// Fast pre-flight: fetch the target block's `block_merkle_tree_leaves[2]`
     /// (the node's BK-set Poseidon commitment) and compare it to
-    /// `compute_bk_set_poseidon(bk_set)`. Prints both and exits WITHOUT proving.
-    /// A mismatch means the loaded BK set does not match the set that signed the
-    /// block (stale config / chain rotated) — the root cause of a 1A/1B/2
-    /// self-verify FAIL, catchable in ~1s instead of a multi-minute prove.
+    /// `compute_bk_set_poseidon(bk_set)`. Prints both and exits WITHOUT
+    /// proving. A mismatch means the loaded BK set does not match the set
+    /// that signed the block (stale config / chain rotated) — the root
+    /// cause of a 1A/1B/2 self-verify FAIL, catchable in ~1s instead of a
+    /// multi-minute prove.
     #[arg(long, default_value_t = false)]
     check_bk_set: bool,
 }
@@ -142,7 +142,10 @@ fn ensure_srs_for(km: &KeyManager, params_dir: &Path, circuit_k: u32) -> anyhow:
     let mut w = std::io::BufWriter::new(std::fs::File::create(&srs_path)?);
     p.write(&mut w)?;
     w.flush()?;
-    println!("provisioned {} (downsized from K={src_k} ceremony)", srs_path.display());
+    println!(
+        "provisioned {} (downsized from K={src_k} ceremony)",
+        srs_path.display()
+    );
     Ok(())
 }
 
@@ -167,9 +170,7 @@ async fn main() -> anyhow::Result<()> {
     // 2026-07-22 as architecturally broken (see `bk_set_fetcher.rs`), so the
     // config file is now the only source.
     let cfg = args.bk_set_config.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "--bk-set-config <path> is required (GraphQL BK-set fetch is disabled)",
-        )
+        anyhow::anyhow!("--bk-set-config <path> is required (GraphQL BK-set fetch is disabled)",)
     })?;
     let bk_set = bk_set_fetcher::load_bk_set_from_config(cfg)?;
     println!("BK set loaded: {} keepers", bk_set.len());
@@ -189,8 +190,19 @@ async fn main() -> anyhow::Result<()> {
         let matches = ours == node;
         println!("bk_set_poseidon(ours) = {}", hex::encode(ours));
         println!("block.leaves[2] (node) = {}", hex::encode(node));
-        println!("MATCH: {}", if matches { "YES — correct set" } else { "NO — wrong/stale set" });
-        anyhow::ensure!(matches, "BK-set commitment mismatch for block {}", args.seqno);
+        println!(
+            "MATCH: {}",
+            if matches {
+                "YES — correct set"
+            } else {
+                "NO — wrong/stale set"
+            }
+        );
+        anyhow::ensure!(
+            matches,
+            "BK-set commitment mismatch for block {}",
+            args.seqno
+        );
         return Ok(());
     }
 
@@ -209,25 +221,27 @@ async fn main() -> anyhow::Result<()> {
                 AttestationEvidence::Primary(_) => {
                     println!("auto: block {} is PRIMARY -> Circuit 1A", args.seqno);
                     CircuitSel::Primary
-                }
-                AttestationEvidence::Fallback { .. } => {
+                },
+                AttestationEvidence::Fallback {
+                    ..
+                } => {
                     println!("auto: block {} is FALLBACK -> Circuit 1B", args.seqno);
                     CircuitSel::Fallback
-                }
+                },
             }
-        }
+        },
     };
 
     match selected {
         CircuitSel::Primary => {
             prove_primary(&mut km, &gql, &params_dir, &snark_dir, &bk_set, &args).await
-        }
+        },
         CircuitSel::Fallback => {
             prove_fallback(&mut km, &gql, &params_dir, &snark_dir, &bk_set, &args).await
-        }
+        },
         CircuitSel::Layer => {
             prove_layer(&mut km, &gql, &params_dir, &snark_dir, &bk_set, &args).await
-        }
+        },
         CircuitSel::Auto => unreachable!("auto resolved above"),
     }
 }
@@ -245,17 +259,20 @@ async fn prove_primary(
         .context("fetch_attestation_evidence")?;
     let primary = match &evidence {
         AttestationEvidence::Primary(p) => p.clone(),
-        AttestationEvidence::Fallback { primary, .. } => {
+        AttestationEvidence::Fallback {
+            primary, ..
+        } => {
             println!(
-                "warning: block {} is FALLBACK evidence but --circuit primary forced; \
-                 proving the PRIMARY half only (use --circuit fallback for the real 1B proof)",
+                "warning: block {} is FALLBACK evidence but --circuit primary forced; proving the \
+                 PRIMARY half only (use --circuit fallback for the real 1B proof)",
                 args.seqno
             );
             primary.clone()
-        }
+        },
     };
 
-    km.ensure_primary_keys(bk_set).context("ensure_primary_keys (keygen)")?;
+    km.ensure_primary_keys(bk_set)
+        .context("ensure_primary_keys (keygen)")?;
     let k = km.primary_config().k as u32;
     ensure_srs_for(km, params_dir, k)?;
     km.load_primary_pk().context("load_primary_pk")?;
@@ -282,7 +299,16 @@ async fn prove_primary(
         TranscriptKind::Poseidon,
     );
     km.unload_primary_pk();
-    finish("circuit1a", "primary", ok, &out.proof_bytes, &instances, params_dir, snark_dir, args)
+    finish(
+        "circuit1a",
+        "primary",
+        ok,
+        &out.proof_bytes,
+        &instances,
+        params_dir,
+        snark_dir,
+        args,
+    )
 }
 
 async fn prove_fallback(
@@ -297,15 +323,19 @@ async fn prove_fallback(
         .await
         .context("fetch_attestation_evidence")?;
     let (primary, fallback) = match &evidence {
-        AttestationEvidence::Fallback { primary, fallback } => (primary.clone(), fallback.clone()),
+        AttestationEvidence::Fallback {
+            primary,
+            fallback,
+        } => (primary.clone(), fallback.clone()),
         AttestationEvidence::Primary(_) => anyhow::bail!(
-            "block {} is PRIMARY evidence (single attestation); it cannot be proven with \
-             Circuit 1B (fallback needs a [PRIMARY, FALLBACK] pair). Use --circuit primary.",
+            "block {} is PRIMARY evidence (single attestation); it cannot be proven with Circuit \
+             1B (fallback needs a [PRIMARY, FALLBACK] pair). Use --circuit primary.",
             args.seqno
         ),
     };
 
-    km.ensure_fallback_keys(bk_set).context("ensure_fallback_keys (keygen)")?;
+    km.ensure_fallback_keys(bk_set)
+        .context("ensure_fallback_keys (keygen)")?;
     let k = km.fallback_config().k as u32;
     ensure_srs_for(km, params_dir, k)?;
     km.load_fallback_pk().context("load_fallback_pk")?;
@@ -333,7 +363,16 @@ async fn prove_fallback(
         TranscriptKind::Poseidon,
     );
     km.unload_fallback_pk();
-    finish("circuit1b", "fallback", ok, &out.proof_bytes, &instances, params_dir, snark_dir, args)
+    finish(
+        "circuit1b",
+        "fallback",
+        ok,
+        &out.proof_bytes,
+        &instances,
+        params_dir,
+        snark_dir,
+        args,
+    )
 }
 
 async fn prove_layer(
@@ -357,7 +396,8 @@ async fn prove_layer(
     )
     .with_context(|| format!("load BridgeState from {}", state_path.display()))?;
 
-    km.ensure_layer_keys().context("ensure_layer_keys (keygen)")?;
+    km.ensure_layer_keys()
+        .context("ensure_layer_keys (keygen)")?;
     let k = km.layer_config().k as u32;
     ensure_srs_for(km, params_dir, k)?;
     km.load_layer_pk().context("load_layer_pk")?;
@@ -391,13 +431,16 @@ async fn prove_layer(
 
     let tree = block_id_tree::BlockIdMerkleTree::from_leaves(leaves);
     let siblings = tree.siblings_for_l0();
-    println!("block_id from GQL leaves merkle root: {}", hex::encode(tree.block_id()));
+    println!(
+        "block_id from GQL leaves merkle root: {}",
+        hex::encode(tree.block_id())
+    );
 
     let bk_hash_bytes: [u8; 32] = bk_commit.to_repr();
     anyhow::ensure!(
         bk_hash_bytes == leaves[2],
-        "loaded BK set Poseidon commitment ({}) != block.leaves[2] ({}) — bk_set is stale or \
-         the chain rotated keys; refresh the BK set",
+        "loaded BK set Poseidon commitment ({}) != block.leaves[2] ({}) — bk_set is stale or the \
+         chain rotated keys; refresh the BK set",
         hex::encode(bk_hash_bytes),
         hex::encode(leaves[2]),
     );
@@ -444,7 +487,16 @@ async fn prove_layer(
         TranscriptKind::Poseidon,
     );
     km.unload_layer_pk();
-    finish("circuit2", "layer", ok, &out.proof_bytes, &instances, params_dir, snark_dir, args)
+    finish(
+        "circuit2",
+        "layer",
+        ok,
+        &out.proof_bytes,
+        &instances,
+        params_dir,
+        snark_dir,
+        args,
+    )
 }
 
 /// Shared tail: self-verify gate + proof/instances/snark export.
@@ -469,7 +521,10 @@ fn finish(
          invalid snark. Regenerate {key_prefix} keys against the current circuit shape."
     );
 
-    let name = args.name.clone().unwrap_or_else(|| default_name.to_string());
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| default_name.to_string());
     let proof_path = snark_dir.join(format!("{name}.proof.bin"));
     std::fs::write(&proof_path, proof_bytes)?;
     let instances_path = snark_dir.join(format!("{name}.instances.bin"));

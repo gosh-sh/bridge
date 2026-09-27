@@ -20,17 +20,16 @@ use std::collections::HashMap;
 
 use attestation_bls_checker_circuit::{
     primary_circuit::PrimaryAttestationBlsCheckerCircuit,
-    test_instances::expected_public_instances,
-    K as C1_K, LOOKUP_BITS as C1_LOOKUP_BITS, NUM_UNUSABLE_ROWS as C1_NUM_UNUSABLE_ROWS,
+    test_instances::expected_public_instances, K as C1_K, LOOKUP_BITS as C1_LOOKUP_BITS,
+    NUM_UNUSABLE_ROWS as C1_NUM_UNUSABLE_ROWS,
 };
 use bridge_poseidon::{LIMB_BITS, MAX_SIGNERS, NUM_LIMBS};
-use bridge_test_data_gen::generator::{generate_bridge_test_data, BridgeTestData};
-use bridge_test_data_gen::layer_hashes::ChainProofStep;
-use gosh_dense_balanced_tree::DenseChainLink;
-use halo2_base::halo2_proofs::{
-    dev::MockProver,
-    halo2curves::bn256::Fr,
+use bridge_test_data_gen::{
+    generator::{generate_bridge_test_data, BridgeTestData},
+    layer_hashes::ChainProofStep,
 };
+use gosh_dense_balanced_tree::DenseChainLink;
+use halo2_base::halo2_proofs::{dev::MockProver, halo2curves::bn256::Fr};
 use historical_layer_hashes_movement_checker_circuit::{
     circuit::LayerHashesMovementCheckerCircuit,
     test_helpers::{
@@ -158,8 +157,7 @@ fn build_circuit_2(
 #[test]
 fn same_block_id_fits_both_verifications() {
     // Small bk-set / layer counts keep the run reasonable (Circuit 1 is K=20).
-    let td = generate_bridge_test_data(5, 3, 1)
-        .expect("generate_bridge_test_data failed");
+    let td = generate_bridge_test_data(5, 3, 1).expect("generate_bridge_test_data failed");
 
     // ---- Circuit 1: expected block_id_fr comes from
     //      `compute_block_id_fr` (now reverses before folding).
@@ -173,8 +171,8 @@ fn same_block_id_fits_both_verifications() {
     // ---- Cross-circuit consistency check (the whole point of the test).
     assert_eq!(
         c1_block_id_fr, c2_block_id_fr,
-        "Circuit 1 and Circuit 2 disagree on block_id_fr — the byte-order \
-         convention has drifted again."
+        "Circuit 1 and Circuit 2 disagree on block_id_fr — the byte-order convention has drifted \
+         again."
     );
 
     // ---- Run Circuit 1 MockProver.
@@ -210,8 +208,7 @@ fn same_block_id_fits_both_verifications() {
 #[test]
 #[should_panic]
 fn wrong_endian_block_id_fr_is_rejected_by_circuit_1() {
-    let td = generate_bridge_test_data(5, 3, 1)
-        .expect("generate_bridge_test_data failed");
+    let td = generate_bridge_test_data(5, 3, 1).expect("generate_bridge_test_data failed");
 
     let (last_seen_block_seqno, mut c1_instances) =
         expected_public_instances(&td.attestation_bytes, &td.bk_set, MAX_SIGNERS);
@@ -221,8 +218,8 @@ fn wrong_endian_block_id_fr_is_rejected_by_circuit_1() {
     // convention. The in-circuit `inner_product` now reverses, so the
     // public input no longer matches what the circuit emits.
     let bad_block_id_fr = bytes_le_to_fr(&td.block_id); // no reverse — wrong convention
-    // Guard: only meaningful if the buggy value actually differs from the
-    // canonical one. For random 32-byte hashes this is overwhelmingly true.
+                                                        // Guard: only meaningful if the buggy value actually differs from the
+                                                        // canonical one. For random 32-byte hashes this is overwhelmingly true.
     assert_ne!(
         bad_block_id_fr,
         expected_block_id_fr(&td.block_id),
@@ -230,11 +227,7 @@ fn wrong_endian_block_id_fr_is_rejected_by_circuit_1() {
     );
     c1_instances[0] = bad_block_id_fr;
 
-    let circuit_1 = build_circuit_1(
-        td.attestation_bytes,
-        td.bk_set,
-        last_seen_block_seqno,
-    );
+    let circuit_1 = build_circuit_1(td.attestation_bytes, td.bk_set, last_seen_block_seqno);
     let prover = MockProver::run(C1_K, &circuit_1, vec![c1_instances])
         .expect("Circuit 1 MockProver::run failed");
     // Must panic: the injected block_id_fr disagrees with the circuit's own value.

@@ -41,8 +41,10 @@
 //! first rotation event with `height > --cap-height`.
 
 use anyhow::{bail, Context};
-use bridge_gql_fetcher::bk_set_fetcher::{bk_set_at_height, load_bk_set_from_config};
-use bridge_gql_fetcher::gql_client::create_client;
+use bridge_gql_fetcher::{
+    bk_set_fetcher::{bk_set_at_height, load_bk_set_from_config},
+    gql_client::create_client,
+};
 use bridge_prover_lib::prover_bk_set::ProverBkSet;
 
 #[tokio::main]
@@ -62,32 +64,27 @@ async fn main() -> anyhow::Result<()> {
                         .parse()
                         .context("--cap-height must be u64")?,
                 );
-            }
+            },
             "--genesis" => {
                 genesis_path = Some(args.next().context("--genesis needs a path")?);
-            }
+            },
             "--out" => {
                 out_path = args.next().context("--out needs a path")?;
-            }
+            },
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: seed_prover_bk_set --cap-height SEQNO [--genesis PATH] [--out PATH]\n\
-                     \n\
-                     Reconstructs the BK set active at chain height SEQNO by folding\n\
-                     `bkSetUpdates` (height <= SEQNO) onto a genesis snapshot, and writes\n\
-                     the result as a ProverBkSet JSON file.\n\
-                     \n\
-                     Options:\n\
-                       --cap-height SEQNO   (required) target chain height\n\
-                       --genesis PATH       genesis BK set JSON; overrides BRIDGE_BK_SET_CONFIG\n\
-                       --out PATH           output file (default: state/prover_bk_set.json)\n\
-                     \n\
-                     Env:\n\
-                       BRIDGE_GQL_ENDPOINT  (required) AN GraphQL endpoint\n\
-                       BRIDGE_BK_SET_CONFIG genesis BK set JSON path (fallback for --genesis)"
+                    "usage: seed_prover_bk_set --cap-height SEQNO [--genesis PATH] [--out \
+                     PATH]\n\nReconstructs the BK set active at chain height SEQNO by \
+                     folding\n`bkSetUpdates` (height <= SEQNO) onto a genesis snapshot, and \
+                     writes\nthe result as a ProverBkSet JSON file.\n\nOptions:\n--cap-height \
+                     SEQNO   (required) target chain height\n--genesis PATH       genesis BK set \
+                     JSON; overrides BRIDGE_BK_SET_CONFIG\n--out PATH           output file \
+                     (default: state/prover_bk_set.json)\n\nEnv:\nBRIDGE_GQL_ENDPOINT  (required) \
+                     AN GraphQL endpoint\nBRIDGE_BK_SET_CONFIG genesis BK set JSON path (fallback \
+                     for --genesis)"
                 );
                 return Ok(());
-            }
+            },
             other => bail!("unknown arg: {other} (try --help)"),
         }
     }
@@ -96,8 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let genesis_path = genesis_path
         .or_else(|| std::env::var("BRIDGE_BK_SET_CONFIG").ok())
         .context("genesis BK set path required: pass --genesis PATH or set BRIDGE_BK_SET_CONFIG")?;
-    let endpoint = std::env::var("BRIDGE_GQL_ENDPOINT")
-        .context("BRIDGE_GQL_ENDPOINT not set")?;
+    let endpoint = std::env::var("BRIDGE_GQL_ENDPOINT").context("BRIDGE_GQL_ENDPOINT not set")?;
 
     let genesis = load_bk_set_from_config(&genesis_path)
         .with_context(|| format!("load genesis BK set from {genesis_path}"))?;

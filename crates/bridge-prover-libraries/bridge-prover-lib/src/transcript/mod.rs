@@ -1,8 +1,8 @@
 //! Fiat–Shamir transcript flavours supported by the bridge provers.
 //!
 //! * [`kind::TranscriptKind`] — the discriminator threaded through
-//!   `generate_*_proof_with_transcript` variants (see
-//!   [`crate::prover`], [`crate::verifier`], [`crate::layer_prover`], and
+//!   `generate_*_proof_with_transcript` variants (see [`crate::prover`],
+//!   [`crate::verifier`], [`crate::layer_prover`], and
 //!   `bridge_event_prover_lib::prover`).
 //! * [`poseidon`] — native Poseidon transcript that produces the SAME proof
 //!   bytes as `snark-verifier-sdk`'s `PoseidonTranscript<NativeLoader, _>`.

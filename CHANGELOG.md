@@ -24,6 +24,65 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`BridgeMultiHopProof` hop count dropped from 5 to 1 per snark.**
+  `H_HOPS_PER_PROOF` in `bridge_event_prove_circuit::multi_hop_witness`
+  (and its mirror in `bridge_event_witness::schema`) is now `1`;
+  `N_BUNDLE_MAX` is bumped from `4` to `20` accordingly (prototype
+  `L_MAX = 20` ⇒ `⌈20 / 1⌉`). Motivation: the outer SHPLONK aggregator
+  Yul bytecode scales at ~450–500 B per inner advice column and is
+  capped by EIP-170 at 24 576 B. At `H = 5` (~200 inner advice cols)
+  the outer keygen exceeded a 16 GB workstation memory budget; at
+  `H = 2` (~50 inner advice cols) the Yul bytecode came out to
+  33 213 B (135 %, FAIL). At `H = 1` the multi-hop inner circuit is
+  SHA-dominated (8 compressions per snark, ~2.83 M cells) and matches
+  the shape of `historical-layer-hashes-movement-checker-circuit`
+  (25 advice cols at K=17); predicted outer Yul ≈ 21 KB at
+  `k_outer=21, Full`, well under EIP-170. The multi-hop inner
+  circuit's `num_advice_per_phase` is dropped from `200` to `25`
+  (measured MockProver minimum sweep 2026-09-27: 22 cols passes,
+  21 cols panics with "NOT ENOUGH ADVICE COLUMNS"; 25 chosen for
+  parity with LayerHashes and a 3-col safety margin). See
+  `crates/bridge-circuits/docs/CIRCUIT_COMPLEXITY_COMPARISON.md`
+  §§2, 5 for the inner/outer-shape analysis and
+  `crates/bridge-circuits/docs/SHA256_INVOCATIONS.md` §4 for the
+  SHA-cell budget.
+  Consequences:
+    - `BridgeMultiHopProof` verifying and proving keys are rotated
+      (`MULTI_HOP_CIRCUIT_REVISION` bumped to 4). On-disk
+      `multi_hop_pk*.bin` / `multi_hop_vk*.bin` cache files invalidate
+      on first daemon start; keygen runs automatically.
+    - `BridgeMultiHopAggregatorVerifier.sol` must be regenerated with
+      `bridge-evm-aggregator export-inner-aggregator --name
+      BridgeMultiHopAggregatorVerifier` and redeployed on Ethereum.
+      Any on-chain reference to the old address must be updated.
+    - `AckiNackiBridge.N_BUNDLE_MAX` is now `20` (was `4`). Callers of
+      `withdrawByProofBundle` can supply up to 20 `BridgeMultiHopProof`
+      snarks per claim (was up to 4). Bundles produced against the old
+      cap remain accepted; the new cap only raises the ceiling.
+    - Multi-hop JSON witness files (`multi_hop_witness_*.json`) with
+      `hops.len() != 1` are rejected by
+      `bridge_event_prover_lib::prover::witness_from_json`; regenerate
+      with the new witness builder (`hops.len() == 1`).
+
+- **Event-prove circuit (Circuit 4) migrated to multi-thread shape.** The
+  single-thread `BridgeEventProveCircuit` (11 public inputs) is removed;
+  every event proof now uses `BridgeEventFinalProof` (13 PIs, adds
+  `xBlockId` / `yBlockId` for cross-thread bundle gluing).
+  Consequences:
+    - Event proving and verifying keys are rotated
+      (`EVENT_CIRCUIT_REVISION` bumped to 4). Existing on-disk
+      `event_pk*.bin` / `event_vk*.bin` cache files invalidate on
+      first daemon start; keygen runs automatically.
+    - `PrivateWitness` JSON schema bumped to `SCHEMA_VERSION = 2`;
+      adds `h07_sibling_hex: String` (32-byte hex, the opaque L07
+      sibling of the depth-4 block-id SHA tree). Fixtures produced
+      by schema v1 will not parse. Regenerate them.
+    - `BridgeWithdrawalAggregatorVerifier.sol` re-exposes 13 inner
+      public inputs (was 11); redeploy the withdrawal adapter and
+      regenerate the Yul verifier `.bin` — the aggregator's
+      `num_instance` count changed. See
+      `contracts/ethereum/verifiers/README.md`.
+
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
   `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,
@@ -208,6 +267,119 @@ assigns it when the release is tagged.
   needs the second call.
 
 ### Added
+
+- **`BridgeMultiHopAggregatorVerifier` — SHPLONK aggregator adapter for the
+  cross-thread hop-chain snark.** New `contracts/ethereum/src/BridgeMultiHopAggregatorVerifier.sol`
+  wraps a SHPLONK Yul verifier at `NUM_INNER = 2` (2 re-exposed PIs:
+  `hopStartBlockId`, `hopEndBlockId`) alongside the 12 KZG accumulator
+  limbs, and implements `IBridgeMultiHopVerifier`. Deploy alongside
+  `BridgeWithdrawalAggregatorVerifier` and pass its address to the new
+  `AckiNackiBridge` constructor's `multiHopVerifier` field. `bridge-evm-aggregator`
+  registers a `BridgeMultiHopAggregatorVerifier` preset (`aggregator.rs`:
+  `k_outer = 21`, `Full` universality — same shape as the withdrawal
+  verifier) that `export-inner-aggregator --name BridgeMultiHopAggregatorVerifier`
+  picks up unchanged. `script/ShplonkDeployLib.sol` gains
+  `multiHopBinPath()` (env override `SHPLONK_BIN_MULTI_HOP`, default path
+  `verifiers/BridgeMultiHopAggregatorVerifier.bin`) and
+  `deployMultiHopAdapter(binPath)`. **The `.bin`/`.sol` artefacts under
+  `contracts/ethereum/verifiers/` and the `MULTI_HOP_YUL_CODEHASH` pin
+  in `ShplonkDeployLib.sol` are pending the first n14 keygen run** — the
+  codehash placeholder is `bytes32(0)` (`deployYulFromBin` skips the check
+  when zero), so once ops regenerates the artefacts they must update
+  `MULTI_HOP_YUL_CODEHASH`, add the file to `verifiers/SHA256SUMS` and
+  `verifiers/SIZES`, and drop the "*pending regen*" row placeholder in
+  `verifiers/README.md` in one commit. Until then, deploys that need the
+  multi-hop adapter can either point at a locally-produced `.bin` via
+  `SHPLONK_BIN_MULTI_HOP` or keep `multiHopVerifier: address(0)` in the
+  bridge constructor to leave `withdrawByProofBundle` disabled.
+
+- **`AckiNackiBridge.withdrawByProofBundle` — multi-thread payout entry point
+  for AN→ETH withdrawals.** New `external nonReentrant` function:
+
+  ```solidity
+  function withdrawByProofBundle(
+      uint256[] calldata finalPublicInputs,   // 13 slots
+      bytes calldata finalProof,
+      uint256[][] calldata hopPublicInputs,   // n × 2 slots, n ∈ [0, N_BUNDLE_MAX]
+      bytes[] calldata hopProofs
+  ) external returns (bool);
+  ```
+
+  Same-thread callers pass `hopPublicInputs.length == 0` and get the same
+  identity / chain / replay / anchor semantics as `withdrawByProof`
+  (unchanged). Cross-thread callers pass one to `N_BUNDLE_MAX` (= 4) hop
+  snarks that walk `xBlockId → … → yBlockId`; the bundle gate mirrors
+  `bridge_event_prove_circuit::bundle_verifier::verify_bundle`. `BridgeWithdrawConfig`
+  gains two constructor fields, `withdrawalFinalVerifier`
+  (`IBridgeWithdrawalFinalVerifier`, 13 PIs) and `multiHopVerifier`
+  (`IBridgeMultiHopVerifier`, 2 PIs), exposed on the deployed bridge via
+  `bridgeWithdrawalFinalVerifier()` and `bridgeMultiHopVerifier()` immutables
+  plus a `N_BUNDLE_MAX()` public constant. The two must be set together and
+  require `bridgeWithdrawalVerifier` to be set (constructor reverts
+  `PartialBundleWiring` / `BundleRequiresLegacyWithdrawal`); either being
+  zero disables the bundle entry point (reverts `WithdrawByProofBundleDisabled`).
+  Custom errors introduced by this path:
+  `WithdrawByProofBundleDisabled`, `PartialBundleWiring`,
+  `BundleRequiresLegacyWithdrawal`, `HopBundleLengthOverflow(got, max)`,
+  `HopPublicInputsHopProofsLengthMismatch(hopPublicInputs, hopProofs)`,
+  `FinalPublicInputsBadLength(got, expected)`,
+  `HopPublicInputsBadLength(at, got, expected)`,
+  `SameThreadEndpointsMismatch`,
+  `SameThreadRequiresEmptyHopChain(hopCount)`,
+  `HopChainHeadMismatch`, `HopChainTailMismatch`,
+  `AdjacentHopBlockIdMismatch(at)`, `MultiHopProofRejected(at)`. Successful
+  bundle payouts emit the same `WithdrawalByProofExecuted` event as the
+  legacy path, so relayer indexers do not need a new topic. Rotates
+  `BridgeWithdrawConfig`'s ABI: every deployer's constructor literal has to
+  add the two zero-inits (`withdrawalFinalVerifier: address(0)`,
+  `multiHopVerifier: address(0)`) even when bundle payouts are off. Two new
+  interface files ship: `src/IBridgeWithdrawalFinalVerifier.sol` (13-PI
+  `WithdrawalFinalPublicInputs` struct + `verifyWithdrawalFinal(bytes, pub)`)
+  and `src/IBridgeMultiHopVerifier.sol` (`MultiHopPublicInputs { hopStartBlockId,
+  hopEndBlockId }` + `verifyMultiHop(bytes, pub)`). Verifier bytecode wiring
+  (SHPLONK aggregator adapters, `.bin` under `contracts/ethereum/verifiers/`,
+  `aggregate-proof` support) lands in a follow-on commit — until then only
+  a mock verifier can be wired, so bundle payouts are unavailable on
+  currently-deployed bridges.
+
+- **`bridge-event-prove-circuit`: `bundle_verifier` — pure-Rust reference
+  implementation of the multi-hop bundle acceptance logic.** New module
+  ships `BundleProof`, `BundleError`, and `verify_bundle(bundle,
+  anchor_ok)` — the specification-executable version of the on-chain
+  `withdrawByProofBundle` gate coming in a follow-on Solidity commit.
+  Checks structural sanity, `N_BUNDLE_MAX` cap, same-thread `X == Y`
+  degeneracy, hop-chain head/adjacency/tail linkage, and delegates the
+  layer-anchor lookup to a caller-supplied closure. No halo2 dependency
+  beyond `Fr` arithmetic; no daemon consumer yet.
+
+- **`bridge-event-prove-circuit`: `BridgeMultiHopProof` — companion hop-chain
+  circuit for cross-thread event proofs.** New halo2 circuit shipped alongside
+  `BridgeEventFinalProof`, exposing 2 public inputs: PI[0] = `hop_start_block_id`
+  (Fr) and PI[1] = `hop_end_block_id` (Fr). Each snark proves up to 5 hops of an
+  L7 reference chain; padding hops flip `is_active = 0` and copy the previous
+  endpoint through. Not yet consumed by the prover daemon or the aggregator —
+  wiring lands in a follow-on commit. See
+  `crates/bridge-circuits/bridge-event-prove-circuit/docs/MULTITHREAD_MIGRATION_PLAN.md`
+  §5.
+
+- **`bridge-event-prove-circuit`: `BridgeEventFinalProof` — multi-thread
+  successor of the single-thread `BridgeEventProveCircuit`.** Ships as a new
+  Rust type in `bridge_event_final_proof` module alongside the existing
+  circuit; consumers migrate on their own schedule. Public-input layout grows
+  from 11 to 13 slots: PI[11] = `x_block_id` (Fr of the event block, keyed by
+  the nullifier), PI[12] = `y_block_id` (Fr of the anchor block, keyed by the
+  block-tree walker). Slots `[0..=10]` are byte-identical to
+  `BridgeEventProveCircuit`, so a downstream PI parser can be extended by
+  reading two additional trailing Fr values. Constraint delta: the events
+  sub-tree root is bound into `x_block_id` via a depth-4 SHA-256 opening (four
+  compressions) against a witness `h07_sibling`, and an `is_same_thread`
+  witness selector copy-constrains `x_block_id == y_block_id` when set.
+  Verifying key differs from `BridgeEventProveCircuit` — regenerate the
+  Circuit 4 VK when the daemon / on-chain path switches over.
+  `BridgeEventProveCircuit` is unchanged; existing proofs and verifier
+  bytecode keep working. See
+  `crates/bridge-circuits/bridge-event-prove-circuit/docs/MULTITHREAD_MIGRATION_PLAN.md`
+  §4 for the migration staging and the follow-on hop-chain circuit.
 
 - **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
   read back with `isPaused()`.** While it is paused, the two cross-chain entry

@@ -125,7 +125,9 @@ contract WithdrawAnchorEvictionTest is Test {
                 accFr: ACC_FR,
                 nullifier: 0xDEAD,
                 finalRoot: evictedL1,
-                anchorLayer: 1
+                anchorLayer: 1,
+                xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
+                yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
             });
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, evictedL1));
@@ -215,7 +217,9 @@ contract WithdrawAnchorEvictionTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: finalRoot,
-            anchorLayer: 1
+            anchorLayer: 1,
+            xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
+            yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
         });
     }
 }

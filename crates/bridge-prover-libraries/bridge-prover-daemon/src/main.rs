@@ -5,46 +5,50 @@
 //! 1A/1B + 2 proof generation, in-memory state advance) lives inside the
 //! library. This binary owns only what a library shouldn't:
 //!
-//!   * env-driven configuration (`BRIDGE_GQL_ENDPOINT`, `BRIDGE_BOOTSTRAP_SEQNO`,
-//!     `BRIDGE_BK_SET_CONFIG`),
+//!   * env-driven configuration (`BRIDGE_GQL_ENDPOINT`,
+//!     `BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_BK_SET_CONFIG`),
 //!   * Ctrl-C graceful shutdown flag,
 //!   * disk persistence (`./state/*.json`, `./bootstrap_seed.json`),
-//!   * verifier IPC (`./proofs/{proof,result,bkupd,bkupd_result}_NNN.json`), and
+//!   * verifier IPC (`./proofs/{proof,result,bkupd,bkupd_result}_NNN.json`),
+//!     and
 //!   * the `self-verify` feature gate that inline-verifies proofs in-process.
 //!
 //! The two-daemon contract is the `LiveProverDriver` API in
 //! `bridge-prover-lib/src/live_driver/mod.rs`.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::Context;
-use tracing::{error, info, warn};
-
-use bridge_prover_lib::bk_set_bootstrap;
-use bridge_prover_lib::bootstrap;
-use bridge_prover_lib::bridge_state::BridgeState;
 use bridge_gql_fetcher::gql_client;
-use bridge_prover_lib::ipc;
-use bridge_prover_lib::keys::KeyManager;
-use bridge_prover_lib::live_driver::{
-    BkUpdateProofArtifacts, BundleFinalizationType, BundleProofArtifacts,
-    DriverError, HISTORY_WINDOW_SIZE, LiveBkUpdateEvent, LiveBundleEvent, LiveProverConfig,
-    LiveProverDriver, SeedPolicy,
-};
 use bridge_poseidon as poseidon;
-use bridge_prover_lib::prover_bk_set::ProverBkSet;
-use bridge_prover_lib::{AnchorMode, THINNING_FACTOR_P};
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-
 #[cfg(feature = "self-verify")]
 use bridge_prover_lib::bridge_state::BundleResult;
 #[cfg(feature = "self-verify")]
 use bridge_prover_lib::verifier;
 #[cfg(feature = "self-verify")]
 use bridge_prover_lib::Fr;
+use bridge_prover_lib::{
+    bk_set_bootstrap, bootstrap,
+    bridge_state::BridgeState,
+    ipc,
+    keys::KeyManager,
+    live_driver::{
+        BkUpdateProofArtifacts, BundleFinalizationType, BundleProofArtifacts, DriverError,
+        LiveBkUpdateEvent, LiveBundleEvent, LiveProverConfig, LiveProverDriver, SeedPolicy,
+        HISTORY_WINDOW_SIZE,
+    },
+    prover_bk_set::ProverBkSet,
+    AnchorMode, THINNING_FACTOR_P,
+};
+use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use tracing::{error, info, warn};
 
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
@@ -82,8 +86,8 @@ async fn main() -> anyhow::Result<()> {
         .to_string_lossy()
         .into_owned();
 
-    let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
-        .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
+    let gql_endpoint =
+        std::env::var(ENV_GQL_ENDPOINT).unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
     let anchor_mode = parse_anchor_level()?;
     // `bundle_size` sourced from `AnchorMode::stride()` so the seed-alignment
     // check tracks whichever anchor level the operator selected.
@@ -94,12 +98,16 @@ async fn main() -> anyhow::Result<()> {
     info!("GQL endpoint: {}", gql_endpoint);
     info!(
         "W = {}, P = {}, anchor_level = L{}, bundle = {} blocks",
-        HISTORY_WINDOW_SIZE, THINNING_FACTOR_P, anchor_mode.level(), bundle_size
+        HISTORY_WINDOW_SIZE,
+        THINNING_FACTOR_P,
+        anchor_mode.level(),
+        bundle_size
     );
     if matches!(anchor_mode, AnchorMode::L2) {
         info!(
             stride = anchor_mode.stride(),
-            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on the first Circuit 2 bundle"
+            "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on \
+             the first Circuit 2 bundle"
         );
     }
     match explicit_bootstrap_seqno {
@@ -131,8 +139,8 @@ async fn main() -> anyhow::Result<()> {
         if let Err(drift) = anchor_mode.verify_state_level(state.anchor_level) {
             anyhow::bail!(
                 "startup drift: prover_state anchor_level={} but daemon configured for L{} \
-                 (BRIDGE_ANCHOR_LEVEL). Rename {} to {}.pre_L{}_$(date +%Y%m%d_%H%M%S) \
-                 and rebootstrap; never auto-migrate anchor levels on a live bridge.",
+                 (BRIDGE_ANCHOR_LEVEL). Rename {} to {}.pre_L{}_$(date +%Y%m%d_%H%M%S) and \
+                 rebootstrap; never auto-migrate anchor levels on a live bridge.",
                 drift.state_level,
                 drift.cfg_level,
                 state_file,
@@ -154,9 +162,8 @@ async fn main() -> anyhow::Result<()> {
         Some(loaded) => {
             if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
                 anyhow::bail!(
-                    "prover_bk_set.json commitment {} disagrees with \
-                     prover_state.json {} — delete BOTH files or restore \
-                     them from a paired backup",
+                    "prover_bk_set.json commitment {} disagrees with prover_state.json {} — \
+                     delete BOTH files or restore them from a paired backup",
                     hex::encode(loaded.commitment),
                     hex::encode(state.stored_bk_set_commitment),
                 );
@@ -167,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 loaded.last_applied_update_seq_no,
             );
             loaded
-        }
+        },
         None => {
             // Cold boot: this is the ONLY code path that reads the seed
             // file directly. Once saved, `prover_bk_set.json` takes over.
@@ -185,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
                 prover_bk_set_file,
             );
             pbs
-        }
+        },
     };
 
     // Guard against the "fresh chain + stale ./state/" footgun without a
@@ -202,9 +209,7 @@ async fn main() -> anyhow::Result<()> {
         &prover_bk_set,
     )?;
 
-    let bk_set = prover_bk_set
-        .pubkeys()
-        .context("prover_bk_set.pubkeys()")?;
+    let bk_set = prover_bk_set.pubkeys().context("prover_bk_set.pubkeys()")?;
     let (bk_commitment_fr, _) = poseidon::compute_bk_set_poseidon(&bk_set);
     info!(
         "BK set: {} signers, commitment={}",
@@ -225,17 +230,12 @@ async fn main() -> anyhow::Result<()> {
         (None, false) => SeedPolicy::Auto,
     };
 
-    let mut driver = LiveProverDriver::new(
-        gql,
-        key_manager,
-        state,
-        prover_bk_set,
-        LiveProverConfig {
+    let mut driver =
+        LiveProverDriver::new(gql, key_manager, state, prover_bk_set, LiveProverConfig {
             seed_policy,
             anchor_mode,
             ..Default::default()
-        },
-    )?;
+        })?;
 
     // Seed persistence: the seed JSON is written once, right after the driver
     // completes its bootstrap. On a Resume start (state already on disk) the
@@ -282,28 +282,28 @@ async fn main() -> anyhow::Result<()> {
                     );
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
-                }
+                },
                 Ok(LiveBkUpdateEvent::BkUpdate(update)) => {
                     match handle_bk_update(&mut driver, update).await? {
                         HandleBkUpdate::Acked => {
                             persist_seed_if_needed(&driver, &mut seed_persisted)?;
                             continue;
-                        }
+                        },
                         HandleBkUpdate::Deferred(artifacts) => {
                             deferred_bk_ack = Some(artifacts);
                             // Fall through to bundle poll: only bundle
                             // acks can push cursor + stride past the
                             // rotation seqno, unblocking the deferred ack.
-                        }
+                        },
                         HandleBkUpdate::Rejected => break,
                     }
-                }
-                Ok(LiveBkUpdateEvent::Nothing) => { /* fall through to bundle poll */ }
+                },
+                Ok(LiveBkUpdateEvent::Nothing) => { /* fall through to bundle poll */ },
                 Err(e) => {
                     warn!("poll_next_bk_update: {} — retrying", e);
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
-                }
+                },
             }
         }
 
@@ -317,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
                     seed_seqno, chain_head_seqno
                 );
                 tokio::time::sleep(POLL_INTERVAL).await;
-            }
+            },
             Ok(LiveBundleEvent::Nothing {
                 next_target_seqno,
                 chain_head_seqno,
@@ -338,17 +338,17 @@ async fn main() -> anyhow::Result<()> {
                     chain_head_seqno,
                 );
                 tokio::time::sleep(POLL_INTERVAL).await;
-            }
+            },
             Ok(LiveBundleEvent::Bundle(bundle)) => {
                 if !handle_bundle(&mut driver, &bundle).await? {
                     break;
                 }
                 persist_seed_if_needed(&driver, &mut seed_persisted)?;
-            }
+            },
             Err(e) => {
                 error!("poll_next_bundle: {:#} — retrying", e);
                 tokio::time::sleep(POLL_INTERVAL).await;
-            }
+            },
         }
     }
     info!("main loop exited cleanly");
@@ -375,7 +375,10 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
     match std::env::var(ENV_BOOTSTRAP_SEQNO) {
         Ok(v) => {
             let n: u64 = v.parse().with_context(|| {
-                format!("{} must be a positive integer, got {:?}", ENV_BOOTSTRAP_SEQNO, v)
+                format!(
+                    "{} must be a positive integer, got {:?}",
+                    ENV_BOOTSTRAP_SEQNO, v
+                )
             })?;
             anyhow::ensure!(
                 n > 0 && n % bundle_size == 0,
@@ -385,7 +388,7 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
                 bundle_size
             );
             Ok(Some(n))
-        }
+        },
         Err(_) => Ok(None),
     }
 }
@@ -396,11 +399,11 @@ fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {
 fn parse_anchor_level() -> anyhow::Result<AnchorMode> {
     match std::env::var(ENV_ANCHOR_LEVEL) {
         Ok(v) => {
-            let n: u8 = v.parse().with_context(|| {
-                format!("{} must be 1 or 2, got {:?}", ENV_ANCHOR_LEVEL, v)
-            })?;
+            let n: u8 = v
+                .parse()
+                .with_context(|| format!("{} must be 1 or 2, got {:?}", ENV_ANCHOR_LEVEL, v))?;
             AnchorMode::from_level(n).map_err(|e| anyhow::anyhow!("{ENV_ANCHOR_LEVEL}: {e}"))
-        }
+        },
         Err(_) => Ok(AnchorMode::L1),
     }
 }
@@ -412,8 +415,12 @@ fn parse_anchor_level() -> anyhow::Result<AnchorMode> {
 fn persist(driver: &LiveProverDriver) -> anyhow::Result<()> {
     let state_file = bridge_prover_lib::paths::prover_state_file();
     let prover_bk_set_file = bridge_prover_lib::paths::prover_bk_set_file();
-    driver.snapshot_state().save(&state_file.to_string_lossy())?;
-    driver.snapshot_prover_bk_set().save(&prover_bk_set_file.to_string_lossy())?;
+    driver
+        .snapshot_state()
+        .save(&state_file.to_string_lossy())?;
+    driver
+        .snapshot_prover_bk_set()
+        .save(&prover_bk_set_file.to_string_lossy())?;
     Ok(())
 }
 
@@ -464,17 +471,16 @@ async fn handle_bundle(
 
     #[cfg(not(feature = "self-verify"))]
     {
-        info!("key block {}: awaiting verifier ACK...", bundle.block_seq_no);
-        let result =
-            ipc::wait_for_result(bundle.block_seq_no as u32, VERIFIER_TIMEOUT).await?;
+        info!(
+            "key block {}: awaiting verifier ACK...",
+            bundle.block_seq_no
+        );
+        let result = ipc::wait_for_result(bundle.block_seq_no as u32, VERIFIER_TIMEOUT).await?;
         if !(result.primary_verified && result.layer_verified) {
             error!(
-                "key block {}: verifier REJECTED (primary={}, layer={}, err={:?}); \
-                 state NOT advanced",
-                bundle.block_seq_no,
-                result.primary_verified,
-                result.layer_verified,
-                result.error,
+                "key block {}: verifier REJECTED (primary={}, layer={}, err={:?}); state NOT \
+                 advanced",
+                bundle.block_seq_no, result.primary_verified, result.layer_verified, result.error,
             );
             return Ok(false);
         }
@@ -500,8 +506,8 @@ async fn handle_bundle(
             // Do NOT ack; persist the failure marker for observability.
             persist(driver)?;
             anyhow::bail!(
-                "key block {}: self-verification FAILED (primary={}, layer={}); \
-                 state NOT advanced past failed bundle",
+                "key block {}: self-verification FAILED (primary={}, layer={}); state NOT \
+                 advanced past failed bundle",
                 bundle.block_seq_no,
                 primary_ok,
                 layer_ok,
@@ -578,8 +584,8 @@ async fn handle_bk_update(
 
     if !result.verify_ok {
         error!(
-            "bk-update {}: verifier REJECTED (attest={}, merkle={}, mono={}, err={:?}); \
-             state NOT advanced",
+            "bk-update {}: verifier REJECTED (attest={}, merkle={}, mono={}, err={:?}); state NOT \
+             advanced",
             update.block_seq_no,
             result.attestation_verified,
             result.merkle_verified,
@@ -594,16 +600,19 @@ async fn handle_bk_update(
         Ok(()) => {
             persist(driver)?;
             Ok(HandleBkUpdate::Acked)
-        }
-        Err(DriverError::AckTooEarly { cursor, rotation_seqno }) => {
+        },
+        Err(DriverError::AckTooEarly {
+            cursor,
+            rotation_seqno,
+        }) => {
             info!(
-                "bk-update {}: driver defers ack — cursor {} + stride ≤ rotation {} \
-                 (bundle lane must advance first). Retaining verified artifacts; \
-                 will re-ack after each successful bundle ack.",
+                "bk-update {}: driver defers ack — cursor {} + stride ≤ rotation {} (bundle lane \
+                 must advance first). Retaining verified artifacts; will re-ack after each \
+                 successful bundle ack.",
                 update.block_seq_no, cursor, rotation_seqno,
             );
             Ok(HandleBkUpdate::Deferred(update))
-        }
+        },
         Err(e) => Err(anyhow::Error::from(e)),
     }
 }
@@ -616,7 +625,9 @@ fn try_drain_deferred_bk_ack(
     driver: &mut LiveProverDriver,
     slot: &mut Option<BkUpdateProofArtifacts>,
 ) -> anyhow::Result<bool> {
-    let Some(update) = slot.take() else { return Ok(false); };
+    let Some(update) = slot.take() else {
+        return Ok(false);
+    };
     match driver.ack_bk_update(&update) {
         Ok(()) => {
             info!(
@@ -625,11 +636,13 @@ fn try_drain_deferred_bk_ack(
             );
             persist(driver)?;
             Ok(true)
-        }
-        Err(DriverError::AckTooEarly { .. }) => {
+        },
+        Err(DriverError::AckTooEarly {
+            ..
+        }) => {
             *slot = Some(update);
             Ok(false)
-        }
+        },
         Err(e) => Err(anyhow::Error::from(e)),
     }
 }
@@ -694,10 +707,7 @@ fn bkupdate_to_ipc_request(u: &BkUpdateProofArtifacts) -> ipc::BkUpdateRequest {
 // -------------------------------------------------------------------------
 
 #[cfg(feature = "self-verify")]
-fn verify_bundle_inline(
-    driver: &LiveProverDriver,
-    bundle: &BundleProofArtifacts,
-) -> (bool, bool) {
+fn verify_bundle_inline(driver: &LiveProverDriver, bundle: &BundleProofArtifacts) -> (bool, bool) {
     // Schema v6: `bundle.block_id_be` is the raw 32-byte BE chain hash — may
     // exceed the Fr modulus, so it is NOT a canonical `Fr::to_repr`. Reduce
     // via the same inner-product fold the circuits and on-chain Yul use.

@@ -9,6 +9,8 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
 /**
@@ -300,7 +302,9 @@ contract DeployRealBridge is Script {
             accFr: accFr,
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
-            altTokenId: altTokenId
+            altTokenId: altTokenId,
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
         });
     }
 

@@ -6,6 +6,8 @@ import "../../src/IPrimaryVerifier.sol";
 import "../../src/IFallbackVerifier.sol";
 import "../../src/ILayerHashesMovementVerifier.sol";
 import "../../src/IBridgeWithdrawalVerifier.sol";
+import "../../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../../src/IBridgeMultiHopVerifier.sol";
 
 /// @title VerifyBlockConfigLib
 /// @notice Test-only helper for assembling `AckiNackiBridge.VerifyBlockConfig`
@@ -59,7 +61,9 @@ library VerifyBlockConfigLib {
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            altTokenId: 0,
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
         });
     }
 
@@ -78,7 +82,9 @@ library VerifyBlockConfigLib {
             accFr: accFr,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            altTokenId: 0,
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
         });
     }
 
@@ -99,7 +105,33 @@ library VerifyBlockConfigLib {
                 accFr: accFr,
                 altDstChainId: altDstChainId,
                 altDstHostChainId: altDstHostChainId,
-                altTokenId: altTokenId
+                altTokenId: altTokenId,
+                withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+                multiHopVerifier: IBridgeMultiHopVerifier(address(0))
             });
+    }
+
+    /// @notice `BridgeWithdrawConfig` wired with the multi-thread FinalProof
+    ///         verifier and the hop-chain verifier alongside the legacy
+    ///         withdrawal verifier. Both new verifiers must be non-zero, and
+    ///         `bridgeWithdrawalVerifier` must be non-zero too (bundle
+    ///         acceptance is all-or-nothing; the constructor enforces this).
+    function withWithdrawBundle(
+        IBridgeWithdrawalVerifier legacyVerifier,
+        IBridgeWithdrawalFinalVerifier finalVerifier,
+        IBridgeMultiHopVerifier multiHopVerifier,
+        uint256 dappFr,
+        uint256 accFr
+    ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory) {
+        return AckiNackiBridge.BridgeWithdrawConfig({
+            bridgeWithdrawalVerifier: legacyVerifier,
+            dappFr: dappFr,
+            accFr: accFr,
+            altDstChainId: 0,
+            altDstHostChainId: 0,
+            altTokenId: 0,
+            withdrawalFinalVerifier: finalVerifier,
+            multiHopVerifier: multiHopVerifier
+        });
     }
 }

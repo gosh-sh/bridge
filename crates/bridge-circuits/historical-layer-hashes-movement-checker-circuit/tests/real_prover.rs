@@ -10,24 +10,28 @@
 //! [`bridge_test_data_gen::layer_hashes::build_synthetic_layer_hashes_input`],
 //! which carries the production tree depth as a hard-coded constant.
 
-use std::fs;
-use std::path::Path;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
 
 use bridge_test_data_gen::layer_hashes::{
     build_synthetic_layer_hashes_input, SyntheticLayerHashesInput, TREE_DEPTH,
 };
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, Fr, G1Affine};
-use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey};
-use halo2_base::halo2_proofs::poly::kzg::commitment::ParamsKZG;
-use halo2_base::halo2_proofs::SerdeFormat;
-use halo2_base::utils::fs::gen_srs;
-use historical_layer_hashes_movement_checker_circuit::circuit::LayerHashesMovementCheckerCircuit;
-use historical_layer_hashes_movement_checker_circuit::test_helpers::*;
-
-use gosh_zk_snark_halo2_utils::io::{read_vk_from_path, save_config_params};
-use gosh_zk_snark_halo2_utils::proof::Proof;
+use gosh_zk_snark_halo2_utils::{
+    io::{read_vk_from_path, save_config_params},
+    proof::Proof,
+};
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{keygen_pk, keygen_vk, ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+        SerdeFormat,
+    },
+    utils::fs::gen_srs,
+};
+use historical_layer_hashes_movement_checker_circuit::{
+    circuit::LayerHashesMovementCheckerCircuit, test_helpers::*,
+};
 
 const CACHE_DIR: &str = "test_cache_real_prover";
 
@@ -128,11 +132,7 @@ const TEST_CASES: &[(usize, usize)] = &[
 #[test]
 #[ignore]
 fn test_real_prover_layer_hashes_sweep() {
-    let cache = format!(
-        "{}/{}",
-        env!("CARGO_MANIFEST_DIR"),
-        CACHE_DIR
-    );
+    let cache = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), CACHE_DIR);
     fs::create_dir_all(&cache).ok();
 
     let config_path = format!("{}/config.json", cache);
@@ -153,7 +153,10 @@ fn test_real_prover_layer_hashes_sweep() {
             // delegates to `BaseCircuitBuilder::configure_with_params`.
             let t = Instant::now();
             let vk = read_vk_from_path(&vk_path, &bp);
-            println!("[CACHE] VK loaded in {:.1}s (PK on disk for prove)\n", t.elapsed().as_secs_f64());
+            println!(
+                "[CACHE] VK loaded in {:.1}s (PK on disk for prove)\n",
+                t.elapsed().as_secs_f64()
+            );
             (vk, bp)
         } else {
             keygen_and_cache(&srs, &vk_path, &pk_path, &config_path)
@@ -179,23 +182,37 @@ fn test_real_prover_layer_hashes_sweep() {
 
         let t = Instant::now();
         let pf = Proof::create_for_circuit_from_paths::<LayerHashesMovementCheckerCircuit>(
-            &srs, &pk_path, &config_path, circuit, &inst_refs,
+            &srs,
+            &pk_path,
+            &config_path,
+            circuit,
+            &inst_refs,
         );
         let pt = t.elapsed().as_secs_f64();
 
         let mut vt_total = 0.0;
         for _ in 0..3 {
             let t = Instant::now();
-            assert!(pf.verify_with_vk(&vk, &srs, &inst_refs), "VERIFY FAILED: L={nl}, S={ns}");
+            assert!(
+                pf.verify_with_vk(&vk, &srs, &inst_refs),
+                "VERIFY FAILED: L={nl}, S={ns}"
+            );
             vt_total += t.elapsed().as_secs_f64();
         }
         let vt_ms = (vt_total / 3.0) * 1000.0;
 
         println!(
             "{:<12} {:<12} {:>10.1} {:>12.2} {:>10}",
-            nl, ns, pt, vt_ms, pf.as_bytes().len()
+            nl,
+            ns,
+            pt,
+            vt_ms,
+            pf.as_bytes().len()
         );
-        save_bytes(&format!("{}/proof_L{}_S{}.bin", cache, nl, ns), pf.as_bytes());
+        save_bytes(
+            &format!("{}/proof_L{}_S{}.bin", cache, nl, ns),
+            pf.as_bytes(),
+        );
     }
 
     println!("\nAll {} cases passed.\n", TEST_CASES.len());

@@ -4,8 +4,9 @@
 //! `bridge-event-prove-circuit::test_helpers::parse_withdrawal_boc`:
 //!   entries[0] = ExtOut wrapper, refs=1
 //!   entries[1] = body cell,      refs=2, fixed 126 bytes, ABI id 0x3c838959
-//!   entries[2] = recipient cell, refs=0, fixed 22 bytes  (d1+d2 + 20-byte addr)
-//!   entries[3] = sender cell,    refs=0, fixed 36 bytes  (std_addr$10 + 256-bit acc_id)
+//!   entries[2] = recipient cell, refs=0, fixed 22 bytes  (d1+d2 + 20-byte
+//! addr)   entries[3] = sender cell,    refs=0, fixed 36 bytes  (std_addr$10 +
+//! 256-bit acc_id)
 //!
 //! Body byte layout (cell_repr_data-relative):
 //!   [0..2)   d1 + d2
@@ -23,8 +24,7 @@
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::boc_walk::FlatCell;
-use crate::schema::WithdrawalInitiated;
+use crate::{boc_walk::FlatCell, schema::WithdrawalInitiated};
 
 /// ABI event id of `WithdrawalInitiated` (first 4 bytes of the truncated
 /// SHA-256 of the canonical signature, per TVM Solidity ABI v2).
@@ -51,7 +51,8 @@ const EVENT_TOKEN_ID_END: usize = 58;
 pub fn validate_layout(cells: Vec<FlatCell>) -> Result<[FlatCell; 4]> {
     if cells.len() != 4 {
         bail!(
-            "expected 4 cells in WithdrawalInitiated BOC (wrapper, body, recipient, sender); got {}",
+            "expected 4 cells in WithdrawalInitiated BOC (wrapper, body, recipient, sender); got \
+             {}",
             cells.len(),
         );
     }
@@ -80,7 +81,8 @@ pub fn validate_layout(cells: Vec<FlatCell>) -> Result<[FlatCell; 4]> {
     let abi_slice = &cells[1].cell_repr_data[EVENT_ABI_PREFIX_START..EVENT_ABI_PREFIX_END];
     if abi_slice != ABI_EVENT_ID {
         bail!(
-            "ABI event id mismatch at body[2..6) — expected WithdrawalInitiated 0x3c838959, got {:02x?}",
+            "ABI event id mismatch at body[2..6) — expected WithdrawalInitiated 0x3c838959, got \
+             {:02x?}",
             abi_slice,
         );
     }

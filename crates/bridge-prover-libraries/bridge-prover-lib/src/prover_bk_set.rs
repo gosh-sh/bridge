@@ -19,14 +19,16 @@
 //! Persistence: JSON at `state/prover_bk_set.json`, written atomically via
 //! `tmp + rename` (same pattern as `BridgeState::save`).
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+};
 
 use anyhow::Context;
+use bridge_poseidon as poseidon;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge_state::BridgeState;
-use bridge_poseidon as poseidon;
 
 /// On-disk format for the prover-private pubkey table. Keys are
 /// `signer_index`; values are 48-byte compressed BLS G1 pubkeys serialised
@@ -52,10 +54,7 @@ impl ProverBkSet {
     /// specific chain height, or `bk_set_fetcher::load_bk_set_from_config`
     /// for the genesis anchor). Computes the Poseidon commitment from
     /// the provided pubkeys.
-    pub fn from_pubkeys(
-        pubkeys: &HashMap<u16, Vec<u8>>,
-        last_applied_update_seq_no: u64,
-    ) -> Self {
+    pub fn from_pubkeys(pubkeys: &HashMap<u16, Vec<u8>>, last_applied_update_seq_no: u64) -> Self {
         let (_fr, commitment) = poseidon::compute_bk_set_poseidon(pubkeys);
         let pubkeys_hex = pubkeys
             .iter()
@@ -73,8 +72,8 @@ impl ProverBkSet {
     pub fn pubkeys(&self) -> anyhow::Result<HashMap<u16, Vec<u8>>> {
         let mut out = HashMap::with_capacity(self.pubkeys_hex.len());
         for (idx, hex_str) in &self.pubkeys_hex {
-            let bytes = hex::decode(hex_str)
-                .with_context(|| format!("invalid hex for signer {idx}"))?;
+            let bytes =
+                hex::decode(hex_str).with_context(|| format!("invalid hex for signer {idx}"))?;
             anyhow::ensure!(
                 bytes.len() == 48,
                 "pubkey for signer {idx} has {} bytes, expected 48",
@@ -151,10 +150,10 @@ impl ProverBkSet {
         if !Path::new(path).exists() {
             return Ok(None);
         }
-        let data = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {path}"))?;
-        let v: Self = serde_json::from_str(&data)
-            .with_context(|| format!("failed to parse {path}"))?;
+        let data =
+            std::fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+        let v: Self =
+            serde_json::from_str(&data).with_context(|| format!("failed to parse {path}"))?;
         Ok(Some(v))
     }
 
@@ -166,16 +165,16 @@ impl ProverBkSet {
         let json = serde_json::to_string_pretty(self)?;
         let tmp = format!("{path}.tmp");
         std::fs::write(&tmp, json).with_context(|| format!("failed to write {tmp}"))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("failed to rename {tmp} -> {path}"))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} -> {path}"))?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bridge_test_data_gen::generator::{build_bk_set_map, generate_bls_keypairs};
+
+    use super::*;
 
     /// Generate `n` *valid* BLS pubkeys (real keypairs from
     /// `bridge-test-data-gen`). Required because `compute_bk_set_poseidon`

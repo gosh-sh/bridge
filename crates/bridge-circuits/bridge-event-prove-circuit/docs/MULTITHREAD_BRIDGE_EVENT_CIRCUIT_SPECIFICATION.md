@@ -24,8 +24,8 @@ Where a symbol has the same meaning as in the DEX spec, only the delta is called
 | **`anchorLayer`** | 1-indexed layer number the prover claims for `finalRoot`. Range `1..=MAX_ANCHOR_LAYER = 10` (must equal Solidity `MAX_LAYER_HASHES`). Existing public input, unchanged. |
 | **L** | True chain length in hops from X to Y. `L = 0 ⇔ t = 0`. |
 | **`L_MAX`** | Circuit-side upper bound on L. **Production target = 300** (same node-team ceiling as DEX). Prototyping point matches DEX: `L_MAX = 20`. |
-| **`H`** | Hops packed per `BridgeMultiHopProof` snark. Locked at **5** (identical to DEX). |
-| **`N_BUNDLE`** | Maximum number of `BridgeMultiHopProof` snarks per claim. Dynamic under this design (§6.5); prototype cap = 4 (`L_MAX = 20`), production cap = 60 (`L_MAX = 300`). |
+| **`H`** | Hops packed per `BridgeMultiHopProof` snark. Set to **1** (see §5.H). DEX runs H=5, but its outer aggregator is lighter — the bridge's SHPLONK Yul aggregator has to fit under EIP-170 (24 576 B), which forces a much smaller inner column budget. |
+| **`N_BUNDLE`** | Maximum number of `BridgeMultiHopProof` snarks per claim. Dynamic under this design (§6.5); prototype cap = 20 (`L_MAX = 20`, `H = 1`), production cap = 300 (`L_MAX = 300`). |
 | **Bundle** | One `BridgeEventFinalProof` + `n ∈ [0, N_BUNDLE]` `BridgeMultiHopProof` snarks. `n = 0` is the same-thread case (`t = 0`, L = 0). |
 | **Circuit 4** | Current on-chain name for the bridge event-prove circuit in `AckiNackiBridge.sol`. This spec keeps the name and extends the public-input surface. |
 
@@ -149,7 +149,7 @@ The bridge prover runs in `crates/bridge-prover-libraries/bridge-event-prover-li
 | Circuit | Role | K | Snarks per claim |
 |---|---|---|---|
 | `BridgeEventFinalProof` | Withdrawal event binding + X-side L8/block-id reconstruction + Y-side thread-0 anchor. Exposes clear X-block-id and Y-block-id in addition to the existing 11 event/nullifier/anchor publics. | **17** (up from single-thread K = 17; adds +4 SHA compressions for the L8 opening) | 1 |
-| `BridgeMultiHopProof` | A chain segment of up to `H = 5` hops with `is_active` per hop. Exposes clear start/end block-ids. Per-hop constraints reuse DEX §4.2 verbatim. | **17** | `ceil(L / H)`, 0 when `L = 0` |
+| `BridgeMultiHopProof` | A single hop segment (`H = 1`) with `is_active` per hop. Exposes clear start/end block-ids. Per-hop constraints reuse DEX §4.2 verbatim. | **17** | `ceil(L / H)`, 0 when `L = 0` |
 
 Both circuits live in the same `bridge-event-prove-circuit` crate as sibling `Circuit` implementations, sharing the same `BaseCircuitParams` conventions and `Sha256Chip`/`gosh-dense-balanced-tree` toolchain the current code uses.
 
@@ -294,7 +294,7 @@ Contrast with DEX §6.5: DEX pads to constant `N_BUNDLE` for anonymity uniformit
 
 ### 6.6 `BridgeMultiHopProof` circuit detail
 
-At K = 17 with H = 5 hops. Structural mirror of `MultiHopProofCircuit` in `dexdo-halo2-kit/dex-halo2-circuit/src/multi_hop_proof.rs` **minus** the salt / salted-endpoint machinery.
+At K = 17 with H = 1 hop. Structural mirror of `MultiHopProofCircuit` in `dexdo-halo2-kit/dex-halo2-circuit/src/multi_hop_proof.rs` **minus** the salt / salted-endpoint machinery and with H reduced from DEX's 5 (see §5.H). With H = 1 the "intra-snark continuity" rule (§6.6 constraint 2) is vacuous — bundle adjacency is enforced across snarks by the outer Solidity `withdrawByProofBundle` (`AckiNackiBridge.sol`).
 
 ```
 witnesses:
@@ -329,7 +329,26 @@ constraints:
        (Fr-encoding via `bytes_to_fr` = the existing `gosh_dense_balanced_tree::bytes_to_fr` convention.)
 ```
 
-**Cell budget.** H = 5 hops × (4 SHA + variable-depth Poseidon fold + range checks) ≈ 20 SHA compressions × 354 K + Poseidon overhead ≈ **7.1 M advice cells** — matches the DEX MultiHopProof envelope of DEX §6.6. K = 17 with ~110 advice columns gives ~14 M cells → ~49% margin.
+**Cell budget.** H = 1 hop × (4 SHA calls × 2 compressions per call + variable-depth Poseidon fold + range checks) = **8 SHA compressions** × 354 K + Poseidon overhead ≈ **2.83 M advice cells** — matches `historical-layer-hashes-movement-checker-circuit`'s shape (25 advice cols at K=17). The outer SHPLONK aggregator lands at `k_outer=21, Full` with predicted Yul ≈ 21 KB, well under the EIP-170 24 576 B cap. See `crates/bridge-circuits/docs/CIRCUIT_COMPLEXITY_COMPARISON.md` §§2, 5 for the inner/outer-shape analysis and `crates/bridge-circuits/docs/SHA256_INVOCATIONS.md` §4 for the SHA-cell budget.
+
+### 5.H `H_HOPS_PER_PROOF` choice
+
+Per **active** hop, `prove_hop_block_merkle_sha256` runs `BLOCK_MERKLE_DEPTH = 4` SHA-256 calls on 64-byte `(child ‖ sibling)` inputs. SHA-256 padding pushes any input ≥ 56 B into a second compression block, so each call = 2 compressions ⇒ **8 SHA-256 compressions per hop**. The gosh eDSL SHA chip costs ≈ 354 K advice cells per compression.
+
+| H | SHA compressions | SHA cells | ~Total cells | K=17 columns | Outer SHPLONK Yul size |
+|---|---|---|---|---|---|
+| 1 | 8 | ~2.83 M | ~2.84 M | ~25 | ~21 KB at `k_outer=21` (fits EIP-170) |
+| 2 | 16 | ~5.7 M | ~7 M | ~50 | 33 213 B at `k_outer=21` (FAIL, 135 % EIP-170) |
+| 3 | 24 | ~8.5 M | ~10 M | ~75 | tight even at `k_outer=22` |
+| 5 (DEX default) | 40 | ~14 M | ~16 M | ~200 | OOMs at outer keygen on 16 GB + swap |
+
+The outer SHPLONK Yul bytecode scales at ~450–500 B per inner advice column (measured empirically across the four existing production verifiers — see `crates/bridge-circuits/docs/CIRCUIT_COMPLEXITY_COMPARISON.md` §4). The bridge's Solidity SHPLONK aggregator is capped by EIP-170 at 24 576 B, which forces a much tighter inner column budget than DEX's TVM aggregator. `H = 1` reduces `BridgeMultiHopProof` to a single-hop proof, but bundle adjacency (`hopEnd[i] == hopStart[i+1]`) is enforced across snarks by the outer Solidity `withdrawByProofBundle` — the multi-hop chaining logic moves from inside the circuit to the smart contract.
+
+Tradeoff: `N_BUNDLE = ⌈L_MAX / H⌉` multi-hop snarks per claim.
+- Prototype `L_MAX = 20`: H=5 → 4 bundles; H=2 → 10 bundles; H=1 → 20 bundles (`N_BUNDLE_MAX = 20`).
+- Production `L_MAX = 300`: H=5 → 60 bundles; H=2 → 150 bundles; H=1 → 300 bundles.
+
+Verification cost per bundle scales linearly. Choosing H trades one heavy inner+outer keygen against a larger `n` at withdraw time.
 
 **Not-a-witness.** No `salt`, no `voucher_secret_seed`, no `bundle_index`, no `salt_commitment` publication. Roughly 4–6 Poseidon calls per snark are removed vs. DEX's `MultiHopProofCircuit` (the salt derivation and per-endpoint salting), and per-hop `salted_start` / `salted_end` computations are dropped in favour of plain `bytes_to_fr` on the clear block-ids.
 

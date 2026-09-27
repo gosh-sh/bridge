@@ -7,9 +7,14 @@
 # circuit (events_pos in Poseidon preimage + anchor_layer range-check). The
 # Yul .bin byte-hashes identically to 2026-09-18 — the deterministic export
 # reproduced the same VK-embedded bytecode — so only _calldata.bin drifted.
+# BridgeMultiHopAggregatorVerifier first-time export 2026-09-27 at rev 4 /
+# H_HOPS_PER_PROOF=1 / K=17 / 25 inner cols / k_outer=21 Full (23722 B,
+# 96.5 % EIP-170, above the 90 % soft-warn line — mirrors LayerHashes 94 %).
 # CREATE extcodehash pins live in ShplonkDeployLib *_YUL_CODEHASH.
 22762e5e8e8aa3781a91114037a319fb9e242b65a97cce5f316b7de39b564b0d  BridgeWithdrawalAggregatorVerifier.bin
 36a2088283ba69a1a96c6c2b903a42044190a7325af6386a14746bd6ff4f8ee0  BridgeWithdrawalAggregatorVerifier_calldata.bin
+a5e38f80f8e51ced5655b8e086c38db4a7be205e0e1cea554cc9a763151daa97  BridgeMultiHopAggregatorVerifier.bin
+c160989b379e3a5b995daf7fc9afcbd625da5ef47545edabb10d8901817504d7  BridgeMultiHopAggregatorVerifier_calldata.bin
 db36c101ad9edf1e0bcb3456276b78bc9bca177d9016b82cfddcfe34db4131df  FallbackAggregatorVerifier.bin
 32cd3f693cb9e570d0de97c073c75607b6efe063f2f47ae5f33740aa2f57a4c5  FallbackAggregatorVerifier_calldata.bin
 bb34278118a0ce7c193005110dec26d59f85dd46759851114b439d9d127e9dce  LayerHashesAggregatorVerifier.bin

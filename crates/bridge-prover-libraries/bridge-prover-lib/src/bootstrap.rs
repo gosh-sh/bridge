@@ -1,4 +1,3 @@
-
 //! Genesis-seed plumbing for the on-disk state mirror.
 //!
 //! In the production analog, the Ethereum bridge contract receives its genesis
@@ -13,7 +12,7 @@
 //! daemon, which has no node connection, then loads that file on cold start
 //! and applies the same seed — guaranteeing that both mirrors share the same
 //! anchor point (the first key block at seq_no = W, one entry per active
-//! layer) and from there advance in lockstep via verified proofs. 
+//! layer) and from there advance in lockstep via verified proofs.
 //!
 //! The seed file is written **once** on cold start. Subsequent restarts pick
 //! up persisted `BridgeState` directly and never re-read the seed.
@@ -45,7 +44,9 @@ pub const SEED_SCHEMA_VERSION: u32 = 2;
 /// state directory is resolved at call time from env
 /// (`BRIDGE_STATE_DIR` / `BRIDGE_CONFIG_DIR`) — see [`crate::paths`].
 pub fn default_seed_path() -> String {
-    crate::paths::bootstrap_seed_file().to_string_lossy().into_owned()
+    crate::paths::bootstrap_seed_file()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Genesis seed for `BridgeState`.
@@ -100,11 +101,7 @@ impl BootstrapSeed {
     /// `!state.initialized`.
     pub fn apply(&self, state: &mut BridgeState) -> anyhow::Result<()> {
         state.initialize_bk_set_commitment(self.bk_set_commitment)?;
-        state.append_bundle(
-            &self.layer_hashes,
-            self.block_height,
-            self.block_seq_no,
-        )?;
+        state.append_bundle(&self.layer_hashes, self.block_height, self.block_seq_no)?;
         // Stamp the anchor level onto the state at genesis. Must happen
         // AFTER `initialize_bk_set_commitment` (which requires the state be
         // uninitialized) but before any subsequent bundle append could
@@ -181,13 +178,15 @@ fn build_layer_hashes_for_seed(
     history_proofs: &std::collections::BTreeMap<u8, [u8; 32]>,
     anchor_level: u8,
 ) -> anyhow::Result<Vec<([u8; 32], u8)>> {
-    let layer_hashes: Vec<([u8; 32], u8)> =
-        history_proofs.iter().map(|(&layer, root)| (*root, layer)).collect();
+    let layer_hashes: Vec<([u8; 32], u8)> = history_proofs
+        .iter()
+        .map(|(&layer, root)| (*root, layer))
+        .collect();
     anyhow::ensure!(
         layer_hashes.iter().any(|(_, l)| *l == anchor_level),
-        "seed block has no layer={} entry in history_proofs (found layers: {:?}). \
-         Under --anchor-level {} the seed key block must already carry a layer-{} root; \
-         either the daemon is pointed at a pre-L{} block or the node did not expose it.",
+        "seed block has no layer={} entry in history_proofs (found layers: {:?}). Under \
+         --anchor-level {} the seed key block must already carry a layer-{} root; either the \
+         daemon is pointed at a pre-L{} block or the node did not expose it.",
         anchor_level,
         layer_hashes.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
         anchor_level,
@@ -207,7 +206,10 @@ pub async fn fetch_from_node(
         .query_proof_block_by_seqno(first_key_seqno)
         .await
         .with_context(|| {
-            format!("could not fetch first key block at seq_no={}", first_key_seqno)
+            format!(
+                "could not fetch first key block at seq_no={}",
+                first_key_seqno
+            )
         })?;
     let block_height = block.height;
     let layer_hashes = build_layer_hashes_for_seed(&block.history_proofs, anchor_level)
@@ -245,7 +247,10 @@ mod tests {
         assert_eq!(state.stored_bk_set_commitment, [9u8; 32]);
         assert_eq!(state.window(1).data_len, 1);
         assert_eq!(state.window(1).latest(), Some([7u8; 32]));
-        assert_eq!(state.anchor_level, 1, "apply must stamp anchor_level onto state");
+        assert_eq!(
+            state.anchor_level, 1,
+            "apply must stamp anchor_level onto state"
+        );
     }
 
     #[test]
@@ -266,7 +271,10 @@ mod tests {
         };
         seed.apply(&mut state).unwrap();
         assert!(state.initialized);
-        assert_eq!(state.anchor_level, 2, "L2 seed must stamp state.anchor_level=2");
+        assert_eq!(
+            state.anchor_level, 2,
+            "L2 seed must stamp state.anchor_level=2"
+        );
         // And the L2 slot got populated verbatim.
         assert_eq!(state.window(2).data_len, 1);
         assert_eq!(state.window(2).latest(), Some([7u8; 32]));
@@ -314,7 +322,9 @@ mod tests {
     fn load_missing_returns_none() {
         let path = std::env::temp_dir().join("definitely_not_present_bootstrap_seed.json");
         let _ = std::fs::remove_file(&path);
-        assert!(BootstrapSeed::load(path.to_str().unwrap()).unwrap().is_none());
+        assert!(BootstrapSeed::load(path.to_str().unwrap())
+            .unwrap()
+            .is_none());
     }
 
     /// A v1 file (no `anchor_level`, `schema_version = 1`) must be rejected

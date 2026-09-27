@@ -70,7 +70,10 @@ mod tests {
     #[test]
     fn returns_next_boundary_from_steady_state() {
         // last=512, head=1024 → next=1024.
-        assert_eq!(find_next_thinned_key_block(STEP, 2 * STEP, W, P), Some(2 * STEP));
+        assert_eq!(
+            find_next_thinned_key_block(STEP, 2 * STEP, W, P),
+            Some(2 * STEP)
+        );
     }
 
     #[test]
@@ -94,7 +97,10 @@ mod tests {
     fn returns_smallest_boundary_when_head_far_ahead() {
         // last=512, head=100000 → next=1024, NOT the biggest ≤head. Guarantees
         // in-order emission (matters for consumer state advancement).
-        assert_eq!(find_next_thinned_key_block(STEP, 100_000, W, P), Some(2 * STEP));
+        assert_eq!(
+            find_next_thinned_key_block(STEP, 100_000, W, P),
+            Some(2 * STEP)
+        );
     }
 
     // ---- L2-stride coverage over the general form -------------------------

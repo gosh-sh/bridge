@@ -3,25 +3,29 @@
 use anyhow::Context;
 use gosh_dense_balanced_tree::DenseChainLink;
 use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
+    halo2curves::{
+        bn256::{Bn256, Fr, G1Affine},
+        group::ff::PrimeField,
+    },
     plonk::create_proof,
     poly::kzg::{commitment::KZGCommitmentScheme, multiopen::ProverSHPLONK},
     transcript::{Blake2bWrite, Challenge255, TranscriptWriterBuffer},
 };
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use historical_layer_hashes_movement_checker_circuit::{
+    circuit::LayerHashesMovementCheckerCircuit, LAYER_PREIMAGE_SIZE, MAX_LAYERS,
+    NUM_MERKLE_SIBLINGS,
+};
 use rand::rngs::OsRng;
 use tracing::info;
 
-use historical_layer_hashes_movement_checker_circuit::{
-    circuit::LayerHashesMovementCheckerCircuit,
-    LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
+use crate::{
+    keys::KeyManager,
+    transcript::{PoseidonWrite, TranscriptKind},
 };
 
-use crate::keys::KeyManager;
-use crate::transcript::{PoseidonWrite, TranscriptKind};
-
 /// Number of public instances Circuit 2 emits:
-/// `block_id + bk_set_poseidon + num_layers + 10 layer hashes + prev_max_level_layer_hash = 14`.
+/// `block_id + bk_set_poseidon + num_layers + 10 layer hashes +
+/// prev_max_level_layer_hash = 14`.
 pub const LAYER_HASHES_NUM_PUBLIC_INPUTS: usize = 1 + 1 + 1 + MAX_LAYERS + 1;
 
 /// Bundled inputs for [`generate_layer_proof_with_input`]. Mirrors the
@@ -37,7 +41,8 @@ pub struct LayerHashesProofInput<'a> {
     pub bk_set_poseidon_hash: Fr,
     /// Public-instance vector, computed off-circuit by the caller and asserted
     /// by the circuit. Order:
-    /// `[block_id, bk_set_poseidon, num_layers, layer_hash_frs[0..10], prev_max_level_layer_hash]`.
+    /// `[block_id, bk_set_poseidon, num_layers, layer_hash_frs[0..10],
+    /// prev_max_level_layer_hash]`.
     pub expected_instances: [Fr; LAYER_HASHES_NUM_PUBLIC_INPUTS],
 }
 
@@ -57,11 +62,7 @@ pub fn generate_layer_proof_with_input(
     key_manager: &KeyManager,
     input: LayerHashesProofInput<'_>,
 ) -> anyhow::Result<LayerHashesProofOutput> {
-    generate_layer_proof_with_input_and_transcript(
-        key_manager,
-        input,
-        TranscriptKind::Blake2b,
-    )
+    generate_layer_proof_with_input_and_transcript(key_manager, input, TranscriptKind::Blake2b)
 }
 
 /// Bundled-input wrapper around
@@ -178,11 +179,11 @@ pub fn generate_layer_proof_with_transcript(
 
     // Build public instances (14 values).
     let mut instances = Vec::with_capacity(14);
-    instances.push(block_id_fr);             // [0]
-    instances.push(bk_set_poseidon_hash);    // [1]
+    instances.push(block_id_fr); // [0]
+    instances.push(bk_set_poseidon_hash); // [1]
     instances.push(Fr::from(num_layers as u64)); // [2]
     for i in 0..MAX_LAYERS {
-        instances.push(layer_hash_frs[i]);   // [3..12]
+        instances.push(layer_hash_frs[i]); // [3..12]
     }
     instances.push(prev_max_level_layer_hash); // [13]
 

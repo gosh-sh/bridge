@@ -23,11 +23,15 @@ use halo2_base::halo2_proofs::{
             strategy::SingleStrategy,
         },
     },
-    transcript::{Blake2bRead, Challenge255, EncodedChallenge, TranscriptRead, TranscriptReadBuffer},
+    transcript::{
+        Blake2bRead, Challenge255, EncodedChallenge, TranscriptRead, TranscriptReadBuffer,
+    },
 };
 
-use crate::keys::KeyManager;
-use crate::transcript::{PoseidonRead, TranscriptKind};
+use crate::{
+    keys::KeyManager,
+    transcript::{PoseidonRead, TranscriptKind},
+};
 
 /// Drive Halo2 KZG/SHPLONK verification with a caller-supplied Fiat–Shamir
 /// transcript reader. Mirror of [`crate::prover::create_proof_with_transcript`]
@@ -54,13 +58,7 @@ where
         E,
         T,
         SingleStrategy<'_, Bn256>,
-    >(
-        verifier_params,
-        vk,
-        strategy,
-        &[instance_refs],
-        transcript,
-    )
+    >(verifier_params, vk, strategy, &[instance_refs], transcript)
     .is_ok()
 }
 
@@ -80,13 +78,7 @@ pub fn verify_kzg_proof(
     proof_bytes: &[u8],
     instances: &[Fr],
 ) -> bool {
-    verify_kzg_proof_with_transcript(
-        srs,
-        vk,
-        proof_bytes,
-        instances,
-        TranscriptKind::Blake2b,
-    )
+    verify_kzg_proof_with_transcript(srs, vk, proof_bytes, instances, TranscriptKind::Blake2b)
 }
 
 /// Shared verification core with caller-picked Fiat–Shamir transcript. The
@@ -114,13 +106,7 @@ pub fn verify_kzg_proof_with_transcript(
                 Challenge255<G1Affine>,
                 Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
                 SingleStrategy<'_, Bn256>,
-            >(
-                verifier_params,
-                vk,
-                strategy,
-                &[instance_refs],
-                &mut t,
-            )
+            >(verifier_params, vk, strategy, &[instance_refs], &mut t)
             .is_ok()
         },
         TranscriptKind::Poseidon => {
@@ -131,21 +117,16 @@ pub fn verify_kzg_proof_with_transcript(
                 _,
                 PoseidonRead<&[u8]>,
                 SingleStrategy<'_, Bn256>,
-            >(
-                verifier_params,
-                vk,
-                strategy,
-                &[instance_refs],
-                &mut t,
-            )
+            >(verifier_params, vk, strategy, &[instance_refs], &mut t)
             .is_ok()
         },
     }
 }
 
 /// Verify a Circuit 1a (Primary Attestation) proof against the given
-/// 4 public instances: `[block_id, bk_set_commitment, block_seq_no, last_seen]`.
-/// Uses the Blake2b transcript — matches [`crate::prover::generate_primary_proof`].
+/// 4 public instances: `[block_id, bk_set_commitment, block_seq_no,
+/// last_seen]`. Uses the Blake2b transcript — matches
+/// [`crate::prover::generate_primary_proof`].
 pub fn verify_primary_proof(
     key_manager: &KeyManager,
     proof_bytes: &[u8],
@@ -216,14 +197,10 @@ pub fn verify_fallback_proof_with_transcript(
 
 /// Verify a Circuit 2 (Layer Historical Hashes Movement Checker) proof
 /// against the given 14 public instances:
-/// `[block_id, bk_set_poseidon_hash, num_layers, layer_hash_frs[0..9], prev_max_level_layer_hash]`.
-/// Uses the Blake2b transcript — matches
+/// `[block_id, bk_set_poseidon_hash, num_layers, layer_hash_frs[0..9],
+/// prev_max_level_layer_hash]`. Uses the Blake2b transcript — matches
 /// [`crate::layer_prover::generate_layer_proof`].
-pub fn verify_layer_proof(
-    key_manager: &KeyManager,
-    proof_bytes: &[u8],
-    instances: &[Fr],
-) -> bool {
+pub fn verify_layer_proof(key_manager: &KeyManager, proof_bytes: &[u8], instances: &[Fr]) -> bool {
     verify_kzg_proof(
         key_manager.layer.srs(),
         key_manager.layer_vk(),

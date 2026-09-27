@@ -4,33 +4,34 @@
 //!
 //! Two SRS provisioning paths:
 //!
-//! * **K in 1..=20** — uses `gosh-zk-snark-halo2-utils::ptau`, which pins
-//!   the K=20 raw-SRS SHA-256 trust anchor. Reads
-//!   `powersOfTau28_hez_final_20.ptau` (SnarkJs, ~1.2 GB) once, verifies
-//!   the anchor, then downsizes to each requested K. Ptau is downloaded
-//!   on cache miss to `$HOME/.cache/halo2-kzg-srs/`.
+//! * **K in 1..=20** — uses `gosh-zk-snark-halo2-utils::ptau`, which pins the
+//!   K=20 raw-SRS SHA-256 trust anchor. Reads `powersOfTau28_hez_final_20.ptau`
+//!   (SnarkJs, ~1.2 GB) once, verifies the anchor, then downsizes to each
+//!   requested K. Ptau is downloaded on cache miss to
+//!   `$HOME/.cache/halo2-kzg-srs/`.
 //!
-//! * **K = 21** — no shared trust anchor available (utils crate is capped
-//!   at K=20). Reads `powersOfTau28_hez_final_21.ptau` (SnarkJs, ~2.4 GB)
-//!   directly via `halo2_kzg_srs::Srs::read_partial(reader, SnarkJs, 21)`
-//!   and materializes via `write_raw`. The Hermez `s_g2 head` byte-level
-//!   check still applies — `bridge_prover_lib::keys::common` will reject
-//!   any file whose `s_g2` head is not `928fafb3d0cc`, so K=21 SRS files
-//!   this binary writes are load-testable via `KeyManager::new` startup.
+//! * **K = 21** — no shared trust anchor available (utils crate is capped at
+//!   K=20). Reads `powersOfTau28_hez_final_21.ptau` (SnarkJs, ~2.4 GB) directly
+//!   via `halo2_kzg_srs::Srs::read_partial(reader, SnarkJs, 21)` and
+//!   materializes via `write_raw`. The Hermez `s_g2 head` byte-level check
+//!   still applies — `bridge_prover_lib::keys::common` will reject any file
+//!   whose `s_g2` head is not `928fafb3d0cc`, so K=21 SRS files this binary
+//!   writes are load-testable via `KeyManager::new` startup.
 //!
 //! * **K = 22** — same no-anchor path as K=21, reads
 //!   `powersOfTau28_hez_final_22.ptau` (SnarkJs, ~4.8 GB) via
-//!   `halo2_kzg_srs::Srs::read_partial(reader, SnarkJs, 22)`. Required
-//!   only for the outer `LayerHashesAggregatorVerifier` (aggregator preset
-//!   `K_outer=22`, see `bridge-evm-aggregator::aggregator::for_verifier_name`).
-//!   Not part of `DEFAULT_KS` — request explicitly via `--k 22`.
+//!   `halo2_kzg_srs::Srs::read_partial(reader, SnarkJs, 22)`. Required only for
+//!   the outer `LayerHashesAggregatorVerifier` (aggregator preset `K_outer=22`,
+//!   see `bridge-evm-aggregator::aggregator::for_verifier_name`). Not part of
+//!   `DEFAULT_KS` — request explicitly via `--k 22`.
 //!
 //! Default outputs:
 //!   params/kzg_bn254_17.srs   (~16 MB)   — Circuit 2 (layer) proving
 //!   params/kzg_bn254_19.srs   (~64 MB)   — Circuit 4 (event) proving
 //!   params/kzg_bn254_20.srs   (~128 MB)  — Circuit 1A (primary) + all keygen
 //!   params/kzg_bn254_21.srs   (~256 MB)  — Circuit 3 (fallback) proving
-//!   params/kzg_bn254_22.srs   (~512 MB)  — LayerHashes outer aggregator (opt-in)
+//!   params/kzg_bn254_22.srs   (~512 MB)  — LayerHashes outer aggregator
+//! (opt-in)
 //!
 //! K=21 uses its own ptau at
 //! `$HOME/.cache/halo2-kzg-srs/powersOfTau28_hez_final_21.ptau` (override
@@ -44,8 +45,10 @@
 //! serve these revoked anonymous access; only K=21 is known to be mirrored,
 //! at `https://storage.googleapis.com/aptos-circuit-testing-setups/ptau/`.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Context, Result};
 use bridge_prover_lib::keys::HERMEZ_S_G2_HEAD;
@@ -94,7 +97,7 @@ fn parse_args() -> Result<Args> {
                 params_dir = Some(PathBuf::from(
                     it.next().context("--params-dir requires a path")?,
                 ));
-            }
+            },
             "--k" => {
                 let v: u32 = it
                     .next()
@@ -105,27 +108,25 @@ fn parse_args() -> Result<Args> {
                     bail!("--k must be in 1..=22, got {v}");
                 }
                 ks.push(v);
-            }
+            },
             "--wipe-cached-keys" => wipe = true,
             "--ptau" => {
-                ptau_path = Some(PathBuf::from(
-                    it.next().context("--ptau requires a path")?,
-                ));
-            }
+                ptau_path = Some(PathBuf::from(it.next().context("--ptau requires a path")?));
+            },
             "--ptau21" => {
                 ptau21_path = Some(PathBuf::from(
                     it.next().context("--ptau21 requires a path")?,
                 ));
-            }
+            },
             "--ptau22" => {
                 ptau22_path = Some(PathBuf::from(
                     it.next().context("--ptau22 requires a path")?,
                 ));
-            }
+            },
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
-            }
+            },
             other => bail!("unknown flag: {other}"),
         }
     }
@@ -138,7 +139,11 @@ fn parse_args() -> Result<Args> {
     let ptau_path = ptau_path.unwrap_or_else(default_ptau_cache_path);
     let ptau21_path = ptau21_path.unwrap_or_else(|| default_hermez_ptau_cache_path(21));
     let ptau22_path = ptau22_path.unwrap_or_else(|| default_hermez_ptau_cache_path(22));
-    let ks = if ks.is_empty() { DEFAULT_KS.to_vec() } else { ks };
+    let ks = if ks.is_empty() {
+        DEFAULT_KS.to_vec()
+    } else {
+        ks
+    };
 
     Ok(Args {
         params_dir,
@@ -164,7 +169,8 @@ OPTIONS:
                              (default: <bridge-prover-lib>/../params)
     --k N                    Circuit K to materialize (repeatable, 1..=22)
                              (default: --k 17 --k 19 --k 20 --k 21; --k 22 is opt-in)
-    --wipe-cached-keys       Delete primary/layer/event/fallback _vk.bin/_pk.bin/_config_params.json
+    --wipe-cached-keys       Delete primary/layer/event/fallback \
+         _vk.bin/_pk.bin/_config_params.json
                              (their commitments embed s_g2 → mandatory after SRS swap)
     --ptau PATH              Path to powersOfTau28_hez_final_20.ptau (used for K in 1..=20)
                              (default: $HOME/.cache/halo2-kzg-srs/powersOfTau28_hez_final_20.ptau;
@@ -213,8 +219,7 @@ fn wipe_cached_keys(params_dir: &Path) -> Result<()> {
         for suf in WIPE_SUFFIXES {
             let p = params_dir.join(format!("{stem}{suf}"));
             if p.exists() {
-                fs::remove_file(&p)
-                    .with_context(|| format!("removing {}", p.display()))?;
+                fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
                 println!("[WIPE] {}", p.display());
             }
         }
@@ -255,7 +260,8 @@ fn main() -> Result<()> {
         .with_context(|| format!("creating {}", args.params_dir.display()))?;
 
     println!(
-        "[bootstrap_hermez_srs]\n  params_dir = {}\n  ptau       = {}\n  ptau21     = {}\n  ptau22     = {}\n  ks         = {:?}\n  wipe       = {}",
+        "[bootstrap_hermez_srs]\n  params_dir = {}\n  ptau       = {}\n  ptau21     = {}\n  \
+         ptau22     = {}\n  ks         = {:?}\n  wipe       = {}",
         args.params_dir.display(),
         args.ptau_path.display(),
         args.ptau21_path.display(),
@@ -295,19 +301,15 @@ fn main() -> Result<()> {
                 _ => unreachable!("parse_args enforces k in 1..=22"),
             };
             println!(
-                "[K={k}] reading K={k} ptau via halo2_kzg_srs (no anchor — relying on s_g2 head)..."
+                "[K={k}] reading K={k} ptau via halo2_kzg_srs (no anchor — relying on s_g2 \
+                 head)..."
             );
             materialize_raw_srs_from_ptau(ptau_path, k)?
         };
         // Byte-level sanity: s_g2 head must be Hermez.
         assert_hermez_head(&out, &raw_srs)?;
-        fs::write(&out, &raw_srs)
-            .with_context(|| format!("writing {}", out.display()))?;
-        println!(
-            "[K={k}] wrote {} ({} bytes)",
-            out.display(),
-            raw_srs.len()
-        );
+        fs::write(&out, &raw_srs).with_context(|| format!("writing {}", out.display()))?;
+        println!("[K={k}] wrote {} ({} bytes)", out.display(), raw_srs.len());
     }
 
     // Step 3 — optional stale-key wipe (VKs embed s_g2, so they must be

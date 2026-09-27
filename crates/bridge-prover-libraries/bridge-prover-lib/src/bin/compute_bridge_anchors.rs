@@ -1,13 +1,11 @@
 //! Compute the two genesis anchors needed by `DeployShellnetE2EBridge.s.sol`:
 //!
 //!   * `GENESIS_BK_SET_COMMITMENT`         — Poseidon commitment of the current
-//!                                           BK set (from `bk_set.*.json`).
+//!     BK set (from `bk_set.*.json`).
 //!   * `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` — layer-`L` root at the seed key
-//!                                           block, where `L` is the chosen
-//!                                           anchor level (1 by default, 2
-//!                                           under `--level 2`). This is the
-//!                                           same anchor the on-chain bridge
-//!                                           stores after its genesis stamp.
+//!     block, where `L` is the chosen anchor level (1 by default, 2 under
+//!     `--level 2`). This is the same anchor the on-chain bridge stores after
+//!     its genesis stamp.
 //!
 //! No proving, no keygen, no SRS — this is a thin wrapper over the same helpers
 //! the daemon uses on cold start:
@@ -97,7 +95,10 @@ fn parse_args() -> Result<Args> {
 
     let default_level: u8 = std::env::var("BRIDGE_ANCHOR_LEVEL")
         .ok()
-        .map(|s| s.parse::<u8>().context("BRIDGE_ANCHOR_LEVEL must be 1 or 2"))
+        .map(|s| {
+            s.parse::<u8>()
+                .context("BRIDGE_ANCHOR_LEVEL must be 1 or 2")
+        })
         .transpose()?
         .unwrap_or(1);
 
@@ -114,7 +115,7 @@ fn parse_args() -> Result<Args> {
             "--bk-set-config" => {
                 bk_set_config =
                     PathBuf::from(it.next().context("--bk-set-config requires a path")?);
-            }
+            },
             "--seed-seqno" => {
                 let v: u64 = it
                     .next()
@@ -122,7 +123,7 @@ fn parse_args() -> Result<Args> {
                     .parse()
                     .context("--seed-seqno value must be a u64")?;
                 seed_seqno = Some(v);
-            }
+            },
             "--at-head" => at_head = true,
             "--level" => {
                 level = it
@@ -130,16 +131,22 @@ fn parse_args() -> Result<Args> {
                     .context("--level requires a value (1 or 2)")?
                     .parse::<u8>()
                     .context("--level value must be 1 or 2")?;
-            }
+            },
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
-            }
+            },
             other => bail!("unknown flag: {other}"),
         }
     }
 
-    Ok(Args { endpoint, bk_set_config, seed_seqno, at_head, level })
+    Ok(Args {
+        endpoint,
+        bk_set_config,
+        seed_seqno,
+        at_head,
+        level,
+    })
 }
 
 fn print_help() {
@@ -181,8 +188,8 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
 
     // Anchor level → bundle stride. Single source of truth: `AnchorMode`.
-    let anchor_mode = AnchorMode::from_level(args.level)
-        .map_err(|e| anyhow::anyhow!("invalid --level: {e}"))?;
+    let anchor_mode =
+        AnchorMode::from_level(args.level).map_err(|e| anyhow::anyhow!("invalid --level: {e}"))?;
     let bundle_boundary: u64 = anchor_mode.stride();
     eprintln!(
         "anchor level = {} (bundle boundary = {})",
@@ -227,24 +234,30 @@ async fn main() -> Result<()> {
         let n = args.seed_seqno.unwrap();
         if !n.is_multiple_of(bundle_boundary) {
             bail!(
-                "--seed-seqno {n} is not a multiple of the level-{level} bundle boundary {bundle_boundary}",
+                "--seed-seqno {n} is not a multiple of the level-{level} bundle boundary \
+                 {bundle_boundary}",
                 level = anchor_mode.level(),
             );
         }
         if n > head_seqno {
             bail!(
-                "--seed-seqno {n} is ahead of chain head {head_seqno} — that block does not exist yet",
+                "--seed-seqno {n} is ahead of chain head {head_seqno} — that block does not exist \
+                 yet",
             );
         }
         n
     };
     if seed_seqno == 0 {
         bail!(
-            "resolved seed_seqno = 0 (chain head {head_seqno} < first level-{level} bundle boundary {bundle_boundary})",
+            "resolved seed_seqno = 0 (chain head {head_seqno} < first level-{level} bundle \
+             boundary {bundle_boundary})",
             level = anchor_mode.level(),
         );
     }
-    eprintln!("seed key-block seq_no = {} (boundary {})", seed_seqno, bundle_boundary);
+    eprintln!(
+        "seed key-block seq_no = {} (boundary {})",
+        seed_seqno, bundle_boundary
+    );
 
     // 3. Pull the key-block envelope, extract layer_hashes.
     let seed = fetch_from_node(&gql, seed_seqno, bk_commit, anchor_mode.level())
@@ -274,13 +287,15 @@ async fn main() -> Result<()> {
         .find(|(_, layer)| *layer == level)
         .with_context(|| {
             format!(
-                "seed block {} has no layer={} entry (found layers: {:?}). \
-                 Under --level 2 the seed must be a W²-aligned key block \
-                 that already carries an L2 root; retry with --at-head or \
-                 pick a later boundary.",
+                "seed block {} has no layer={} entry (found layers: {:?}). Under --level 2 the \
+                 seed must be a W²-aligned key block that already carries an L2 root; retry with \
+                 --at-head or pick a later boundary.",
                 seed_seqno,
                 level,
-                seed.layer_hashes.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+                seed.layer_hashes
+                    .iter()
+                    .map(|(_, l)| *l)
+                    .collect::<Vec<_>>(),
             )
         })?;
     let genesis_anchor = picked.0;
@@ -324,10 +339,10 @@ mod tests {
     //! Round-trip tests pinning the emitted-env-value convention against the
     //! two consumers that must agree on the numeric:
     //!
-    //!   * the on-chain constructor
-    //!     (`vm.envUint` in `DeployShellnetE2EBridge.s.sol` → BE-hex uint256)
-    //!   * the daemon submission path
-    //!     (`bridge-relayer-daemon/src/types.rs` → `U256::from_le_bytes`)
+    //!   * the on-chain constructor (`vm.envUint` in
+    //!     `DeployShellnetE2EBridge.s.sol` → BE-hex uint256)
+    //!   * the daemon submission path (`bridge-relayer-daemon/src/types.rs` →
+    //!     `U256::from_le_bytes`)
     //!
     //! A regression on either side (e.g. someone reverts to
     //! `hex::encode(fr.to_repr())` or the daemon flips to `from_be_bytes`)
@@ -336,14 +351,17 @@ mod tests {
     //! We deliberately do NOT pull in `alloy::U256` here — the assertions are
     //! byte-level so this test module compiles as part of the bin's own
     //! `cargo test --bin compute_bridge_anchors` run and has no extra deps.
-    use super::*;
     use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
+
+    use super::*;
 
     /// Simulates Foundry's `vm.envUint("0x…")` at the byte level: strip the
     /// `0x`, hex-decode, and return the 32-byte big-endian representation of
     /// the resulting uint256.
     fn parse_foundry_be_hex(env_value: &str) -> [u8; 32] {
-        let stripped = env_value.strip_prefix("0x").expect("env value must start with 0x");
+        let stripped = env_value
+            .strip_prefix("0x")
+            .expect("env value must start with 0x");
         let bytes = hex::decode(stripped).expect("env value must be valid hex");
         assert_eq!(bytes.len(), 32, "uint256 literal must decode to 32 bytes");
         let mut out = [0u8; 32];
@@ -386,7 +404,8 @@ mod tests {
             let parsed_be = parse_foundry_be_hex(&emitted);
             let daemon_be = daemon_submission_be_bytes(&fr);
             assert_eq!(
-                parsed_be, daemon_be,
+                parsed_be,
+                daemon_be,
                 "emitted env value {emitted} parses to BE bytes {} but daemon would submit {}",
                 hex::encode(parsed_be),
                 hex::encode(daemon_be),
@@ -409,8 +428,8 @@ mod tests {
         let buggy = format!("0x{}", hex::encode(fr.to_repr()));
         assert_ne!(
             correct, buggy,
-            "asymmetric Fr must not produce the same string in LE-hex and BE-hex forms — \
-             if these are equal the test is trivially passing and needs a better sample"
+            "asymmetric Fr must not produce the same string in LE-hex and BE-hex forms — if these \
+             are equal the test is trivially passing and needs a better sample"
         );
     }
 
@@ -424,18 +443,17 @@ mod tests {
         // bytes fetched from shellnet at seq_no = 4_887_552.  Constructed
         // here from those bytes so we don't depend on the live chain.
         let raw_layer1_le: [u8; 32] = [
-            0x58, 0x91, 0x86, 0xa7, 0x29, 0x48, 0x02, 0x0e, 0xf9, 0x59, 0x45, 0x9c,
-            0x5e, 0xbf, 0x45, 0x61, 0x34, 0xff, 0x2c, 0xee, 0xd7, 0x2f, 0x0d, 0x85,
-            0x3a, 0x73, 0x53, 0xf6, 0x0a, 0x7b, 0x8e, 0x26,
+            0x58, 0x91, 0x86, 0xa7, 0x29, 0x48, 0x02, 0x0e, 0xf9, 0x59, 0x45, 0x9c, 0x5e, 0xbf,
+            0x45, 0x61, 0x34, 0xff, 0x2c, 0xee, 0xd7, 0x2f, 0x0d, 0x85, 0x3a, 0x73, 0x53, 0xf6,
+            0x0a, 0x7b, 0x8e, 0x26,
         ];
         // Emission from the fixed helper must be the BE-hex string that
         // matches what the daemon submits (byte-reversal of the raw LE bytes).
         let emitted = le_repr_to_solidity_be_hex(&raw_layer1_le);
         assert_eq!(
-            emitted,
-            "0x268e7b0af653733a850d2fd7ee2cff346145bf5e9c4559f90e024829a7869158",
-            "emission convention drifted from the daemon-submitted numeric \
-             observed on shellnet 2026-08-02",
+            emitted, "0x268e7b0af653733a850d2fd7ee2cff346145bf5e9c4559f90e024829a7869158",
+            "emission convention drifted from the daemon-submitted numeric observed on shellnet \
+             2026-08-02",
         );
     }
 }

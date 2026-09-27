@@ -30,11 +30,13 @@
 use std::collections::HashMap;
 
 use anyhow::{bail, Context};
-use bridge_gql_fetcher::bk_set_fetcher::{
-    bk_set_at_height, load_bk_set_from_config, normalize_bk_set_pubkeys,
-    parse_bk_set_changes_pub, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED,
+use bridge_gql_fetcher::{
+    bk_set_fetcher::{
+        bk_set_at_height, load_bk_set_from_config, normalize_bk_set_pubkeys,
+        parse_bk_set_changes_pub, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED,
+    },
+    gql_client::create_client,
 };
-use bridge_gql_fetcher::gql_client::create_client;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -49,7 +51,9 @@ struct BkUpdateFixture {
 }
 
 fn to_hex_map(m: &HashMap<u16, Vec<u8>>) -> HashMap<String, String> {
-    m.iter().map(|(k, v)| (k.to_string(), hex::encode(v))).collect()
+    m.iter()
+        .map(|(k, v)| (k.to_string(), hex::encode(v)))
+        .collect()
 }
 
 #[tokio::main]
@@ -58,9 +62,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut target_height: Option<u64> = None;
     let mut genesis_path: Option<String> = None;
-    let mut out_path: String =
-        "crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json"
-            .to_string();
+    let mut out_path: String = "crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/\
+                                bk_update_shellnet.json"
+        .to_string();
     let mut source_label: String = "shellnet".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -72,33 +76,31 @@ async fn main() -> anyhow::Result<()> {
                         .parse()
                         .context("--height must be u64")?,
                 );
-            }
+            },
             "--genesis-bk-set" => {
                 genesis_path = Some(args.next().context("--genesis-bk-set needs a path")?);
-            }
+            },
             "--out" => {
                 out_path = args.next().context("--out needs a path")?;
-            }
+            },
             "--source" => {
                 source_label = args.next().context("--source needs a label")?;
-            }
+            },
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: capture_bk_update_fixture --height N --genesis-bk-set PATH \\\n\
-                    \x20\x20                            [--out PATH] [--source LABEL]"
+                    "usage: capture_bk_update_fixture --height N --genesis-bk-set PATH \
+                     \\\n\x20\x20                            [--out PATH] [--source LABEL]"
                 );
                 return Ok(());
-            }
+            },
             other => bail!("unknown arg: {other}"),
         }
     }
 
-    let target_height =
-        target_height.context("--height is required (bk-update block seq_no)")?;
+    let target_height = target_height.context("--height is required (bk-update block seq_no)")?;
     let genesis_path = genesis_path.context("--genesis-bk-set is required")?;
 
-    let endpoint = std::env::var("BRIDGE_GQL_ENDPOINT")
-        .context("BRIDGE_GQL_ENDPOINT not set")?;
+    let endpoint = std::env::var("BRIDGE_GQL_ENDPOINT").context("BRIDGE_GQL_ENDPOINT not set")?;
     let client = create_client(&endpoint).context("create_client failed")?;
 
     // Reconstruct old_pubkeys = fold(genesis, all updates with height < target).
@@ -115,7 +117,11 @@ async fn main() -> anyhow::Result<()> {
             .await
             .with_context(|| format!("bk_set_at_height({})", target_height - 1))?
     };
-    println!("old_pubkeys: {} signers (folded to height {})", old_pubkeys.len(), target_height - 1);
+    println!(
+        "old_pubkeys: {} signers (folded to height {})",
+        old_pubkeys.len(),
+        target_height - 1
+    );
 
     // Fetch the target block and locate its bk_set_update_hex.
     let block = client
@@ -125,8 +131,8 @@ async fn main() -> anyhow::Result<()> {
 
     let leaves = block.block_merkle_tree_leaves.ok_or_else(|| {
         anyhow::anyhow!(
-            "block {} has no block_merkle_tree_leaves — pick a newer block \
-             or check node exposes this field",
+            "block {} has no block_merkle_tree_leaves — pick a newer block or check node exposes \
+             this field",
             target_height,
         )
     })?;
@@ -160,8 +166,8 @@ async fn main() -> anyhow::Result<()> {
     // must agree. If not, the capture is picking the wrong pair.
     if hit.block_id != hex::encode(block.block_id) {
         bail!(
-            "bkSetUpdates event.block_id {} != proof_block.block_id {} — \
-             pagination or filtering bug in capture",
+            "bkSetUpdates event.block_id {} != proof_block.block_id {} — pagination or filtering \
+             bug in capture",
             hit.block_id,
             hex::encode(block.block_id),
         );
@@ -179,11 +185,11 @@ async fn main() -> anyhow::Result<()> {
         match *variant {
             BK_CHANGE_VARIANT_ADDED => {
                 expected_new.insert(*idx, pk.clone());
-            }
+            },
             BK_CHANGE_VARIANT_REMOVED => {
                 expected_new.remove(idx);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     let expected_new = normalize_bk_set_pubkeys(expected_new).context("normalize expected_new")?;

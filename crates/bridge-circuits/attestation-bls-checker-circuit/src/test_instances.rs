@@ -30,8 +30,10 @@ pub fn expected_public_instances(
     let last_seen_block_seqno: u32 = block_seq_no.saturating_sub(1);
     let block_seq_no_fr = Fr::from(block_seq_no as u64);
     let last_seen_fr = Fr::from(last_seen_block_seqno as u64);
-    (
-        last_seen_block_seqno,
-        vec![block_id_fr, bk_set_commitment, block_seq_no_fr, last_seen_fr],
-    )
+    (last_seen_block_seqno, vec![
+        block_id_fr,
+        bk_set_commitment,
+        block_seq_no_fr,
+        last_seen_fr,
+    ])
 }

@@ -24,21 +24,24 @@
 //! [`super::state::KeyManagerState`]. Only the circuit-specific
 //! reference-witness construction lives here.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Context;
 use attestation_bls_checker_circuit::fallback_circuit::FallbackAttestationBlsCheckerCircuit;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
 };
 use tracing::info;
 
-use super::state::KeyManagerState;
-use super::primary::{LIMB_BITS, LOOKUP_BITS, MAX_SIGNERS, NUM_LIMBS, NUM_UNUSABLE_ROWS};
+use super::{
+    primary::{LIMB_BITS, LOOKUP_BITS, MAX_SIGNERS, NUM_LIMBS, NUM_UNUSABLE_ROWS},
+    state::KeyManagerState,
+};
 
 pub(super) const PREFIX: &str = "fallback";
 

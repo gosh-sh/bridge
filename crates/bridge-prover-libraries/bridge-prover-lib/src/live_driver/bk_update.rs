@@ -14,22 +14,25 @@
 //!   `ack_bk_update`.
 //! * No `state.apply_bk_set_update` / `prover_bk_set.rotate` / in-memory
 //!   `bk_set` refresh — those all move into `ack_bk_update`.
-//! * All state mutation is deferred to ack, so a caller that drops the
-//!   returned artifacts (e.g. downstream verification failed) leaves the
-//!   driver ready to re-emit the same event on the next poll — that's the
-//!   intended retry semantics.
+//! * All state mutation is deferred to ack, so a caller that drops the returned
+//!   artifacts (e.g. downstream verification failed) leaves the driver ready to
+//!   re-emit the same event on the next poll — that's the intended retry
+//!   semantics.
 
-use anyhow::Context;
-use tracing::{error, info, warn};
 use std::time::Instant;
 
-use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
-use bridge_gql_fetcher::bk_set_fetcher::{self, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED};
-use crate::block_id_tree::BlockIdMerkleTree;
+use anyhow::Context;
+use bridge_gql_fetcher::{
+    attestation_fetcher::{self, AttestationEvidence},
+    bk_set_fetcher::{self, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED},
+};
 use bridge_poseidon as poseidon;
-use crate::prover;
+use tracing::{error, info, warn};
 
-use super::{BkUpdateProofArtifacts, BundleFinalizationType, DriverError, DriverResult, LiveProverDriver};
+use super::{
+    BkUpdateProofArtifacts, BundleFinalizationType, DriverError, DriverResult, LiveProverDriver,
+};
+use crate::{block_id_tree::BlockIdMerkleTree, prover};
 
 /// Drive one bk-set-update step. Returns `Some(artifacts)` when a rotation
 /// is ready for downstream submission, `None` when the prover is caught up
@@ -53,17 +56,20 @@ pub(super) async fn drive_next_bk_update(
                 e,
             );
             return Ok(None);
-        }
+        },
     };
     let upd_seqno = match upd.height {
         Some(h) if h > cursor => h,
         _ => {
             warn!("bk-update drain: skipping event with missing/stale height");
             return Ok(None);
-        }
+        },
     };
 
-    info!("=== bk-update drain: processing event at seq_no {} ===", upd_seqno);
+    info!(
+        "=== bk-update drain: processing event at seq_no {} ===",
+        upd_seqno
+    );
 
     // Fetch the bk-update block's 16 Merkle leaves to derive L2/L3 and the
     // three open siblings h01 / h4_7 / h8_15 for the depth-4 fold.
@@ -73,14 +79,12 @@ pub(super) async fn drive_next_bk_update(
         .await
         .with_context(|| format!("bk-update {}: GQL block fetch", upd_seqno))
         .map_err(DriverError::gql_transient)?;
-    let leaves = upd_block
-        .block_merkle_tree_leaves
-        .ok_or_else(|| {
-            DriverError::gql_schema(anyhow::anyhow!(
-                "bk-update {}: block has no block_merkle_tree_leaves",
-                upd_seqno,
-            ))
-        })?;
+    let leaves = upd_block.block_merkle_tree_leaves.ok_or_else(|| {
+        DriverError::gql_schema(anyhow::anyhow!(
+            "bk-update {}: block has no block_merkle_tree_leaves",
+            upd_seqno,
+        ))
+    })?;
     let tree = BlockIdMerkleTree::from_leaves(leaves);
 
     // Structural sanity: the tree we just folded must agree with the
@@ -92,8 +96,8 @@ pub(super) async fn drive_next_bk_update(
     // further down is compiled out in release; this bail! stays in).
     if tree.root != upd_block.block_id {
         return Err(DriverError::gql_schema(anyhow::anyhow!(
-            "bk-update {}: reconstructed tree.root {} != upd_block.block_id {} — \
-             GQL leaves inconsistent with block header",
+            "bk-update {}: reconstructed tree.root {} != upd_block.block_id {} — GQL leaves \
+             inconsistent with block header",
             upd_seqno,
             hex::encode(tree.root),
             hex::encode(upd_block.block_id),
@@ -138,16 +142,16 @@ pub(super) async fn drive_next_bk_update(
         match *variant {
             BK_CHANGE_VARIANT_ADDED => {
                 new_pubkeys.insert(*idx, pk.clone());
-            }
+            },
             BK_CHANGE_VARIANT_REMOVED => {
                 new_pubkeys.remove(idx);
-            }
+            },
             other => {
                 warn!(
                     "bk-update {}: ignoring unknown change variant {}",
                     upd_seqno, other,
                 );
-            }
+            },
         }
     }
     // Delta entries arrive as 96-byte uncompressed BLS pubkeys; the base
@@ -180,7 +184,7 @@ pub(super) async fn drive_next_bk_update(
                     upd_seqno, e,
                 );
                 return Ok(None);
-            }
+            },
         };
 
     // Generate Circuit 1A/1B proof, on-demand PK load/unload to stay within
@@ -218,10 +222,13 @@ pub(super) async fn drive_next_bk_update(
                 Err(e) => {
                     error!("bk-update {}: Circuit 1a proof failed: {}", upd_seqno, e);
                     return Err(DriverError::proof_gen(upd_seqno, e));
-                }
+                },
             }
-        }
-        AttestationEvidence::Fallback { primary, fallback } => {
+        },
+        AttestationEvidence::Fallback {
+            primary,
+            fallback,
+        } => {
             info!(
                 "bk-update {}: FALLBACK path → Circuit 1b (transcript={:?})",
                 upd_seqno, transcript,
@@ -245,9 +252,9 @@ pub(super) async fn drive_next_bk_update(
                 Err(e) => {
                     error!("bk-update {}: Circuit 1b proof failed: {}", upd_seqno, e);
                     return Err(DriverError::proof_gen(upd_seqno, e));
-                }
+                },
             }
-        }
+        },
     };
     let attestation_proof_gen_ms = t_upd_proof.elapsed().as_millis() as u64;
     info!(
@@ -270,8 +277,8 @@ pub(super) async fn drive_next_bk_update(
     debug_assert_eq!(
         crate::ipc::fold_hash_be_to_fr(&tree.root),
         upd_proof.block_id_fr,
-        "bk-update: fold(reverse(tree.root)) must equal Circuit 1's committed \
-         block_id_fr; a mismatch means the wire hash and the proof disagree",
+        "bk-update: fold(reverse(tree.root)) must equal Circuit 1's committed block_id_fr; a \
+         mismatch means the wire hash and the proof disagree",
     );
     let l2_l3_siblings = tree.siblings_for_l2_l3();
     Ok(Some(BkUpdateProofArtifacts {

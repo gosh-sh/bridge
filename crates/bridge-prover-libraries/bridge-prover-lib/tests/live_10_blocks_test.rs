@@ -1,8 +1,10 @@
 //! Integration test: prove and verify 10 consecutive blocks from a live node.
 //! Requires: running acki-nacki node at localhost, ./bk_set.json
 
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 const NUM_BLOCKS: u32 = 10;
 const GQL_ENDPOINT: &str = "http://localhost/graphql";
@@ -26,7 +28,10 @@ async fn test_prove_10_live_blocks() {
     };
 
     println!("\n{}", "=".repeat(70));
-    println!("  LIVE TEST: Prove and verify {} consecutive blocks", NUM_BLOCKS);
+    println!(
+        "  LIVE TEST: Prove and verify {} consecutive blocks",
+        NUM_BLOCKS
+    );
     println!("{}", "=".repeat(70));
     let t_total = Instant::now();
 
@@ -44,7 +49,9 @@ async fn test_prove_10_live_blocks() {
     println!("\n--- Loading keys ---");
     let t = Instant::now();
     let mut key_manager = bridge_prover_lib::keys::KeyManager::new(Path::new(params_dir));
-    key_manager.ensure_primary_keys(&bk_set).expect("keygen failed");
+    key_manager
+        .ensure_primary_keys(&bk_set)
+        .expect("keygen failed");
     println!("[timing] key load/gen: {:?}", t.elapsed());
 
     // 3. Connect to node.
@@ -52,14 +59,21 @@ async fn test_prove_10_live_blocks() {
         .expect("failed to create GQL client");
 
     // 4. Find a starting point: pick a recent block.
-    let blocks = gql.query_latest_blocks(20).await.expect("failed to query blocks");
+    let blocks = gql
+        .query_latest_blocks(20)
+        .await
+        .expect("failed to query blocks");
     if blocks.is_empty() {
         eprintln!("No blocks found on the node");
         return;
     }
     // Start from a block ~15 behind the latest (so all attestations are available).
     let latest_seq = blocks.iter().map(|(_, s)| *s).max().unwrap();
-    let start_seq = if latest_seq > 15 { (latest_seq - 15) as u32 } else { 1 };
+    let start_seq = if latest_seq > 15 {
+        (latest_seq - 15) as u32
+    } else {
+        1
+    };
     println!("\nLatest block on node: seq_no={}", latest_seq);
     println!("Starting from block: seq_no={}", start_seq);
 
@@ -77,33 +91,33 @@ async fn test_prove_10_live_blocks() {
 
         // Fetch attestation.
         let t = Instant::now();
-        let ev = match bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(
-            &gql, target,
-        )
-        .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                println!("  SKIP: attestation not found: {}", e);
-                results.push(BlockResult {
-                    seq_no: target,
-                    status: "SKIP".to_string(),
-                    proof_time: Duration::ZERO,
-                    verify_time: Duration::ZERO,
-                    proof_size: 0,
-                    signers: 0,
-                    target_type: "?".to_string(),
-                    error: Some(e.to_string()),
-                });
-                last_seen = target;
-                continue;
-            }
-        };
+        let ev =
+            match bridge_gql_fetcher::attestation_fetcher::fetch_attestation_evidence(&gql, target)
+                .await
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    println!("  SKIP: attestation not found: {}", e);
+                    results.push(BlockResult {
+                        seq_no: target,
+                        status: "SKIP".to_string(),
+                        proof_time: Duration::ZERO,
+                        verify_time: Duration::ZERO,
+                        proof_size: 0,
+                        signers: 0,
+                        target_type: "?".to_string(),
+                        error: Some(e.to_string()),
+                    });
+                    last_seen = target;
+                    continue;
+                },
+            };
         let fetch_time = t.elapsed();
         let att = match ev {
             bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
             bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback {
-                primary, fallback,
+                primary,
+                fallback,
             } => {
                 println!(
                     "  SKIP: fallback attestation (primary_signers={}, fallback_signers={})",
@@ -122,12 +136,14 @@ async fn test_prove_10_live_blocks() {
                 });
                 last_seen = target;
                 continue;
-            }
+            },
         };
         let target_type_str = "Primary";
         let num_signers = att.signature_occurrences.len();
-        println!("  attestation: type={}, signers={}, fetch_time={:?}",
-            target_type_str, num_signers, fetch_time);
+        println!(
+            "  attestation: type={}, signers={}, fetch_time={:?}",
+            target_type_str, num_signers, fetch_time
+        );
         println!("  block_id:    {}", hex::encode(&att.block_id));
         println!("  parent_id:   {}", hex::encode(&att.parent_block_id));
         println!("  env_hash:    {}", hex::encode(&att.envelope_hash));
@@ -137,14 +153,21 @@ async fn test_prove_10_live_blocks() {
         // Off-circuit BLS verification.
         let t = Instant::now();
         {
-            let sig_bytes = attestation_bls_checker_circuit::attestation_data_parser::parse_signature_bytes(&att.raw_bytes);
-            let entries = attestation_bls_checker_circuit::attestation_data_parser::parse_signer_entries(&att.raw_bytes);
+            let sig_bytes =
+                attestation_bls_checker_circuit::attestation_data_parser::parse_signature_bytes(
+                    &att.raw_bytes,
+                );
+            let entries =
+                attestation_bls_checker_circuit::attestation_data_parser::parse_signer_entries(
+                    &att.raw_bytes,
+                );
             let att_data = attestation_bls_checker_circuit::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);
             let signature = gosh_bls_verification::helpers::deserialize_g2_signature(sig_bytes);
             let msg_hash = gosh_bls_verification::helpers::compute_msg_hash(&att_data[..120]);
             let pks = gosh_bls_verification::helpers::resolve_pubkeys(&entries, &bk_set);
             let agg_pk = gosh_bls_verification::helpers::compute_agg_pubkey(&pks);
-            let ok = gosh_bls_verification::helpers::verify_bls_native(&signature, &agg_pk, &msg_hash);
+            let ok =
+                gosh_bls_verification::helpers::verify_bls_native(&signature, &agg_pk, &msg_hash);
             assert!(ok, "Off-circuit BLS failed for block {}", target);
         }
         println!("  off-circuit BLS: PASSED ({:?})", t.elapsed());
@@ -172,16 +195,26 @@ async fn test_prove_10_live_blocks() {
                 });
                 last_seen = target;
                 continue;
-            }
+            },
         };
         let proof_time = t.elapsed();
         total_proof_time += proof_time;
-        println!("  proof: {} bytes, generated in {:?}", proof_output.proof_bytes.len(), proof_time);
+        println!(
+            "  proof: {} bytes, generated in {:?}",
+            proof_output.proof_bytes.len(),
+            proof_time
+        );
         println!("  instances:");
         println!("    [0] block_id: {:?}", proof_output.block_id_fr);
-        println!("    [1] bk_commit:     {:?}", proof_output.bk_set_commitment_fr);
+        println!(
+            "    [1] bk_commit:     {:?}",
+            proof_output.bk_set_commitment_fr
+        );
         println!("    [2] block_seq_no:  {}", proof_output.block_seq_no);
-        println!("    [3] last_seen:     {}", proof_output.last_seen_block_seqno);
+        println!(
+            "    [3] last_seen:     {}",
+            proof_output.last_seen_block_seqno
+        );
 
         // Verify proof.
         let t = Instant::now();
@@ -209,7 +242,11 @@ async fn test_prove_10_live_blocks() {
             proof_size: proof_output.proof_bytes.len(),
             signers: num_signers,
             target_type: target_type_str.to_string(),
-            error: if verified { None } else { Some("proof verification failed".into()) },
+            error: if verified {
+                None
+            } else {
+                Some("proof verification failed".into())
+            },
         });
 
         last_seen = target;
@@ -219,7 +256,10 @@ async fn test_prove_10_live_blocks() {
     let elapsed = t_total.elapsed();
     let ok_count = results.iter().filter(|r| r.status == "OK").count();
     let fail_count = results.iter().filter(|r| r.status.contains("FAIL")).count();
-    let skip_count = results.iter().filter(|r| r.status.starts_with("SKIP")).count();
+    let skip_count = results
+        .iter()
+        .filter(|r| r.status.starts_with("SKIP"))
+        .count();
 
     println!("\n{}", "=".repeat(70));
     println!("  SUMMARY");
@@ -230,15 +270,27 @@ async fn test_prove_10_live_blocks() {
     println!("  Verification FAIL:  {}", fail_count);
     println!("  Skipped:            {}", skip_count);
     if ok_count > 0 {
-        println!("  Avg proof time:     {:?}", total_proof_time / ok_count as u32);
-        println!("  Avg verify time:    {:?}", total_verify_time / ok_count as u32);
+        println!(
+            "  Avg proof time:     {:?}",
+            total_proof_time / ok_count as u32
+        );
+        println!(
+            "  Avg verify time:    {:?}",
+            total_verify_time / ok_count as u32
+        );
     }
 
     println!("\n  Per-block results:");
-    println!("  {:>6} {:>8} {:>7} {:>10} {:>10} {:>6}", "seq_no", "status", "type", "proof_t", "verify_t", "size");
+    println!(
+        "  {:>6} {:>8} {:>7} {:>10} {:>10} {:>6}",
+        "seq_no", "status", "type", "proof_t", "verify_t", "size"
+    );
     for r in &results {
-        println!("  {:>6} {:>8} {:>7} {:>10} {:>10} {:>6}",
-            r.seq_no, r.status, r.target_type,
+        println!(
+            "  {:>6} {:>8} {:>7} {:>10} {:>10} {:>6}",
+            r.seq_no,
+            r.status,
+            r.target_type,
             format!("{:.1?}", r.proof_time),
             format!("{:.1?}", r.verify_time),
             r.proof_size,

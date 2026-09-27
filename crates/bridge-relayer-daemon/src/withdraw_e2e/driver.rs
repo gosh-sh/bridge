@@ -422,15 +422,29 @@ async fn prove_and_finalize(
         witness = %witness_path.display(),
         "invoking Circuit4ShplonkPipeline (in-process Poseidon C4 prove → aggregate)",
     );
-    let proof = pipeline
+    let mut proof = pipeline
         .prove(&witness_path, &cfg.snark_dir, cfg.prover_seq_no as u64)
         .await
         .context("Circuit4ShplonkPipeline::prove failed")?;
+    // Attach the multi-hop snark chain to the same `PartnerWithdrawalProof`
+    // the CLI submits on-chain — the pipeline only knows about the outer
+    // Circuit-4 aggregator, so `hops_hex` starts empty here. Cross-thread
+    // events land as `hop_blobs.len() > 0`; same-thread leaves it empty and
+    // the on-chain path accepts `hopPis = hopProofs = []` when
+    // `xBlockId == yBlockId`.
+    proof.hops_hex = hop_blobs
+        .iter()
+        .map(|h| crate::withdrawal::HopBlobHex {
+            proof_hex: h.proof_hex.clone(),
+            public_instances_hex: h.public_instances_hex.clone(),
+        })
+        .collect();
     info!(
         seq_no = proof.seq_no,
         self_verified = proof.self_verified,
         pi_len = proof.public_instances_hex.len(),
         calldata_bytes = proof.proof_hex.len() / 2,
+        hops = proof.hops_hex.len(),
         "pipeline produced PartnerWithdrawalProof (SHPLONK aggregator calldata)",
     );
 

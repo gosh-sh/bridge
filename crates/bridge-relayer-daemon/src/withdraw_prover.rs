@@ -89,6 +89,7 @@ impl MockWithdrawalProver {
                 ]),
                 public_instances_hex,
                 self_verified: true,
+                hops_hex: Vec::new(),
             },
             fail: false,
         }
@@ -282,7 +283,9 @@ mod tests {
             .await
             .unwrap();
         assert!(proof.self_verified);
-        assert_eq!(proof.public_instances_hex.len(), 11);
+        // 13 = `WITHDRAWAL_PUBLIC_INPUTS` after the multi-thread migration
+        // (11 legacy slots + `x_block_id` + `y_block_id`).
+        assert_eq!(proof.public_instances_hex.len(), 13);
         // Canned proof is submit-shaped (SHPLONK aggregator calldata).
         assert!(proof.proof_bytes().is_ok());
         let pi = proof.public_inputs().unwrap();

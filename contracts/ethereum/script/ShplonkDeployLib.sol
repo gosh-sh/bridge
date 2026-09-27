@@ -41,12 +41,12 @@ library ShplonkDeployLib {
         0xd6f78f3b014cf94b0fbc8d60e409955adf86c7f2274c84ce19b745f5bb92525e;
     bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
         0x23e0d1a694c9b7485f81a59eefafa6c0d1865db721133b030ecd6ff86dfe48bb;
-    /// @dev Multi-hop verifier codehash is unset until the Yul artefact is
-    ///      first generated on n14 (see `contracts/ethereum/verifiers/README.md`).
-    ///      `deployYulFromBin(path, bytes32(0))` skips the check for spike/pre-
-    ///      keygen deploys; regenerate + update this constant in the same
-    ///      commit as the artefact bump.
-    bytes32 internal constant MULTI_HOP_YUL_CODEHASH = bytes32(0);
+    /// @dev Multi-hop verifier codehash, computed from the committed
+    ///      `verifiers/BridgeMultiHopAggregatorVerifier.bin` via
+    ///      `script/PrintMultiHopCodehash.s.sol`. Regenerate + update this
+    ///      constant in the same commit as any artefact bump.
+    bytes32 internal constant MULTI_HOP_YUL_CODEHASH =
+        0xd1cfbbd8f1b9879070b1b61eb3541111b57743fd011da5f4b4a152d7cc1e46a5;
 
     struct VerifyBlockVerifiers {
         IPrimaryVerifier primary;
@@ -137,9 +137,10 @@ library ShplonkDeployLib {
     /// @notice Multi-thread cross-thread hop-chain adapter for
     ///         `withdrawByProofBundle`. Companion to the withdrawal-final
     ///         adapter — deploy both together whenever bundle wiring is
-    ///         enabled on `AckiNackiBridge`. `MULTI_HOP_YUL_CODEHASH` is
-    ///         still zero pending the first n14 keygen run; the check is
-    ///         skipped until it is populated.
+    ///         enabled on `AckiNackiBridge`. Pinned to
+    ///         `MULTI_HOP_YUL_CODEHASH`, mirroring the other four verifier
+    ///         adapters — a deploy against a mismatched `.bin` reverts with
+    ///         `YulCodehashMismatch`.
     function deployMultiHopAdapter(string memory binPath)
         internal
         returns (IBridgeMultiHopVerifier)

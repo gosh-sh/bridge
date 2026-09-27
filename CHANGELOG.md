@@ -769,6 +769,37 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **Cross-thread `withdrawByProofBundle` now works from the daemon and the
+  end-user CLI.** Every in-tree caller under
+  `crates/bridge-relayer-daemon/src/bin/relayer.rs` and
+  `crates/ackinacki-bridge/src/orchestrator.rs` was passing empty hop
+  arrays (`&[], &[]`) to `dry_run_withdraw_bundle` / `submit_withdraw_bundle`
+  — the bundle path silently degraded to same-thread only, so any
+  cross-thread claim would revert with `SameThreadEndpointsMismatch()`.
+  The `withdraw_e2e` driver was already resolving the L7 hop chain and
+  proving each hop, but the resulting `hop_blobs` were being dropped
+  before submission. `PartnerWithdrawalProof` now carries a `hops_hex`
+  field (populated by the driver from `hop_blobs` before returning, and
+  written into `proof_event_*.json` so daemon restarts read it back);
+  new accessors `hop_pis() -> Vec<Vec<U256>>` and `hop_proofs() -> Vec<Bytes>`
+  decode it. All eight submission call sites (six in `relayer.rs`, two
+  in `orchestrator.rs`) now plumb the decoded arrays through — empty
+  vecs for same-thread claims (fast path, `xBlockId == yBlockId`),
+  N-long for cross-thread walks (2- to 4-thread multi-thread node runs).
+  Legacy `proof_event_*.json` files without a `hops_hex` field still
+  parse (`#[serde(default)]`).
+- **`ShplonkDeployLib.MULTI_HOP_YUL_CODEHASH` pinned.** The multi-hop Yul
+  verifier was deployed with the placeholder `bytes32(0)`, which
+  `deployYulFromBin` interprets as "skip the runtime `extcodehash`
+  self-check" — so any drift between the committed
+  `verifiers/BridgeMultiHopAggregatorVerifier.bin` and the on-chain
+  bytecode would have deployed silently. The pin is now
+  `0xd1cfbbd8f1b9879070b1b61eb3541111b57743fd011da5f4b4a152d7cc1e46a5`,
+  matching the four sibling verifier pins in the same file. A one-shot
+  helper `script/PrintMultiHopCodehash.s.sol` regenerates the value from
+  the committed `.bin` on future artefact bumps; the Foundry test
+  `test_eth6_multiHopYul_extcodehashMatchesPin` locks the invariant
+  into CI alongside the four existing pin tests.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's

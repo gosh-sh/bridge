@@ -1519,13 +1519,26 @@ where
             },
         };
 
+        // Cross-thread hop chain: empty for same-thread claims (`xBlockId ==
+        // yBlockId`), N-long for cross-thread walks. The bundle contract
+        // enforces the invariant on both cases — parking on a decode error
+        // rather than paying out with an under-specified claim.
+        let (hop_pis, hop_proofs) = match (bundle.hop_pis(), bundle.hop_proofs()) {
+            (Ok(pis), Ok(proofs)) => (pis, proofs),
+            (Err(e), _) | (_, Err(e)) => {
+                warn!(?e, proof = %proof_path.display(), "malformed hops_hex; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
         if dry_run {
             match bridge
-                .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
+                .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
                 .await?
             {
                 DryRunOutcome::WouldSucceed => {
-                    info!(proof = %proof_path.display(), "dry-run: withdrawByProofBundle would succeed");
+                    info!(proof = %proof_path.display(), hops = hop_pis.len(), "dry-run: withdrawByProofBundle would succeed");
                     st.done.insert(proof_path);
                 },
                 DryRunOutcome::WouldRevert {
@@ -1540,7 +1553,7 @@ where
         }
 
         match bridge
-            .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
+            .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
             .await?
         {
             WithdrawSubmitOutcome::Paid {
@@ -1775,16 +1788,20 @@ async fn submit_withdraw(
     let bundle = PartnerWithdrawalProof::from_json_bytes(&std::fs::read(&proof_event)?)?;
     let proof = bundle.proof_bytes()?;
     let pub_inputs = bundle.public_inputs()?;
+    // Empty vecs for same-thread claims (`xBlockId == yBlockId`), N-long for
+    // cross-thread walks. Parity with `daemon-bridge`'s hop-plumbing.
+    let hop_pis = bundle.hop_pis()?;
+    let hop_proofs = bundle.hop_proofs()?;
 
     if dry_run {
         let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge
-            .dry_run_withdraw_bundle(&pub_inputs, &proof, &[], &[])
+            .dry_run_withdraw_bundle(&pub_inputs, &proof, &hop_pis, &hop_proofs)
             .await?
         {
             DryRunOutcome::WouldSucceed => {
-                info!("dry-run: withdrawByProofBundle would succeed")
+                info!(hops = hop_pis.len(), "dry-run: withdrawByProofBundle would succeed")
             },
             DryRunOutcome::WouldRevert {
                 reason,
@@ -1805,7 +1822,7 @@ async fn submit_withdraw(
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge
-        .submit_withdraw_bundle(&pub_inputs, &proof, &[], &[])
+        .submit_withdraw_bundle(&pub_inputs, &proof, &hop_pis, &hop_proofs)
         .await?
     {
         WithdrawSubmitOutcome::Paid {
@@ -1906,16 +1923,21 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
 
     let proof_bytes = summary.proof.proof_bytes()?;
     let pub_inputs = summary.proof.public_inputs()?;
+    // The driver populated `summary.proof.hops_hex` from `hop_blobs` before
+    // returning — same in-memory decode path as the disk-loaded daemon paths,
+    // no round-trip through JSON needed. Empty for same-thread events.
+    let hop_pis = summary.proof.hop_pis()?;
+    let hop_proofs = summary.proof.hop_proofs()?;
 
     if args.dry_run {
         let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge
-            .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
+            .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
             .await?
         {
             DryRunOutcome::WouldSucceed => {
-                info!("dry-run: withdrawByProofBundle would succeed")
+                info!(hops = hop_pis.len(), "dry-run: withdrawByProofBundle would succeed")
             },
             DryRunOutcome::WouldRevert {
                 reason,
@@ -1934,7 +1956,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge
-        .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
+        .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
         .await?
     {
         WithdrawSubmitOutcome::Paid {

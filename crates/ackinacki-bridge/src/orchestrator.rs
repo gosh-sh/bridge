@@ -997,6 +997,22 @@ pub async fn run(
             reason: format!("PartnerWithdrawalProof::public_inputs: {e}"),
             source: Some(anyhow::Error::new(e)),
         })?;
+    // Multi-thread claims: the driver populated `e2e.proof.hops_hex` from the
+    // resolved cross-thread hop chain (empty for same-thread events). The
+    // bundle contract enforces `SameThreadEndpointsMismatch` /
+    // `HopChain*Mismatch` on both cases, so passing the decoded pairs
+    // through works uniformly.
+    let hop_pis = e2e.proof.hop_pis().map_err(|e| CliError::EthSubmitFailed {
+        reason: format!("PartnerWithdrawalProof::hop_pis: {e}"),
+        source: Some(anyhow::Error::new(e)),
+    })?;
+    let hop_proofs = e2e
+        .proof
+        .hop_proofs()
+        .map_err(|e| CliError::EthSubmitFailed {
+            reason: format!("PartnerWithdrawalProof::hop_proofs: {e}"),
+            source: Some(anyhow::Error::new(e)),
+        })?;
 
     // Always dry-run first — catches on-chain-side issues (paused bridge,
     // treasury shortfall) before we spend gas.
@@ -1009,13 +1025,12 @@ pub async fn run(
                 }
             })?);
         let ro_bridge = EthBridgeClient::new(args.bridge_address, ro_provider);
-        // `&[]`, `&[]` = same-thread claim (no hop bridge). The bundle contract accepts
-        // empty hop arrays only when the FinalProof PIs have `xBlockId == yBlockId`; the
-        // single-thread CLI never produces cross-thread claims (that's the relayer /
-        // multi-hop path), so this is safe. `SameThreadEndpointsMismatch()` would fire
-        // if they diverged. See bridge.rs docstring above `dry_run_withdraw_bundle`.
+        // `hop_pis` / `hop_proofs` are empty for same-thread claims and
+        // N-long for cross-thread walks — the on-chain bundle path enforces
+        // `SameThreadEndpointsMismatch()` and the `HopChain*Mismatch()` /
+        // `AdjacentHopBlockIdMismatch()` invariants on both shapes.
         match ro_bridge
-            .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
+            .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
             .await
             .map_err(|e| CliError::EthSubmitFailed {
                 reason: format!("dry_run_withdraw_bundle: {e}"),
@@ -1085,13 +1100,12 @@ pub async fn run(
     // flight, and the next run would refuse-duplicate on Submitted
     // instead of allowing a retry.
     //
-    // `&[]`, `&[]` = same-thread claim (no hop bridge). The bundle contract accepts
-    // empty hop arrays only when the FinalProof PIs have `xBlockId == yBlockId`; the
-    // single-thread CLI never produces cross-thread claims (that's the relayer /
-    // multi-hop path), so this is safe. `SameThreadEndpointsMismatch()` would fire
-    // if they diverged. See bridge.rs docstring above `dry_run_withdraw_bundle`.
+    // `hop_pis` / `hop_proofs` were decoded above once — reused for the
+    // real submit so the dry-run and the broadcast use byte-identical hop
+    // arrays. Same-thread claims pass empty vecs; cross-thread claims pass
+    // the ordered `BridgeMultiHopProof` chain the driver resolved.
     let submit = match bridge
-        .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
+        .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
         .await
         .map_err(|e| CliError::EthSubmitFailed {
             reason: format!("submit_withdraw_bundle: {e}"),

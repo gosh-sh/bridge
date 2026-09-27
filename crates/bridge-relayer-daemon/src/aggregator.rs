@@ -588,6 +588,12 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
             proof_hex: hex::encode(&calldata),
             public_instances_hex: instances_hex,
             self_verified: true,
+            // `Circuit4ShplonkPipeline` proves only the outer Circuit-4 SHPLONK
+            // calldata. Per-hop `BridgeMultiHopProof` snarks are proved by the
+            // separate multi-hop leg (see `withdraw_e2e/driver.rs`) and
+            // populated on the persisted JSON — the pipeline returns an empty
+            // vec here for the same-thread path.
+            hops_hex: Vec::new(),
         })
     }
 }

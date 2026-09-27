@@ -192,4 +192,12 @@ contract ShplonkArtefactPairingTest is Test {
             ShplonkDeployLib.deployYulFromBin("verifiers/LayerHashesAggregatorVerifier.bin", pin);
         assertEq(yul.codehash, pin, "LayerHashes CREATE runtime must match pin");
     }
+
+    function test_eth6_multiHopYul_extcodehashMatchesPin() public {
+        bytes32 pin = 0xd1cfbbd8f1b9879070b1b61eb3541111b57743fd011da5f4b4a152d7cc1e46a5;
+        address yul = ShplonkDeployLib.deployYulFromBin(
+            "verifiers/BridgeMultiHopAggregatorVerifier.bin", pin
+        );
+        assertEq(yul.codehash, pin, "MultiHop CREATE runtime must match pin");
+    }
 }

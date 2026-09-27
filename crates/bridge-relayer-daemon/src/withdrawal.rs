@@ -45,6 +45,21 @@ pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 13;
 /// `BridgeWithdrawalAggregatorVerifier`'s 25-instance layout.
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
 
+/// One per-hop `BridgeMultiHopProof` blob as persisted in
+/// `proof_event_*.json` under the `hops_hex` array. Mirrors the driver's
+/// `HopBlob` (see
+/// `crates/bridge-relayer-daemon/src/withdraw_e2e/driver.rs`): two
+/// public instances per hop (`hopStartBlockId`, `hopEndBlockId`, each a
+/// 32-byte LE Fr repr) plus the raw multi-hop proof bytes.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct HopBlobHex {
+    pub proof_hex: String,
+    pub public_instances_hex: Vec<String>,
+}
+
+/// Number of per-hop public instances (`hopStartBlockId`, `hopEndBlockId`).
+pub const MULTI_HOP_PUBLIC_INPUTS: usize = 2;
+
 /// Parsed `proof_event_*.json` from
 #[derive(Clone, Debug, Deserialize)]
 pub struct PartnerWithdrawalProof {
@@ -54,6 +69,11 @@ pub struct PartnerWithdrawalProof {
     pub public_instances_hex: Vec<String>,
     #[serde(default)]
     pub self_verified: bool,
+    /// Ordered `BridgeMultiHopProof` snarks for the cross-thread hop chain.
+    /// Empty for same-thread claims (where the FinalProof PIs satisfy
+    /// `xBlockId == yBlockId`). Consumed by `withdrawByProofBundle`.
+    #[serde(default)]
+    pub hops_hex: Vec<HopBlobHex>,
 }
 
 /// Mirrors `IBridgeWithdrawalVerifier.WithdrawalPublicInputs`. Trailing
@@ -97,6 +117,41 @@ impl PartnerWithdrawalProof {
             )));
         }
         Ok(Bytes::from(raw))
+    }
+
+    /// Decode `hops_hex` into the flat `(hopStart, hopEnd)` public-input
+    /// pairs the `withdrawByProofBundle` calldata carries. Return type
+    /// matches [`EthBridgeClient::submit_withdraw_bundle`]'s
+    /// `hop_public_inputs: &[Vec<U256>]`. Same-thread bundles yield an
+    /// empty vec — legitimate on-chain path when the FinalProof PIs have
+    /// `xBlockId == yBlockId`.
+    pub fn hop_pis(&self) -> Result<Vec<Vec<U256>>, RelayerError> {
+        self.hops_hex
+            .iter()
+            .enumerate()
+            .map(|(i, hop)| {
+                if hop.public_instances_hex.len() != MULTI_HOP_PUBLIC_INPUTS {
+                    return Err(RelayerError::other(format!(
+                        "hop #{i}: expected {MULTI_HOP_PUBLIC_INPUTS} public_instances_hex \
+                         entries, got {}",
+                        hop.public_instances_hex.len()
+                    )));
+                }
+                Ok(vec![
+                    fr_hex_to_u256(&hop.public_instances_hex[0])?,
+                    fr_hex_to_u256(&hop.public_instances_hex[1])?,
+                ])
+            })
+            .collect()
+    }
+
+    /// Decode `hops_hex` into the ordered `BridgeMultiHopProof` byte blobs
+    /// the on-chain multi-hop verifier consumes.
+    pub fn hop_proofs(&self) -> Result<Vec<Bytes>, RelayerError> {
+        self.hops_hex
+            .iter()
+            .map(|hop| Ok(Bytes::from(decode_hex(&hop.proof_hex)?)))
+            .collect()
     }
 
     pub fn public_inputs(&self) -> Result<WithdrawalPublicInputs, RelayerError> {
@@ -308,6 +363,7 @@ mod tests {
             proof_hex: "aa".into(),
             public_instances_hex: hexes.clone(),
             self_verified: false,
+            hops_hex: Vec::new(),
         };
         assert!(
             p.public_inputs().is_err(),
@@ -322,6 +378,7 @@ mod tests {
             proof_hex: "aa".into(),
             public_instances_hex: hexes,
             self_verified: false,
+            hops_hex: Vec::new(),
         };
         assert!(
             p_short.public_inputs().is_err(),
@@ -364,6 +421,92 @@ mod tests {
         // A blob shorter than the SHPLONK instance prefix is rejected.
         let bad = PartnerWithdrawalProof::from_json_bytes(proof_json_with(300).as_bytes()).unwrap();
         assert!(bad.proof_bytes().is_err());
+    }
+
+    /// Legacy `proof_event_*.json` files (pre-multi-hop) lack the `hops_hex`
+    /// field entirely. `#[serde(default)]` must let them parse as an empty
+    /// vec — otherwise same-thread daemons flying pre-migration bundles
+    /// would fail to load their own output.
+    #[test]
+    fn legacy_proof_event_without_hops_field_parses() {
+        let hexes: Vec<String> = (0..WITHDRAWAL_PUBLIC_INPUTS)
+            .map(|i| format!("{:02x}{}", (i + 1) as u8, "00".repeat(31)))
+            .collect();
+        let insts = hexes
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"proof_hex":"aa","public_instances_hex":[{insts}]}}"#
+        );
+        let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
+        assert!(p.hops_hex.is_empty(), "legacy files must parse with empty hops_hex");
+        assert!(p.hop_pis().unwrap().is_empty(), "same-thread claim has no hop pis");
+        assert!(p.hop_proofs().unwrap().is_empty(), "same-thread claim has no hop proofs");
+    }
+
+    /// A `proof_event_*.json` with a populated `hops_hex` array must
+    /// round-trip: parse → `hop_pis()` returns each `[hopStart, hopEnd]`
+    /// pair as `U256`, and `hop_proofs()` returns each raw proof blob.
+    #[test]
+    fn cross_thread_proof_event_hops_roundtrip() {
+        let hexes: Vec<String> = (0..WITHDRAWAL_PUBLIC_INPUTS)
+            .map(|i| format!("{:02x}{}", (i + 1) as u8, "00".repeat(31)))
+            .collect();
+        let insts = hexes
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        // Two hops chain-linked: hop0 = [xBlockId, 0x2a], hop1 = [0x2a, yBlockId].
+        // Values match the LE Fr repr convention (first byte is low limb).
+        let hop0_start = "0b00000000000000000000000000000000000000000000000000000000000000";
+        let hop0_end = "2a00000000000000000000000000000000000000000000000000000000000000";
+        let hop1_start = hop0_end;
+        let hop1_end = "0c00000000000000000000000000000000000000000000000000000000000000";
+        let json = format!(
+            r#"{{
+                "proof_hex":"aa",
+                "public_instances_hex":[{insts}],
+                "hops_hex":[
+                    {{"proof_hex":"deadbeef","public_instances_hex":["{hop0_start}","{hop0_end}"]}},
+                    {{"proof_hex":"cafef00d","public_instances_hex":["{hop1_start}","{hop1_end}"]}}
+                ]
+            }}"#
+        );
+        let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
+        assert_eq!(p.hops_hex.len(), 2);
+        let pis = p.hop_pis().unwrap();
+        assert_eq!(pis.len(), 2);
+        assert_eq!(pis[0].len(), 2);
+        assert_eq!(pis[0][0], U256::from(0x0bu64));
+        assert_eq!(pis[0][1], U256::from(0x2au64));
+        assert_eq!(pis[1][0], U256::from(0x2au64));
+        assert_eq!(pis[1][1], U256::from(0x0cu64));
+        let proofs = p.hop_proofs().unwrap();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(proofs[0].as_ref(), &hex::decode("deadbeef").unwrap()[..]);
+        assert_eq!(proofs[1].as_ref(), &hex::decode("cafef00d").unwrap()[..]);
+    }
+
+    /// A hop entry with the wrong number of public instances must not decode.
+    /// Guards against a schema drift that silently drops the tail endpoint.
+    #[test]
+    fn hop_pis_rejects_wrong_instance_count() {
+        let p = PartnerWithdrawalProof {
+            seq_no: 0,
+            proof_hex: "aa".into(),
+            public_instances_hex: (0..WITHDRAWAL_PUBLIC_INPUTS)
+                .map(|i| format!("{:02x}{}", (i + 1) as u8, "00".repeat(31)))
+                .collect(),
+            self_verified: false,
+            hops_hex: vec![HopBlobHex {
+                proof_hex: "aa".into(),
+                public_instances_hex: vec!["0b00000000000000000000000000000000000000000000000000000000000000".into()],
+            }],
+        };
+        assert!(p.hop_pis().is_err(), "hop with 1 PI must not decode");
     }
 
     #[test]

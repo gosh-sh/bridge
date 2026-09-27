@@ -95,10 +95,17 @@ this doc extends.
 > `xBlockId == yBlockId`. "Cross-thread claim" = one or more hops, and
 > the contract folds `xBlockId → hop0.start → hop0.end → hop1.start → …
 > → hopLast.end → yBlockId` (`AckiNackiBridge.sol:1480–1514`). All
-> today's in-tree callers under
-> `crates/bridge-relayer-daemon/src/bin/relayer.rs` and
-> `crates/ackinacki-bridge/src/orchestrator.rs` pass empty hop slices —
-> same-thread only in practice.
+> in-tree callers under `crates/bridge-relayer-daemon/src/bin/relayer.rs`
+> and `crates/ackinacki-bridge/src/orchestrator.rs` now plumb the
+> hop chain through: `PartnerWithdrawalProof::hop_pis()` /
+> `hop_proofs()` decode the `hops_hex` array the driver writes into
+> `proof_event_*.json` (populated by `resolve_cross_thread_chain` +
+> `generate_multi_hop_proof`), and pass it to
+> `submit_withdraw_bundle` alongside the outer Circuit-4 calldata.
+> Same-thread events resolve to empty vecs and take the
+> `xBlockId == yBlockId` fast path; cross-thread events (2- to 4-thread
+> multi-thread node runs) exercise the full hop-fold path with N ≥ 1
+> hops.
 
 ---
 

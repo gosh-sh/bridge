@@ -557,6 +557,25 @@ mod sol_bindings {
                 uint8 finType,
                 uint8 numLayers
             );
+
+            // Custom errors that `withdrawByProofBundle(...)` can revert with.
+            // Mirrors `AckiNackiBridge.sol:461-472`. Adding them here lets
+            // `alloy::contract::Error::as_decoded_interface_error::<AckiNackiBridgeErrors>()`
+            // recover a human-readable variant name (and its args, when the
+            // Solidity error carries any) from a revert instead of leaving
+            // callers with an opaque 4-byte selector in the log.
+            error WithdrawByProofBundleDisabled();
+            error PartialBundleWiring();
+            error HopBundleLengthOverflow(uint256 got, uint256 max);
+            error HopPublicInputsHopProofsLengthMismatch(uint256 hopPublicInputs, uint256 hopProofs);
+            error FinalPublicInputsBadLength(uint256 got, uint256 expected);
+            error HopPublicInputsBadLength(uint256 at, uint256 got, uint256 expected);
+            error SameThreadEndpointsMismatch();
+            error SameThreadRequiresEmptyHopChain(uint256 hopCount);
+            error HopChainHeadMismatch();
+            error HopChainTailMismatch();
+            error AdjacentHopBlockIdMismatch(uint256 at);
+            error MultiHopProofRejected(uint256 at);
         }
 
         /// The two links between `bridgeWithdrawalFinalVerifier` and the
@@ -692,7 +711,7 @@ where
         match call.call().await {
             Ok(_) => Ok(DryRunOutcome::WouldSucceed),
             Err(e) => Ok(DryRunOutcome::WouldRevert {
-                reason: format!("{e}"),
+                reason: decode_bundle_revert(&e),
             }),
         }
     }
@@ -740,7 +759,10 @@ where
                 }),
             },
             Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
-                reason: format!("withdrawByProofBundle send failed: {e}"),
+                reason: format!(
+                    "withdrawByProofBundle send failed: {}",
+                    decode_bundle_revert(&e)
+                ),
             }),
         }
     }
@@ -1359,6 +1381,68 @@ where
 
 fn map_contract_err(e: AlloyContractError) -> RelayerError {
     RelayerError::other(format!("contract call failed: {e}"))
+}
+
+/// Best-effort decoder for a `withdrawByProofBundle` revert. Uses alloy's
+/// [`AlloyContractError::as_decoded_interface_error`] to lift the 4-byte
+/// selector + ABI-encoded args back into the matching sol!-generated
+/// variant of [`sol_bindings::AckiNackiBridge::AckiNackiBridgeErrors`], then
+/// prints a human-readable `Name { arg = value, ... }` string. When the
+/// revert isn't one of the twelve declared bundle errors (or the revert data
+/// is unavailable — e.g. the RPC returned a bare "execution reverted"), the
+/// original alloy error string is returned unchanged, so no signal is lost.
+fn decode_bundle_revert(e: &AlloyContractError) -> String {
+    use sol_bindings::AckiNackiBridge::AckiNackiBridgeErrors as E;
+
+    if let Some(decoded) = e.as_decoded_interface_error::<E>() {
+        let head = match &decoded {
+            E::WithdrawByProofBundleDisabled(_) => {
+                "WithdrawByProofBundleDisabled: bundle wiring is off — bridgeWithdrawalFinalVerifier and/or bridgeMultiHopVerifier is zero at deploy".to_string()
+            }
+            E::PartialBundleWiring(_) => {
+                "PartialBundleWiring: constructor received only one of {withdrawal-final, multi-hop} verifiers; both must be set together".to_string()
+            }
+            E::HopBundleLengthOverflow(v) => format!(
+                "HopBundleLengthOverflow: got {} hops, cap is {} (N_BUNDLE_MAX)",
+                v.got, v.max
+            ),
+            E::HopPublicInputsHopProofsLengthMismatch(v) => format!(
+                "HopPublicInputsHopProofsLengthMismatch: {} PI arrays vs {} proof blobs",
+                v.hopPublicInputs, v.hopProofs
+            ),
+            E::FinalPublicInputsBadLength(v) => format!(
+                "FinalPublicInputsBadLength: got {}, expected {} (must match FINAL_PUBLIC_INPUTS)",
+                v.got, v.expected
+            ),
+            E::HopPublicInputsBadLength(v) => format!(
+                "HopPublicInputsBadLength at hop {}: got {}, expected {} (must equal HOP_PUBLIC_INPUTS = 2)",
+                v.at, v.got, v.expected
+            ),
+            E::SameThreadEndpointsMismatch(_) => {
+                "SameThreadEndpointsMismatch: xBlockId != yBlockId with no hops — either supply a cross-thread hop chain or pin a same-thread claim".to_string()
+            }
+            E::SameThreadRequiresEmptyHopChain(v) => format!(
+                "SameThreadRequiresEmptyHopChain: xBlockId == yBlockId but hopCount = {} — drop the hops for a same-thread claim",
+                v.hopCount
+            ),
+            E::HopChainHeadMismatch(_) => {
+                "HopChainHeadMismatch: hop[0].hopStart != finalProof.xBlockId — first hop must start at the event thread's block id".to_string()
+            }
+            E::HopChainTailMismatch(_) => {
+                "HopChainTailMismatch: hop[last].hopEnd != finalProof.yBlockId — last hop must land on the anchor thread's block id".to_string()
+            }
+            E::AdjacentHopBlockIdMismatch(v) => format!(
+                "AdjacentHopBlockIdMismatch at hop boundary {}: hop[{}].hopEnd != hop[{}].hopStart",
+                v.at, v.at, v.at
+            ),
+            E::MultiHopProofRejected(v) => format!(
+                "MultiHopProofRejected at hop {}: BridgeMultiHopAggregatorVerifier rejected the SHPLONK proof",
+                v.at
+            ),
+        };
+        return format!("{head} [raw: {e}]");
+    }
+    format!("{e}")
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -354,12 +354,19 @@ Faucets that require depositing ≥0.001 ETH on mainnet first (Alchemy /
 Infura / QuickNode) are usable once you're funded; they hand out
 0.05–0.5 ETH/day and are the practical top-up path after bootstrap.
 
-**Budget.** The one-shot deploy creates six logical components
-(`AckiNackiBridge`, four verifier lanes and `MockBlockHeaderOracle`) through
-14 physical `CREATE` transactions (the four lanes each include adapter,
-wrapper and Yul verifier). It cost **0.063 ETH** on 2026-08-13 (30M gas @
-2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
-submit (one per bundle stride — 1024 blocks in L1 mode, 16384 in L2).
+**Budget.** The one-shot deploy creates seven logical components
+(`AckiNackiBridge`, **five** aggregator verifiers — primary Circuit 1A,
+fallback Circuit 1B, layer-hashes Circuit 2, withdrawal-final Circuit 4,
+and the multi-hop cross-thread verifier — plus `MockBlockHeaderOracle`)
+through 17 physical `CREATE` transactions (each of the five lanes includes
+adapter, wrapper and Yul verifier). The 2026-08-13 measurement of
+**0.063 ETH** (30M gas @ 2.1 gwei) was captured before the multi-hop lane
+was added; today's deploy is closer to **~0.075 ETH** at the same gas
+price. Add a running budget of ~0.001–0.003 ETH per `verifyBlock` submit
+(one per bundle stride — 1024 blocks in L1 mode, 16384 in L2), plus
+~0.002–0.008 ETH per `withdrawByProofBundle` (same-thread claims are on
+the low end; cross-thread claims that carry a non-empty hop-chain cost
+proportionally more).
 **Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
 The [Health checks](#health-checks-run-any-time) block includes a
 wallet-balance line — refill from either faucet when it drops below

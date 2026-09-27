@@ -769,6 +769,38 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`withdrawByProofBundle` revert reasons are now human-readable in the
+  relayer logs.** The three call sites in `bridge-relayer-daemon`
+  (`EthBridgeClient::dry_run_withdraw_bundle`,
+  `submit_withdraw_bundle`, and the tx-send error branch of the same
+  function) previously surfaced every revert as the raw alloy error
+  string — which meant the twelve bundle-specific Solidity custom
+  errors (`SameThreadEndpointsMismatch`, `HopChainHeadMismatch`,
+  `HopChainTailMismatch`, `AdjacentHopBlockIdMismatch(at)`,
+  `HopBundleLengthOverflow(got, max)`,
+  `SameThreadRequiresEmptyHopChain(hopCount)`,
+  `MultiHopProofRejected(at)`, `WithdrawByProofBundleDisabled`,
+  `FinalPublicInputsBadLength(got, expected)`,
+  `HopPublicInputsBadLength(at, got, expected)`,
+  `HopPublicInputsHopProofsLengthMismatch`, `PartialBundleWiring`)
+  showed up as bare 4-byte selectors that operators had to look up by
+  hand. The errors are now declared inside the sol! block in
+  `crates/bridge-relayer-daemon/src/bridge.rs` and a new
+  `decode_bundle_revert` helper lifts each revert into a message that
+  names the variant, expands its args, and appends the raw error for
+  fallback debugging. The `verify-fixture`, `withdraw-e2e` and
+  `daemon-bridge` logs — and the `WithdrawSubmitOutcome::Reverted { reason }`
+  variant returned to callers — carry the decoded string; the raw
+  string is still returned unchanged when the revert isn't one of the
+  twelve declared errors, so no signal is lost.
+- The `verifyBlock` runbook
+  (`crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`)
+  §2 "Budget" now names **five** aggregator verifiers and **17**
+  physical `CREATE` transactions (the multi-hop lane was missing from
+  the previous count). The 2026-08-13 `0.063 ETH` measurement is
+  labelled as pre-multi-hop; today's deploy is closer to `~0.075 ETH`
+  at the same gas price. A `withdrawByProofBundle`-per-submit line
+  budget is added.
 - **Cross-thread `withdrawByProofBundle` now works from the daemon and the
   end-user CLI.** Every in-tree caller under
   `crates/bridge-relayer-daemon/src/bin/relayer.rs` and

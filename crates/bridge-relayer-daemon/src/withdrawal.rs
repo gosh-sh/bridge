@@ -1,13 +1,16 @@
 //! Circuit 4 (`withdrawByProof`) artefacts from the partner prover daemon.
 //!
 //! The shellnet orchestrator writes `proofs/proof_event_NNN.json` with a raw
-//! Halo2 proof (`proof_hex`) and eleven public-instance field elements
-//! (`public_instances_hex`).
+//! Halo2 proof (`proof_hex`) and thirteen public-instance field elements
+//! (`public_instances_hex`) — the 11 pre-multi-thread slots plus the two
+//! block-id endpoints `x_block_id` and `y_block_id` added by the multi-hop
+//! commit (Circuit 4 = `BridgeEventFinalProof` with `TOTAL_PUBLIC_INPUTS =
+//! 13`).
 //!
 //! The production on-chain verifier is the R15 SHPLONK aggregator
 //! (`BridgeWithdrawalAggregatorVerifier`, Yul): it consumes aggregator calldata
 //! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
-//! the 11 re-exposed Circuit-4 public inputs (≥
+//! the 13 re-exposed Circuit-4 public inputs (≥
 //! `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the 1A/1B/2 shape
 //! checks in [`crate::proof_validation`].
 
@@ -30,13 +33,16 @@ use crate::error::RelayerError;
 // success on the actual `withdrawByProof` transaction (or its `eth_call`
 // dry-run) — nothing else.
 
-/// Eleven public inputs for Circuit 4 (single-final-root + `anchorLayer`).
-pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 11;
+/// Thirteen public inputs for Circuit 4: the 11 pre-multi-thread slots
+/// (`tokenId..anchorLayer`) plus the two block-id endpoints (`x_block_id`,
+/// `y_block_id`) added by the multi-hop commit. Matches
+/// `bridge_event_prove_circuit::bridge_event_final_proof::TOTAL_PUBLIC_INPUTS`.
+pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 13;
 
 /// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
-/// prefix is 12 KZG accumulator limbs + the 11 re-exposed Circuit-4 public
+/// prefix is 12 KZG accumulator limbs + the 13 re-exposed Circuit-4 public
 /// inputs, each a 32-byte field element (the outer proof bytes follow). Matches
-/// `BridgeWithdrawalAggregatorVerifier`'s 23-instance layout.
+/// `BridgeWithdrawalAggregatorVerifier`'s 25-instance layout.
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
 
 /// Parsed `proof_event_*.json` from
@@ -50,7 +56,11 @@ pub struct PartnerWithdrawalProof {
     pub self_verified: bool,
 }
 
-/// Mirrors `IBridgeWithdrawalVerifier.WithdrawalPublicInputs`.
+/// Mirrors `IBridgeWithdrawalVerifier.WithdrawalPublicInputs`. Trailing
+/// `x_block_id` / `y_block_id` slots hold the multi-thread block-id
+/// endpoints: same-thread claims satisfy `x_block_id == y_block_id`;
+/// cross-thread claims carry the terminal L7 walker endpoint in
+/// `y_block_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WithdrawalPublicInputs {
     pub token_id: U256,
@@ -64,6 +74,8 @@ pub struct WithdrawalPublicInputs {
     pub nullifier: U256,
     pub final_root: U256,
     pub anchor_layer: U256,
+    pub x_block_id: U256,
+    pub y_block_id: U256,
 }
 
 impl PartnerWithdrawalProof {
@@ -110,6 +122,8 @@ impl PartnerWithdrawalProof {
             nullifier: field(8)?,
             final_root: field(9)?,
             anchor_layer: field(10)?,
+            x_block_id: field(11)?,
+            y_block_id: field(12)?,
         })
     }
 }
@@ -251,23 +265,29 @@ mod tests {
                 "0700000000000000000000000000000000000000000000000000000000000000",
                 "0800000000000000000000000000000000000000000000000000000000000000",
                 "0900000000000000000000000000000000000000000000000000000000000000",
-                "0100000000000000000000000000000000000000000000000000000000000000"
+                "0100000000000000000000000000000000000000000000000000000000000000",
+                "0b00000000000000000000000000000000000000000000000000000000000000",
+                "0c00000000000000000000000000000000000000000000000000000000000000"
             ]
         }"#;
         let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
         let pi = p.public_inputs().unwrap();
         assert_eq!(pi.token_id, U256::from(3u64));
-        // Slot 10 (`anchor_layer`) is the last public-instance entry.
-        // Guarding it explicitly so a future off-by-one that dropped
-        // `anchor_layer` entirely — or swapped slots 9 and 10 — trips
-        // this test immediately. If a decoder mutation put `finalRoot`
-        // (a ~256-bit hash) into `anchor_layer`, the on-chain revert
-        // would almost always be `InvalidNumLayers` at
-        // `AckiNackiBridge.sol:1339-1340` (bounded by
-        // `MAX_LAYER_HASHES`), and in the rare small-value case would
-        // fall through to `UnknownAnchor` at :1342-1343 — either way
-        // masking the real bug as a chain-side error.
+        // Slot 10 (`anchor_layer`) — guard against off-by-one that drops or
+        // swaps `anchor_layer` with an adjacent slot. If a decoder mutation
+        // put `finalRoot` (a ~256-bit hash) into `anchor_layer`, the
+        // on-chain revert would almost always be `InvalidNumLayers` at
+        // `AckiNackiBridge.sol:1339-1340` (bounded by `MAX_LAYER_HASHES`),
+        // and in the rare small-value case would fall through to
+        // `UnknownAnchor` at :1342-1343 — either way masking the real bug
+        // as a chain-side error.
         assert_eq!(pi.anchor_layer, U256::from(1u64));
+        // Slot 11 = `x_block_id`, slot 12 = `y_block_id`. Distinct values in
+        // the fixture prove the trailing multi-thread endpoints round-trip
+        // independently — a decoder that mis-orders 11 and 12, or drops
+        // either, trips this assertion.
+        assert_eq!(pi.x_block_id, U256::from(0x0bu64));
+        assert_eq!(pi.y_block_id, U256::from(0x0cu64));
     }
 
     /// Negative: a `proof_event_*.json` carrying

@@ -382,11 +382,20 @@ async fn prove_and_finalize(
         std::fs::create_dir_all(out_dir)
             .with_context(|| format!("mkdir prover_out_dir {}", out_dir.display()))?;
         let out_path = out_dir.join(format!("proof_event_{:06}.json", cfg.prover_seq_no));
+        // `hops_hex` is the per-hop `BridgeMultiHopProof` snark bundle
+        // (each entry: `{proof_hex, public_instances_hex}`, 2 PIs =
+        // `hopStart`/`hopEnd`). Consumed by `withdrawByProofBundle` on
+        // the EVM side; empty array signals a same-thread event, which
+        // the contract short-circuits to the single-proof path. The
+        // `Circuit4ShplonkPipeline` currently produces only the outer
+        // Circuit 4 SHPLONK proof — hops are populated by the
+        // cross-thread live prover once wired.
         let json = serde_json::json!({
             "seq_no": proof.seq_no,
             "proof_hex": proof.proof_hex,
             "public_instances_hex": proof.public_instances_hex,
             "self_verified": proof.self_verified,
+            "hops_hex": Vec::<serde_json::Value>::new(),
         });
         std::fs::write(&out_path, serde_json::to_vec_pretty(&json)?)
             .with_context(|| format!("write {}", out_path.display()))?;

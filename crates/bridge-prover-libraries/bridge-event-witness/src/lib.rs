@@ -6,8 +6,8 @@
 //! ### Library API
 //!
 //! [`export_from_event_boc_base64`] — hermetic exporter. Inputs:
-//!   * Base64-encoded `Message` BOC of the ExtOut event (matches the format
-//!     of `bridge-event-prove-circuit/withdrawals.txt`)
+//!   * Base64-encoded `Message` BOC of the ExtOut event (matches the format of
+//!     `bridge-event-prove-circuit/withdrawals.txt`)
 //!   * Block-level context (block_id, account_dapp_id, account_id, envelope
 //!     hash) — supplied by the caller; the exporter cannot derive these from
 //!     the event BOC alone.
@@ -29,29 +29,28 @@
 //!
 //! ### Binaries
 //!
-//!   * `bridge-event-private-witness-export` (`bin/export.rs`) — hermetic
-//!     CLI wrapper over [`export_from_event_boc_base64`]. No GQL, no state.
-//!   * `bridge-event-witness-builder` (`bin/build.rs`) — thin CLI wrapper
-//!     over [`enrich::enrich_witness`]. Handles argument parsing, state
-//!     file / partial JSON loading, and output serialization.
+//!   * `bridge-event-private-witness-export` (`bin/export.rs`) — hermetic CLI
+//!     wrapper over [`export_from_event_boc_base64`]. No GQL, no state.
+//!   * `bridge-event-witness-builder` (`bin/build.rs`) — thin CLI wrapper over
+//!     [`enrich::enrich_witness`]. Handles argument parsing, state file /
+//!     partial JSON loading, and output serialization.
 
 pub mod boc_walk;
 pub mod enrich;
 pub mod event_decode;
 pub mod schema;
 
-pub use enrich::{
-    enrich_witness, AnchorLayerMode, EnrichSummary, EnrichedWitness,
-    HISTORY_WINDOW_SIZE, THINNING_FACTOR_P,
-};
-
 use anyhow::{Context, Result};
+pub use enrich::{
+    enrich_witness, AnchorLayerMode, EnrichSummary, EnrichedWitness, HISTORY_WINDOW_SIZE,
+    THINNING_FACTOR_P,
+};
 use tvm_block::{Deserializable, Message, Serializable};
 
-use crate::boc_walk::{serialize_cells_tree_root_first, FlatCell};
-use crate::event_decode::{decode_event, validate_layout};
-use crate::schema::{
-    BlockContext, CellRecord, PrivateWitness, SCHEMA_VERSION,
+use crate::{
+    boc_walk::{serialize_cells_tree_root_first, FlatCell},
+    event_decode::{decode_event, validate_layout},
+    schema::{BlockContext, CellRecord, PrivateWitness, SCHEMA_VERSION},
 };
 
 /// Caller-supplied block context fields. These come from the GraphQL block
@@ -108,6 +107,12 @@ pub fn export_from_event_boc_base64(
         events_tree_proof: None,
         block_tree_proof: None,
         anchor: None,
+        // TODO(commit-8b/8c): populate from GQL — the L8 opening's opaque
+        // left aggregate of the depth-4 block-id SHA tree. The exporter
+        // sees only the event BOC, so the daemon-side enrichment step
+        // fills this in. Zero placeholder documented in
+        // `schema::PrivateWitness::h07_sibling_hex`.
+        h07_sibling_hex: hex::encode([0u8; 32]),
     })
 }
 

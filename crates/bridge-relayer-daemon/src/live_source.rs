@@ -186,6 +186,12 @@ fn map_driver_err(e: DriverError) -> RelayerError {
         DriverError::StateInconsistent(inner) => {
             RelayerError::Other(format!("driver state inconsistent: {inner}"))
         },
+        DriverError::AckTooEarly {
+            cursor,
+            rotation_seqno,
+        } => RelayerError::AckiNacki(format!(
+            "ack too early: cursor={cursor} rotation_seqno={rotation_seqno}"
+        )),
         DriverError::Other(inner) => RelayerError::Other(inner.to_string()),
     }
 }

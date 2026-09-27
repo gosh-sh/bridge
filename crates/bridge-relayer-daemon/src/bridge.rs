@@ -516,11 +516,28 @@ mod sol_bindings {
                 uint256 nullifier;
                 uint256 finalRoot;
                 uint256 anchorLayer;
+                uint256 xBlockId;
+                uint256 yBlockId;
             }
 
             function withdrawByProof(
                 bytes calldata proof,
                 WithdrawalPublicInputs calldata pub
+            ) external returns (bool success);
+
+            /// Multi-hop bundle withdrawal: `finalProof` is the Circuit 4
+            /// SHPLONK proof whose 13 public inputs already commit to
+            /// `xBlockId → yBlockId`; `hopProofs`/`hopPubInputs` are the
+            /// per-hop BridgeMultiHopProof (2-PI: `hopStart`, `hopEnd`)
+            /// snarks that chain `xBlockId` back to a known layer anchor.
+            /// Same-thread events pass empty `hopProofs`/`hopPubInputs`
+            /// arrays and the contract short-circuits to the single-proof
+            /// path.
+            function withdrawByProofBundle(
+                uint256[] calldata finalPI,
+                bytes calldata finalProof,
+                uint256[][] calldata hopPI,
+                bytes[] calldata hopProofs
             ) external returns (bool success);
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
@@ -680,6 +697,95 @@ where
             },
             Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
                 reason: format!("withdrawByProof send failed: {e}"),
+            }),
+        }
+    }
+
+    /// Simulate `withdrawByProofBundle(...)` via `eth_call`. `hop_proofs`
+    /// and `hop_public_inputs` must be same-length arrays, empty for
+    /// same-thread events (the contract then defaults to the single-proof
+    /// path).
+    pub async fn dry_run_withdraw_bundle(
+        &self,
+        final_public_inputs: &WithdrawalPublicInputs,
+        final_proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
+    ) -> Result<DryRunOutcome, RelayerError> {
+        let final_pi = to_sol_withdrawal_pub(final_public_inputs);
+        let final_pi_vec = vec![
+            final_pi.tokenId,
+            final_pi.amount,
+            final_pi.recipientHi,
+            final_pi.recipientLo,
+            final_pi.dstChainId,
+            final_pi.senderAccFr,
+            final_pi.dappFr,
+            final_pi.accFr,
+            final_pi.nullifier,
+            final_pi.finalRoot,
+            final_pi.anchorLayer,
+            final_pi.xBlockId,
+            final_pi.yBlockId,
+        ];
+        let call = self.contract.withdrawByProofBundle(
+            final_pi_vec,
+            final_proof.clone(),
+            hop_public_inputs.to_vec(),
+            hop_proofs.to_vec(),
+        );
+        match call.call().await {
+            Ok(_) => Ok(DryRunOutcome::WouldSucceed),
+            Err(e) => Ok(DryRunOutcome::WouldRevert {
+                reason: format!("{e}"),
+            }),
+        }
+    }
+
+    /// Submit `withdrawByProofBundle` — the multi-hop variant of
+    /// `submit_withdraw`. Empty `hop_proofs`/`hop_public_inputs` slices
+    /// signal a same-thread event; the contract falls through to the
+    /// single-proof path in that case.
+    pub async fn submit_withdraw_bundle(
+        &self,
+        final_public_inputs: &WithdrawalPublicInputs,
+        final_proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
+    ) -> Result<WithdrawSubmitOutcome, RelayerError> {
+        let final_pi = to_sol_withdrawal_pub(final_public_inputs);
+        let final_pi_vec = vec![
+            final_pi.tokenId,
+            final_pi.amount,
+            final_pi.recipientHi,
+            final_pi.recipientLo,
+            final_pi.dstChainId,
+            final_pi.senderAccFr,
+            final_pi.dappFr,
+            final_pi.accFr,
+            final_pi.nullifier,
+            final_pi.finalRoot,
+            final_pi.anchorLayer,
+            final_pi.xBlockId,
+            final_pi.yBlockId,
+        ];
+        let call = self.contract.withdrawByProofBundle(
+            final_pi_vec,
+            final_proof.clone(),
+            hop_public_inputs.to_vec(),
+            hop_proofs.to_vec(),
+        );
+        match call.send().await {
+            Ok(pending) => match pending.get_receipt().await {
+                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
+                    tx_hash: receipt.transaction_hash(),
+                }),
+                Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
+                    reason: format!("tx confirmation error: {e}"),
+                }),
+            },
+            Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
+                reason: format!("withdrawByProofBundle send failed: {e}"),
             }),
         }
     }
@@ -1038,6 +1144,8 @@ fn to_sol_withdrawal_pub(
         nullifier: pub_inputs.nullifier,
         finalRoot: pub_inputs.final_root,
         anchorLayer: pub_inputs.anchor_layer,
+        xBlockId: pub_inputs.x_block_id,
+        yBlockId: pub_inputs.y_block_id,
     }
 }
 

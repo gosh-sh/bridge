@@ -12,31 +12,33 @@
 //!
 //! ### Fields filled in
 //!
-//! * `events_tree_proof` — Poseidon Merkle proof from
-//!   `ext_msg_leaf = Poseidon96(dapp || account || repr_hash)` up to the
-//!   block's `ext_out_messages_root`.
-//! * `block_tree_proof` — Poseidon Merkle proof from
-//!   `block_leaf = Poseidon96(block_id || envelope_hash || ext_out_root)`
-//!   up to `root_1` (the L1 window root the verifier mirrors).
-//! * `anchor` — references the L(target_layer) hash the verifier mirrors,
-//!   with a dense chain from H_e to the verifier-side key block.
+//! * `events_tree_proof` — Poseidon Merkle proof from `ext_msg_leaf =
+//!   Poseidon96(dapp || account || repr_hash)` up to the block's
+//!   `ext_out_messages_root`.
+//! * `block_tree_proof` — Poseidon Merkle proof from `block_leaf =
+//!   Poseidon96(block_id || envelope_hash || ext_out_root)` up to `root_1` (the
+//!   L1 window root the verifier mirrors).
+//! * `anchor` — references the L(target_layer) hash the verifier mirrors, with
+//!   a dense chain from H_e to the verifier-side key block.
 //!
 //! Behavior mirrors what the standalone binary used to do; the only
 //! surface change is that `guard_wait_time` and `resolve_anchor_layer`
 //! are now internal helpers with a stable public entrypoint.
 
 use anyhow::{bail, Context, Result};
+use bridge_gql_fetcher::gql_client::GqlClient;
+use bridge_prover_lib::{
+    block_id_tree::BlockIdMerkleTree,
+    bridge_state::{BridgeState, MAX_LAYERS},
+    chain_proof_builder::{build_tree_and_proof, pad_leaves_to_power_of_2},
+    real_chain_builder,
+};
+use gosh_dense_balanced_tree::{DenseChainLink, MAX_CHAIN_LEN};
 use tracing::{info, warn};
 
-use bridge_gql_fetcher::gql_client::GqlClient;
-use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
-use bridge_prover_lib::chain_proof_builder::{build_tree_and_proof, pad_leaves_to_power_of_2};
-use bridge_prover_lib::real_chain_builder;
-
-use gosh_dense_balanced_tree::{DenseChainLink, MAX_CHAIN_LEN};
-
 use crate::schema::{
-    AnchorRef, DenseChainLinkSer, MerkleProofData, PrivateWitness, SCHEMA_VERSION,
+    AnchorRef, DenseChainLinkSer, MerkleProofData, MultiHopBundleWitnessJson, PrivateWitness,
+    SCHEMA_VERSION,
 };
 
 pub const HISTORY_WINDOW_SIZE: u64 =
@@ -47,12 +49,12 @@ pub const THINNING_FACTOR_P: u64 = bridge_prover_lib::THINNING_FACTOR_P;
 /// Anchor-layer selection mode. See the `bin/build.rs` module docblock
 /// for the full semantics of each variant.
 ///
-/// * `Explicit(n)` — strict: use L(n), error out if the anchor's height
-///   has rolled out of `layer_windows[n-1]`.
-/// * `Auto` — try L1 first; if L1's K has rolled out of the L1 window,
-///   escalate through L2, L3, …, L(num_active_layers) and take the first
-///   layer whose window still covers the event. Implies opt-in to the
-///   wait budget of the chosen layer.
+/// * `Explicit(n)` — strict: use L(n), error out if the anchor's height has
+///   rolled out of `layer_windows[n-1]`.
+/// * `Auto` — try L1 first; if L1's K has rolled out of the L1 window, escalate
+///   through L2, L3, …, L(num_active_layers) and take the first layer whose
+///   window still covers the event. Implies opt-in to the wait budget of the
+///   chosen layer.
 #[derive(Debug, Clone, Copy)]
 pub enum AnchorLayerMode {
     Explicit(u8),
@@ -101,12 +103,12 @@ pub struct EnrichedWitness {
 ///   `state/prover_state.json`; the schema is shared with
 ///   `verifier_state.json`).
 /// * `partial` — partial witness JSON from
-///   [`crate::export_from_event_boc_base64`]. Consumed and returned in
-///   enriched form.
+///   [`crate::export_from_event_boc_base64`]. Consumed and returned in enriched
+///   form.
 /// * `anchor_mode` — see [`AnchorLayerMode`].
-/// * `i_know_the_wait` — opt-in to expensive anchor layers when
-///   `anchor_mode = Explicit(n)` and `n ≥ 2`. Ignored for L1. Auto mode
-///   counts as an implicit opt-in.
+/// * `i_know_the_wait` — opt-in to expensive anchor layers when `anchor_mode =
+///   Explicit(n)` and `n ≥ 2`. Ignored for L1. Auto mode counts as an implicit
+///   opt-in.
 pub async fn enrich_witness(
     gql: &GqlClient,
     bridge_state: &BridgeState,
@@ -133,8 +135,7 @@ pub async fn enrich_witness(
     );
 
     let event_seq = partial.block_seq_no;
-    let event_repr_hash =
-        parse_hex32("event_message_hash_hex", &partial.event_message_hash_hex)?;
+    let event_repr_hash = parse_hex32("event_message_hash_hex", &partial.event_message_hash_hex)?;
     let dapp = parse_hex32(
         "block_context.account_dapp_id_hex",
         &partial.block_context.account_dapp_id_hex,
@@ -169,10 +170,9 @@ pub async fn enrich_witness(
     )?;
 
     // events_tree_proof.
-    let events_tree_proof =
-        build_events_tree_proof(gql, event_seq, &dapp, &acc, &event_repr_hash)
-            .await
-            .context("building events_tree_proof failed")?;
+    let events_tree_proof = build_events_tree_proof(gql, event_seq, &dapp, &acc, &event_repr_hash)
+        .await
+        .context("building events_tree_proof failed")?;
     info!(
         "events_tree_proof: position={}, depth={}",
         events_tree_proof.position,
@@ -221,8 +221,8 @@ pub async fn enrich_witness(
     let num_active = chain_result.active_links.len();
     if num_active > MAX_CHAIN_LEN {
         bail!(
-            "internal: {} active chain links exceed MAX_CHAIN_LEN={} \
-             (anchor_layer=L{}, event_seq={}, W={}, P={}, anchor_kb={})",
+            "internal: {} active chain links exceed MAX_CHAIN_LEN={} (anchor_layer=L{}, \
+             event_seq={}, W={}, P={}, anchor_kb={})",
             num_active,
             MAX_CHAIN_LEN,
             anchor_layer,
@@ -261,11 +261,9 @@ pub async fn enrich_witness(
         .slot_for_event_height(anchor_layer, key_block_height)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "anchor key block height {} not found in L{} window {:?} \
-                 — block has rolled out of the L{} rolling window. \
-                 Re-run with `--anchor-layer auto` (probes L1 then L2) or \
-                 explicitly pick a higher layer if the state has progressed \
-                 to it.",
+                "anchor key block height {} not found in L{} window {:?} — block has rolled out \
+                 of the L{} rolling window. Re-run with `--anchor-layer auto` (probes L1 then L2) \
+                 or explicitly pick a higher layer if the state has progressed to it.",
                 key_block_height,
                 anchor_layer,
                 bridge_state.layer_windows[target_layer_idx0]
@@ -275,10 +273,7 @@ pub async fn enrich_witness(
                 anchor_layer,
             )
         })?;
-    info!(
-        "L{} slot for this anchor key block: {}",
-        anchor_layer, slot,
-    );
+    info!("L{} slot for this anchor key block: {}", anchor_layer, slot,);
 
     let chosen_layer_hash = bridge_state.layer_windows[target_layer_idx0]
         .iter_chronological()
@@ -294,9 +289,9 @@ pub async fn enrich_witness(
 
     if chosen_layer_hash != chain_result.final_chain_root {
         warn!(
-            "final chain root mismatch — verifier mirror (L{} root @ anchor KB) = {}, \
-             locally rebuilt = {}. The proof will not satisfy the circuit until \
-             every tree along the chain matches the node's construction byte-for-byte.",
+            "final chain root mismatch — verifier mirror (L{} root @ anchor KB) = {}, locally \
+             rebuilt = {}. The proof will not satisfy the circuit until every tree along the \
+             chain matches the node's construction byte-for-byte.",
             anchor_layer,
             hex::encode(chosen_layer_hash),
             hex::encode(chain_result.final_chain_root),
@@ -333,6 +328,34 @@ pub async fn enrich_witness(
     let block_tree_depth = block_tree_proof.siblings_hex.len();
     let layer_hash_hex = anchor.layer_hash_hex.clone();
 
+    // h07_sibling_hex — the depth-4 SHA-256 block-id tree's h0_7 aggregate,
+    // consumed by the multi-thread `BridgeEventFinalProof` circuit's L8
+    // opening (schema.rs:71). Derive from the event block's canonical
+    // `block_merkle_tree_leaves` (served by the node since acki-nacki
+    // 2608f686e); the exporter cannot know this because it has only the
+    // ExtOut BOC. Older blocks without `block_merkle_tree_leaves` fail
+    // fast rather than silently producing a garbage witness.
+    let event_block = gql
+        .query_proof_block_by_seqno(event_seq)
+        .await
+        .with_context(|| {
+            format!("fetching event block seq={event_seq} for h07_sibling derivation")
+        })?;
+    let leaves = event_block.block_merkle_tree_leaves.ok_or_else(|| {
+        anyhow::anyhow!(
+            "event block seq={} does not expose block_merkle_tree_leaves — node predates the \
+             depth-4 block-id tree exposure (acki-nacki commit 2608f686e). Cross-thread / \
+             multi-hop event proofs are unsupported against this node.",
+            event_seq,
+        )
+    })?;
+    let h07_sibling = BlockIdMerkleTree::from_leaves(leaves).h0_7;
+    partial.h07_sibling_hex = hex::encode(h07_sibling);
+    info!(
+        "h07_sibling derived from block_merkle_tree_leaves: {}",
+        partial.h07_sibling_hex,
+    );
+
     partial.events_tree_proof = Some(events_tree_proof);
     partial.block_tree_proof = Some(block_tree_proof);
     partial.anchor = Some(anchor);
@@ -365,13 +388,13 @@ pub async fn enrich_witness(
 /// Resolve the requested [`AnchorLayerMode`] into a concrete 1-indexed
 /// layer number (1 = L1, 2 = L2, …, up to `MAX_LAYERS`).
 ///
-/// * `Explicit(n)` — returns `n` unchanged. Rollout detection is left to
-///   the downstream `slot_for_event_height` lookup so the error carries
-///   the exact window contents.
+/// * `Explicit(n)` — returns `n` unchanged. Rollout detection is left to the
+///   downstream `slot_for_event_height` lookup so the error carries the exact
+///   window contents.
 /// * `Auto` — probes the verifier state, cheapest layer first:
-///   1. Compute `K` via [`real_chain_builder::l1_anchor_boundaries`] and
-///      fetch its observed_height. If `K`'s height is in `layer_windows[0]`,
-///      pick L1 (cheapest wait budget).
+///   1. Compute `K` via [`real_chain_builder::l1_anchor_boundaries`] and fetch
+///      its observed_height. If `K`'s height is in `layer_windows[0]`, pick L1
+///      (cheapest wait budget).
 ///   2. Otherwise, loop `n = 2..=num_active_layers` (capped at `MAX_LAYERS`).
 ///      For each `n`, compute `T_n` via
 ///      [`real_chain_builder::l_n_anchor_boundaries`], fetch its
@@ -398,7 +421,10 @@ pub(crate) async fn resolve_anchor_layer(
         .await
         .with_context(|| format!("auto-probe: fetching observed_height for L1 anchor K={k}"))?;
     if bridge_state.slot_for_event_height(1, k_height).is_some() {
-        info!("auto: L1 slot present for K={} (height={}); using L1", k, k_height);
+        info!(
+            "auto: L1 slot present for K={} (height={}); using L1",
+            k, k_height
+        );
         return Ok((1, false));
     }
     info!(
@@ -410,10 +436,10 @@ pub(crate) async fn resolve_anchor_layer(
     let num_active = bridge_state.num_active_layers() as u8;
     if num_active < 2 {
         bail!(
-            "auto: L1 anchor K={} (height={}) rolled out of the L1 rolling window \
-             and the verifier state has only {} active layer(s) — no higher layer \
-             to escalate to. Event is older than L1 coverage; L(N≥2) escalation \
-             requires the verifier to have observed at least one L(N) boundary.",
+            "auto: L1 anchor K={} (height={}) rolled out of the L1 rolling window and the \
+             verifier state has only {} active layer(s) — no higher layer to escalate to. Event \
+             is older than L1 coverage; L(N≥2) escalation requires the verifier to have observed \
+             at least one L(N) boundary.",
             k,
             k_height,
             num_active,
@@ -423,7 +449,9 @@ pub(crate) async fn resolve_anchor_layer(
     let mut probes: Vec<(u8, u64, u64)> = Vec::with_capacity((max_probe - 1) as usize);
     for n in 2..=max_probe {
         let boundaries = real_chain_builder::l_n_anchor_boundaries(event_seq, w, n);
-        let t_n = *boundaries.last().expect("l_n_anchor_boundaries returns ≥ 1 entry");
+        let t_n = *boundaries
+            .last()
+            .expect("l_n_anchor_boundaries returns ≥ 1 entry");
         let t_n_height = fetch_block_observed_height(gql, t_n)
             .await
             .with_context(|| {
@@ -431,8 +459,8 @@ pub(crate) async fn resolve_anchor_layer(
             })?;
         if bridge_state.slot_for_event_height(n, t_n_height).is_some() {
             info!(
-                "auto: escalating L1 → L{} for event_seq={} (K={} rolled out; \
-                 T_{}={} in L{} window at height={})",
+                "auto: escalating L1 → L{} for event_seq={} (K={} rolled out; T_{}={} in L{} \
+                 window at height={})",
                 n, event_seq, k, n, t_n, n, t_n_height,
             );
             return Ok((n, true));
@@ -450,9 +478,9 @@ pub(crate) async fn resolve_anchor_layer(
         .collect::<Vec<_>>()
         .join(", ");
     bail!(
-        "auto: L1 (K={}, height={}) and all higher active layers rolled out of \
-         their rolling windows. Event is older than verifier coverage. Probed: {}. \
-         num_active_layers={}, MAX_LAYERS={}.",
+        "auto: L1 (K={}, height={}) and all higher active layers rolled out of their rolling \
+         windows. Event is older than verifier coverage. Probed: {}. num_active_layers={}, \
+         MAX_LAYERS={}.",
         k,
         k_height,
         probes_str,
@@ -494,10 +522,10 @@ pub(crate) fn guard_wait_time(anchor_layer: u8, i_know_the_wait: bool, w: u64) -
     let max_minutes = max_secs / 60.0;
     if !i_know_the_wait {
         bail!(
-            "--anchor-layer {} has an impractical wait budget: worst case {} blocks \
-             (≈ {:.0} min at ~{:.1}s per seq_no verifier catch-up). Re-run with \
-             --i-know-the-wait if this is intentional; typical E2E callers should \
-             stick with --anchor-layer 1 (L1, ≤ W·P−1 blocks ≈ 4 min).",
+            "--anchor-layer {} has an impractical wait budget: worst case {} blocks (≈ {:.0} min \
+             at ~{:.1}s per seq_no verifier catch-up). Re-run with --i-know-the-wait if this is \
+             intentional; typical E2E callers should stick with --anchor-layer 1 (L1, ≤ W·P−1 \
+             blocks ≈ 4 min).",
             anchor_layer,
             max_blocks,
             max_minutes,
@@ -505,8 +533,8 @@ pub(crate) fn guard_wait_time(anchor_layer: u8, i_know_the_wait: bool, w: u64) -
         );
     }
     warn!(
-        "anchor_layer=L{}: worst-case verifier catch-up ≈ {} blocks (~{:.0} min); \
-         proceeding because --i-know-the-wait was passed",
+        "anchor_layer=L{}: worst-case verifier catch-up ≈ {} blocks (~{:.0} min); proceeding \
+         because --i-know-the-wait was passed",
         anchor_layer, max_blocks, max_minutes,
     );
     Ok(())
@@ -551,19 +579,22 @@ pub(crate) async fn build_events_tree_proof(
     }
     if leaves.is_empty() {
         bail!(
-            "block seq={event_seq} has no tracked_ext_out_messages — \
-             cannot have emitted a WithdrawalInitiated event there"
+            "block seq={event_seq} has no tracked_ext_out_messages — cannot have emitted a \
+             WithdrawalInitiated event there"
         );
     }
 
     let target_leaf = compute_ext_message_leaf_hash(dapp, acc, event_repr_hash);
-    let position = leaves.iter().position(|l| *l == target_leaf).ok_or_else(|| {
-        anyhow::anyhow!(
-            "target event leaf {} not found in block seq={}'s tracked_ext_out_messages",
-            hex::encode(target_leaf),
-            event_seq,
-        )
-    })?;
+    let position = leaves
+        .iter()
+        .position(|l| *l == target_leaf)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "target event leaf {} not found in block seq={}'s tracked_ext_out_messages",
+                hex::encode(target_leaf),
+                event_seq,
+            )
+        })?;
 
     let hasher = PoseidonHasher::new();
     let siblings = dense_merkle_proof(&hasher, &leaves, position);
@@ -596,7 +627,7 @@ pub(crate) async fn build_block_tree_proof(
                     most_recent_l2_block, e
                 );
                 [0u8; 32]
-            }
+            },
         }
     };
 
@@ -612,7 +643,7 @@ pub(crate) async fn build_block_tree_proof(
                     prev_key_block_seq, e
                 );
                 [0u8; 32]
-            }
+            },
         }
     };
 
@@ -657,8 +688,71 @@ pub(crate) async fn build_block_tree_proof(
     ))
 }
 
-/// Resolve a block's `observed_height` (= `common_section.block_height.height()`).
+/// Resolve a block's `observed_height` (=
+/// `common_section.block_height.height()`).
 pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Result<u64> {
     let block = gql.query_proof_block_by_seqno(seq).await?;
     Ok(block.height)
+}
+
+/// Detect whether the event's block is on the same thread as the anchor
+/// (currently `DEFAULT_THREAD_ID` = thread 0 for the bridge cut) and, if
+/// cross-thread, walk `proof_block_refs` back to a same-thread ancestor —
+/// emitting a `MultiHopBundleWitnessJson` the multi-hop verifier consumes.
+///
+/// Returns `MultiHopBundleWitnessJson::default()` (i.e. `snarks = []`) for
+/// same-thread claims — the signal the prover uses to short-circuit
+/// `y_block_id = x_block_id`.
+///
+/// # Scope
+///
+/// This function is a **stub** for cross-thread walks past a single hop.
+/// The multi-hop witness shape (per-hop SHA-256 depth-4 L7 opening +
+/// Poseidon dense-merkle L7 inner path) is byte-tied to the acki-nacki
+/// node's `compute_referenced_blocks_root` / `dense_combine` and to the
+/// circuit's `proof_block_refs_root_native` / `proof_block_ref_inner_path_native`.
+/// Re-implementing these primitives here without a chain-produced test
+/// fixture would ship an unvalidated walker into the bridge prover.
+///
+/// Current behaviour:
+///
+/// * **Same-thread** (`event_block.thread_id == DEFAULT_THREAD_ID`) — returns
+///   `MultiHopBundleWitnessJson::default()`. This is the only path the
+///   current shellnet withdrawal E2E exercises.
+/// * **Cross-thread** — errors with a clear message pointing at the follow-up
+///   commit that ships the Poseidon L7 walker + a bundle fixture generated
+///   from a real cross-thread event on stress_mt_merge_dev2.
+///
+/// Once real cross-thread test vectors land, this stub is the extension
+/// point: replace the `bail!` branch with the walk over `event_block
+/// .proof_block_refs[1..]`, `query_proof_block_by_id` for each ancestor,
+/// and per-hop witness assembly.
+pub async fn resolve_cross_thread_chain(
+    gql: &GqlClient,
+    event_seq: u64,
+) -> Result<MultiHopBundleWitnessJson> {
+    let event_block = gql
+        .query_proof_block_by_seqno(event_seq)
+        .await
+        .with_context(|| format!("fetching event block seq={event_seq} for thread detection"))?;
+
+    // Compare thread_id via its canonical 34-byte identity. The default
+    // (all-zero) thread is what the bridge anchors to today.
+    let default_thread = bridge_gql_fetcher::types::ThreadIdentifier::default();
+    if event_block.thread_id == default_thread {
+        info!(
+            "event block seq={} is on the default thread — same-thread claim, empty bundle",
+            event_seq,
+        );
+        return Ok(MultiHopBundleWitnessJson::default());
+    }
+
+    bail!(
+        "event block seq={event_seq} is on thread {} (non-default) — cross-thread multi-hop \
+         bundle assembly is not yet implemented. The GQL fetch surface is in place \
+         (`GqlProofBlock::proof_block_refs`, `query_proof_block_by_id`); the missing piece \
+         is a byte-accurate port of `proof_block_ref_inner_path_native` (Poseidon L7 dense \
+         merkle) driven by a stress_mt_merge_dev2 fixture. Same-thread flows are unaffected.",
+        event_block.thread_id,
+    );
 }

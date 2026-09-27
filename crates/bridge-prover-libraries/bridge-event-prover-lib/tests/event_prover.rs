@@ -2,14 +2,16 @@
 //!
 //! The Circuit-4 MockProver test that *exercises constraint satisfaction*
 //! already lives in the upstream circuits crate
-//! (`bridge-event-prove-circuit::tests::test_bridge_event_prove_circuit_for_all_collected_events_mock_prover`).
+//! (`bridge_event_prove_circuit::bridge_event_final_proof::tests`).
 //! These tests focus on what Track C actually owns: the JSON-schema →
-//! `BridgeEventProveCircuit` + public-instance-vector translation, plus the
+//! `BridgeEventFinalProof` + public-instance-vector translation, plus the
 //! validation guardrails `build_proof_inputs` enforces against an
 //! ill-formed daemon-side anchor.
 
-use bridge_event_prove_circuit::bridge_event_prove_circuit::TOTAL_PUBLIC_INPUTS;
-use bridge_event_prover_lib::{build_proof_inputs, default_event_circuit_params};
+use bridge_event_prove_circuit::bridge_event_final_proof::TOTAL_PUBLIC_INPUTS;
+use bridge_event_prover_lib::{
+    build_proof_inputs, default_event_circuit_params, MultiHopBundleWitnessJson,
+};
 use bridge_event_witness::{
     export_from_event_boc_base64,
     schema::{AnchorRef, DenseChainLinkSer, MerkleProofData, PrivateWitness, SCHEMA_VERSION},
@@ -98,18 +100,28 @@ fn populated_witness() -> PrivateWitness {
     w.events_tree_proof = Some(events_tree_proof);
     w.block_tree_proof = Some(block_tree_proof);
     w.anchor = Some(anchor);
+    // Multi-thread `BridgeEventFinalProof` field. The value is opaque to
+    // this plumbing test — pick a distinctive non-zero constant so the
+    // "non-zero fixture seeding" assertion downstream still catches
+    // silent zero-through translation bugs.
+    w.h07_sibling_hex = hex::encode([0xB7u8; 32]);
     w
 }
 
 #[test]
 fn happy_path_translates_to_circuit_inputs() {
     let w = populated_witness();
-    let inputs = build_proof_inputs(&w, default_event_circuit_params())
-        .expect("build_proof_inputs must succeed on fully-populated witness");
+    let inputs = build_proof_inputs(
+        &w,
+        &MultiHopBundleWitnessJson::default(),
+        default_event_circuit_params(),
+    )
+    .expect("build_proof_inputs must succeed on fully-populated witness");
 
-    // public_instances layout (11 slots, see event_verifier.rs):
+    // public_instances layout (13 slots, see bridge_event_final_proof.rs):
     //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
+    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root,
+    //    anchor_layer, x_block_id, y_block_id]
     assert_eq!(inputs.public_instances.len(), TOTAL_PUBLIC_INPUTS);
     assert_eq!(
         inputs.public_instances[0],
@@ -133,7 +145,11 @@ fn happy_path_translates_to_circuit_inputs() {
 /// `EventProofInputs` does not implement `Debug`, so `Result::expect_err`
 /// is unavailable. This helper pulls the error out without that bound.
 fn must_err(w: &PrivateWitness, ctx: &str) -> anyhow::Error {
-    match build_proof_inputs(w, default_event_circuit_params()) {
+    match build_proof_inputs(
+        w,
+        &MultiHopBundleWitnessJson::default(),
+        default_event_circuit_params(),
+    ) {
         Ok(_) => panic!("{ctx}: expected error, got Ok"),
         Err(e) => e,
     }
@@ -260,8 +276,12 @@ fn block_tree_position_at_max_minus_one_is_accepted() {
     let proof = w.block_tree_proof.as_mut().unwrap();
     let depth = proof.siblings_hex.len();
     proof.position = (1u32 << depth) - 1;
-    build_proof_inputs(&w, default_event_circuit_params())
-        .expect("boundary block_tree position (1<<depth)-1 must be accepted");
+    build_proof_inputs(
+        &w,
+        &MultiHopBundleWitnessJson::default(),
+        default_event_circuit_params(),
+    )
+    .expect("boundary block_tree position (1<<depth)-1 must be accepted");
 }
 
 /// Mirror of `block_tree_position_at_max_minus_one_is_accepted` on the
@@ -276,6 +296,10 @@ fn events_tree_position_at_max_minus_one_is_accepted() {
     let proof = w.events_tree_proof.as_mut().unwrap();
     let depth = proof.siblings_hex.len();
     proof.position = (1u32 << depth) - 1;
-    build_proof_inputs(&w, default_event_circuit_params())
-        .expect("boundary events_tree position (1<<depth)-1 must be accepted");
+    build_proof_inputs(
+        &w,
+        &MultiHopBundleWitnessJson::default(),
+        default_event_circuit_params(),
+    )
+    .expect("boundary events_tree position (1<<depth)-1 must be accepted");
 }

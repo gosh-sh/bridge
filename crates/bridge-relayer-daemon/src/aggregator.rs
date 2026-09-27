@@ -187,7 +187,8 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
     ) -> Result<SnarkArtefacts, RelayerError> {
         use bridge_event_prover_lib::{
             prover::generate_event_proof_with_transcript,
-            verifier::verify_event_proof_with_transcript, PrivateWitness,
+            verifier::verify_event_proof_with_transcript, MultiHopBundleWitnessJson,
+            PrivateWitness,
         };
         use bridge_prover_lib::{keys::KeyManager, transcript::TranscriptKind};
 
@@ -222,9 +223,15 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                     RelayerError::other(format!("parse witness {}: {e}", witness_path.display()))
                 })?;
 
+                // In-process aggregator only serves the same-thread flow —
+                // cross-thread bundle proving lives in `BundleProver` and
+                // ships its own hop snarks; here `MultiHopBundleWitnessJson::
+                // default()` (empty `snarks`) locks the final proof's
+                // `y_block_id == x_block_id`.
                 let out = generate_event_proof_with_transcript(
                     &km.event,
                     &witness,
+                    &MultiHopBundleWitnessJson::default(),
                     TranscriptKind::Poseidon,
                 )
                 .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e:#}")))?;

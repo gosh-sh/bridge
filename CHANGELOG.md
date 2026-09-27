@@ -24,6 +24,30 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`AckiNackiBridge.withdrawByProof` is removed; every AN→ETH withdrawal
+  now goes through `withdrawByProofBundle` (see Added).** The old
+  single-thread function
+  `withdrawByProof(bytes proof, WithdrawalPublicInputs pubInputs)`
+  (selector `0xa9753d18`, 11-slot inner PIs) and the accompanying
+  `bridgeWithdrawalVerifier()` immutable getter, `IBridgeWithdrawalVerifier`
+  interface (`src/IBridgeWithdrawalVerifier.sol`), and
+  `WithdrawByProofDisabled` custom error are deleted. Integrators that
+  hand-craft calldata (`cast call` scripts, custom relayers, front-ends,
+  wallet integrations) MUST switch to the new 4-argument
+  `withdrawByProofBundle(uint256[],bytes,uint256[][],bytes[])` (selector
+  `0x6b49e921`); the OLD selector reverts with empty returndata against a
+  deployed bridge. Same-thread callers pass empty hop arrays and set
+  `xBlockId == yBlockId` in the 13-slot final PIs (see Added for the
+  layout and the `SameThreadEndpointsMismatch` gate). Rust callers of
+  `EthBridgeClient::dry_run_withdraw` / `submit_withdraw` must switch to
+  `dry_run_withdraw_bundle` / `submit_withdraw_bundle` — the arg order
+  changes (PI first, proof second). Deploy scripts consume
+  `WITHDRAWAL_FINAL_VERIFIER` + `MULTI_HOP_VERIFIER` env vars where they
+  used to consume `WITHDRAWAL_VERIFIER`; JSON deployment outputs emit
+  `withdrawal_final_verifier` + `multi_hop_verifier` keys. Redeploy the
+  bridge; a live 0.2.0 bridge cannot accept bundle-shape calldata and
+  cannot be patched into acceptance.
+
 - **`BridgeMultiHopProof` hop count dropped from 5 to 1 per snark.**
   `H_HOPS_PER_PROOF` in `bridge_event_prove_circuit::multi_hop_witness`
   (and its mirror in `bridge_event_witness::schema`) is now `1`;
@@ -293,8 +317,9 @@ assigns it when the release is tagged.
   `SHPLONK_BIN_MULTI_HOP` or keep `multiHopVerifier: address(0)` in the
   bridge constructor to leave `withdrawByProofBundle` disabled.
 
-- **`AckiNackiBridge.withdrawByProofBundle` — multi-thread payout entry point
-  for AN→ETH withdrawals.** New `external nonReentrant` function:
+- **`AckiNackiBridge.withdrawByProofBundle` — the sole AN→ETH payout entry
+  point.** External `nonReentrant`, replaces the removed
+  `withdrawByProof` (see Removed):
 
   ```solidity
   function withdrawByProofBundle(
@@ -305,22 +330,23 @@ assigns it when the release is tagged.
   ) external returns (bool);
   ```
 
-  Same-thread callers pass `hopPublicInputs.length == 0` and get the same
-  identity / chain / replay / anchor semantics as `withdrawByProof`
-  (unchanged). Cross-thread callers pass one to `N_BUNDLE_MAX` (= 4) hop
-  snarks that walk `xBlockId → … → yBlockId`; the bundle gate mirrors
-  `bridge_event_prove_circuit::bundle_verifier::verify_bundle`. `BridgeWithdrawConfig`
-  gains two constructor fields, `withdrawalFinalVerifier`
+  Same-thread callers pass `hopPublicInputs.length == 0` and
+  `finalPublicInputs.xBlockId == finalPublicInputs.yBlockId`; the contract
+  refuses the mismatch with `SameThreadEndpointsMismatch`. Cross-thread
+  callers pass one to `N_BUNDLE_MAX` (= 20, see the `BridgeMultiHopProof`
+  hop-count entry above) hop snarks that walk `xBlockId → … → yBlockId`;
+  the bundle gate mirrors
+  `bridge_event_prove_circuit::bundle_verifier::verify_bundle`.
+  `BridgeWithdrawConfig` requires both `withdrawalFinalVerifier`
   (`IBridgeWithdrawalFinalVerifier`, 13 PIs) and `multiHopVerifier`
-  (`IBridgeMultiHopVerifier`, 2 PIs), exposed on the deployed bridge via
-  `bridgeWithdrawalFinalVerifier()` and `bridgeMultiHopVerifier()` immutables
-  plus a `N_BUNDLE_MAX()` public constant. The two must be set together and
-  require `bridgeWithdrawalVerifier` to be set (constructor reverts
-  `PartialBundleWiring` / `BundleRequiresLegacyWithdrawal`); either being
-  zero disables the bundle entry point (reverts `WithdrawByProofBundleDisabled`).
+  (`IBridgeMultiHopVerifier`, 2 PIs); they are exposed on the deployed
+  bridge via `bridgeWithdrawalFinalVerifier()` and
+  `bridgeMultiHopVerifier()` immutables plus a `N_BUNDLE_MAX()` public
+  constant. Either being zero disables the entry point (reverts
+  `WithdrawByProofBundleDisabled`).
   Custom errors introduced by this path:
-  `WithdrawByProofBundleDisabled`, `PartialBundleWiring`,
-  `BundleRequiresLegacyWithdrawal`, `HopBundleLengthOverflow(got, max)`,
+  `WithdrawByProofBundleDisabled`,
+  `HopBundleLengthOverflow(got, max)`,
   `HopPublicInputsHopProofsLengthMismatch(hopPublicInputs, hopProofs)`,
   `FinalPublicInputsBadLength(got, expected)`,
   `HopPublicInputsBadLength(at, got, expected)`,
@@ -329,18 +355,25 @@ assigns it when the release is tagged.
   `HopChainHeadMismatch`, `HopChainTailMismatch`,
   `AdjacentHopBlockIdMismatch(at)`, `MultiHopProofRejected(at)`. Successful
   bundle payouts emit the same `WithdrawalByProofExecuted` event as the
-  legacy path, so relayer indexers do not need a new topic. Rotates
-  `BridgeWithdrawConfig`'s ABI: every deployer's constructor literal has to
-  add the two zero-inits (`withdrawalFinalVerifier: address(0)`,
-  `multiHopVerifier: address(0)`) even when bundle payouts are off. Two new
-  interface files ship: `src/IBridgeWithdrawalFinalVerifier.sol` (13-PI
+  removed legacy path, so relayer indexers do not need a new topic.
+  `BridgeWithdrawConfig`'s ABI is rotated: every deployer's constructor
+  literal now sets `withdrawalFinalVerifier` and `multiHopVerifier` (the
+  removed `bridgeWithdrawalVerifier` field is gone). Two new interface
+  files ship: `src/IBridgeWithdrawalFinalVerifier.sol` (13-PI
   `WithdrawalFinalPublicInputs` struct + `verifyWithdrawalFinal(bytes, pub)`)
   and `src/IBridgeMultiHopVerifier.sol` (`MultiHopPublicInputs { hopStartBlockId,
-  hopEndBlockId }` + `verifyMultiHop(bytes, pub)`). Verifier bytecode wiring
-  (SHPLONK aggregator adapters, `.bin` under `contracts/ethereum/verifiers/`,
-  `aggregate-proof` support) lands in a follow-on commit — until then only
-  a mock verifier can be wired, so bundle payouts are unavailable on
-  currently-deployed bridges.
+  hopEndBlockId }` + `verifyMultiHop(bytes, pub)`).
+  `BridgeWithdrawalAggregatorVerifier.{bin,sol}` under
+  `contracts/ethereum/verifiers/` re-exposes 13 inner PIs and is ready to
+  deploy; `BridgeMultiHopAggregatorVerifier.{bin,sol}` are pending the
+  first n14 keygen (see Added: `BridgeMultiHopAggregatorVerifier`), so
+  live deploys still need to point `SHPLONK_BIN_MULTI_HOP` at a
+  locally-produced `.bin` until the artefact is committed. Rust-side
+  entry points on `EthBridgeClient`: `dry_run_withdraw_bundle(pi, proof,
+  hop_pi, hop_proofs)` and `submit_withdraw_bundle(pi, proof, hop_pi,
+  hop_proofs)` — arg order is PI first, proof second (inverted from the
+  removed `dry_run_withdraw`/`submit_withdraw`); pass `&[]`, `&[]` for
+  same-thread claims.
 
 - **`bridge-event-prove-circuit`: `bundle_verifier` — pure-Rust reference
   implementation of the multi-hop bundle acceptance logic.** New module
@@ -929,6 +962,23 @@ assigns it when the release is tagged.
   deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
 
 ### Removed
+
+- **`AckiNackiBridge.withdrawByProof` (single-thread payout entry point) and
+  its wiring.** Deleted: the function
+  `withdrawByProof(bytes, WithdrawalPublicInputs)` (selector `0xa9753d18`),
+  the `bridgeWithdrawalVerifier` immutable getter, the
+  `IBridgeWithdrawalVerifier` interface file
+  (`contracts/ethereum/src/IBridgeWithdrawalVerifier.sol`), the
+  `WithdrawByProofDisabled` custom error, the
+  `bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier` field of
+  `BridgeWithdrawConfig`, and the deploy env var `WITHDRAWAL_VERIFIER` /
+  JSON output key `withdrawal_verifier`. Rust-side, the
+  `EthBridgeClient::dry_run_withdraw` and `EthBridgeClient::submit_withdraw`
+  methods and the `withdrawByProof` `sol!` declaration in
+  `crates/bridge-relayer-daemon/src/bridge.rs` are deleted. See Breaking
+  Changes / Added for the replacement (`withdrawByProofBundle`, the split
+  `bridgeWithdrawalFinalVerifier` + `bridgeMultiHopVerifier` getters, and
+  the `_bundle` Rust methods).
 
 - `EthBeaconLightClient_rotate_decider.patch`, and with it the claim that the
   two light-client copies are kept identical. The patch created

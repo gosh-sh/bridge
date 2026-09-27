@@ -17,7 +17,7 @@
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
 # Single shared shellnet burner used for BOTH the deploy (owner) role and the
-# relayer role. `verifyBlock` and `withdrawByProof` are permissionless so one
+# relayer role. `verifyBlock` and `withdrawByProofBundle` are permissionless so one
 # key covers everything for the shellnet E2E. Address:
 # 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307. For the deploy path
 # (`scripts/deploy_bridge_bundle.sh`) re-export the same value as `PRIVATE_KEY`

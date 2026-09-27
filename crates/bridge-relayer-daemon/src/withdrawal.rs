@@ -1,4 +1,4 @@
-//! Circuit 4 (`withdrawByProof`) artefacts from the partner prover daemon.
+//! Circuit 4 (`withdrawByProofBundle`) artefacts from the partner prover daemon.
 //!
 //! The shellnet orchestrator writes `proofs/proof_event_NNN.json` with a raw
 //! Halo2 proof (`proof_hex`) and thirteen public-instance field elements
@@ -23,15 +23,15 @@ use crate::error::RelayerError;
 
 // Historical note (2026-08-16): a `WithdrawalResultGate` struct + a
 // `proof_event_*.result.json` polling loop used to live here, gating each
-// on-chain `withdrawByProof` submission on `verified && anchor_matched
+// on-chain `withdrawByProofBundle` submission on `verified && anchor_matched
 // && proof_valid` fields written by `bridge-verifier-daemon`. That
 // daemon was a Rust mirror of the Solidity verifier used during early
 // bring-up when the on-chain verifier did not yet exist; keeping the
 // gate meant the production relayer waited for a dev-only sidecar to
 // rubber-stamp every proof. Deleted along with the `skip_verified_gate`
 // opt-out. Authoritative acceptance is now the on-chain verifier's
-// success on the actual `withdrawByProof` transaction (or its `eth_call`
-// dry-run) — nothing else.
+// success on the actual `withdrawByProofBundle` transaction (or its
+// `eth_call` dry-run) — nothing else.
 
 /// Thirteen public inputs for Circuit 4: the 11 pre-multi-thread slots
 /// (`tokenId..anchorLayer`) plus the two block-id endpoints (`x_block_id`,

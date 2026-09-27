@@ -83,8 +83,10 @@ code and were wrong in the old docs:
 * Verification is **SHPLONK aggregator Yul** for four circuits. 
 * BK-set rotation **shipped** as `applyBkSetUpdate` (16-leaf, depth-4). Archive text calling it
   "pending Phase 1.C" is stale, and so is any monitor asserting the commitment never changes.
-* The payout path is `withdrawByProof` against a Circuit-4 proof, nullifier-guarded. The refund-style
-  `withdraw(depositId, …)` and `processedDeposits` are gone.
+* The payout path is `withdrawByProofBundle` against a Circuit-4 bundle: one `BridgeEventFinalProof`
+  with 13 public inputs (adds `xBlockId`/`yBlockId` endpoints) plus zero or more `BridgeMultiHopProof`
+  hops (2 public inputs each), nullifier-guarded. The refund-style `withdraw(depositId, …)` and
+  `processedDeposits` are gone.
 * `skimExcessUsdc` (added `9cc2fdb`, audit finding QC-A1-3) is the *only* way to collect yield after
   `emergencyWithdrawAll` — `harvestYield` necessarily reverts `NoYield` at that point. No archive
   document knows this.

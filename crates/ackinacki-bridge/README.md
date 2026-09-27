@@ -6,7 +6,7 @@ multisig to an EVM recipient. Additional subcommands (e.g. `deposit`)
 are planned. This is the operator-facing counterpart to the relayer
 daemon: the daemon owns the continuous bundle-proving stream
 (`verifyBlock`); this CLI owns per-withdrawal composition
-(multisig burn → capture → Circuit-4 SHPLONK proof → `withdrawByProof`).
+(multisig burn → capture → Circuit-4 SHPLONK proof → `withdrawByProofBundle`).
 
 **In a hurry?** [QUICKSTART.md](QUICKSTART.md) is one withdrawal in seven
 steps, starting with `scripts/install.sh`. This README is the reference
@@ -46,6 +46,13 @@ pipeline:
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy, a drained treasury — not only AN-side ones.**
 
+   The pinned `(dappFr, accFr)` pair, plus the `xBlockId`/`yBlockId`
+   endpoint check, is what enforces the same-thread invariant on-chain:
+   the CLI always produces same-thread claims (single-user path), and it
+   sets `xBlockId == yBlockId` with empty `hopPI`/`hopProofs` arrays. If
+   those endpoints ever disagreed with an empty hop list, `withdrawByProofBundle`
+   would revert with `SameThreadEndpointsMismatch()`.
+
    *Real runs only*, because these need the submit-only flags: the burner
    key parses, the KZG ceremony resolves at k=20 **and** k=21, the
    Circuit-4 key cache is usable, `aggregate-proof` is prebuilt and
@@ -75,8 +82,8 @@ pipeline:
 6. **Prove + submit** — enrich the resurrected `BridgeState`
    (single-shot, no retry), produce a Circuit-4 SHPLONK proof via the
    in-process Circuit-4 prover + `aggregate-proof` subprocess, always
-   `dry_run_withdraw` first, then unless `--dry-run` is set, submit
-   `withdrawByProof` and wait for the receipt.
+   `dry_run_withdraw_bundle` first, then unless `--dry-run` is set, submit
+   `withdrawByProofBundle` and wait for the receipt.
 
 Every stage transition is persisted to a per-withdrawal state file so
 a mid-flight crash leaves a resumable trace (v1: refuse-duplicate +
@@ -113,7 +120,7 @@ a mid-flight crash leaves a resumable trace (v1: refuse-duplicate +
 The pinned shellnet deploy is **L2-anchored**: bundles land at
 `W² = 16 384` seq_no boundaries ≈ 91 min of chain-time at ~3 seq/s.
 End-to-end wall time from `withdraw` invocation to
-`withdrawByProof` receipt is dominated by the wait for the next
+`withdrawByProofBundle` receipt is dominated by the wait for the next
 covering L2 bundle:
 
 | Phase                                      | Budget                       |
@@ -121,7 +128,7 @@ covering L2 bundle:
 | Capture (`WithdrawalInitiated` poll)       | up to 300 s                  |
 | Wait for covering L2 bundle on-chain       | up to ~91 min (typical ~45)  |
 | Enrich + Circuit-4 SHPLONK proof           | ~5 min warm PK, ~20 min cold |
-| `withdrawByProof` submit + receipt         | ~30 s                        |
+| `withdrawByProofBundle` submit + receipt   | ~30 s                        |
 | **End-to-end (typical / worst case)**      | **~50 min / ~101 min**       |
 
 Plan a half-day for stress-test loops of 3+ cycles. Advanced users
@@ -151,9 +158,9 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
 | `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
-| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProof` |
+| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProofBundle` |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
-| `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
+| `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProofBundle` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain) and `.sol` (the proof self-check) |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
@@ -346,7 +353,7 @@ refuses `blocked` without touching anything; remove the directory by hand.
 
 ### Step 1 — Create + fund a Sepolia burner wallet
 
-The CLI signs `withdrawByProof` with an EVM key you provide. Never
+The CLI signs `withdrawByProofBundle` with an EVM key you provide. Never
 reuse a wallet that holds real funds; never commit the private key.
 
 ```bash
@@ -458,7 +465,7 @@ check. A dry run that fails may be telling you about your RPC or your
 bridge deploy, not about your multisig.
 
 What it does **not** do: compose or sign the burn, capture, prove, or run
-the `dry_run_withdraw` eth_call. It also does not check the prover
+the `dry_run_withdraw_bundle` eth_call. It also does not check the prover
 artifacts — the ceremony, the verifier `.bin` and `.sol`, `aggregate-proof`,
 the key cache or disk headroom — because those are gated on the submit-only
 flags a dry run does not require. Pass `--verifiers-dir` and the
@@ -529,15 +536,15 @@ INFO stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering 
 INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)   # L2; "L1" = fallback bug
 INFO chain built: anchor_layer=L2, anchor_kb=…, active_links=…, final_root=…
 INFO stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)
-INFO stage 6/6: submit withdrawByProof
-INFO withdrawByProof paid out tx=0x…             # ← definitive on-chain payout marker
+INFO stage 6/6: submit withdrawByProofBundle
+INFO withdrawByProofBundle paid out tx=0x…       # ← definitive on-chain payout marker
 
 withdraw complete:
   amount:       1.000000 USDC
   AN tx:        0x…
   msg id:       0x…
   block:        seq=<N> id=0x…
-  proof:        <NNNN> bytes, 11 public inputs, self_verified=true
+  proof:        <NNNN> bytes, 13 public inputs, self_verified=true
   ETH tx:       0x… (confirmed)
 ```
 
@@ -547,14 +554,14 @@ withdraw complete:
 2. Stderr ends with a `withdraw complete:` block whose last line is
    `ETH tx: 0x… (confirmed)`.
 3. The log contains all six stage lines and the
-   `withdrawByProof paid out tx=0x…` line.
+   `withdrawByProofBundle paid out tx=0x…` line.
 
 Grep verdict from the saved log (both smoke wrappers `tee` to
 `./work_dir/withdraw_{smoke_live,smoke,dry}_<ts>.log`):
 
 ```bash
 LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
-grep -E 'stage [1-6]/6|withdrawByProof paid out|withdraw complete:|^error:' "$LOG"
+grep -E 'stage [1-6]/6|withdrawByProofBundle paid out|withdraw complete:|^error:' "$LOG"
 grep -E 'resolved anchor:|anchor_layer=|anchor_stride=' "$LOG"
 # On the pinned L2 deploy: `resolved anchor: L2`, `anchor_layer=L2`,
 # `anchor_stride=16384`. The log is 1-INDEXED (L1/L2); the witness file
@@ -589,7 +596,7 @@ claiming there is no record — it never opened one to find out.
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
+| 13   | Proof succeeded, `withdrawByProofBundle` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
 **Exit 10 covers six situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went
@@ -720,7 +727,7 @@ deterministic and reused.
 
 ### On-chain submit reverted (exit 13)
 
-`withdrawByProof` reverted on Sepolia. The most common cause on the
+`withdrawByProofBundle` reverted on Sepolia. The most common cause on the
 pinned deploy is `WithdrawTreasuryShortfall` — the treasury drained
 below your amount between Step 3's check and Step 5. Top it up as in
 Step 3, re-run with `--allow-retry`; the proof regenerates
@@ -731,7 +738,7 @@ side).
 Other Sepolia reverts (proof PI mismatch, anchor not found,
 withdrawal already executed) are advanced-runbook territory — see the
 selector → error table in
-[docs/advanced_user_withdraw_runbook.md](docs/advanced_user_withdraw_runbook.md#case-3c--on-chain-withdrawbyproof-revert).
+[docs/advanced_user_withdraw_runbook.md](docs/advanced_user_withdraw_runbook.md#case-3c--on-chain-withdrawbyproofbundle-revert).
 
 ### Health check — is the server-side bundle daemon alive?
 
@@ -803,7 +810,7 @@ Two withdrawals with identical tuples collide; anything different
 | `Burned` | multisig `sendTransaction` broadcast | + `an_tx_hash` |
 | `Captured` | `WithdrawalInitiated` event observed | + `withdrawal_msg_id`, `block_seq_no` |
 | `Proved` | Circuit-4 proof produced | (same as Captured) |
-| `Submitted` | EVM `withdrawByProof` returned a tx hash | + `eth_tx_hash` |
+| `Submitted` | EVM `withdrawByProofBundle` returned a tx hash | + `eth_tx_hash` |
 | `Confirmed` | EVM receipt observed | + `eth_tx_hash` |
 | `Failed` | any stage errors out | fields preserved from last successful stage |
 
@@ -824,7 +831,7 @@ the condition that failed it has been fixed.
   capture. Prior `an_tx_hash` reused, so **the burn is never broadcast
   twice.**
 - `Failed` **with** an `an_tx_hash` → same resume, and no flag needed.
-  This is the normal `withdrawByProof`-reverted path: the burn happened,
+  This is the normal `withdrawByProofBundle`-reverted path: the burn happened,
   so it is skipped and everything after it re-runs.
 - `Failed` **without** an `an_tx_hash` → **refused.** No production path
   writes that combination — the sole writer of `Failed` is the post-burn
@@ -979,7 +986,11 @@ is ~5 min.
   faucet (Step 3).
 - Continuous bundle proving is a daemon (`daemon-live`) running
   somewhere — for the pinned default path this is our server; the CLI
-  only waits for its output to land on-chain (stage 5).
+  only waits for its output to land on-chain (stage 5). Cross-thread
+  multi-hop claims (the non-empty `hopPI`/`hopProofs` lane of
+  `withdrawByProofBundle`) also belong to the relayer daemon; the CLI
+  always produces same-thread claims with `xBlockId == yBlockId` and
+  empty hop arrays.
 - Full `--resume` semantics → v2 (v1 has refuse-duplicate + blunt
   `--allow-retry` override).
 - Self-deploy of `AckiNackiBridge` + running your own bundle

@@ -235,7 +235,8 @@ ok "Sepolia bridge owner/config/anchors cursor=$last_seen"
 verify_verifier_lane 'primaryVerifier()(address)' 'PrimaryAggregatorVerifier.bin' 'primary'
 verify_verifier_lane 'fallbackVerifier()(address)' 'FallbackAggregatorVerifier.bin' 'fallback'
 verify_verifier_lane 'layerHashesVerifier()(address)' 'LayerHashesAggregatorVerifier.bin' 'layer-hashes'
-verify_verifier_lane 'bridgeWithdrawalVerifier()(address)' 'BridgeWithdrawalAggregatorVerifier.bin' 'withdrawal'
+verify_verifier_lane 'bridgeWithdrawalFinalVerifier()(address)' 'BridgeWithdrawalFinalAggregatorVerifier.bin' 'withdrawal-final'
+verify_verifier_lane 'bridgeMultiHopVerifier()(address)' 'BridgeMultiHopAggregatorVerifier.bin' 'multi-hop'
 
 latest_nonce=$(cast nonce "$RELAYER_ADDRESS" --block latest --rpc-url "$RPC_URL")
 pending_nonce=$(cast nonce "$RELAYER_ADDRESS" --block pending --rpc-url "$RPC_URL")

@@ -1,5 +1,5 @@
 [Unit]
-Description=AN to ETH bridge relayer (unified: verifyBlock + withdrawByProof in one daemon)
+Description=AN to ETH bridge relayer (unified: verifyBlock + withdrawByProofBundle in one daemon)
 After=network.target
 
 [Service]
@@ -12,8 +12,8 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/b
 # interleaved sequentially so there is never more than one in-flight tx
 # (nonces can't race). It replaces the old two-service split
 # (bridge-relayer=daemon-prover + bridge-withdraw=daemon-withdraw).
-#   leg 1: verifyBlock   — advance the on-chain AN anchor from proof_<seqno>.json
-#   leg 2: withdrawByProof — pay out ready proof_event_*.json (gated on *.result.json)
+#   leg 1: verifyBlock          — advance the on-chain AN anchor from proof_<seqno>.json
+#   leg 2: withdrawByProofBundle — pay out ready proof_event_*.json (gated on *.result.json)
 # `--state` is a global flag and must precede the subcommand.
 # BK-rotation sentry (`--an-node-url`) needs an AN node serving the REST
 # `/v2/bk_set{,_update}` endpoints (e.g. http://<an-node-host>:8600).

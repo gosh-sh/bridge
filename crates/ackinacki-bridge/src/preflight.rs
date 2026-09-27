@@ -1852,14 +1852,14 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 ///
 /// The treasury check is a **preflight, not a promise** — the same rule the
 /// ticket sets for the multisig's ECC[3] balance. Between this call and
-/// `withdrawByProof` (up to ~101 min later) other withdrawals can drain the
+/// `withdrawByProofBundle` (up to ~101 min later) other withdrawals can drain the
 /// treasury and operators can top it up; the chain has the last word. Its
 /// job is to refuse now when it is already visible that the payout cannot
 /// happen, not to guarantee that it will.
 ///
 /// The identity and verifier checks carry no such caveat: both read
 /// `immutable` storage, so what this function sees is what
-/// `withdrawByProof` will see.
+/// `withdrawByProofBundle` will see.
 pub async fn check_bridge_deploy(
     rpc_url: &str,
     bridge: Address,
@@ -1894,7 +1894,7 @@ pub async fn check_bridge_deploy(
         .await
         .map_err(|e| CliError::Preflight {
             reason: format!(
-                "--bridge-address {bridge}: bridgeWithdrawalVerifier() failed: {e} — is this an \
+                "--bridge-address {bridge}: bridgeWithdrawalFinalVerifier() failed: {e} — is this an \
                  AckiNackiBridge deploy?"
             ),
             source: Some(anyhow::Error::new(e)),
@@ -1902,9 +1902,9 @@ pub async fn check_bridge_deploy(
     if adapter == Address::ZERO {
         return Err(CliError::Preflight {
             reason: format!(
-                "--bridge-address {bridge}: bridgeWithdrawalVerifier is the zero address — this \
-                 deploy cannot verify withdrawal proofs (withdrawByProof reverts \
-                 WithdrawByProofDisabled)"
+                "--bridge-address {bridge}: bridgeWithdrawalFinalVerifier is the zero address — this \
+                 deploy cannot verify withdrawal proofs (withdrawByProofBundle reverts \
+                 WithdrawByProofBundleDisabled)"
             ),
             source: None,
         });
@@ -1970,7 +1970,7 @@ pub async fn check_bridge_deploy(
         },
     }
 
-    // 4. Identity. `withdrawByProof` compares these before it verifies anything
+    // 4. Identity. `withdrawByProofBundle` compares these before it verifies anything
     //    (`AckiNackiBridge.sol:1164`), so a bridge pinned to a different AN-side
     //    account rejects every proof we can ever build. Both sides are immutable —
     //    this is a decision, not a snapshot.
@@ -1998,7 +1998,7 @@ pub async fn check_bridge_deploy(
                 // the same pair as hex.
                 "--bridge-address {bridge} is pinned to a different Acki Nacki bridge account: on \
                  chain (dappFr, accFr) = ({:064x}, {:064x}), this withdrawal would prove \
-                 ({:064x}, {:064x}). withdrawByProof reverts WithdrawIdentityMismatch before it \
+                 ({:064x}, {:064x}). withdrawByProofBundle reverts WithdrawIdentityMismatch before it \
                  even verifies the proof.\n\x20 Check USDC_BRIDGE_ACCOUNT_ID in $BRIDGE_CONFIG \
                  against the bridge you are withdrawing from.",
                 on_chain_identity.0, on_chain_identity.1, expected_identity.0, expected_identity.1,
@@ -2021,7 +2021,7 @@ pub async fn check_bridge_deploy(
         return Err(CliError::Preflight {
             reason: format!(
                 "--bridge-address {bridge}: treasuryBalance is {treasury} µUSDC but this \
-                 withdrawal needs {needed} ({}). withdrawByProof would revert \
+                 withdrawal needs {needed} ({}). withdrawByProofBundle would revert \
                  WithdrawTreasuryShortfall. Top the treasury up (README Step 3) and re-run.\n\x20 \
                  Note this is a preflight, not a guarantee — the treasury is shared, and it can \
                  be drained again while this withdrawal waits for its anchor bundle.",
@@ -2346,7 +2346,7 @@ pub(crate) mod tests {
     /// it does not recognise, so a stale selector here makes a test fail
     /// loudly on an empty decode rather than silently pass.
     const SEL_TREASURY: &str = "313dab20"; // treasuryBalance()
-    const SEL_VERIFIER: &str = "1792b9fe"; // bridgeWithdrawalVerifier()
+    const SEL_VERIFIER: &str = "60a11a09"; // bridgeWithdrawalFinalVerifier()
     pub(crate) const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
     pub(crate) const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
     const SEL_SHPLONK: &str = "66dbcfb5"; // shplonkVerifier()
@@ -2527,7 +2527,7 @@ pub(crate) mod tests {
             &UsdcAmount(1_000_000),
         )
         .await
-        .expect_err("withdrawByProof reverts WithdrawByProofDisabled on a zero verifier");
+        .expect_err("withdrawByProofBundle reverts WithdrawByProofBundleDisabled on a zero verifier");
         assert!(format!("{err}").contains("cannot verify"), "got: {err}");
     }
 
@@ -3256,7 +3256,7 @@ pub(crate) mod tests {
             &UsdcAmount(1_000_000),
         )
         .await
-        .expect_err("withdrawByProof would revert WithdrawTreasuryShortfall");
+        .expect_err("withdrawByProofBundle would revert WithdrawTreasuryShortfall");
         let msg = format!("{err}");
         assert!(
             msg.contains("WithdrawTreasuryShortfall"),

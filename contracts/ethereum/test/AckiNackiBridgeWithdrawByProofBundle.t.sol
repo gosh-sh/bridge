@@ -8,7 +8,6 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
 import "../src/IBridgeWithdrawalFinalVerifier.sol";
 import "../src/IBridgeMultiHopVerifier.sol";
 
@@ -16,7 +15,6 @@ import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
-import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockBridgeWithdrawalFinalVerifier.sol";
 import "./mocks/MockBridgeMultiHopVerifier.sol";
 import "./mocks/MockERC20.sol";
@@ -39,7 +37,6 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
     MockLayerHashesMovementVerifier internal layerHashesVerifier;
-    MockBridgeWithdrawalVerifier internal legacyWithdrawalVerifier;
     MockBridgeWithdrawalFinalVerifier internal finalVerifier;
     MockBridgeMultiHopVerifier internal multiHopVerifier;
 
@@ -79,14 +76,12 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
-        legacyWithdrawalVerifier = new MockBridgeWithdrawalVerifier();
         finalVerifier = new MockBridgeWithdrawalFinalVerifier();
         multiHopVerifier = new MockBridgeMultiHopVerifier();
 
         primaryVerifier.setShouldAccept(true);
         fallbackVerifier.setShouldAccept(true);
         layerHashesVerifier.setShouldAccept(true);
-        legacyWithdrawalVerifier.setShouldAccept(true);
         finalVerifier.setShouldAccept(true);
         multiHopVerifier.setShouldAccept(true);
 
@@ -103,7 +98,6 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
                 GENESIS_PREV_ANCHOR
             ),
             VerifyBlockConfigLib.withWithdrawBundle(
-                IBridgeWithdrawalVerifier(address(legacyWithdrawalVerifier)),
                 IBridgeWithdrawalFinalVerifier(address(finalVerifier)),
                 IBridgeMultiHopVerifier(address(multiHopVerifier)),
                 DAPP_FR,
@@ -232,9 +226,9 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     function test_constructor_partialBundleWiring_finalOnly_reverts() public {
-        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdraw(
-            IBridgeWithdrawalVerifier(address(legacyWithdrawalVerifier)), DAPP_FR, ACC_FR
-        );
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+        bw.dappFr = DAPP_FR;
+        bw.accFr = ACC_FR;
         bw.withdrawalFinalVerifier = IBridgeWithdrawalFinalVerifier(address(finalVerifier));
         // multiHopVerifier stays address(0)
         vm.expectRevert(AckiNackiBridge.PartialBundleWiring.selector);
@@ -255,33 +249,12 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     function test_constructor_partialBundleWiring_multiHopOnly_reverts() public {
-        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdraw(
-            IBridgeWithdrawalVerifier(address(legacyWithdrawalVerifier)), DAPP_FR, ACC_FR
-        );
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+        bw.dappFr = DAPP_FR;
+        bw.accFr = ACC_FR;
         bw.multiHopVerifier = IBridgeMultiHopVerifier(address(multiHopVerifier));
         // withdrawalFinalVerifier stays address(0)
         vm.expectRevert(AckiNackiBridge.PartialBundleWiring.selector);
-        new AckiNackiBridge(
-            address(oracle),
-            address(usdc),
-            address(0),
-            address(0),
-            VerifyBlockConfigLib.with(
-                IPrimaryVerifier(address(primaryVerifier)),
-                IFallbackVerifier(address(fallbackVerifier)),
-                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
-                BK_SET,
-                GENESIS_PREV_ANCHOR
-            ),
-            bw
-        );
-    }
-
-    function test_constructor_bundleWithoutLegacyWithdrawal_reverts() public {
-        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
-        bw.withdrawalFinalVerifier = IBridgeWithdrawalFinalVerifier(address(finalVerifier));
-        bw.multiHopVerifier = IBridgeMultiHopVerifier(address(multiHopVerifier));
-        vm.expectRevert(AckiNackiBridge.BundleRequiresLegacyWithdrawal.selector);
         new AckiNackiBridge(
             address(oracle),
             address(usdc),
@@ -370,9 +343,7 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
                 BK_SET,
                 GENESIS_PREV_ANCHOR
             ),
-            VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(legacyWithdrawalVerifier)), DAPP_FR, ACC_FR
-            )
+            VerifyBlockConfigLib.disabledWithdraw()
         );
 
         uint256[] memory finalPub = _finalPub(1, 1, 1, 1);

@@ -8,7 +8,8 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./helpers/UsdcTestLib.sol";
@@ -16,12 +17,17 @@ import "./helpers/Bn254FrLib.sol";
 import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
-import "./mocks/MockBridgeWithdrawalVerifier.sol";
+import "./mocks/MockBridgeWithdrawalFinalVerifier.sol";
+import "./mocks/MockBridgeMultiHopVerifier.sol";
 import "./mocks/MockERC20.sol";
 
 /// @title WithdrawAnchorEvictionTest
 /// @notice Phase C / A3 — WD-Q1 / WD-6: L1 anchor evicted after 128 newer verifyBlocks.
 /// @dev INV: WD-6 — rolling window HISTORY_PROOF_WINDOW = 128
+///
+///      The withdrawal entry-point this suite exercises is
+///      `withdrawByProofBundle` — same-thread claims only, so the hop-chain
+///      is always empty and `xBlockId == yBlockId`.
 contract WithdrawAnchorEvictionTest is Test {
     AckiNackiBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
@@ -29,7 +35,8 @@ contract WithdrawAnchorEvictionTest is Test {
     MockPrimaryVerifier internal primaryVerifier;
     MockFallbackVerifier internal fallbackVerifier;
     MockLayerHashesMovementVerifier internal layerHashesVerifier;
-    MockBridgeWithdrawalVerifier internal withdrawalVerifier;
+    MockBridgeWithdrawalFinalVerifier internal finalVerifier;
+    MockBridgeMultiHopVerifier internal multiHopVerifier;
 
     uint256 internal constant BK_SET = 0xBE5E7;
     uint256 internal constant GENESIS_PREV_ANCHOR = 0xA10C;
@@ -41,6 +48,9 @@ contract WithdrawAnchorEvictionTest is Test {
     uint256 internal constant DAPP_FR = 0xD499F4CEC0FFEE01;
     uint256 internal constant ACC_FR = 0xAC0F4CEDEADBEEF1;
 
+    /// @dev Same-thread claims use a fixed block-id for the FinalProof's X/Y.
+    uint256 internal constant SAME_THREAD_BLOCK = 0xB10C41D;
+
     address internal funder = address(0xF00D);
     address internal constant RECIPIENT = address(0x1111111111111111111111111111111111111111);
 
@@ -50,12 +60,14 @@ contract WithdrawAnchorEvictionTest is Test {
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
-        withdrawalVerifier = new MockBridgeWithdrawalVerifier();
+        finalVerifier = new MockBridgeWithdrawalFinalVerifier();
+        multiHopVerifier = new MockBridgeMultiHopVerifier();
 
         primaryVerifier.setShouldAccept(true);
         fallbackVerifier.setShouldAccept(true);
         layerHashesVerifier.setShouldAccept(true);
-        withdrawalVerifier.setShouldAccept(true);
+        finalVerifier.setShouldAccept(true);
+        multiHopVerifier.setShouldAccept(true);
 
         bridge = new AckiNackiBridge(
             address(oracle),
@@ -69,8 +81,11 @@ contract WithdrawAnchorEvictionTest is Test {
                 BK_SET,
                 GENESIS_PREV_ANCHOR
             ),
-            VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+            VerifyBlockConfigLib.withWithdrawBundle(
+                IBridgeWithdrawalFinalVerifier(address(finalVerifier)),
+                IBridgeMultiHopVerifier(address(multiHopVerifier)),
+                DAPP_FR,
+                ACC_FR
             )
         );
     }
@@ -98,8 +113,17 @@ contract WithdrawAnchorEvictionTest is Test {
         );
     }
 
+    function _emptyHops()
+        internal
+        pure
+        returns (uint256[][] memory hopPubs, bytes[] memory hopProofs)
+    {
+        hopPubs = new uint256[][](0);
+        hopProofs = new bytes[](0);
+    }
+
     /// @dev QC: WD-Q1 — stale finalRoot becomes UnknownAnchor after window eviction.
-    function test_withdrawByProof_evictedAnchor_reverts() public {
+    function test_withdrawByProofBundle_evictedAnchor_reverts() public {
         uint256 evictedL1 = _submitBlock(1);
         assertTrue(bridge.isKnownLayerAnchor(1, evictedL1), "pre: first anchor known");
 
@@ -113,25 +137,10 @@ contract WithdrawAnchorEvictionTest is Test {
         assertEq(bridge.layerWindowLen(1), WINDOW, "ring stays full after wrap");
         assertEq(bridge.anchorRemainingAppends(1, evictedL1), 0, "evicted is 0");
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
-                tokenId: 0,
-                amount: 1,
-                recipientHi: 0,
-                recipientLo: uint256(uint160(address(0x1111))),
-                dstChainId: block.chainid,
-                senderAccFr: 1,
-                dappFr: DAPP_FR,
-                accFr: ACC_FR,
-                nullifier: 0xDEAD,
-                finalRoot: evictedL1,
-                anchorLayer: 1,
-                xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
-                yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
-            });
-
+        uint256[] memory pub = _withdrawPub(evictedL1, 0xDEAD, 1);
+        (uint256[][] memory hopPubs, bytes[] memory hopProofs) = _emptyHops();
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.UnknownAnchor.selector, evictedL1));
-        bridge.withdrawByProof(hex"00", pub);
+        bridge.withdrawByProofBundle(pub, hex"00", hopPubs, hopProofs);
     }
 
     /// @dev A `blockSeqNo` jump writes one window slot. The earlier L1 hash
@@ -194,32 +203,35 @@ contract WithdrawAnchorEvictionTest is Test {
         uint256 laterL1 = _layers(2)[0];
         assertTrue(bridge.isKnownLayerAnchor(1, laterL1), "block-2 L1 still in window");
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _withdrawPub(laterL1, 0xBEEF);
-        assertTrue(bridge.withdrawByProof(hex"00", pub), "re-prove against later anchor");
+        uint256[] memory pub = _withdrawPub(laterL1, 0xBEEF, 1 * UsdcTestLib.UNIT);
+        (uint256[][] memory hopPubs, bytes[] memory hopProofs) = _emptyHops();
+        assertTrue(
+            bridge.withdrawByProofBundle(pub, hex"00", hopPubs, hopProofs),
+            "re-prove against later anchor"
+        );
         assertEq(usdc.balanceOf(RECIPIENT), 1 * UsdcTestLib.UNIT);
         assertTrue(bridge.isNullifierUsed(0xBEEF));
     }
 
-    function _withdrawPub(uint256 finalRoot, uint256 nullifier)
+    function _withdrawPub(uint256 finalRoot, uint256 nullifier, uint256 amount)
         internal
         view
-        returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory)
+        returns (uint256[] memory pub)
     {
         uint256 a = uint256(uint160(RECIPIENT));
-        return IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
-            tokenId: 0,
-            amount: 1 * UsdcTestLib.UNIT,
-            recipientHi: a >> 80,
-            recipientLo: a & ((1 << 80) - 1),
-            dstChainId: block.chainid,
-            senderAccFr: 1,
-            dappFr: DAPP_FR,
-            accFr: ACC_FR,
-            nullifier: nullifier,
-            finalRoot: finalRoot,
-            anchorLayer: 1,
-            xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
-            yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
-        });
+        pub = new uint256[](13);
+        pub[0]  = 0;                    // tokenId
+        pub[1]  = amount;
+        pub[2]  = a >> 80;              // recipientHi
+        pub[3]  = a & ((1 << 80) - 1);  // recipientLo
+        pub[4]  = block.chainid;
+        pub[5]  = 1;                    // senderAccFr
+        pub[6]  = DAPP_FR;
+        pub[7]  = ACC_FR;
+        pub[8]  = nullifier;
+        pub[9]  = finalRoot;
+        pub[10] = 1;                    // anchorLayer
+        pub[11] = SAME_THREAD_BLOCK;    // xBlockId
+        pub[12] = SAME_THREAD_BLOCK;    // yBlockId (same-thread: x == y)
     }
 }

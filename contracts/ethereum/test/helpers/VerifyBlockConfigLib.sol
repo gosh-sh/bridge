@@ -5,7 +5,6 @@ import "../../src/AckiNackiBridge.sol";
 import "../../src/IPrimaryVerifier.sol";
 import "../../src/IFallbackVerifier.sol";
 import "../../src/ILayerHashesMovementVerifier.sol";
-import "../../src/IBridgeWithdrawalVerifier.sol";
 import "../../src/IBridgeWithdrawalFinalVerifier.sol";
 import "../../src/IBridgeMultiHopVerifier.sol";
 
@@ -15,7 +14,7 @@ import "../../src/IBridgeMultiHopVerifier.sol";
 ///         re-typing every field. The deposit / AAVE / verifyBlock suites
 ///         only need *disabled* configs — pass `disabled()` /
 ///         `disabledWithdraw()` and the corresponding entrypoint reverts
-///         with `VerifyBlockDisabled` / `WithdrawByProofDisabled`.
+///         with `VerifyBlockDisabled` / `WithdrawByProofBundleDisabled`.
 library VerifyBlockConfigLib {
     /// @notice Build an all-zero `VerifyBlockConfig` (verifyBlock disabled).
     function disabled() internal pure returns (AckiNackiBridge.VerifyBlockConfig memory) {
@@ -48,15 +47,14 @@ library VerifyBlockConfigLib {
         });
     }
 
-    /// @notice All-zero `BridgeWithdrawConfig` — Circuit 4 `withdrawByProof`
-    ///         disabled.
+    /// @notice All-zero `BridgeWithdrawConfig` — Circuit 4
+    ///         `withdrawByProofBundle` disabled.
     function disabledWithdraw()
         internal
         pure
         returns (AckiNackiBridge.BridgeWithdrawConfig memory)
     {
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
             dappFr: 0,
             accFr: 0,
             altDstChainId: 0,
@@ -67,32 +65,34 @@ library VerifyBlockConfigLib {
         });
     }
 
-    /// @notice `BridgeWithdrawConfig` wired with an explicit verifier and
-    ///         AN-side `(dappFr, accFr)` identity. `accFr` must be non-zero
-    ///         when the verifier is non-zero (`InvalidBridgeWithdrawalIdentity`);
-    ///         `dappFr` may be zero on shellnet (zero `dapp_id` deployments).
-    function withWithdraw(IBridgeWithdrawalVerifier verifier, uint256 dappFr, uint256 accFr)
-        internal
-        pure
-        returns (AckiNackiBridge.BridgeWithdrawConfig memory)
-    {
+    /// @notice `BridgeWithdrawConfig` wired with the multi-thread FinalProof
+    ///         verifier and the hop-chain verifier. Both verifiers must be
+    ///         non-zero for the bundle path to be enabled; `accFr` must be
+    ///         non-zero (`InvalidBridgeWithdrawalIdentity`); `dappFr` may be
+    ///         zero on shellnet (zero `dapp_id` deployments).
+    function withWithdrawBundle(
+        IBridgeWithdrawalFinalVerifier finalVerifier,
+        IBridgeMultiHopVerifier multiHopVerifier,
+        uint256 dappFr,
+        uint256 accFr
+    ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory) {
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: verifier,
             dappFr: dappFr,
             accFr: accFr,
             altDstChainId: 0,
             altDstHostChainId: 0,
             altTokenId: 0,
-            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
-            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
+            withdrawalFinalVerifier: finalVerifier,
+            multiHopVerifier: multiHopVerifier
         });
     }
 
-    /// @notice Shellnet E2E wiring: logical `altDstChainId` accepted only on
-    ///         `altDstHostChainId` (e.g. Sepolia accepts AN proofs with
-    ///         `dstChainId = 1`).
-    function withWithdrawShellnet(
-        IBridgeWithdrawalVerifier verifier,
+    /// @notice Shellnet E2E wiring for the bundle path: logical
+    ///         `altDstChainId` accepted only on `altDstHostChainId` (e.g.
+    ///         Sepolia accepts AN proofs with `dstChainId = 1`).
+    function withWithdrawBundleShellnet(
+        IBridgeWithdrawalFinalVerifier finalVerifier,
+        IBridgeMultiHopVerifier multiHopVerifier,
         uint256 dappFr,
         uint256 accFr,
         uint256 altDstChainId,
@@ -100,36 +100,11 @@ library VerifyBlockConfigLib {
         uint256 altTokenId
     ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory) {
         return AckiNackiBridge.BridgeWithdrawConfig({
-                bridgeWithdrawalVerifier: verifier,
-                dappFr: dappFr,
-                accFr: accFr,
-                altDstChainId: altDstChainId,
-                altDstHostChainId: altDstHostChainId,
-                altTokenId: altTokenId,
-                withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
-                multiHopVerifier: IBridgeMultiHopVerifier(address(0))
-            });
-    }
-
-    /// @notice `BridgeWithdrawConfig` wired with the multi-thread FinalProof
-    ///         verifier and the hop-chain verifier alongside the legacy
-    ///         withdrawal verifier. Both new verifiers must be non-zero, and
-    ///         `bridgeWithdrawalVerifier` must be non-zero too (bundle
-    ///         acceptance is all-or-nothing; the constructor enforces this).
-    function withWithdrawBundle(
-        IBridgeWithdrawalVerifier legacyVerifier,
-        IBridgeWithdrawalFinalVerifier finalVerifier,
-        IBridgeMultiHopVerifier multiHopVerifier,
-        uint256 dappFr,
-        uint256 accFr
-    ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory) {
-        return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: legacyVerifier,
             dappFr: dappFr,
             accFr: accFr,
-            altDstChainId: 0,
-            altDstHostChainId: 0,
-            altTokenId: 0,
+            altDstChainId: altDstChainId,
+            altDstHostChainId: altDstHostChainId,
+            altTokenId: altTokenId,
             withdrawalFinalVerifier: finalVerifier,
             multiHopVerifier: multiHopVerifier
         });

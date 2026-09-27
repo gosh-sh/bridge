@@ -9,7 +9,7 @@ failure origins) beyond the summaries in the default-user README.
 
 > **Default users should not read this doc first.** See
 > [`../README.md`](../README.md) — it covers the pinned shellnet L2
-> deploy end-to-end, from wallet creation to `withdrawByProof`
+> deploy end-to-end, from wallet creation to `withdrawByProofBundle`
 > receipt, and is the shorter path for anyone not deploying their own
 > bridge.
 
@@ -39,6 +39,15 @@ CLI code paths are the same on both; L1 exists as a fast-lane for
 smoke-testing your own bridge — 5.7 min chain-time per bundle vs
 91 min for L2, so ~17 min end-to-end vs ~101 min.
 
+**Same-thread invariant, CLI edition.** `withdrawByProofBundle` accepts
+one final proof plus an optional list of hop proofs bridging cross-thread
+endpoints. The CLI is the single-user path, so it always produces
+same-thread claims: `xBlockId == yBlockId` in the 13-element finalPI and
+`hopPI`/`hopProofs` are both empty. The bridge enforces this with the
+`SameThreadEndpointsMismatch()` revert — that error is what would fire if
+the endpoints ever disagreed with an empty hop list. Multi-hop
+(cross-thread) claims live in the relayer daemon, not here.
+
 > **Notation.** `seq_no` = Acki Nacki block sequence number.
 > "Covering bundle" = the first bundle whose `key_seq_no ≥ event_seq_no`
 > that is verified on-chain. Withdrawals can only be submitted after
@@ -65,7 +74,7 @@ smoke-testing your own bridge — 5.7 min chain-time per bundle vs
 - [Case 3 — Incidents & failure modes](#case-3--incidents--failure-modes)
   - [Case 3a — Capture timeout — advanced diagnostics](#case-3a--capture-timeout--advanced-diagnostics)
   - [Case 3b — Prover subprocess timeout / OOM](#case-3b--prover-subprocess-timeout--oom)
-  - [Case 3c — On-chain `withdrawByProof` revert](#case-3c--on-chain-withdrawbyproof-revert)
+  - [Case 3c — On-chain `withdrawByProofBundle` revert](#case-3c--on-chain-withdrawbyproofbundle-revert)
   - [Case 3d — Multisig / USDCBridge key drift](#case-3d--multisig--usdcbridge-key-drift)
   - [Case 3e — `WithdrawTreasuryShortfall`](#case-3e--withdrawtreasuryshortfall)
 - [Health checks](#health-checks)
@@ -87,7 +96,7 @@ Key scalars:
 - Capture (`WithdrawalInitiated` poll) timeout: 300 s
 
 **End-to-end wall-time from `withdraw` invocation to
-`withdrawByProof` receipt:**
+`withdrawByProofBundle` receipt:**
 
 | Mode | Bundle stride (chain-time) | Fast case | Worst case |
 |------|----------------------------|-----------|------------|
@@ -335,9 +344,13 @@ establish them:
    chain. Verify it, do not assume it:
 
    ```bash
-   ADAPTER=$(cast call "$BRIDGE_ADDRESS" 'bridgeWithdrawalVerifier()(address)' --rpc-url "$RPC_URL")
-   WRAPPER=$(cast call "$ADAPTER" 'shplonkVerifier()(address)'  --rpc-url "$RPC_URL")
-   YUL=$(    cast call "$WRAPPER" 'yulVerifier()(address)'      --rpc-url "$RPC_URL")
+   # The withdrawal verifier was split: one adapter for the final proof
+   # and one for the multi-hop proofs. Walk both — the .bin on disk is
+   # the final-lane bytecode, which is what the CLI diffs against.
+   FINAL=$(cast call "$BRIDGE_ADDRESS" 'bridgeWithdrawalFinalVerifier()(address)' --rpc-url "$RPC_URL")
+   MULTIHOP=$(cast call "$BRIDGE_ADDRESS" 'bridgeMultiHopVerifier()(address)' --rpc-url "$RPC_URL")
+   WRAPPER=$(cast call "$FINAL" 'shplonkVerifier()(address)'  --rpc-url "$RPC_URL")
+   YUL=$(    cast call "$WRAPPER" 'yulVerifier()(address)'    --rpc-url "$RPC_URL")
    # gen_evm_verifier_shplonk emits a 32-byte CREATE prelude before the
    # runtime payload; eth_getCode returns only the payload.
    diff <(cast code "$YUL" --rpc-url "$RPC_URL") \
@@ -928,7 +941,7 @@ df -h ../bridge-prover-libraries/params/
 
 ---
 
-### Case 3c — On-chain `withdrawByProof` revert
+### Case 3c — On-chain `withdrawByProofBundle` revert
 
 **Symptom (CLI exit 13):** Dry-run or real submit fails with a
 Sepolia revert. State file records `Failed` with `stage=submit` and
@@ -959,21 +972,20 @@ up, so all three are spelled out here:
    `DIR/proof_event_NNNNNN.json` (`NNNNNN` = the zero-padded anchor
    seq_no). A re-run without it re-proves, deterministically.
 2. **Its keys are `proof_hex` and `public_instances_hex`** — an array of
-   eleven 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
-3. **Those eleven are little-endian Fr**, and `uint256` on the wire is
+   thirteen 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
+3. **Those thirteen are little-endian Fr**, and `uint256` on the wire is
    big-endian, so each one must be byte-reversed before `cast` sees it.
 
-`pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
-eleven `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
-dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot,
-anchorLayer)` — so the signature is a parenthesised tuple, not
-`uint256[11]`. The selector for the eleven-slot signature is
-`0xa9753d18`, computed with `cast sig` from the fully-expanded
-signature below (`cast` will not parse `×11` shorthand — it needs
-eleven comma-separated `uint256`s inside the tuple, exactly as the
-`cast call` invocation further down spells out); the
-previous ten-slot form was `0x6e6f66ad` and will not decode against the
-current bridge:
+The finalPI is a `uint256[]` of 13 elements — the eleven legacy public
+inputs `(tokenId, amount, recipientHi, recipientLo, dstChainId,
+senderAccFr, dappFr, accFr, nullifier, finalRoot, anchorLayer)` plus
+`xBlockId` and `yBlockId` at the end. The CLI is the single-user path,
+so it always sets `xBlockId == yBlockId` and passes empty `hopPI` /
+`hopProofs` arrays — that is the same-thread claim shape. If the two
+endpoints ever disagreed with empty hop arrays,
+`withdrawByProofBundle` would revert with `SameThreadEndpointsMismatch()`.
+The four-argument signature is
+`withdrawByProofBundle(uint256[],bytes,uint256[][],bytes[])`:
 
 ```bash
 # $PROVER_OUT_DIR is yours to set — the CLI reads the directory from
@@ -982,15 +994,16 @@ P="$PROVER_OUT_DIR/proof_event_$(printf '%06d' "$SEQ").json"
 
 PROOF=0x$(jq -r '.proof_hex' "$P" | sed 's/^0[xX]//')
 # ltrimstr + scan/reverse turns each LE Fr into the BE uint256 the ABI
-# expects; join wraps the eleven into the tuple literal cast wants.
+# expects; join wraps the thirteen into the [ ... ] literal cast wants.
 PI=$(jq -r '
   def be: sub("^0[xX]";"") | [scan("..")] | reverse | add;
-  "(" + ([.public_instances_hex[] | "0x" + be] | join(",")) + ")"
+  "[" + ([.public_instances_hex[] | "0x" + be] | join(",")) + "]"
 ' "$P")
 
+# Empty hop arrays for the CLI's same-thread claim shape.
 cast call "$BRIDGE_ADDRESS" \
-  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
-  "$PROOF" "$PI" \
+  'withdrawByProofBundle(uint256[],bytes,uint256[][],bytes[])' \
+  "$PI" "$PROOF" '[]' '[]' \
   --rpc-url "$RPC_URL" --trace
 ```
 
@@ -1123,7 +1136,7 @@ record exists"** in Case 3a.
 
 (The old text here said "prune the `Failed` state file". No `Failed`
 record can exist at exit 10 in the first place — the only production
-writer of `Failed` is the `withdrawByProof` revert path, which is
+writer of `Failed` is the `withdrawByProofBundle` revert path, which is
 exit 13.)
 
 Note that `scripts/deploy_msig_and_mint.sh` validates the key against
@@ -1159,7 +1172,7 @@ branch). The AN burn is NOT re-fired — this is what prevents the
 double-spend on the AN side. Capture replays the same event by
 `an_tx_hash`, proof regenerates deterministically against the new
 chain state (treasury balance is a component of the check), and
-`withdrawByProof` submits against the topped-up treasury.
+`withdrawByProofBundle` submits against the topped-up treasury.
 
 **Do not delete the state file** between attempts — deletion would
 strip the `an_tx_hash` and cause the next run to fire a second

@@ -4,7 +4,7 @@
 # Same ordering discipline as launch_withdraw_e2e.sh (baseline BEFORE burn
 # → avoid Case 2b permanent-timeout), but without --dry-run. The Rust
 # orchestrator (bridge-relayer-daemon/src/withdraw_e2e) will subprocess
-# bridge-event-halo2-prover for Circuit 4 and then submit withdrawByProof
+# bridge-event-halo2-prover for Circuit 4 and then submit withdrawByProofBundle
 # to Sepolia in the same process.
 #
 # ORDER MATTERS:
@@ -87,9 +87,9 @@ echo "    Expected timeline:"
 echo "      + capture event         (~30s from burn)"
 echo "      + enrich witness        (blocks until covering bundle in prover_state.json)"
 echo "      + Circuit 4 prove       (~5 min warm PK, ~20 min cold)"
-echo "      + submit withdrawByProof + confirm (~30-60s)"
+echo "      + submit withdrawByProofBundle + confirm (~30-60s)"
 echo "    Success signal:"
-echo "      grep 'withdrawByProof confirmed tx=' $WITHDRAW_LOG"
+echo "      grep 'withdrawByProofBundle confirmed tx=' $WITHDRAW_LOG"
 echo "    Verify on-chain:"
 echo "      cast logs --address \$BRIDGE_ADDRESS --rpc-url \$RPC_URL \\"
 echo "        'event WithdrawalExecuted(uint256,address,uint256,uint256)' --from-block -100"

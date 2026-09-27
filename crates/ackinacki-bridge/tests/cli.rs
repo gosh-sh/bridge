@@ -581,7 +581,7 @@ fn a_full_output_stream_does_not_replace_the_exit_code_with_101() {
     // disk, a closed pipe or a `> /dev/full` turned every refusal into
     // exit 101 — discarding the exit-code contract this whole branch is
     // about. The worst case is not reachable from a test: `print_success`
-    // runs only after the burn landed and `withdrawByProof` was mined, so
+    // runs only after the burn landed and `withdrawByProofBundle` was mined, so
     // the process that told a wrapper "unknown failure" had already moved
     // value on both chains. Same `emit`, so pinning the error path pins
     // that one too.

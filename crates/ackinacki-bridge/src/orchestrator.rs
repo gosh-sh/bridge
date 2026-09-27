@@ -21,7 +21,7 @@
 //!    just-captured event and the resurrected `BridgeState`. Exit 12 on prover
 //!    failure.
 //! 6. **Submit** — reuses [`bridge_relayer_daemon::bridge::EthBridgeClient`]
-//!    `dry_run_withdraw` (always) and `submit_withdraw` (unless `--dry-run`).
+//!    `dry_run_withdraw_bundle` (always) and `submit_withdraw_bundle` (unless `--dry-run`).
 //!    Exit 13 on revert.
 //!
 //! Every stage transition updates the idempotency record so a mid-flight
@@ -526,7 +526,7 @@ pub async fn run(
     // Scoping it to the reservation-and-send block was enough for the
     // double-burn it was added for, and not enough for what comes after:
     // two runs that both get past the burn reach stage 6 together, and the
-    // loser's `withdrawByProof` reverts on the nullifier and writes
+    // loser's `withdrawByProofBundle` reverts on the nullifier and writes
     // `Failed` over the winner's `Confirmed`. The record then says a
     // paid-out withdrawal is resumable.
     //
@@ -982,7 +982,7 @@ pub async fn run(
     }
 
     // ---- 6. Submit (dry-run then real) ----
-    info!("stage 6/6: submit withdrawByProof");
+    info!("stage 6/6: submit withdrawByProofBundle");
     let proof_bytes = e2e
         .proof
         .proof_bytes()
@@ -1009,19 +1009,24 @@ pub async fn run(
                 }
             })?);
         let ro_bridge = EthBridgeClient::new(args.bridge_address, ro_provider);
+        // `&[]`, `&[]` = same-thread claim (no hop bridge). The bundle contract accepts
+        // empty hop arrays only when the FinalProof PIs have `xBlockId == yBlockId`; the
+        // single-thread CLI never produces cross-thread claims (that's the relayer /
+        // multi-hop path), so this is safe. `SameThreadEndpointsMismatch()` would fire
+        // if they diverged. See bridge.rs docstring above `dry_run_withdraw_bundle`.
         match ro_bridge
-            .dry_run_withdraw(&proof_bytes, &pub_inputs)
+            .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
             .await
             .map_err(|e| CliError::EthSubmitFailed {
-                reason: format!("dry_run_withdraw: {e}"),
+                reason: format!("dry_run_withdraw_bundle: {e}"),
                 source: Some(anyhow::Error::new(e)),
             })? {
-            DryRunOutcome::WouldSucceed => info!("eth dry-run: withdrawByProof would succeed"),
+            DryRunOutcome::WouldSucceed => info!("eth dry-run: withdrawByProofBundle would succeed"),
             DryRunOutcome::WouldRevert {
                 reason,
             } => {
                 return Err(CliError::EthSubmitFailed {
-                    reason: format!("withdrawByProof dry-run reverted: {reason}"),
+                    reason: format!("withdrawByProofBundle dry-run reverted: {reason}"),
                     source: None,
                 });
             },
@@ -1072,25 +1077,31 @@ pub async fn run(
             );
     let bridge = EthBridgeClient::new(args.bridge_address, provider);
 
-    // NB: `Status::Submitted` is written only AFTER `submit_withdraw`
+    // NB: `Status::Submitted` is written only AFTER `submit_withdraw_bundle`
     // returns with an actual `tx_hash`. Writing it beforehand (as v1
-    // originally did) was misleading — if `submit_withdraw` errored out
+    // originally did) was misleading — if `submit_withdraw_bundle` errored out
     // before broadcast (RPC unreachable, wallet reject, gas estimation
     // failure), the on-disk record would falsely claim a tx was in
     // flight, and the next run would refuse-duplicate on Submitted
     // instead of allowing a retry.
+    //
+    // `&[]`, `&[]` = same-thread claim (no hop bridge). The bundle contract accepts
+    // empty hop arrays only when the FinalProof PIs have `xBlockId == yBlockId`; the
+    // single-thread CLI never produces cross-thread claims (that's the relayer /
+    // multi-hop path), so this is safe. `SameThreadEndpointsMismatch()` would fire
+    // if they diverged. See bridge.rs docstring above `dry_run_withdraw_bundle`.
     let submit = match bridge
-        .submit_withdraw(&proof_bytes, &pub_inputs)
+        .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &[], &[])
         .await
         .map_err(|e| CliError::EthSubmitFailed {
-            reason: format!("submit_withdraw: {e}"),
+            reason: format!("submit_withdraw_bundle: {e}"),
             source: Some(anyhow::Error::new(e)),
         })? {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => {
             let tx = format!("{tx_hash:?}");
-            info!(tx = %tx, "withdrawByProof paid out");
+            info!(tx = %tx, "withdrawByProofBundle paid out");
             // Preserve the two-step trail (Submitted → Confirmed) so debug
             // tools and crash recovery can distinguish "we broadcast" from
             // "we saw the receipt". Both writes happen post-broadcast, so
@@ -1100,7 +1111,7 @@ pub async fn run(
                 r.eth_tx_hash = Some(tx.clone());
                 idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
                     e.after_send(&format!(
-                        "withdrawByProof paid out on the EVM side as {tx} — the USDC has MOVED on \
+                        "withdrawByProofBundle paid out on the EVM side as {tx} — the USDC has MOVED on \
                          both chains"
                     ))
                 })?;
@@ -1150,7 +1161,7 @@ pub async fn run(
                 }
             }
             return Err(CliError::EthSubmitFailed {
-                reason: format!("withdrawByProof reverted: {reason}"),
+                reason: format!("withdrawByProofBundle reverted: {reason}"),
                 source: None,
             });
         },
@@ -1283,7 +1294,7 @@ fn reserve_and_take_the_lock<'a>(
 /// next layer of the same defect: this branch is entered on `an_tx_hash`
 /// alone, so a `confirmed` record — a withdrawal that has already paid out
 /// — deleted during the minutes-long preflight came back as `burned` and
-/// was carried through capture, prove and a SECOND `withdrawByProof`.
+/// was carried through capture, prove and a SECOND `withdrawByProofBundle`.
 /// `reserve` refuses that record; it just never saw it, because the file
 /// was gone.
 ///
@@ -1906,7 +1917,7 @@ fn reserve_and_decide_holding(
         // Another live process on this host owns this withdrawal. Refuse
         // before reserving: its outcome is that run's to record, and a
         // second run racing it through capture and submit gets a reverted
-        // `withdrawByProof` at best.
+        // `withdrawByProofBundle` at best.
         idempotency::LockAttempt::Contended => {
             // Re-badged, like every other read of a record that
             // exists. Bare, this reports `CliError::Preflight` — exit 2,
@@ -2155,7 +2166,7 @@ fn confirm_before_burn(
          : {bridge}\n\x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\nThis will:\n\x20 1. \
          broadcast a multisig sendTransaction burning {amount_display} USDC on Acki Nacki\n\x20 \
          2. wait for the covering anchor bundle to land on Sepolia\n\x20 3. produce a Circuit-4 \
-         SHPLONK proof\n\x20 4. submit withdrawByProof (spends ETH gas)\n\nThe AN burn is \
+         SHPLONK proof\n\x20 4. submit withdrawByProofBundle (spends ETH gas)\n\nThe AN burn is \
          irreversible once broadcast. Pass --yes to skip this prompt.\nProceed? [y/N]: ",
         from = from.extended(),
         to_hex = hex::encode(to.address.as_slice()),
@@ -4509,7 +4520,7 @@ mod tests {
         // record during preflight, which takes minutes because it hashes a
         // 2.65 GB proving key, and a `confirmed` withdrawal came back as
         // `burned` and was carried through capture, prove and a SECOND
-        // `withdrawByProof`. The concurrent route to that end state was
+        // `withdrawByProofBundle`. The concurrent route to that end state was
         // closed a round ago; this is the sequential one.
         let dir = tempfile::TempDir::new().unwrap();
         let an = format!("0x{}", "ef".repeat(32));

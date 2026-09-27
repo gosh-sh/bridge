@@ -7,7 +7,6 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
 import "../src/IBridgeWithdrawalFinalVerifier.sol";
 import "../src/IBridgeMultiHopVerifier.sol";
 
@@ -42,10 +41,11 @@ contract GenesisCursorBridge is AckiNackiBridge {
 /// @title DeployGenesisCursorBridge
 /// @notice Deploy a fresh `GenesisCursorBridge` that REUSES already-deployed
 ///         Sepolia verifier contracts (Primary/Fallback/LayerHashes/
-///         BridgeWithdrawal) and genesis's the layer-bundle cursor to
+///         WithdrawalFinal/MultiHop) and genesis's the layer-bundle cursor to
 ///         `GENESIS_LAST_SEEN_BLOCK_SEQ_NO`. Used for the AN→ETH mid-chain
 ///         replay E2E where the local proof window starts above the true chain
-///         segment genesis.
+///         segment genesis. Bundle wiring is all-or-nothing — set both
+///         `WITHDRAWAL_FINAL_VERIFIER` and `MULTI_HOP_VERIFIER`.
 contract DeployGenesisCursorBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
@@ -65,16 +65,15 @@ contract DeployGenesisCursorBridge is Script {
         });
 
         AckiNackiBridge.BridgeWithdrawConfig memory bw = AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(
-                vm.envAddress("WITHDRAWAL_VERIFIER")
-            ),
             dappFr: vm.envUint("WITHDRAW_DAPP_FR"),
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
             altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)),
-            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
-            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(
+                vm.envAddress("WITHDRAWAL_FINAL_VERIFIER")
+            ),
+            multiHopVerifier: IBridgeMultiHopVerifier(vm.envAddress("MULTI_HOP_VERIFIER"))
         });
 
         uint64 genesisLastSeen = uint64(vm.envUint("GENESIS_LAST_SEEN_BLOCK_SEQ_NO"));
@@ -90,6 +89,7 @@ contract DeployGenesisCursorBridge is Script {
         console.log("oracle:", address(oracle));
         console.log("genesisLastSeenBlockSeqNo:", genesisLastSeen);
         console.log("primaryVerifier:", address(vb.primaryVerifier));
-        console.log("bridgeWithdrawalVerifier:", address(bw.bridgeWithdrawalVerifier));
+        console.log("withdrawalFinalVerifier:", address(bw.withdrawalFinalVerifier));
+        console.log("multiHopVerifier:", address(bw.multiHopVerifier));
     }
 }

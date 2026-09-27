@@ -8,7 +8,8 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "../script/ShplonkDeployLib.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
@@ -17,6 +18,7 @@ import "./helpers/Bn254FrLib.sol";
 import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
+import "./mocks/MockBridgeMultiHopVerifier.sol";
 import "./mocks/MockERC20.sol";
 
 /// @title AckiNackiBridgeEthFieldCongruenceTest
@@ -28,11 +30,23 @@ import "./mocks/MockERC20.sol";
 /// Invariant (WD-7, extended): a nullifier congruence class pays at most
 /// once. Invariant (verifyBlock): a layer-hash congruence class occupies at
 /// most one window slot, and the stored value is the canonical Fr.
+///
+/// The withdrawal path this suite exercises is the multi-thread bundle
+/// entrypoint `withdrawByProofBundle`. The Yul-model mock test uses a
+/// same-thread claim (empty hop-chain); the production-Yul test bridges
+/// the committed fixture's cross-thread `xBlockId → yBlockId` via a
+/// single-hop chain against a mock `MockBridgeMultiHopVerifier` so the
+/// contract-level WD-7 congruence check is reached regardless of whether
+/// the committed proof happens to be same- or cross-thread.
 contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     uint256 internal constant BN254_R =
         0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
 
+    /// @dev Aggregator layout: 12-word accumulator prefix, then the 13 inner
+    ///      instances of `BridgeEventFinalProof`.
     uint256 internal constant ACC = 12;
+    /// @dev Position of the `nullifier` word in the aggregator calldata:
+    ///      `ACC + 8` (slot 8 of the FinalProof PI vector).
     uint256 internal constant WD_NULLIFIER_WORD = ACC + 8;
 
     string internal constant WD_BIN = "verifiers/BridgeWithdrawalAggregatorVerifier.bin";
@@ -75,22 +89,75 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         require(_binPresent(WD_BIN) && _binPresent(WD_CD), "missing Circuit 4 verifier artefacts");
     }
 
-    function _pubFromWithdrawalCalldata(bytes memory cd)
+    /// @dev Extract the 13-instance FinalProof PI struct from the aggregator
+    ///      calldata (slots `ACC + 0 .. ACC + 12`).
+    function _pubFromCalldata(bytes memory cd)
         internal
         pure
-        returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub)
+        returns (IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub)
     {
-        pub.tokenId = _word(cd, ACC + 0);
-        pub.amount = _word(cd, ACC + 1);
+        pub.tokenId     = _word(cd, ACC + 0);
+        pub.amount      = _word(cd, ACC + 1);
         pub.recipientHi = _word(cd, ACC + 2);
         pub.recipientLo = _word(cd, ACC + 3);
-        pub.dstChainId = _word(cd, ACC + 4);
+        pub.dstChainId  = _word(cd, ACC + 4);
         pub.senderAccFr = _word(cd, ACC + 5);
-        pub.dappFr = _word(cd, ACC + 6);
-        pub.accFr = _word(cd, ACC + 7);
-        pub.nullifier = _word(cd, ACC + 8);
-        pub.finalRoot = _word(cd, ACC + 9);
+        pub.dappFr      = _word(cd, ACC + 6);
+        pub.accFr       = _word(cd, ACC + 7);
+        pub.nullifier   = _word(cd, ACC + 8);
+        pub.finalRoot   = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.xBlockId    = _word(cd, ACC + 11);
+        pub.yBlockId    = _word(cd, ACC + 12);
+    }
+
+    /// @dev Copy a FinalProof struct into the 13-slot `uint256[]` shape the
+    ///      bundle entrypoint expects.
+    function _pubArray(IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub)
+        internal
+        pure
+        returns (uint256[] memory arr)
+    {
+        arr = new uint256[](13);
+        arr[0]  = pub.tokenId;
+        arr[1]  = pub.amount;
+        arr[2]  = pub.recipientHi;
+        arr[3]  = pub.recipientLo;
+        arr[4]  = pub.dstChainId;
+        arr[5]  = pub.senderAccFr;
+        arr[6]  = pub.dappFr;
+        arr[7]  = pub.accFr;
+        arr[8]  = pub.nullifier;
+        arr[9]  = pub.finalRoot;
+        arr[10] = pub.anchorLayer;
+        arr[11] = pub.xBlockId;
+        arr[12] = pub.yBlockId;
+    }
+
+    function _emptyHops()
+        internal
+        pure
+        returns (uint256[][] memory hopPubs, bytes[] memory hopProofs)
+    {
+        hopPubs = new uint256[][](0);
+        hopProofs = new bytes[](0);
+    }
+
+    /// @dev Single-hop chain bridging `x → y` for a cross-thread fixture. The
+    ///      MultiHop verifier is a mock (`setShouldAccept(true)`), so the exact
+    ///      hop-proof bytes are irrelevant; the contract-level chain
+    ///      connectivity check is what we exercise.
+    function _singleHop(uint256 x, uint256 y)
+        internal
+        pure
+        returns (uint256[][] memory hopPubs, bytes[] memory hopProofs)
+    {
+        hopPubs = new uint256[][](1);
+        hopPubs[0] = new uint256[](2);
+        hopPubs[0][0] = x;
+        hopPubs[0][1] = y;
+        hopProofs = new bytes[](1);
+        hopProofs[0] = hex"00";
     }
 
     function _reconstruct(uint256 hi, uint256 lo) internal pure returns (address) {
@@ -103,18 +170,21 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
 
     function test_eth1_productionYul_acceptsNullifierPlusR() public {
         _requireWithdrawalArtefacts();
-        IBridgeWithdrawalVerifier verifier = ShplonkDeployLib.deployWithdrawalAdapter(WD_BIN);
+        IBridgeWithdrawalFinalVerifier verifier = ShplonkDeployLib.deployWithdrawalAdapter(WD_BIN);
         bytes memory cd = vm.readFileBinary(WD_CD);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromWithdrawalCalldata(cd);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            _pubFromCalldata(cd);
 
-        assertTrue(verifier.verifyWithdrawal(cd, pub), "canonical Circuit 4 calldata must verify");
+        assertTrue(
+            verifier.verifyWithdrawalFinal(cd, pub), "canonical Circuit 4 calldata must verify"
+        );
 
         uint256 n = pub.nullifier;
         _addR(cd, WD_NULLIFIER_WORD);
         pub.nullifier = n + BN254_R;
 
         assertTrue(
-            verifier.verifyWithdrawal(cd, pub),
+            verifier.verifyWithdrawalFinal(cd, pub),
             "Yul reduces instances mod f_q, so N+R must still verify"
         );
     }
@@ -123,14 +193,15 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     // WD-7: congruence class pays at most once (production path)
     // ─────────────────────────────────────────────────────────────────────
 
-    function test_eth1_withdrawByProof_nullifierPlusR_doesNotPayTwice() public {
+    function test_eth1_withdrawByProofBundle_nullifierPlusR_doesNotPayTwice() public {
         _requireWithdrawalArtefacts();
         bytes memory cd = vm.readFileBinary(WD_CD);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromWithdrawalCalldata(cd);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            _pubFromCalldata(cd);
 
         vm.chainId(pub.dstChainId);
 
-        IBridgeWithdrawalVerifier verifier = ShplonkDeployLib.deployWithdrawalAdapter(WD_BIN);
+        IBridgeWithdrawalFinalVerifier verifier = ShplonkDeployLib.deployWithdrawalAdapter(WD_BIN);
         AckiNackiBridge bridge = _deployWithdrawBridge(verifier, pub);
 
         UsdcTestLib.depositUsdc(
@@ -141,7 +212,13 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         address recipient = _reconstruct(pub.recipientHi, pub.recipientLo);
         uint256 treasuryBefore = bridge.treasuryBalance();
 
-        assertTrue(bridge.withdrawByProof(cd, pub), "honest withdraw");
+        (uint256[][] memory hopPubs, bytes[] memory hopProofs) =
+            pub.xBlockId == pub.yBlockId
+                ? _emptyHops()
+                : _singleHop(pub.xBlockId, pub.yBlockId);
+        assertTrue(
+            bridge.withdrawByProofBundle(_pubArray(pub), cd, hopPubs, hopProofs), "honest withdraw"
+        );
         assertTrue(bridge.isNullifierUsed(pub.nullifier));
         assertEq(MockERC20(address(bridge.usdc())).balanceOf(recipient), pub.amount);
         assertEq(bridge.treasuryBalance(), treasuryBefore - pub.amount);
@@ -153,7 +230,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, pub.nullifier)
         );
-        bridge.withdrawByProof(cd, pub);
+        bridge.withdrawByProofBundle(_pubArray(pub), cd, hopPubs, hopProofs);
 
         assertFalse(bridge.isNullifierUsed(n + BN254_R), "congruent key must stay unused");
         assertEq(
@@ -167,25 +244,27 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function test_eth1_yulModelMock_nullifierPlusR_doesNotPayTwice() public {
-        YulModelWithdrawalVerifier mock = new YulModelWithdrawalVerifier();
+        YulModelWithdrawalFinalVerifier mock = new YulModelWithdrawalFinalVerifier();
         uint256 n = Bn254FrLib.toFr(uint256(keccak256("eth1-nul")));
         uint256 amount = 1 * UsdcTestLib.UNIT;
         uint256 finalRoot = Bn254FrLib.toFr(uint256(keccak256("eth1-anchor")));
 
-        AckiNackiBridge bridge = _deployWithdrawBridge(mock, _mockPub(amount, n, finalRoot));
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            _mockPub(amount, n, finalRoot);
+        AckiNackiBridge bridge = _deployWithdrawBridge(mock, pub);
         UsdcTestLib.depositUsdc(vm, MockERC20(address(bridge.usdc())), bridge, funder, 3 * amount);
         _seedAnchor(bridge, finalRoot);
 
+        (uint256[][] memory hopPubs, bytes[] memory hopProofs) = _emptyHops();
         bytes memory proofN = mock.packProof(n);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _mockPub(amount, n, finalRoot);
-        assertTrue(bridge.withdrawByProof(proofN, pub));
+        assertTrue(bridge.withdrawByProofBundle(_pubArray(pub), proofN, hopPubs, hopProofs));
 
         bytes memory proofNR = mock.packProof(n + BN254_R);
         pub.nullifier = n + BN254_R;
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, pub.nullifier)
         );
-        bridge.withdrawByProof(proofNR, pub);
+        bridge.withdrawByProofBundle(_pubArray(pub), proofNR, hopPubs, hopProofs);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -293,11 +372,12 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
     function _mockPub(uint256 amount, uint256 nullifier, uint256 finalRoot)
         internal
         view
-        returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory)
+        returns (IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub)
     {
         address recipient = address(0x1111111111111111111111111111111111111111);
         uint256 a = uint256(uint160(recipient));
-        return IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
+        uint256 sameThreadBlock = Bn254FrLib.toFr(uint256(keccak256("eth1-same-thread")));
+        pub = IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs({
             tokenId: 0,
             amount: amount,
             recipientHi: a >> 80,
@@ -309,23 +389,25 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             nullifier: nullifier,
             finalRoot: finalRoot,
             anchorLayer: 1,
-            xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
-            yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
+            xBlockId: sameThreadBlock,
+            yBlockId: sameThreadBlock
         });
     }
 
     function _deployWithdrawBridge(
-        IBridgeWithdrawalVerifier verifier,
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub
+        IBridgeWithdrawalFinalVerifier verifier,
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub
     ) internal returns (AckiNackiBridge bridge) {
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
         MockPrimaryVerifier primary = new MockPrimaryVerifier();
         MockFallbackVerifier fallback_ = new MockFallbackVerifier();
         MockLayerHashesMovementVerifier layer = new MockLayerHashesMovementVerifier();
+        MockBridgeMultiHopVerifier hop = new MockBridgeMultiHopVerifier();
         primary.setShouldAccept(true);
         fallback_.setShouldAccept(true);
         layer.setShouldAccept(true);
+        hop.setShouldAccept(true);
 
         bridge = new AckiNackiBridge(
             address(oracle),
@@ -339,9 +421,15 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
                 BK_SET,
                 GENESIS_PREV
             ),
-            VerifyBlockConfigLib.withWithdrawShellnet(
-                    verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
-                )
+            VerifyBlockConfigLib.withWithdrawBundleShellnet(
+                verifier,
+                IBridgeMultiHopVerifier(address(hop)),
+                pub.dappFr,
+                pub.accFr,
+                0,
+                0,
+                pub.tokenId
+            )
         );
     }
 
@@ -394,23 +482,24 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
 
 /// @dev Models R15 adapter + Yul: raw instance must equal `pub.nullifier`,
 ///      SHPLONK pairing is treated as accepting any word (pairing sees `mod f_q`).
-contract YulModelWithdrawalVerifier is IBridgeWithdrawalVerifier {
+contract YulModelWithdrawalFinalVerifier is IBridgeWithdrawalFinalVerifier {
     uint256 internal constant ACC = 12;
+    uint256 internal constant NUM_INNER = 13;
 
     function packProof(uint256 nullifier) external pure returns (bytes memory proof) {
-        proof = new bytes((ACC + 10) * 32);
+        proof = new bytes((ACC + NUM_INNER) * 32);
         assembly {
             mstore(add(add(proof, 0x20), mul(add(ACC, 8), 32)), nullifier)
         }
     }
 
-    function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)
+    function verifyWithdrawalFinal(bytes calldata proof, WithdrawalFinalPublicInputs calldata pub)
         external
         pure
         override
         returns (bool)
     {
-        if (proof.length < (ACC + 10) * 32) return false;
+        if (proof.length < (ACC + NUM_INNER) * 32) return false;
         uint256 inst = uint256(bytes32(proof[(ACC + 8) * 32:(ACC + 9) * 32]));
         return inst == pub.nullifier;
     }

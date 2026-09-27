@@ -24,7 +24,7 @@ use crate::{errors::CliError, orchestrator::WithdrawSuccess};
 /// `withdraw 2>/dev/full`.
 ///
 /// The worst case is [`print_success`], which is reached only after the
-/// burn landed AND `withdrawByProof` was mined. Value has moved on both
+/// burn landed AND `withdrawByProofBundle` was mined. Value has moved on both
 /// chains and the wrapper is told the process died of something
 /// unknown — the one reading a script is most likely to retry.
 ///

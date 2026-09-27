@@ -13,7 +13,7 @@ when Circuit 4 grew an 11th public input, see below), so re-measure rather than 
 | `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | 21 494 B | OK |
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 493 B | OK (K=21 inner) |
 | `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 23 111 B | OK (k_outer=21) |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 11 | 21 152 B | OK (K=19 inner) |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal (`BridgeEventFinalProof`) | 13 | 21 152 B | OK (K=19 inner) |
 | `BridgeMultiHopAggregatorVerifier.bin` | multi-hop (cross-thread) | 2 | *pending regen* | *pending regen* |
 
 Layer hashes grew because the aggregator was re-keygen'd at `k_outer=21`: at `k_outer=20` the
@@ -48,9 +48,10 @@ changing the key — `aggregate-proof` then refuses with `aggregator VK drift`, 
 regenerate both files, not to suspect the key. Regeneration compiles the source, so it needs
 `solc 0.8.19` on `PATH`.
 
-Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
-is keygen'd at `K=19`; the aggregated Yul is 21 152 B (23 outer instances = 12 KZG accumulator
-limbs + 11 re-exposed Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`).
+Circuit **4** (`withdrawByProofBundle`, `BridgeEventFinalProof`) uses the same SHPLONK aggregator
+path. Its inner event circuit is keygen'd at `K=19`; the aggregated Yul is 21 152 B (25 outer
+instances = 12 KZG accumulator limbs + 13 re-exposed public inputs, adding `xBlockId` and
+`yBlockId` to the legacy 11-slot layout so cross-thread hop chains anchor to a bundle endpoint).
 Rotated 2026-09-18 for the `events_pos` nullifier preimage and the per-layer anchor scan.
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at

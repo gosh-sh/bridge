@@ -71,9 +71,10 @@ frontend/
 ## Features Overview
 
 **This is a deposit-only interface.** There is no withdrawal UI, and that is deliberate: the
-Ethereum contract exposes no user-callable withdrawal. Payouts go through `withdrawByProof`, which
-requires a Circuit-4 ZK proof of a burn on Acki Nacki and is submitted by a relayer, not by the
-person receiving the funds. A withdrawal form existed here once and was removed — it could make a
+Ethereum contract exposes no user-callable withdrawal. Payouts go through `withdrawByProofBundle`,
+which requires a Circuit-4 ZK proof bundle (one `BridgeEventFinalProof` for the burn event on Acki
+Nacki plus zero or more `BridgeMultiHopProof` hops when the event thread differs from the anchor)
+and is submitted by a relayer, not by the person receiving the funds. A withdrawal form existed here once and was removed — it could make a
 user believe funds had been returned when nothing had happened. Verified 2026-08-18: the string
 `withdraw` does not occur anywhere under `frontend/src/`.
 

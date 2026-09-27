@@ -1,33 +1,31 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./IBridgeWithdrawalVerifier.sol";
+import "./IBridgeWithdrawalFinalVerifier.sol";
 import "./ShplonkAggregatorVerifierBase.sol";
 
 /// @title BridgeWithdrawalAggregatorVerifier
 /// @notice R15 adapter: verifies Circuit 4 (`BridgeEventFinalProof`,
 ///         multi-thread) via SHPLONK aggregator Yul verifier.
 /// @dev `proof` calldata = `instances (12 acc + 13 inner) ‖ snark_proof`.
-///      Re-exposed inner PIs at indices 12..=24 (12,13,…,24 inclusive
-///      — thirteen slots) must match `pub`. The previous single-thread
-///      variant re-exposed 11 slots; every deployment tied to the old
-///      layout must redeploy this adapter alongside the rotated Circuit-4
-///      verifying key.
+///      Re-exposed inner PIs at indices 12..=24 (12,13,…,24 inclusive —
+///      thirteen slots) must match `pub`. This adapter implements
+///      `IBridgeWithdrawalFinalVerifier`; the pre-bundle 11-slot variant is
+///      gone from the bridge and every deployment must redeploy this adapter
+///      alongside the Circuit-4 verifying key.
 contract BridgeWithdrawalAggregatorVerifier is
-    IBridgeWithdrawalVerifier,
+    IBridgeWithdrawalFinalVerifier,
     ShplonkAggregatorVerifierBase
 {
     uint256 private constant NUM_INNER = 13;
 
     constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
 
-    /// @inheritdoc IBridgeWithdrawalVerifier
-    function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)
-        external
-        view
-        override
-        returns (bool isValid)
-    {
+    /// @inheritdoc IBridgeWithdrawalFinalVerifier
+    function verifyWithdrawalFinal(
+        bytes calldata proof,
+        WithdrawalFinalPublicInputs calldata pub
+    ) external view override returns (bool isValid) {
         if (proof.length < (NUM_ACCUMULATOR_INSTANCES + NUM_INNER) * 32) {
             return false;
         }

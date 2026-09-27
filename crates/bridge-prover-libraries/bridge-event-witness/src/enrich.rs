@@ -26,7 +26,14 @@
 //! are now internal helpers with a stable public entrypoint.
 
 use anyhow::{bail, Context, Result};
-use bridge_gql_fetcher::gql_client::GqlClient;
+use bridge_event_prove_circuit::multi_hop_witness::{
+    block_merkle_leaf_proof, proof_block_ref_inner_path_native, ref_leaf_hash_native,
+    verify_block_merkle_leaf_proof, verify_proof_block_ref_inner_path, N_BUNDLE_MAX,
+};
+use bridge_gql_fetcher::{
+    gql_client::{GqlClient, GqlProofBlock},
+    types::ThreadIdentifier,
+};
 use bridge_prover_lib::{
     block_id_tree::BlockIdMerkleTree,
     bridge_state::{BridgeState, MAX_LAYERS},
@@ -37,8 +44,8 @@ use gosh_dense_balanced_tree::{DenseChainLink, MAX_CHAIN_LEN};
 use tracing::{info, warn};
 
 use crate::schema::{
-    AnchorRef, DenseChainLinkSer, MerkleProofData, MultiHopBundleWitnessJson, PrivateWitness,
-    SCHEMA_VERSION,
+    AnchorRef, BlockWitnessJson, DenseChainLinkSer, HopWitnessJson, MerkleProofData,
+    MultiHopBundleWitnessJson, MultiHopProofWitnessJson, PrivateWitness, SCHEMA_VERSION,
 };
 
 pub const HISTORY_WINDOW_SIZE: u64 =
@@ -704,29 +711,45 @@ pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Re
 /// same-thread claims — the signal the prover uses to short-circuit
 /// `y_block_id = x_block_id`.
 ///
-/// # Scope
+/// # Cross-thread walk
 ///
-/// This function is a **stub** for cross-thread walks past a single hop.
-/// The multi-hop witness shape (per-hop SHA-256 depth-4 L7 opening +
-/// Poseidon dense-merkle L7 inner path) is byte-tied to the acki-nacki
-/// node's `compute_referenced_blocks_root` / `dense_combine` and to the
-/// circuit's `proof_block_refs_root_native` / `proof_block_ref_inner_path_native`.
-/// Re-implementing these primitives here without a chain-produced test
-/// fixture would ship an unvalidated walker into the bridge prover.
+/// Starting from `event_block` (on some non-default thread), the walker
+/// repeatedly picks a `proof_block_refs[i]` with `i >= 1` (slot 0 is the
+/// same-thread parent, excluded per spec §4) that leads to a strictly
+/// different thread, preferring the default thread when it appears among
+/// the candidates. Each step produces one `MultiHopProofWitnessJson` snark
+/// carrying:
 ///
-/// Current behaviour:
+/// * the SHA-256 depth-4 L7 opening of `block_merkle_tree_leaves[7]`
+///   (`proof_block_refs_root`) against the current block's `block_id`
+///   (`block_merkle_leaf_proof` — mirrors `gql_proof.rs::block_merkle_leaf_proof`);
+/// * the Poseidon dense-merkle inner path of the chosen
+///   `proof_block_refs[ref_index]` against L7
+///   (`proof_block_ref_inner_path_native` — mirrors
+///   `history-proof::dense_merkle_proof` with the byte-flat sponge convention);
+/// * the clear-byte endpoints `hop_start_block_id = refs[ref_index]` and
+///   `hop_end_block_id = block_id`.
 ///
-/// * **Same-thread** (`event_block.thread_id == DEFAULT_THREAD_ID`) — returns
-///   `MultiHopBundleWitnessJson::default()`. This is the only path the
-///   current shellnet withdrawal E2E exercises.
-/// * **Cross-thread** — errors with a clear message pointing at the follow-up
-///   commit that ships the Poseidon L7 walker + a bundle fixture generated
-///   from a real cross-thread event on stress_mt_merge_dev2.
+/// Both openings are re-verified natively before the witness is shipped —
+/// a mismatched leaf or wrong `refs_tree_depth` fails here instead of
+/// blowing up in-circuit.
 ///
-/// Once real cross-thread test vectors land, this stub is the extension
-/// point: replace the `bail!` branch with the walk over `event_block
-/// .proof_block_refs[1..]`, `query_proof_block_by_id` for each ancestor,
-/// and per-hop witness assembly.
+/// The walk terminates when the next referenced block is on the default
+/// thread; the bundle is then reversed so `snarks[0].hops[0].hop_start`
+/// = default-thread ancestor and `snarks[K].hops[0].hop_end` = event block.
+/// The circuit's `x_block_id` / `y_block_id` public inputs bind to those two
+/// endpoints.
+///
+/// # Errors
+///
+/// * `event_block` on a non-default thread with `proof_block_refs.len() < 2`
+///   — no cross-thread ref to hop through.
+/// * No ref leads to a different thread (walk is stuck).
+/// * More than `N_BUNDLE_MAX = 20` hops needed — over the prototype cap.
+/// * A referenced block is missing `block_merkle_tree_leaves` (very old
+///   blocks that predate the node exposing the field).
+/// * A native re-check of the L7 SHA-256 or Poseidon opening fails —
+///   chain-side data inconsistency that the prover would surface downstream.
 pub async fn resolve_cross_thread_chain(
     gql: &GqlClient,
     event_seq: u64,
@@ -738,7 +761,7 @@ pub async fn resolve_cross_thread_chain(
 
     // Compare thread_id via its canonical 34-byte identity. The default
     // (all-zero) thread is what the bridge anchors to today.
-    let default_thread = bridge_gql_fetcher::types::ThreadIdentifier::default();
+    let default_thread = ThreadIdentifier::default();
     if event_block.thread_id == default_thread {
         info!(
             "event block seq={} is on the default thread — same-thread claim, empty bundle",
@@ -747,12 +770,295 @@ pub async fn resolve_cross_thread_chain(
         return Ok(MultiHopBundleWitnessJson::default());
     }
 
-    bail!(
-        "event block seq={event_seq} is on thread {} (non-default) — cross-thread multi-hop \
-         bundle assembly is not yet implemented. The GQL fetch surface is in place \
-         (`GqlProofBlock::proof_block_refs`, `query_proof_block_by_id`); the missing piece \
-         is a byte-accurate port of `proof_block_ref_inner_path_native` (Poseidon L7 dense \
-         merkle) driven by a stress_mt_merge_dev2 fixture. Same-thread flows are unaffected.",
-        event_block.thread_id,
+    info!(
+        event_seq,
+        thread = %event_block.thread_id,
+        "event block is on a non-default thread — walking proof_block_refs back to thread 0",
     );
+
+    let mut snarks: Vec<MultiHopProofWitnessJson> = Vec::new();
+    let mut cur_block = event_block;
+
+    loop {
+        let (ref_index, next_block) = pick_next_hop(gql, &cur_block, &default_thread)
+            .await
+            .with_context(|| {
+                format!(
+                    "picking next hop from block {} on thread {}",
+                    hex::encode(cur_block.block_id),
+                    cur_block.thread_id
+                )
+            })?;
+
+        let hop = build_hop_witness(&cur_block, ref_index)?;
+        snarks.push(MultiHopProofWitnessJson {
+            hops: [hop],
+        });
+
+        if next_block.thread_id == default_thread {
+            info!(
+                hops = snarks.len(),
+                terminal_block = %hex::encode(next_block.block_id),
+                "L7 walk reached the default thread",
+            );
+            break;
+        }
+        if snarks.len() >= N_BUNDLE_MAX {
+            bail!(
+                "cross-thread chain from event seq={} exceeds N_BUNDLE_MAX = {} hops \
+                 without reaching the default thread",
+                event_seq,
+                N_BUNDLE_MAX
+            );
+        }
+        cur_block = next_block;
+    }
+
+    // Reverse to chronological order: snarks[0].hops[0].hop_start =
+    // default-thread ancestor (== y_block_id), snarks[K].hops[0].hop_end =
+    // event block (== x_block_id). Cross-hop continuity in the circuit is
+    // `snarks[i].hop_end == snarks[i+1].hop_start`.
+    snarks.reverse();
+    Ok(MultiHopBundleWitnessJson {
+        snarks,
+    })
+}
+
+/// Pick the next hop from `cur`. Scans `cur.proof_block_refs[1..]` in order,
+/// fetches each referenced block, and returns:
+///
+/// * the first ref whose block is on `default_thread` (preferred terminus), or
+/// * the first ref whose block is on a strictly different thread from `cur`
+///   (progresses the walk), or
+/// * an error if no such ref exists.
+///
+/// Slot 0 is the same-thread parent — excluded per spec §4.
+async fn pick_next_hop(
+    gql: &GqlClient,
+    cur: &GqlProofBlock,
+    default_thread: &ThreadIdentifier,
+) -> Result<(u32, GqlProofBlock)> {
+    if cur.proof_block_refs.len() < 2 {
+        bail!(
+            "block {} on thread {} has no cross-thread refs \
+             (proof_block_refs.len() = {}); cannot hop",
+            hex::encode(cur.block_id),
+            cur.thread_id,
+            cur.proof_block_refs.len()
+        );
+    }
+
+    let mut fallback: Option<(u32, GqlProofBlock)> = None;
+    for (i, ref_id) in cur.proof_block_refs.iter().enumerate().skip(1) {
+        let ref_hex = hex::encode(ref_id);
+        let ref_block = gql
+            .query_proof_block_by_id(&ref_hex)
+            .await
+            .with_context(|| {
+                format!(
+                    "fetch ref block {ref_hex} (slot {i} of block {})",
+                    hex::encode(cur.block_id)
+                )
+            })?;
+        if ref_block.thread_id == *default_thread {
+            return Ok((i as u32, ref_block));
+        }
+        if ref_block.thread_id != cur.thread_id && fallback.is_none() {
+            fallback = Some((i as u32, ref_block));
+        }
+    }
+    fallback.ok_or_else(|| {
+        anyhow::anyhow!(
+            "block {} on thread {} has no ref leading to a different thread — L7 walk stuck \
+             ({} refs scanned)",
+            hex::encode(cur.block_id),
+            cur.thread_id,
+            cur.proof_block_refs.len() - 1,
+        )
+    })
+}
+
+/// Build one `HopWitnessJson` opening `cur.proof_block_refs[ref_index]`
+/// against `cur.block_id` via the L7 SHA-256 leaf proof + Poseidon dense
+/// merkle inner path. Both openings are re-verified natively so a
+/// malformed chain payload fails here rather than in-circuit.
+fn build_hop_witness(cur: &GqlProofBlock, ref_index: u32) -> Result<HopWitnessJson> {
+    let leaves = cur.block_merkle_tree_leaves.ok_or_else(|| {
+        anyhow::anyhow!(
+            "block {} missing block_merkle_tree_leaves — cannot build hop witness",
+            hex::encode(cur.block_id)
+        )
+    })?;
+
+    let idx = ref_index as usize;
+    if idx == 0 {
+        bail!(
+            "ref_index 0 is the same-thread parent slot; the bridge L7 walk requires idx >= 1"
+        );
+    }
+    if idx >= cur.proof_block_refs.len() {
+        bail!(
+            "ref_index {} out of range (proof_block_refs.len() = {})",
+            idx,
+            cur.proof_block_refs.len()
+        );
+    }
+
+    let l7_sibling_path = block_merkle_leaf_proof(&leaves, 7);
+    let (inner_path, refs_tree_depth) =
+        proof_block_ref_inner_path_native(&cur.proof_block_refs, idx);
+
+    // Defense-in-depth: re-verify both openings before shipping the witness.
+    let l7_leaf = leaves[7];
+    if !verify_block_merkle_leaf_proof(&cur.block_id, &l7_leaf, 7, &l7_sibling_path) {
+        bail!(
+            "block {}: L7 SHA-256 opening does not verify against block_id — \
+             chain data inconsistent",
+            hex::encode(cur.block_id)
+        );
+    }
+    let ref_leaf = ref_leaf_hash_native(idx, &cur.proof_block_refs[idx]);
+    if !verify_proof_block_ref_inner_path(&l7_leaf, &ref_leaf, idx, &inner_path, refs_tree_depth) {
+        bail!(
+            "block {}: L7 Poseidon opening at ref_index {} does not verify — \
+             chain data inconsistent",
+            hex::encode(cur.block_id),
+            idx
+        );
+    }
+
+    let hop_start_block_id = cur.proof_block_refs[idx];
+    let hop_end_block_id = cur.block_id;
+
+    let block_json = BlockWitnessJson {
+        block_id_hex: hex::encode(cur.block_id),
+        block_merkle_tree_leaves_hex: std::array::from_fn(|i| hex::encode(leaves[i])),
+        proof_block_refs_hex: cur.proof_block_refs.iter().map(hex::encode).collect(),
+    };
+
+    Ok(HopWitnessJson {
+        is_active: true,
+        block: block_json,
+        block_merkle_leaf_proof_l7_hex: std::array::from_fn(|i| hex::encode(l7_sibling_path[i])),
+        ref_index,
+        refs_tree_depth,
+        proof_block_ref_inner_path_hex: std::array::from_fn(|i| hex::encode(inner_path[i])),
+        hop_start_block_id_hex: hex::encode(hop_start_block_id),
+        hop_end_block_id_hex: hex::encode(hop_end_block_id),
+    })
+}
+
+#[cfg(test)]
+mod cross_thread_tests {
+    //! Pure-Rust tests for `build_hop_witness`. The GQL-driven
+    //! `resolve_cross_thread_chain` needs a live `GqlClient`, so it is
+    //! covered by the daemon integration tests (see
+    //! `bridge-relayer-daemon/src/withdraw_e2e`) — here we only pin the
+    //! byte-flat witness assembly against the same primitives the circuit
+    //! uses.
+    use bridge_event_prove_circuit::multi_hop_witness::{
+        block_merkle_root, proof_block_refs_root_native, BLOCK_MERKLE_LEAF_COUNT,
+        MAX_PROOF_BLOCK_REFS_DEPTH,
+    };
+    use bridge_gql_fetcher::gql_client::GqlProofBlock;
+    use bridge_gql_fetcher::types::ThreadIdentifier;
+    use std::collections::BTreeMap;
+
+    use super::build_hop_witness;
+
+    /// Assemble a synthetic `GqlProofBlock` whose L7 leaf equals the
+    /// Poseidon root over `refs` and whose `block_id` equals the SHA-256
+    /// root over its own leaves — the invariant the walker's re-check
+    /// asserts.
+    fn synth_block(thread_seed: u8, refs: Vec<[u8; 32]>) -> GqlProofBlock {
+        let mut leaves = [[0u8; 32]; BLOCK_MERKLE_LEAF_COUNT];
+        // Fill L0..L6, L8..L15 with distinguishable garbage so the L7 slot
+        // is what the opening actually binds to.
+        for (i, leaf) in leaves.iter_mut().enumerate() {
+            leaf[0] = thread_seed;
+            leaf[1] = i as u8;
+        }
+        leaves[7] = proof_block_refs_root_native(&refs);
+        let block_id = block_merkle_root(&leaves);
+
+        // 34-byte thread_id: seed in the first byte, rest zero. The
+        // canonical default is all-zero; any non-zero seed produces a
+        // distinct thread.
+        let mut tid_bytes = [0u8; 34];
+        tid_bytes[0] = thread_seed;
+        let thread_id_hex = hex::encode(tid_bytes);
+        let thread_id = ThreadIdentifier::try_from(thread_id_hex).expect("thread_id");
+
+        GqlProofBlock {
+            id: format!("synth-{thread_seed}"),
+            block_id,
+            thread_id,
+            height: thread_seed as u64,
+            envelope_hash: [0u8; 32],
+            tracked_ext_out_messages_root: [0u8; 32],
+            tracked_ext_out_messages: BTreeMap::new(),
+            history_proofs: BTreeMap::new(),
+            proof_block_refs: refs,
+            block_merkle_tree_leaves: Some(leaves),
+        }
+    }
+
+    #[test]
+    fn hop_witness_roundtrips_with_native_openings() {
+        // 3 refs: slot 0 = parent (unused for hop), slots 1, 2 = cross-thread candidates.
+        let refs = vec![[0xAAu8; 32], [0xBBu8; 32], [0xCCu8; 32]];
+        let block = synth_block(1, refs.clone());
+        let hop = build_hop_witness(&block, 2).expect("hop witness");
+
+        assert!(hop.is_active);
+        assert_eq!(hop.ref_index, 2);
+        assert_eq!(hop.hop_start_block_id_hex, hex::encode(refs[2]));
+        assert_eq!(hop.hop_end_block_id_hex, hex::encode(block.block_id));
+        // refs.len() = 3 → next_power_of_two = 4 → depth = 2.
+        assert_eq!(hop.refs_tree_depth, 2);
+        // Padded siblings beyond refs_tree_depth are zero.
+        for i in (hop.refs_tree_depth as usize)..MAX_PROOF_BLOCK_REFS_DEPTH {
+            assert_eq!(hop.proof_block_ref_inner_path_hex[i], hex::encode([0u8; 32]));
+        }
+    }
+
+    #[test]
+    fn hop_witness_rejects_ref_index_zero() {
+        let refs = vec![[0xAAu8; 32], [0xBBu8; 32]];
+        let block = synth_block(1, refs);
+        let err = build_hop_witness(&block, 0).expect_err("must reject ref_index 0");
+        assert!(err.to_string().contains("same-thread parent slot"));
+    }
+
+    #[test]
+    fn hop_witness_rejects_out_of_range_ref_index() {
+        let refs = vec![[0xAAu8; 32], [0xBBu8; 32]];
+        let block = synth_block(1, refs);
+        let err = build_hop_witness(&block, 5).expect_err("must reject overflow");
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn hop_witness_rejects_missing_block_merkle_leaves() {
+        let refs = vec![[0xAAu8; 32], [0xBBu8; 32]];
+        let mut block = synth_block(1, refs);
+        block.block_merkle_tree_leaves = None;
+        let err = build_hop_witness(&block, 1).expect_err("must reject missing leaves");
+        assert!(err.to_string().contains("missing block_merkle_tree_leaves"));
+    }
+
+    #[test]
+    fn hop_witness_detects_l7_inconsistency() {
+        // Tamper with the L7 leaf so the Poseidon opening no longer matches.
+        let refs = vec![[0xAAu8; 32], [0xBBu8; 32]];
+        let mut block = synth_block(1, refs);
+        let mut leaves = block.block_merkle_tree_leaves.unwrap();
+        leaves[7][0] ^= 0xFF;
+        // Re-derive block_id so the SHA-256 opening still verifies —
+        // this isolates the Poseidon-side failure.
+        block.block_id = block_merkle_root(&leaves);
+        block.block_merkle_tree_leaves = Some(leaves);
+        let err = build_hop_witness(&block, 1).expect_err("must reject inconsistent L7");
+        assert!(err.to_string().contains("Poseidon opening"));
+    }
 }

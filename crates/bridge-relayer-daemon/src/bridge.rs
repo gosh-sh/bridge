@@ -520,19 +520,14 @@ mod sol_bindings {
                 uint256 yBlockId;
             }
 
-            function withdrawByProof(
-                bytes calldata proof,
-                WithdrawalPublicInputs calldata pub
-            ) external returns (bool success);
-
             /// Multi-hop bundle withdrawal: `finalProof` is the Circuit 4
             /// SHPLONK proof whose 13 public inputs already commit to
             /// `xBlockId → yBlockId`; `hopProofs`/`hopPubInputs` are the
             /// per-hop BridgeMultiHopProof (2-PI: `hopStart`, `hopEnd`)
             /// snarks that chain `xBlockId` back to a known layer anchor.
             /// Same-thread events pass empty `hopProofs`/`hopPubInputs`
-            /// arrays and the contract short-circuits to the single-proof
-            /// path.
+            /// arrays; the contract accepts them when the FinalProof PIs
+            /// have `xBlockId == yBlockId`.
             function withdrawByProofBundle(
                 uint256[] calldata finalPI,
                 bytes calldata finalProof,
@@ -546,7 +541,8 @@ mod sol_bindings {
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
-            function bridgeWithdrawalVerifier() external view returns (address);
+            function bridgeWithdrawalFinalVerifier() external view returns (address);
+            function bridgeMultiHopVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
 
@@ -563,7 +559,7 @@ mod sol_bindings {
             );
         }
 
-        /// The two links between `bridgeWithdrawalVerifier` and the
+        /// The two links between `bridgeWithdrawalFinalVerifier` and the
         /// deployed Yul verifier. Declared here so the CLI can walk
         /// `adapter → shplonkVerifier() → yulVerifier()` the same way
         /// `deploy/shellnet-l2/scripts/preflight.sh:28` does: a non-zero
@@ -660,51 +656,10 @@ where
         }
     }
 
-    /// Simulate `withdrawByProof(...)` via `eth_call`.
-    pub async fn dry_run_withdraw(
-        &self,
-        proof: &alloy::primitives::Bytes,
-        pub_inputs: &WithdrawalPublicInputs,
-    ) -> Result<DryRunOutcome, RelayerError> {
-        let call = self
-            .contract
-            .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
-        match call.call().await {
-            Ok(_) => Ok(DryRunOutcome::WouldSucceed),
-            Err(e) => Ok(DryRunOutcome::WouldRevert {
-                reason: format!("{e}"),
-            }),
-        }
-    }
-
-    /// Submit Circuit 4 `withdrawByProof` to Sepolia/mainnet.
-    pub async fn submit_withdraw(
-        &self,
-        proof: &alloy::primitives::Bytes,
-        pub_inputs: &WithdrawalPublicInputs,
-    ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-        let call = self
-            .contract
-            .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
-        match call.send().await {
-            Ok(pending) => match pending.get_receipt().await {
-                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
-                    tx_hash: receipt.transaction_hash(),
-                }),
-                Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
-                    reason: format!("tx confirmation error: {e}"),
-                }),
-            },
-            Err(e) => Ok(WithdrawSubmitOutcome::Reverted {
-                reason: format!("withdrawByProof send failed: {e}"),
-            }),
-        }
-    }
-
     /// Simulate `withdrawByProofBundle(...)` via `eth_call`. `hop_proofs`
-    /// and `hop_public_inputs` must be same-length arrays, empty for
-    /// same-thread events (the contract then defaults to the single-proof
-    /// path).
+    /// and `hop_public_inputs` must be same-length arrays; pass empty
+    /// slices for same-thread events, in which case the FinalProof PIs
+    /// must have `xBlockId == yBlockId` for the contract to accept them.
     pub async fn dry_run_withdraw_bundle(
         &self,
         final_public_inputs: &WithdrawalPublicInputs,
@@ -742,10 +697,10 @@ where
         }
     }
 
-    /// Submit `withdrawByProofBundle` — the multi-hop variant of
-    /// `submit_withdraw`. Empty `hop_proofs`/`hop_public_inputs` slices
-    /// signal a same-thread event; the contract falls through to the
-    /// single-proof path in that case.
+    /// Submit Circuit 4 `withdrawByProofBundle` to Sepolia/mainnet.
+    /// Empty `hop_proofs`/`hop_public_inputs` slices signal a same-thread
+    /// event; the contract accepts them when the FinalProof PIs have
+    /// `xBlockId == yBlockId`.
     pub async fn submit_withdraw_bundle(
         &self,
         final_public_inputs: &WithdrawalPublicInputs,
@@ -856,12 +811,12 @@ where
             .map_err(map_contract_err)
     }
 
-    /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`
+    /// `IBridgeWithdrawalFinalVerifier public immutable bridgeWithdrawalFinalVerifier`
     /// (`AckiNackiBridge.sol:208`). Zero disables withdrawals entirely —
-    /// `withdrawByProof` reverts `WithdrawByProofDisabled` (`:1160`).
+    /// `withdrawByProofBundle` reverts `WithdrawByProofBundleDisabled` (`:1160`).
     pub async fn withdrawal_verifier(&self) -> Result<Address, RelayerError> {
         self.contract
-            .bridgeWithdrawalVerifier()
+            .bridgeWithdrawalFinalVerifier()
             .call()
             .await
             .map_err(map_contract_err)
@@ -1110,7 +1065,7 @@ where
     }
 }
 
-/// Outcome of [`EthBridgeClient::submit_withdraw`].
+/// Outcome of [`EthBridgeClient::submit_withdraw_bundle`].
 #[derive(Clone, Debug)]
 pub enum WithdrawSubmitOutcome {
     Paid { tx_hash: B256 },

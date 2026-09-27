@@ -77,9 +77,9 @@ pub enum Status {
     Captured,
     /// Circuit-4 proof produced (self-verified locally).
     Proved,
-    /// `withdrawByProof` broadcast — waiting on receipt.
+    /// `withdrawByProofBundle` broadcast — waiting on receipt.
     Submitted,
-    /// `withdrawByProof` receipt received, mined.
+    /// `withdrawByProofBundle` receipt received, mined.
     Confirmed,
     /// Terminal failure at some stage; needs `--allow-retry` (v1) or
     /// `--resume` (v2) to re-attempt.
@@ -106,7 +106,7 @@ enum Disposition {
     /// passes, and carries what the operator is told.
     Terminal(&'static str),
     /// `Failed`, which is resumable but not like the others: the only
-    /// production writer sets it after `withdrawByProof` reverts on an
+    /// production writer sets it after `withdrawByProofBundle` reverts on an
     /// already-broadcast burn, so a stored `an_tx_hash` means the AN burn
     /// is done.
     FailedAfterSubmit,
@@ -251,13 +251,13 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
 ///   skips `burn::compose`/`burn::send`. Wiping here would drop the hash and
 ///   cause a second `initiateWithdrawal` broadcast — a double-spend on the AN
 ///   side. The only writer of `Status::Failed` in production is the
-///   `withdrawByProof` revert path, which by construction only runs after a
+///   `withdrawByProofBundle` revert path, which by construction only runs after a
 ///   successful burn, so a `Failed` record without an `an_tx_hash` is a
 ///   manual-edit or future-writer edge case.
 /// - Prior `Status::Failed` without `an_tx_hash` → REFUSED by [`read_record`]
 ///   before this function chooses anything. There is no production writer of
 ///   that combination — `Failed` is written only by the post-burn
-///   `withdrawByProof` revert — so it is a hand-edited or corrupt record, and
+///   `withdrawByProofBundle` revert — so it is a hand-edited or corrupt record, and
 ///   the branch that used to wipe it and report a fresh reservation is gone. It
 ///   published with `rename`, which excludes nobody, while calling the result
 ///   `Created`: two runs could both wipe and both burn.
@@ -450,7 +450,7 @@ pub(crate) fn what_a_found_record_earns(prior: &Record, allow_retry: bool) -> Cl
         // re-broadcasting is a double-spend risk.
         Disposition::Terminal(remedy) => Err(terminal_refusal(prior, remedy)),
         // Failed → the only production writer sets this after
-        // `withdrawByProof` reverts on an already-broadcast burn,
+        // `withdrawByProofBundle` reverts on an already-broadcast burn,
         // so a stored `an_tx_hash` means "AN burn is already
         // done". Resume from the prior record in that case
         // so the orchestrator's resume branch (`prior_an_tx =
@@ -463,7 +463,7 @@ pub(crate) fn what_a_found_record_earns(prior: &Record, allow_retry: bool) -> Cl
         // stated grounds that "`Failed` without a hash is only ever
         // written by a pre-burn path". No such path exists — the sole
         // production writer of `Failed` is the post-burn
-        // `withdrawByProof` revert — so the branch only ever ran on a
+        // `withdrawByProofBundle` revert — so the branch only ever ran on a
         // hand-edited or corrupt record, and it answered by writing a
         // fresh record with `rename` and reporting `Created`.
         //
@@ -530,7 +530,7 @@ pub(crate) fn what_a_found_record_earns(prior: &Record, allow_retry: bool) -> Cl
 /// The right exit code depends on a fact the author has to supply and
 /// cannot be trusted to remember: whether anything has already gone on the
 /// wire. Exit 2 is published as "refused before sending, nothing left the
-/// machine"; after a burn — let alone after `withdrawByProof` has paid out
+/// machine"; after a burn — let alone after `withdrawByProofBundle` has paid out
 /// — that is a false statement to an operator and to every script matching
 /// on the contract. Four call sites drifted into `?` exactly because the
 /// compiler had no opinion. Now it does: pick [`Self::before_send`] or
@@ -1752,7 +1752,7 @@ fn read_record(path: &Path) -> CliResult<Record> {
     //    that says a burn already happened.
     //
     // `Failed` belongs in this list and was missing from it. Its ONLY
-    // production writer is the `withdrawByProof` revert path
+    // production writer is the `withdrawByProofBundle` revert path
     // (`orchestrator.rs`), which by construction runs after a successful
     // burn — so a `Failed` record without a hash is exactly as impossible
     // as a `Burned` one, and exactly as hand-editable. Leaving it out is
@@ -3154,7 +3154,7 @@ mod tests {
         // `reserve`'s arm and against the resume path, which asks by
         // status after restoring a record deleted mid-preflight. Drift
         // there is a paid-out withdrawal carried through a second
-        // `withdrawByProof`.
+        // `withdrawByProofBundle`.
         //
         // The expectation is written out rather than read from
         // production, so changing `disposition` fails here instead of
@@ -3488,7 +3488,7 @@ mod tests {
         //
         // The justification in the comment ("only ever written by a
         // pre-burn path") described a writer that does not exist: the sole
-        // production writer of `Failed` is the post-burn `withdrawByProof`
+        // production writer of `Failed` is the post-burn `withdrawByProofBundle`
         // revert. So the record is a hand-edit, and `read_record` now
         // refuses it with the same message as `burned`-with-no-hash.
         let dir = TempDir::new().unwrap();
@@ -3564,7 +3564,7 @@ mod tests {
     fn reserve_over_failed_with_an_tx_hash_preserves_prior_record() {
         // Regression (Sergey review 2026-09-01, "Failed still burns ECC a
         // second time"): the sole production writer of Status::Failed is
-        // the withdrawByProof-revert arm of the orchestrator, which only
+        // the withdrawByProofBundle-revert arm of the orchestrator, which only
         // fires after a successful AN burn. If reserve_rec() wiped the
         // record on Failed, the stored `an_tx_hash` would be dropped and
         // the orchestrator's Some(existing) resume branch would miss —
@@ -3641,7 +3641,7 @@ mod tests {
 
         // Exit 2 is published as "refused before sending, nothing left the
         // machine". Four call sites reached it with `?` after the burn — two
-        // of them after withdrawByProof had already paid out — because
+        // of them after withdrawByProofBundle had already paid out — because
         // `update` returned a plain `CliError` and the compiler had no
         // opinion. `UpdateFailed` has no `From<..> for CliError`, so `?` no
         // longer compiles and the code must be chosen; these assert that

@@ -1,7 +1,7 @@
 # Prover throughput vs shellnet chain speed — user wait analysis
 
 Reduced summary of the daemon-vs-chain rate analysis. Answers: **how long
-must a user wait for `withdrawByProof` to succeed after firing a burn, as
+must a user wait for `withdrawByProofBundle` to succeed after firing a burn, as
 a function of daemon uptime T?**
 
 ## Constants (hard)
@@ -62,7 +62,7 @@ Solving `W(T) ≤ 3 h`:
 ## Empirical cross-check
 
 Deploy #11 run today: daemon cold-started, burn fired ~10 min in, covering
-bundle 4 landed at ~65 min, withdrawByProof mined ~73 min from cold start.
+bundle 4 landed at ~65 min, withdrawByProofBundle mined ~73 min from cold start.
 Model predicts `W(0.17 h) ≈ 26 min` for the gap-close portion + 12 min
 τ = ~38 min for the *covering* bundle only, but bundles 1–3 must land
 first because storedLastSeenBlockSeqNo advances strictly. Serialized

@@ -146,25 +146,34 @@ The contract:
 
 1. **`verifyBlock`** — accepts a (Circuit 1A/1B + Circuit 2) bundle per thinned key block; verifies each proof; cross-checks shared `block_id` and `bk_set_poseidon_hash`; calls `appendLayer(L, root, blockHeight)` for each layer the bundle publishes; advances `storedLastSeenBlockSeqNo` and `storedLastSeenBlockHeight`. BK-set rotations are applied separately via `applyBkSetUpdate(L2, L3, …)`, which the verifier daemon (and eventually the contract) calls with the two open SHA-256 siblings against an already-verified `block_id` — `storedBkSetCommitment` is rolled forward there, not in `verifyBlock`.
 
-2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 11 public-instance Frs. The contract verifies the SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan. On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
+2. **`withdrawByProofBundle`** — accepts a bundle of Circuit 4 proofs: one `BridgeEventFinalProof` for the event, whose 13 public-instance Frs end in `xBlockId`/`yBlockId` (the two cross-thread endpoints), plus zero or more `BridgeMultiHopProof` hops (2 public-instance Frs each: `hopStartBlockId`, `hopEndBlockId`) that walk the chain between them. Same-thread bundles must have empty hop chains and `xBlockId == yBlockId`, or the call reverts `SameThreadEndpointsMismatch` / `SameThreadRequiresEmptyHopChain`; cross-thread bundles must chain head-to-head and tail-to-tail (`HopChainHeadMismatch`, `HopChainTailMismatch`, `AdjacentHopBlockIdMismatch`). The contract verifies every SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan. On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
 
    ```solidity
-   function withdrawByProof(bytes calldata proof4, uint256[11] calldata pub4) external {
-       require(verifier.verify(vk4, proof4, pub4), "proof");
-       uint8 anchorLayer = uint8(pub4[10]);
+   function withdrawByProofBundle(
+       uint256[] calldata finalPublicInputs,   // 13 slots
+       bytes calldata finalProof,
+       uint256[][] calldata hopPublicInputs,   // 2 slots per hop
+       bytes[] calldata hopProofs
+   ) external {
+       require(bridgeWithdrawalFinalVerifier.verifyWithdrawalFinal(finalProof, finalPublicInputs), "final");
+       for (uint256 i = 0; i < hopProofs.length; i++) {
+           require(bridgeMultiHopVerifier.verifyMultiHop(hopProofs[i], hopPublicInputs[i]), "hop");
+       }
+       // …enforce bundle adjacency (xBlockId/yBlockId against hop chain endpoints)
+       uint8 anchorLayer = uint8(finalPublicInputs[10]);
        require(anchorLayer != 0 && anchorLayer <= MAX_LAYER_HASHES, "anchorLayer");
-       bytes32 finalRoot = bytes32(pub4[9]);
+       bytes32 finalRoot = bytes32(finalPublicInputs[9]);
        HistoryWindow storage w = layerWindows[anchorLayer];
        bool found = false;
        for (uint256 i = 0; i < w.dataLen; i++) {
            if (w.data[i] == finalRoot) { found = true; break; }
        }
        require(found, "anchor not in layerWindows");
-       // …consume nullifier pub4[8], pay out, emit
+       // …consume nullifier finalPublicInputs[8], pay out, emit
    }
    ```
 
-   The off-chain prover computes `final_root` directly from its dense-chain climb, and the contract spends an O(MAX_LAYERS·W) loop to recognise it against the layer-hash windows it already maintains. The off-chain verifier daemon performs the same membership check before approving the proof.
+   The off-chain prover computes `final_root` directly from its dense-chain climb, and the contract spends an O(MAX_LAYERS·W) loop to recognise it against the layer-hash windows it already maintains. The off-chain verifier daemon performs the same membership check before approving the bundle.
 
 ### State (per thread)
 

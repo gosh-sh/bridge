@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live shellnet smoke test for `ackinacki-bridge withdraw` — REAL submit.
 #
-# Broadcasts the AN burn AND the EVM `withdrawByProof`. Only use on
+# Broadcasts the AN burn AND the EVM `withdrawByProofBundle`. Only use on
 # shellnet or a testnet where the value is disposable.
 #
 # HOW IT WORKS
@@ -71,7 +71,7 @@ LOG="$LOG_DIR/withdraw_smoke_live_${TS}.log"
 echo "==> LIVE submit  BRIDGE_CONFIG=$BRIDGE_CONFIG"
 echo "    from=$WITHDRAW_FROM to=$WITHDRAW_TO amount=$WITHDRAW_AMOUNT chain=$WITHDRAW_TO_CHAIN"
 echo "    snark_dir=$BRIDGE_SNARK_DIR  log=$LOG"
-echo "    (this WILL broadcast an AN burn and an EVM withdrawByProof tx)"
+echo "    (this WILL broadcast an AN burn and an EVM withdrawByProofBundle tx)"
 # Extra arguments are forwarded to the CLI. They used to be dropped in
 # silence, which is worse than refusing them: `live_smoke.sh
 # --allow-retry` printed the same banner, ran WITHOUT the flag, and

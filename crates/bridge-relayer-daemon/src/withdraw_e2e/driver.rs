@@ -9,7 +9,7 @@
 //!
 //! ETH-side submission is left to the caller: the CLI subcommand takes
 //! the returned [`WithdrawE2ESummary`], parses the proof bytes, and
-//! drives `EthBridgeClient::submit_withdraw` itself. Keeping the ETH
+//! drives `EthBridgeClient::submit_withdraw_bundle` itself. Keeping the ETH
 //! wallet / provider out of this module simplifies embedding into
 //! non-CLI callers (tests, higher-level loops) that don't have or want
 //! a signing key.
@@ -18,8 +18,9 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use bridge_event_witness::{
-    enrich_witness, export_from_event_boc_base64, AnchorLayerMode, BlockContextInput,
-    EnrichSummary, EnrichedWitness,
+    enrich::resolve_cross_thread_chain, enrich_witness, export_from_event_boc_base64,
+    schema::MultiHopBundleWitnessJson, AnchorLayerMode, BlockContextInput, EnrichSummary,
+    EnrichedWitness,
 };
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::bridge_state::BridgeState;
@@ -28,8 +29,8 @@ use tracing::info;
 use super::capture::{capture_next_withdrawal_event, snapshot_baseline_msg_ids, CapturedEvent};
 use crate::{
     aggregator::{
-        Circuit4ShplonkPipeline, InProcessCircuit4SnarkProver, SubprocessAggregator,
-        SubprocessAggregatorConfig,
+        sibling_hops_path, Circuit4ShplonkPipeline, InProcessCircuit4SnarkProver,
+        SubprocessAggregator, SubprocessAggregatorConfig,
     },
     withdrawal::PartnerWithdrawalProof,
 };
@@ -107,15 +108,40 @@ pub struct WithdrawE2EConfig {
     pub replay_latest: bool,
 }
 
+/// Single per-hop `BridgeMultiHopProof` blob + its two clear-byte public
+/// instances (`hopStartBlockId`, `hopEndBlockId`). Populated only for
+/// cross-thread events; same-thread claims return an empty `hop_blobs`
+/// vector on the summary.
+#[derive(Debug, Clone)]
+pub struct HopBlob {
+    /// Raw `BridgeMultiHopProof` proof bytes, lowercase hex.
+    pub proof_hex: String,
+    /// Two per-snark public instances (`hopStartBlockId`, `hopEndBlockId`),
+    /// each 32-byte LE Fr repr, lowercase hex.
+    pub public_instances_hex: Vec<String>,
+}
+
 /// Everything `run_once` produced, in one bundle. The CLI logs the
 /// summary + captured event, then converts `proof` into ETH calldata via
 /// `PartnerWithdrawalProof::proof_bytes()` / `public_inputs()`.
+///
+/// `hop_blobs` is empty for same-thread events; non-empty entries carry
+/// the ordered `BridgeMultiHopProof` snarks the on-chain
+/// `withdrawByProofBundle` path consumes alongside the outer Circuit 4
+/// SHPLONK calldata.
 #[derive(Debug, Clone)]
 pub struct WithdrawE2ESummary {
     pub captured: CapturedEvent,
     pub enrich: EnrichSummary,
     pub witness_path: PathBuf,
     pub proof: PartnerWithdrawalProof,
+    /// Ordered per-hop `BridgeMultiHopProof` blobs. Empty for same-thread
+    /// claims — the on-chain `withdrawByProofBundle` path accepts an empty
+    /// hop array when the FinalProof PIs have `xBlockId == yBlockId`.
+    pub hop_blobs: Vec<HopBlob>,
+    /// Absolute path to the sibling `_hops.json` (`MultiHopBundleWitnessJson`)
+    /// the driver wrote when hops were resolved. `None` for same-thread claims.
+    pub hops_path: Option<PathBuf>,
 }
 
 /// File-based entrypoint. Loads `BridgeState` from `cfg.prover_state_path`
@@ -209,7 +235,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     };
     log_enriched_summary(&enriched);
 
-    prove_and_finalize(&cfg, captured, enriched).await
+    prove_and_finalize(&cfg, &gql, captured, enriched).await
 }
 
 /// State-in-memory entrypoint. Skips the file load, skips the capture
@@ -262,7 +288,7 @@ pub async fn run_once_with_state(
     .context("enrich_witness failed (caller-provided state did not cover the target burn)")?;
     log_enriched_summary(&enriched);
 
-    prove_and_finalize(&cfg, captured, enriched).await
+    prove_and_finalize(&cfg, &gql, captured, enriched).await
 }
 
 async fn capture_stage(gql: &GqlClient, cfg: &WithdrawE2EConfig) -> Result<CapturedEvent> {
@@ -322,6 +348,7 @@ fn log_enriched_summary(enriched: &EnrichedWitness) {
 
 async fn prove_and_finalize(
     cfg: &WithdrawE2EConfig,
+    gql: &GqlClient,
     captured: CapturedEvent,
     enriched: EnrichedWitness,
 ) -> Result<WithdrawE2ESummary> {
@@ -333,6 +360,35 @@ async fn prove_and_finalize(
     serde_json::to_writer_pretty(file, &enriched.witness)
         .context("serialize PrivateWitness to JSON")?;
     info!("wrote enriched witness: {}", witness_path.display());
+
+    // Cross-thread walker: resolve the L7 chain back to the default
+    // thread. Same-thread events return `snarks = []` and skip both the
+    // sibling `_hops.json` write and the hop prover leg entirely.
+    let event_seq = enriched.witness.block_seq_no;
+    let hop_bundle: MultiHopBundleWitnessJson = resolve_cross_thread_chain(gql, event_seq)
+        .await
+        .with_context(|| {
+            format!("resolve_cross_thread_chain for event block seq={event_seq} failed")
+        })?;
+    let (hops_path, hop_blobs) = if hop_bundle.snarks.is_empty() {
+        info!("resolve_cross_thread_chain: same-thread claim (empty bundle)");
+        (None, Vec::<HopBlob>::new())
+    } else {
+        // Persist the bundle next to the witness — `InProcessCircuit4SnarkProver`
+        // reads it automatically to bind the final proof's `y_block_id`.
+        let hops_path = sibling_hops_path(&witness_path);
+        let hops_file = std::fs::File::create(&hops_path)
+            .with_context(|| format!("create hops file {}", hops_path.display()))?;
+        serde_json::to_writer_pretty(hops_file, &hop_bundle)
+            .context("serialize MultiHopBundleWitnessJson to JSON")?;
+        info!(
+            snarks = hop_bundle.snarks.len(),
+            path = %hops_path.display(),
+            "wrote cross-thread hop bundle",
+        );
+        let blobs = prove_hop_snarks(cfg, &hop_bundle).await?;
+        (Some(hops_path), blobs)
+    };
 
     // Compose the SHPLONK pipeline the on-chain
     // `BridgeWithdrawalAggregatorVerifier` accepts:
@@ -386,20 +442,31 @@ async fn prove_and_finalize(
         // (each entry: `{proof_hex, public_instances_hex}`, 2 PIs =
         // `hopStart`/`hopEnd`). Consumed by `withdrawByProofBundle` on
         // the EVM side; empty array signals a same-thread event, which
-        // the contract short-circuits to the single-proof path. The
-        // `Circuit4ShplonkPipeline` currently produces only the outer
-        // Circuit 4 SHPLONK proof — hops are populated by the
-        // cross-thread live prover once wired.
+        // the contract accepts when the FinalProof PIs have
+        // `xBlockId == yBlockId`.
+        let hops_hex_json: Vec<serde_json::Value> = hop_blobs
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "proof_hex": h.proof_hex,
+                    "public_instances_hex": h.public_instances_hex,
+                })
+            })
+            .collect();
         let json = serde_json::json!({
             "seq_no": proof.seq_no,
             "proof_hex": proof.proof_hex,
             "public_instances_hex": proof.public_instances_hex,
             "self_verified": proof.self_verified,
-            "hops_hex": Vec::<serde_json::Value>::new(),
+            "hops_hex": hops_hex_json,
         });
         std::fs::write(&out_path, serde_json::to_vec_pretty(&json)?)
             .with_context(|| format!("write {}", out_path.display()))?;
-        info!(out = %out_path.display(), "persisted proof_event JSON");
+        info!(
+            out = %out_path.display(),
+            hops = hop_blobs.len(),
+            "persisted proof_event JSON",
+        );
     }
 
     Ok(WithdrawE2ESummary {
@@ -407,7 +474,58 @@ async fn prove_and_finalize(
         enrich: enriched.summary,
         witness_path,
         proof,
+        hop_blobs,
+        hops_path,
     })
+}
+
+/// Prove every snark in `hop_bundle` with the multi-hop key manager,
+/// returning ordered `HopBlob`s ready for on-chain submission. Runs the
+/// Halo2 prover inside `spawn_blocking` — it is CPU-bound at K=17 and
+/// would otherwise starve the async runtime.
+async fn prove_hop_snarks(
+    cfg: &WithdrawE2EConfig,
+    hop_bundle: &MultiHopBundleWitnessJson,
+) -> Result<Vec<HopBlob>> {
+    use bridge_event_prover_lib::generate_multi_hop_proof;
+    use bridge_prover_lib::keys::MultiHopKeyManager;
+    use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+
+    let params_dir = cfg.params_dir.clone();
+    let bundle = hop_bundle.clone();
+
+    let blobs = tokio::task::spawn_blocking(move || -> Result<Vec<HopBlob>> {
+        let mut mhkm = MultiHopKeyManager::new(&params_dir);
+        mhkm.ensure_keys().context("ensure_multi_hop_keys failed")?;
+        mhkm.load_pk().context("load_multi_hop_pk failed")?;
+
+        let t0 = std::time::Instant::now();
+        let mut out = Vec::with_capacity(bundle.snarks.len());
+        for (i, snark) in bundle.snarks.iter().enumerate() {
+            let mh = generate_multi_hop_proof(&mhkm, snark)
+                .with_context(|| format!("BridgeMultiHopProof for snark #{i} failed"))?;
+            let public_instances_hex: Vec<String> = mh
+                .public_instances
+                .iter()
+                .map(|fr| hex::encode(fr.to_repr()))
+                .collect();
+            out.push(HopBlob {
+                proof_hex: hex::encode(&mh.proof_bytes),
+                public_instances_hex,
+            });
+        }
+        mhkm.unload_pk();
+        info!(
+            "generated {} BridgeMultiHopProof snark(s) in {} ms",
+            out.len(),
+            t0.elapsed().as_millis(),
+        );
+        Ok(out)
+    })
+    .await
+    .context("prove_hop_snarks blocking task join failed")??;
+
+    Ok(blobs)
 }
 
 /// Decode a 32-byte hex string (optional `0x` prefix) into `[u8; 32]`.

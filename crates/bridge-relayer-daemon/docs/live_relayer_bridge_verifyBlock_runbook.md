@@ -34,8 +34,12 @@ Live BK set (5 signers, fixed from genesis) is committed at
 - SHA-256 of `bk_set.shellnet.json` (tamper-detection):
   `c77e3d6de5e6ea8ee96c6902f1b6ecb011bba2d631e76fa546e44ee67173898f`
 
-Event-level withdrawal proofs (Circuit 4 / `withdrawByProof`) are **out of scope** — that path is
-covered in [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
+Event-level withdrawal proofs (Circuit 4 FinalProof + optional MultiHop
+hops, submitted through `withdrawByProofBundle`) are **out of scope** —
+that path is covered in
+[`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
+The file keeps its `withdrawByProof` name for git-history continuity;
+the on-chain entry-point is `withdrawByProofBundle`.
 
 > **Notation.** `seq_no` is the Acki Nacki block sequence number.
 > A **key block** is a block at height `seq_no`, where `seq_no % W == 0` (producer-side,
@@ -62,7 +66,7 @@ system viable:
   therefore how often a user can withdraw.
   - `L1` (stride `W·P = 1024`, ~5 min shellnet-time) — every bundle is
     an anchor. Convenient for one-fire-and-withdraw E2E tests and CI:
-    a user's `withdrawByProof` becomes provable faster within one bundle cycle.
+    a user's `withdrawByProofBundle` becomes provable faster within one bundle cycle.
     Used for all dev/iteration work here. About 30-50 minutes per test.
   - `L2` (stride `W² = 16384`, ~91 min shellnet-time) — the production
     variant. Thinning does **not** apply here: the daemon proves one
@@ -72,7 +76,7 @@ system viable:
     withdrawal to become provable — a *constant* cadence — in exchange
     for far fewer on-chain writes and lower gas.
 
-Operational impact on `withdrawByProof` is detailed in
+Operational impact on `withdrawByProofBundle` is detailed in
 [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
 
 > **Runtime layout.** For a long-running L2 server, use the production

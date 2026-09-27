@@ -7,7 +7,6 @@ import "./IERC20.sol";
 import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
-import "./IBridgeWithdrawalVerifier.sol";
 import "./IBridgeWithdrawalFinalVerifier.sol";
 import "./IBridgeMultiHopVerifier.sol";
 
@@ -32,15 +31,17 @@ import "./IBridgeMultiHopVerifier.sol";
 ///      AN→ETH event verification + payout (withdraw):
 ///      every successful `verifyBlock` appends the new top-of-chain anchor
 ///      to the per-layer rolling windows (`_layerWindows`).
-///      `withdrawByProof` consumes those windows plus a Circuit 4
-///      (`bridge-event-prove-circuit`) SHPLONK aggregator proof whose
-///      11 public inputs include `finalRoot` and `anchorLayer`. The bridge
-///      calls `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit
-///      (this contract) — the circuit only proves that the event's hash
-///      chain extends *into* `finalRoot` via a dense-chain extension and
-///      range-checks `anchorLayer` into `1..=MAX_LAYER_HASHES`. The proof
-///      binds the payout's `amount` and `recipient` (split-α 10/10 bytes)
-///      along with the AN-side bridge identity `(bridgeWithdrawalDappFr,
+///      `withdrawByProofBundle` consumes those windows plus a
+///      `BridgeEventFinalProof` SHPLONK aggregator proof (13 public inputs
+///      including `finalRoot`, `anchorLayer`, `xBlockId`, `yBlockId`) and
+///      zero or more `BridgeMultiHopProof` snarks (2 public inputs each)
+///      that chain `xBlockId → yBlockId` across threads. The bridge calls
+///      `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit — the
+///      circuit only proves that the event's hash chain extends *into*
+///      `finalRoot` via a dense-chain extension and range-checks
+///      `anchorLayer` into `1..=MAX_LAYER_HASHES`. The proof binds the
+///      payout's `amount` and `recipient` (split-α 10/10 bytes) along with
+///      the AN-side bridge identity `(bridgeWithdrawalDappFr,
 ///      bridgeWithdrawalAccFr)` and a Poseidon nullifier for replay
 ///      protection.
 contract AckiNackiBridge {
@@ -70,21 +71,21 @@ contract AckiNackiBridge {
     /// @dev WD-Q1: each successful `verifyBlock` appends one hash per
     ///      active layer. The oldest hash in that layer is evicted after 128
     ///      subsequent appends — this is a count of `verifyBlock` calls, not a
-    ///      `blockSeqNo` span. A `withdrawByProof` whose `finalRoot` has been
-    ///      evicted reverts `UnknownAnchor`; funds stay in the treasury.
-    ///      The bridge is a stateless verifier and does not retry on anyone's
-    ///      behalf: the withdrawing user is responsible for re-proving
-    ///      Circuit 4 against a still-in-window descendant (dense chain
-    ///      ≤ 11 rungs) before their anchor is evicted. Any relayer is
-    ///      best-effort convenience infrastructure, not a privileged or
-    ///      obligated actor. Fast-forward of `blockSeqNo` does **not** skip
-    ///      extra slots — one call still writes one slot.
+    ///      `blockSeqNo` span. A `withdrawByProofBundle` whose `finalRoot`
+    ///      has been evicted reverts `UnknownAnchor`; funds stay in the
+    ///      treasury. The bridge is a stateless verifier and does not retry
+    ///      on anyone's behalf: the withdrawing user is responsible for
+    ///      re-proving the FinalProof against a still-in-window descendant
+    ///      (dense chain ≤ 11 rungs) before their anchor is evicted. Any
+    ///      relayer is best-effort convenience infrastructure, not a
+    ///      privileged or obligated actor. Fast-forward of `blockSeqNo`
+    ///      does **not** skip extra slots — one call still writes one slot.
     uint256 public constant HISTORY_PROOF_WINDOW = 128;
 
     /// @notice Maximum number of `BridgeMultiHopProof` snarks per
     ///         `withdrawByProofBundle` call. Mirrors
     ///         `bridge_event_prove_circuit::multi_hop_witness::N_BUNDLE_MAX`
-    ///         (prototype `L_MAX = 20`, `H_HOPS_PER_PROOF = 1` → 20).
+    ///         (`L_MAX = 20`, `H_HOPS_PER_PROOF = 1` → 20).
     uint256 public constant N_BUNDLE_MAX = 20;
 
     /// @notice BN254 scalar field order — the modulus every circuit public
@@ -224,16 +225,6 @@ contract AckiNackiBridge {
     // Storage: Circuit 4 (Bridge Withdrawal) — AN→ETH payout
     // ---------------------------------------------------------------------
 
-    /// @notice Circuit 4 verifier, consumed through the
-    ///         `IBridgeWithdrawalVerifier` interface (11-input
-    ///         layout — slot 10 is `anchorLayer`, 1-indexed and range-checked
-    ///         in-circuit to `1..=MAX_LAYER_HASHES`; production backend:
-    ///         Halo2 SHPLONK aggregator adapter).
-    ///         May be `address(0)` if AN→ETH payout verification is
-    ///         disabled at deployment; in that case `withdrawByProof` reverts
-    ///         with `WithdrawByProofDisabled`. Independent of `verifyBlock`.
-    IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier;
-
     /// @notice Fr-encoded AN-side bridge dApp identifier. Set at construction
     ///         and immutable. The Circuit 4 proof binds to a specific
     ///         `(dappFr, accFr)` pair via its public inputs — pinning these
@@ -255,15 +246,17 @@ contract AckiNackiBridge {
     /// @notice See `BridgeWithdrawConfig.altTokenId`.
     uint256 public immutable bridgeWithdrawalAltTokenId;
 
-    /// @notice Multi-thread FinalProof (13-instance) verifier used by
-    ///         `withdrawByProofBundle`. `address(0)` disables the bundle
+    /// @notice `BridgeEventFinalProof` (13-instance) verifier used by
+    ///         `withdrawByProofBundle`. `address(0)` disables the withdraw
     ///         entry-point (it reverts with `WithdrawByProofBundleDisabled`).
-    ///         Independent of the legacy 11-instance `bridgeWithdrawalVerifier`
-    ///         which continues to serve `withdrawByProof`.
+    ///         Slot layout: `[0..10]` mirrors the FinalProof `WithdrawalFinal-
+    ///         PublicInputs` field order, `[11] = xBlockId`, `[12] = yBlockId`;
+    ///         range checks match the legacy 11-slot layout for
+    ///         `anchorLayer` (1-indexed, `1..=MAX_LAYER_HASHES`).
     IBridgeWithdrawalFinalVerifier public immutable bridgeWithdrawalFinalVerifier;
 
     /// @notice `BridgeMultiHopProof` (2-instance) verifier for the L7
-    ///         cross-thread hop chain. `address(0)` disables the bundle
+    ///         cross-thread hop chain. `address(0)` disables the withdraw
     ///         entry-point (same-thread `hopPublicInputs.length == 0`
     ///         bundles also require it to be set — an intentional coupling
     ///         so bundle acceptance is all-or-nothing).
@@ -285,8 +278,8 @@ contract AckiNackiBridge {
     mapping(bytes32 => bool) private _nullifiers;
 
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
-    ///         Each `withdrawByProof` checks `finalRoot` against the window
-    ///         named by Circuit 4's `anchorLayer` public input.
+    ///         Each `withdrawByProofBundle` checks `finalRoot` against the
+    ///         window named by the FinalProof's `anchorLayer` public input.
     struct HistoryWindow {
         uint256[HISTORY_PROOF_WINDOW] data;
         /// @dev No longer written. `lastHeight` is the on-chain
@@ -358,11 +351,11 @@ contract AckiNackiBridge {
         uint256 indexed oldCommitment, uint256 indexed newCommitment, uint64 indexed blockSeqNo
     );
 
-    /// @notice Emitted on every successful `withdrawByProof` call (Circuit 4),
-    ///         A verified ZK proof releases
+    /// @notice Emitted on every successful `withdrawByProofBundle` call.
+    ///         A verified FinalProof + hop-chain releases
     ///         `amount` USDC to `recipient` exactly once (replay-protected by
     ///         `nullifier`).
-    /// @param nullifier The Poseidon-derived nullifier from public input slot [8];
+    /// @param nullifier The Poseidon-derived nullifier from FinalProof PI slot [8];
     ///        also the key in the `_nullifiers` mapping.
     /// @param recipient The 20-byte EVM address reconstructed from
     ///        `(recipientHi, recipientLo)`.
@@ -370,8 +363,9 @@ contract AckiNackiBridge {
     /// @param tokenId Token id from the event body (only `tokenId == 0` =
     ///        bridged USDC is currently supported; non-zero reserved for
     ///        multi-token wiring in a future milestone).
-    /// @param submitter `msg.sender` of the `withdrawByProof` call (typically
-    ///        a relayer; the payout goes to `recipient`, not `submitter`).
+    /// @param submitter `msg.sender` of the `withdrawByProofBundle` call
+    ///        (typically a relayer; the payout goes to `recipient`, not
+    ///        `submitter`).
     event WithdrawalByProofExecuted(
         uint256 indexed nullifier,
         address indexed recipient,
@@ -395,9 +389,10 @@ contract AckiNackiBridge {
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
     error InsufficientTreasury();
-    /// @notice Zero EVM payout address. `withdrawByProof` rejects a reconstructed
-    ///         `address(0)` before verify (WD-Q2). Do not remove — AN
-    ///         `initiateWithdrawal` also rejects empty recipient (QC-AN-10).
+    /// @notice Zero EVM payout address. `withdrawByProofBundle` rejects a
+    ///         reconstructed `address(0)` before verify (WD-Q2). Do not
+    ///         remove — AN `initiateWithdrawal` also rejects empty
+    ///         recipient (QC-AN-10).
     error InvalidRecipient();
     error InvalidOracle();
     error InvalidAaveAddress();
@@ -465,7 +460,6 @@ contract AckiNackiBridge {
     // withdrawByProofBundle (BridgeEventFinalProof + BridgeMultiHopProof) errors
     error WithdrawByProofBundleDisabled();
     error PartialBundleWiring();
-    error BundleRequiresLegacyWithdrawal();
     error HopBundleLengthOverflow(uint256 got, uint256 max);
     error HopPublicInputsHopProofsLengthMismatch(uint256 hopPublicInputs, uint256 hopProofs);
     error FinalPublicInputsBadLength(uint256 got, uint256 expected);
@@ -477,8 +471,6 @@ contract AckiNackiBridge {
     error AdjacentHopBlockIdMismatch(uint256 at);
     error MultiHopProofRejected(uint256 at);
 
-    // withdrawByProof (Circuit 4) errors
-    error WithdrawByProofDisabled();
     error WithdrawalProofRejected();
     error NullifierAlreadyUsed(uint256 nullifier);
     /// @notice A public input used as a mapping/window key is not a canonical
@@ -506,11 +498,11 @@ contract AckiNackiBridge {
     ///         Non-zero token ids are reserved for multi-token wiring in a
     ///         future milestone.
     error UnsupportedTokenId(uint256 tokenId);
-    /// @notice Circuit 4 withdraw is wired but the verifyBlock triple is
+    /// @notice Bundle withdraw is wired but the verifyBlock triple is
     ///         not. Without `verifyBlock`, no anchors ever land and every
-    ///         `withdrawByProof` reverts `UnknownAnchor` — a silently dead
-    ///         payout path. Wire all three attestation/layer verifiers, or
-    ///         disable withdraw too.
+    ///         `withdrawByProofBundle` reverts `UnknownAnchor` — a
+    ///         silently dead payout path. Wire all three attestation/layer
+    ///         verifiers, or disable withdraw too.
     error WithdrawRequiresVerifyBlock();
     /// @notice verifyBlock is all-or-nothing. Partial wiring (1 or 2 of
     ///         the three verifier addresses set) is rejected at construction.
@@ -571,20 +563,21 @@ contract AckiNackiBridge {
         uint64 genesisLastSeenBlockSeqNo;
     }
 
-    /// @notice Argument bundle for the AN→ETH Circuit 4
-    ///         wiring. verifyBlock-only deployments are legal; withdraw-only
-    ///         is not (see `WithdrawRequiresVerifyBlock`).
-    /// @dev Passing `bridgeWithdrawalVerifier == address(0)` disables
-    ///      `withdrawByProof` (it reverts with `WithdrawByProofDisabled`).
-    ///      When enabled, `accFr` must be non-zero and the verifyBlock triple
-    ///      must be fully wired so anchors can land.
+    /// @notice Argument bundle for the AN→ETH withdraw wiring.
+    ///         verifyBlock-only deployments are legal; withdraw-only is not
+    ///         (see `WithdrawRequiresVerifyBlock`).
+    /// @dev Passing both `withdrawalFinalVerifier == address(0)` and
+    ///      `multiHopVerifier == address(0)` disables `withdrawByProofBundle`
+    ///      (it reverts with `WithdrawByProofBundleDisabled`). When enabled,
+    ///      both verifier addresses must be non-zero, `accFr` must be
+    ///      non-zero, and the verifyBlock triple must be fully wired so
+    ///      anchors can land.
     struct BridgeWithdrawConfig {
-        IBridgeWithdrawalVerifier bridgeWithdrawalVerifier;
         /// @notice Fr-encoded AN-side bridge dApp identifier. May be zero on
         ///         shellnet (zero `dapp_id` deployments) when `accFr` is set.
         uint256 dappFr;
         /// @notice Fr-encoded AN-side bridge account identifier. Must be
-        ///         non-zero when `bridgeWithdrawalVerifier` is non-zero.
+        ///         non-zero when the withdraw verifiers are wired.
         uint256 accFr;
         /// @notice Optional shellnet/testnet alias for `pub.dstChainId` when
         ///         the AN orchestrator uses a logical id (e.g. `1`) distinct
@@ -603,7 +596,7 @@ contract AckiNackiBridge {
         ///         (see `DeployRealBridge`); not enforced here because
         ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
         uint256 altTokenId;
-        /// @notice Multi-thread FinalProof (13-instance) verifier. Zero
+        /// @notice `BridgeEventFinalProof` (13-instance) verifier. Zero
         ///         disables `withdrawByProofBundle`. When non-zero,
         ///         `multiHopVerifier` must also be non-zero — bundle
         ///         acceptance is wired all-or-nothing.
@@ -626,14 +619,15 @@ contract AckiNackiBridge {
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
     ///                            zeros to disable the AN→ETH path; the deposit/
     ///                            AAVE surface stays fully functional.
-    /// @param _bw                 Circuit 4 wiring. Zero-init every field to
-    ///                            disable the withdraw-by-proof surface. When
-    ///                            `bridgeWithdrawalVerifier` is non-zero both
-    ///                            `dappFr` and `accFr` must be non-zero;
-    ///                            `withdrawalFinalVerifier` and `multiHopVerifier`
-    ///                            must be set together (both non-zero or both
-    ///                            zero) and, when non-zero, require the legacy
-    ///                            `bridgeWithdrawalVerifier` to be set too.
+    /// @param _bw                 Bundle-withdraw wiring. Zero-init every
+    ///                            field to disable the withdraw-by-proof
+    ///                            surface. `withdrawalFinalVerifier` and
+    ///                            `multiHopVerifier` must be set together
+    ///                            (both non-zero or both zero); when
+    ///                            non-zero, `dappFr` (may be zero on shellnet
+    ///                            when `accFr` is set) and `accFr` (non-zero)
+    ///                            configure the AN-side identity the
+    ///                            FinalProof binds to.
     /// @dev Pass address(0) for `_aavePool`/`_aUSDC` to disable AAVE.
     ///      `_usdc` must always be non-zero — deposits pull USDC via `transferFrom`.
     constructor(
@@ -664,29 +658,23 @@ contract AckiNackiBridge {
             bool f = address(_vb.fallbackVerifier) != address(0);
             bool l = address(_vb.layerHashesVerifier) != address(0);
             if ((p || f || l) && !(p && f && l)) revert PartialVerifyBlockWiring();
-            if (address(_bw.bridgeWithdrawalVerifier) != address(0)) {
-                if (_bw.accFr == 0) revert InvalidBridgeWithdrawalIdentity();
-                if (!(p && f && l)) revert WithdrawRequiresVerifyBlock();
-                // Identity slots are compared raw against Yul-reduced
-                // instances. A non-canonical value makes every withdrawal
-                // revert permanently — same invariant as the genesis anchors.
-                _requireCanonicalFr(_bw.dappFr);
-                _requireCanonicalFr(_bw.accFr);
-                _requireCanonicalFr(_bw.altTokenId);
-            }
-            // Bundle acceptance is all-or-nothing: both new verifiers must
-            // be wired together, and only alongside the identity/verifyBlock
-            // set the legacy `bridgeWithdrawalVerifier` already gates.
+            // Bundle acceptance is all-or-nothing: both verifiers must be
+            // wired together. When wired, the AN-side identity slots and
+            // the verifyBlock triple are required so anchors land and the
+            // FinalProof can bind.
             {
                 bool wf = address(_bw.withdrawalFinalVerifier) != address(0);
                 bool mh = address(_bw.multiHopVerifier) != address(0);
                 if (wf != mh) revert PartialBundleWiring();
                 if (wf) {
-                    if (address(_bw.bridgeWithdrawalVerifier) == address(0)) {
-                        // Sharing the identity/anchor plumbing with the
-                        // legacy path keeps both entry-points consistent.
-                        revert BundleRequiresLegacyWithdrawal();
-                    }
+                    if (_bw.accFr == 0) revert InvalidBridgeWithdrawalIdentity();
+                    if (!(p && f && l)) revert WithdrawRequiresVerifyBlock();
+                    // Identity slots are compared raw against Yul-reduced
+                    // instances. A non-canonical value makes every withdrawal
+                    // revert permanently — same invariant as the genesis anchors.
+                    _requireCanonicalFr(_bw.dappFr);
+                    _requireCanonicalFr(_bw.accFr);
+                    _requireCanonicalFr(_bw.altTokenId);
                 }
             }
             // Genesis anchors enter the same slots `applyBkSetUpdate`
@@ -709,7 +697,6 @@ contract AckiNackiBridge {
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
         storedLastSeenBlockSeqNo = _vb.genesisLastSeenBlockSeqNo;
-        bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
         bridgeWithdrawalDappFr = _bw.dappFr;
         bridgeWithdrawalAccFr = _bw.accFr;
         bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
@@ -1235,8 +1222,8 @@ contract AckiNackiBridge {
     }
 
     /// @dev Flat membership — true if `anchor` appears in any layer window.
-    ///      Off-chain helper (`isKnownAnchor`); `withdrawByProof` uses the
-    ///      per-layer scan `_isKnownLayerAnchor(pub.anchorLayer, finalRoot)`.
+    ///      Off-chain helper (`isKnownAnchor`); `withdrawByProofBundle` uses
+    ///      the per-layer scan `_isKnownLayerAnchor(pub.anchorLayer, finalRoot)`.
     function _isKnownAnchor(uint256 anchor) internal view returns (bool) {
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
             if (_isKnownLayerAnchor(L, anchor)) {
@@ -1272,8 +1259,8 @@ contract AckiNackiBridge {
 
     /// @notice Flat membership across all ten layer windows. Off-chain
     ///         monitors can use this to ask "is this hash an anchor at
-    ///         all"; `withdrawByProof` does not. It scans only the window
-    ///         named by `pub.anchorLayer` (`isKnownLayerAnchor`).
+    ///         all"; `withdrawByProofBundle` does not. It scans only the
+    ///         window named by `pub.anchorLayer` (`isKnownLayerAnchor`).
     function isKnownAnchor(uint256 anchor) external view returns (bool) {
         return _isKnownAnchor(anchor);
     }
@@ -1345,146 +1332,16 @@ contract AckiNackiBridge {
     }
 
     // ---------------------------------------------------------------------
-    // AN→ETH withdrawal payout — withdrawByProof (Circuit 4)
+    // AN→ETH withdrawal payout — withdrawByProofBundle
     // ---------------------------------------------------------------------
 
     /// @notice Mask for each half of a split-α `recipient` address (10 bytes = 80 bits).
-    /// @dev Circuit 4 uses split-α (10/10) per
+    /// @dev The circuit uses split-α (10/10) per
     ///      `bridge_event_prove_circuit::RECIPIENT_HI_*` / `RECIPIENT_LO_*`
     ///      offsets in the partner repo. The split is locked at deployment
-    ///      via the immutable `bridgeWithdrawalVerifier` — its on-chain VK
-    ///      only accepts proofs with the matching layout.
+    ///      via the immutable `bridgeWithdrawalFinalVerifier` — its on-chain
+    ///      VK only accepts proofs with the matching layout.
     uint256 private constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
-
-    /// @notice Pay out a withdrawal proven by a Circuit 4
-    ///         Halo2 SHPLONK aggregator proof.
-    ///
-    /// Verifies that:
-    ///   1. The proof witnesses a `WithdrawalInitiated(dstChainId, recipient,
-    ///      amount, tokenId, sender)` event emitted by the AN-side TokenBridge
-    ///      identified by `(bridgeWithdrawalDappFr, bridgeWithdrawalAccFr)`,
-    ///      anchored — via the proof's dense-chain extension — to a
-    ///      `finalRoot` the bridge has previously observed via `verifyBlock`
-    ///      in the window named by `pub.anchorLayer`.
-    ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
-    ///      only — `pub.dstChainId == altDstChainId` while
-    ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the
-    ///      same proof is rejected because nullifiers are per-contract *and*
-    ///      `dstChainId` must match the executing chain (or its scoped alias).
-    ///   3. `pub.dappFr == bridgeWithdrawalDappFr` and
-    ///      `pub.accFr == bridgeWithdrawalAccFr` (defensive — also enforced
-    ///      by the verifier under the same identity, but checked here so
-    ///      the explicit `WithdrawIdentityMismatch` error surfaces before
-    ///      the more opaque `WithdrawalProofRejected`).
-    ///   4. `pub.nullifier` has not been used before (replay protection).
-    ///   5. `pub.tokenId == 0` (only bridged USDC is currently supported;
-    ///      non-zero token ids reserved for multi-token in a future milestone).
-    ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
-    ///      (well-formedness check against malformed split inputs).
-    ///
-    /// State updates (CEI):
-    ///   - **Effects**: mark `nullifier` used; decrement `treasuryBalance`.
-    ///   - **Interactions**: (optional) `_pullFromAave(shortfall)` to top up
-    ///     liquid USDC; `usdc.transfer(recipient, amount)` to pay out.
-    ///
-    /// @dev Permissionless. The caller pays gas but the payout goes to
-    ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
-    ///      Typical caller is a relayer running `bridge-relayer-daemon`.
-    ///
-    /// @param proof   Circuit 4 proof bytes accepted by
-    ///                `IBridgeWithdrawalVerifier` (Halo2 SHPLONK aggregator
-    ///                proof in production).
-    /// @param pub     Public-input slots [0..10]; see `IBridgeWithdrawalVerifier`.
-    /// @return success Always `true` on a successful payout; reverts on failure.
-    function withdrawByProof(
-        bytes calldata proof,
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-    ) external nonReentrant returns (bool success) {
-        if (address(bridgeWithdrawalVerifier) == address(0)) {
-            revert WithdrawByProofDisabled();
-        }
-
-        // ---- Checks: identity, chain, replay, shape, anchor ----
-        if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
-            revert WithdrawIdentityMismatch();
-        }
-        bool dstOk = pub.dstChainId == block.chainid
-            || (bridgeWithdrawalAltDstChainId != 0
-                && bridgeWithdrawalAltDstHostChainId != 0
-                && block.chainid == bridgeWithdrawalAltDstHostChainId
-                && pub.dstChainId == bridgeWithdrawalAltDstChainId);
-        if (!dstOk) {
-            revert DstChainIdMismatch(pub.dstChainId, block.chainid);
-        }
-        bool tokenOk = pub.tokenId == 0
-            || (bridgeWithdrawalAltTokenId != 0 && pub.tokenId == bridgeWithdrawalAltTokenId);
-        if (!tokenOk) {
-            revert UnsupportedTokenId(pub.tokenId);
-        }
-        if (pub.recipientHi > RECIPIENT_HALF_MASK) {
-            revert RecipientHalfOutOfRange(pub.recipientHi);
-        }
-        if (pub.recipientLo > RECIPIENT_HALF_MASK) {
-            revert RecipientHalfOutOfRange(pub.recipientLo);
-        }
-        // WD-Q2: reject recipient=0 before crypto / CEI so a stranded event
-        // cannot burn gas on verify then strand forever on a real USDC reject.
-        if (_reconstructRecipient(pub.recipientHi, pub.recipientLo) == address(0)) {
-            revert InvalidRecipient();
-        }
-        // Yul reduces instances mod BN254_R; the mapping must not treat
-        // N and N + k·BN254_R as distinct spent keys. Reject unreduced words
-        // rather than reducing-and-keying (that would alias two caller-supplied keys).
-        _requireCanonicalFr(pub.nullifier);
-        _requireCanonicalFr(pub.finalRoot);
-        _requireCanonicalFr(pub.anchorLayer);
-        bytes32 nullifierKey = bytes32(pub.nullifier);
-        if (_nullifiers[nullifierKey]) {
-            revert NullifierAlreadyUsed(pub.nullifier);
-        }
-        if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
-            revert LayerOutOfRange(pub.anchorLayer > type(uint8).max
-                    ? type(uint8).max
-                    : uint8(pub.anchorLayer));
-        }
-        if (!_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)) {
-            revert UnknownAnchor(pub.finalRoot);
-        }
-
-        // ---- Crypto: verify the withdrawal proof. The 11 public inputs flow
-        //      verbatim through the adapter; the layer-window check above
-        //      guards against a forged `finalRoot` that the circuit alone
-        //      cannot bind to the bridge's view of AN state.
-        bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
-        if (!ok) revert WithdrawalProofRejected();
-
-        // ---- Treasury check (must happen before the AAVE pull). ----
-        if (pub.amount > treasuryBalance) {
-            revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
-        }
-
-        // ---- Effects (CEI: mutate state before any external call). ----
-        _nullifiers[nullifierKey] = true;
-        treasuryBalance -= pub.amount;
-
-        // ---- Interactions ----
-        // Top up liquid USDC from AAVE if the contract's plain USDC balance
-        // is below the requested amount.
-        uint256 liquid = usdc.balanceOf(address(this));
-        if (liquid < pub.amount && suppliedPrincipal > 0) {
-            uint256 shortfall = pub.amount - liquid;
-            uint256 toPull = shortfall > suppliedPrincipal ? suppliedPrincipal : shortfall;
-            _pullFromAave(toPull);
-        }
-
-        address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        _pushExactUsdc(recipient, pub.amount);
-
-        emit WithdrawalByProofExecuted(
-            pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
-        );
-        return true;
-    }
 
     /// @notice `BridgeEventFinalProof` public-input vector length (13).
     uint256 private constant FINAL_PI_LEN = 13;
@@ -1511,9 +1368,9 @@ contract AckiNackiBridge {
     ///         `hopPublicInputs[last][HOP_END] == yBlockId`.
     ///
     /// @dev Mirrors `bridge_event_prove_circuit::bundle_verifier::verify_bundle`
-    ///      step-for-step. Also runs the same identity / dst-chain / replay /
-    ///      recipient-shape / canonical-Fr / anchor-window checks that
-    ///      `withdrawByProof` runs against the legacy 11-input proof.
+    ///      step-for-step. Runs the identity / dst-chain / replay /
+    ///      recipient-shape / canonical-Fr / anchor-window checks in the
+    ///      same order as the circuit binds them.
     ///
     /// @param finalPublicInputs 13 slots matching
     ///        `IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs`
@@ -1576,7 +1433,7 @@ contract AckiNackiBridge {
                 yBlockId:    finalPublicInputs[PUB_Y_BLOCK_ID]
             });
 
-        // ---- Identity, chain, replay, shape (same as withdrawByProof) ------
+        // ---- Identity, chain, replay, shape --------------------------------
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
             revert WithdrawIdentityMismatch();
         }

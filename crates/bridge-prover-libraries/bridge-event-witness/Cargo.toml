@@ -48,6 +48,12 @@ tvm_types = { workspace = true }
 bridge-prover-lib = { workspace = true }
 bridge-gql-fetcher = { workspace = true }
 gosh-dense-balanced-tree = { workspace = true }
+# Native (non-halo2) helpers for the cross-thread L7 walker in
+# `enrich::resolve_cross_thread_chain`: block_merkle_leaf_proof,
+# proof_block_ref_inner_path_native, ref_leaf_hash_native and the pair of
+# `verify_*` re-checks. These live next to the in-circuit versions so the
+# byte layout stays in lock-step.
+bridge-event-prove-circuit = { workspace = true }
 tokio = { workspace = true }
 
 # Shared

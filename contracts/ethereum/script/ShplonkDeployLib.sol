@@ -7,7 +7,6 @@ import "../src/ShplonkHalo2Verifier.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
 import "../src/IBridgeWithdrawalFinalVerifier.sol";
 import "../src/IBridgeMultiHopVerifier.sol";
 import "../src/PrimaryAggregatorVerifier.sol";
@@ -128,10 +127,11 @@ library ShplonkDeployLib {
 
     function deployWithdrawalAdapter(string memory binPath)
         internal
-        returns (IBridgeWithdrawalVerifier)
+        returns (IBridgeWithdrawalFinalVerifier)
     {
         address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, WITHDRAWAL_YUL_CODEHASH));
-        return IBridgeWithdrawalVerifier(address(new BridgeWithdrawalAggregatorVerifier(wrapper)));
+        return
+            IBridgeWithdrawalFinalVerifier(address(new BridgeWithdrawalAggregatorVerifier(wrapper)));
     }
 
     /// @notice Multi-thread cross-thread hop-chain adapter for

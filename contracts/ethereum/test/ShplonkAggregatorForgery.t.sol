@@ -5,11 +5,15 @@ import "forge-std/Test.sol";
 
 import "../src/BridgeWithdrawalAggregatorVerifier.sol";
 import "../src/PrimaryAggregatorVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
-import "./mocks/MockBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "./mocks/MockBridgeWithdrawalFinalVerifier.sol";
 
 /// @title ShplonkAggregatorForgeryTest
 /// @notice Forgery negatives for R15 aggregator adapters (mock SHPLONK = always false).
+///
+///         The withdrawal adapter under test is
+///         `BridgeWithdrawalAggregatorVerifier`, the R15 wrapper for the
+///         multi-thread `BridgeEventFinalProof` (13 inner public inputs).
 contract ShplonkAggregatorForgeryTest is Test {
     /// @dev Codeless address. A high-level call with a return value reverts via
     ///         Solidity's `extcodesize` check — not because staticcall always
@@ -19,30 +23,37 @@ contract ShplonkAggregatorForgeryTest is Test {
     ///         (QC-A4-1).
     address internal constant FAILING_SHPLONK = address(0xdead);
 
+    function _finalPub()
+        internal
+        pure
+        returns (IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub)
+    {
+        pub = IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs({
+            tokenId: 0,
+            amount: 1,
+            recipientHi: 1,
+            recipientLo: 2,
+            dstChainId: 1,
+            senderAccFr: 3,
+            dappFr: 4,
+            accFr: 5,
+            nullifier: 6,
+            finalRoot: 7,
+            anchorLayer: 1,
+            xBlockId: 8,
+            yBlockId: 8
+        });
+    }
+
     function test_withdrawalAggregator_rejectsGroth16StubProof() public {
         BridgeWithdrawalAggregatorVerifier v =
             new BridgeWithdrawalAggregatorVerifier(FAILING_SHPLONK);
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
-                tokenId: 0,
-                amount: 1,
-                recipientHi: 1,
-                recipientLo: 2,
-                dstChainId: 1,
-                senderAccFr: 3,
-                dappFr: 4,
-                accFr: 5,
-                nullifier: 6,
-                finalRoot: 7,
-                anchorLayer: 1,
-                xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
-                yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
-            });
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub = _finalPub();
 
         // 256-byte legacy Groth16 stub — wrong shape for SHPLONK aggregator calldata.
         bytes memory groth16Stub = new bytes(256);
-        assertFalse(v.verifyWithdrawal(groth16Stub, pub));
+        assertFalse(v.verifyWithdrawalFinal(groth16Stub, pub));
     }
 
     function test_primaryAggregator_rejectsShortCalldata() public {
@@ -51,12 +62,12 @@ contract ShplonkAggregatorForgeryTest is Test {
     }
 
     function test_mockGroth16Verifier_acceptsStubButShplonkPathDoesNot() public {
-        MockBridgeWithdrawalVerifier mock = new MockBridgeWithdrawalVerifier();
+        MockBridgeWithdrawalFinalVerifier mock = new MockBridgeWithdrawalFinalVerifier();
         mock.setShouldAccept(true);
 
         bytes memory groth16Stub = new bytes(256);
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs({
                 tokenId: 0,
                 amount: 1,
                 recipientHi: 0,
@@ -68,14 +79,14 @@ contract ShplonkAggregatorForgeryTest is Test {
                 nullifier: 123,
                 finalRoot: 456,
                 anchorLayer: 1,
-                xBlockId: 0, // TODO(multi-thread bundle): pass real x/y ids
-                yBlockId: 0 // TODO(multi-thread bundle): pass real x/y ids
+                xBlockId: 789,
+                yBlockId: 789
             });
 
-        assertTrue(mock.verifyWithdrawal(groth16Stub, pub));
+        assertTrue(mock.verifyWithdrawalFinal(groth16Stub, pub));
 
         BridgeWithdrawalAggregatorVerifier shplonk =
             new BridgeWithdrawalAggregatorVerifier(FAILING_SHPLONK);
-        assertFalse(shplonk.verifyWithdrawal(groth16Stub, pub));
+        assertFalse(shplonk.verifyWithdrawalFinal(groth16Stub, pub));
     }
 }

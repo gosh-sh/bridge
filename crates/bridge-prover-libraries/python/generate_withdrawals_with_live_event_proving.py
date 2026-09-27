@@ -12,7 +12,7 @@ Pipeline (single event):
 Scope:
   AN side only. This driver covers the L1 (single-chain) Circuit 4 event
   proving path against the on-AN `USDCBridge`. It does NOT drive the
-  Ethereum side (no `withdrawByProof` submission to the L1 EVM bridge)
+  Ethereum side (no `withdrawByProofBundle` submission to the L1 EVM bridge)
   and it does NOT exercise the L2 (multi-chain / thinned) path.
   Sepolia submission is covered by `ackinacki-bridge withdraw`.
   TODO: extend / add a parallel driver for the L2 path (currently only

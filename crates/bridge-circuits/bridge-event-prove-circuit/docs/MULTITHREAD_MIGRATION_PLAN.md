@@ -39,7 +39,7 @@ Every commit below is meant to compile, `cargo test -p bridge-event-prove-circui
 | `multi_hop_witness.rs` | — | Ported from DEX minus salt fields | **new** (§3) |
 | `multi_hop_proof.rs` | — | Ported from DEX minus salted-endpoint gadget | **new** (§5) |
 | `bundle_verifier.rs` | — | Pure-Rust mock of `withdrawByProofBundle` | **new** (§6) |
-| `kzg_source.rs` | — | Hermez SRS wrapper (bin + lib) | **new** (§8) |
+| `kzg_source.rs` | — | Hermez SRS wrapper (bin + lib) | ~~**new** (§8)~~ **skipped** — `bridge-prover-lib/src/bin/bootstrap_hermez_srs` already provisions `kzg_bn254_{K}.srs` at K=17/19/20/21/22 via the shared `gosh_zk_snark_halo2_utils::ptau` anchor; a per-circuit dispatcher would be redundant. See §8. |
 
 Bridge deltas from DEX file set:
 - **no** `salt.rs`
@@ -287,7 +287,10 @@ All three tests must fit inside the `bridge-circuits.yaml` fast step (each ≤60
 
 **Concrete steps.**
 
-1. Copy `dex-halo2-circuit/src/kzg_source.rs` (Hermez SRS wrapper) into `bridge-event-prove-circuit/src/kzg_source.rs` — same shape as DEX `ad44758`. Keep the `bin/keygen_bridge_final.rs` / `bin/keygen_bridge_multi_hop.rs` bin targets in `src/bin/` so key rotation is reproducible offline. Add `pub mod kzg_source;` to `lib.rs`.
+1. **Deviation from DEX shape — skip `kzg_source.rs`.** The DEX had two independent SRS provisioning code paths (`KzgSource::Hermez` vs `KzgSource::GenSrs`) and its module dispatched between them by env var. The bridge has consolidated on Hermez-only, and `bridge-prover-lib/src/bin/bootstrap_hermez_srs` already covers SRS provisioning at the params-dir layer (K=17 layer, K=19 event, K=20 primary+keygen, K=21 fallback, K=22 optional outer aggregator — all Hermez-anchored via `gosh_zk_snark_halo2_utils::ptau`). Adding a per-circuit dispatcher would duplicate that concern in a sub-workspace (`crates/bridge-circuits/`) whose Cargo tree cannot see `KeyManagerState`. **Instead, keygen bins live in `bridge-prover-lib/src/bin/`** where `EventKeyManager` / `MultiHopKeyManager` (and the shared `KeyManagerState` orchestration) already live:
+   - `bridge-prover-lib/src/bin/keygen_bridge_final.rs` — CLI `--params-dir <PATH> [--k K]` (default K=19). Asserts `kzg_bn254_{K}.srs` present; instantiates `EventKeyManager::new_with_k`; calls `ensure_keys()`; prints paths+sizes of `event_{vk,pk}.bin`, `event_config_params.json`, `event_manifest.json`. Idempotent (warm cache is a no-op). `flock`'ed on `event_keygen.lock` — safe next to a live daemon.
+   - `bridge-prover-lib/src/bin/keygen_bridge_multi_hop.rs` — same shape at K=17 with `MultiHopKeyManager`; writes `multi_hop_*` files under the same manifest-consistent atomic-write policy.
+   Result: `bridge-event-prove-circuit` gains **no** new modules and **no** new bin targets. Circuit-shape changes still trigger `EVENT_CIRCUIT_REVISION` / `MULTI_HOP_CIRCUIT_REVISION` bumps in the key manager files (existing discipline) — the bins pick this up automatically because they go through `ensure_keys`.
 2. In `crates/bridge-evm-aggregator/src/aggregator.rs`, add a second `BoundCircuit` entry for `BridgeMultiHopProof` alongside the existing `BridgeEventFinalProof` binding. Follow the exact pattern already used for the primary/fallback pair.
 3. In `crates/bridge-evm-aggregator/src/evm_export.rs`, extend the `export-inner-aggregator` binary to emit `BridgeMultiHopAggregatorVerifier.sol` + `.bin` + `_calldata.bin` into `contracts/ethereum/verifiers/`. Add SHA256 entries to `verifiers/SHA256SUMS`. Add row to `verifiers/SIZES`.
 4. `verifier_sources.yaml` will byte-compare on the next PR touching `contracts/ethereum/verifiers/` — this is that PR.

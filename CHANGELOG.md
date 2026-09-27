@@ -292,6 +292,27 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **Offline keygen bins for the multi-thread Circuit-4 pair —
+  `keygen_bridge_final` and `keygen_bridge_multi_hop` under
+  `bridge-prover-lib/src/bin/`.** Both accept `--params-dir <PATH>` (required)
+  and `--k <K>` (default K=19 for the final proof, K=17 for multi-hop), assert
+  `kzg_bn254_{K}.srs` is present in `params_dir` (pointing at
+  `bootstrap_hermez_srs` if not), then run the same
+  `EventKeyManager::ensure_keys` / `MultiHopKeyManager::ensure_keys` path the
+  daemon does on first start — off the hot path, so a subsequently launched
+  `daemon-bridge` / `daemon-live` picks up warm cache instead of stalling its
+  read loop for ~7 min at K=19. Manifest-consistent atomic writes and the
+  cross-process keygen `flock` are provided by the shared
+  `KeyManagerState`, so these bins are safe to run alongside a live daemon.
+  Idempotent — a warm cache short-circuits and exits 0. Run them ahead of a
+  circuit-revision rotation:
+  ```
+  cargo run --release -p bridge-prover-lib --bin keygen_bridge_final -- \
+      --params-dir ./params --k 19
+  cargo run --release -p bridge-prover-lib --bin keygen_bridge_multi_hop -- \
+      --params-dir ./params --k 17
+  ```
+
 - **`BridgeMultiHopAggregatorVerifier` — SHPLONK aggregator adapter for the
   cross-thread hop-chain snark.** New `contracts/ethereum/src/BridgeMultiHopAggregatorVerifier.sol`
   wraps a SHPLONK Yul verifier at `NUM_INNER = 2` (2 re-exposed PIs:

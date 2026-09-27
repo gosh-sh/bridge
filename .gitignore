@@ -159,6 +159,11 @@ params/multi_hop_vk.bin
 params/multi_hop_config_params.json
 params/multi_hop_manifest.json
 params/multi_hop_keygen.lock
+params/event_pk.bin
+params/event_vk.bin
+params/event_config_params.json
+params/event_manifest.json
+params/event_keygen.lock
 params/aggregator_pk_cache/
 contracts/ethereum/test/test_proof.json
 
@@ -291,6 +296,7 @@ eth-light-client-prover/shard_snark/
 eth-light-client-prover/rotate_tree/
 crates/bridge-prover-libraries/relayer-state.json
 crates/bridge-prover-libraries/relayer-state.json.stale_*
+crates/bridge-prover-libraries/relayer-state.pre_deploy_*.json
 crates/bridge-prover-libraries/state.stale_*/
 crates/bridge-prover-libraries/submissions/
 crates/bridge-prover-libraries/diag/

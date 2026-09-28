@@ -711,14 +711,17 @@ pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Re
 /// same-thread claims — the signal the prover uses to short-circuit
 /// `y_block_id = x_block_id`.
 ///
-/// # Cross-thread walk
+/// # Cross-thread walk (Direction (a))
 ///
 /// Starting from `event_block` (on some non-default thread), the walker
 /// repeatedly picks a `proof_block_refs[i]` with `i >= 1` (slot 0 is the
 /// same-thread parent, excluded per spec §4) that leads to a strictly
 /// different thread, preferring the default thread when it appears among
-/// the candidates. Each step produces one `MultiHopProofWitnessJson` snark
-/// carrying:
+/// the candidates. Because `refs` on Acki Nacki only ever point at strictly
+/// older blocks, the walk emits snarks in newest→oldest order — matching
+/// Direction (a) of the cross-thread reachability model (event `X` newer on
+/// thread `t`; anchor `Y` older on thread 0). Each step produces one
+/// `MultiHopProofWitnessJson` snark carrying:
 ///
 /// * the SHA-256 depth-4 L7 opening of `block_merkle_tree_leaves[7]`
 ///   (`proof_block_refs_root`) against the current block's `block_id`
@@ -727,17 +730,20 @@ pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Re
 ///   `proof_block_refs[ref_index]` against L7
 ///   (`proof_block_ref_inner_path_native` — mirrors
 ///   `history-proof::dense_merkle_proof` with the byte-flat sponge convention);
-/// * the clear-byte endpoints `hop_start_block_id = refs[ref_index]` and
-///   `hop_end_block_id = block_id`.
+/// * the clear-byte endpoints — Direction (a):
+///   `hop_start_block_id = block_id` (the *current* block being opened,
+///   newer) and `hop_end_block_id = refs[ref_index]` (the *older* ref
+///   extracted from that block).
 ///
 /// Both openings are re-verified natively before the witness is shipped —
 /// a mismatched leaf or wrong `refs_tree_depth` fails here instead of
 /// blowing up in-circuit.
 ///
 /// The walk terminates when the next referenced block is on the default
-/// thread; the bundle is then reversed so `snarks[0].hops[0].hop_start`
-/// = default-thread ancestor and `snarks[K].hops[0].hop_end` = event block.
-/// The circuit's `x_block_id` / `y_block_id` public inputs bind to those two
+/// thread. The emitted `snarks` are already in newest→oldest order — no
+/// reverse — so `snarks[0].hops[0].hop_start` = event block (`X`) and
+/// `snarks[K-1].hops.last().hop_end` = default-thread ancestor (`Y`). The
+/// circuit's `x_block_id` / `y_block_id` public inputs bind to those two
 /// endpoints.
 ///
 /// # Errors
@@ -814,11 +820,11 @@ pub async fn resolve_cross_thread_chain(
         cur_block = next_block;
     }
 
-    // Reverse to chronological order: snarks[0].hops[0].hop_start =
-    // default-thread ancestor (== y_block_id), snarks[K].hops[0].hop_end =
-    // event block (== x_block_id). Cross-hop continuity in the circuit is
-    // `snarks[i].hop_end == snarks[i+1].hop_start`.
-    snarks.reverse();
+    // Direction (a): snarks are already newest→oldest. snarks[0].hop_start =
+    // event block (== x_block_id), snarks[K-1].hop_end = default-thread
+    // ancestor (== y_block_id). Cross-hop continuity in the circuit is
+    // `snarks[i].hop_end == snarks[i+1].hop_start` — the older ref extracted
+    // by hop i is the current block opened by hop i+1.
     Ok(MultiHopBundleWitnessJson {
         snarks,
     })
@@ -927,8 +933,9 @@ fn build_hop_witness(cur: &GqlProofBlock, ref_index: u32) -> Result<HopWitnessJs
         );
     }
 
-    let hop_start_block_id = cur.proof_block_refs[idx];
-    let hop_end_block_id = cur.block_id;
+    // Direction (a): start = current (newer) block; end = older ref.
+    let hop_start_block_id = cur.block_id;
+    let hop_end_block_id = cur.proof_block_refs[idx];
 
     let block_json = BlockWitnessJson {
         block_id_hex: hex::encode(cur.block_id),
@@ -1012,8 +1019,9 @@ mod cross_thread_tests {
 
         assert!(hop.is_active);
         assert_eq!(hop.ref_index, 2);
-        assert_eq!(hop.hop_start_block_id_hex, hex::encode(refs[2]));
-        assert_eq!(hop.hop_end_block_id_hex, hex::encode(block.block_id));
+        // Direction (a): start = current (newer) block; end = older ref.
+        assert_eq!(hop.hop_start_block_id_hex, hex::encode(block.block_id));
+        assert_eq!(hop.hop_end_block_id_hex, hex::encode(refs[2]));
         // refs.len() = 3 → next_power_of_two = 4 → depth = 2.
         assert_eq!(hop.refs_tree_depth, 2);
         // Padded siblings beyond refs_tree_depth are zero.

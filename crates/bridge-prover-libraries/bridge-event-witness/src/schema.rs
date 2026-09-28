@@ -226,7 +226,9 @@ pub struct HopWitnessJson {
     /// Real-vs-padding flag (`HopWitness::is_active`). Padded hops satisfy
     /// `hop_start_block_id_hex == hop_end_block_id_hex`.
     pub is_active: bool,
-    /// The hop's end block (`HopWitness::block`).
+    /// The hop's **start** block (`HopWitness::block`) under Direction (a):
+    /// `block.block_id_hex` == `hop_start_block_id_hex` (current/newer). The
+    /// hop's end (older ref) lives in `block.proof_block_refs_hex[ref_index]`.
     pub block: BlockWitnessJson,
     /// SHA-256 merkle opening for L7 against `block.block_id_hex`,
     /// `BLOCK_MERKLE_DEPTH = 4` siblings.
@@ -241,9 +243,13 @@ pub struct HopWitnessJson {
     /// `MAX_PROOF_BLOCK_REFS_DEPTH = 8`. Only the first `refs_tree_depth`
     /// entries are used inside the circuit.
     pub proof_block_ref_inner_path_hex: [String; MAX_PROOF_BLOCK_REFS_DEPTH],
-    /// Hop's start endpoint as clear bytes, hex.
+    /// Hop's start endpoint as clear bytes, hex — Direction (a): the current
+    /// (newer) block whose L7 walk this hop closes. Equal to
+    /// `block.block_id_hex` for active hops.
     pub hop_start_block_id_hex: String,
-    /// Hop's end endpoint as clear bytes, hex.
+    /// Hop's end endpoint as clear bytes, hex — Direction (a): the older ref
+    /// extracted from `block.proof_block_refs_hex[ref_index]`. Threads into
+    /// the next hop's `hop_start_block_id_hex` as intra-bundle continuity.
     pub hop_end_block_id_hex: String,
 }
 

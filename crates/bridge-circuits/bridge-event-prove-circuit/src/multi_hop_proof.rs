@@ -8,6 +8,20 @@
 //! so the padding tail of a partially-full snark propagates the terminal
 //! block-id.
 //!
+//! # Walk direction (Direction (a), spec §3, cross-thread reachability)
+//!
+//! Bridge Circuit 4 commits to Direction (a): the event `X` sits on a
+//! non-default thread `t` and is *newer*; the anchor `Y` sits on the default
+//! thread and is *older*. The walk crawls **newest → oldest** via
+//! `proof_block_refs` (chain `refs` only ever point at strictly older blocks).
+//! Per hop, `hop_start_block_id` is the *current block being opened* (newer)
+//! and `hop_end_block_id` is the *ref extracted from that block* (older).
+//!
+//! So for the whole hop-chain snark:
+//!
+//! * `first_start = hops[0].hop_start_block_id` = `X` (event block, newer)
+//! * `last_end    = hops[H-1].hop_end_block_id` = `Y` (anchor block, older)
+//!
 //! Ported from `dexdo-halo2-kit/dex-halo2-circuit/src/multi_hop_proof.rs`,
 //! minus the DEX-only salt / anonymity plumbing (spec §1.4, §9):
 //! - No `sk_u`, no `salt`, no `salt_commitment`, no salted-endpoint Poseidon
@@ -20,8 +34,8 @@
 //!
 //! | idx | name                  | derivation                                    |
 //! |-----|-----------------------|-----------------------------------------------|
-//! | 0   | `hop_start_block_id`  | LE-pack of `hops[0].hop_start_block_id`       |
-//! | 1   | `hop_end_block_id`    | LE-pack of `hops[H-1].hop_end_block_id`       |
+//! | 0   | `hop_start_block_id`  | LE-pack of `hops[0].hop_start_block_id` (`X`) |
+//! | 1   | `hop_end_block_id`    | LE-pack of `hops[H-1].hop_end_block_id` (`Y`) |
 //!
 //! Adjacent-hop continuity (`hops[i].hop_end == hops[i+1].hop_start`) is
 //! enforced in-circuit as 32 byte-wise copy constraints per adjacency;
@@ -34,10 +48,12 @@
 //!
 //! Reused verbatim from [`crate::multi_hop_witness`]. Circuit consumes:
 //! - `is_active: bool` — selector, `assert_bit`-checked
-//! - `hop_start_block_id: [u8; 32]` — the ref (parent) block-id
-//! - `hop_end_block_id: [u8; 32]` — the block-id containing the ref
+//! - `hop_start_block_id: [u8; 32]` — the *current* block-id (newer; the
+//!   block whose `proof_block_refs` are being opened)
+//! - `hop_end_block_id: [u8; 32]` — the *ref* block-id extracted from
+//!   `hop_start_block_id`'s `proof_block_refs[ref_index]` (older)
 //! - `block.block_id`, `block.block_merkle_tree_leaves[7]` — L7 and the block
-//!   the L7 SHA walk lifts to
+//!   the L7 SHA walk lifts to (identical to `hop_start_block_id`)
 //! - `block_merkle_leaf_proof_l7` — 4-sibling SHA-256 path for leaf 7
 //! - `ref_index`, `refs_tree_depth`, `proof_block_ref_inner_path` — L7
 //!   dense-merkle opening data
@@ -51,7 +67,7 @@
 //!   parent).
 //! - `refs_tree_depth ∈ [0, 16)` via 4-bit range check.
 //! - **Ref-tree** — `ref_leaf = Poseidon([c0, c1, c2])` derived from the
-//!   byte-flat `REFERENCED_REF_BLOCK_TAG (34 B) ‖ hop_start_block_id` layout
+//!   byte-flat `REFERENCED_REF_BLOCK_TAG (34 B) ‖ hop_end_block_id` layout
 //!   (chunks 31+31+4). Walked to `computed_l7_fr` via variable-depth
 //!   [`walk_dense_merkle_bind_pos`] over `MAX_PROOF_BLOCK_REFS_DEPTH = 8`
 //!   levels. Gated equality: `(computed_l7_fr - l7_fr) · is_active == 0`.
@@ -59,15 +75,19 @@
 //!   Gated equality per byte: `(cur_bytes[i] - block_id_bytes[i]) · is_active
 //!   == 0`.
 //! - **Endpoint binding** — active hop enforces:
-//!     - `hop_start_block_id[i] == ref_block_id[i]` (byte-wise, active-gated)
-//!     - `hop_end_block_id[i]   == block_id[i]`     (byte-wise, active-gated)
+//!     - `hop_start_block_id[i] == block_id[i]`     (byte-wise, active-gated —
+//!       the "current" newer block is the one whose L7 walk we just closed)
+//!     - `hop_end_block_id[i]   == ref_block_id[i]` (byte-wise, active-gated —
+//!       the older ref extracted from `proof_block_refs[ref_index]`)
 //! - **Padding propagation** — inactive hop enforces:
 //!     - `hop_start_block_id[i] == hop_end_block_id[i]` (byte-wise, gated by `1
 //!       - is_active`)
 //!
 //! Intra-snark continuity: `hops[i].hop_end_block_id ==
 //! hops[i+1].hop_start_block_id` for `i = 0..H_HOPS_PER_PROOF-1`, enforced
-//! byte-wise unconditionally.
+//! byte-wise unconditionally. In Direction (a) semantics: the older ref
+//! extracted from hop `i` (its `hop_end`) is the current block being opened
+//! by hop `i+1` (its `hop_start`).
 
 use std::cell::RefCell;
 
@@ -160,7 +180,8 @@ impl BridgeMultiHopProof {
 ///   `walk_dense_merkle_bind_pos`'s internal `range_check + num_to_bits`.
 /// * `refs_tree_depth ∈ [0, 16)` via 4-bit range check.
 /// * `ref_leaf_fr = Poseidon([c0, c1, c2])` from `REFERENCED_REF_BLOCK_TAG ‖
-///   hop_start_block_id` (chunks 31+31+4).
+///   hop_end_block_id` (chunks 31+31+4). `hop_end_block_id` is the older
+///   ref extracted from the current block's `proof_block_refs[ref_index]`.
 /// * Variable-depth dense-merkle walk (`MAX_PROOF_BLOCK_REFS_DEPTH` levels,
 ///   gated per-level by `refs_tree_depth`) with direction bits bound to
 ///   `ref_index`'s bit-decomposition.
@@ -205,9 +226,10 @@ fn prove_hop_ref_tree_opening(
         gate.inner_product(ctx, cells, powers_le_32[..32].iter().cloned())
     };
 
-    // ref_block_id (== hop_start_block_id, semantically) as 32 byte cells.
+    // ref_block_id (== hop_end_block_id, semantically — the older block that
+    // `proof_block_refs[ref_index]` points at) as 32 byte cells.
     let ref_block_id_bytes: Vec<AssignedValue<Fr>> = hop
-        .hop_start_block_id
+        .hop_end_block_id
         .iter()
         .map(|&b| ctx.load_witness(Fr::from(b as u64)))
         .collect();
@@ -263,7 +285,7 @@ fn prove_hop_ref_tree_opening(
         depth,
         MAX_PROOF_BLOCK_REFS_DEPTH,
     );
-    let ref_leaf_native_bytes = ref_leaf_hash_native(hop.ref_index, &hop.hop_start_block_id);
+    let ref_leaf_native_bytes = ref_leaf_hash_native(hop.ref_index, &hop.hop_end_block_id);
     let ref_proof = preprocess_dense_proof_padded(
         ref_leaf_native_bytes,
         &hop.proof_block_ref_inner_path[..depth],
@@ -365,11 +387,15 @@ fn prove_hop_block_merkle_sha256(
 /// Prove one hop's clear-byte endpoint bindings (bridge-side replacement for
 /// DEX's `prove_hop_salted_endpoints`).
 ///
+/// Direction (a) semantics: `hop_start` = *current block being opened*
+/// (newer, == `block.block_id`); `hop_end` = *ref extracted from that block*
+/// (older, == `proof_block_refs[ref_index]`).
+///
 /// Constraints (per byte, `i = 0..32`):
-/// * `(hop_start_block_id[i] - ref_block_id[i]) · is_active == 0` — active
-///   hop's start endpoint is the L7-opened ref block_id.
-/// * `(hop_end_block_id[i] - block_id[i]) · is_active == 0` — active hop's end
-///   endpoint is the block containing the ref.
+/// * `(hop_start_block_id[i] - block_id[i]) · is_active == 0` — active hop's
+///   start endpoint is the current block whose L7 walk we just closed.
+/// * `(hop_end_block_id[i] - ref_block_id[i]) · is_active == 0` — active
+///   hop's end endpoint is the older L7-opened ref block_id.
 /// * `(hop_start_block_id[i] - hop_end_block_id[i]) · not_active == 0` —
 ///   inactive padding hop collapses to a single terminal block-id, which the
 ///   intra-snark continuity chain then propagates through the tail.
@@ -407,11 +433,12 @@ fn prove_hop_clear_endpoints(
     }
 
     for i in 0..32 {
-        // Active-hop bindings.
+        // Active-hop bindings (Direction (a) — start = newer current block,
+        // end = older ref).
         let d_start = gate.sub(
             ctx,
             QuantumCell::Existing(hop_start_bytes[i]),
-            QuantumCell::Existing(ref_block_id_bytes[i]),
+            QuantumCell::Existing(block_id_bytes[i]),
         );
         let g_start = gate.mul(
             ctx,
@@ -423,7 +450,7 @@ fn prove_hop_clear_endpoints(
         let d_end = gate.sub(
             ctx,
             QuantumCell::Existing(hop_end_bytes[i]),
-            QuantumCell::Existing(block_id_bytes[i]),
+            QuantumCell::Existing(ref_block_id_bytes[i]),
         );
         let g_end = gate.mul(
             ctx,
@@ -666,12 +693,14 @@ mod tests {
     /// so native `proof_block_refs_root_native` is reproducible.
     const SLOT0_PARENT_PLACEHOLDER: [u8; 32] = [0xF0; 32];
 
-    /// Build one active hop mapping `predecessor_id` to a fresh
-    /// `computed_block_id` via a two-slot ref-tree (slot 0 = placeholder,
-    /// slot 1 = predecessor). Returns the fully-populated `HopWitness` and
-    /// the derived `computed_block_id`.
-    fn make_active_hop(predecessor_id: [u8; 32], sentinel_byte: u8) -> (HopWitness, [u8; 32]) {
-        let proof_block_refs: Vec<[u8; 32]> = vec![SLOT0_PARENT_PLACEHOLDER, predecessor_id];
+    /// Build one active hop opening `older_ref_id` (which will sit at slot 1
+    /// of the current block's `proof_block_refs`) and derive the "current"
+    /// block-id from that ref-tree + 16-leaf block-merkle. Returns the
+    /// fully-populated `HopWitness` and the derived `current_block_id` —
+    /// which is `hop.hop_start_block_id` under Direction (a) semantics
+    /// (start = current/newer, end = older ref).
+    fn make_active_hop(older_ref_id: [u8; 32], sentinel_byte: u8) -> (HopWitness, [u8; 32]) {
+        let proof_block_refs: Vec<[u8; 32]> = vec![SLOT0_PARENT_PLACEHOLDER, older_ref_id];
         let l7 = proof_block_refs_root_native(&proof_block_refs);
 
         let mut leaves = [[0u8; 32]; BLOCK_MERKLE_LEAF_COUNT];
@@ -698,8 +727,8 @@ mod tests {
             ref_index,
             refs_tree_depth,
             proof_block_ref_inner_path,
-            hop_start_block_id: predecessor_id,
-            hop_end_block_id: block_id,
+            hop_start_block_id: block_id,
+            hop_end_block_id: older_ref_id,
         };
         (hop, block_id)
     }
@@ -728,21 +757,36 @@ mod tests {
         }
     }
 
-    /// Build `H_HOPS_PER_PROOF` hops from a genesis + `k_active` active hops
-    /// followed by inactive padding carrying the terminal block-id.
+    /// Build `H_HOPS_PER_PROOF` hops from a `seed_bytes` (the *oldest* / anchor
+    /// block-id `Y`) walking newest→oldest under Direction (a). We construct
+    /// the chain oldest→newest (each iteration derives a newer block whose
+    /// L7 references the previous older one) and then reverse so the first
+    /// hop's `hop_start` is the newest / event block `X` and the last active
+    /// hop's `hop_end` is `seed_bytes` (`Y`). Any tail is inactive padding
+    /// carrying `Y` on both endpoints.
     fn synth_hops(seed_bytes: [u8; 32], k_active: usize) -> [HopWitness; H_HOPS_PER_PROOF] {
         assert!(k_active <= H_HOPS_PER_PROOF);
-        let mut hops: Vec<HopWitness> = Vec::with_capacity(H_HOPS_PER_PROOF);
-        let mut cur_bid = seed_bytes;
+        let mut chain: Vec<HopWitness> = Vec::with_capacity(k_active);
+        let mut older_bid = seed_bytes;
         for i in 0..k_active {
-            let (hop, next_bid) = make_active_hop(cur_bid, 0x10 + i as u8);
-            hops.push(hop);
-            cur_bid = next_bid;
+            let (hop, newer_bid) = make_active_hop(older_bid, 0x10 + i as u8);
+            chain.push(hop);
+            older_bid = newer_bid;
         }
-        while hops.len() < H_HOPS_PER_PROOF {
-            hops.push(make_inactive_hop(cur_bid));
+        // Reverse so index 0 is the newest hop (start = X) and the last
+        // active hop's end is `seed_bytes` (Y). At k_active=0 this is a
+        // no-op and the tail pads with `seed_bytes`.
+        chain.reverse();
+        let terminal_older = if chain.is_empty() {
+            seed_bytes
+        } else {
+            chain.last().unwrap().hop_end_block_id
+        };
+        while chain.len() < H_HOPS_PER_PROOF {
+            chain.push(make_inactive_hop(terminal_older));
         }
-        hops.try_into()
+        chain
+            .try_into()
             .unwrap_or_else(|v: Vec<HopWitness>| panic!("hop slot count {}", v.len()))
     }
 

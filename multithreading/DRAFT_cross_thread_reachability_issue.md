@@ -94,6 +94,34 @@ refs, within ≤ L_MAX hops, and that Y's batch is still in
 Both directions are cryptographically sound given a single valid walk. The
 question is whether such a walk exists.
 
+### 3.3 Witness-latency predictability
+
+The two directions differ sharply in *when* the relayer can build the
+private witness for a given event, independent of whether a walk exists at
+all.
+
+- **Direction (a).** Predictable and bounded. Once the event block X is
+  finalized, `X.refs` is fixed on-chain and readable now; every subsequent
+  hop just fetches a ref that already exists in chain state. Total wait ≈
+  `time_to_finalize(X) + K × GQL_round_trip`, K ≤ L_MAX.
+
+- **Direction (b).** Unpredictable, unbounded from code. The relayer must
+  poll for *some* future thread-0 block Y that transitively references X.
+  Nothing in the node scheduler binds when or whether that happens:
+  `should_include` (`process.rs:530-540`) only fires when other threads have
+  advanced between two consecutive thread-0 productions; the checkpoint
+  stride (`process.rs:578-628`) permanently skips non-checkpoint
+  intermediates; `evaluate_thread_lag` (`cross_thread_ref_enforcement/mod.rs:150`)
+  explicitly does not constrain per-block coverage
+  ("*Any advance passes, however small and however far behind the result
+  still is.*"). Witness-availability latency is therefore not derivable
+  from code, which is a hard operational problem for a relayer that has to
+  ship proofs on a fixed cadence.
+
+This is what makes (a) the pragmatic choice even before the (B)-termination
+question is answered — (b)'s waiting problem hits every event, not just the
+pathological ones.
+
 ## 4. Neither direction is guaranteed by acki-nacki today
 
 ### 4.1 Direction (a) — the walk can start with an empty ref set
@@ -176,6 +204,16 @@ permanently skipped by every cross-thread walk that starts from thread-0.
 Events in those blocks are un-anchorable, no matter what L_MAX we pick.
 
 ## 5. What we are asking the node team
+
+**Bridge team's current position.** We are committing to Direction (a) for
+the near-term implementation — it is the only direction with a predictable
+witness-build latency (§3.3), and the plumbing changes it needs are local
+to the bridge circuits. Under (a), events in blocks with `refs = []`
+(§4.1) are simply un-provable for now; the relayer will surface them as an
+error rather than attempt a fallback. Same-thread walk-back and other
+fallbacks (options 3 and 4 below) remain on the table for a later
+iteration once we have measured how often the empty-refs case actually
+occurs, but we are not selecting between them yet.
 
 The bridge circuit can be built for either direction; the choice does not
 matter cryptographically as long as termination is guaranteed. What we

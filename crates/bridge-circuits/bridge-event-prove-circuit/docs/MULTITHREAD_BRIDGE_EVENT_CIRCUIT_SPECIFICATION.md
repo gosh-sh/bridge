@@ -305,15 +305,20 @@ At `gosh-sha256-chip`'s measured ≈ 354 K advice cells per SHA compression: **�
 
 ### 4.4 The full L7 walk
 
-A chain of L hops `[hop_0, hop_1, ..., hop_{L-1}]` collectively proves:
+Direction (a): X (event) is *newer* on thread `t`; Y (anchor) is *older* on
+thread 0. Because `refs` only ever point at strictly older blocks, the walk
+crawls **newest → oldest**. A chain of L hops `[hop_0, hop_1, …, hop_{L-1}]`
+collectively proves:
 
 ```
-X  =  B_0  →  B_1  →  B_2  →  ...  →  B_L  =  Y
+X  =  B_0  →  B_1  →  B_2  →  ...  →  B_L  =  Y   (newest → oldest)
        ^                                          ^
        thread t (event block)                     thread 0 (anchor)
 ```
 
-with the gluing constraint `hop_i.next_block_id == hop_{i+1}.current_block_id` for all i.
+with the per-hop endpoint convention `hop_i.hop_start = B_i` (current, newer)
+and `hop_i.hop_end = B_{i+1}` (older ref extracted from `B_i.proof_block_refs`)
+and the gluing constraint `hop_i.hop_end == hop_{i+1}.hop_start` for all i.
 
 At `H = 1`, each hop lives in its own snark; the gluing constraint becomes cross-snark and is enforced by the Solidity orchestrator on the clear block-ids exposed at the snarks' publics (§6.4).
 
@@ -408,8 +413,8 @@ Every snark exposes clear 32-byte block-ids as its glue instances. Since the bri
 #### Per-`BridgeMultiHopProof` public inputs (2 Fr)
 
 ```
-inst[0] = hop_start_block_id   =  bytes_to_fr( B_0.block_id )        // Fr-encoded LE
-inst[1] = hop_end_block_id     =  bytes_to_fr( B_H.block_id )        // Fr-encoded LE
+inst[0] = hop_start_block_id   =  bytes_to_fr( B_0.block_id )        // Fr-encoded LE — newer, X-side for snarks[0]
+inst[1] = hop_end_block_id     =  bytes_to_fr( B_H.block_id )        // Fr-encoded LE — older, Y-side for snarks[last]
 ```
 
 **No `salt_commitment`, no `bundle_index`, no position tag.**

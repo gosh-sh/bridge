@@ -888,14 +888,17 @@ pub fn multi_hop_base_circuit_params() -> BaseCircuitParams {
     }
 }
 
-/// Build one active hop mapping `predecessor_id → computed_block_id` via a
-/// two-slot ref-tree (slot 0 = placeholder, slot 1 = predecessor). Returns
-/// the fully-populated `HopWitness` and the derived `computed_block_id`.
+/// Build one active hop under Direction (a) semantics: given
+/// `older_ref_id` (the block the current hop's `proof_block_refs[1]` points
+/// at), derive the current (newer) block whose L7 contains that ref. Returns
+/// the fully-populated `HopWitness` — `hop.hop_start_block_id ==
+/// current_block_id` (newer), `hop.hop_end_block_id == older_ref_id` (older)
+/// — and the derived `current_block_id` so callers can chain multiple hops.
 pub fn make_active_hop_public(
-    predecessor_id: [u8; 32],
+    older_ref_id: [u8; 32],
     sentinel_byte: u8,
 ) -> (HopWitness, [u8; 32]) {
-    let proof_block_refs: Vec<[u8; 32]> = vec![SLOT0_PARENT_PLACEHOLDER, predecessor_id];
+    let proof_block_refs: Vec<[u8; 32]> = vec![SLOT0_PARENT_PLACEHOLDER, older_ref_id];
     let l7 = proof_block_refs_root_native(&proof_block_refs);
 
     let mut leaves = [[0u8; 32]; BLOCK_MERKLE_LEAF_COUNT];
@@ -922,8 +925,8 @@ pub fn make_active_hop_public(
         ref_index,
         refs_tree_depth,
         proof_block_ref_inner_path,
-        hop_start_block_id: predecessor_id,
-        hop_end_block_id: block_id,
+        hop_start_block_id: block_id,
+        hop_end_block_id: older_ref_id,
     };
     (hop, block_id)
 }
@@ -949,25 +952,38 @@ pub fn make_inactive_hop_public(pad_bid: [u8; 32]) -> HopWitness {
     }
 }
 
-/// Build `H_HOPS_PER_PROOF` hops from a genesis + `k_active` active hops
-/// followed by inactive padding carrying the terminal block-id. `k_active`
+/// Build `H_HOPS_PER_PROOF` hops under Direction (a) semantics: `seed_bytes`
+/// is the *oldest* block-id (the anchor `Y`). We construct the chain
+/// oldest→newest — each iteration derives a newer block whose L7 references
+/// the previous older one — then reverse so `hops[0].hop_start = X` (newest
+/// event block) and the last active hop's `hop_end = seed_bytes` (`Y`). Any
+/// tail slot is inactive padding carrying `Y` on both endpoints. `k_active`
 /// must be `<= H_HOPS_PER_PROOF`.
 pub fn synth_hops_public(
     seed_bytes: [u8; 32],
     k_active: usize,
 ) -> [HopWitness; H_HOPS_PER_PROOF] {
     assert!(k_active <= H_HOPS_PER_PROOF);
-    let mut hops: Vec<HopWitness> = Vec::with_capacity(H_HOPS_PER_PROOF);
-    let mut cur_bid = seed_bytes;
+    let mut chain: Vec<HopWitness> = Vec::with_capacity(k_active);
+    let mut older_bid = seed_bytes;
     for i in 0..k_active {
-        let (hop, next_bid) = make_active_hop_public(cur_bid, 0x10 + i as u8);
-        hops.push(hop);
-        cur_bid = next_bid;
+        let (hop, newer_bid) = make_active_hop_public(older_bid, 0x10 + i as u8);
+        chain.push(hop);
+        older_bid = newer_bid;
     }
-    while hops.len() < H_HOPS_PER_PROOF {
-        hops.push(make_inactive_hop_public(cur_bid));
+    // Reverse so index 0 is the newest hop (start = X) and the last active
+    // hop's end is `seed_bytes` (Y). At k_active=0 this is a no-op.
+    chain.reverse();
+    let terminal_older = if chain.is_empty() {
+        seed_bytes
+    } else {
+        chain.last().unwrap().hop_end_block_id
+    };
+    while chain.len() < H_HOPS_PER_PROOF {
+        chain.push(make_inactive_hop_public(terminal_older));
     }
-    hops.try_into()
+    chain
+        .try_into()
         .unwrap_or_else(|v: Vec<HopWitness>| panic!("hop slot count {}", v.len()))
 }
 

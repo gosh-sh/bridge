@@ -33,8 +33,8 @@ use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -656,9 +656,7 @@ async fn run_daemon(
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
 
     let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
-    let scan_cursor = Arc::new(Mutex::new(
-        existing_state.scanned_through_block.unwrap_or(from_block),
-    ));
+    let scan_cursor = Arc::new(Mutex::new(existing_state.scanned_through_block));
 
     // Same gate as `watch` / `prove-one`: an unsupported chain produces proofs
     // the AN-side bridge has no allowlist entry for, so fail before the first
@@ -759,7 +757,7 @@ async fn run_daemon_loop<S, P, A>(
     deployment: DeploymentIdentity,
     force_state: bool,
     skip_after_attempts: Option<u32>,
-    scan_cursor: Arc<Mutex<u64>>,
+    scan_cursor: Arc<Mutex<Option<u64>>>,
     source: Arc<S>,
     prover: Arc<P>,
     submitter: Arc<A>,

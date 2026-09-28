@@ -628,6 +628,16 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-relayer daemon` jumped `scanned_through_block` to the confirmed
+  head on every `eth_getLogs` tick, even when the target `depositId` was
+  missing or `finalizeDeposit` failed. The next scan started at that head
+  plus one, so a second deposit in the same window — and a retry of the
+  first — returned `None` forever. The cursor now moves only after AN
+  accepts that id, and only to the block before it, so a later deposit in
+  the same block is still found. Fresh start includes `--from-block` (it
+  used to skip it). If a running `state.json` already has a jumped
+  `scanned_through_block`, delete that field and restart, or finish the
+  stuck id with `prove-one` / `finalize-one`.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's

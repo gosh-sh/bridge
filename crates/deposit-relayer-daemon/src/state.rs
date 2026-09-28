@@ -66,9 +66,12 @@ pub struct RelayerState {
     /// Consecutive non-success outcomes for the current target. Reset to 0
     /// on every finalized deposit.
     pub attempts_since_progress: u32,
-    /// Highest Ethereum block (inclusive) scanned by [`EthLogSource`] on the
-    /// last fetch attempt. Lets the daemon resume log scans from the tail
-    /// instead of re-walking from the bridge deploy block every tick.
+    /// Highest Ethereum block the daemon may skip on the next `eth_getLogs`
+    /// scan. Set only after a deposit is finalized on AN, to that deposit's
+    /// block minus one, so a later `depositId` in the same block is still
+    /// found. `None` = scan from `--from-block` (DEP-02). A leftover value
+    /// from before this fix (often the old `safe_head`) hides confirmed
+    /// deposits: delete `scanned_through_block` from `state.json` and restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scanned_through_block: Option<u64>,
     /// Deposit ids the daemon advanced past after `--skip-after-attempts`.

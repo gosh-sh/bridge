@@ -58,9 +58,11 @@ pub struct RelayerConfig {
     /// advance the cursor. `None` or `0` disables skipping (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_after_attempts: Option<u32>,
-    /// Shared with [`EthLogSource`] — highest safe head scanned so far.
+    /// Shared with [`EthLogSource`] — last block before the most recently
+    /// finalized deposit, so a later deposit in the same block is still
+    /// found. `None` inside the mutex means "never finalized".
     #[serde(skip)]
-    pub scan_cursor: Option<Arc<Mutex<u64>>>,
+    pub scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
 }
 
 fn default_poll_interval() -> Duration {
@@ -225,6 +227,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Finalized {
                 tx_hash,
             } => {
+                self.mark_finalized_block(event.block_number)?;
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -239,6 +242,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 })
             },
             SubmitOutcome::AlreadyFinalized => {
+                self.mark_finalized_block(event.block_number)?;
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -308,13 +312,32 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     fn persist_state(&mut self) -> Result<(), RelayerError> {
         if let Some(cursor) = &self.config.scan_cursor {
-            self.state.scanned_through_block = Some(
-                *cursor
-                    .lock()
-                    .map_err(|e| RelayerError::other(e.to_string()))?,
-            );
+            self.state.scanned_through_block = *cursor
+                .lock()
+                .map_err(|e| RelayerError::other(e.to_string()))?;
         }
         self.state.save(&self.config.state_path)
+    }
+
+    /// Remember that a deposit at `block_number` is done. The next log scan
+    /// still includes that block (a later `depositId` can share it). Never
+    /// called on a failed tick, so a rejected `finalizeDeposit` is retried
+    /// against the same logs (DEP-02).
+    fn mark_finalized_block(&self, block_number: u64) -> Result<(), RelayerError> {
+        let Some(cursor) = &self.config.scan_cursor else {
+            return Ok(());
+        };
+        let Some(through) = block_number.checked_sub(1) else {
+            return Ok(());
+        };
+        let mut guard = cursor
+            .lock()
+            .map_err(|e| RelayerError::other(e.to_string()))?;
+        *guard = Some(match *guard {
+            Some(old) => old.max(through),
+            None => through,
+        });
+        Ok(())
     }
 
     /// Record a failed attempt and optionally park the deposit when the skip
@@ -431,6 +454,100 @@ mod tests {
         assert_eq!(submitter.finalized_log(), vec![0, 1, 2, 3, 4]);
         assert_eq!(relayer.state().last_processed_deposit_id, Some(4));
         assert_eq!(relayer.state().attempts_since_progress, 0);
+    }
+
+    #[tokio::test]
+    async fn scan_cursor_moves_only_after_finalize_and_keeps_the_deposit_block() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        let mut a = deposit(0);
+        a.block_number = 105;
+        let mut b = deposit(1);
+        b.block_number = 105;
+        let mut c = deposit(2);
+        c.block_number = 107;
+        source.insert(a);
+        source.insert(b);
+        source.insert(c);
+        let cursor = Arc::new(Mutex::new(None));
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            start_deposit_id: 0,
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: Some(cursor.clone()),
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
+        assert_eq!(relayer.state().scanned_through_block, Some(104));
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 1,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 2,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(106));
+        assert_eq!(relayer.state().scanned_through_block, Some(106));
+    }
+
+    #[tokio::test]
+    async fn scan_cursor_stays_none_while_the_deposit_is_missing() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        let cursor = Arc::new(Mutex::new(None));
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            start_deposit_id: 0,
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: Some(cursor.clone()),
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable {
+                deposit_id: 0
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), None);
+        assert_eq!(relayer.state().scanned_through_block, None);
     }
 
     #[tokio::test]

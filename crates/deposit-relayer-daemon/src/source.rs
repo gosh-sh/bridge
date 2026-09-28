@@ -145,6 +145,19 @@ pub fn resolve_from_block(cli_from_block: u64) -> u64 {
         .unwrap_or(0)
 }
 
+/// Inclusive start block for the next `eth_getLogs` scan.
+///
+/// `scanned_through = None` is a fresh daemon: start at `from_block` (the
+/// previous `unwrap_or(from_block)` + `last + 1` combo skipped the deploy
+/// block). After a finalize at block B the cursor stores `B - 1` so a later
+/// deposit in B is still found.
+pub(crate) fn scan_from_block(from_block: u64, scanned_through: Option<u64>) -> u64 {
+    match scanned_through {
+        None => from_block,
+        Some(last) => last.saturating_add(1).max(from_block),
+    }
+}
+
 /// Map a block-global `logIndex` (from `eth_getLogs`) to the receipt-local
 /// position `deposit-prover` indexes by.
 pub fn receipt_log_index_from_block_log(
@@ -187,10 +200,10 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     confirmations: u64,
     /// Cached `eth_chainId` from the RPC (stamped onto every [`DepositEvent`]).
     chain_id: Mutex<Option<u64>>,
-    /// Highest `safe_head` scanned on the previous fetch. When set, the next
-    /// scan starts at `scanned_through + 1` instead of re-walking from
-    /// `from_block`.
-    scan_cursor: Option<Arc<Mutex<u64>>>,
+    /// Last Ethereum block the daemon has fully processed (the block *before*
+    /// the last finalized deposit, so a later deposit in the same block is
+    /// still visible). `None` means "never finalized — scan from `from_block`".
+    scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
     _network: std::marker::PhantomData<N>,
 }
 
@@ -211,24 +224,18 @@ where
         }
     }
 
-    /// Attach a shared scan cursor (typically backed by `RelayerState`).
-    pub fn with_scan_cursor(mut self, cursor: Arc<Mutex<u64>>) -> Self {
+    /// Attach a shared scan cursor (typically backed by [`RelayerState`]).
+    pub fn with_scan_cursor(mut self, cursor: Arc<Mutex<Option<u64>>>) -> Self {
         self.scan_cursor = Some(cursor);
         self
     }
 
     fn effective_scan_from(&self) -> u64 {
-        match &self.scan_cursor {
-            Some(cursor) => {
-                let last = *cursor.lock().expect("poisoned scan cursor");
-                if last >= self.from_block {
-                    last.saturating_add(1)
-                } else {
-                    self.from_block
-                }
-            },
-            None => self.from_block,
-        }
+        let scanned_through = self
+            .scan_cursor
+            .as_ref()
+            .and_then(|cursor| *cursor.lock().expect("poisoned scan cursor"));
+        scan_from_block(self.from_block, scanned_through)
     }
 
     pub fn address(&self) -> Address {
@@ -388,9 +395,10 @@ where
             chunk_start = chunk_end.saturating_add(1);
         }
 
-        if let Some(cursor) = &self.scan_cursor {
-            *cursor.lock().expect("poisoned scan cursor") = safe_head;
-        }
+        // Do not move the scan cursor here. A missed or rejected finalize
+        // must still see this deposit on the next tick; the relayer advances
+        // the cursor only after AN accepts the target id, and never past
+        // that deposit's block (DEP-02).
 
         for log in logs {
             let decoded = match log.log_decode::<Deposit>() {
@@ -495,6 +503,18 @@ mod tests {
     #[test]
     fn resolve_from_block_prefers_cli() {
         assert_eq!(resolve_from_block(42), 42);
+    }
+
+    #[test]
+    fn scan_from_block_includes_from_block_until_a_finalize() {
+        assert_eq!(scan_from_block(100, None), 100);
+        assert_eq!(scan_from_block(0, None), 0);
+        // After deposit 0 in block 105: cursor = 104 → next scan starts at 105
+        // (same-block sibling still visible).
+        assert_eq!(scan_from_block(100, Some(104)), 105);
+        assert_eq!(scan_from_block(100, Some(99)), 100);
+        // Stale cursor below the deploy block must not walk genesis.
+        assert_eq!(scan_from_block(100, Some(50)), 100);
     }
 
     #[test]

@@ -249,6 +249,31 @@ Passing any `--k` replaces the program's default set, so list all five values;
 `--k 22` alone would provision only K=22. Pin and verify the resulting artifact
 manifest before starting a production container.
 
+### Step 3.5 — Offline keygen (optional but recommended)
+
+Both bundle-lane circuits (`BridgeEventFinalProof` at K=19,
+`BridgeMultiHopProof` at K=17) build their proving keys deterministically
+from the SRS + a per-circuit revision counter (see
+`bridge_prover_lib::keys::{EventKeyManager, MultiHopKeyManager}`). If you
+skip this step the daemon runs keygen synchronously on first launch: ~7 min
+at K=19 with RSS >10 GB, blocking the read loop the whole time. Running
+the keygen bins now produces the same on-disk artefacts (`event_pk.bin`,
+`multi_hop_pk.bin`, `*_manifest.json`) that the daemon would produce and
+warm-caches them under `$BRIDGE_PARAMS_DIR`.
+
+```bash
+# Requires kzg_bn254_{17,19}.srs already present in $BRIDGE_PARAMS_DIR
+# (produced by Step 3 above). ≥20 GB free needed for both PKs.
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_final -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_multi_hop -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+```
+
+Both bins are idempotent (warm cache → info log + exit 0) and `flock`-guarded
+on their own lockfiles, so re-running alongside a live daemon is safe. See
+`MULTITHREAD_MIGRATION_PLAN.md` §8 (Commit-7 context).
+
 ### Step 4 — Source the mode env file
 
 ```bash

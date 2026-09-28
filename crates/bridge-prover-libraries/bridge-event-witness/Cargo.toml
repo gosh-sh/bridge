@@ -39,10 +39,19 @@ path = "src/bin/export.rs"
 name = "bridge-event-witness-builder"
 path = "src/bin/build.rs"
 
+# --- Empirical tvm-sdk wire-format parity probe (offline / GQL) --------
+# One-off diagnostic used before a full multi-thread E2E to answer "does
+# our v3.0.6.an pin still decode ExtOut BOCs the state_v2 node emits?".
+# See src/bin/probe_tvm_decode.rs for interpretation.
+[[bin]]
+name = "probe-tvm-decode"
+path = "src/bin/probe_tvm_decode.rs"
+
 [dependencies]
 # Schema + hermetic exporter
 tvm_block = { workspace = true }
 tvm_types = { workspace = true }
+sha2 = { workspace = true }
 
 # Daemon-side enrichment (only the `build` binary uses these)
 bridge-prover-lib = { workspace = true }

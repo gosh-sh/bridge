@@ -278,6 +278,20 @@ cd ../bridge-evm-aggregator && cargo build --release && cd ../bridge-prover-libr
 # 3. Build the Circuit 4 event prover
 cargo build --release -p bridge-event-halo2-prover
 #   -> ./target/release/bridge-event-halo2-prover
+
+# 4. Provision the Hermez KZG SRS + offline keygen (skip if $BRIDGE_PARAMS_DIR
+#    already contains multi_hop_manifest.json + event_manifest.json).
+#    Both keygen bins are idempotent (warm cache → instant no-op) and
+#    flock-guarded, so re-running while a daemon is up is safe. Doing them
+#    now avoids the ~7-min synchronous stall on first daemon launch (K=19
+#    Circuit-4 keygen spikes RSS >10 GB). See `MULTITHREAD_MIGRATION_PLAN.md`
+#    §8. `$BRIDGE_PARAMS_DIR` needs ≥20 GB free.
+cargo run --release -p bridge-prover-lib --bin bootstrap_hermez_srs -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_final -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_multi_hop -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
 ```
 
 **Env sanity (in addition to bundle-lane vars from parent runbook):**
@@ -302,6 +316,100 @@ file before invoking the binary.
 The withdraw command reads `RPC_URL`, `BRIDGE_ADDRESS`, `RELAYER_PRIVATE_KEY`
 via clap `env` attrs; `BRIDGE_GQL_ENDPOINT` must be aliased to
 `GQL_ENDPOINT` on the command line (see Case 1).
+
+---
+
+## Local multi-thread devnet (state_v2) — cross-thread source
+
+**When you need this:** you want to exercise the cross-thread hop in
+Circuit 4 end-to-end. Shellnet is single-thread on `v3.0.6.an`, so the
+`is_same_thread` selector always fires the trivial branch there. The
+target-side wire-format probe
+(`bridge-event-witness/src/bin/probe_tvm_decode.rs`) can only reach parity
+verdict against a real state_v2 node.
+
+**Prerequisite: state_v2-compatible tool binaries.** The MT harness spawns
+child threads and generates a new zerostate — it needs `tvm-cli`, `sold`,
+`tvm-debugger`, `zerostate-helper`, `node-helper` all built from a
+tvm-sdk tree compatible with `state_v2`. A `v3.0.6.an`-era `tvm-cli`
+against a state_v2 node fails silently at zerostate generation and leaves
+the docker compose stack un-bootable. Point the env vars below at
+state_v2 builds.
+
+**Prerequisite: Docker Desktop VM ≥ 12 GiB.** Five nodes × ~2 GiB plus
+aerospike; below 8 GiB aerospike hits `stop-writes` and block production
+halts at seq_no ≈ 500 with the symptom looking like a chain hang.
+
+**Bring up 2 threads.** From an `acki-nacki` checkout on branch
+`feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`:
+
+```sh
+DISABLE_MV=true \
+CLI_NAME=/path/to/v2_tools/tvm-cli \
+TVM_CLI=/path/to/v2_tools/tvm-cli \
+SOLD=/path/to/v2_tools/sold \
+TVM_DEBUGGER=/path/to/v2_tools/tvm-debugger \
+ZEROSTATE_HELPER=/path/to/cargo-target/release/zerostate-helper \
+NODE_HELPER=/path/to/cargo-target/release/node-helper \
+MESSAGE_ARCHIVE_OTEL_RUN_ID=local-2-thread \
+python3 tests/mt/cli.py test-multithread-cross-thread \
+  --threads 2 \
+  --total 20000 \
+  --hold-burst-total 5000 \
+  --hold-quiet-seconds 0 \
+  --batch-size 200 \
+  --deploy-value 12000000000000 \
+  --minimum-balance 8000000000000 \
+  --hold-seconds 1800 \
+  --timeout 2400
+```
+
+The `--hold-*` flags are load-bearing — dropping them lets the child thread
+starve and finalization stalls (Michael's warm-up burst gets no
+cross-thread refills). See
+[MT test session notes](https://github.com/gosh-sh/acki-nacki/blob/feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on/MULTITHREAD_TEST_SESSION.md)
+for cyclic-hold internals.
+
+**Wait for the split.** The harness logs `split thread` when the second
+thread is stable. `BRIDGE_GQL_ENDPOINT` should point at any node's port
+8600 (all nodes serve the merged view).
+
+**Sanity probe before bridge deploy.** Confirm the bridge's `v3.0.6.an`
+tvm-sdk pin still decodes the node's BOCs (see the top of this section):
+
+```sh
+cd crates/bridge-prover-libraries
+cargo run --release -p bridge-event-witness --bin probe-tvm-decode -- \
+    --gql-url http://127.0.0.1:8600/graphql \
+    --account-id <64-hex account emitting ExtOut> \
+    --dapp-id    <64-hex dapp id> \
+    --limit 3 -v
+```
+
+Exit 0 = safe to proceed. Exit 1 = wire format changed, migrate the
+bridge's tvm-sdk pins to `state_v2` before continuing. Exit 2 = cell
+descriptor layout changed, also update `boc_walk::build_cell_repr_data`.
+
+**Firing a real cross-thread `WithdrawalInitiated`.** The paced-workload
+harness spawns two threads and cycles arbitrary messages between them,
+but it does not orchestrate a USDC deposit → cross-thread burn on its
+own. To exercise the Circuit-4 multi-hop path you additionally need to:
+
+1. Deploy the AN bridge (`contracts/an/exchange/eccUSDCBridge`) using
+   the harness's zerostate. The deploy typically lands on thread 0.
+2. Deploy a caller account whose routing places it on thread 1 (the
+   split thread). AN routes by DApp ID at zerostate time — use a
+   distinct DApp ID for the caller.
+3. Fund the caller with ECC[3] USDC via `USDCBridge.mintAndSend` from
+   the giver (`config/USDCBridge.keys.json` is the mint authority).
+4. Call `burn(recipient, amount)` on the caller. The internal
+   cross-thread call to the bridge fires `WithdrawalInitiated` in a
+   block on thread 1 whose parent chain traces back into thread 0 —
+   the daemon's `resolve_cross_thread_chain` walks that Leaf-7 path.
+
+TODO — the exact `tvm-cli` invocations for steps 1-4 are not in this
+runbook yet. Fill in on first successful E2E; the harness spawns the
+threads but the bridge/caller wiring is bespoke per deployment.
 
 ---
 

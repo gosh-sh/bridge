@@ -313,6 +313,46 @@ assigns it when the release is tagged.
       --params-dir ./params --k 17
   ```
 
+  Both runbooks now reference this ceremony in their build-prerequisite
+  sections (`live_withdrawByProof_runbook.md` §"One-time setup" step 4;
+  `live_relayer_bridge_verifyBlock_runbook.md` §"Step 3.5 — Offline keygen").
+
+- **`probe-tvm-decode` — empirical tvm-sdk wire-format parity probe under
+  `bridge-event-witness/src/bin/`.** One-off diagnostic to answer "does
+  the bridge's `tvm-sdk = v3.0.6.an` pin still decode ExtOut BOCs the
+  live multi-thread node (`acki-nacki@state_v2`) emits?" — before that
+  question was answerable only empirically by watching the full daemon
+  E2E fail. Two modes: `--boc-base64 <B64>` (offline, no network) or
+  `--gql-url <URL> --account-id <HEX> --dapp-id <HEX> [--limit N]`
+  (pulls last N ExtOut messages via `query_bridge_extouts`, same call
+  path the daemon uses). For each BOC: `Message::construct_from_base64`
+  → tree walk → per-cell descriptor SHA-256 parity check
+  (`sha256(cell_repr_data) == cell.repr_hash()`, catches
+  `build_cell_repr_data` drift) → GQL-id/root-repr_hash identity
+  (online mode). Exit `0` = safe, `1` = parse failure (wire format
+  changed), `2` = descriptor parity failure (cell layout changed),
+  `3` = usage/network error. `live_withdrawByProof_runbook.md` §"Local
+  multi-thread devnet (state_v2)" documents running it against a fresh
+  MT node before the first bundle attempt.
+
+- **`live_withdrawByProof_runbook.md` §"Local multi-thread devnet
+  (state_v2)".** New section that documents how to bring up a 2-thread
+  local acki-nacki devnet against which the bundle-lane cross-thread
+  path can be exercised end-to-end (shellnet is single-thread and can
+  only fire the same-thread branch of Circuit 4's `is_same_thread`
+  selector). Covers: state_v2-compatible `tvm-cli` / `sold` /
+  `tvm-debugger` / `zerostate-helper` / `node-helper` binary
+  requirement (v1 tools against a state_v2 node fail silently at
+  zerostate generation), Docker VM ≥ 12 GiB, the
+  `tests/mt/cli.py test-multithread-cross-thread` invocation with
+  hold-cycle flags on branch
+  `feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`,
+  and the `probe-tvm-decode` pre-flight step. Steps 1-4 of the actual
+  cross-thread `WithdrawalInitiated` orchestration (deploy AN bridge,
+  place caller on split thread, mint ECC[3], burn) are stubbed
+  `TODO` — they are bespoke per deployment and to be filled after the
+  first successful run.
+
 - **`BridgeMultiHopAggregatorVerifier` — SHPLONK aggregator adapter for the
   cross-thread hop-chain snark.** New `contracts/ethereum/src/BridgeMultiHopAggregatorVerifier.sol`
   wraps a SHPLONK Yul verifier at `NUM_INNER = 2` (2 re-exposed PIs:

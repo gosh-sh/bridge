@@ -830,6 +830,62 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **Cross-thread hop-chain walk direction (`resolve_cross_thread_chain` +
+  `BridgeMultiHopProof`) now matches Direction (a) of the reachability
+  spec end-to-end, so a cross-thread `withdrawByProofBundle` claim
+  actually clears `bundle_verifier`.** Under the intended contract, the
+  event `X` sits on a non-default thread `t` and is *newer* than the
+  anchor `Y` on thread 0; the L7 walk chases `proof_block_refs`
+  newest → oldest. The pre-fix code base was internally inconsistent:
+  per-hop, `hop_start_block_id` was set to the older ref and
+  `hop_end_block_id` to the newer current block, and the walker then
+  reversed the emitted `snarks` vector. Composed, `snarks[0].hop_start`
+  came out as `Y` and `snarks[last].hop_end` as `X` — the exact opposite
+  of the Solidity/Rust `bundle_verifier` expectation
+  (`x_block_id == snarks[0].hop_start`, `y_block_id ==
+  snarks[last].hop_end`, per `bundle_verifier.rs:280,301`), so every
+  cross-thread bundle failed `HopChainHeadMismatch` at proof-check time.
+  The fix flips per-hop semantics — `hop_start = current block being
+  opened` (newer), `hop_end = ref extracted from
+  proof_block_refs[ref_index]` (older) — and drops the trailing
+  `snarks.reverse()` from `resolve_cross_thread_chain`, so the emitted
+  bundle is already newest → oldest with `snarks[0].hop_start == X` and
+  `snarks[last].hop_end == Y`. Touches `BridgeMultiHopProof` (endpoint
+  bindings + ref-tree opening read-side), `HopWitness` / `HopWitnessJson`
+  field-doc semantics, the pure-Rust walker `build_hop_witness` +
+  `resolve_cross_thread_chain`, and MULTITHREAD_BRIDGE_EVENT_CIRCUIT
+  spec §4.4 / §6.3. Consequences for operators:
+    - **No verification-key rotation.** Empirically verified 2026-09-28
+      by regenerating the inner Poseidon snark
+      (`export-multi-hop-poseidon-snark`) and the outer SHPLONK Yul
+      (`export-inner-aggregator --name BridgeMultiHopAggregatorVerifier`)
+      from the fixed circuit: the resulting
+      `BridgeMultiHopAggregatorVerifier.bin` byte-hashes identically
+      to the previous export (SHA-256
+      `a5e38f80f8e51ced5655b8e086c38db4a7be205e0e1cea554cc9a763151daa97`,
+      23 722 B), so the inner VK it embeds is byte-identical too.
+      `multi_hop_vk*.bin` on-disk caches remain valid;
+      `MULTI_HOP_CIRCUIT_REVISION` is **not** bumped; no on-chain
+      redeploy of `BridgeMultiHopAggregatorVerifier` is required.
+    - **`BridgeMultiHopAggregatorVerifier_calldata.bin` (smoke-test
+      fixture) drifts** as a side-effect of regenerating from the
+      swapped operand order — the proof polynomial commitments carry
+      the flipped witness values even though the VK is unchanged. The
+      committed calldata is regenerated in this branch; deployment
+      pipelines that pin its SHA-256 must update the pin.
+    - **`multi_hop_witness_*.json` files produced by the pre-fix
+      walker are no longer valid** — their `hop_start_block_id_hex` /
+      `hop_end_block_id_hex` roles are inverted. The daemon's
+      pipeline regenerates them from live GQL on every claim, so
+      operators only need to discard any hand-cached hop witness
+      blobs. The `H_HOPS_PER_PROOF = 1` schema-shape rejection above
+      already invalidated every prior file, so in practice no
+      cached JSON survives from before this branch.
+    - **Same-thread claims are unaffected** — the walker returns
+      `MultiHopBundleWitnessJson::default()` (empty `snarks`) for
+      `event_block.thread_id == DEFAULT_THREAD_ID` and the prover
+      still short-circuits `y_block_id = x_block_id`.
+
 - **`withdrawByProofBundle` revert reasons are now human-readable in the
   relayer logs.** The three call sites in `bridge-relayer-daemon`
   (`EthBridgeClient::dry_run_withdraw_bundle`,

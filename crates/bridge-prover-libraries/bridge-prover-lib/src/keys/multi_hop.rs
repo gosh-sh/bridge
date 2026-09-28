@@ -55,24 +55,7 @@ pub(super) const PREFIX: &str = "multi_hop";
 /// change: old PK/VK on disk are invalidated, `N_BUNDLE_MAX` doubles from 10
 /// to 20, the outer verifier YUL must be regenerated and the on-chain
 /// `BridgeMultiHopAggregatorVerifier` redeployed.
-///
-/// Rev 5: Direction (a) semantic swap in `BridgeMultiHopProof`'s per-hop
-/// endpoint bindings. The `prove_hop_clear_endpoints` gadget now binds
-/// `hop_start_block_id == block_id` and `hop_end_block_id == ref_block_id`
-/// (was: `hop_start == ref_block_id`, `hop_end == block_id`). Same gate
-/// count, same PI layout, but the `gate.sub` calls emit copy constraints
-/// from *different source cells* (`block_id_bytes` vs `ref_block_id_bytes`),
-/// which shifts the permutation-argument cycles and rotates the VK
-/// commitment. The `prove_hop_ref_tree_opening` gadget's `ref_block_id_bytes`
-/// source is also flipped from `hop.hop_start_block_id` to
-/// `hop.hop_end_block_id` — same cell offsets, but the value origin
-/// changes what the walker enrichment emits. See CHANGELOG "Cross-thread
-/// hop-chain walk direction" entry for the bundle-verifier contract this
-/// aligns with. Breaking change: old PK/VK on disk are invalidated, outer
-/// SHPLONK YUL must be regenerated (`export-multi-hop-poseidon-snark` +
-/// `export-inner-aggregator --name BridgeMultiHopAggregatorVerifier`), and
-/// the on-chain `BridgeMultiHopAggregatorVerifier` must be redeployed.
-pub(super) const MULTI_HOP_CIRCUIT_REVISION: u32 = 5;
+pub(super) const MULTI_HOP_CIRCUIT_REVISION: u32 = 4;
 
 /// Deterministic seed for the synthetic-witness keygen path. Any seed
 /// produces the same VK/PK shape.

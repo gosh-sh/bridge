@@ -515,7 +515,9 @@ contract EthBeaconLightClient {
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
     ///         push that landed before `setLightClient`). Does not re-prove.
     ///         `blockHash` is the stored anchor key (`_piForm` packing), not
-    ///         the Ethereum byte order a block explorer shows.
+    ///         the Ethereum byte order a block explorer shows. The sink is
+    ///         told `_piForm(blockHash)`, the raw keccak `finalizeDeposit`
+    ///         looks up.
     function rePushAnchor(uint256 blockHash) public {
         require(_isLive(blockHash), ERR_NOT_PROVEN);
         tvm.accept();

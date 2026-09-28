@@ -1,7 +1,7 @@
 //! Multi-thread Halo2 circuit proving an Acki Nacki `WithdrawalInitiated`
 //! event was committed into a block on Acki Nacki, with the X-block (event
 //! block) and Y-block (anchor block) *distinguishable* so that a companion
-//! `BridgeMultiHopProof` (added in a later commit) can chain X → Y across
+//! `BridgeMultiHopProof` can chain X → Y across
 //! threads.
 //!
 //! This is the multi-thread successor of the removed single-thread
@@ -30,9 +30,8 @@
 //!                                 senderAccFr, eventsPos))
 //!   9  finalRoot      (anchor root the proof binds to)
 //!  10  anchorLayer    (1-indexed layer number, 1..=MAX_ANCHOR_LAYER)
-//!  11  x_block_id     (Fr of X-block block_id — the event block)
-//!  12  y_block_id     (Fr of Y-block block_id — the anchor block)
-//! ```
+//!
+//! 
 //!
 //! Slots `[0..=10]` are **byte-identical** to the legacy single-thread
 //! layout (the same slot constants are re-exported from

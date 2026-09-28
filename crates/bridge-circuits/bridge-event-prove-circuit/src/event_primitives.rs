@@ -2,12 +2,6 @@
 //! offsets used by both the multi-thread `BridgeEventFinalProof` (Circuit 4
 //! final) and the `MultiHopProof` (Circuit 4 multi-hop) paths.
 //!
-//! Extracted verbatim (minus the legacy `TOTAL_PUBLIC_INPUTS = 11` constant)
-//! from the removed single-thread `bridge_event_prove_circuit.rs`. The circuit
-//! type that used to live alongside these primitives has been deleted as part
-//! of the multi-thread Circuit-4 migration; see the CHANGELOG
-//! `## [Unreleased]` `### Breaking Changes` entry and
-//! `bridge_event_final_proof.rs` for the current in-circuit consumer.
 //!
 //! Event body byte layout (cell_repr_data-relative offsets):
 //!   [0..2)    d1 + d2

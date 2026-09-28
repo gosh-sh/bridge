@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use anyhow::Context;
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
@@ -13,27 +14,26 @@ use halo2_base::{
         poly::kzg::commitment::ParamsKZG,
     },
 };
+pub use snark_verifier_sdk::halo2::aggregation::VerifierUniversality;
 use snark_verifier_sdk::{
     evm::gen_evm_verifier_shplonk,
     gen_pk,
-    halo2::{
-        aggregation::{AggregationCircuit, VerifierUniversality},
-        gen_snark_shplonk,
-    },
+    halo2::{aggregation::AggregationCircuit, gen_snark_shplonk},
     Snark, SHPLONK,
 };
 
 use crate::{
     aggregator_cache::{keygen_or_load, CachedKeygen},
     eip170,
-    multiply::build_multiply_circuit,
+    multiply::{build_multiply_circuit, build_multiply_plus_one_circuit},
 };
 
 /// Inner-circuit row count for the M2 multiply spike (`2^9` rows).
 pub const K_INNER_SPIKE: u32 = 9;
 pub const LOOKUP_BITS_INNER_SPIKE: usize = 8;
 
-/// Default outer row count — safe minimum for `expose_previous_instances` @ ~13 inner PIs.
+/// Default outer row count — safe minimum for `expose_previous_instances` @ ~13
+/// inner PIs.
 pub const K_OUTER_DEFAULT: u32 = 21;
 pub const LOOKUP_BITS_OUTER_DEFAULT: usize = 20;
 
@@ -63,12 +63,9 @@ impl Default for AggregatorConfig {
 
 impl AggregatorConfig {
     pub fn for_inner_instances(num_inner: usize) -> Self {
-        // Empirics: 13 re-exposed PIs fit @ K=21 (~13 KB). Circuit 2 (14 PIs) may need K=22.
-        let k_outer = if num_inner <= 13 {
-            21
-        } else {
-            22
-        };
+        // Empirics: 13 re-exposed PIs fit @ K=21 (~13 KB). Circuit 2 (14 PIs) may need
+        // K=22.
+        let k_outer = if num_inner <= 13 { 21 } else { 22 };
         Self {
             k_outer,
             lookup_bits_outer: k_outer.saturating_sub(1) as usize,
@@ -76,12 +73,14 @@ impl AggregatorConfig {
         }
     }
 
-    /// Production R15 verifier presets (empirical on bound Poseidon snarks, 2026-06-22).
+    /// Production R15 verifier presets (empirical on bound Poseidon snarks,
+    /// 2026-06-22).
     pub fn for_verifier_name(name: &str) -> Self {
         Self::for_verifier_name_with_overrides(name, None, None)
     }
 
-    /// Like [`for_verifier_name`] but allows sweep overrides (`k_outer`, universality tag).
+    /// Like [`for_verifier_name`] but allows sweep overrides (`k_outer`,
+    /// universality tag).
     pub fn for_verifier_name_with_overrides(
         name: &str,
         k_outer: Option<u32>,
@@ -125,14 +124,15 @@ impl AggregatorConfig {
             "none" => Ok(VerifierUniversality::None),
             "preprocessed" | "preprocessed-as-witness" => {
                 Ok(VerifierUniversality::PreprocessedAsWitness)
-            }
+            },
             "full" => Ok(VerifierUniversality::Full),
             other => anyhow::bail!("unknown universality {other} (none|preprocessed|full)"),
         }
     }
 }
 
-/// Number of public-instance scalars contributed by the KZG accumulator (12 limbs).
+/// Number of public-instance scalars contributed by the KZG accumulator (12
+/// limbs).
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
 /// Generate a SHPLONK SNARK proving `a * b == c` (M2 spike inner circuit).
@@ -153,7 +153,23 @@ pub fn prove_inner_multiply(
     Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
 }
 
-/// Wrap a pre-built inner [`Snark`] in an [`AggregationCircuit`] and prove the aggregator.
+/// Inner snark for [`crate::multiply::build_multiply_plus_one_circuit`].
+/// Same `k` and lookup bits as [`prove_inner_multiply`]; the public
+/// instance is `a * b + 1` instead of `a * b`.
+pub fn prove_inner_plus_one(
+    params: &ParamsKZG<Bn256>,
+    k_inner: u32,
+    lookup_bits: usize,
+    a: Fr,
+    b: Fr,
+) -> anyhow::Result<Snark> {
+    let (builder, _) = build_multiply_plus_one_circuit(false, k_inner as usize, lookup_bits, a, b);
+    let pk = gen_pk(params, &builder, None);
+    Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
+}
+
+/// Wrap a pre-built inner [`Snark`] in an [`AggregationCircuit`] and prove the
+/// aggregator.
 ///
 /// Back-compat wrapper: delegates to [`aggregate_inner_cached`] with no PK
 /// cache directory. Every call runs full outer keygen. Prefer
@@ -194,9 +210,19 @@ pub fn aggregate_inner_cached(
         config.universality,
     );
     prover_circuit.expose_previous_instances(false);
+    // Bind the inner-circuit VK by exposing its Poseidon digest as the last
+    // public instance. Must run after `expose_previous_instances` so the
+    // digest lands at the tail of the instance column (matches the layout
+    // `keygen_or_load` accounts for and `expected_vk_digest` computes).
+    crate::vk_binding::expose_vk_digest(&mut prover_circuit);
     let prover_circuit = prover_circuit.use_break_points(break_points);
 
-    Ok(gen_snark_shplonk(agg_params, &pk, prover_circuit, None::<&Path>))
+    Ok(gen_snark_shplonk(
+        agg_params,
+        &pk,
+        prover_circuit,
+        None::<&Path>,
+    ))
 }
 
 /// Back-compat wrapper using default outer config.
@@ -206,8 +232,8 @@ pub fn aggregate(agg_params: &ParamsKZG<Bn256>, inner_snark: Snark) -> anyhow::R
 
 /// Generate Yul EVM verifier for an aggregator keyed on `inner_snark`.
 ///
-/// Writes `.sol` + sibling `.bin`. When `enforce_eip170` is true, fails if bytecode
-/// exceeds 24 576 bytes.
+/// Writes `.sol` + sibling `.bin`. When `enforce_eip170` is true, fails if
+/// bytecode exceeds 24 576 bytes.
 pub fn generate_yul_verifier(
     agg_params: &ParamsKZG<Bn256>,
     inner_snark: &Snark,
@@ -255,7 +281,7 @@ pub fn generate_yul_verifier_cached(
 
     let bin_path = output_path.with_extension("bin");
     std::fs::write(&bin_path, &bytecode)
-        .map_err(|e| anyhow::anyhow!("write {}: {e}", bin_path.display()))?;
+        .with_context(|| format!("write {}", bin_path.display()))?;
 
     let size = if enforce_eip170 {
         eip170::assert_eip170(&bytecode, &output_path.display().to_string())?

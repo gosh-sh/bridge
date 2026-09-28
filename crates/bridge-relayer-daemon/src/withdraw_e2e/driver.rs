@@ -340,7 +340,7 @@ async fn prove_and_finalize(
     //      transcript at K=19, writing `circuit4.snark` + `circuit4.instances.bin`
     //      into `snark_dir`.
     //   2. `SubprocessAggregator` shells out to `aggregate-proof --name
-    //      BridgeWithdrawalAggregatorVerifier`, producing the 23-instance SHPLONK
+    //      BridgeWithdrawalAggregatorVerifier`, producing the 24-instance SHPLONK
     //      calldata (`instances ‖ proof`) that matches the deployed Yul verifier
     //      byte-for-byte.
     std::fs::create_dir_all(&cfg.snark_dir)

@@ -2,26 +2,22 @@
 
 Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefacts. 
 
-Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-09-18**, the same
-metric `scripts/check_eip170_verifier_bins.sh` uses. Every figure a table here has carried has at
-some point drifted from the artefacts (Primary 21 493 → 21 494 and Withdrawal 20 987 → 20 990 when
-they were regenerated on 2026-08-13; Layer hashes 19 100 → 23 111; Withdrawal 20 990 → 21 152
-when Circuit 4 grew an 11th public input, see below), so re-measure rather than trusting the row.
+Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-09-23**, the same
+metric `scripts/check_eip170_verifier_bins.sh` uses. Re-measure rather than trusting the row.
 
 | File | Circuit | Inner PIs | Size | EIP-170 (24 576 B) |
 |------|---------|-----------|------|--------------------|
-| `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | 21 494 B | OK |
-| `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 493 B | OK (K=21 inner) |
-| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 23 111 B | OK (k_outer=21) |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 11 | 21 152 B | OK (K=19 inner) |
+| `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | 21 655 B | OK (88%) |
+| `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 655 B | OK (K=21 inner, 88%) |
+| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 19 263 B | OK (k_outer=22, 78%) |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 11 | 21 314 B | OK (24 instances) |
 
-Layer hashes grew because the aggregator was re-keygen'd at `k_outer=21`: at `k_outer=20` the
-outer circuit did not fit the 14 inner public inputs. The margin to EIP-170 is 1 465 B, the
-tightest of the four — regenerate with the size gate in the loop, not after it.
+Against 0.2.0 Layer hashes stays at `k_outer=22` (19 100 → 19 263 B). Primary and Fallback
+at 21 655 B are the tightest — regenerate with the size gate in the loop, not after it.
 
 Every size is also pinned in `SIZES`, next to `SHA256SUMS`, and
-`scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (layer hashes
-warns today, at 94%). That is deliberate: past the limit `CREATE` returns the zero address and
+`scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (none warn
+today; Primary/Fallback sit at 88%). That is deliberate: past the limit `CREATE` returns the zero address and
 `deployYulFromBin` reverts `YulDeployFailed`, so growth has to be visible in a diff rather than in
 a failed deploy. Regenerating an artefact means updating `SIZES` in the same commit.
 
@@ -48,14 +44,20 @@ regenerate both files, not to suspect the key. Regeneration compiles the source,
 `solc 0.8.19` on `PATH`.
 
 Circuit **4** (`withdrawByProof`) uses the same SHPLONK aggregator path. Its inner event circuit
-is keygen'd at `K=19`; the aggregated Yul is 21 152 B (23 outer instances = 12 KZG accumulator
-limbs + 11 re-exposed Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`).
-Rotated 2026-09-18 for the `events_pos` nullifier preimage and the per-layer anchor scan.
+is keygen'd on the shared `K=20` ceremony SRS (see
+`crates/bridge-prover-libraries/bridge-prover-lib/src/keys/event.rs:76`) even though the circuit
+itself fits at `K=19` — halo2-axiom bakes `params.k()` into `vk.domain`, so the value that lands
+in the inner `k` witness (and, transitively, in the `vkDigest` Poseidon preimage) is `20`. The
+aggregated Yul is 21 314 B (24 outer instances = 12 KZG accumulator limbs + 11 re-exposed
+Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`, plus 1 Poseidon digest of
+the inner VK witnesses that the on-chain adapter pins against its immutable `vkDigest`). Rotated
+2026-09-23 for the inner-VK-digest binding (previous rotation 2026-09-18 for the `events_pos`
+nullifier preimage and the per-layer anchor scan).
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation
 envelopes, so at `K=20` it needs 44 advice columns and the aggregator Yul exceeds EIP-170
-(~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul drops to 21 493 B. 
+(~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul is 21 655 B. 
 
 ## Generate SHPLONK `.sol` + `.bin` (1A + 1B + 2)
 

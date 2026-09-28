@@ -464,12 +464,16 @@ AckiNackiBridge
 layout), `_readInstance(data, i)` = `uint256(bytes32(data[i*32 : i*32+32]))` with a
 `"short instances"` require, and `_verifyShplonk`.
 
-Proof calldata is `instances (12 accumulator + N inner) ‖ snark_proof`. Each adapter:
+Proof calldata is `instances (12 accumulator + N inner + 1 inner-VK digest) ‖ snark_proof`. Each
+adapter:
 
-1. returns `false` if `proof.length < (12 + N) * 32`;
+1. returns `false` if `proof.length < (12 + N + 1) * 32`;
 2. compares every re-exposed inner instance at index `12 + k` against the corresponding argument,
    returning `false` on the first mismatch;
-3. delegates to the Yul verifier.
+3. returns `false` if the instance at index `12 + N` does not equal the adapter's immutable
+   `vkDigest` (Poseidon digest of the inner-circuit VK witnesses; base contract's constructor
+   rejects `bytes32(0)`);
+4. delegates to the Yul verifier.
 
 | Adapter | N | Instance index ↔ argument |
 |---|---:|---|
@@ -491,15 +495,15 @@ contract's fallback entrypoint via `staticcall`.
 
 | `.bin` (creation bytecode) | Circuit | Inner PIs | Size (B) | Reference calldata (B) |
 |---|---|---:|---:|---:|
-| `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 494 | 3 840 |
-| `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 493 | 3 840 |
-| `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 23 111 | 4 160 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 (inner K=19) | 11 | 21 152 | 3 648 |
+| `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 655 | 3 872 |
+| `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 655 | 3 872 |
+| `LayerHashesAggregatorVerifier.bin` | 2 (k_outer=22) | 14 | 19 263 | 3 104 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 | 11 | 21 314 | 3 680 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
-output exceeds ~28 KB (`verifiers/README.md:16-20`). 
+output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`). 
 
 `verifiers/*.sol` are the generated `Halo2Verifier` sources (a single `fallback(bytes) → bytes` with
 inline assembly) kept for reference; deployment always goes through `create` on the `.bin`
@@ -718,6 +722,8 @@ was written in, so the suite was read, not executed).
 | `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
 | `ShplonkAggregatorForgery.t.sol` (3) | Groth16-stub proof rejected by the SHPLONK path. |
+| `ShplonkAggregatorVkBinding.t.sol` (16) | Inner-VK Poseidon digest binding: mutated-digest calldata rejected by all four adapters; unmodified calldata rejected when the adapter is deployed with a wrong `vkDigest`; `bytes32(0)` constructor argument rejected with `InvalidVkDigest`; pin at or above the BN254 scalar-field modulus rejected with `VkDigestExceedsFieldModulus` (a chain id is below `r` and is not what this guard catches); pin `r − 1` accepted; calldata one word short of the trailing digest slot rejected without reverting inside `_readInstance` (all four adapters). |
+| `ShplonkVkDigestPinDerivation.t.sol` | Each `*_VK_DIGEST` constant equals word `12 + N` of the matching `<name>_calldata.bin`. |
 | `ShplonkDeployLib.t.sol`, `ShplonkSpikeOnChain.t.sol` (4) | Wrapper accepts/rejects spike calldata (`test/fixtures/r15_spike/`, **not** production verifiers). |
 | `AxiomBlockHeaderOracle.t.sol` (16) | Oracle recent/historical/future paths. |
 | `Halo2PoseidonVerifier.t.sol` (7) | Standalone DarkDEX Poseidon Halo2 verifier bytecode — unrelated to the bridge's live path. |

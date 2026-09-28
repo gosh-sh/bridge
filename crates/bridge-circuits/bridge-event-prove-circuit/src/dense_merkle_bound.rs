@@ -485,17 +485,18 @@ mod tests {
     /// Negative: a position witness with a bit flipped inside the active
     /// range makes the walker take a different path. In this test the
     /// chunk witnesses are still those the preprocessor built for the
-    /// honest orientation, so what actually rejects the proof is the
-    /// walker's level-`j` chunk-link constraint — but that is NOT where
-    /// active-bit position-binding rests. The chunk cells are prover-
-    /// supplied `load_witness` values: an attacker willing to rebuild
-    /// them for the flipped orientation satisfies every chunk link, and
-    /// the walker instead produces a root that differs from the honest
-    /// one. What rejects that stronger attacker is the root leaving this
-    /// gadget flowing into `final_root`, which the bridge compares
-    /// against `_layerWindows[anchorLayer]` in `withdrawByProof` — so a
-    /// flipped-active-bit proof is rejected on-chain by the layer-window
-    /// check, not by anything inside this gadget.
+    /// honest orientation, so the algebraic linking constraints inside
+    /// the walker are what actually fires and the walked root does not
+    /// change — but that is NOT where active-bit position-binding rests.
+    /// The chunk cells are prover-supplied `load_witness` values: an
+    /// attacker who rebuilds them for the flipped orientation satisfies
+    /// every chunk link, and the walker instead produces a root that
+    /// differs from the honest one. What rejects that stronger attacker
+    /// is the root leaving this gadget flowing into `final_root`, which
+    /// the bridge compares against `_layerWindows[anchorLayer]` in
+    /// `withdrawByProof` — so a flipped-active-bit proof is rejected
+    /// on-chain by the layer-window check, not by anything inside this
+    /// gadget.
     #[test]
     fn test_dense_merkle_bound_negative_flipped_bit_within_active_levels() {
         let (leaf, siblings, root) = build_tree(1 << 3, 5, 0xBEEF);

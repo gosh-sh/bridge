@@ -334,8 +334,8 @@ fn content_length(head: &str) -> usize {
 ///
 /// * `GET /graphql?query={info…}` — endpoint resolution
 ///   (`tvm_client/src/net/endpoint.rs`, `QUERY_INFO`).
-/// * `GET /v2/account?address=0:…` — `get_account`'s pre-1.0.0 form
-///   (`tvm_client/src/account/mod.rs`).
+/// * `GET /v2/account?account_id=0:…` — `get_account` on tvm-sdk 3.0.6. The
+///   pre-1.0.0 query used `address=` and is still accepted.
 /// * `POST /graphql` — everything `bridge_gql_fetcher::GqlClient` asks, which
 ///   for preflight is the USDCBridge account's `info`.
 /// * `POST /v2/messages` — `send_message` (`tvm_client/src/net/server_link.rs`,
@@ -374,7 +374,8 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
         // measured, with a `--from` pointing at an account the node had
         // never heard of and the suite green.
         let asked = request_line
-            .split_once("address=")
+            .split_once("account_id=")
+            .or_else(|| request_line.split_once("address="))
             .map(|(_, rest)| rest)
             .and_then(|rest| rest.split([' ', '&']).next())
             .unwrap_or_default();
@@ -578,6 +579,13 @@ impl FakeWorld {
             &verifier,
         )
         .unwrap();
+        // 3 680 B, word 23 zero. `full_walk`'s vkDigest answer is the zero
+        // word, so step 3b matches and the run continues to the ceremony.
+        std::fs::write(
+            path.join("BridgeWithdrawalAggregatorVerifier_calldata.bin"),
+            vec![0u8; bridge_relayer_daemon::withdrawal::WITHDRAWAL_CALLDATA_LEN],
+        )
+        .unwrap();
         let args = self.args.as_mut().expect("the arguments are still here");
         args.eth_private_key = Some("1a".repeat(32));
         args.aggregator_dir = Some(path.clone());
@@ -777,7 +785,7 @@ mod tests {
         // whole of preflight green, because the fake answered with the
         // only account it had.
         let (fixture, _) = one_account_node().await;
-        let line = format!("GET /v2/account?address=0:{} HTTP/1.1", "ab".repeat(32));
+        let line = format!("GET /v2/account?account_id=0:{} HTTP/1.1", "ab".repeat(32));
         answer(&fixture, &line, "");
     }
 

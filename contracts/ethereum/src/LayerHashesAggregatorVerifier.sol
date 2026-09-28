@@ -5,14 +5,17 @@ import "./ILayerHashesMovementVerifier.sol";
 import "./ShplonkAggregatorVerifierBase.sol";
 
 /// @title LayerHashesAggregatorVerifier
-/// @notice R15 SHPLONK adapter for Circuit 2 (14 public inputs).
+/// @notice R15 SHPLONK adapter for Circuit 2 (14 public inputs + inner-VK digest).
+/// @dev Calldata layout: `instances (12 acc + 14 inner + 1 vk_digest) ‖ snark_proof`.
 contract LayerHashesAggregatorVerifier is
     ILayerHashesMovementVerifier,
     ShplonkAggregatorVerifierBase
 {
     uint256 private constant NUM_INNER = 14;
 
-    constructor(address _shplonkVerifier) ShplonkAggregatorVerifierBase(_shplonkVerifier) { }
+    constructor(address _shplonkVerifier, bytes32 _vkDigest)
+        ShplonkAggregatorVerifierBase(_shplonkVerifier, _vkDigest)
+    { }
 
     function verifyLayerHashesMovement(
         bytes calldata proof,
@@ -22,7 +25,7 @@ contract LayerHashesAggregatorVerifier is
         uint256[10] calldata layerHashes,
         uint256 prevMaxLevelLayerHash
     ) external view override returns (bool isValid) {
-        if (proof.length < (NUM_ACCUMULATOR_INSTANCES + NUM_INNER) * 32) {
+        if (proof.length < (NUM_ACCUMULATOR_INSTANCES + NUM_INNER + 1) * 32) {
             return false;
         }
         if (_readInstance(proof, 12) != blockId) return false;
@@ -32,6 +35,9 @@ contract LayerHashesAggregatorVerifier is
             if (_readInstance(proof, 15 + i) != layerHashes[i]) return false;
         }
         if (_readInstance(proof, 25) != prevMaxLevelLayerHash) return false;
+        if (_readInstance(proof, NUM_ACCUMULATOR_INSTANCES + NUM_INNER) != uint256(vkDigest)) {
+            return false;
+        }
         return _verifyShplonk(proof);
     }
 }

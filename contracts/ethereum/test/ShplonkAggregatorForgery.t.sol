@@ -18,10 +18,14 @@ contract ShplonkAggregatorForgeryTest is Test {
     ///         success; the real guard is the constructor `extcodesize` check
     ///         (QC-A4-1).
     address internal constant FAILING_SHPLONK = address(0xdead);
+    /// @dev Non-zero placeholder — the base contract's constructor rejects
+    ///      `bytes32(0)`. These forgery tests trip the length or shape check
+    ///      long before the digest check, so any non-zero value works.
+    bytes32 internal constant DUMMY_VK_DIGEST = bytes32(uint256(1));
 
     function test_withdrawalAggregator_rejectsGroth16StubProof() public {
         BridgeWithdrawalAggregatorVerifier v =
-            new BridgeWithdrawalAggregatorVerifier(FAILING_SHPLONK);
+            new BridgeWithdrawalAggregatorVerifier(FAILING_SHPLONK, DUMMY_VK_DIGEST);
 
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
             IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
@@ -44,7 +48,8 @@ contract ShplonkAggregatorForgeryTest is Test {
     }
 
     function test_primaryAggregator_rejectsShortCalldata() public {
-        PrimaryAggregatorVerifier v = new PrimaryAggregatorVerifier(FAILING_SHPLONK);
+        PrimaryAggregatorVerifier v =
+            new PrimaryAggregatorVerifier(FAILING_SHPLONK, DUMMY_VK_DIGEST);
         assertFalse(v.verifyPrimaryAttestation(hex"00", 1, 2, 3, 4));
     }
 
@@ -71,7 +76,7 @@ contract ShplonkAggregatorForgeryTest is Test {
         assertTrue(mock.verifyWithdrawal(groth16Stub, pub));
 
         BridgeWithdrawalAggregatorVerifier shplonk =
-            new BridgeWithdrawalAggregatorVerifier(FAILING_SHPLONK);
+            new BridgeWithdrawalAggregatorVerifier(FAILING_SHPLONK, DUMMY_VK_DIGEST);
         assertFalse(shplonk.verifyWithdrawal(groth16Stub, pub));
     }
 }

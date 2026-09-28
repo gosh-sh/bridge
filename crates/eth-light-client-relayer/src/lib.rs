@@ -6,9 +6,10 @@
 //! default (`--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
 //! Epoch ancestry: [`ancestry`]
 //! (off-chain) + [`header_rlp`] + `submitAncestry` (on-chain writer).
-//! `finalizeDeposit` flip: the daemon issues `setLightClient` +
-//! `disableOwnerAnchors` + `disableOwnerRotation` after the first accepted
-//! update (`--no-flip-owner` opts out). With `ETH_RPC_URL` the same tick then
+//! `finalizeDeposit` flip: the daemon checks `getAnchorConfig().lightClient`
+//! against `AN_LIGHT_CLIENT`, then `disableOwnerAnchors` +
+//! `disableOwnerRotation` after the first accepted update (`--no-flip-owner`
+//! opts out). With `ETH_RPC_URL` the same tick then
 //! `rePushAnchor`s the checkpoint and runs `link_headers` locally. On-chain
 //! `submitAncestry` is `--submit-ancestry` (default off) until a keccak builtin
 //! makes the call executable.

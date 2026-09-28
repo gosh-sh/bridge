@@ -44,7 +44,7 @@ different language dialect and a different chain.
 |---|---|---|---|
 | `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. Everything else is the same code — both carry `_piForm`, `provenQueue` and the rotate decider — so the only things this repo hands over are fixes and comments, as `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch`; `scripts/check_eth_beacon_lc_sources.sh` asserts neither of them carries the local sink wiring. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
-| `USDCBridge` | `acki-nacki` repo, patches `USDCBridge_12pi_chainid_allowlist.patch`, `USDCBridge_disable_owner_allows_light_client.patch`, `USDCBridge_forget_block_hash_from_light_client.patch` | Acki Nacki | Consumer. Gains `setLightClient`, `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (one-year window; same sender gate, idempotent `delete`), and `disableOwnerAnchors` that accepts a configured light client. |
+| `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. Light-client address is derived from `setLightClientCode` / `deployLightClient` (`getAnchorConfig().lightClient`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (same sender gate, idempotent `delete`). `disableOwnerAnchors` is one-way once a light client is set. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | Invoked as `cargo run --release --example export_step_vk_blob` with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
 | Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
@@ -238,7 +238,7 @@ stateDiagram-v2
   state "USDCBridge anchors" as UBA {
     OwnerAnchors: owner or attesters write _acceptedBlockHash
     LightClientAnchors: only EthBeaconLightClient writes
-    OwnerAnchors --> LightClientAnchors: setLightClient, then disableOwnerAnchors (one way)
+    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way; light client already derived from code)
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
@@ -350,8 +350,9 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
 3. Compile and deploy `EthBeaconLightClient(pubkey, l1ChainId, 0, 0)` with `sold`; fund it.
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
 5. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
-6. Start the systemd unit. After the first accepted update the daemon calls `setLightClient`,
-   `disableOwnerAnchors`, `disableOwnerRotation`. From here on the owner key cannot add hashes.
+6. Start the systemd unit. After the first accepted update the daemon checks
+   `getAnchorConfig().lightClient` against `AN_LIGHT_CLIENT`, then calls
+   `disableOwnerAnchors` and `disableOwnerRotation`. From here on the owner key cannot add hashes.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): same steps 3 to 5
 with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`, `deploy-contract.sh`,

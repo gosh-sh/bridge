@@ -149,8 +149,9 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
-    /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors` +
-    /// `disableOwnerRotation`. Relayer keys must be the owner pubkey.
+    /// Owner one-way flip: check `getAnchorConfig().lightClient`, then
+    /// `disableOwnerAnchors` + `disableOwnerRotation`. Relayer keys must be the
+    /// owner pubkey.
     FlipOwner {
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,

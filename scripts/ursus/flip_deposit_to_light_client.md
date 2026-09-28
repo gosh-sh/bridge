@@ -21,10 +21,15 @@ must be the contract owner pubkey. tvm-sdk#284 co-deploys with this contract.
    `submitUpdate` it calls, in order:
 
 ```text
-USDCBridge.setLightClient(lightClient)
-USDCBridge.disableOwnerAnchors()                 # one-way
+USDCBridge.getAnchorConfig()                     # lightClient must match AN_LIGHT_CLIENT
+USDCBridge.disableOwnerAnchors()                 # one-way; ERR_OWNER_ANCHORS_DISABLED is 225
 EthBeaconLightClient.disableOwnerRotation()      # one-way
 ```
+
+There is no `setLightClient` on `eccUSDCBridge` 1.5.0 — the address is derived
+from `setLightClientCode` / `deployLightClient`. If `getAnchorConfig().lightClient`
+does not match `AN_LIGHT_CLIENT`, the flip refuses instead of calling a missing
+function.
 
 State file records `owner_flip_done` so a restart does not resend. One-shot
 without waiting for a tick:

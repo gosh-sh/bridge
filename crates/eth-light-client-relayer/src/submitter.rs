@@ -37,8 +37,10 @@ pub trait AnSubmitter: Send + Sync {
     /// crate; [`anchor_key_hex`] re-packs it at the ABI boundary.
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
-    /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors`
-    /// (USDCBridge) and `disableOwnerRotation` (EthBeaconLightClient).
+    /// Owner one-way flip: check `getAnchorConfig().lightClient` against
+    /// `AN_LIGHT_CLIENT`, then `disableOwnerAnchors` (USDCBridge) and
+    /// `disableOwnerRotation` (EthBeaconLightClient). The light client
+    /// address is derived from `setLightClientCode`, not `setLightClient`.
     /// Idempotent.
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError>;
 
@@ -288,6 +290,15 @@ impl AnSubmitter for MockAnSubmitter {
 #[cfg(test)]
 mod set_committee_tests {
     use super::*;
+
+    #[test]
+    fn same_tvm_account_accepts_workchain_and_extended_forms() {
+        let acc = "aa".repeat(32);
+        assert!(same_tvm_account(&format!("0:{acc}"), &acc));
+        assert!(same_tvm_account(&format!("0x{acc}"), &acc));
+        assert!(same_tvm_account(&format!("{acc}::{acc}"), &acc));
+        assert!(!same_tvm_account(&format!("0:{}", "bb".repeat(32)), &acc));
+    }
 
     #[test]
     fn le_word_becomes_big_endian_uint256() {
@@ -613,40 +624,49 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
 
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError> {
         if let Some((usdc_addr, usdc_client)) = &self.usdc {
-            let lc = ExtendedAddress::parse(&self.config.light_client)
-                .map_err(RelayerError::from)?
-                .workchain_address();
-            match self
-                .call_on(
-                    usdc_client.as_ref(),
-                    usdc_addr,
-                    "setLightClient",
-                    json!({ "lightClient": lc }),
-                )
-                .await?
-            {
-                SubmitOutcome::Accepted {
-                    ..
-                } => {},
-                other => return Ok(other),
+            let expected =
+                ExtendedAddress::parse(&self.config.light_client).map_err(RelayerError::from)?;
+            let cfg = usdc_client
+                .run_getter(usdc_addr, "getAnchorConfig", json!({}))
+                .await
+                .map_err(RelayerError::from)?;
+            let on_chain = cfg
+                .get("lightClient")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !same_tvm_account(on_chain, expected.account_id()) {
+                return Ok(SubmitOutcome::Rejected {
+                    reason: format!(
+                        "getAnchorConfig.lightClient={on_chain} != AN_LIGHT_CLIENT {}",
+                        expected.workchain_address()
+                    ),
+                });
             }
-            match self
-                .call_on(
-                    usdc_client.as_ref(),
-                    usdc_addr,
-                    "disableOwnerAnchors",
-                    json!({}),
-                )
-                .await?
-            {
-                SubmitOutcome::Accepted {
-                    ..
-                } => {},
-                // Second call after a wiped `state.json`: already one-way.
-                SubmitOutcome::Rejected {
-                    reason,
-                } if reason.contains("228") || reason.contains("OWNER_ANCHORS_DISABLED") => {},
-                other => return Ok(other),
+            let already_off =
+                cfg.get("ownerAnchorsEnabled").and_then(|v| v.as_bool()) == Some(false);
+            if !already_off {
+                match self
+                    .call_on(
+                        usdc_client.as_ref(),
+                        usdc_addr,
+                        "disableOwnerAnchors",
+                        json!({}),
+                    )
+                    .await?
+                {
+                    SubmitOutcome::Accepted {
+                        ..
+                    } => {},
+                    // Leftover 1.4.x ABI threw ERR_OWNER_ANCHORS_DISABLED
+                    // (225 on eccUSDCBridge 1.5.0; 228 was the previous
+                    // USDCBridge). 1.5.0 does not revert a second call.
+                    SubmitOutcome::Rejected {
+                        reason,
+                    } if reason.contains("225")
+                        || reason.contains("228")
+                        || reason.contains("OWNER_ANCHORS_DISABLED") => {},
+                    other => return Ok(other),
+                }
             }
         }
         self.call("disableOwnerRotation", json!({})).await
@@ -665,6 +685,33 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             }),
         )
         .await
+    }
+}
+
+/// Compare a TVM `address` getter (`0:<hex>` / `0x<hex>` / `dapp::account`)
+/// with the 64-hex account id from `AN_LIGHT_CLIENT`.
+fn same_tvm_account(on_chain: &str, expected_account_id: &str) -> bool {
+    let got = tvm_account_hex(on_chain);
+    let exp = tvm_account_hex(expected_account_id);
+    match (got, exp) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+        _ => false,
+    }
+}
+
+fn tvm_account_hex(s: &str) -> Option<String> {
+    if let Ok(ext) = ExtendedAddress::parse(s) {
+        return Some(ext.account_id().to_ascii_lowercase());
+    }
+    let bare = s
+        .trim()
+        .strip_prefix("0:")
+        .or_else(|| s.trim().strip_prefix("0x"))
+        .unwrap_or(s.trim());
+    if bare.len() == 64 && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(bare.to_ascii_lowercase())
+    } else {
+        None
     }
 }
 

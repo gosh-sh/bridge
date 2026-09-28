@@ -369,9 +369,9 @@ assigns it when the release is tagged.
   `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
   unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
   default, `--no-rotate` opts out). After the first accepted `submitUpdate` the
-  daemon issues `setLightClient` + `disableOwnerAnchors` +
-  `disableOwnerRotation` (`--no-flip-owner` opts out; one-shot:
-  `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
+  daemon checks `getAnchorConfig().lightClient` against `AN_LIGHT_CLIENT`, then
+  `disableOwnerAnchors` + `disableOwnerRotation` (`--no-flip-owner` opts out;
+  one-shot: `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
   `AN_USDC_BRIDGE` / `AN_USDC_ABI_PATH`. tvm-sdk#284 co-deploys with this contract.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
@@ -380,8 +380,8 @@ assigns it when the release is tagged.
   accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`) and runs
   `link_headers` locally; on-chain `submitAncestry` is `--submit-ancestry`
   (default **off**) because two headers already cost ~130 M gas against the
-  10 M limit. It also calls `rePushAnchor` so a bounce before `setLightClient`
-  is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
+  10 M limit. It also calls `rePushAnchor` so a bounce before the light client
+  was the sink writer is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
   0x…`. Contracts: `contracts/an/EthKeccak.sol`,
   `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
   the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
@@ -628,6 +628,14 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `eth-lc-relayer flip-owner` called `setLightClient`, which
+  `eccUSDCBridge` 1.5.0 does not have (the address is derived from
+  `setLightClientCode`). It now reads `getAnchorConfig().lightClient`,
+  compares it with `AN_LIGHT_CLIENT`, then `disableOwnerAnchors`
+  (`ERR_OWNER_ANCHORS_DISABLED` is **225**, not 228) and
+  `disableOwnerRotation`. Rebuild `eth-lc-relayer` with `--features
+  live-submit` and point `AN_USDC_ABI_PATH` at the trimmed ABI in this
+  tree. Ship with or after the QC-AN-13 sink `_piForm` fix.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's

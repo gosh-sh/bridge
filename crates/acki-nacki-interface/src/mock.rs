@@ -160,6 +160,18 @@ impl IAckiNacki for MockAckiNacki {
     async fn get_balance(&self, _address: &str) -> Result<u64> {
         Ok(1_000_000) // Mock balance
     }
+
+    async fn run_getter(
+        &self,
+        to: &str,
+        _function: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "lightClient": to,
+            "ownerAnchorsEnabled": true,
+        }))
+    }
 }
 
 /// Mock transaction sender with retry logic

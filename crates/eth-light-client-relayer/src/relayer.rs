@@ -23,8 +23,8 @@ pub struct RelayerConfig {
     /// / `enable_rotate = false` returns [`TickOutcome::RotateRequired`]
     /// instead. Rotate prove is still a ~40 GB n14 job.
     pub enable_rotate: bool,
-    /// After the first accepted `submitUpdate`, call `setLightClient` +
-    /// `disableOwnerAnchors` + `disableOwnerRotation` with the relayer keys
+    /// After the first accepted `submitUpdate`, call `disableOwnerAnchors` +
+    /// `disableOwnerRotation` with the relayer keys
     /// (must be the owner pubkey). Default **true**. `--no-flip-owner` opts
     /// out.
     pub flip_owner: bool,
@@ -367,7 +367,8 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     }
 
     /// After a proven checkpoint: re-push the hash to USDCBridge (the first
-    /// push often bounced because `setLightClient` had not run yet), then
+    /// push often bounced because the light client was not yet the sink
+    /// writer), then
     /// optionally walk the epoch parent chain when an execution RPC is
     /// configured. On-chain `submitAncestry` is a separate flag — the call
     /// cannot succeed on Acki Nacki today (see `submit_ancestry`).

@@ -81,7 +81,7 @@ pub struct DepositProofInput {
     pub event_data: DepositEventData,
     /// Receipt proof (private - proves event exists in Ethereum state)
     pub receipt_proof: ReceiptProof,
-    /// Transaction proof (private — proves enclosing EIP-1559 tx + `chain_id`).
+    /// Transaction proof (private — proves enclosing EIP-2930 / EIP-1559 tx + `chain_id`).
     /// Required for chain-binding; regenerate fixtures via
     /// `generate_transaction_proof` / `fetch_deposit_proof`.
     /// `#[serde(default)]` keeps pre-Track-2 JSON loadable; the circuit asserts
@@ -99,7 +99,7 @@ pub struct DepositProofInput {
 
 impl DepositProofInput {
     /// The `chain_id` the circuit will bind, decoded from the enclosing
-    /// EIP-1559 transaction's RLP.
+    /// EIP-2930 / EIP-1559 transaction's RLP.
     pub fn witness_chain_id(&self) -> anyhow::Result<u64> {
         crate::rlp_utils::typed_tx_chain_id(&self.tx_proof.tx_bytes)
     }

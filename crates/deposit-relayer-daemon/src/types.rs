@@ -29,7 +29,7 @@ use crate::error::RelayerError;
 /// dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow,
 /// promiseCommit]`.
 ///
-/// `chainId` is the EIP-1559 RLP field-0 value bound via the enclosing tx MPT
+/// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559) bound via the enclosing tx MPT
 /// proof (not VK-baked). `anAccount{High,Low}` bind the Acki Nacki destination
 /// account into the proof (an EVM address is not a valid AN recipient).
 /// `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced `anWorkchain`

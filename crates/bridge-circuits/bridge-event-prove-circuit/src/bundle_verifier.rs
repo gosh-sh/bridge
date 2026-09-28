@@ -12,13 +12,17 @@
 //!      declared PI length, and `n = bundle.len() - 1 <= N_BUNDLE_MAX`.
 //!   2. If `n == 0`, `FinalProof.PI[PUB_X_BLOCK_ID] == PI[PUB_Y_BLOCK_ID]` (a
 //!      same-thread claim: no hop chain, so X and Y must be the same block).
-//!   3. If `n > 0`:
-//!      * head linkage: `FinalProof.PI[PUB_X_BLOCK_ID] ==
-//!        MultiHop[0].PI[HOP_START_BLOCK_ID]`;
+//!   3. If `n > 0` (Direction (b): walk begins at the on-chain-anchored
+//!      thread-0 block Y and terminates at the event block X — see the spec's
+//!      §0.1 arrow convention and §4.4 walk diagram):
+//!      * head linkage: `FinalProof.PI[PUB_Y_BLOCK_ID] ==
+//!        MultiHop[0].PI[HOP_START_BLOCK_ID]`  — Y is the walk's newer,
+//!        on-chain-known head;
 //!      * hop adjacency: `MultiHop[i].PI[HOP_END_BLOCK_ID] ==
 //!        MultiHop[i+1].PI[HOP_START_BLOCK_ID]` for every `i`;
 //!      * tail linkage: `MultiHop[last].PI[HOP_END_BLOCK_ID] ==
-//!        FinalProof.PI[PUB_Y_BLOCK_ID]`.
+//!        FinalProof.PI[PUB_X_BLOCK_ID]`  — X is the walk's older, event
+//!        block terminus.
 //!   4. `_isKnownLayerAnchor(final_root, anchor_layer)` accepts the pair
 //!      `(FinalProof.PI[PUB_FINAL_ROOT], FinalProof.PI[PUB_ANCHOR_LAYER])`.
 //!      Off-chain callers wire this through a closure; on-chain the check is
@@ -134,10 +138,12 @@ pub enum BundleError {
     HopBundleLengthOverflow { got: usize, max: usize },
     /// Same-thread claim (`n == 0`) but FinalProof declares `X != Y`.
     SameThreadEndpointsMismatch { x_block_id: Fr, y_block_id: Fr },
-    /// `FinalProof.X_BLOCK_ID != MultiHop[0].HOP_START_BLOCK_ID`.
-    HopChainHeadMismatch { x_block_id: Fr, first_hop_start: Fr },
-    /// `MultiHop[last].HOP_END_BLOCK_ID != FinalProof.Y_BLOCK_ID`.
-    HopChainTailMismatch { last_hop_end: Fr, y_block_id: Fr },
+    /// `FinalProof.Y_BLOCK_ID != MultiHop[0].HOP_START_BLOCK_ID` — Direction
+    /// (b) head linkage: the walk begins at the on-chain-anchored Y.
+    HopChainHeadMismatch { y_block_id: Fr, first_hop_start: Fr },
+    /// `MultiHop[last].HOP_END_BLOCK_ID != FinalProof.X_BLOCK_ID` — Direction
+    /// (b) tail linkage: the walk terminates at the event block X.
+    HopChainTailMismatch { last_hop_end: Fr, x_block_id: Fr },
     /// `MultiHop[at].HOP_END_BLOCK_ID != MultiHop[at + 1].HOP_START_BLOCK_ID`.
     AdjacentHopBlockIdMismatch {
         at: usize,
@@ -277,10 +283,13 @@ pub fn verify_bundle(
         }
     } else {
         // ---- (3) cross-thread claim: head, adjacency, tail --------------
+        // Direction (b): the walk begins at the on-chain-anchored Y and
+        // terminates at the event block X. Head links Y to hop[0].start;
+        // tail links hop[last].end to X.
         let first_hop_start = multi_hop_start(&bundle[1], 1)?;
-        if x_block_id != first_hop_start {
+        if y_block_id != first_hop_start {
             return Err(BundleError::HopChainHeadMismatch {
-                x_block_id,
+                y_block_id,
                 first_hop_start,
             });
         }
@@ -299,10 +308,10 @@ pub fn verify_bundle(
 
         let last_idx = bundle.len() - 1;
         let last_hop_end = multi_hop_end(&bundle[last_idx], last_idx)?;
-        if last_hop_end != y_block_id {
+        if last_hop_end != x_block_id {
             return Err(BundleError::HopChainTailMismatch {
                 last_hop_end,
-                y_block_id,
+                x_block_id,
             });
         }
     }
@@ -396,15 +405,17 @@ mod tests {
     #[test]
     fn cross_thread_bundle_verifies() {
         // n == 4: full chain of the maximum canonical length.
+        // Direction (b): walk begins at Y (thread 0, anchored) and terminates
+        // at X (event). Head hop's start = Y, last hop's end = X.
         let final_root = Fr::from(0xDEADBEEFu64);
         let anchor_layer = 7u8;
-        let p0 = Fr::from(1000u64);
+        let p0 = Fr::from(1000u64); // = Y, walk head
         let p1 = Fr::from(1001u64);
         let p2 = Fr::from(1002u64);
         let p3 = Fr::from(1003u64);
-        let p4 = Fr::from(1004u64);
+        let p4 = Fr::from(1004u64); // = X, walk tail
         let bundle = vec![
-            make_final(p0, p4, final_root, anchor_layer),
+            make_final(p4, p0, final_root, anchor_layer), // x = p4, y = p0
             make_hop(p0, p1),
             make_hop(p1, p2),
             make_hop(p2, p3),
@@ -416,11 +427,12 @@ mod tests {
     #[test]
     fn single_hop_bundle_verifies() {
         // n == 1: minimum cross-thread chain. Adjacency loop is empty.
+        // Direction (b): the sole hop starts at Y and ends at X.
         let final_root = Fr::from(1u64);
         let anchor_layer = 0u8;
         let x = Fr::from(100u64);
         let y = Fr::from(200u64);
-        let bundle = vec![make_final(x, y, final_root, anchor_layer), make_hop(x, y)];
+        let bundle = vec![make_final(x, y, final_root, anchor_layer), make_hop(y, x)];
         assert_eq!(verify_bundle(&bundle, accept_any_anchor), Ok(()));
     }
 
@@ -548,16 +560,18 @@ mod tests {
 
     #[test]
     fn hop_chain_head_mismatch_rejected() {
-        let x = Fr::from(100u64);
+        // Direction (b): head check compares Y to the first hop's start.
+        let y = Fr::from(100u64);
+        let x = Fr::from(200u64);
         let wrong_start = Fr::from(999u64);
         let bundle = vec![
-            make_final(x, Fr::from(200u64), Fr::from(0u64), 0),
-            make_hop(wrong_start, Fr::from(200u64)),
+            make_final(x, y, Fr::from(0u64), 0),
+            make_hop(wrong_start, x), // start != y, end == x so tail would pass
         ];
         assert_eq!(
             verify_bundle(&bundle, accept_any_anchor),
             Err(BundleError::HopChainHeadMismatch {
-                x_block_id: x,
+                y_block_id: y,
                 first_hop_start: wrong_start,
             })
         );
@@ -566,12 +580,14 @@ mod tests {
     #[test]
     fn adjacent_hop_block_id_mismatch_rejected() {
         // Break adjacency between hops 1 → 2.
+        // Direction (b): head passes (y = p0 = hop[0].start),
+        // tail would pass (x = p3 = hop[last].end); adjacency fires.
         let p0 = Fr::from(100u64);
         let p1 = Fr::from(101u64);
         let broken = Fr::from(999u64);
         let p3 = Fr::from(103u64);
         let bundle = vec![
-            make_final(p0, p3, Fr::from(0u64), 0),
+            make_final(p3, p0, Fr::from(0u64), 0), // x = p3, y = p0
             make_hop(p0, p1),
             make_hop(broken, p3), // start != previous end
         ];
@@ -587,12 +603,13 @@ mod tests {
 
     #[test]
     fn hop_chain_tail_mismatch_rejected() {
+        // Direction (b): tail check compares the last hop's end to X.
         let p0 = Fr::from(100u64);
         let p1 = Fr::from(101u64);
         let hop_end = Fr::from(200u64);
-        let wrong_y = Fr::from(999u64);
+        let wrong_x = Fr::from(999u64);
         let bundle = vec![
-            make_final(p0, wrong_y, Fr::from(0u64), 0),
+            make_final(wrong_x, p0, Fr::from(0u64), 0), // x = wrong_x, y = p0
             make_hop(p0, p1),
             make_hop(p1, hop_end),
         ];
@@ -600,7 +617,7 @@ mod tests {
             verify_bundle(&bundle, accept_any_anchor),
             Err(BundleError::HopChainTailMismatch {
                 last_hop_end: hop_end,
-                y_block_id: wrong_y,
+                x_block_id: wrong_x,
             })
         );
     }

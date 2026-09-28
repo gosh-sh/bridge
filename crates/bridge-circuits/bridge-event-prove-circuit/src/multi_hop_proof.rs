@@ -8,19 +8,27 @@
 //! so the padding tail of a partially-full snark propagates the terminal
 //! block-id.
 //!
-//! # Walk direction (Direction (a), spec §3, cross-thread reachability)
+//! # Walk direction (Direction (b), spec §0.1 arrow convention + §4.4 walk diagram)
 //!
-//! Bridge Circuit 4 commits to Direction (a): the event `X` sits on a
-//! non-default thread `t` and is *newer*; the anchor `Y` sits on the default
-//! thread and is *older*. The walk crawls **newest → oldest** via
-//! `proof_block_refs` (chain `refs` only ever point at strictly older blocks).
-//! Per hop, `hop_start_block_id` is the *current block being opened* (newer)
-//! and `hop_end_block_id` is the *ref extracted from that block* (older).
+//! Bridge Circuit 4 commits to Direction (b): the anchor `Y` sits on the
+//! default (thread-0) chain, is *newer*, and is the block whose L7 root the
+//! Ethereum contract has already accepted into `layerWindows[]`; the event `X`
+//! sits on a non-default thread `t` and is *older*. The walk crawls
+//! **newest → oldest** via `proof_block_refs` — an unavoidable property of
+//! chain `refs`, which only ever point at strictly older blocks — so the walk
+//! starts at `Y` (on-chain-anchored head) and terminates at `X` (event
+//! terminus). Per hop, `hop_start_block_id` is the *current block being
+//! opened* (the newer of the two, walked from) and `hop_end_block_id` is the
+//! *ref extracted from that block* (the older, walked to).
 //!
 //! So for the whole hop-chain snark:
 //!
-//! * `first_start = hops[0].hop_start_block_id` = `X` (event block, newer)
-//! * `last_end    = hops[H-1].hop_end_block_id` = `Y` (anchor block, older)
+//! * `first_start = hops[0].hop_start_block_id` = `Y` (anchor block, newer, walk head)
+//! * `last_end    = hops[H-1].hop_end_block_id` = `X` (event block, older, walk tail)
+//!
+//! See `DRAFT_cross_thread_reachability_issue.md` for why the previously
+//! considered Direction (a) (walk starts at `X`) is cryptographically unsound
+//! and rejected.
 //!
 //! Ported from `dexdo-halo2-kit/dex-halo2-circuit/src/multi_hop_proof.rs`,
 //! minus the DEX-only salt / anonymity plumbing (spec §1.4, §9):
@@ -34,8 +42,8 @@
 //!
 //! | idx | name                  | derivation                                    |
 //! |-----|-----------------------|-----------------------------------------------|
-//! | 0   | `hop_start_block_id`  | LE-pack of `hops[0].hop_start_block_id` (`X`) |
-//! | 1   | `hop_end_block_id`    | LE-pack of `hops[H-1].hop_end_block_id` (`Y`) |
+//! | 0   | `hop_start_block_id`  | LE-pack of `hops[0].hop_start_block_id` (`Y`) |
+//! | 1   | `hop_end_block_id`    | LE-pack of `hops[H-1].hop_end_block_id` (`X`) |
 //!
 //! Adjacent-hop continuity (`hops[i].hop_end == hops[i+1].hop_start`) is
 //! enforced in-circuit as 32 byte-wise copy constraints per adjacency;
@@ -85,9 +93,10 @@
 //!
 //! Intra-snark continuity: `hops[i].hop_end_block_id ==
 //! hops[i+1].hop_start_block_id` for `i = 0..H_HOPS_PER_PROOF-1`, enforced
-//! byte-wise unconditionally. In Direction (a) semantics: the older ref
-//! extracted from hop `i` (its `hop_end`) is the current block being opened
-//! by hop `i+1` (its `hop_start`).
+//! byte-wise unconditionally. Under Direction (b): the older ref extracted
+//! from hop `i` (its `hop_end`) is the current block being opened by hop
+//! `i+1` (its `hop_start`) — the walk keeps stepping to older blocks even
+//! though it originates at the newer, on-chain-anchored `Y`.
 
 use std::cell::RefCell;
 

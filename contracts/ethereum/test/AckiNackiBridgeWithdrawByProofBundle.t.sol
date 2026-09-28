@@ -181,18 +181,22 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     /// @dev Build an `n`-hop chain of proofs and matching PI vectors that
-    ///      walks `x → ... → y` through the sequence `chain[0..=n]` where
-    ///      `chain[0] == x` and `chain[n] == y`. Every intermediate id is
-    ///      derived deterministically from `seed`.
-    function _linearHopChain(uint256 x, uint256 y, uint256 n, string memory seed)
+    ///      walks `walkHead → ... → walkTail` through the sequence
+    ///      `chain[0..=n]` where `chain[0] == walkHead` and
+    ///      `chain[n] == walkTail`. Every intermediate id is derived
+    ///      deterministically from `seed`. Under Direction (b), callers pass
+    ///      `walkHead = yBlockId` and `walkTail = xBlockId` so the resulting
+    ///      hop chain satisfies `hopPubs[0][HOP_START] == yBlockId` and
+    ///      `hopPubs[last][HOP_END] == xBlockId`.
+    function _linearHopChain(uint256 walkHead, uint256 walkTail, uint256 n, string memory seed)
         internal
         pure
         returns (uint256[][] memory hopPubs, bytes[] memory hopProofs)
     {
         require(n > 0, "n>0 required");
         uint256[] memory chain = new uint256[](n + 1);
-        chain[0] = x;
-        chain[n] = y;
+        chain[0] = walkHead;
+        chain[n] = walkTail;
         for (uint256 i = 1; i < n; i++) {
             chain[i] = Bn254FrLib.toFr(uint256(keccak256(abi.encode(seed, i))));
         }
@@ -303,7 +307,8 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
         uint256 y = Bn254FrLib.toFr(uint256(keccak256("y-block-n1")));
 
         uint256[] memory finalPub = _finalPub(amount, nullifier, x, y);
-        (uint256[][] memory hopPubs, bytes[] memory hopProofs) = _linearHopChain(x, y, 1, "n1");
+        // Direction (b): walk head is Y, walk tail is X.
+        (uint256[][] memory hopPubs, bytes[] memory hopProofs) = _linearHopChain(y, x, 1, "n1");
 
         bool ok = bridge.withdrawByProofBundle(finalPub, _dummyProof(), hopPubs, hopProofs);
         assertTrue(ok);
@@ -317,8 +322,9 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
         uint256 y = Bn254FrLib.toFr(uint256(keccak256("y-block-nMax")));
 
         uint256[] memory finalPub = _finalPub(amount, nullifier, x, y);
+        // Direction (b): walk head is Y, walk tail is X.
         (uint256[][] memory hopPubs, bytes[] memory hopProofs) =
-            _linearHopChain(x, y, bridge.N_BUNDLE_MAX(), "nMax");
+            _linearHopChain(y, x, bridge.N_BUNDLE_MAX(), "nMax");
 
         bool ok = bridge.withdrawByProofBundle(finalPub, _dummyProof(), hopPubs, hopProofs);
         assertTrue(ok);
@@ -393,8 +399,11 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
         uint256 nMax = bridge.N_BUNDLE_MAX();
         uint256 tooMany = nMax + 1;
         uint256[] memory finalPub = _finalPub(amount, nullifier, x, y);
+        // Direction (b): walk head is Y, walk tail is X. Overflow trips
+        // before the endpoint checks, so hop layout does not affect the
+        // outcome; keep it Direction (b) for consistency.
         (uint256[][] memory hopPubs, bytes[] memory hopProofs) =
-            _linearHopChain(x, y, tooMany, "overflow");
+            _linearHopChain(y, x, tooMany, "overflow");
         vm.expectRevert(
             abi.encodeWithSelector(
                 AckiNackiBridge.HopBundleLengthOverflow.selector, tooMany, nMax
@@ -454,13 +463,16 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     function test_bundle_hopChainHeadMismatch_reverts() public {
+        // Direction (b): head check compares Y (walk head) to
+        // hopPubs[0][HOP_START]. Tail passes (hopPubs[last][HOP_END] == X)
+        // so only head fires.
         uint256 x = Bn254FrLib.toFr(uint256(keccak256("head-x")));
         uint256 y = Bn254FrLib.toFr(uint256(keccak256("head-y")));
         uint256 wrongStart = Bn254FrLib.toFr(uint256(keccak256("wrong-start")));
 
         uint256[] memory finalPub = _finalPub(1, 1, x, y);
         uint256[][] memory hopPubs = new uint256[][](1);
-        hopPubs[0] = _hopPub(wrongStart, y);
+        hopPubs[0] = _hopPub(wrongStart, x);
         bytes[] memory hopProofs = new bytes[](1);
         hopProofs[0] = _dummyProof();
 
@@ -469,6 +481,8 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     function test_bundle_adjacentHopBlockIdMismatch_reverts() public {
+        // Direction (b): head is Y and tail is X. Wire both so they pass,
+        // then break the mid-chain adjacency between hops 0 → 1.
         uint256 x = Bn254FrLib.toFr(uint256(keccak256("adj-x")));
         uint256 y = Bn254FrLib.toFr(uint256(keccak256("adj-y")));
         uint256 mid = Bn254FrLib.toFr(uint256(keccak256("adj-mid")));
@@ -476,8 +490,8 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
 
         uint256[] memory finalPub = _finalPub(1, 1, x, y);
         uint256[][] memory hopPubs = new uint256[][](2);
-        hopPubs[0] = _hopPub(x, mid);
-        hopPubs[1] = _hopPub(broken, y); // start != mid → gap at index 0
+        hopPubs[0] = _hopPub(y, mid);     // head OK: hopPubs[0].HOP_START == y
+        hopPubs[1] = _hopPub(broken, x);  // tail OK; start != mid → gap at index 0
         bytes[] memory hopProofs = new bytes[](2);
         hopProofs[0] = _dummyProof();
         hopProofs[1] = _dummyProof();
@@ -491,13 +505,15 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     function test_bundle_hopChainTailMismatch_reverts() public {
+        // Direction (b): tail check compares hopPubs[last][HOP_END] to X.
+        // Head passes (hopPubs[0][HOP_START] == Y) so only tail fires.
         uint256 x = Bn254FrLib.toFr(uint256(keccak256("tail-x")));
         uint256 y = Bn254FrLib.toFr(uint256(keccak256("tail-y")));
         uint256 wrongEnd = Bn254FrLib.toFr(uint256(keccak256("wrong-end")));
 
         uint256[] memory finalPub = _finalPub(1, 1, x, y);
         uint256[][] memory hopPubs = new uint256[][](1);
-        hopPubs[0] = _hopPub(x, wrongEnd);
+        hopPubs[0] = _hopPub(y, wrongEnd);
         bytes[] memory hopProofs = new bytes[](1);
         hopProofs[0] = _dummyProof();
 
@@ -553,20 +569,21 @@ contract AckiNackiBridgeWithdrawByProofBundleTest is Test {
     }
 
     function test_bundle_multiHopProofRejected_reverts() public {
+        // Direction (b): hops walk Y → mid → X.
         uint256 x = Bn254FrLib.toFr(uint256(keccak256("reject-mh-x")));
         uint256 y = Bn254FrLib.toFr(uint256(keccak256("reject-mh-y")));
         uint256 mid = Bn254FrLib.toFr(uint256(keccak256("reject-mh-mid")));
 
         uint256[] memory finalPub = _finalPub(1, 1, x, y);
         uint256[][] memory hopPubs = new uint256[][](2);
-        hopPubs[0] = _hopPub(x, mid);
-        hopPubs[1] = _hopPub(mid, y);
+        hopPubs[0] = _hopPub(y, mid);
+        hopPubs[1] = _hopPub(mid, x);
         bytes[] memory hopProofs = new bytes[](2);
         hopProofs[0] = _dummyProof();
         hopProofs[1] = _dummyProof();
 
         // Reject the second hop; the first passes.
-        multiHopVerifier.setRejectFor(mid, y);
+        multiHopVerifier.setRejectFor(mid, x);
 
         vm.expectRevert(
             abi.encodeWithSelector(

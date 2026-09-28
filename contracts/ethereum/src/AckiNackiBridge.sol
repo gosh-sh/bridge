@@ -35,7 +35,9 @@ import "./IBridgeMultiHopVerifier.sol";
 ///      `BridgeEventFinalProof` SHPLONK aggregator proof (13 public inputs
 ///      including `finalRoot`, `anchorLayer`, `xBlockId`, `yBlockId`) and
 ///      zero or more `BridgeMultiHopProof` snarks (2 public inputs each)
-///      that chain `xBlockId → yBlockId` across threads. The bridge calls
+///      that chain `yBlockId → xBlockId` across threads (Direction (b):
+///      the L7 walk starts at the on-chain-anchored `yBlockId` in
+///      `layerWindows[]` and terminates at the event's `xBlockId`). The bridge calls
 ///      `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit — the
 ///      circuit only proves that the event's hash chain extends *into*
 ///      `finalRoot` via a dense-chain extension and range-checks
@@ -1362,10 +1364,13 @@ contract AckiNackiBridge {
     ///         Same-thread claims pass `hopPublicInputs.length == 0` and the
     ///         FinalProof must satisfy `xBlockId == yBlockId`. Cross-thread
     ///         claims pass a hop chain of length up to `N_BUNDLE_MAX` where
-    ///         `xBlockId == hopPublicInputs[0][HOP_START]`,
+    ///         (Direction (b), spec §0.1 arrow convention + §6.4):
+    ///         `yBlockId == hopPublicInputs[0][HOP_START]` (walk head, the
+    ///         on-chain-anchored thread-0 block),
     ///         `hopPublicInputs[i][HOP_END] == hopPublicInputs[i+1][HOP_START]`
     ///         for every adjacent pair, and
-    ///         `hopPublicInputs[last][HOP_END] == yBlockId`.
+    ///         `hopPublicInputs[last][HOP_END] == xBlockId` (walk tail, the
+    ///         event block).
     ///
     /// @dev Mirrors `bridge_event_prove_circuit::bundle_verifier::verify_bundle`
     ///      step-for-step. Runs the identity / dst-chain / replay /
@@ -1500,7 +1505,7 @@ contract AckiNackiBridge {
                 _requireCanonicalFr(hopPublicInputs[i][HOP_START]);
                 _requireCanonicalFr(hopPublicInputs[i][HOP_END]);
             }
-            if (pub.xBlockId != hopPublicInputs[0][HOP_START]) {
+            if (pub.yBlockId != hopPublicInputs[0][HOP_START]) {
                 revert HopChainHeadMismatch();
             }
             for (uint256 i = 0; i + 1 < hopCount; i++) {
@@ -1508,7 +1513,7 @@ contract AckiNackiBridge {
                     revert AdjacentHopBlockIdMismatch(i);
                 }
             }
-            if (hopPublicInputs[hopCount - 1][HOP_END] != pub.yBlockId) {
+            if (hopPublicInputs[hopCount - 1][HOP_END] != pub.xBlockId) {
                 revert HopChainTailMismatch();
             }
         }

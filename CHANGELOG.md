@@ -24,6 +24,41 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`AckiNackiBridge.withdrawByProofBundle` hop-chain endpoint semantics
+  flipped to Direction (b).** The cross-thread hop chain now walks
+  `yBlockId → ... → xBlockId` instead of the previous
+  `xBlockId → ... → yBlockId`. On the on-chain gate this changes two
+  require checks in `withdrawByProofBundle` (see `contracts/ethereum/src/AckiNackiBridge.sol`):
+  head linkage is now `pub.yBlockId == hopPublicInputs[0][HOP_START]`
+  (was `pub.xBlockId`) and tail linkage is
+  `hopPublicInputs[hopCount - 1][HOP_END] == pub.xBlockId` (was
+  `pub.yBlockId`). Same-thread claims (`xBlockId == yBlockId`, empty
+  hop arrays) are unaffected. Relayer / integrator impact: bundles
+  produced against the previous contract revert with
+  `HopChainHeadMismatch` / `HopChainTailMismatch` against the new one,
+  and vice versa — redeploy the bridge and rotate any hand-crafted
+  cross-thread calldata so `hopPublicInputs[0][HOP_START] == yBlockId`
+  and `hopPublicInputs[last][HOP_END] == xBlockId`. **Verification keys
+  are NOT rotated** — the two production SHPLONK Yul verifiers
+  (`BridgeWithdrawalAggregatorVerifier`, `BridgeMultiHopAggregatorVerifier`)
+  and the underlying halo2 circuits are byte-identical: `MULTI_HOP_PI_LEN`,
+  `TOTAL_PUBLIC_INPUTS`, the two slot constants (`PUB_X_BLOCK_ID = 11`,
+  `PUB_Y_BLOCK_ID = 12`), and every circuit constraint stay the same. The
+  pivot is a bundle-composition contract change; only the caller
+  (the witness walker in `bridge-event-witness::resolve_cross_thread_chain`)
+  has to reorder which endpoint feeds which slot — that walker rewrite
+  is not part of this changeset and is tracked as a follow-up on
+  `feature/multithreading`. Until the walker ships, cross-thread
+  bundles produced by the daemon still carry the old
+  `xBlockId → yBlockId` layout and will be rejected by the new
+  contract; the pipeline needs both halves to land before it can
+  round-trip end-to-end. Same-thread claims remain fully functional.
+  Motivation
+  and full-length analysis in
+  `multithreading/DRAFT_cross_thread_reachability_issue.md` §3
+  (rejects Direction (a) as unsound — an attacker can synthesise a
+  fake event block whose L7 tree contains a real anchored ancestor).
+
 - **`AckiNackiBridge.withdrawByProof` is removed; every AN→ETH withdrawal
   now goes through `withdrawByProofBundle` (see Added).** The old
   single-thread function

@@ -32,9 +32,10 @@ import "./mocks/MockERC20.sol";
 /// most one window slot, and the stored value is the canonical Fr.
 ///
 /// The withdrawal path this suite exercises is the multi-thread bundle
-/// entrypoint `withdrawByProofBundle`. The Yul-model mock test uses a
+/// entrypoint `withdrawByProofBundle` (Direction (b): the on-chain hop chain
+/// walks yBlockId → ... → xBlockId — see the circuit spec §0.1). The Yul-model mock test uses a
 /// same-thread claim (empty hop-chain); the production-Yul test bridges
-/// the committed fixture's cross-thread `xBlockId → yBlockId` via a
+/// the committed fixture's cross-thread `yBlockId → xBlockId` via a
 /// single-hop chain against a mock `MockBridgeMultiHopVerifier` so the
 /// contract-level WD-7 congruence check is reached regardless of whether
 /// the committed proof happens to be same- or cross-thread.
@@ -143,19 +144,21 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         hopProofs = new bytes[](0);
     }
 
-    /// @dev Single-hop chain bridging `x → y` for a cross-thread fixture. The
-    ///      MultiHop verifier is a mock (`setShouldAccept(true)`), so the exact
+    /// @dev Single-hop chain for a cross-thread fixture under Direction (b):
+    ///      the walk starts at Y (on-chain anchor) and terminates at X (event
+    ///      block), so `hopPubs[0] = (walkHead=Y, walkTail=X)`. The MultiHop
+    ///      verifier is a mock (`setShouldAccept(true)`), so the exact
     ///      hop-proof bytes are irrelevant; the contract-level chain
     ///      connectivity check is what we exercise.
-    function _singleHop(uint256 x, uint256 y)
+    function _singleHop(uint256 walkHead, uint256 walkTail)
         internal
         pure
         returns (uint256[][] memory hopPubs, bytes[] memory hopProofs)
     {
         hopPubs = new uint256[][](1);
         hopPubs[0] = new uint256[](2);
-        hopPubs[0][0] = x;
-        hopPubs[0][1] = y;
+        hopPubs[0][0] = walkHead;
+        hopPubs[0][1] = walkTail;
         hopProofs = new bytes[](1);
         hopProofs[0] = hex"00";
     }
@@ -212,10 +215,11 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         address recipient = _reconstruct(pub.recipientHi, pub.recipientLo);
         uint256 treasuryBefore = bridge.treasuryBalance();
 
+        // Direction (b): walkHead = Y, walkTail = X.
         (uint256[][] memory hopPubs, bytes[] memory hopProofs) =
             pub.xBlockId == pub.yBlockId
                 ? _emptyHops()
-                : _singleHop(pub.xBlockId, pub.yBlockId);
+                : _singleHop(pub.yBlockId, pub.xBlockId);
         assertTrue(
             bridge.withdrawByProofBundle(_pubArray(pub), cd, hopPubs, hopProofs), "honest withdraw"
         );

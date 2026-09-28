@@ -461,11 +461,13 @@ contract EthBeaconLightClient {
     /// @dev Anchors are keyed the way the step circuit publishes them, not the
     ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
     ///      the 32-byte hash little-endian, so `submitUpdate` stores
-    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that is also the word
-    ///      the bridge holds and the deposit public inputs carry. `EthKeccak`
-    ///      returns Ethereum byte order, so every keccak result must be
-    ///      re-packed before it reaches `_provenEthSlot`. Name and body match
-    ///      `acki-nacki` `181b0c6a`, the code deployed on shellnet.
+    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`. `_piForm` is an involution:
+    ///      applying it again recovers the Ethereum-order keccak. Deposit
+    ///      public inputs carry that raw keccak (`hi << 128 | lo` of the two
+    ///      16-byte halves), so the sink is notified with `_piForm(stored)` —
+    ///      not the stored key. `EthKeccak` returns Ethereum byte order, so
+    ///      every keccak result must be re-packed before it reaches
+    ///      `_provenEthSlot`. Name and body match `acki-nacki` `181b0c6a`.
     function _piForm(uint256 h) private pure returns (uint256) {
         return (_rev16(h >> 128) << 128) | _rev16(h & ((uint256(1) << 128) - 1));
     }
@@ -534,7 +536,7 @@ contract EthBeaconLightClient {
                 value: 1 vmshell,
                 bounce: true,
                 flag: 1
-            }(_l1ChainId, h);
+            }(_l1ChainId, _piForm(h));
         }
     }
 
@@ -544,7 +546,7 @@ contract EthBeaconLightClient {
                 value: 1 vmshell,
                 bounce: true,
                 flag: 1
-            }(_l1ChainId, h);
+            }(_l1ChainId, _piForm(h));
         }
     }
 

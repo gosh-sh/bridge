@@ -628,6 +628,13 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `EthBeaconLightClient` told `USDCBridge` the stored `_piForm` key, but
+  `finalizeDeposit` looks up the raw keccak from the deposit public inputs.
+  After `disableOwnerAnchors` the light client is the only writer, so every
+  LC-admitted hash missed the deposit gate. `_notifySink` / `_forgetSink`
+  now send `_piForm(stored)` (an involution). Redeploy or `updateCode` the
+  light client; already-pushed keys in `_acceptedBlockHash` stay wrong and
+  need `rePushAnchor` (or `forget` + notify) once the new code is on chain.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's

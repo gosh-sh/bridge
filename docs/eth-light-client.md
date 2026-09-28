@@ -214,13 +214,17 @@ The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) 
 `AnchorPushBounced` and the daemon retries with `rePushAnchor` on the next accepted update.
 
 **Anchor keys are not Ethereum byte order.** The step circuit splits a 32-byte hash with
-`node_hi_lo`, which reads each 16-byte half little-endian, so the contract keys everything by
-`(LE(h[0..16]) << 128) | LE(h[16..32])` — the same word the bridge holds and the deposit public
-inputs carry. A block explorer's `0xaf0919eb…` is stored as `0xa3e073c2…`. Keccak inside the VM
-returns Ethereum order, so `submitAncestry` re-packs through `_piForm` before touching
-`_provenEthSlot`, and the daemon re-packs through `anchor_key_hex` before calling `rePushAnchor`.
-Calling either with the explorer's order silently misses the map: `ERR_UNKNOWN_CHECKPOINT` /
-`ERR_NOT_PROVEN` (compute phase, exit 252).
+`node_hi_lo`, which reads each 16-byte half little-endian, so the contract *stores* everything by
+`(LE(h[0..16]) << 128) | LE(h[16..32])`. A block explorer's `0xaf0919eb…` is stored as
+`0xa3e073c2…`. Keccak inside the VM returns Ethereum order, so `submitAncestry` re-packs through
+`_piForm` before touching `_provenEthSlot`, and the daemon re-packs through `anchor_key_hex`
+before calling `rePushAnchor`. Calling either with the explorer's order silently misses the map:
+`ERR_UNKNOWN_CHECKPOINT` / `ERR_NOT_PROVEN` (compute phase, exit 252).
+
+Deposit public inputs carry the **raw** keccak (`hi << 128 | lo` of the two 16-byte halves).
+`_piForm` is an involution, so `_notifySink` / `_forgetSink` send `_piForm(stored)` — the raw
+word `finalizeDeposit` looks up in `_acceptedBlockHash`. `rePushAnchor` still takes the stored
+key; the transform happens at the notify boundary.
 
 `finalizeDeposit` on `USDCBridge` is unchanged: it still reads `_acceptedBlockHash`. Only the
 writer of that map changes.
@@ -389,7 +393,9 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   `executionBlockHash`, `committeeCommitment`, `updatesApplied`; `getCommitteeState()`
   (`:619`) returns the committee, period, `ownerRotationEnabled`, `reAnchorsApplied`.
 - Roots come back in the contract's encoding: `(hi << 128) | lo` over little-endian 16-byte
-  halves, the same convention `USDCBridge._parseBlockHash` uses. Byte-reverse each half to get
+  halves. That is the *stored* key, not the word `finalizeDeposit` looks up.
+  `USDCBridge._parseBlockHash` reassembles the deposit PI as raw keccak; the sink is told
+  `_piForm(stored)`, which is that raw word. Byte-reverse each half of a `getHead` root to get
   the Ethereum hex; `deploy/shellnet-shadow/status.sh` prints both.
 - Check any recorded execution hash against an independent Ethereum node:
   `eth_getBlockByHash` must return a block, and `eth_getBlockByNumber` for that height must

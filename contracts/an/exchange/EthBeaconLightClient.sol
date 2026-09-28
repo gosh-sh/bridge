@@ -498,7 +498,7 @@ contract EthBeaconLightClient {
             value: 1 vmshell,
             bounce: true,
             flag: 1
-        }(_l1ChainId, h);
+        }(_l1ChainId, _piForm(h));
     }
 
     function _forgetSink(uint256 h) private {
@@ -506,7 +506,7 @@ contract EthBeaconLightClient {
             value: 1 vmshell,
             bounce: true,
             flag: 1
-        }(_l1ChainId, h);
+        }(_l1ChainId, _piForm(h));
     }
 
     onBounce(TvmSlice /*body*/) external {

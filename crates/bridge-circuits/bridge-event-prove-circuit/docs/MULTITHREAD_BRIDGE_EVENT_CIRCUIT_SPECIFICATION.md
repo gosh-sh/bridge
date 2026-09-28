@@ -8,20 +8,60 @@ The document is self-contained. A bridge developer should be able to implement t
 
 ## 0. Terminology
 
+### 0.1 Notation convention — the `→` arrow
+
+Throughout this document, when a hop chain is written
+
+```
+A  →  B
+```
+
+it means **"A references B via its `refs` list — i.e. A is the current
+block whose L7 we open, and B is the next (older, cross-thread) block
+extracted from one slot of A.refs."**
+
+The arrow direction is the **walk-step direction**, and because acki-nacki
+`refs` always point at strictly older blocks in other threads (§2.3,
+`node/src/multithreading/thread_synchrinization_service.rs:67-77`), the
+arrow always points from a **newer** block to an **older** block. Reading
+the walk left-to-right therefore reads **newest → oldest**.
+
+This is the opposite of the usual Merkle-tree drawing convention where
+`leaf → root` means "leaf feeds up into root". Here `→` is a hop, not a
+Merkle level. A single hop internally opens a Merkle path (L7 Poseidon
+dense-Merkle plus the depth-4 SHA outer path up to `block_id`) — those
+openings run leaf-to-root inside the hop, but the `→` arrow between hops
+in the walk chain runs newest-to-oldest.
+
+**A note on this convention's history.** An earlier revision of this doc
+drew the walk as `X → … → Y` where X (thread t, event) was on the left and
+Y (thread 0, anchor) was on the right. That reading matched the "walk
+starts at X" (Direction (a)) framing rejected in
+[`multithreading/DRAFT_cross_thread_reachability_issue.md`](../../../../../multithreading/DRAFT_cross_thread_reachability_issue.md)
+§3.1.1 on cryptographic-soundness grounds. Under the sound direction
+(Direction (b), the one this doc now specifies), the walk **starts at the
+on-chain-anchored thread-0 block Y** and terminates at the event block X.
+Because refs still point at older blocks, and the walk still runs
+newest → oldest as written left-to-right, the endpoints are reordered:
+`Y → … → X`, Y on the left, X on the right. If in any earlier text an
+arrow reads the other way, treat this section as the source of truth.
+
+### 0.2 Terminology table
+
 | Term | Meaning |
 |------|---------|
 | **BWS** | Batch Window Size = **128**. Canonical value from `HISTORY_PROOF_WINDOW_SIZE` in the AN node's `history-proof` library. |
 | **Batch M** (thread 0) | The contiguous range of thread-0 blocks at heights `[M·BWS, (M+1)·BWS − 1]`. |
 | **`#L<N>(M)`** | Layer-N batch root for batch M of thread 0. Layer-1 is built over the blocks of batch M; layer-(N+1) is built over `BWS` consecutive layer-N roots. |
-| **X** | The **event block** — the AN block, in some thread t (t may be 0 or ≠ 0), that emitted the `WithdrawalInitiated` event. Its `block_id` is a public input (§6.3); no anonymity is claimed. |
-| **Y** | The **anchor block** — a block in **thread 0** reached from X by a chain of L cross-thread reference (L7) hops. When t = 0, Y = X and L = 0. |
+| **X** | The **event block** — the AN block, in some thread t (t may be 0 or ≠ 0), that emitted the `WithdrawalInitiated` event. Its `block_id` is a public input (§6.3); no anonymity is claimed. **X is the walk's terminus (older endpoint) under Direction (b).** |
+| **Y** | The **anchor block** — a block in **thread 0**, *newer* than X, whose transitive `refs` closure reaches X within ≤ L cross-thread hops. Y's `block_leaf` folds into a `finalRoot ∈ layerWindows[]` on Ethereum, so Y is the on-chain trust root the walk begins at. When t = 0, Y = X and L = 0. |
 | **X-side / Y-side** | The portions of the proof concerned with X (event binding, in thread t) and Y (thread-0 anchor). When t ≠ 0 they are separate; when t = 0 they collapse onto the same block. |
 | **`event_hash`** | 32-byte SHA-256 root hash of the `WithdrawalInitiated` ext-out message wrapper cell (`repr_hash(C0)` of the 4-cell BOC — wrapper, body, recipient, sender). |
 | **Block leaf** (thread 0, layer-1) | `block_leaf = Poseidon96(block_id ‖ envelope_hash ‖ tracked_ext_out_messages_root)`. Feeds the per-batch layer-1 Poseidon dense-Merkle tree in thread 0. |
 | **`layerWindows[N]`** | On-chain (Ethereum) rolling window of thread-0 layer-N batch roots maintained by `AckiNackiBridge.sol`. Mirrors the node-side `GlobalHistoricalData[thread 0][N]`. |
 | **`finalRoot`** | The layer-N batch root the prover anchors against. Exposed as `PUB_FINAL_ROOT`. Must lie inside `layerWindows[anchorLayer]` (`_isKnownLayerAnchor` in `AckiNackiBridge.sol`). |
 | **`anchorLayer`** | 1-indexed layer number the prover claims for `finalRoot`. Range `1..=MAX_ANCHOR_LAYER = 10` (must equal Solidity `MAX_LAYER_HASHES`). |
-| **L** | True chain length in hops from X to Y. `L = 0 ⇔ t = 0`. |
+| **L** | True chain length in hops between Y and X (under Direction (b): Y → … → X, walked newest → oldest). `L = 0 ⇔ t = 0`. |
 | **`L_MAX`** | Circuit-side upper bound on L. **Production target = 300** (node-team ceiling on cross-thread walk length under the current threading design). Prototyping target = **20**. |
 | **`H`** | Hops packed per `BridgeMultiHopProof` snark. Set to **1** for the bridge (see §5.H for the sizing derivation). |
 | **`N_BUNDLE_MAX`** | Upper bound on the number of `BridgeMultiHopProof` snarks per claim. `N_BUNDLE_MAX = ⌈L_MAX / H⌉`. Dynamic per claim (§6.5); prototype cap = 20, production cap = 300. |
@@ -42,7 +82,9 @@ The **anchor**, in contrast, must land in **thread 0**. Under the current thread
 
 When `t = 0`, event and anchor coincide (`X = Y`) and no cross-thread bridging is needed. This is the "single-thread" case.
 
-When `t ≠ 0`, the proof must chain X (thread t) via cross-thread L7 reference edges (§4) to some thread-0 block Y that transitively references X. Only Y — a thread-0 block — can be anchored to the Ethereum-side per-layer window.
+When `t ≠ 0`, the proof must chain Y (thread 0, anchored on Ethereum) via cross-thread L7 reference edges (§4) *down to* X (thread t). The walk begins at Y — the block whose `block_leaf` folds into a `finalRoot ∈ layerWindows[]` — and follows Y.refs, then the next block's refs, etc., across threads until it reaches X. This is Direction (b) of
+[`multithreading/DRAFT_cross_thread_reachability_issue.md`](../../../../../multithreading/DRAFT_cross_thread_reachability_issue.md);
+Direction (a) (walk starts at X) is cryptographically unsound (see that doc's §3.1.1). Only Y — a thread-0 block — can be anchored to the Ethereum-side per-layer window, so the walk must start at an anchored Y and end at X; the reverse direction leaves X unbound.
 
 ### 1.2 The contract-side check — Ethereum
 
@@ -241,7 +283,9 @@ A **hop** is the atomic cross-thread step. One hop proves:
 
 > *Block A's block_id appears in block B's L7 as one of `refs[0..n]` (slots `1..n`).*
 
-That is, **block B references block A cross-thread** via its `refs` list. The hop's "current" block is B (the one whose L7 we open), the "next" block is A (the one we hop to). Because `refs` point to **older** blocks in other threads, repeated hops walk **into the past across threads**. Starting from X (thread t) and following backward `refs` edges, we land on some block Y in thread 0.
+That is, **block B references block A cross-thread** via its `refs` list, which — per the arrow convention of §0.1 — is written **`B → A`** (B on the left, newer, opens its L7 to expose A on the right, older, in another thread). The hop's "current" block is B (the one whose L7 we open, `hop_start`), the "next" block is A (the one we hop to, `hop_end`). Because `refs` point to **older** blocks in other threads, repeated hops walk **into the past across threads**.
+
+Under Direction (b), the walk starts at **Y in thread 0** (an anchored, on-chain-known block) and, by following forward `refs` edges hop-by-hop, terminates at **X in thread t** (the event block, older). At the walk-chain level this reads `Y → … → X`, newest → oldest, left to right.
 
 Slot 0 of L7 (`parent_block_id`) is **not** used as a hop edge: per §2.3 it is same-thread by producer construction and therefore never crosses a thread boundary. The circuit consequently only handles the `refs` case, and `ref_index` is range-checked to `1..=MAX_PROOF_BLOCK_REFS`.
 
@@ -305,22 +349,46 @@ At `gosh-sha256-chip`'s measured ≈ 354 K advice cells per SHA compression: **�
 
 ### 4.4 The full L7 walk
 
-Direction (a): X (event) is *newer* on thread `t`; Y (anchor) is *older* on
-thread 0. Because `refs` only ever point at strictly older blocks, the walk
-crawls **newest → oldest**. A chain of L hops `[hop_0, hop_1, …, hop_{L-1}]`
-collectively proves:
+**Direction convention: Direction (b).** The walk starts at **Y** (the
+anchor block, thread 0, newer, on-chain-anchored via
+`layerWindows[anchorLayer]`) and terminates at **X** (the event block,
+thread t, older). Because `refs` only ever point at strictly older blocks,
+the walk crawls **newest → oldest**, matching the arrow convention of §0.1.
+A chain of L hops `[hop_0, hop_1, …, hop_{L-1}]` collectively proves:
 
 ```
-X  =  B_0  →  B_1  →  B_2  →  ...  →  B_L  =  Y   (newest → oldest)
+Y  =  B_0  →  B_1  →  B_2  →  ...  →  B_L  =  X   (newest → oldest)
        ^                                          ^
-       thread t (event block)                     thread 0 (anchor)
+       thread 0 (anchor, on-chain-known)          thread t (event block)
 ```
 
-with the per-hop endpoint convention `hop_i.hop_start = B_i` (current, newer)
-and `hop_i.hop_end = B_{i+1}` (older ref extracted from `B_i.proof_block_refs`)
-and the gluing constraint `hop_i.hop_end == hop_{i+1}.hop_start` for all i.
+with the per-hop endpoint convention `hop_i.hop_start = B_i` (current,
+newer — the block whose L7 we open) and `hop_i.hop_end = B_{i+1}` (older
+ref extracted from `B_i.proof_block_refs`) and the gluing constraint
+`hop_i.hop_end == hop_{i+1}.hop_start` for all i.
+
+Reading the diagram: `hop_0.hop_start = Y`, `hop_{L-1}.hop_end = X`, so at
+the bundle level `hopProofs[0].publicInputs[PUB_HOP_START] = y_block_id_fr`
+and `hopProofs[last].publicInputs[PUB_HOP_END] = x_block_id_fr` (§6.4).
 
 At `H = 1`, each hop lives in its own snark; the gluing constraint becomes cross-snark and is enforced by the Solidity orchestrator on the clear block-ids exposed at the snarks' publics (§6.4).
+
+**Why Direction (b) and not (a).** A walk that started at X and terminated
+at Y (Direction (a) of the earlier draft) would be syntactically symmetric
+— the hop gadget itself is direction-agnostic; it just opens a Merkle
+leaf against a root — but is cryptographically **unsound** in this
+design. X is not independently anchored on Ethereum; only Y is
+(`layerWindows[]` holds thread-0 layer roots). A walk that starts at an
+un-anchored X and ends at an anchored Y proves at most "if X existed, it
+referenced Y", which is trivially satisfiable by an attacker who
+fabricates a synthetic X whose L7 tree they controlled — the circuit's
+constraints check hash consistency of X's block-id tree but never that
+any real producer signed X.block_id. See
+[`multithreading/DRAFT_cross_thread_reachability_issue.md`](../../../../../multithreading/DRAFT_cross_thread_reachability_issue.md)
+§3.1.1 for the concrete forgery. Under Direction (b), the walk begins on
+`layerWindows[]` and every subsequent block's `block_id` is transitively
+committed to the on-chain anchor via the preceding hop's `refs` opening,
+so X inherits Y's on-chain trust.
 
 **Production bound: `L_MAX = 300`** (specified by the node team as the cross-thread walk-length ceiling under the current threading design). Prototyping target `L_MAX = 20`. `N_BUNDLE_MAX = ⌈L_MAX / H⌉` scales linearly — at `H = 1` this yields 20 hop snarks (prototype) or 300 hop snarks (production) in the worst case. Per-snark K is unchanged by `L_MAX`.
 
@@ -330,7 +398,16 @@ Reference off-chain implementation of the equivalent chain walk: acki-nacki's `h
 
 ## 5. Full protocol binding scheme
 
-Reading the chain from the withdrawal event back to the anchor:
+**Diagram convention below.** The vertical `↓` arrows in the flow diagram
+that follows denote **cryptographic reduction** (each step is a hash
+opening: `child_bytes → hash(child_bytes) = parent_root`), read top-to-bottom
+as "event data reduces to `finalRoot`". This is orthogonal to the
+walk-chain arrow convention of §0.1 / §4.4 — the L7-walk row inside the
+diagram compresses L hops in the newest → oldest order (`Y → … → X`) into
+a single "walk" step for readability. The vertical `↓` there is the
+composition of L Merkle openings, not a hop.
+
+Reading the chain from the withdrawal event down to the on-chain-known anchor root:
 
 ```
 WithdrawalInitiated(X)  →  event body BOC (4 cells: wrapper, body, recipient, sender)
@@ -342,7 +419,9 @@ ext_msg_leaf  =  Poseidon96( account_dapp_id ‖ account_id ‖ event_hash )
 X.tracked_ext_out_messages_root                        (= X.L8)
    ↓ (block-id tree, depth 4, opens L8; 3 constant siblings + h0..7 witness)
 X.block_id                                             (PUBLIC on FinalProof)
-   ↓ (L7 walk: L hops, L ∈ [0, L_MAX])
+   ↑ (L7 walk: L hops opened in order Y → B_1 → … → B_{L-1} → X, i.e. newest → oldest;
+       each hop's L7 opening commits its `hop_start.block_id` to its `hop_end.block_id`;
+       here shown bottom-up to match the "reduction" direction of the surrounding diagram)
 Y.block_id                                             (Y in thread 0; when t=0, Y = X and L = 0)
                                                        (PUBLIC on FinalProof)
    ↓ (Poseidon96)
@@ -413,13 +492,16 @@ Every snark exposes clear 32-byte block-ids as its glue instances. Since the bri
 #### Per-`BridgeMultiHopProof` public inputs (2 Fr)
 
 ```
-inst[0] = hop_start_block_id   =  bytes_to_fr( B_0.block_id )        // Fr-encoded LE — newer, X-side for snarks[0]
-inst[1] = hop_end_block_id     =  bytes_to_fr( B_H.block_id )        // Fr-encoded LE — older, Y-side for snarks[last]
+inst[0] = hop_start_block_id   =  bytes_to_fr( B_0.block_id )        // Fr-encoded LE — newer end of this snark's segment (= Y for snarks[0])
+inst[1] = hop_end_block_id     =  bytes_to_fr( B_H.block_id )        // Fr-encoded LE — older end of this snark's segment (= X for snarks[last])
 ```
 
 **No `salt_commitment`, no `bundle_index`, no position tag.**
 
-Cross-snark continuity is a plain field equality: `hopProofs[i].publicInputs[1] == hopProofs[i+1].publicInputs[0]`.
+Cross-snark continuity is a plain field equality:
+`hopProofs[i].publicInputs[1] == hopProofs[i+1].publicInputs[0]`
+(each snark's `hop_end` — its older endpoint — equals the next snark's
+`hop_start` — that snark's newer endpoint, one hop deeper into the past).
 
 #### Per-`BridgeEventFinalProof` public inputs (13 Fr)
 
@@ -444,8 +526,8 @@ TOTAL_PUBLIC_INPUTS = 13
 
 Rationale for exposing both `x_block_id_fr` and `y_block_id_fr`:
 
-- **`x_block_id_fr`** is the head of the chain — `hopProofs[0].hop_start_block_id` must equal it. It is also the value the on-circuit nullifier binds to, so exposing it lets a fraud-proof verifier or an off-chain auditor re-derive the nullifier from the observable event and instantly detect a mismatch.
-- **`y_block_id_fr`** is the tail — `hopProofs[last].hop_end_block_id` must equal it. It's the block whose `block_leaf` feeds the Y-side dense-chain walk that produces `finalRoot`.
+- **`y_block_id_fr`** is the **head** of the walk (newest, thread 0, on-chain-anchored) — `hopProofs[0].hop_start_block_id` must equal it. It's the block whose `block_leaf` feeds the Y-side dense-chain walk that produces `finalRoot`, so this is where the on-chain trust root plugs into the bundle.
+- **`x_block_id_fr`** is the **tail** of the walk (oldest, thread t, event block) — `hopProofs[last].hop_end_block_id` must equal it. It is also the value the on-circuit nullifier binds to, so exposing it lets a fraud-proof verifier or an off-chain auditor re-derive the nullifier from the observable event and instantly detect a mismatch.
 - **`t = 0` case** — `x_block_id_fr == y_block_id_fr` and the bundle contains zero hop snarks; the on-chain check degenerates to `require(x_block_id_fr == y_block_id_fr)`, no continuity walk.
 
 **Destination identity pin.** The bridge already exposes `dappFr` / `accFr` as the destination (the Acki-Nacki-side bridge contract's dApp id and account id). The on-chain verifier compares them against pre-committed constants (`EXPECTED_BRIDGE_DAPP_FR`, `EXPECTED_BRIDGE_ACC_FR`), which closes off any attempt to forge a proof from an event emitted by a different account. No additional contract-identity pins are added on top.
@@ -477,15 +559,18 @@ function withdrawByProofBundle(
         ERR_UNKNOWN_ANCHOR
     );
 
-    // 1c. Chain continuity — CLEAR block-id equality
+    // 1c. Chain continuity — CLEAR block-id equality.
+    //     Direction (b): walk begins at Y (thread 0, on-chain-anchored) and
+    //     terminates at X (thread t, event). hopProofs[0].hop_start = Y;
+    //     hopProofs[last].hop_end = X.
     bytes32 xBlockId = finalProof.publicInputs[PUB_X_BLOCK_ID];
     bytes32 yBlockId = finalProof.publicInputs[PUB_Y_BLOCK_ID];
     if (hopProofs.length == 0) {
         require(xBlockId == yBlockId, ERR_MISSING_HOP_FOR_CROSS_THREAD);
     } else {
         require(
-            hopProofs[0].publicInputs[PUB_HOP_START] == xBlockId,
-            ERR_X_HEAD_MISMATCH
+            hopProofs[0].publicInputs[PUB_HOP_START] == yBlockId,
+            ERR_Y_HEAD_MISMATCH
         );
         for (uint i = 0; i + 1 < hopProofs.length; ++i) {
             require(
@@ -495,8 +580,8 @@ function withdrawByProofBundle(
             );
         }
         require(
-            hopProofs[hopProofs.length - 1].publicInputs[PUB_HOP_END] == yBlockId,
-            ERR_Y_TAIL_MISMATCH
+            hopProofs[hopProofs.length - 1].publicInputs[PUB_HOP_END] == xBlockId,
+            ERR_X_TAIL_MISMATCH
         );
     }
 

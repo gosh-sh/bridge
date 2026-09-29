@@ -256,7 +256,8 @@ assigns it when the release is tagged.
   The bridge's code hash moves with this, `48d5c0ed…` → `68b17ae3…`, and the
   contract reports version `1.5.0`. A network takes it as a fresh zerostate or
   as an `updateCode` round on the bridge, not as an in-place patch; the voucher
-  and the light client are unchanged and their artefacts are byte-identical.
+  is unchanged and its artefacts are byte-identical. The light client changes
+  separately, see the entry on light-client anchors under Fixed.
 
 - **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
   `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
@@ -637,6 +638,43 @@ assigns it when the release is tagged.
   / `AN_GRAPHQL_URL` must now name a host that serves GraphQL *and*
   `/v2/messages`. Rebuild `deposit-relayer` from this tree before
   `daemon` / `finalize-one`.
+- **No block the light client admitted could finalize a deposit.**
+  `EthBeaconLightClient` sent `USDCBridge` its stored anchor key — the block
+  hash with each 16-byte half byte-reversed, `(LE(h[0..16]) << 128) |
+  LE(h[16..32])` — while `finalizeDeposit` looks the block hash up in
+  Ethereum byte order, the way the deposit proof carries it. Every
+  light-client anchor missed, and once `disableOwnerAnchors` leaves the light
+  client as the only writer, every `finalizeDeposit` fails with
+  `ERR_UNKNOWN_BLOCK` (224). `acceptBlockHashFromLightClient` and
+  `forgetBlockHashFromLightClient` now carry the Ethereum-order hash.
+  Everything else keeps the stored key: `rePushAnchor` takes it, `getHead`,
+  `HeadUpdated`, `CheckpointBackfilled` and `AncestryAccepted` report it, and
+  `isProvenExecutionBlockHash` and the light client's own
+  `isAcceptedBlockHash` take it. So the light client's `isAcceptedBlockHash`
+  is not interchangeable with the bridge's: for the same block the bridge is
+  asked the Ethereum-order hash. The ABI is unchanged.
+
+  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is rebuilt
+  and reports version `1.4.1`; its code hash moves from `78905cf7…9ed532` to
+  `314ac6b8…6092f5`. A network takes it with a fresh zerostate, every
+  contract deployed from scratch, once acki-nacki's pin is moved. The
+  standalone `contracts/an/EthBeaconLightClient.sol` has the same fix and
+  reports version `0.1.1`; a light client deployed from it has to be deployed
+  again from this source.
+
+  A light client already deployed from the 1.4.0 `.tvc` is upgraded in place:
+  its owner calls `updateCode` (present since 1.4.0) with the rebuilt code.
+  The address, head, committee and proven set stay, and the bridge keeps
+  accepting it as the writer. Anchors it pushed before the upgrade do not
+  count; the daemon re-sends the checkpoint it proves next, and an older
+  block still needed by a deposit gets `rePushAnchor` with its stored key
+  (or, while owner anchors are enabled, `setAcceptedBlockHash` with the
+  Ethereum-order hash). The words pushed before the upgrade stay in the
+  bridge's anchor set; they match no block, so they admit nothing.
+  `EthBeaconLightClient_encoding_and_gas_notes.patch` is regenerated against
+  this copy: its `rePushAnchor` note is now in the source, the two remaining
+  hunks still apply, and the code hash stays `314ac6b8…6092f5` with them
+  applied.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's
@@ -738,8 +776,7 @@ assigns it when the release is tagged.
   (compute phase, exit 252) because two byte orders were in play. The step
   circuit splits a hash with `node_hi_lo` — each 16-byte half read
   little-endian — so `submitUpdate` keys an anchor as
-  `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that word is what the bridge
-  holds and what the deposit public inputs carry. Keccak in the VM returns
+  `(LE(h[0..16]) << 128) | LE(h[16..32])`. Keccak in the VM returns
   Ethereum byte order, so `submitAncestry` looked up
   `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
   `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong
@@ -848,7 +885,8 @@ assigns it when the release is tagged.
   `_piForm`, `provenQueue` and the rotate decider. So the delivery is now two
   narrow patches instead of a file — `EthKeccak_sold_fixes.patch` (behaviour)
   and `EthBeaconLightClient_encoding_and_gas_notes.patch` (comments only, code
-  hash verified unchanged at `78905cf7…9ed532`) — and the gate was rewritten to
+  hash verified unchanged at `78905cf7…9ed532`, then at `314ac6b8…6092f5` after
+  the QC-AN-13 rebuild) — and the gate was rewritten to
   assert scope: patches stay inside `contracts/exchange/`, carry no sink wiring
   in either direction, the keccak patch only moves their library toward
   `contracts/an/EthKeccak.sol`, and the notes patch adds nothing but comments.

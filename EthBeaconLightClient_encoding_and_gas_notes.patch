@@ -1,5 +1,5 @@
 diff --git a/contracts/exchange/EthBeaconLightClient.sol b/contracts/exchange/EthBeaconLightClient.sol
-index 29e73aab3..fd5a283e6 100644
+index 87b53ce..0418fd6 100644
 --- a/contracts/exchange/EthBeaconLightClient.sol
 +++ b/contracts/exchange/EthBeaconLightClient.sol
 @@ -387,6 +387,23 @@ contract EthBeaconLightClient {
@@ -33,19 +33,10 @@ index 29e73aab3..fd5a283e6 100644
 +    /// @dev Anchors are keyed the way the step circuit publishes them, not the
 +    ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
 +    ///      the 32-byte hash little-endian, so `submitUpdate` stores
-+    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that is also the word
-+    ///      the bridge holds and the deposit public inputs carry. `EthKeccak`
-+    ///      returns Ethereum byte order, so every keccak result must be
-+    ///      re-packed before it reaches `_provenEthSlot`.
++    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`. The bridge keys by the
++    ///      Ethereum-order hash, `_piForm` of that word. `EthKeccak` returns
++    ///      Ethereum byte order too, so every keccak result must be re-packed
++    ///      before it reaches `_provenEthSlot`.
      function _piForm(uint256 h) private pure returns (uint256) {
          return (_rev16(h >> 128) << 128) | _rev16(h & ((uint256(1) << 128) - 1));
      }
-@@ -483,6 +507,8 @@ contract EthBeaconLightClient {
-     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
-     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
-     ///         push that landed before `setLightClient`). Does not re-prove.
-+    ///         `blockHash` is the stored anchor key (`_piForm` packing), not
-+    ///         the Ethereum byte order a block explorer shows.
-     function rePushAnchor(uint256 blockHash) public {
-         require(_isLive(blockHash), ERR_NOT_PROVEN);
-         tvm.accept();

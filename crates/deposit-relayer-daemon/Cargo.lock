@@ -2659,6 +2659,7 @@ version = "0.2.0"
 dependencies = [
  "acki-nacki-interface",
  "alloy",
+ "alloy-json-rpc",
  "anyhow",
  "async-trait",
  "clap",
@@ -2672,6 +2673,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tower-service",
  "tracing",
  "tracing-subscriber 0.3.23",
  "tvm_client",

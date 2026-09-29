@@ -252,7 +252,7 @@ assigns it when the release is tagged.
   `deposit-prover` subprocess, `deposit_relayer_eth_get_logs_total{outcome}`
   (ok, retry, error) and `deposit_relayer_eth_scanned_blocks_total` for the
   `eth_getLogs` cost, gauges `deposit_relayer_eth_safe_head_block`,
-  `deposit_relayer_eth_scan_from_block`, `deposit_relayer_scanned_through_block`,
+  `deposit_relayer_eth_scan_from_block`, `deposit_relayer_scan_done_through_block`,
   `deposit_relayer_eth_deposit_counter` (`depositCounter()` on Ethereum,
   polled once a minute; minus `last_finalized + 1` is the backlog),
   `deposit_relayer_target_deposit_id`, `deposit_relayer_last_finalized_deposit_id`,
@@ -263,6 +263,11 @@ assigns it when the release is tagged.
   `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
   counters and the shutdown snapshot are unchanged.
 
+- **`AckiNackiBridge` has `pause()` / `unpause()` again** (owner-only). While
+  paused, `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof`
+  revert `BridgePaused`. AAVE management stays available so the owner can
+  evacuate funds. Restored after it was dropped in #20; the AN-side
+  `eccUSDCBridge.setPaused` is a separate control.
 - **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
   read back with `isPaused()`.** While it is paused, the two cross-chain entry
   points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:
@@ -655,6 +660,44 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
+  cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
+  head on every poll, whether the target `depositId` was found or not. A
+  second deposit confirmed in the same poll window, and a deposit whose
+  proof or `finalizeDeposit` had failed, were never looked for again: the
+  daemon kept waiting as if they were not made yet, while the bridge's
+  `depositCounter()` was already past them. A fresh start also skipped the
+  `--from-block` block itself. Now each poll first reads `depositCounter()`
+  at the confirmed head (`--confirmations` below the head):
+  - while the next `depositId` is not made yet, the poll makes no
+    `eth_getLogs` call and moves the cursor up to the confirmed head;
+  - once it is made, the scan starts after the cursor and stops at the block
+    that holds the deposit. The cursor moves only after AN accepts the
+    deposit, and only to the block before it, so a retry finds the deposit
+    again and a later deposit in the same block is still found;
+  - if `depositCounter()` says the deposit is made but no scanned block holds
+    its log, the poll fails with an error naming the blocks it scanned: the
+    RPC returned incomplete logs, or `--from-block` is above the deposit.
+    `watch` and `prove-one` look deposits up the same way and fail with the
+    same error where they used to report the deposit as not visible yet.
+
+  The field is now `scan_done_through_block`. The old one is ignored and
+  dropped on the next save, so `state.json` needs no editing. After the
+  upgrade the first scan starts at `--from-block`, which must not be above
+  the oldest deposit the daemon has yet to deliver. The RPC must answer
+  `eth_call` at a block `--confirmations` below the head.
+- `deposit-relayer daemon --skip-after-attempts` counted every poll that
+  found no deposit as a failed attempt, so an idle daemon parked ids nobody
+  had deposited yet, and the deposits that later took those ids needed a
+  manual `finalize-one`. Waiting no longer counts; only a failed proof, an
+  AN rejection or a submit still pending does. The attempt count an older
+  daemon saved in `state.json` included those polls, so the first start
+  after the upgrade resets it. The warning `no confirmed deposit yet; relayer
+  is idle` is gone with it. The flag now also reads
+  `SKIP_AFTER_ATTEMPTS`. The systemd unit does not pass
+  `--skip-after-attempts`, so a `SKIP_AFTER_ATTEMPTS` line in
+  `deposit-relayer.env` did nothing before and takes effect now: check it
+  before restarting the daemon.
 - `deposit-relayer` did not build against tvm-sdk `v3.0.6.an`: its
   `Cargo.toml` lacked the halo2 `[patch]` tables that pin `tvm_vm` to a
   single `halo2-axiom` (already present on `eth-light-client-relayer`),

@@ -16,16 +16,16 @@
 //! | `deposit_relayer_eth_get_logs_total` | counter | `outcome` | `eth_getLogs` calls: `ok`, `retry` (retryable error, retried), `error` (given up) |
 //! | `deposit_relayer_eth_scanned_blocks_total` | counter | | Blocks covered by `eth_getLogs` windows (the idle-scan cost) |
 //! | `deposit_relayer_eth_safe_head_block` | gauge | | `head - confirmations` at the last scan |
-//! | `deposit_relayer_eth_scan_from_block` | gauge | | First block of the last scan (cursor + 1 or the deploy block) |
+//! | `deposit_relayer_eth_scan_from_block` | gauge | | First block of the last `eth_getLogs` scan (cursor + 1, or `--from-block`); a tick that finds no new deposit by `depositCounter()` makes no scan and leaves it |
 //! | `deposit_relayer_eth_deposit_counter` | gauge | | `AckiNackiBridge.depositCounter()` on Ethereum, polled by the daemon; `counter - (last_finalized + 1)` is the backlog |
 //! | `deposit_relayer_target_deposit_id` | gauge | | The `depositId` the loop is working on |
 //! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN in this process |
-//! | `deposit_relayer_attempts_since_progress` | gauge | | Consecutive non-success ticks on the current target (`state.json`) |
+//! | `deposit_relayer_attempts_since_progress` | gauge | | Consecutive failed attempts at the current target (`state.json`); waiting for a deposit nobody made yet is not an attempt |
 //! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` |
 //! | `deposit_relayer_backoff_seconds` | gauge | | Sleep the daemon applies after the last tick |
 //! | `deposit_relayer_last_tick_timestamp_seconds` | gauge | | Unix time of the last completed tick |
 //! | `deposit_relayer_last_finalized_timestamp_seconds` | gauge | | Unix time of the last `finalized` / `already_finalized` outcome |
-//! | `deposit_relayer_scanned_through_block` | gauge | | The log-scan cursor persisted in `state.json` |
+//! | `deposit_relayer_scan_done_through_block` | gauge | | The log-scan cursor persisted in `state.json` (`scan_done_through_block`): no block up to it holds a deposit still to deliver |
 //! | `deposit_relayer_build_info` | gauge | `version` | Always 1; the crate version |
 //! | `deposit_relayer_start_timestamp_seconds` | gauge | | Unix time the daemon started |
 
@@ -52,7 +52,7 @@ pub const BACKOFF_SECONDS: &str = "deposit_relayer_backoff_seconds";
 pub const LAST_TICK_TIMESTAMP_SECONDS: &str = "deposit_relayer_last_tick_timestamp_seconds";
 pub const LAST_FINALIZED_TIMESTAMP_SECONDS: &str =
     "deposit_relayer_last_finalized_timestamp_seconds";
-pub const SCANNED_THROUGH_BLOCK: &str = "deposit_relayer_scanned_through_block";
+pub const SCAN_DONE_THROUGH_BLOCK: &str = "deposit_relayer_scan_done_through_block";
 pub const BUILD_INFO: &str = "deposit_relayer_build_info";
 pub const START_TIMESTAMP_SECONDS: &str = "deposit_relayer_start_timestamp_seconds";
 
@@ -124,8 +124,8 @@ pub fn describe() {
         "Unix time of the last finalized or already_finalized outcome."
     );
     describe_gauge!(
-        SCANNED_THROUGH_BLOCK,
-        "Log-scan cursor persisted in state.json."
+        SCAN_DONE_THROUGH_BLOCK,
+        "Log-scan cursor persisted in state.json (scan_done_through_block)."
     );
     describe_gauge!(
         BUILD_INFO,
@@ -161,13 +161,13 @@ pub fn set_state_gauges(
     target: u64,
     attempts_since_progress: u32,
     parked: usize,
-    scanned_through_block: Option<u64>,
+    scan_done_through_block: Option<u64>,
 ) {
     gauge!(TARGET_DEPOSIT_ID).set(target as f64);
     gauge!(ATTEMPTS_SINCE_PROGRESS).set(f64::from(attempts_since_progress));
     gauge!(PARKED_DEPOSITS).set(parked as f64);
-    if let Some(block) = scanned_through_block {
-        gauge!(SCANNED_THROUGH_BLOCK).set(block as f64);
+    if let Some(block) = scan_done_through_block {
+        gauge!(SCAN_DONE_THROUGH_BLOCK).set(block as f64);
     }
 }
 

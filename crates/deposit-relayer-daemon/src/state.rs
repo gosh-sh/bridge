@@ -9,9 +9,10 @@
 //!   finalized on AN (either by our own submission or by `is_finalized`).
 //! - `last_attempt_deposit_id` records the most recent attempt regardless of
 //!   outcome.
-//! - `attempts_since_progress` increments on every non-success outcome and
-//!   resets on a finalize; it caps the relayer's willingness to spin on one
-//!   deposit.
+//! - `attempts_since_progress` increments on every failed attempt at the
+//!   current target and resets on a finalize; it caps the relayer's willingness
+//!   to spin on one deposit. Waiting for a deposit that is not made yet is not
+//!   an attempt.
 //!
 //! Concurrency note: like the AN→ETH relayer, this is a single-process
 //! daemon. The file is overwritten atomically (write-temp-then-rename + fsync).
@@ -63,14 +64,16 @@ pub struct RelayerState {
     /// Most recent `depositId` attempted (may be ahead of
     /// `last_processed_deposit_id` if the latest attempt failed).
     pub last_attempt_deposit_id: Option<u64>,
-    /// Consecutive non-success outcomes for the current target. Reset to 0
-    /// on every finalized deposit.
+    /// Consecutive failed attempts at the current target. Reset to 0 on
+    /// every finalized deposit.
     pub attempts_since_progress: u32,
-    /// Highest Ethereum block (inclusive) scanned by [`EthLogSource`] on the
-    /// last fetch attempt. Lets the daemon resume log scans from the tail
-    /// instead of re-walking from the bridge deploy block every tick.
+    /// No Ethereum block up to and including this one holds a deposit the
+    /// relayer still has to deliver, so the next `eth_getLogs` scan starts
+    /// after it. Set to the confirmed head while the next deposit is not made
+    /// yet, and to a finalized deposit's block minus one (a later `depositId`
+    /// can share that block). `None` = scan from `--from-block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scanned_through_block: Option<u64>,
+    pub scan_done_through_block: Option<u64>,
     /// Deposit ids the daemon advanced past after `--skip-after-attempts`.
     /// Operators must finalise these manually via `finalize-one`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -82,10 +85,24 @@ impl RelayerState {
     /// (fresh start), `Err` on corruption.
     pub fn load(path: &Path) -> Result<Option<Self>, RelayerError> {
         match fs::read(path) {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Ok(bytes) => Ok(Some(Self::from_json(&bytes)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn from_json(bytes: &[u8]) -> Result<Self, RelayerError> {
+        let raw: serde_json::Value = serde_json::from_slice(bytes)?;
+        // Every file an older daemon saved carries `scanned_through_block`.
+        // That daemon also counted each poll that found no deposit as a failed
+        // attempt, so its count says nothing about the current target: start
+        // it over rather than let one real failure reach the skip threshold.
+        let written_by_older_daemon = raw.get("scanned_through_block").is_some();
+        let mut state: Self = serde_json::from_value(raw)?;
+        if written_by_older_daemon {
+            state.attempts_since_progress = 0;
+        }
+        Ok(state)
     }
 
     /// Validate or stamp deployment binding. Legacy state files without
@@ -156,8 +173,8 @@ impl RelayerState {
         self.attempts_since_progress = 0;
     }
 
-    /// Mark an attempt that did not finalize the deposit (not yet available,
-    /// AN rejection, or a transient error).
+    /// Mark an attempt that did not finalize the deposit (proof failure, AN
+    /// rejection, or a submit still pending).
     pub fn record_attempt(&mut self, deposit_id: u64) {
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = self.attempts_since_progress.saturating_add(1);
@@ -285,6 +302,49 @@ mod tests {
         assert_eq!(s.next_target(0), 4);
         assert_eq!(s.parked_deposit_ids, vec![3]);
         assert_eq!(s.attempts_since_progress, 0);
+    }
+
+    #[test]
+    fn the_old_scan_field_is_dropped() {
+        // An older daemon stored the confirmed head it last scanned to, which
+        // could be past a deposit it never delivered. Its value must not
+        // become the new cursor, and the first save removes it.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_processed_deposit_id":6,"last_attempt_deposit_id":7,
+                "attempts_since_progress":3,"scanned_through_block":11800417}"#,
+        )
+        .unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.scan_done_through_block, None);
+        assert_eq!(loaded.next_target(0), 7);
+        // Its attempt count included polls that found no deposit.
+        assert_eq!(loaded.attempts_since_progress, 0);
+
+        loaded.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("scanned_through_block"), "{raw}");
+    }
+
+    #[test]
+    fn a_current_file_keeps_its_attempt_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = RelayerState {
+            scan_done_through_block: Some(11800417),
+            ..RelayerState::default()
+        };
+        for _ in 0..3 {
+            s.record_attempt(7);
+        }
+        s.save(&path).unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.attempts_since_progress, 3);
+        assert_eq!(loaded.scan_done_through_block, Some(11800417));
     }
 
     #[test]

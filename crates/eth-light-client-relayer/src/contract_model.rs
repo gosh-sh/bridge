@@ -201,6 +201,9 @@ impl LightClient {
         Ok(added)
     }
 
+    /// `rePushAnchor`: takes the stored key, unlike
+    /// [`crate::submitter::AnSubmitter::re_push_anchor`], which takes the
+    /// Ethereum-order hash and re-packs it.
     pub fn re_push_anchor(&mut self, block_hash: [u8; 32]) -> Result<(), LcError> {
         if !self.is_live(&block_hash) {
             return Err(LcError::NotProven);
@@ -265,7 +268,10 @@ pub enum UpdateKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header_rlp::{dummy_linked_headers, keccak256};
+    use crate::{
+        header_rlp::{dummy_linked_headers, keccak256},
+        submitter::anchor_key_hex,
+    };
 
     fn lc() -> LightClient {
         LightClient::bootstrap([0xC0; 32], 0)
@@ -280,7 +286,7 @@ mod tests {
     /// `(hi << 128) | lo`: the key `submitUpdate` stores.
     const FIXTURE_STORED_KEY: &str =
         "89d2463dac3b23c587cf9d97a626f2cee2f7f00249d876f2e0794c53d2d1c5ee";
-    /// The execution `block_hash` of the same update in
+    /// `finalized_header.execution.block_hash` of the same update in
     /// `eth-light-client-prover/fixtures/mainnet/finality_update.json`: the
     /// word `finalizeDeposit` looks up for that block.
     const FIXTURE_BLOCK_HASH: &str =
@@ -292,6 +298,11 @@ mod tests {
         let block_hash = hex32(FIXTURE_BLOCK_HASH);
         assert_eq!(pi_form(&key), block_hash);
         assert_eq!(pi_form(&block_hash), key);
+        // The relayer's re-packing for `rePushAnchor` is the same transform.
+        assert_eq!(
+            anchor_key_hex(&block_hash),
+            format!("0x{FIXTURE_STORED_KEY}")
+        );
 
         let mut c = lc();
         c.submit_update(100, key, [0xC0; 32]).unwrap();
@@ -425,6 +436,21 @@ mod tests {
         assert_eq!(added, 1);
         assert!(c.is_live(&pi_form(&keccak256(&parent))));
         assert_eq!(c.sink_notifies.last(), Some(&keccak256(&parent)));
+    }
+
+    #[test]
+    fn ancestry_re_walk_adds_and_notifies_nothing() {
+        let mut c = lc();
+        let (child, parent) = dummy_linked_headers();
+        c.submit_update(32, pi_form(&keccak256(&child)), [0xC0; 32])
+            .unwrap();
+        let walk = [child, parent];
+        assert_eq!(c.submit_ancestry(&walk).unwrap(), 1);
+        let notified = c.sink_notifies.len();
+        let queued = c.queue.len();
+        assert_eq!(c.submit_ancestry(&walk).unwrap(), 0);
+        assert_eq!(c.sink_notifies.len(), notified);
+        assert_eq!(c.queue.len(), queued);
     }
 
     #[test]

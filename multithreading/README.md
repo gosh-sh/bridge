@@ -150,7 +150,7 @@ Soundness is settled by starting at Y. The open questions are **existence**
 The walker polls thread-0 GQL every **~20 s** (roughly the block cadence),
 extends the ref-DAG with each new thread-0 block plus its transitively-fetched
 predecessors, and runs BFS on the reverse graph rooted at `X`. It reports the
-**shortest** `X <- … <- Y` path found within a **budget of ~5 minutes** since the
+**shortest** `Y <- … <- X` path found within a **budget of ~5 minutes** since the
 event's finalisation.
 
 - If a path with `L ≤ 10` shows up quickly: happy path, hand the witness off.
@@ -256,7 +256,7 @@ Aggregated over a session this gives us:
   extra delay a caller pays if they wait for a *good* path rather than the
   first-any path.
 - **no-path-in-budget rate** — fraction of candidates for which the BFS
-  found no `X <- … <- Y` path inside the observation window. Any nonzero rate is
+  found no `Y <- … <- X` path inside the observation window. Any nonzero rate is
   a hard operational problem (retention policy, node-side guarantee, or
   same-thread walk-back — see §4 asks 1/2/3 below).
 - **edge-type breakdown of shortest paths** — how often the shortest path
@@ -281,7 +281,7 @@ Acki-nacki, current tree:
 
 Bridge research, this tree:
 
-- `bridge/multithreading/research/multipath_collector.py` — polls thread-0 GQL, builds the global block-ref DAG, runs BFS-on-reverse-graph rooted at each candidate `X` to enumerate the shortest `X <- … <- Y` paths (all edge kinds), emits JSONL `direction_b_multipath.v1` with shortest length, path bodies, length histogram, and wall-clock timings.
+- `bridge/multithreading/research/multipath_collector.py` — polls thread-0 GQL, builds the global block-ref DAG, runs BFS-on-reverse-graph rooted at each candidate `X` to enumerate the shortest `Y <- … <- X` paths (all edge kinds), emits JSONL `direction_b_multipath.v1` with shortest length, path bodies, length histogram, and wall-clock timings.
 
 Bridge, current tree:
 

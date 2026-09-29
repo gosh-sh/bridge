@@ -16,7 +16,8 @@ The bridge circuit spec is
   same-thread opening inside the anchor's batch tree; when the batch commits
   to a single block, Y = Y_anchor.
 - To pay a withdrawal on Ethereum, the circuit has to cryptographically bind
-  event → X → Y → Y_anchor → on-chain root. When `t = 0` this collapses to
+  `on-chain root <- Y_anchor <- Y <- X <- event` (each `<-` a Merkle
+  inclusion: right side is a leaf of the left). When `t = 0` this collapses to
   X = Y and no cross-thread walk is needed (Y still opens from Y_anchor).
   When `t ≠ 0` the circuit additionally needs a walk between X and Y through
   the block's `proof_block_refs` list.
@@ -72,26 +73,30 @@ paths is tracked separately.
 Some representative topologies:
 
 ```
+Arrows below follow the §2 Merkle convention: `A ◀── C` means "C is a leaf
+inside A's L7". The arrow points from the leaf/older block toward the
+root/newer block that Merkle-commits to it.
+
 (a) Direct cross-thread ref, single hop:            L = 1
-    Y (thread 0) ── slot k ──▶ X (thread t)
+    Y (thread 0) ◀── slot k ── X (thread t)
     Only possible if thread-0 producer directly referenced X. Rare in bursts
     — the checkpoint stride (§3) skips most of thread t's intermediates.
 
 (b) Same-thread walk-back + one cross-thread hop:   L = 1 + Δ
-    Y (thread 0) ── slot k ──▶ X' (thread t, seq_no > X)
-                               X' ── slot 0 ──▶ X'−1 ── slot 0 ──▶ … ──▶ X
+    Y (thread 0) ◀── slot k ── X' (thread t, seq_no > X)
+                               X' ◀── slot 0 ── X'−1 ◀── slot 0 ── … ◀── slot 0 ── X
     Δ = (X'.seq_no − X.seq_no). Fires whenever thread 0 refs a *later*
     thread-t block; we walk the same-thread parent chain back to X.
     Only requires 2 threads to exist.
 
 (c) Multi-thread transitive shortcut:               L = h_0 + h_v
-    Y (thread 0) ── slot k ──▶ C (thread v ≠ 0, t) ── slot k' ──▶ X (thread t)
+    Y (thread 0) ◀── slot k ── C (thread v ≠ 0, t) ◀── slot k' ── X (thread t)
     Requires ≥ 3 threads live in the window. Often *shorter* than (b) when
     thread t is deep in a burst but thread v has a fresher direct ref to X.
 
-(d) Arbitrary mix: any DAG path Y ⇝ X interleaving slot-0 (same-thread) and
-    slot-≥1 (cross-thread) edges, respecting the strictly-older-cross-thread
-    invariant.
+(d) Arbitrary mix: any DAG path Y ◀── … ◀── X interleaving slot-0
+    (same-thread) and slot-≥1 (cross-thread) edges, respecting the
+    strictly-older-cross-thread invariant.
 ```
 
 `bridge/multithreading/research/multipath_collector.py` builds
@@ -145,7 +150,7 @@ Soundness is settled by starting at Y. The open questions are **existence**
 The walker polls thread-0 GQL every **~20 s** (roughly the block cadence),
 extends the ref-DAG with each new thread-0 block plus its transitively-fetched
 predecessors, and runs BFS on the reverse graph rooted at `X`. It reports the
-**shortest** `Y ⇝ X` path found within a **budget of ~5 minutes** since the
+**shortest** `X <- … <- Y` path found within a **budget of ~5 minutes** since the
 event's finalisation.
 
 - If a path with `L ≤ 10` shows up quickly: happy path, hand the witness off.
@@ -251,7 +256,7 @@ Aggregated over a session this gives us:
   extra delay a caller pays if they wait for a *good* path rather than the
   first-any path.
 - **no-path-in-budget rate** — fraction of candidates for which the BFS
-  found no `Y ⇝ X` path inside the observation window. Any nonzero rate is
+  found no `X <- … <- Y` path inside the observation window. Any nonzero rate is
   a hard operational problem (retention policy, node-side guarantee, or
   same-thread walk-back — see §4 asks 1/2/3 below).
 - **edge-type breakdown of shortest paths** — how often the shortest path
@@ -276,7 +281,7 @@ Acki-nacki, current tree:
 
 Bridge research, this tree:
 
-- `bridge/multithreading/research/multipath_collector.py` — polls thread-0 GQL, builds the global block-ref DAG, runs BFS-on-reverse-graph rooted at each candidate `X` to enumerate the shortest `Y ⇝ X` paths (all edge kinds), emits JSONL `direction_b_multipath.v1` with shortest length, path bodies, length histogram, and wall-clock timings.
+- `bridge/multithreading/research/multipath_collector.py` — polls thread-0 GQL, builds the global block-ref DAG, runs BFS-on-reverse-graph rooted at each candidate `X` to enumerate the shortest `X <- … <- Y` paths (all edge kinds), emits JSONL `direction_b_multipath.v1` with shortest length, path bodies, length histogram, and wall-clock timings.
 
 Bridge, current tree:
 

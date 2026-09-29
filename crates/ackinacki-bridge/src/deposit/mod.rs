@@ -7,6 +7,7 @@
 
 pub mod args;
 pub mod limits;
+pub mod log_index;
 pub mod pi;
 
 /// Replaced by the driver in `run.rs`.

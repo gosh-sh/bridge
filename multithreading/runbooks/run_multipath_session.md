@@ -65,7 +65,7 @@ the graph before the first event fires.
 |------|------------------------------------------------------------|-----|
 | A    | Local acki-nacki node                                      | [`../../../run_acki_nacki_node.md`](../../../run_acki_nacki_node.md) |
 | B    | Split-thread `cli.py` test                                 | This file |
-| C    | WithdrawalInitiated trigger loop (`trigger_loop.py`)       | This file |
+| C    | WithdrawalInitiated trigger (`smart_trigger.py`)           | This file |
 | D    | **Multi-path collector** (`multipath_collector.py`) | This file |
 | E    | **Thread-liveness monitor** (`thread_liveness_monitor.py`) | This file |
 
@@ -192,14 +192,36 @@ health signal for the polling loop.
 
 ## Pane C — WithdrawalInitiated trigger
 
-The existing `trigger_loop.py` fires one event per iteration by spawning
-a fresh multisig, minting ECC[3] via `USDCBridge.mintAndSend`, and
-calling `initiateWithdrawal`:
+`smart_trigger.py` fires one event per iteration by spawning a fresh
+multisig, minting ECC[3] via `USDCBridge.mintAndSend`, and calling
+`initiateWithdrawal` — then paces the *next* fire based on where X
+landed:
+
+- X on thread 0 → sleep `--same-thread-pause-s` (default 15 s). Nothing
+  to walk, no reason to burn the collector's 5-min observation window.
+- X on any other thread → sleep the full `--observation-window-s` so D
+  can enumerate every alternate path before we perturb the ref-DAG with
+  a fresh event.
+
+Match `--observation-window-s` to the same value Pane D uses (default
+300 s) so the two are in phase.
 
 ```bash
 cd ../multithreading    # or wherever this repo lives
-python3 research/trigger_loop.py --interval 60
+python3 research/smart_trigger.py \
+  --count 12 \
+  --graphql http://localhost/graphql \
+  --observation-window-s 300 \
+  --same-thread-pause-s 15 \
+  --collector-out research/stats/dirb-mp-YYYYMMDD-HHMM.jsonl \
+  --events-out    research/stats/events-$(date +%Y%m%d-%H%M).jsonl
 ```
+
+Point `--collector-out` at the *same* JSONL file Pane D writes to;
+`smart_trigger.py` reads it at the end of the run to join per-event
+observations with the collector's shortest-path records. `--events-out`
+gets its own per-event digest (fire wall-clock, X thread, `dst_msg_id`,
+carrier block).
 
 Env pass-throughs (edit if the vendored helper needs them):
 

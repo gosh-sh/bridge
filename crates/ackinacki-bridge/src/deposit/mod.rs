@@ -10,6 +10,7 @@ pub mod identity;
 pub mod limits;
 pub mod log_index;
 pub mod pi;
+pub mod refusals;
 
 /// Replaced by the driver in `run.rs`.
 pub async fn run(_params: args::DepositParams) -> crate::errors::CliResult<DepositSuccess> {

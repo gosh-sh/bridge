@@ -57,56 +57,6 @@ The wrapper is idempotent on node bringup — if `docker ps` already
 shows a healthy node0 (GQL answering), it skips `make run` and moves
 straight to the test.
 
-### Why this recipe (params analysis)
-
-**Why not default flags.** `cli.py test-multithread-cross-thread`'s
-default `--hold-seconds 0` blocks on the initial cross-thread drain:
-the harness forces a 1→2 thread split via a same-DApp warmup burst,
-but with no sustaining load the child thread's last block never gets
-a BK quorum of attestations, stays *prefinalized*, and
-`authority_switch` refuses to open round 0 → dead thread →
-cross-thread messages queue up but never get delivered → the test
-times out. The cyclic-hold path (both `--hold-seconds` and
-`--hold-burst-total` set — see `tests/mt/cli.py:3046` in the
-acki-nacki checkout) keeps sustained traffic on both threads so the
-split holds.
-
-Chosen values:
-
-- `--threads 2 --total 20000` — 20 k funded senders across 2 threads.
-- `--hold-seconds 1800` — 30 min cyclic-hold window.
-- `--hold-burst-total 5000 --hold-quiet-seconds 0 --batch-size 200` —
-  keeps 5 000 tx in flight per cycle with no quiet period; cli.py's
-  `_wait_for_active_thread_count` self-heals if the split retracts.
-- `--deploy-value 12e12 --minimum-balance 8e12` — deploy budget + top-up
-  threshold sized so senders don't run out mid-burst.
-- `--timeout 2400` — 40 min hard ceiling, 10 min buffer beyond the hold.
-
-Observed clean on a mac (Docker VM 12 GiB, 5 nodes) on 2026-09-18:
-27 clean hold cycles, ~180 msg/s per direction, ~140 k msgs
-delivered per receiver over ~24 min; then a client-side back-pressure
-crash at cycle ~28 from the hard-coded 20 k `SINGLE_THREAD_LOAD_THRESHOLD`
-refill inside `keep_split_load_active` (harness bug, not a network
-failure — the split itself stayed healthy the whole time). n14 is a
-Linux box with more headroom than the mac, so the same values should
-ride even easier — `pulse_stall` overshoot is the usual failure
-mode, and it's CPU-contention driven.
-
-Even so, the wrapper runs `thread_liveness_monitor.py` in-band and a
-watchdog polls it every 15 s: if any child thread flips to
-STALLED/IDLE after a 90 s grace, the trigger is SIGTERM'd and the run
-aborts with an explicit ABORTED banner. That is defence-in-depth over
-the cli.py's own health check, whose fan-timeout only fires after
-tens of minutes — well after events start falling into thread 0.
-
-The `smart_trigger.py --count 12` value assumes the current
-2-thread + `DEFAULT_DAPP_ID` USDCBridge setup routes ~100 % of events
-to thread 0. Each same-thread event costs ~60 s (15 s pause +
-resolve), so 12 events ≈ 12 min — well inside the 30 min hold. If a
-future setup routes many events off thread 0 (each cross-thread event
-consumes the full 300 s observation window), cut `--count` to 5; the
-wrapper has a comment marking the exact spot.
-
 ## What we're measuring
 
 Per event, one JSONL row with:
@@ -402,3 +352,53 @@ follow-ups worth trying, in order:
 
 Both are protocol changes to the test setup, not to the collector.
 Leave the collector unchanged.
+
+## Why this recipe (params analysis)
+
+**Why not default flags.** `cli.py test-multithread-cross-thread`'s
+default `--hold-seconds 0` blocks on the initial cross-thread drain:
+the harness forces a 1→2 thread split via a same-DApp warmup burst,
+but with no sustaining load the child thread's last block never gets
+a BK quorum of attestations, stays *prefinalized*, and
+`authority_switch` refuses to open round 0 → dead thread →
+cross-thread messages queue up but never get delivered → the test
+times out. The cyclic-hold path (both `--hold-seconds` and
+`--hold-burst-total` set — see `tests/mt/cli.py:3046` in the
+acki-nacki checkout) keeps sustained traffic on both threads so the
+split holds.
+
+Chosen values:
+
+- `--threads 2 --total 20000` — 20 k funded senders across 2 threads.
+- `--hold-seconds 1800` — 30 min cyclic-hold window.
+- `--hold-burst-total 5000 --hold-quiet-seconds 0 --batch-size 200` —
+  keeps 5 000 tx in flight per cycle with no quiet period; cli.py's
+  `_wait_for_active_thread_count` self-heals if the split retracts.
+- `--deploy-value 12e12 --minimum-balance 8e12` — deploy budget + top-up
+  threshold sized so senders don't run out mid-burst.
+- `--timeout 2400` — 40 min hard ceiling, 10 min buffer beyond the hold.
+
+Observed clean on a mac (Docker VM 12 GiB, 5 nodes) on 2026-09-18:
+27 clean hold cycles, ~180 msg/s per direction, ~140 k msgs
+delivered per receiver over ~24 min; then a client-side back-pressure
+crash at cycle ~28 from the hard-coded 20 k `SINGLE_THREAD_LOAD_THRESHOLD`
+refill inside `keep_split_load_active` (harness bug, not a network
+failure — the split itself stayed healthy the whole time). n14 is a
+Linux box with more headroom than the mac, so the same values should
+ride even easier — `pulse_stall` overshoot is the usual failure
+mode, and it's CPU-contention driven.
+
+Even so, the wrapper runs `thread_liveness_monitor.py` in-band and a
+watchdog polls it every 15 s: if any child thread flips to
+STALLED/IDLE after a 90 s grace, the trigger is SIGTERM'd and the run
+aborts with an explicit ABORTED banner. That is defence-in-depth over
+the cli.py's own health check, whose fan-timeout only fires after
+tens of minutes — well after events start falling into thread 0.
+
+The `smart_trigger.py --count 12` value assumes the current
+2-thread + `DEFAULT_DAPP_ID` USDCBridge setup routes ~100 % of events
+to thread 0. Each same-thread event costs ~60 s (15 s pause +
+resolve), so 12 events ≈ 12 min — well inside the 30 min hold. If a
+future setup routes many events off thread 0 (each cross-thread event
+consumes the full 300 s observation window), cut `--count` to 5; the
+wrapper has a comment marking the exact spot.

@@ -1,10 +1,11 @@
-# Direction (b) multi-path collector — algorithm
+# Multi-path collector — algorithm
 
-Supersedes the single-anchor design in
-[`walker_algorithm.md`](walker_algorithm.md) for
-the research pipeline. The single-anchor collector answers "does *some*
-walk exist for this event?"; the multi-path collector answers **"what
-does the shortest walk cost, and how many alternatives are there?"**
+For every `WithdrawalInitiated` event `X`, the collector answers
+**"what does the shortest walk `Y ◀── … ◀── X` cost, and how many
+alternative paths appear within the observation window?"** — where `Y`
+is any thread-0 block whose `proof_block_refs` DAG transitively contains
+`X`, and `◀──` reads "right side is a leaf inside left side's L7"
+(root/newer on the left, leaf/older on the right).
 
 ## Why this matters
 
@@ -101,31 +102,32 @@ only the shortest. For the length-distribution question this is fine;
 different anchors give path diversity, and multiple paths to the same
 anchor would all pay ≥ shortest hops anyway.
 
-## Why not the simpler direct-hit strategy?
+## Why BFS over every edge, not a direct-hit walker
 
-The single-anchor collector maintained `thread0_view[t]`: for each
-non-default thread `t`, the sorted list of thread-0 blocks with a ref
-into `t`. Given event X on thread `t`, the anchor was the *first
-entry* with `b_seq ≥ x_seq`, and the walk was `B →ref[0]→
-parent(B) → …`. That algorithm is optimal on a **2-thread network**
-because the only path shape is thread-0 → x_thread + parent chain.
+A simpler strategy would be: for each non-default thread `t`, index only
+thread-0 blocks whose `refs[i≥1]` point into `t`, pick the first such
+`Y` with `b_seq ≥ x_seq`, and walk B's parent chain back to X. This is
+optimal on a **2-thread network** because the only path shape is
+`thread-0 ◀── x_thread` + parent chain.
 
-On 4+ threads, an **indirect prefix** can be strictly shorter:
+On 3+ threads an **indirect prefix** can be strictly shorter:
 
 ```
-      direct  Y —→ B_t (thread t, ~50 back) —→ …parent walk… → X    (52 hops)
-    indirect  Y —→ B_t' (thread t', slot 2) —→ B_t (thread t) —→ … → X  (4 hops)
+      direct  Y ◀── B_t (thread t, ~50 back) ◀── …parent walk… ◀── X    (52 hops)
+    indirect  Y ◀── B_t' (thread t', slot 2) ◀── B_t (thread t) ◀── … ◀── X  (4 hops)
 ```
 
 when thread 0 is lagging thread `t` heavily but a sibling thread `t'`
-tracks `t` tightly at a seq close to X. The direct-hit heuristic never
-considers B_t' because it doesn't index other threads. BFS considers
+tracks `t` tightly at a seq close to X. A direct-hit walker never
+considers `B_t'` because it doesn't index other threads. BFS considers
 every edge type uniformly.
 
-**Empirically we may not see this happen on 2-thread runs.** The point
-of running BFS anyway is to have the machinery in place when a 4-thread
-run becomes available, and to detect degenerate 2-thread cases (e.g.,
-producer stalls into crawl mode).
+**Empirically the indirect win may not show up on 2-thread runs.** BFS
+is still the right primitive: it costs nothing extra when only the
+direct path exists, it has the machinery ready when 3+-thread runs
+become available, and it detects degenerate 2-thread cases (e.g.,
+producer stalls into crawl mode) where the direct-hit result would
+overestimate cost.
 
 ## Termination / soft deadlines
 
@@ -169,7 +171,7 @@ Seven digest sections in `multipath_analyzer.py`:
    near-100 % direct fraction means the simple direct-hit walker
    would have sufficed.
 
-## Deferred / non-goals (same as single-anchor plan)
+## Deferred / non-goals
 
 - **Cryptographic verification.** The collector confirms only that the
   ref edges exist — it does not open Poseidon proofs or Leaf-7 SHA
@@ -182,7 +184,3 @@ Seven digest sections in `multipath_analyzer.py`:
   slow-to-anchor live thread.
 - **Aggregator hop-cost benchmark.** Circuit-side budget is a separate
   measurement.
-- **Direction (a) walker rewrite.** The daemon walker in
-  `bridge-event-witness` still walks Direction (a) and will need
-  independent updating before Direction (b) semantics can go live
-  end-to-end.

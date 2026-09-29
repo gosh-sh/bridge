@@ -628,6 +628,15 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-relayer` did not build against tvm-sdk `v3.0.6.an`: its
+  `Cargo.toml` lacked the halo2 `[patch]` tables that pin `tvm_vm` to a
+  single `halo2-axiom` (already present on `eth-light-client-relayer`),
+  and `TvmAckiNacki::supports_dapp_id` called a `ClientContext` method
+  removed in that tag. The probe was only a log line — `v3.0.6.an`
+  `send_message` already rejects an empty `dapp_id`. `--an-graphql-url`
+  / `AN_GRAPHQL_URL` must now name a host that serves GraphQL *and*
+  `/v2/messages`. Rebuild `deposit-relayer` from this tree before
+  `daemon` / `finalize-one`.
 - `EthBeaconLightClient` told `USDCBridge` the stored `_piForm` key, but
   `finalizeDeposit` looks up the raw keccak from the deposit public inputs.
   After `disableOwnerAnchors` the light client is the only writer, so every

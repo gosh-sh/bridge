@@ -33,8 +33,8 @@ use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -156,7 +156,9 @@ enum Cmd {
         /// Must be non-zero unless `--dry-run` (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
-        /// GraphQL endpoint for tvm_client 3.0 (live submit). Example:
+        /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
+        /// `/v2/messages` (`send_message`). A public gateway that only
+        /// answers `/graphql` is not enough. Example:
         /// `http://127.0.0.1:11000/graphql`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
@@ -211,8 +213,10 @@ enum Cmd {
         /// `vk_blob.bin`) — e.g. a `prove-one --out-dir`.
         #[arg(long)]
         bundle_dir: PathBuf,
-        /// GraphQL endpoint for tvm_client 3.0 (e.g. shellnet
-        /// `https://shellnet.ackinacki.org/graphql`).
+        /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
+        /// `/v2/messages` (`send_message`). A public gateway that only
+        /// answers `/graphql` is not enough. Example: shellnet
+        /// `https://shellnet.ackinacki.org/graphql`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         /// Path to tvm-cli keys JSON (signer for `finalizeDeposit`).
@@ -729,11 +733,6 @@ async fn run_daemon(
             bridge_abi,
         })
         .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
-        if tvm.supports_dapp_id().await? {
-            info!("AN node supports SDK 3.0 dapp_id wire format");
-        } else {
-            warn!("AN node is pre-1.0.0; empty dapp_id is allowed on the wire");
-        }
         let submit_cfg = an_cfg.to_submit_config();
         run_daemon_loop(
             state_path,

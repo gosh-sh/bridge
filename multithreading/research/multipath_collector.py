@@ -12,8 +12,9 @@ Motivation
 ----------
 Each hop in the aggregated bridge SNARK costs **~8 SHA-256 gadgets**.
 Fifty hops is a huge circuit load, so shortest-path characterisation is
-a first-class research target — not just "does *some* path exist" (the
-question `collector.py` answers).
+a first-class research target — extracting a single walk per event is
+not enough; we need the full set of paths that materialise within the
+observation window so the shortest can be identified with confidence.
 
 Approach
 --------
@@ -24,7 +25,7 @@ Approach
    at X: the frontier expands from X toward newer blocks that reference
    X (directly or transitively).  Each time BFS reaches a thread-0
    block, that block is a candidate anchor Y — record the shortest
-   path Y → … → X.
+   path Y ◀── … ◀── X (`A ◀── C` = C is a leaf of A's L7).
 3. Keep watching for an **observation window** (default 300 s) after
    the first path appears.  New blocks arrive during the window; each
    new block may unlock a shorter or structurally different path.

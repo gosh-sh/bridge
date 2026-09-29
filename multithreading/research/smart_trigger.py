@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Direction (b) smart trigger — adaptive event firing for the multi-path
+Smart trigger — adaptive event firing for the multi-path
 collector session.
 
 Fires N WithdrawalInitiated events one at a time.  After each fire, waits

@@ -1,14 +1,9 @@
-# Direction (b) multi-path session
+# Multi-path reachability session
 
-End-to-end recipe for the split-thread devnet run that measures the
-**shortest walk** `Y (thread 0) → … → X (event block)` per
-WithdrawalInitiated event, along with alternative paths.
-
-Companion to
-[`run_session.md`](run_session.md). The
-single-anchor collector answers "does *some* walk exist"; this session
-answers **"how short is the shortest walk, and how many alternatives
-exist within a 5-minute observation window?"** Model + math live in
+End-to-end recipe for the split-thread devnet run that measures, per
+`WithdrawalInitiated` event, **every path** `Y (thread 0) ◀── … ◀── X
+(event block)` observed within a 5-minute observation window — with the
+shortest one ranked first. Model + math live in
 [`../docs/multipath_algorithm.md`](../docs/multipath_algorithm.md).
 
 ## What we're measuring
@@ -23,8 +18,8 @@ Per event, one JSONL row with:
   `--max-paths-per-event`, default 20), ordered shortest-first.
 - **`shortest_path.signature`** — thread stack of the winning path,
   e.g. `t0 -> t1a2b -> t2c3d -> X`. Tells you whether the shortest
-  walk went direct (Y → x_thread → … → X) or indirect (through
-  another thread).
+  walk went direct (Y ◀── … ◀── X, all hops staying in `x_thread`)
+  or indirect (through another thread).
 - Latency: `T_first_path_wall_s`, `T_best_path_wall_s`,
   `improvement_wait_s`.
 - Failure buckets: `orphan_timeout`, `event_block_unresolved`,
@@ -42,13 +37,11 @@ practical output on 2 threads is:
    record so we can check the direct-hit heuristic wasn't overpaying.
 
 The multi-path machinery pays off on **4-thread runs**, where a
-Y → t' → t indirect prefix may strictly beat the direct 50-hop parent
-walk. Run this recipe the same way when the 4-thread test becomes
+`Y ◀── t' ◀── t` indirect prefix may strictly beat the direct 50-hop
+parent walk. Run this recipe the same way when the 4-thread test becomes
 available; no collector changes needed.
 
 ## Prerequisites
-
-Same as `run_session.md`:
 
 | # | Item |
 |---|------|
@@ -67,15 +60,15 @@ first event fires.
 | Pane | Role                                                       | See |
 |------|------------------------------------------------------------|-----|
 | A    | Local acki-nacki node                                      | [`../../../run_acki_nacki_node.md`](../../../run_acki_nacki_node.md) |
-| B    | Split-thread `cli.py` test                                 | This file / `run_session.md` |
+| B    | Split-thread `cli.py` test                                 | This file |
 | C    | WithdrawalInitiated trigger loop (`trigger_loop.py`)       | This file |
 | D    | **Multi-path collector** (`multipath_collector.py`) | This file |
 | E    | Observability (`docker stats`, node logs)                  | — |
 
 ## Pane B — split-thread test
 
-Identical to `run_session.md`; run from the acki-nacki repo
-root, not this directory:
+Run from the acki-nacki repo root, not this directory. The env-var prefix
+bypasses the auto-discovery bug at `tests/mt/cli.py:1050`:
 
 ```bash
 cd $ACKI_NACKI_ROOT   # branch feature/node-3953-...
@@ -153,17 +146,29 @@ health signal for the polling loop.
 
 ## Pane C — WithdrawalInitiated trigger
 
-Same as `run_session.md`:
+The existing `trigger_loop.py` fires one event per iteration by spawning
+a fresh multisig, minting ECC[3] via `USDCBridge.mintAndSend`, and
+calling `initiateWithdrawal`:
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
 python3 research/trigger_loop.py --interval 60
 ```
 
+Env pass-throughs (edit if the vendored helper needs them):
+
+- `ACKI_NACKI_ROOT` — points at the acki-nacki checkout (needed by
+  `helper/common.py` to locate `config/USDCBridge.keys.json`).
+- `USDC_BRIDGE_KEY_PATH` — set to
+  `research/vendored/contracts/USDCBridge.keys.json` if the acki-nacki
+  `config/` copy has drifted (see `bridge_python_orchestrator_usdc_keys.md`
+  in memory).
+- `NETWORK=http://127.0.0.1:80` and `GRAPHQL_URL=http://localhost/graphql`
+  are the collector defaults.
+
 ## Full-run timing
 
-Same as the single-anchor session: one `--hold-seconds 1800` block
-yields roughly 15–20 events; each event stays open for
+One `--hold-seconds 1800` block yields roughly 15–20 events; each event stays open for
 `observation-window-s` (5 min) after its first path, so records get
 emitted with ~5 min lag from event fire. Plan for the session to run
 a hold burst *and then* 5+ min of extra collector time before closing
@@ -217,19 +222,3 @@ follow-ups worth trying, in order:
 
 Both are protocol changes to the test setup, not to the collector.
 Leave the collector unchanged.
-
-## Comparison to the single-anchor session
-
-| Aspect                    | Single-anchor (`collector.py`)     | Multi-path (`multipath_collector.py`) |
-|---------------------------|-------------------------------------------------|----------------------------------------------------|
-| Data structure            | `thread0_view[t]` per-thread ref index          | Full block DAG + reverse-parent index              |
-| Path selection            | First `b_seq ≥ x_seq` in `thread0_view[t]`      | BFS on reverse graph, all thread-0 anchors         |
-| Handles indirect prefix?  | No                                              | Yes (BFS traverses every ref slot uniformly)       |
-| Path enumeration          | One walk per event                              | Up to `--max-paths-per-event` per event            |
-| Fetch-on-demand?          | Only for events + gap-fill via `blockByHeight`  | Yes (bounded per-poll for any missing ref target)  |
-| Latency captured          | `T_anchor_wall_s`, `T_anchor_blocks_thread_t`   | `T_first_path_wall_s`, `T_best_path_wall_s`        |
-| Circuit-cost signal       | `hop_count = 1 + (b_seq − x_seq)`               | `shortest_length` (all edge types counted)         |
-
-Use the single-anchor session when you want the traditional
-"same-thread parent walk" cost bound. Use the multi-path session
-when you care about **shortest** walks and structural diversity.

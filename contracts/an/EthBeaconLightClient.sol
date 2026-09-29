@@ -735,12 +735,17 @@ contract EthBeaconLightClient {
     }
 
     /// @notice Whether a finalized execution block hash has been proven canonical.
+    ///         Takes the stored anchor key (`_piForm` packing), as `getHead`
+    ///         returns it, not the Ethereum byte order.
     function isProvenExecutionBlockHash(uint256 blockHash) external view returns (bool) {
         return _isLive(blockHash);
     }
 
-    /// @notice Drop-in canonicality query matching `USDCBridge.isAcceptedBlockHash`:
-    ///         true only for the followed L1 and a live (in-window) proven hash.
+    /// @notice True only for the followed L1 and a live (in-window) proven hash.
+    ///         Takes the stored anchor key, like `isProvenExecutionBlockHash`.
+    ///         Not interchangeable with `USDCBridge.isAcceptedBlockHash`, which
+    ///         takes the Ethereum byte order: for the same block it is asked
+    ///         `_piForm` of the word this one is asked.
     function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
         return chainId == _l1ChainId && _isLive(blockHash);
     }

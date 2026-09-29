@@ -9,7 +9,8 @@
 //! 3. generates the AN-consumable proof triple via the [`ProofGenerator`];
 //! 4. submits it to AN via the [`AnSubmitter`] (`finalizeDeposit`);
 //! 5. on success — advances [`RelayerState`] and persists it; otherwise records
-//!    the attempt.
+//!    the attempt. A deposit that is not made yet is waited for, not counted as
+//!    an attempt.
 //!
 //! [`Relayer::run_loop`] calls `tick` in a loop with a configurable delay and
 //! a "max ticks" budget for tests; [`crate::daemon`] adds the long-running
@@ -27,7 +28,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     error::RelayerError,
     prover::ProofGenerator,
-    source::DepositSource,
+    source::{advance_scan_cursor, DepositSource},
     state::{DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
 };
@@ -44,10 +45,6 @@ pub struct RelayerConfig {
     /// Interval between attempts in [`Relayer::run_loop`].
     #[serde(default = "default_poll_interval")]
     pub poll_interval: Duration,
-    /// After this many consecutive failures on the same deposit, emit a
-    /// warning. Doesn't stop the relayer; operator-visible only.
-    #[serde(default = "default_max_attempts_warn")]
-    pub max_attempts_warn: u32,
     /// Deployment binding stamped into `state.json` (daemon only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment: Option<DeploymentIdentity>,
@@ -58,27 +55,25 @@ pub struct RelayerConfig {
     /// advance the cursor. `None` or `0` disables skipping (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_after_attempts: Option<u32>,
-    /// Shared with [`EthLogSource`] — highest safe head scanned so far.
+    /// Scan cursor shared with [`EthLogSource`](crate::source::EthLogSource),
+    /// persisted as [`RelayerState::scan_done_through_block`]. After a
+    /// finalize the relayer moves it to the deposit's block minus one. `None`
+    /// inside the mutex means "scan from `--from-block`".
     #[serde(skip)]
-    pub scan_cursor: Option<Arc<Mutex<u64>>>,
+    pub scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
 }
 
 fn default_poll_interval() -> Duration {
     Duration::from_secs(2)
 }
-fn default_max_attempts_warn() -> u32 {
-    16
-}
 
 impl RelayerConfig {
-    /// Sensible defaults: start at deposit 0, 2-second polling, warn after
-    /// 16 attempts on the same deposit.
+    /// Sensible defaults: start at deposit 0, 2-second polling.
     pub fn new(state_path: impl Into<PathBuf>) -> Self {
         Self {
             state_path: state_path.into(),
             start_deposit_id: 0,
             poll_interval: default_poll_interval(),
-            max_attempts_warn: default_max_attempts_warn(),
             deployment: None,
             force_state: false,
             skip_after_attempts: None,
@@ -99,7 +94,8 @@ pub enum TickOutcome {
     /// prior submit we didn't observe succeeded). Cursor advances; no
     /// proving was done.
     AlreadyFinalized { deposit_id: u64 },
-    /// The deposit isn't visible / confirmed on Ethereum yet.
+    /// The deposit is not made on Ethereum yet, or not `--confirmations`
+    /// deep. Not a failure: it does not count toward `--skip-after-attempts`.
     NotYetAvailable { deposit_id: u64 },
     /// Proof generation failed (witness fetch blip, circuit error). The
     /// relayer records the attempt and retries later; persistent failures
@@ -176,18 +172,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let event = match self.source.fetch(target).await? {
             Some(e) => e,
             None => {
-                if let Some(outcome) =
-                    self.record_failure(target, "deposit not yet confirmed on Ethereum")?
-                {
-                    return Ok(outcome);
-                }
-                if self.state.attempts_since_progress >= self.config.max_attempts_warn {
-                    warn!(
-                        deposit_id = target,
-                        attempts = self.state.attempts_since_progress,
-                        "no confirmed deposit yet; relayer is idle",
-                    );
-                }
+                // Nothing to attempt yet. Persist anyway: the source may have
+                // moved the scan cursor.
+                self.persist_state()?;
+                debug!(deposit_id = target, "no confirmed deposit yet");
                 return Ok(TickOutcome::NotYetAvailable {
                     deposit_id: target,
                 });
@@ -225,6 +213,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Finalized {
                 tx_hash,
             } => {
+                self.mark_finalized_block(event.block_number);
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -239,6 +228,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 })
             },
             SubmitOutcome::AlreadyFinalized => {
+                self.mark_finalized_block(event.block_number);
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -308,13 +298,22 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     fn persist_state(&mut self) -> Result<(), RelayerError> {
         if let Some(cursor) = &self.config.scan_cursor {
-            self.state.scanned_through_block = Some(
-                *cursor
-                    .lock()
-                    .map_err(|e| RelayerError::other(e.to_string()))?,
-            );
+            self.state.scan_done_through_block = *cursor
+                .lock()
+                .map_err(|e| RelayerError::other(e.to_string()))?;
         }
         self.state.save(&self.config.state_path)
+    }
+
+    /// Remember that the deposit at `block_number` is done. The next log
+    /// scan still includes that block: a later `depositId` can share it.
+    /// Never called on a failed tick, so a retry finds the deposit again.
+    fn mark_finalized_block(&self, block_number: u64) {
+        if let (Some(cursor), Some(through)) =
+            (&self.config.scan_cursor, block_number.checked_sub(1))
+        {
+            advance_scan_cursor(cursor, through);
+        }
     }
 
     /// Record a failed attempt and optionally park the deposit when the skip
@@ -353,14 +352,20 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     use alloy::primitives::{Address, B256, U256};
     use tempfile::tempdir;
 
     use super::*;
     use crate::{
-        prover::MockProofGenerator, source::InMemoryDepositSource, submitter::MockAnSubmitter,
+        fake_rpc::FakeRpc,
+        prover::MockProofGenerator,
+        source::{EthLogSource, InMemoryDepositSource},
+        submitter::MockAnSubmitter,
         types::DepositEvent,
     };
 
@@ -393,7 +398,6 @@ mod tests {
             state_path,
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
-            max_attempts_warn: 16,
             deployment: None,
             force_state: false,
             skip_after_attempts: None,
@@ -434,6 +438,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_moves_the_cursor_to_the_block_before_the_deposit() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        let mut a = deposit(0);
+        a.block_number = 105;
+        let mut b = deposit(1);
+        b.block_number = 105;
+        let mut c = deposit(2);
+        c.block_number = 107;
+        source.insert(a);
+        source.insert(b);
+        source.insert(c);
+        let cursor = Arc::new(Mutex::new(None));
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            start_deposit_id: 0,
+            poll_interval: Duration::from_millis(0),
+            deployment: None,
+            force_state: false,
+            skip_after_attempts: None,
+            scan_cursor: Some(cursor.clone()),
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
+        assert_eq!(relayer.state().scan_done_through_block, Some(104));
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 1,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 2,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(106));
+        assert_eq!(relayer.state().scan_done_through_block, Some(106));
+    }
+
+    #[tokio::test]
+    async fn log_source_retry_and_same_block_neighbour_end_to_end() {
+        // Deposits 0 and 1 share block 105, deposit 2 is in block 107; AN
+        // rejects the first attempt at deposit 0. Every deposit is delivered
+        // in order, and an idle tick then parks the cursor at the safe head.
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let bridge = Address::repeat_byte(0x22);
+        let rpc = FakeRpc::new(bridge, 130);
+        for block in [105, 105, 107] {
+            rpc.deposit(block);
+        }
+        let cursor = Arc::new(Mutex::new(None));
+        let source =
+            EthLogSource::new(rpc.provider(), bridge, 100, 12).with_scan_cursor(cursor.clone());
+        let rejected_once = AtomicBool::new(false);
+        let submitter = MockAnSubmitter::with_verifier(Arc::new(move |_| {
+            rejected_once.swap(true, Ordering::SeqCst)
+        }));
+        let cfg = RelayerConfig {
+            scan_cursor: Some(cursor.clone()),
+            ..RelayerConfig::new(&state_path)
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            Arc::new(source),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(submitter),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), None);
+
+        for (id, cursor_after) in [(0, 104), (1, 104), (2, 106)] {
+            match relayer.tick().await.unwrap() {
+                TickOutcome::Finalized {
+                    deposit_id, ..
+                } => assert_eq!(deposit_id, id),
+                other => panic!("expected Finalized({id}), got {other:?}"),
+            }
+            assert_eq!(*cursor.lock().unwrap(), Some(cursor_after));
+        }
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable {
+                deposit_id: 3
+            }
+        ));
+        assert_eq!(*cursor.lock().unwrap(), Some(118));
+        let saved = RelayerState::load(&state_path).unwrap().unwrap();
+        assert_eq!(saved.scan_done_through_block, Some(118));
+        assert_eq!(saved.last_processed_deposit_id, Some(2));
+    }
+
+    #[tokio::test]
     async fn not_yet_available_then_recovers() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
@@ -453,7 +580,7 @@ mod tests {
             other => panic!("expected NotYetAvailable, got {other:?}"),
         }
         assert_eq!(relayer.state().last_processed_deposit_id, None);
-        assert_eq!(relayer.state().attempts_since_progress, 1);
+        assert_eq!(relayer.state().attempts_since_progress, 0);
 
         source.insert(deposit(0));
         match relayer.tick().await.unwrap() {
@@ -584,30 +711,45 @@ mod tests {
         assert_eq!(submitter.finalized_count(), 4);
     }
 
+    fn relayer_skipping_after(
+        attempts: u32,
+        source: Arc<InMemoryDepositSource>,
+        prover: MockProofGenerator,
+        state_path: PathBuf,
+    ) -> R {
+        let cfg = RelayerConfig {
+            skip_after_attempts: Some(attempts),
+            poll_interval: Duration::from_millis(0),
+            ..RelayerConfig::new(state_path)
+        };
+        Relayer::new(
+            cfg,
+            source,
+            Arc::new(prover),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn skips_stuck_deposit_after_max_attempts() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
         source.insert(deposit(1));
-        let prover = Arc::new(MockProofGenerator::new());
-        let submitter = Arc::new(MockAnSubmitter::accepting());
-        let cfg = RelayerConfig {
-            state_path: dir.path().join("state.json"),
-            start_deposit_id: 0,
-            poll_interval: Duration::from_millis(0),
-            max_attempts_warn: 16,
-            deployment: None,
-            force_state: false,
-            skip_after_attempts: Some(3),
-            scan_cursor: None,
-        };
-        let mut relayer = Relayer::new(cfg, source, prover, submitter).unwrap();
+        let mut relayer = relayer_skipping_after(
+            3,
+            source,
+            MockProofGenerator::failing_on(0),
+            dir.path().join("state.json"),
+        );
 
         for _ in 0..2 {
             assert!(matches!(
                 relayer.tick().await.unwrap(),
-                TickOutcome::NotYetAvailable {
-                    deposit_id: 0
+                TickOutcome::ProofFailed {
+                    deposit_id: 0,
+                    ..
                 }
             ));
         }
@@ -618,7 +760,75 @@ mod tests {
             other => panic!("expected Skipped, got {other:?}"),
         }
         assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
-        assert_eq!(relayer.state().next_target(0), 1);
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 1,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn idle_polls_an_older_daemon_counted_do_not_park_after_upgrade() {
+        // An older daemon counted every empty poll as a failed attempt and
+        // saved the count. After the upgrade one real failure must not reach
+        // the skip threshold on top of it.
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        std::fs::write(
+            &state_path,
+            r#"{"last_processed_deposit_id":4,"last_attempt_deposit_id":5,
+                "attempts_since_progress":500,"scanned_through_block":11800417}"#,
+        )
+        .unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(5));
+        let mut relayer =
+            relayer_skipping_after(64, source, MockProofGenerator::failing_on(5), state_path);
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::ProofFailed {
+                deposit_id: 5,
+                ..
+            }
+        ));
+        assert_eq!(relayer.state().attempts_since_progress, 1);
+        assert!(relayer.state().parked_deposit_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_deposit_never_parks_it() {
+        // An idle bridge: the next id is not made yet, however long we poll.
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        let mut relayer = relayer_skipping_after(
+            3,
+            source.clone(),
+            MockProofGenerator::new(),
+            dir.path().join("state.json"),
+        );
+
+        for _ in 0..10 {
+            assert!(matches!(
+                relayer.tick().await.unwrap(),
+                TickOutcome::NotYetAvailable {
+                    deposit_id: 0
+                }
+            ));
+        }
+        assert_eq!(relayer.state().attempts_since_progress, 0);
+        assert!(relayer.state().parked_deposit_ids.is_empty());
+
+        source.insert(deposit(0));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

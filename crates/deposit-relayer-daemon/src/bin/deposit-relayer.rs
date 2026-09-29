@@ -188,8 +188,9 @@ enum Cmd {
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in
-        /// `state.json` and advance the cursor (0 = disabled).
-        #[arg(long, default_value_t = 0)]
+        /// `state.json` and advance the cursor (0 = disabled). Waiting for a
+        /// deposit that is not made yet is not a failure.
+        #[arg(long, env = "SKIP_AFTER_ATTEMPTS", default_value_t = 0)]
         skip_after_attempts: u32,
         /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
         #[arg(long)]
@@ -660,9 +661,7 @@ async fn run_daemon(
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
 
     let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
-    let scan_cursor = Arc::new(Mutex::new(
-        existing_state.scanned_through_block.unwrap_or(from_block),
-    ));
+    let scan_cursor = Arc::new(Mutex::new(existing_state.scan_done_through_block));
 
     // Same gate as `watch` / `prove-one`: an unsupported chain produces proofs
     // the AN-side bridge has no allowlist entry for, so fail before the first
@@ -758,7 +757,7 @@ async fn run_daemon_loop<S, P, A>(
     deployment: DeploymentIdentity,
     force_state: bool,
     skip_after_attempts: Option<u32>,
-    scan_cursor: Arc<Mutex<u64>>,
+    scan_cursor: Arc<Mutex<Option<u64>>>,
     source: Arc<S>,
     prover: Arc<P>,
     submitter: Arc<A>,
@@ -772,7 +771,6 @@ where
         state_path,
         start_deposit_id,
         poll_interval: backoff.initial,
-        max_attempts_warn: 16,
         deployment: Some(deployment),
         force_state,
         skip_after_attempts,

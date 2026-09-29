@@ -62,6 +62,9 @@ axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", rev = "1d61be00a63ec
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The `EthLogSource` tests answer JSON-RPC in-process (`src/fake_rpc.rs`).
+alloy-json-rpc = "2"
+tower-service = "0.3"
 
 [[bin]]
 name = "deposit-relayer"

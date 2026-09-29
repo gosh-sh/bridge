@@ -47,7 +47,7 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
 #[command(
     name = "ackinacki-bridge",
     version,
-    about = "Acki Nacki ↔ EVM bridge CLI. Currently ships the `withdraw` subcommand.",
+    about = "Acki Nacki ↔ EVM bridge CLI. Ships the `withdraw` and `deposit` subcommands.",
     long_about = "Composes a single-custodian multisig sendTransaction that calls \
                   USDCBridge.initiateWithdrawal, waits for the WithdrawalInitiated event, \
                   resurrects the prover's mirror of `AckiNackiBridge` state from the on-chain \
@@ -89,6 +89,8 @@ pub struct Cli {
 pub enum Command {
     /// Withdraw USDC from an AN multisig to an EVM recipient.
     Withdraw(WithdrawArgs),
+    /// Deposit USDC from an EVM wallet to an Acki Nacki account.
+    Deposit(crate::deposit::args::DepositArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -909,7 +911,9 @@ mod tests {
             "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
         ])
         .expect("parse");
-        let Command::Withdraw(args) = cli.cmd;
+        let Command::Withdraw(args) = cli.cmd else {
+            panic!("expected withdraw")
+        };
         args
     }
 
@@ -945,7 +949,9 @@ mod tests {
             "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
         ])
         .expect("--dry-run must parse without --eth-private-key or the prover dirs");
-        let Command::Withdraw(args) = cli.cmd;
+        let Command::Withdraw(args) = cli.cmd else {
+            panic!("expected withdraw")
+        };
         assert!(args.dry_run);
         assert!(args.eth_private_key.is_none());
         assert!(args.params_dir.is_none());

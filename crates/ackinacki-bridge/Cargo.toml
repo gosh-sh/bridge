@@ -2,7 +2,7 @@
 name = "ackinacki-bridge"
 version = "0.2.0"
 edition = "2021"
-description = "End-user CLI for the Acki Nacki ↔ EVM bridge. Currently ships the `withdraw` subcommand: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side. Additional subcommands (e.g. deposit) will land here."
+description = "End-user CLI for the Acki Nacki ↔ EVM bridge. Ships the `withdraw` and `deposit` subcommands. `withdraw`: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side. Additional subcommands (e.g. deposit) will land here."
 
 # Build via the bridge-prover-libraries workspace (member symlink
 # crates/bridge-prover-libraries/ackinacki-bridge → ../ackinacki-bridge):
@@ -63,6 +63,7 @@ bridge-event-witness  = { path = "../bridge-event-witness" }
 bridge-prover-lib     = { path = "../bridge-prover-lib" }
 bridge-gql-fetcher    = { path = "../bridge-gql-fetcher" }
 acki-nacki-interface  = { path = "../../acki-nacki-interface" }
+deposit-chain-ids     = { path = "../../deposit-chain-ids" }
 
 # `bytes_to_fr` — the exact conversion the prover uses for public inputs
 # [6] and [7]. Reused rather than reimplemented so the preflight cannot
@@ -76,6 +77,10 @@ tempfile = "3"
 # statvfs + errno constants. Already in this workspace's lock file via
 # transitive deps, so this costs nothing.
 libc = "0.2"
+
+# Operation ids, and the endpoint parsing behind the recorded network id.
+ulid = "1"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

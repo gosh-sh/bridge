@@ -5,6 +5,16 @@
 //! credit check — runs here, keyed by an operation id that survives a
 //! crash.
 
+pub mod args;
+
+/// Replaced by the driver in `run.rs`.
+pub async fn run(_params: args::DepositParams) -> crate::errors::CliResult<DepositSuccess> {
+    Err(crate::errors::CliError::Preflight {
+        reason: "deposit: the pipeline is not assembled in this build".into(),
+        source: None,
+    })
+}
+
 /// The final summary of a deposit run, printed by `output`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DepositSuccess {

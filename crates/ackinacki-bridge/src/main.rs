@@ -239,6 +239,17 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
                 .await
                 .map(output::RunSuccess::Withdraw)
         },
+        Command::Deposit(args) => {
+            let g = crate::deposit::args::GlobalFlags {
+                json: cli.json,
+                yes: cli.yes,
+                non_interactive: cli.non_interactive,
+            };
+            let params = args.validate(&g)?;
+            crate::deposit::run(params)
+                .await
+                .map(output::RunSuccess::Deposit)
+        },
     }
 }
 

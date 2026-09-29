@@ -796,3 +796,39 @@ fn a_control_character_in_an_argument_does_not_reach_the_terminal() {
         "the newline was replayed verbatim: {e:?}"
     );
 }
+
+#[test]
+fn deposit_refuses_an_unknown_network_before_the_network() {
+    let out = run(&[
+        "deposit",
+        "--network",
+        "mainnet",
+        "--amount",
+        "1",
+        "--to",
+        "x::y",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("sepolia"));
+}
+
+#[test]
+fn deposit_tx_hash_needs_resume() {
+    let out = run(&["deposit", "--tx-hash", &format!("0x{}", "ab".repeat(32))]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn deposit_refuses_a_malformed_to_as_exit_2() {
+    let out = run(&[
+        "deposit",
+        "--network",
+        "sepolia",
+        "--amount",
+        "1",
+        "--to",
+        "abc",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--to"));
+}

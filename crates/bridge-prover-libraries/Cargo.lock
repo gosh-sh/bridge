@@ -29,6 +29,7 @@ dependencies = [
  "bridge-prover-lib",
  "bridge-relayer-daemon",
  "clap",
+ "deposit-chain-ids",
  "dotenvy",
  "gosh-dense-balanced-tree",
  "hex",
@@ -45,6 +46,8 @@ dependencies = [
  "tvm_block",
  "tvm_client",
  "tvm_types",
+ "ulid",
+ "url",
 ]
 
 [[package]]
@@ -2997,6 +3000,10 @@ dependencies = [
  "monotree",
  "tvm_vm",
 ]
+
+[[package]]
+name = "deposit-chain-ids"
+version = "0.2.0"
 
 [[package]]
 name = "der"
@@ -8366,6 +8373,16 @@ dependencies = [
  "crunchy",
  "hex",
  "static_assertions",
+]
+
+[[package]]
+name = "ulid"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+dependencies = [
+ "rand 0.9.5",
+ "web-time",
 ]
 
 [[package]]

@@ -1,7 +1,8 @@
 //! Off-chain replica of `EthBeaconLightClient` control flow (no Halo2).
 //!
 //! Proof bytes are assumed valid: these tests pin the `require`s around head
-//! movement, ancestry, sink re-push, and the weak-subjectivity hatch.
+//! movement, ancestry, sink re-push, and the weak-subjectivity hatch, and the
+//! byte order of the words the sink is sent.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -11,6 +12,17 @@ use crate::header_rlp::{keccak256, rlp_parent_hash};
 pub const SLOTS_PER_YEAR: u64 = 2_628_000;
 /// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
 pub const MAX_EVICT_PER_TX: usize = 128;
+
+/// `EthBeaconLightClient._piForm` over big-endian bytes: each 16-byte half
+/// reversed. The step circuit reads each half of a hash little-endian, so the
+/// contract keys its proven set by this form of the Ethereum-order hash, while
+/// `USDCBridge` keys its anchor set by the hash itself. Its own inverse.
+pub fn pi_form(h: &[u8; 32]) -> [u8; 32] {
+    let mut k = *h;
+    k[..16].reverse();
+    k[16..].reverse();
+    k
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LcError {
@@ -53,12 +65,15 @@ pub struct LightClient {
     pub period: u64,
     pub owner_rotation_enabled: bool,
     pub re_anchors_applied: u64,
-    /// Hash → Ethereum slot at admission. Absent / expired ⇒ not live.
+    /// Stored key (`pi_form` of the Ethereum-order hash) → Ethereum slot at
+    /// admission. Absent / expired ⇒ not live.
     pub proven: HashMap<[u8; 32], u64>,
     pub queue: VecDeque<[u8; 32]>,
-    /// Each `_notifySink` / `rePushAnchor` (including first insert).
+    /// The hash each `_notifySink` / `rePushAnchor` sends (including first
+    /// insert), in Ethereum byte order.
     pub sink_notifies: Vec<[u8; 32]>,
-    /// Each `_forgetSink` after eviction.
+    /// The hash each `_forgetSink` after eviction sends, in Ethereum byte
+    /// order.
     pub sink_forgets: Vec<[u8; 32]>,
 }
 
@@ -102,7 +117,7 @@ impl LightClient {
                 Some(s) if self.within_year(s) => self.queue.push_back(h),
                 Some(_) => {
                     self.proven.remove(&h);
-                    self.sink_forgets.push(h);
+                    self.sink_forgets.push(pi_form(&h));
                 },
                 None => {},
             }
@@ -118,10 +133,11 @@ impl LightClient {
         }
         self.proven.insert(h, eth_slot);
         self.queue.push_back(h);
-        self.sink_notifies.push(h);
+        self.sink_notifies.push(pi_form(&h));
     }
 
     /// `submitUpdate` after a successful ZK verify (committee already checked).
+    /// `exec` is the stored key, as the step public inputs carry it.
     pub fn submit_update(
         &mut self,
         slot: u64,
@@ -162,7 +178,7 @@ impl LightClient {
         if header_rlps.len() > 32 {
             return Err(LcError::AncestryTooLong);
         }
-        let checkpoint = keccak256(&header_rlps[0]);
+        let checkpoint = pi_form(&keccak256(&header_rlps[0]));
         if !self.is_live(&checkpoint) {
             return Err(LcError::UnknownCheckpoint);
         }
@@ -175,8 +191,9 @@ impl LightClient {
             if h != want {
                 return Err(LcError::BadAncestry);
             }
-            if !self.is_live(&h) {
-                self.push_exec(h, ckpt_slot);
+            let key = pi_form(&h);
+            if !self.is_live(&key) {
+                self.push_exec(key, ckpt_slot);
                 added += 1;
             }
             want = rlp_parent_hash(rlp).map_err(|_| LcError::BadAncestry)?;
@@ -188,7 +205,7 @@ impl LightClient {
         if !self.is_live(&block_hash) {
             return Err(LcError::NotProven);
         }
-        self.sink_notifies.push(block_hash);
+        self.sink_notifies.push(pi_form(&block_hash));
         Ok(())
     }
 
@@ -252,6 +269,42 @@ mod tests {
 
     fn lc() -> LightClient {
         LightClient::bootstrap([0xC0; 32], 0)
+    }
+
+    fn hex32(s: &str) -> [u8; 32] {
+        hex::decode(s).unwrap().try_into().unwrap()
+    }
+
+    /// Step public inputs 6 and 7 of the fixture in
+    /// `eth-light-client-prover/fixtures/step_vkblob`, recombined as
+    /// `(hi << 128) | lo`: the key `submitUpdate` stores.
+    const FIXTURE_STORED_KEY: &str =
+        "89d2463dac3b23c587cf9d97a626f2cee2f7f00249d876f2e0794c53d2d1c5ee";
+    /// The execution `block_hash` of the same update in
+    /// `eth-light-client-prover/fixtures/mainnet/finality_update.json`: the
+    /// word `finalizeDeposit` looks up for that block.
+    const FIXTURE_BLOCK_HASH: &str =
+        "cef226a6979dcf87c5233bac3d46d289eec5d1d2534c79e0f276d84902f0f7e2";
+
+    #[test]
+    fn sink_is_sent_the_ethereum_order_hash() {
+        let key = hex32(FIXTURE_STORED_KEY);
+        let block_hash = hex32(FIXTURE_BLOCK_HASH);
+        assert_eq!(pi_form(&key), block_hash);
+        assert_eq!(pi_form(&block_hash), key);
+
+        let mut c = lc();
+        c.submit_update(100, key, [0xC0; 32]).unwrap();
+        c.re_push_anchor(key).unwrap();
+        assert_eq!(c.sink_notifies, vec![block_hash, block_hash]);
+        assert_eq!(
+            c.re_push_anchor(block_hash).unwrap_err(),
+            LcError::NotProven
+        );
+
+        c.submit_update(100 + SLOTS_PER_YEAR + 1, [0x22; 32], [0xC0; 32])
+            .unwrap();
+        assert_eq!(c.sink_forgets, vec![block_hash]);
     }
 
     #[test]
@@ -366,11 +419,12 @@ mod tests {
     fn ancestry_walks_parents_into_proven_set() {
         let mut c = lc();
         let (child, parent) = dummy_linked_headers();
-        let ckpt = keccak256(&child);
+        let ckpt = pi_form(&keccak256(&child));
         c.submit_update(32, ckpt, [0xC0; 32]).unwrap();
         let added = c.submit_ancestry(&[child, parent.clone()]).unwrap();
         assert_eq!(added, 1);
-        assert!(c.is_live(&keccak256(&parent)));
+        assert!(c.is_live(&pi_form(&keccak256(&parent))));
+        assert_eq!(c.sink_notifies.last(), Some(&keccak256(&parent)));
     }
 
     #[test]
@@ -440,7 +494,7 @@ mod tests {
     fn ancestry_expired_checkpoint_unknown() {
         let mut c = lc();
         let (child, parent) = dummy_linked_headers();
-        let ckpt = keccak256(&child);
+        let ckpt = pi_form(&keccak256(&child));
         c.submit_update(32, ckpt, [0xC0; 32]).unwrap();
         c.submit_update(32 + SLOTS_PER_YEAR + 1, [0xEE; 32], [0xC0; 32])
             .unwrap();

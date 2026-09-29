@@ -1,9 +1,5 @@
 # Draft — cross-thread reachability guarantees for bridge event proofs
 
-Status: **draft**, prepared by the bridge team for discussion with the acki-nacki
-node team. Not landed anywhere yet. All acki-nacki citations are file:line
-references into the current `acki-nacki` repo state at the time of writing.
-
 ## 1. What the bridge is trying to do
 
 The bridge circuit spec is
@@ -15,11 +11,15 @@ The bridge circuit spec is
 - The Ethereum side (`AckiNackiBridge.sol`) can only trust a thread-0 layer-N
   batch root — see spec §1.2 (`_isKnownLayerAnchor` reads
   `layerWindows[anchorLayer]`, populated only from thread-0 blocks). Call the
-  block that supplies that root **Y**.
+  batch root recorded on Ethereum **Y_anchor**, and call the thread-0 block
+  the cross-thread walk starts from **Y**. Y is proven against Y_anchor by a
+  same-thread opening inside the anchor's batch tree; when the batch commits
+  to a single block, Y = Y_anchor.
 - To pay a withdrawal on Ethereum, the circuit has to cryptographically bind
-  event → X → Y → on-chain root. When `t = 0` this collapses to X = Y and no
-  cross-thread work is needed. When `t ≠ 0` the circuit needs a walk between X
-  and Y through cross-thread `refs` edges.
+  event → X → Y → Y_anchor → on-chain root. When `t = 0` this collapses to
+  X = Y and no cross-thread walk is needed (Y still opens from Y_anchor).
+  When `t ≠ 0` the circuit additionally needs a walk between X and Y through
+  cross-thread `refs` edges.
 
 The current spec calls this walk "the L7 walk" (spec §4). It uses acki-nacki's
 per-block `refs` list, opened through the block's L7 Poseidon dense-Merkle root.
@@ -29,56 +29,41 @@ per-block `refs` list, opened through the block's L7 Poseidon dense-Merkle root.
 The walk is
 
 ```
-Y  =  B_0  →  B_1  →  ...  →  B_L  =  X
-       ^                                ^
-       thread 0 (anchor, newer)         thread t (event, older)
+ Y_anchor  <-  Y  =  B_0  <-  B_1  <-  ...  <-  B_L  =  X
+     ^         ^                                    ^
+     on-chain  thread 0 (newer)                     thread t (event, older)
+     root
 ```
+Here cryptographically ` A <- C` arrow means that C is leaf, A -- Merkle root, containing this leaf.
 
-with `hop_start_block_id = Y.block_id` (the walk begins at the on-chain-known
-anchor) and `hop_end_block_id = X.block_id` (the walk terminates at the event
-block).
+But speaking about real grabbing private witness : the walk begins at the thread-0
+block Y (proven against the on-chain-known batch root Y_anchor), with
+`hop_start_block_id = Y.block_id` and `hop_end_block_id = X.block_id` (the
+walk terminates at the event block).
 
-Arrow `→` reads **"left block's `refs` contains right block"**:
+Arrow `<-` reads **"left block's `refs` contains right block"**:
 
 - `B_0.refs` contains `B_1`,
 - `B_1.refs` contains `B_2`,
 - …
 - `B_{L-1}.refs` contains `B_L = X`.
 
-Each hop opens `B_i.L7` and extracts a slot whose leaf hashes to
-`B_{i+1}.block_id`. Slot 0 of L7 (`parent_block_id`) is excluded (spec §2.3,
-§4.1), so only cross-thread ref slots are hopped. Because acki-nacki refs are
+Each hop opens `B_i.L7` and extracts a slot whose leaf is `B_{i+1}.block_id`. Slot 0 of L7 (`parent_block_id`) is excluded, so only cross-thread ref slots are hopped. Because acki-nacki refs are
 strictly older-cross-thread (§2.1), every hop moves backward in wall-clock
 time and never stays in the same thread.
 
-The production ceiling declared in the spec is `L_MAX = 300` (spec §4.4, §5.2),
+The production ceiling declared in the spec is `L_MAX = 300`,
 attributed to "the node-team-stated cross-thread walk-length ceiling under the
 current threading design".
 
-### 2.1 Why the walk must start at Y, not at X
-
-Refs point older-cross-thread, so the walk has only two directions: start at
-X (step through X.refs) or start at Y (step through Y.refs). The Ethereum
-side's only on-chain trust root is `layerWindows[anchorLayer]` (spec §1.2),
-and Y folds into it — Y.block_id is anchored. X.block_id isn't; it enters
-the circuit as a witness.
-
-A walk Y → X inherits Y's on-chain commitment and transitively binds X. A
-walk X → Y proves only "if X existed, it referenced Y", which is vacuously
-true — an attacker picks any anchored Y, fabricates `X.L7` slot 1 opening
-to `Poseidon(REFERENCED_REF_BLOCK_TAG ‖ Y.block_id)`, fabricates `X.L8` leaf 0
-with a synthetic `WithdrawalInitiated`, folds a fresh `fake_X.block_id`, and
-verifies. Same-thread walk-back from X does not help — it just moves the
-un-anchored endpoint.
-
-### 2.2 The reduction chain
+### 2.1 The reduction chain
 
 Under the Y-start walk the reduction chain is
 
 ```
-finalRoot ∈ layerWindows[]  ⊃  block_leaf(Y)  ⊃  Y.block_id  ⊃  Y.L7  ⊃  Y1.block_id  ⊃  …  ⊃  X.block_id  ⊃  X.L8  ⊃  event
-                                                                                                 |
-                                                                                                 └── X is now committed on-chain via Y's anchor
+finalRoot ∈ layerWindows[]  ⊃  Y_anchor  ⊃  block_leaf(Y)  ⊃  Y.block_id  ⊃  Y.L7  ⊃  Y1.block_id  ⊃  …  ⊃  X.block_id  ⊃  X.L8  ⊃  event
+                                                                                                              |
+                                                                                                              └── X is now committed on-chain via Y_anchor
 ```
 
 Every step is a cryptographic opening from an on-chain-known value. There is
@@ -88,14 +73,15 @@ transitively opened from an already-bound predecessor.
 
 For the walk to be usable end-to-end, we need: **for every event-carrying
 non-thread-0 block X, some later thread-0 block Y transitively references X
-via cross-thread refs, within ≤ L_MAX hops, and that Y's batch is still in
-`layerWindows[anchorLayer]` on Ethereum when the withdrawal is claimed.**
+via cross-thread refs, within ≤ L_MAX hops, and Y is committed inside some
+Y_anchor that is still in `layerWindows[anchorLayer]` on Ethereum when the
+withdrawal is claimed.**
 
 Soundness is settled by starting at Y. The question that remains is
 termination — and from reading the code we cannot find a mechanism that
 guarantees it.
 
-### 2.3 Witness-latency implication
+### 2.2 Witness-latency implication
 
 The Y-start walk has unpredictable, unbounded witness-build latency. The
 relayer must poll for *some* future thread-0 block Y that transitively
@@ -112,12 +98,13 @@ happens:
 
 Witness-availability latency is therefore not derivable from code, and the
 relayer's build pipeline must accommodate arbitrary wait times per event, plus
-a policy for events that never gain an anchor Y within the on-chain retention
-window. This is a **first-order operational problem** the bridge team must
-solve — with a walker that polls the GQL surface, a retention policy for
-un-anchored events, and (if the empirical latency is unacceptable) either a
-node-side coverage guarantee (§4 ask 1) or a same-thread walk-back to a
-descendant X' that *is* eventually referenced (§4 ask 2).
+a policy for events that never gain a Y whose Y_anchor is still in the
+on-chain retention window. This is a **first-order operational problem** the
+bridge team must solve — with a walker that polls the GQL surface, a
+retention policy for un-anchored events, and (if the empirical latency is
+unacceptable) either a node-side coverage guarantee (§4 ask 1) or a
+same-thread walk-back to a descendant X' that *is* eventually referenced
+(§4 ask 2).
 
 ## 3. What acki-nacki does and does not guarantee for termination
 
@@ -158,44 +145,8 @@ some thread-t' block that in turn references X — depends on the ref-DAG's
 shape, and is exactly what the bridge team must measure empirically before
 locking `L_MAX` (§5).
 
-## 4. What we are asking the node team
 
-**Bridge team's current position.** The walk is well-defined and sound: the
-relayer polls for an anchored thread-0 Y, then BFS-walks Y.refs backward
-until it lands on X. The gadget itself is direction-agnostic (opens a leaf
-against a Merkle root) and needs no algebraic change from earlier drafts;
-what changes is the witness-builder, which starts at Y instead of X.
-
-Under this walk, events whose block X is never transitively referenced by
-any thread-0 block within the retention window are un-provable. The relayer
-will surface them as an error rather than attempt a fallback until we have
-measured how often the case actually occurs.
-
-We would like the node team's position on one of the following:
-
-1. **Coverage guarantee.** Add a rule such that every finalized non-thread-0
-   block is referenced (directly or transitively) by *some* later block in
-   another thread within ≤ L_MAX hops and within the Ethereum-side
-   `layerWindows` retention window. This eliminates the checkpoint-stride
-   skipping problem for events specifically.
-
-2. **A same-thread walk-back opt-in.** Currently spec §2.3 / §4.1 forbids
-   opening slot 0 of L7 (`parent_block_id`). If the node protocol cannot
-   provide (1), the bridge can absorb the gap by walking forward from X to
-   some descendant X' in the same thread that *did* get cross-thread
-   referenced (from a thread-0 anchor Y). The Y → X' segment stays the
-   normal cross-thread walk; the same-thread X' → X extension is a linear
-   parent-chain walk that binds X to X' through same-thread
-   `parent_block_id` edges, which acki-nacki does guarantee. Requires no
-   acki-nacki protocol change but does require the node team to confirm the
-   same-thread parent chain is stable enough to open in circuit.
-
-3. **Explicit "we don't guarantee this and you have to live with lost
-   events"** — in which case the bridge relayer will need a documented
-   fallback (skip, retry later, off-chain refund) and users need to be told
-   that some withdrawals may be unprovable.
-
-## 5. What we would like to measure before landing this
+## 4. What we would like to measure before landing this
 
 We plan to run the multithread test at
 `acki-nacki/tests/mt/cli.py test-multithread-cross-thread` with the
@@ -205,11 +156,14 @@ query `proof_block_refs` via GQL, and compute:
 - **anchor-latency distribution.** For every finalized non-thread-0 block X
   in the observation window, measure the wall-clock delay `T_anchor(X)` from
   X's finalization to the first thread-0 block Y whose ref-DAG transitively
-  reaches X within ≤ L_MAX hops. This is the witness-build latency.
+  reaches X within ≤ L_MAX hops. (User-visible latency also includes the
+  Y_anchor commit delay, but that lives outside this experiment.) This is
+  the witness-build latency.
 - **anchor-loss rate.** Fraction of finalized non-thread-0 blocks that
-  *never* gain a transitive thread-0 anchor within the retention window of
-  `layerWindows[anchorLayer]` on Ethereum. Any nonzero rate means the walk
-  simply has no path for some subset of events — see §4 asks 1/2/3.
+  *never* gain a transitive thread-0 Y within the retention window of
+  `layerWindows[anchorLayer]` on Ethereum (i.e. no Y is committed via any
+  Y_anchor that is still on-chain). Any nonzero rate means the walk simply
+  has no path for some subset of events — see §4 asks 1/2/3.
 - **empirical L distribution** for those blocks that *do* have a walk —
   informs `L_MAX` sizing and (since bundle verification cost scales
   linearly in L at H = 1) the outer-aggregator threshold.
@@ -217,7 +171,7 @@ query `proof_block_refs` via GQL, and compute:
 If either of the first two quantities is materially adverse, we come back
 to §4 asks (1)–(3).
 
-## 6. Files cited
+## 5. Files cited
 
 Acki-nacki, current tree:
 
@@ -236,6 +190,7 @@ Bridge, current tree:
   bundle-verifier orchestration), §6.7 (event-block reconstruction).
 - `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs`
   — the walker that produces the multi-hop witness; polls for a future
-  anchor Y and BFS-walks Y.refs backward to reach X.
+  thread-0 Y (committed via some Y_anchor) and BFS-walks Y.refs backward to
+  reach X.
 - `contracts/ethereum/src/AckiNackiBridge.sol` — `withdrawByProofBundle`
   continuity check (spec §6.4).

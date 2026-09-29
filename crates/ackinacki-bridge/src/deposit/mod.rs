@@ -6,6 +6,7 @@
 //! crash.
 
 pub mod args;
+pub mod identity;
 pub mod limits;
 pub mod log_index;
 pub mod pi;

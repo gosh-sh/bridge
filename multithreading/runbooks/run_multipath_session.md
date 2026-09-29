@@ -103,7 +103,7 @@ available; no collector changes needed.
 | 1 | Docker Desktop VM ≥ 12 GiB. |
 | 2 | acki-nacki checkout at `$ACKI_NACKI_ROOT`, branch **`feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`**. |
 | 3 | Node built and healthy per [`./run_local_node.md`](./run_local_node.md). |
-| 4 | State-v2-compatible tooling at `/Volumes/x5/v2_tools/` and `/Volumes/x5/cargo-target/release/`. |
+| 4 | State-v2-compatible tool binaries populated under `bridge/multithreading/bins_<OS>/` (see [`../bins_macOS/README.md`](../bins_macOS/README.md)). |
 | 5 | `research/stats/` writable. |
 
 ## Pane layout (tmux, 5 panes)
@@ -126,20 +126,22 @@ the graph before the first event fires.
 
 ## Pane B — split-thread test
 
-Run from the acki-nacki repo root, not this directory. The env-var prefix
-bypasses the auto-discovery bug at `tests/mt/cli.py:1050`:
+Source `bins_<OS>/env.sh` first — it exports the six tool paths
+(`CLI_NAME`, `TVM_CLI`, `SOLD`, `TVM_DEBUGGER`, `ZEROSTATE_HELPER`,
+`NODE_HELPER`) plus `DISABLE_MV=true` from the binaries you populated
+in that directory (per Prereq #4). Exporting these before invoking
+`cli.py` also bypasses the auto-discovery bug at
+`tests/mt/cli.py:1050`, which otherwise walks symlinks into
+`tvm-sdk/target/release/` where `zerostate-helper` doesn't exist.
+
+Then run the test from the acki-nacki repo root:
 
 ```bash
-cd $ACKI_NACKI_ROOT   # branch feature/node-3953-...
+# From bridge/ root:
+source multithreading/bins_macOS/env.sh    # or bins_linux/env.sh on Linux
+export MESSAGE_ARCHIVE_OTEL_RUN_ID="local-2-thread-$(date +%Y%m%d-%H%M)"
 
-DISABLE_MV=true \
-CLI_NAME=/Volumes/x5/v2_tools/tvm-cli \
-TVM_CLI=/Volumes/x5/v2_tools/tvm-cli \
-SOLD=/Volumes/x5/v2_tools/sold \
-TVM_DEBUGGER=/Volumes/x5/v2_tools/tvm-debugger \
-ZEROSTATE_HELPER=/Volumes/x5/cargo-target/release/zerostate-helper \
-NODE_HELPER=/Volumes/x5/cargo-target/release/node-helper \
-MESSAGE_ARCHIVE_OTEL_RUN_ID=local-2-thread \
+cd "$ACKI_NACKI_ROOT"   # branch feature/node-3953-...
 python3 tests/mt/cli.py test-multithread-cross-thread \
   --threads 2 \
   --total 20000 \
@@ -151,6 +153,11 @@ python3 tests/mt/cli.py test-multithread-cross-thread \
   --hold-seconds 1800 \
   --timeout 2400
 ```
+
+If binaries live outside the repo (e.g. an external volume, a shared
+tools shelf, or a colleague's setup), either symlink them into
+`bins_<OS>/`, or export the six env vars by hand pointing wherever
+they live — `cli.py` only cares about the resolved absolute paths.
 
 Verify the split before proceeding (in another shell):
 

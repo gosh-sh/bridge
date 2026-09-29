@@ -340,18 +340,19 @@ state_v2 builds.
 aerospike; below 8 GiB aerospike hits `stop-writes` and block production
 halts at seq_no ≈ 500 with the symptom looking like a chain hang.
 
-**Bring up 2 threads.** From an `acki-nacki` checkout on branch
-`feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`:
+**Bring up 2 threads.** Populate `bridge/multithreading/bins_<OS>/`
+with state_v2-compatible builds of `tvm-cli`, `sold`, `tvm-debugger`,
+`zerostate-helper`, `node-helper` (see
+[`../../../multithreading/bins_macOS/README.md`](../../../multithreading/bins_macOS/README.md)),
+then source the env script and run from an `acki-nacki` checkout on
+branch `feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`:
 
 ```sh
-DISABLE_MV=true \
-CLI_NAME=/path/to/v2_tools/tvm-cli \
-TVM_CLI=/path/to/v2_tools/tvm-cli \
-SOLD=/path/to/v2_tools/sold \
-TVM_DEBUGGER=/path/to/v2_tools/tvm-debugger \
-ZEROSTATE_HELPER=/path/to/cargo-target/release/zerostate-helper \
-NODE_HELPER=/path/to/cargo-target/release/node-helper \
-MESSAGE_ARCHIVE_OTEL_RUN_ID=local-2-thread \
+# From bridge/ root:
+source multithreading/bins_macOS/env.sh    # or bins_linux/env.sh on Linux
+export MESSAGE_ARCHIVE_OTEL_RUN_ID="local-2-thread-$(date +%Y%m%d-%H%M)"
+
+cd "$ACKI_NACKI_ROOT"
 python3 tests/mt/cli.py test-multithread-cross-thread \
   --threads 2 \
   --total 20000 \
@@ -363,6 +364,15 @@ python3 tests/mt/cli.py test-multithread-cross-thread \
   --hold-seconds 1800 \
   --timeout 2400
 ```
+
+`env.sh` exports `CLI_NAME`, `TVM_CLI`, `SOLD`, `TVM_DEBUGGER`,
+`ZEROSTATE_HELPER`, `NODE_HELPER` (all resolved to the binaries in
+that directory) plus `DISABLE_MV=true`. Exporting them ahead of
+`cli.py` also bypasses the auto-discovery bug at
+`tests/mt/cli.py:1050`, which otherwise walks symlinks into
+`tvm-sdk/target/release/` where `zerostate-helper` doesn't exist. If
+binaries live elsewhere, either symlink them into `bins_<OS>/` or
+export the six vars by hand.
 
 The `--hold-*` flags are load-bearing — dropping them lets the child thread
 starve and finalization stalls (the warm-up burst gets no cross-thread

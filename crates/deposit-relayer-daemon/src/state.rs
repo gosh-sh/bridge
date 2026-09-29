@@ -85,10 +85,24 @@ impl RelayerState {
     /// (fresh start), `Err` on corruption.
     pub fn load(path: &Path) -> Result<Option<Self>, RelayerError> {
         match fs::read(path) {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Ok(bytes) => Ok(Some(Self::from_json(&bytes)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn from_json(bytes: &[u8]) -> Result<Self, RelayerError> {
+        let raw: serde_json::Value = serde_json::from_slice(bytes)?;
+        // Every file an older daemon saved carries `scanned_through_block`.
+        // That daemon also counted each poll that found no deposit as a failed
+        // attempt, so its count says nothing about the current target: start
+        // it over rather than let one real failure reach the skip threshold.
+        let written_by_older_daemon = raw.get("scanned_through_block").is_some();
+        let mut state: Self = serde_json::from_value(raw)?;
+        if written_by_older_daemon {
+            state.attempts_since_progress = 0;
+        }
+        Ok(state)
     }
 
     /// Validate or stamp deployment binding. Legacy state files without
@@ -307,10 +321,30 @@ mod tests {
         let loaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(loaded.scan_done_through_block, None);
         assert_eq!(loaded.next_target(0), 7);
+        // Its attempt count included polls that found no deposit.
+        assert_eq!(loaded.attempts_since_progress, 0);
 
         loaded.save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("scanned_through_block"), "{raw}");
+    }
+
+    #[test]
+    fn a_current_file_keeps_its_attempt_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = RelayerState {
+            scan_done_through_block: Some(11800417),
+            ..RelayerState::default()
+        };
+        for _ in 0..3 {
+            s.record_attempt(7);
+        }
+        s.save(&path).unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.attempts_since_progress, 3);
+        assert_eq!(loaded.scan_done_through_block, Some(11800417));
     }
 
     #[test]

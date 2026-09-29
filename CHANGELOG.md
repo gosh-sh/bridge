@@ -658,8 +658,10 @@ assigns it when the release is tagged.
   found no deposit as a failed attempt, so an idle daemon parked ids nobody
   had deposited yet, and the deposits that later took those ids needed a
   manual `finalize-one`. Waiting no longer counts; only a failed proof, an
-  AN rejection or a submit still pending does. The warning `no confirmed
-  deposit yet; relayer is idle` is gone with it. The flag now also reads
+  AN rejection or a submit still pending does. The attempt count an older
+  daemon saved in `state.json` included those polls, so the first start
+  after the upgrade resets it. The warning `no confirmed deposit yet; relayer
+  is idle` is gone with it. The flag now also reads
   `SKIP_AFTER_ATTEMPTS`. The systemd unit does not pass
   `--skip-after-attempts`, so a `SKIP_AFTER_ATTEMPTS` line in
   `deposit-relayer.env` did nothing before and takes effect now: check it

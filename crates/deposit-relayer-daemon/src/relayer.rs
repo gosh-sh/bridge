@@ -770,6 +770,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_polls_an_older_daemon_counted_do_not_park_after_upgrade() {
+        // An older daemon counted every empty poll as a failed attempt and
+        // saved the count. After the upgrade one real failure must not reach
+        // the skip threshold on top of it.
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        std::fs::write(
+            &state_path,
+            r#"{"last_processed_deposit_id":4,"last_attempt_deposit_id":5,
+                "attempts_since_progress":500,"scanned_through_block":11800417}"#,
+        )
+        .unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(5));
+        let mut relayer =
+            relayer_skipping_after(64, source, MockProofGenerator::failing_on(5), state_path);
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::ProofFailed {
+                deposit_id: 5,
+                ..
+            }
+        ));
+        assert_eq!(relayer.state().attempts_since_progress, 1);
+        assert!(relayer.state().parked_deposit_ids.is_empty());
+    }
+
+    #[tokio::test]
     async fn waiting_for_a_deposit_never_parks_it() {
         // An idle bridge: the next id is not made yet, however long we poll.
         let dir = tempdir().unwrap();

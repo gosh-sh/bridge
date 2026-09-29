@@ -638,6 +638,15 @@ assigns it when the release is tagged.
   used to skip it). If a running `state.json` already has a jumped
   `scanned_through_block`, delete that field and restart, or finish the
   stuck id with `prove-one` / `finalize-one`.
+- `deposit-relayer` did not build against tvm-sdk `v3.0.6.an`: its
+  `Cargo.toml` lacked the halo2 `[patch]` tables that pin `tvm_vm` to a
+  single `halo2-axiom` (already present on `eth-light-client-relayer`),
+  and `TvmAckiNacki::supports_dapp_id` called a `ClientContext` method
+  removed in that tag. The probe was only a log line — `v3.0.6.an`
+  `send_message` already rejects an empty `dapp_id`. `--an-graphql-url`
+  / `AN_GRAPHQL_URL` must now name a host that serves GraphQL *and*
+  `/v2/messages`. Rebuild `deposit-relayer` from this tree before
+  `daemon` / `finalize-one`.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's

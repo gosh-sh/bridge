@@ -99,7 +99,7 @@ check_deps() {
   need curl
   need make
   [ -n "$ACKI_NACKI_DIR" ] && [ -d "$ACKI_NACKI_DIR" ] \
-    || { echo "ACKI_NACKI_DIR not set and $MT_DIR/../../../acki-nacki not found." >&2; exit 1; }
+    || { echo "ACKI_NACKI_DIR not set and $MT_DIR/../../acki-nacki not found." >&2; exit 1; }
   for tool in tvm-cli sold tvm-debugger zerostate-helper node-helper; do
     if [ ! -x "$TOOLS_DIR/$tool" ]; then
       echo "MISSING or non-executable: $TOOLS_DIR/$tool" >&2
@@ -118,6 +118,9 @@ export_tool_env() {
   export NODE_HELPER="$TOOLS_DIR/node-helper"
   export DISABLE_MV=true
   export MESSAGE_ARCHIVE_OTEL_RUN_ID="mt-$TS"
+  # Vendored helpers under research/vendored/ read ACKI_NACKI_ROOT.
+  # Alias it to ACKI_NACKI_DIR so callers only need to set one.
+  [ -n "$ACKI_NACKI_DIR" ] && export ACKI_NACKI_ROOT="$ACKI_NACKI_DIR"
 }
 
 # ----------------------------------------------------------------------

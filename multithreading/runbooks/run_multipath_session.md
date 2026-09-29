@@ -39,7 +39,7 @@ JSONL, events JSONL, analyzer summary JSON.
    Linux release assets or a Linux `cargo build --release`.
 
 3. **System deps:** `python3` (≥ 3.10), `docker` (Compose v2), `jq`,
-   `curl`, `make`, `git-lfs`. Docker VM ≥ 13 GiB RAM, ≥ 20 GB disk.
+   `curl`, `make`. Docker VM ≥ 13 GiB RAM, ≥ 20 GB disk.
 
 4. **Run:**
 
@@ -101,7 +101,7 @@ available; no collector changes needed.
 | # | Item |
 |---|------|
 | 1 | Docker Desktop VM ≥ 12 GiB. |
-| 2 | acki-nacki checkout at `$ACKI_NACKI_ROOT`, branch **`feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`**. |
+| 2 | acki-nacki checkout at `$ACKI_NACKI_DIR` (default `../../acki-nacki` sibling of `bridge/`), branch **`feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`**. |
 | 3 | Node built and healthy per [`./run_local_node.md`](./run_local_node.md). |
 | 4 | State-v2-compatible tool binaries populated under `bridge/multithreading/bins_<OS>/` (see [`../bins_macOS/README.md`](../bins_macOS/README.md)). |
 | 5 | `research/stats/` writable. |
@@ -141,7 +141,7 @@ Then run the test from the acki-nacki repo root:
 source multithreading/bins_macOS/env.sh    # or bins_linux/env.sh on Linux
 export MESSAGE_ARCHIVE_OTEL_RUN_ID="local-2-thread-$(date +%Y%m%d-%H%M)"
 
-cd "$ACKI_NACKI_ROOT"   # branch feature/node-3953-...
+cd "$ACKI_NACKI_DIR"   # branch feature/node-3953-...
 python3 tests/mt/cli.py test-multithread-cross-thread \
   --threads 2 \
   --total 20000 \
@@ -186,14 +186,14 @@ few seconds:
 - `pulse_stall … thread=<T:HEX>` — that thread's producer missed its
   chain-pulse deadline. Persistent stalls with zero candidates = wedged.
 
-Run *inside* the acki-nacki checkout (the monitor exec's `docker logs`
-against the compose project running there):
+Run from `bridge/multithreading/` (the monitor exec's `docker logs`
+via `docker ps`, so any CWD works as long as the compose project is up):
 
 ```bash
-cd "${ACKI_NACKI_DIR:-../../../acki-nacki}"
-python3 "$OLDPWD/../multithreading/research/thread_liveness_monitor.py" \
+cd bridge/multithreading
+python3 research/thread_liveness_monitor.py \
   --interval 5 \
-  --out "$OLDPWD/../multithreading/research/stats/thread-mon-$(date +%Y%m%d-%H%M).jsonl"
+  --out research/stats/thread-mon-$(date +%Y%m%d-%H%M).jsonl
 ```
 
 Each sample line looks like:
@@ -287,7 +287,7 @@ carrier block).
 
 Env pass-throughs (edit if the vendored helper needs them):
 
-- `ACKI_NACKI_ROOT` — points at the acki-nacki checkout (needed by
+- `ACKI_NACKI_DIR` — points at the acki-nacki checkout (needed by
   `helper/common.py` to locate `config/USDCBridge.keys.json`).
 - `USDC_BRIDGE_KEY_PATH` — set to
   `research/vendored/contracts/USDCBridge.keys.json` if the acki-nacki

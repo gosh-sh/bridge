@@ -21,12 +21,30 @@ JSONL, events JSONL, analyzer summary JSON.
 
 ### Setup on a fresh machine (n14 / Linux)
 
-1. **Clone the two repos as siblings.** The wrapper expects
-   `acki-nacki` next to `bridge/` (or set `ACKI_NACKI_DIR` to override):
+1. **Clone the two repos as siblings**, each on the required branch:
+
+   ```bash
+   mkdir -p ~/work && cd ~/work
+
+   # bridge — this repo, feature/multithreading branch
+   git clone https://github.com/gosh-sh/bridge.git
+   cd bridge
+   git checkout feature/multithreading
+   cd ..
+
+   # acki-nacki — Michael's cyclic-hold branch (what tests/mt/cli.py
+   # test-multithread-cross-thread needs)
+   git clone https://github.com/gosh-sh/acki-nacki.git
+   cd acki-nacki
+   git checkout feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on
+   ```
+
+   Resulting layout the wrapper expects (or set `ACKI_NACKI_DIR` to
+   override):
 
    ```
    ~/work/
-     ├── bridge/                ← this repo
+     ├── bridge/                ← branch feature/multithreading
      └── acki-nacki/            ← branch feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on
    ```
 
@@ -36,12 +54,22 @@ JSONL, events JSONL, analyzer summary JSON.
    binaries (`tvm-cli`, `sold`, `tvm-debugger`, `zerostate-helper`,
    `node-helper`) and how to populate them from a local `acki-nacki`
    checkout. For a Linux box, populate `bins_linux/` the same way from
-   Linux release assets or a Linux `cargo build --release`.
+   Linux release assets or a Linux `cargo build --release`
+   (see [`../bins_linux/README.md`](../bins_linux/README.md)).
 
 3. **System deps:** `python3` (≥ 3.10), `docker` (Compose v2), `jq`,
    `curl`, `make`. Docker VM ≥ 13 GiB RAM, ≥ 20 GB disk.
 
-4. **Run:**
+4. **Docker images for the acki-nacki compose project** must be built
+   (or pullable) before the wrapper's `make run` step will bring the
+   node up quickly. If `docker images` is empty, or you have never run
+   the compose project on this box, **do the node bringup first, by
+   hand, following [`./run_local_node.md`](./run_local_node.md)** — the
+   first `make run` builds the images, which is slow (tens of minutes).
+   Once the node is up and GQL answers, the wrapper's `ensure_node_up`
+   step will skip bringup and go straight to the test.
+
+5. **Run:**
 
    ```bash
    cd bridge/multithreading
@@ -59,7 +87,10 @@ JSONL, events JSONL, analyzer summary JSON.
 
 The wrapper is idempotent on node bringup — if `docker ps` already
 shows a healthy node0 (GQL answering), it skips `make run` and moves
-straight to the test.
+straight to the test. Otherwise it invokes `make generate_zerostate`
+(if `docker/.env` is missing) + `make run` in the acki-nacki checkout —
+which will hang for the image-build time if the images don't exist yet.
+That is why the manual pre-flight in step 4 matters on a fresh box.
 
 ## What we're measuring
 

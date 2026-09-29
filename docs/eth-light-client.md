@@ -221,10 +221,13 @@ The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) 
 before calling `rePushAnchor`. Calling either with the explorer's order silently misses the map:
 `ERR_UNKNOWN_CHECKPOINT` / `ERR_NOT_PROVEN` (compute phase, exit 252).
 
-Deposit public inputs carry the **raw** keccak (`hi << 128 | lo` of the two 16-byte halves).
-`_piForm` is an involution, so `_notifySink` / `_forgetSink` send `_piForm(stored)` — the raw
-word `finalizeDeposit` looks up in `_acceptedBlockHash`. `rePushAnchor` still takes the stored
-key; the transform happens at the notify boundary.
+The bridge is keyed differently. The deposit public inputs carry the block hash in Ethereum byte
+order (`hi << 128 | lo` of its two big-endian halves), and that is the word `finalizeDeposit` looks
+up in `_acceptedBlockHash`. `_piForm` is its own inverse, so `acceptBlockHashFromLightClient` and
+`forgetBlockHashFromLightClient` are sent `_piForm(stored)`, the Ethereum-order hash. Everything
+on the light client itself — `rePushAnchor`, `getHead`, `isProvenExecutionBlockHash` and its own
+`isAcceptedBlockHash` — still speaks the stored key. For the same block, the light client's
+`isAcceptedBlockHash` is asked the stored key and the bridge's the Ethereum-order hash.
 
 `finalizeDeposit` on `USDCBridge` is unchanged: it still reads `_acceptedBlockHash`. Only the
 writer of that map changes.
@@ -393,10 +396,10 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   `executionBlockHash`, `committeeCommitment`, `updatesApplied`; `getCommitteeState()`
   (`:619`) returns the committee, period, `ownerRotationEnabled`, `reAnchorsApplied`.
 - Roots come back in the contract's encoding: `(hi << 128) | lo` over little-endian 16-byte
-  halves. That is the *stored* key, not the word `finalizeDeposit` looks up.
-  `USDCBridge._parseBlockHash` reassembles the deposit PI as raw keccak; the sink is told
-  `_piForm(stored)`, which is that raw word. Byte-reverse each half of a `getHead` root to get
-  the Ethereum hex; `deploy/shellnet-shadow/status.sh` prints both.
+  halves. That is the *stored* key, not the word `finalizeDeposit` looks up: the bridge holds
+  the Ethereum-order hash (§3.4). Byte-reverse each half of a `getHead` root to get the
+  Ethereum hex, which is also what to ask the bridge's `isAcceptedBlockHash` about;
+  `deploy/shellnet-shadow/status.sh` prints both.
 - Check any recorded execution hash against an independent Ethereum node:
   `eth_getBlockByHash` must return a block, and `eth_getBlockByNumber` for that height must
   return the same hash.

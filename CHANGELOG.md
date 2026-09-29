@@ -637,13 +637,46 @@ assigns it when the release is tagged.
   / `AN_GRAPHQL_URL` must now name a host that serves GraphQL *and*
   `/v2/messages`. Rebuild `deposit-relayer` from this tree before
   `daemon` / `finalize-one`.
-- `EthBeaconLightClient` told `USDCBridge` the stored `_piForm` key, but
-  `finalizeDeposit` looks up the raw keccak from the deposit public inputs.
-  After `disableOwnerAnchors` the light client is the only writer, so every
-  LC-admitted hash missed the deposit gate. `_notifySink` / `_forgetSink`
-  now send `_piForm(stored)` (an involution). Redeploy or `updateCode` the
-  light client; already-pushed keys in `_acceptedBlockHash` stay wrong and
-  need `rePushAnchor` (or `forget` + notify) once the new code is on chain.
+- **No block the light client admitted could finalize a deposit.**
+  `EthBeaconLightClient` sent `USDCBridge` its stored anchor key — the block
+  hash with each 16-byte half byte-reversed, `(LE(h[0..16]) << 128) |
+  LE(h[16..32])` — while `finalizeDeposit` looks the block hash up in
+  Ethereum byte order, the way the deposit proof carries it. Every
+  light-client anchor missed, and once `disableOwnerAnchors` leaves the light
+  client as the only writer, every `finalizeDeposit` fails with
+  `ERR_UNKNOWN_BLOCK` (224). `acceptBlockHashFromLightClient` and
+  `forgetBlockHashFromLightClient` now carry the Ethereum-order hash.
+  `rePushAnchor`, `getHead`, `isProvenExecutionBlockHash` and the light
+  client's own `isAcceptedBlockHash` still take and return the stored key, so
+  the light client's `isAcceptedBlockHash` is not interchangeable with the
+  bridge's. The ABI is unchanged. The light client reports version `1.4.1`,
+  and `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is
+  rebuilt: code hash `78905cf7…9ed532` → `314ac6b8…6092f5`.
+
+  A new network takes the fix with the zerostate once acki-nacki's pin is
+  moved. On a network whose light client is already deployed, upgrade it in
+  place: the light client's owner calls its `updateCode` with the new code.
+  That keeps its address, head, committee and proven set, and the bridge still
+  accepts it as the writer. Installing the new code with `setLightClientCode`
+  and `deployLightClient` instead puts the light client at a new address with
+  an empty state: `eth-lc-relayer --an-light-client` / `AN_LIGHT_CLIENT` has
+  to follow it, and the light client has to be bootstrapped from a
+  weak-subjectivity checkpoint again.
+
+  After the upgrade:
+  - Anchors pushed before it do not count. A deposit whose block the light
+    client proved before the upgrade stays unfinalizable until the anchor is
+    sent again: call `rePushAnchor` with that block's stored key (its hash
+    with each 16-byte half byte-reversed; `getHead` returns it in this form),
+    or, while owner anchors are still enabled, have the owner admit the
+    Ethereum-order hash with `setAcceptedBlockHash`. The daemon re-sends only
+    the checkpoint it has just proven. `rePushAnchor` refuses a hash older
+    than the one-year window.
+  - The words pushed before the upgrade stay in the bridge's anchor set for
+    good: when they age out, the light client now retracts the Ethereum-order
+    hash instead. They match no block, so they admit nothing.
+  - `getVersion()` returning `1.4.1` tells the fixed light client from the
+    old one.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's
@@ -745,8 +778,7 @@ assigns it when the release is tagged.
   (compute phase, exit 252) because two byte orders were in play. The step
   circuit splits a hash with `node_hi_lo` — each 16-byte half read
   little-endian — so `submitUpdate` keys an anchor as
-  `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that word is what the bridge
-  holds and what the deposit public inputs carry. Keccak in the VM returns
+  `(LE(h[0..16]) << 128) | LE(h[16..32])`. Keccak in the VM returns
   Ethereum byte order, so `submitAncestry` looked up
   `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
   `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong

@@ -256,7 +256,8 @@ assigns it when the release is tagged.
   The bridge's code hash moves with this, `48d5c0ed…` → `68b17ae3…`, and the
   contract reports version `1.5.0`. A network takes it as a fresh zerostate or
   as an `updateCode` round on the bridge, not as an in-place patch; the voucher
-  and the light client are unchanged and their artefacts are byte-identical.
+  is unchanged and its artefacts are byte-identical. The light client changes
+  separately, see the entry on light-client anchors under Fixed.
 
 - **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
   `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
@@ -646,37 +647,20 @@ assigns it when the release is tagged.
   client as the only writer, every `finalizeDeposit` fails with
   `ERR_UNKNOWN_BLOCK` (224). `acceptBlockHashFromLightClient` and
   `forgetBlockHashFromLightClient` now carry the Ethereum-order hash.
-  `rePushAnchor`, `getHead`, `isProvenExecutionBlockHash` and the light
-  client's own `isAcceptedBlockHash` still take and return the stored key, so
-  the light client's `isAcceptedBlockHash` is not interchangeable with the
-  bridge's. The ABI is unchanged. The light client reports version `1.4.1`,
-  and `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is
-  rebuilt: code hash `78905cf7…9ed532` → `314ac6b8…6092f5`.
+  Everything else keeps the stored key: `rePushAnchor` takes it, `getHead`,
+  `HeadUpdated`, `CheckpointBackfilled` and `AncestryAccepted` report it, and
+  `isProvenExecutionBlockHash` and the light client's own
+  `isAcceptedBlockHash` take it. So the light client's `isAcceptedBlockHash`
+  is not interchangeable with the bridge's: for the same block the bridge is
+  asked the Ethereum-order hash. The ABI is unchanged.
 
-  A new network takes the fix with the zerostate once acki-nacki's pin is
-  moved. On a network whose light client is already deployed, upgrade it in
-  place: the light client's owner calls its `updateCode` with the new code.
-  That keeps its address, head, committee and proven set, and the bridge still
-  accepts it as the writer. Installing the new code with `setLightClientCode`
-  and `deployLightClient` instead puts the light client at a new address with
-  an empty state: `eth-lc-relayer --an-light-client` / `AN_LIGHT_CLIENT` has
-  to follow it, and the light client has to be bootstrapped from a
-  weak-subjectivity checkpoint again.
-
-  After the upgrade:
-  - Anchors pushed before it do not count. A deposit whose block the light
-    client proved before the upgrade stays unfinalizable until the anchor is
-    sent again: call `rePushAnchor` with that block's stored key (its hash
-    with each 16-byte half byte-reversed; `getHead` returns it in this form),
-    or, while owner anchors are still enabled, have the owner admit the
-    Ethereum-order hash with `setAcceptedBlockHash`. The daemon re-sends only
-    the checkpoint it has just proven. `rePushAnchor` refuses a hash older
-    than the one-year window.
-  - The words pushed before the upgrade stay in the bridge's anchor set for
-    good: when they age out, the light client now retracts the Ethereum-order
-    hash instead. They match no block, so they admit nothing.
-  - `getVersion()` returning `1.4.1` tells the fixed light client from the
-    old one.
+  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is rebuilt
+  and reports version `1.4.1`; its code hash moves from `78905cf7…9ed532` to
+  `314ac6b8…6092f5`. A network takes it with a fresh zerostate, every
+  contract deployed from scratch, once acki-nacki's pin is moved. The
+  standalone `contracts/an/EthBeaconLightClient.sol` has the same fix and
+  reports version `0.1.1`; a light client deployed from it has to be deployed
+  again from this source.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's

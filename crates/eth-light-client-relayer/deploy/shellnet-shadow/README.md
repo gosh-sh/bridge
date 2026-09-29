@@ -103,8 +103,9 @@ update, proves it (keygen + prove, ~7 min at k=19 on 48 threads) and calls
 
 `status.sh` prints `getHead` (finalized slot, execution block hash) next to
 the live `finality_update`. The getter returns roots in the contract's
-encoding, `(hi << 128) | lo` over little-endian 16-byte halves — the light
-client's stored key, not the Ethereum-order hash it sends `USDCBridge`;
+encoding, `(hi << 128) | lo` over little-endian 16-byte halves; for the
+execution block hash that is the light client's stored key, not the
+Ethereum-order hash it sends `USDCBridge`;
 `status.sh` also prints the Ethereum form (each half byte-reversed).
 Independently, for any recorded hash:
 

@@ -396,8 +396,8 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   `executionBlockHash`, `committeeCommitment`, `updatesApplied`; `getCommitteeState()`
   (`:619`) returns the committee, period, `ownerRotationEnabled`, `reAnchorsApplied`.
 - Roots come back in the contract's encoding: `(hi << 128) | lo` over little-endian 16-byte
-  halves. That is the *stored* key, not the word `finalizeDeposit` looks up: the bridge holds
-  the Ethereum-order hash (§3.4). Byte-reverse each half of a `getHead` root to get the
+  halves. For `executionBlockHash` that is the *stored* key, not the word `finalizeDeposit`
+  looks up: the bridge holds the Ethereum-order hash (§3.4). Byte-reverse each half of a `getHead` root to get the
   Ethereum hex, which is also what to ask the bridge's `isAcceptedBlockHash` about;
   `deploy/shellnet-shadow/status.sh` prints both.
 - Check any recorded execution hash against an independent Ethereum node:

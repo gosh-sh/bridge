@@ -59,8 +59,19 @@ straight to the test.
 
 ### Why this recipe (params analysis)
 
-The `cli.py test-multithread-cross-thread` invocation matches the
-reference recipe recorded in memory `acki_nacki_mt_test_hold_recipe.md`:
+**Why not default flags.** `cli.py test-multithread-cross-thread`'s
+default `--hold-seconds 0` blocks on the initial cross-thread drain:
+the harness forces a 1→2 thread split via a same-DApp warmup burst,
+but with no sustaining load the child thread's last block never gets
+a BK quorum of attestations, stays *prefinalized*, and
+`authority_switch` refuses to open round 0 → dead thread →
+cross-thread messages queue up but never get delivered → the test
+times out. The cyclic-hold path (both `--hold-seconds` and
+`--hold-burst-total` set — see `tests/mt/cli.py:3046` in the
+acki-nacki checkout) keeps sustained traffic on both threads so the
+split holds.
+
+Chosen values:
 
 - `--threads 2 --total 20000` — 20 k funded senders across 2 threads.
 - `--hold-seconds 1800` — 30 min cyclic-hold window.
@@ -71,10 +82,15 @@ reference recipe recorded in memory `acki_nacki_mt_test_hold_recipe.md`:
   threshold sized so senders don't run out mid-burst.
 - `--timeout 2400` — 40 min hard ceiling, 10 min buffer beyond the hold.
 
-That combination stayed clean 27/28 cycles on the mac (memory
-snapshot). n14 is a Linux box with more headroom than the mac, so the
-same values should ride even easier — `pulse_stall` overshoot is the
-usual failure mode, and it's CPU-contention driven.
+Observed clean on a mac (Docker VM 12 GiB, 5 nodes) on 2026-09-18:
+27 clean hold cycles, ~180 msg/s per direction, ~140 k msgs
+delivered per receiver over ~24 min; then a client-side back-pressure
+crash at cycle ~28 from the hard-coded 20 k `SINGLE_THREAD_LOAD_THRESHOLD`
+refill inside `keep_split_load_active` (harness bug, not a network
+failure — the split itself stayed healthy the whole time). n14 is a
+Linux box with more headroom than the mac, so the same values should
+ride even easier — `pulse_stall` overshoot is the usual failure
+mode, and it's CPU-contention driven.
 
 Even so, the wrapper runs `thread_liveness_monitor.py` in-band and a
 watchdog polls it every 15 s: if any child thread flips to
@@ -132,7 +148,7 @@ available; no collector changes needed.
 |---|------|
 | 1 | Docker Desktop VM ≥ 12 GiB. |
 | 2 | acki-nacki checkout at `$ACKI_NACKI_ROOT`, branch **`feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`**. |
-| 3 | Node built and healthy per [`../../../run_acki_nacki_node.md`](../../../run_acki_nacki_node.md). |
+| 3 | Node built and healthy per [`./run_local_node.md`](./run_local_node.md). |
 | 4 | State-v2-compatible tooling at `/Volumes/x5/v2_tools/` and `/Volumes/x5/cargo-target/release/`. |
 | 5 | `research/stats/` writable. |
 
@@ -148,7 +164,7 @@ the graph before the first event fires.
 
 | Pane | Role                                                       | See |
 |------|------------------------------------------------------------|-----|
-| A    | Local acki-nacki node                                      | [`../../../run_acki_nacki_node.md`](../../../run_acki_nacki_node.md) |
+| A    | Local acki-nacki node                                      | [`./run_local_node.md`](./run_local_node.md) |
 | B    | Split-thread `cli.py` test                                 | This file |
 | C    | WithdrawalInitiated trigger (`smart_trigger.py`)           | This file |
 | D    | **Multi-path collector** (`multipath_collector.py`) | This file |
@@ -314,8 +330,12 @@ Env pass-throughs (edit if the vendored helper needs them):
   `helper/common.py` to locate `config/USDCBridge.keys.json`).
 - `USDC_BRIDGE_KEY_PATH` — set to
   `research/vendored/contracts/USDCBridge.keys.json` if the acki-nacki
-  `config/` copy has drifted (see `bridge_python_orchestrator_usdc_keys.md`
-  in memory).
+  `config/USDCBridge.keys.json` has drifted from the vendored copy the
+  helpers ship with. Symptom of drift: `USDCBridge.mintAndSend` fails
+  with TVM exit code 209 on a fresh local devnet. Diagnose by
+  diffing the two JSON files byte-for-byte; the file the orchestrator
+  actually uses is the one at this env var (or the acki-nacki `config/`
+  copy if unset).
 - `NETWORK=http://127.0.0.1:80` and `GRAPHQL_URL=http://localhost/graphql`
   are the collector defaults.
 
@@ -367,7 +387,13 @@ Expected outcome on the current 2-thread setup. All rows will be
 follow-ups worth trying, in order:
 
 1. **Redeploy USDCBridge under a dapp/account_id the split routes off
-   thread 0** — see `MULTITHREAD_TEST_SESSION.md`.
+   thread 0.** The current bridge account uses `DEFAULT_DAPP_ID` and
+   an account_id of `1a1a…1a1a`, and the 2-thread split routes both
+   to thread 0. To land the contract on another thread, deploy it
+   under a different `dapp_id`/`account_id` combination and verify
+   with the GraphQL query in Pane B (the account's landing block
+   should have a non-zero `thread_id`). Then re-point Pane C's
+   `smart_trigger.py` at the new bridge address.
 2. **Fire events from a cross-thread caller** — `cli.py` already
    funds senders across threads for burst traffic; sending
    `initiateWithdrawal` from one of those senders (instead of a

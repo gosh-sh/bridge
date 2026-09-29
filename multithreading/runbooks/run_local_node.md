@@ -42,8 +42,12 @@ curl -s http://localhost:8700/graphql -H 'Content-Type: application/json' \
 - **`bk_set` mismatch** — for shellnet, `BRIDGE_BK_SET_CONFIG` must be set. For local
   devnet the default `bk_set.local.json` works and no override is needed.
 - **Zerostate keys drift** — `contracts/USDCBridge.keys.json` in acki-nacki must match
-  what the bridge python helper expects. See
-  `feedback/bridge_python_orchestrator_usdc_keys.md` in `MEMORY.md`.
+  what the bridge python helper expects. Symptom: `USDCBridge.mintAndSend`
+  fails with TVM exit code 209 on a fresh local devnet. Diagnose by
+  diffing the acki-nacki `config/USDCBridge.keys.json` against the copy
+  the bridge helper actually loads (env var `USDC_BRIDGE_KEY_PATH`, or
+  `research/vendored/contracts/USDCBridge.keys.json` if the bridge tree
+  ships a vendored copy); overlay whichever is stale.
 
 ## Teardown
 

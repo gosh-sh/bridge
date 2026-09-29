@@ -365,10 +365,15 @@ python3 tests/mt/cli.py test-multithread-cross-thread \
 ```
 
 The `--hold-*` flags are load-bearing — dropping them lets the child thread
-starve and finalization stalls (Michael's warm-up burst gets no
-cross-thread refills). See
-[MT test session notes](https://github.com/gosh-sh/acki-nacki/blob/feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on/MULTITHREAD_TEST_SESSION.md)
-for cyclic-hold internals.
+starve and finalization stalls (the warm-up burst gets no cross-thread
+refills, the child thread's last block never gets a BK quorum of
+attestations, stays *prefinalized*, and `authority_switch` refuses to
+open round 0 → dead thread → cross-thread messages queue up but never
+get delivered → test times out). The cyclic-hold path is gated at
+`tests/mt/cli.py:3046` — both `--hold-seconds` and `--hold-burst-total`
+must be set for it to activate. Full end-to-end reasoning + Pane
+layout for a multi-path research session is in
+[`../../../multithreading/runbooks/run_multipath_session.md`](../../../multithreading/runbooks/run_multipath_session.md).
 
 **Wait for the split.** The harness logs `split thread` when the second
 thread is stable. `BRIDGE_GQL_ENDPOINT` should point at any node's port

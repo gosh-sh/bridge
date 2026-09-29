@@ -229,7 +229,11 @@ locking `L_MAX` (§5).
 
 We run the multithread test at
 `acki-nacki/tests/mt/cli.py test-multithread-cross-thread` with the
-sustained-load recipe from `acki-nacki/MULTITHREAD_TEST_SESSION.md:54-77`,
+sustained-load recipe spelled out in
+[`runbooks/run_multipath_session.md`](runbooks/run_multipath_session.md)
+(cyclic-hold path: `--hold-seconds 1800 --hold-burst-total 5000
+--hold-quiet-seconds 0 --batch-size 200 --timeout 2400`; default
+`--hold-seconds 0` starves the child thread and finalisation stalls),
 poll thread-0 tips via GQL, and let
 `bridge/multithreading/research/multipath_collector.py` do the
 work. The collector implements exactly the algorithm §2.3 sketches:
@@ -277,7 +281,9 @@ Acki-nacki, current tree:
 - `helpers/proof_helper/src/gql_proof.rs:76,109` — `proof_block_refs[0]` is `parent_block_id`; slots ≥1 are cross-thread refs; all live in the same L7 tree
 - `helpers/proof_helper/src/{proof.rs, blockchain.rs, main.rs}` — walks single-thread layer trees only
 - `tests/mt/cli.py` — `test-multithread-cross-thread` entry
-- `MULTITHREAD_TEST_SESSION.md:54-77` — sustained-load recipe
+  (see `tests/mt/cli.py:3046` for the `cyclic_cross_thread_hold`
+  gate — both `--hold-seconds` and `--hold-burst-total` must be set
+  to enable the sustained-load path)
 
 Bridge research, this tree:
 

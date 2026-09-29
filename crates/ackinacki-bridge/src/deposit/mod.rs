@@ -6,6 +6,7 @@
 //! crash.
 
 pub mod args;
+pub mod limits;
 
 /// Replaced by the driver in `run.rs`.
 pub async fn run(_params: args::DepositParams) -> crate::errors::CliResult<DepositSuccess> {

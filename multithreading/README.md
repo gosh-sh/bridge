@@ -1,38 +1,46 @@
 # Multithreading — cross-thread reachability research
 
-This directory holds the plan, runbooks, vendored helpers, and research scripts used to
-empirically measure how often a `WithdrawalInitiated` event fires on an acki-nacki block
-that has **no reachable thread-0 ancestor via `proof_block_refs`** — the failure mode
-Direction (a) walks worry about in
-[`DRAFT_cross_thread_reachability_issue.md`](DRAFT_cross_thread_reachability_issue.md).
+This directory holds the plan, runbooks, and research scripts used to empirically
+measure the walk `Y (thread 0, on-chain-anchored) → … → X (event block on a
+non-default thread)` for `WithdrawalInitiated` events — the shape a
+`BridgeMultiHopProof` SNARK will have to prove.
 
-The goal is *data, not implementation*: a JSONL trace of per-event outcomes that answers
-two headline questions:
+The soundness argument for starting at Y (not at X) is in
+[`DRAFT_cross_thread_reachability_issue.md`](DRAFT_cross_thread_reachability_issue.md) §2.1.
 
-1. **Non-anchorable rate** — how often does `X.refs` fail to reach thread 0?
-2. **Hop distribution** — for the walks that succeed, how many hops did they take?
+The goal is *data, not implementation*: JSONL traces the analyzer digests into
+two headline metrics — thread distribution of X, and hop distribution of the
+successful walks.
 
 ## Layout
 
 ```
 multithreading/
-├── DRAFT_cross_thread_reachability_issue.md     — the problem statement
+├── DRAFT_cross_thread_reachability_issue.md     — the problem statement (retracts Direction (a))
 ├── README.md                                    — this file
 ├── docs/
-│   └── reachability_research_plan.md            — full plan (P1..P4)
+│   ├── direction_b_research_plan.md             — full plan (supersedes reachability plan)
+│   ├── direction_b_walker_algorithm.md          — single-anchor collector algorithm
+│   └── direction_b_multipath_algorithm.md       — multi-path collector algorithm + math
 ├── runbooks/
-│   ├── run_local_node.md                        — P1: local acki-nacki devnet
-│   ├── run_mt_test.md                           — P2: Michael's thread-split test
-│   └── run_reachability_session.md              — the whole tmux/5-pane recipe
+│   ├── run_local_node.md                        — local acki-nacki devnet
+│   ├── run_direction_b_session.md               — single-anchor session recipe
+│   └── run_direction_b_multipath_session.md     — multi-path session recipe (preferred)
 └── research/
     ├── vendored/                                — copies of upstream python/ (see SYNC_FROM.md)
-    ├── trigger_loop.py                          — P3: periodic event firing
-    ├── reachability_collector.py                — P4: refs-only ref-walk + JSONL stats
+    ├── trigger_loop.py                          — periodic WithdrawalInitiated firing
+    ├── direction_b_smart_trigger.py             — smarter cross-thread trigger variant
+    ├── direction_b_collector.py                 — single-anchor walker + JSONL stats
+    ├── direction_b_multipath_collector.py       — BFS multi-path walker + JSONL stats
+    ├── direction_b_analyzer.py                  — single-anchor digest
+    ├── direction_b_multipath_analyzer.py        — multi-path digest
+    ├── keepalive_load_driver.py                 — driver for keeping the split alive between fans
+    ├── thread_liveness_monitor.py               — samples GraphQL for active thread set
     └── stats/                                   — JSONL output (gitignored)
 ```
 
 ## Start here
 
-1. Read [`docs/reachability_research_plan.md`](docs/reachability_research_plan.md).
-2. Follow [`runbooks/run_reachability_session.md`](runbooks/run_reachability_session.md)
-   for the end-to-end multi-hour session.
+1. Read [`docs/direction_b_research_plan.md`](docs/direction_b_research_plan.md).
+2. Follow [`runbooks/run_direction_b_multipath_session.md`](runbooks/run_direction_b_multipath_session.md)
+   for the end-to-end session — its Pane B block has the correct `cli.py` incantation.

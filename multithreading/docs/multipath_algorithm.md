@@ -1,7 +1,7 @@
 # Direction (b) multi-path collector — algorithm
 
 Supersedes the single-anchor design in
-[`direction_b_walker_algorithm.md`](direction_b_walker_algorithm.md) for
+[`walker_algorithm.md`](walker_algorithm.md) for
 the research pipeline. The single-anchor collector answers "does *some*
 walk exist for this event?"; the multi-path collector answers **"what
 does the shortest walk cost, and how many alternatives are there?"**
@@ -154,7 +154,7 @@ don't idle waiting for a shorter path that isn't coming.
 
 ## What the analyzer surfaces
 
-Seven digest sections in `direction_b_multipath_analyzer.py`:
+Seven digest sections in `multipath_analyzer.py`:
 
 1. Total + outcome breakdown.
 2. Thread distribution of X.

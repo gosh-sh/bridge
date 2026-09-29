@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Post-hoc analysis of `direction_b_multipath_collector.py` output.
+Post-hoc analysis of `multipath_collector.py` output.
 
 Each JSONL record carries a *set* of paths per event, so the digest
 answers questions the direct-hit analyzer can't:
@@ -21,8 +21,8 @@ Sections:
      x_thread (direct) or jumps through another thread (indirect).
 
 Usage:
-    python direction_b_multipath_analyzer.py research/stats/dirb-mp-*.jsonl
-    python direction_b_multipath_analyzer.py research/stats/dirb-mp-*.jsonl --json > s.json
+    python multipath_analyzer.py research/stats/dirb-mp-*.jsonl
+    python multipath_analyzer.py research/stats/dirb-mp-*.jsonl --json > s.json
 """
 from __future__ import annotations
 import argparse

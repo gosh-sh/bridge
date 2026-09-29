@@ -20,7 +20,7 @@ collector record can close, then dumps a per-event digest that combines
 what this script observed with what the collector wrote to JSONL.
 
 Usage:
-  python research/direction_b_smart_trigger.py \\
+  python research/smart_trigger.py \\
      --count 7 \\
      --collector-out research/stats/dirb-mp-YYYYMMDD-HHMM.jsonl \\
      --observation-window-s 300 \\

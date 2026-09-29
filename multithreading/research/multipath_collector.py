@@ -13,7 +13,7 @@ Motivation
 Each hop in the aggregated bridge SNARK costs **~8 SHA-256 gadgets**.
 Fifty hops is a huge circuit load, so shortest-path characterisation is
 a first-class research target — not just "does *some* path exist" (the
-question `direction_b_collector.py` answers).
+question `collector.py` answers).
 
 Approach
 --------

@@ -4,7 +4,7 @@ End-to-end recipe for the split-thread devnet run that measures where
 `WithdrawalInitiated` events land and, for the ones that don't land on thread 0,
 what path a Direction (b) prover would walk `Y (thread 0) → B (thread t) → …
 → X (event block)`. Model + math live in
-[`../docs/direction_b_walker_algorithm.md`](../docs/direction_b_walker_algorithm.md).
+[`../docs/walker_algorithm.md`](../docs/walker_algorithm.md).
 
 ## What we're measuring
 
@@ -48,7 +48,7 @@ before C so the collector captures the baseline of pre-existing events cleanly.
 | A    | Local acki-nacki node | [`../../../run_acki_nacki_node.md`](../../../run_acki_nacki_node.md) |
 | B    | Split-thread cli.py test (below) | This file |
 | C    | WithdrawalInitiated trigger loop | Existing `trigger_loop.py` |
-| D    | Direction (b) collector (`direction_b_collector.py`) | This file |
+| D    | Direction (b) collector (`collector.py`) | This file |
 | E    | Observability (`docker stats`, node logs) | — |
 
 ## Pane B — split-thread test
@@ -95,7 +95,7 @@ thread-0 rows.
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
-python3 research/direction_b_collector.py \
+python3 research/collector.py \
   --graphql http://localhost/graphql \
   --out research/stats/dirb-$(date +%Y%m%d-%H%M).jsonl \
   --poll-interval 2.0 \
@@ -149,9 +149,9 @@ grow the sample.
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
-python3 research/direction_b_analyzer.py research/stats/dirb-*.jsonl
+python3 research/analyzer.py research/stats/dirb-*.jsonl
 # Machine-readable version:
-python3 research/direction_b_analyzer.py research/stats/dirb-*.jsonl --json > research/stats/summary-$(date +%Y%m%d-%H%M).json
+python3 research/analyzer.py research/stats/dirb-*.jsonl --json > research/stats/summary-$(date +%Y%m%d-%H%M).json
 ```
 
 The digest prints five sections; the two we care about most:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Post-hoc analysis of `direction_b_collector.py` JSONL output.
+Post-hoc analysis of `collector.py` JSONL output.
 
 Prints a human-readable digest to stdout and (with --json) a machine-readable
 summary. Consumes one or more JSONL files.
@@ -15,8 +15,8 @@ Sections in the digest:
   5. Orphan / failure counts, with sampled msg_ids for follow-up.
 
 Usage:
-    python direction_b_analyzer.py research/stats/dirb-*.jsonl
-    python direction_b_analyzer.py research/stats/dirb-*.jsonl --json > summary.json
+    python analyzer.py research/stats/dirb-*.jsonl
+    python analyzer.py research/stats/dirb-*.jsonl --json > summary.json
 """
 from __future__ import annotations
 import argparse

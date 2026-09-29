@@ -5,11 +5,11 @@ End-to-end recipe for the split-thread devnet run that measures the
 WithdrawalInitiated event, along with alternative paths.
 
 Companion to
-[`run_direction_b_session.md`](run_direction_b_session.md). The
+[`run_session.md`](run_session.md). The
 single-anchor collector answers "does *some* walk exist"; this session
 answers **"how short is the shortest walk, and how many alternatives
 exist within a 5-minute observation window?"** Model + math live in
-[`../docs/direction_b_multipath_algorithm.md`](../docs/direction_b_multipath_algorithm.md).
+[`../docs/multipath_algorithm.md`](../docs/multipath_algorithm.md).
 
 ## What we're measuring
 
@@ -48,7 +48,7 @@ available; no collector changes needed.
 
 ## Prerequisites
 
-Same as `run_direction_b_session.md`:
+Same as `run_session.md`:
 
 | # | Item |
 |---|------|
@@ -67,14 +67,14 @@ first event fires.
 | Pane | Role                                                       | See |
 |------|------------------------------------------------------------|-----|
 | A    | Local acki-nacki node                                      | [`../../../run_acki_nacki_node.md`](../../../run_acki_nacki_node.md) |
-| B    | Split-thread `cli.py` test                                 | This file / `run_direction_b_session.md` |
+| B    | Split-thread `cli.py` test                                 | This file / `run_session.md` |
 | C    | WithdrawalInitiated trigger loop (`trigger_loop.py`)       | This file |
-| D    | **Multi-path collector** (`direction_b_multipath_collector.py`) | This file |
+| D    | **Multi-path collector** (`multipath_collector.py`) | This file |
 | E    | Observability (`docker stats`, node logs)                  | — |
 
 ## Pane B — split-thread test
 
-Identical to `run_direction_b_session.md`; run from the acki-nacki repo
+Identical to `run_session.md`; run from the acki-nacki repo
 root, not this directory:
 
 ```bash
@@ -118,7 +118,7 @@ one cross-thread ref).
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
-python3 research/direction_b_multipath_collector.py \
+python3 research/multipath_collector.py \
   --graphql http://localhost/graphql \
   --out research/stats/dirb-mp-$(date +%Y%m%d-%H%M).jsonl \
   --poll-interval 2.0 \
@@ -153,7 +153,7 @@ health signal for the polling loop.
 
 ## Pane C — WithdrawalInitiated trigger
 
-Same as `run_direction_b_session.md`:
+Same as `run_session.md`:
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
@@ -173,10 +173,10 @@ D.
 
 ```bash
 cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
-python3 research/direction_b_multipath_analyzer.py \
+python3 research/multipath_analyzer.py \
   research/stats/dirb-mp-*.jsonl
 # Machine-readable version:
-python3 research/direction_b_multipath_analyzer.py \
+python3 research/multipath_analyzer.py \
   research/stats/dirb-mp-*.jsonl --json \
   > research/stats/summary-mp-$(date +%Y%m%d-%H%M).json
 ```
@@ -220,7 +220,7 @@ Leave the collector unchanged.
 
 ## Comparison to the single-anchor session
 
-| Aspect                    | Single-anchor (`direction_b_collector.py`)     | Multi-path (`direction_b_multipath_collector.py`) |
+| Aspect                    | Single-anchor (`collector.py`)     | Multi-path (`multipath_collector.py`) |
 |---------------------------|-------------------------------------------------|----------------------------------------------------|
 | Data structure            | `thread0_view[t]` per-thread ref index          | Full block DAG + reverse-parent index              |
 | Path selection            | First `b_seq ≥ x_seq` in `thread0_view[t]`      | BFS on reverse graph, all thread-0 anchors         |

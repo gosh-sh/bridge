@@ -10,7 +10,7 @@ references it via `Y.refs[i>=1] -> B (thread t, seq >= x_seq)` and then B's
 same-thread parent chain `refs[0]` down to X.
 
 Model backing this walk lives in
-`bridge/multithreading/docs/direction_b_walker_algorithm.md`:
+`bridge/multithreading/docs/walker_algorithm.md`:
 
   * `proof_block_refs[0]` is the same-thread parent (per acki-nacki
     `node/src/types/ackinacki_block/mod.rs:549-552`).
@@ -21,10 +21,10 @@ Model backing this walk lives in
     blocks (`cross_thread_ref_enforcement/mod.rs:56`).
 
 The collector is topology-only: it does NOT reconstruct SHA-256/Poseidon
-openings. Its output feeds `direction_b_analyzer.py` for post-hoc histograms.
+openings. Its output feeds `analyzer.py` for post-hoc histograms.
 
 Usage:
-    python direction_b_collector.py \
+    python collector.py \
         --graphql http://localhost/graphql \
         --out research/stats/dirb-$(date +%Y%m%d-%H%M).jsonl \
         --poll-interval 2.0 \
@@ -155,7 +155,7 @@ class GqlClient:
 
     def fetch_latest_blocks(self, limit: int = 20) -> list[dict]:
         """Order by seq_no desc across all threads. Same query shape as
-        `runbooks/run_direction_b_multipath_session.md` verification snippet."""
+        `runbooks/run_multipath_session.md` verification snippet."""
         q = f'''{{
           blockchain {{
             blocks(order_by:{{seq_no:desc}}, limit: {limit}) {{

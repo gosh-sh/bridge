@@ -61,7 +61,7 @@ Impact on same-thread parent hops `(b_seq − x_seq)`:
 
 ## Two headline empirical metrics
 
-The session (see `../runbooks/run_direction_b_session.md`) yields JSONL
+The session (see `../runbooks/run_session.md`) yields JSONL
 records the analyzer digests into:
 
 1. **Thread distribution of X.** With the current USDCBridge deployment at
@@ -80,8 +80,8 @@ records the analyzer digests into:
 ## Collector design (topology only)
 
 Full description in
-[`direction_b_walker_algorithm.md`](direction_b_walker_algorithm.md);
-implementation at `../research/direction_b_collector.py`.
+[`walker_algorithm.md`](walker_algorithm.md);
+implementation at `../research/collector.py`.
 
 Two loops:
 

@@ -19,14 +19,21 @@ The bridge circuit spec is
   event → X → Y → Y_anchor → on-chain root. When `t = 0` this collapses to
   X = Y and no cross-thread walk is needed (Y still opens from Y_anchor).
   When `t ≠ 0` the circuit additionally needs a walk between X and Y through
-  cross-thread `refs` edges.
+  the block's `proof_block_refs` list.
 
 The current spec calls this walk "the L7 walk" (spec §4). It uses acki-nacki's
-per-block `refs` list, opened through the block's L7 Poseidon dense-Merkle root.
+per-block `proof_block_refs` list, opened through the block's L7 Poseidon
+dense-Merkle root. **On chain, `proof_block_refs[0]` is `parent_block_id`
+(the same-thread parent) and `proof_block_refs[1..]` are cross-thread refs**
+— both live inside the same L7 tree
+(`acki-nacki/helpers/proof_helper/src/gql_proof.rs:76,109`:
+`"proof_block_refs must contain parent block id"`). So slot 0 is a valid
+chain-side hop; whether the *circuit* opens it is a spec choice — see §2 and
+§3.
 
 ## 2. The walk
 
-The walk is
+The walk is a path in the block-ref DAG:
 
 ```
  Y_anchor  <-  Y  =  B_0  <-  B_1  <-  ...  <-  B_L  =  X
@@ -34,77 +41,129 @@ The walk is
      on-chain  thread 0 (newer)                     thread t (event, older)
      root
 ```
-Here cryptographically ` A <- C` arrow means that C is leaf, A -- Merkle root, containing this leaf.
 
-But speaking about real grabbing private witness : the walk begins at the thread-0
-block Y (proven against the on-chain-known batch root Y_anchor), with
-`hop_start_block_id = Y.block_id` and `hop_end_block_id = X.block_id` (the
-walk terminates at the event block).
+`A <- C` reads **"C is a leaf inside A's L7 Poseidon dense-Merkle tree"** —
+i.e. `C.block_id` appears in `A.proof_block_refs`, and the L7 opening binds
+`C.block_id` to the L7 root committed by `A`. Each hop costs an L7 Poseidon
+opening plus the SHA-256 gadgetry that folds `B_i.L7` into `B_i.block_id`
+into the next step (§2.1 of the spec: **≈ 8 SHA-256 gadgets per hop**), so
+`L` — the *count* of hops — is what drives per-event circuit cost.
 
-Arrow `<-` reads **"left block's `refs` contains right block"**:
+The walker is producing a witness, not a canonical chain. Any DAG path from
+some thread-0 `Y` (later, committed via a still-current `Y_anchor`) down to
+`X` (event block, thread `t`) is valid provided every intermediate block-id
+is opened from an already-bound predecessor.
 
-- `B_0.refs` contains `B_1`,
-- `B_1.refs` contains `B_2`,
-- …
-- `B_{L-1}.refs` contains `B_L = X`.
+### 2.0 Path topologies
 
-Each hop opens `B_i.L7` and extracts a slot whose leaf is `B_{i+1}.block_id`. Slot 0 of L7 (`parent_block_id`) is excluded, so only cross-thread ref slots are hopped. Because acki-nacki refs are
-strictly older-cross-thread (§2.1), every hop moves backward in wall-clock
-time and never stays in the same thread.
+`proof_block_refs` slot semantics are set by acki-nacki
+(`helpers/proof_helper/src/gql_proof.rs:76,109`):
 
-The production ceiling declared in the spec is `L_MAX = 300`,
-attributed to "the node-team-stated cross-thread walk-length ceiling under the
-current threading design".
+- **slot 0** = `parent_block_id` (same-thread, previous seq_no)
+- **slots 1..** = cross-thread refs (any thread ≠ own, strictly older)
 
-### 2.1 The reduction chain
+Both live inside the same L7 tree, so opening slot 0 is as cheap and as sound
+as opening any cross-thread slot — the "slot 0 is excluded" constraint in
+`bridge-event-witness` today is a **circuit-code choice**, not a chain-side
+requirement. The measurement work in §4 characterises paths under the DAG's
+actual shape; the circuit-spec update that allows the walker to *use* those
+paths is tracked separately.
 
-Under the Y-start walk the reduction chain is
+Some representative topologies:
 
 ```
-finalRoot ∈ layerWindows[]  ⊃  Y_anchor  ⊃  block_leaf(Y)  ⊃  Y.block_id  ⊃  Y.L7  ⊃  Y1.block_id  ⊃  …  ⊃  X.block_id  ⊃  X.L8  ⊃  event
-                                                                                                              |
-                                                                                                              └── X is now committed on-chain via Y_anchor
+(a) Direct cross-thread ref, single hop:            L = 1
+    Y (thread 0) ── slot k ──▶ X (thread t)
+    Only possible if thread-0 producer directly referenced X. Rare in bursts
+    — the checkpoint stride (§3) skips most of thread t's intermediates.
+
+(b) Same-thread walk-back + one cross-thread hop:   L = 1 + Δ
+    Y (thread 0) ── slot k ──▶ X' (thread t, seq_no > X)
+                               X' ── slot 0 ──▶ X'−1 ── slot 0 ──▶ … ──▶ X
+    Δ = (X'.seq_no − X.seq_no). Fires whenever thread 0 refs a *later*
+    thread-t block; we walk the same-thread parent chain back to X.
+    Only requires 2 threads to exist.
+
+(c) Multi-thread transitive shortcut:               L = h_0 + h_v
+    Y (thread 0) ── slot k ──▶ C (thread v ≠ 0, t) ── slot k' ──▶ X (thread t)
+    Requires ≥ 3 threads live in the window. Often *shorter* than (b) when
+    thread t is deep in a burst but thread v has a fresher direct ref to X.
+
+(d) Arbitrary mix: any DAG path Y ⇝ X interleaving slot-0 (same-thread) and
+    slot-≥1 (cross-thread) edges, respecting the strictly-older-cross-thread
+    invariant.
 ```
 
-Every step is a cryptographic opening from an on-chain-known value. There is
-no free endpoint anywhere in the chain — every witnessed `block_id` appears
-either as the walk's output (X, bound by all preceding openings) or is
-transitively opened from an already-bound predecessor.
+`bridge/multithreading/research/multipath_collector.py` builds
+the full ref-DAG from live GQL data and enumerates paths in this exact
+sense, ranking by hop count (shortest first).
+
+### 2.1 Hop cost and the L target
+
+Circuit cost scales linearly in `L` (spec §6.3–6.4: bundle verification is
+`H = 1` per hop). The spec's declared ceiling is **`L_MAX = 300`**,
+attributed to the node team's stated cross-thread walk-length upper bound
+under the current threading design. That is a *safety* cap for the outer
+aggregator; the operational target the walker aims for is much smaller —
+**`L ≤ 10`** in the common case, since each hop is ≈ 8 SHA-256 gadgets and
+the aggregator threshold binds the acceptable bundle depth.
+
+The purpose of §4 is exactly to check that the empirical `L` distribution
+under sustained multi-thread load sits well below `L_MAX` and, ideally,
+inside the `L ≤ 10` regime — using multi-path BFS (topology (d)), not just
+the linear direct-ref chain.
+
+### 2.2 The reduction chain
+
+For any admissible path `Y = B_0 <- B_1 <- ... <- B_L = X` the reduction chain
+is:
+
+```
+finalRoot ∈ layerWindows[]  ⊃  Y_anchor  ⊃  block_leaf(Y)  ⊃  Y.block_id
+   ⊃  Y.L7  ⊃  B_1.block_id  ⊃  B_1.L7  ⊃  B_2.block_id  ⊃  …
+   ⊃  X.block_id  ⊃  X.L8  ⊃  event
+                              |
+                              └── X is now committed on-chain via Y_anchor
+```
+
+Each `B_i.L7 ⊃ B_{i+1}.block_id` step is an L7 Poseidon dense-Merkle opening
+into an arbitrary slot of `B_i.proof_block_refs` — slot 0 (`parent_block_id`)
+included. Every step is a cryptographic opening from an on-chain-known value;
+no free endpoint anywhere.
 
 For the walk to be usable end-to-end, we need: **for every event-carrying
-non-thread-0 block X, some later thread-0 block Y transitively references X
-via cross-thread refs, within ≤ L_MAX hops, and Y is committed inside some
-Y_anchor that is still in `layerWindows[anchorLayer]` on Ethereum when the
-withdrawal is claimed.**
+non-thread-0 block X, some later thread-0 block Y is reachable from X in the
+ref-DAG (via any interleaving of parent-chain and cross-thread edges) within
+`≤ L_MAX` hops, and Y is committed inside some Y_anchor that is still in
+`layerWindows[anchorLayer]` on Ethereum when the withdrawal is claimed.**
 
-Soundness is settled by starting at Y. The question that remains is
-termination — and from reading the code we cannot find a mechanism that
-guarantees it.
+Soundness is settled by starting at Y. The open questions are **existence**
+(does *any* path exist?) and **shortness** (how many hops on the shortest?).
 
-### 2.2 Witness-latency implication
+### 2.3 Witness-build latency and the walker strategy
 
-The Y-start walk has unpredictable, unbounded witness-build latency. The
-relayer must poll for *some* future thread-0 block Y that transitively
-references X. Nothing in the node scheduler binds when or whether that
-happens:
+The walker polls thread-0 GQL every **~20 s** (roughly the block cadence),
+extends the ref-DAG with each new thread-0 block plus its transitively-fetched
+predecessors, and runs BFS on the reverse graph rooted at `X`. It reports the
+**shortest** `Y ⇝ X` path found within a **budget of ~5 minutes** since the
+event's finalisation.
 
-- `should_include` (`process.rs:530-540`) only fires when other threads have
-  advanced between two consecutive thread-0 productions;
-- the checkpoint stride (`process.rs:578-628`) permanently skips non-checkpoint
-  intermediates;
-- `evaluate_thread_lag` (`cross_thread_ref_enforcement/mod.rs:150`) explicitly
-  does not constrain per-block coverage ("*Any advance passes, however small
-  and however far behind the result still is.*").
+- If a path with `L ≤ 10` shows up quickly: happy path, hand the witness off.
+- If only longer paths exist inside the budget: use the best one, log the `L`.
+- If no path exists by budget expiry: park the event; either wait for another
+  thread-0 anchor or drop it under the operational retention policy.
 
-Witness-availability latency is therefore not derivable from code, and the
-relayer's build pipeline must accommodate arbitrary wait times per event, plus
-a policy for events that never gain a Y whose Y_anchor is still in the
-on-chain retention window. This is a **first-order operational problem** the
-bridge team must solve — with a walker that polls the GQL surface, a
-retention policy for un-anchored events, and (if the empirical latency is
-unacceptable) either a node-side coverage guarantee (§4 ask 1) or a
-same-thread walk-back to a descendant X' that *is* eventually referenced
-(§4 ask 2).
+Latency is not derivable from the acki-nacki scheduler alone —
+`should_include` (`process.rs:530-540`) only fires when other threads
+advanced between two consecutive thread-0 productions, the checkpoint stride
+(`process.rs:578-628`) permanently skips non-checkpoint intermediates, and
+`evaluate_thread_lag` (`cross_thread_ref_enforcement/mod.rs:150`) does not
+constrain per-block coverage. What §3 *does* give us is a
+**freshness bound**: `MAX_UNREFERENCED_THREAD_LAG = 50` limits how far a
+lineage's view of a thread may lag before attestation is withheld — see §3.
+
+The empirical `L` distribution and the fraction of events without a path
+inside the budget are exactly what §4 measures.
 
 ## 3. What acki-nacki does and does not guarantee for termination
 
@@ -131,6 +190,21 @@ same-thread walk-back to a descendant X' that *is* eventually referenced
   says nothing about which blocks between the old and new referenced tip are
   covered.
 
+- **`MAX_UNREFERENCED_THREAD_LAG = 50` bounds freshness, not coverage.**
+  `node/src/protocol/cross_thread_ref_enforcement/mod.rs:56`
+  (`pub const MAX_UNREFERENCED_THREAD_LAG: u64 = 50;`) plus the doc-comment
+  at `mod.rs:10-45` state: a lineage whose view of some other thread is
+  more than 50 blocks behind that thread's finalised tip will have its
+  attestation withheld — forcing a rebuild that re-references. This is a
+  **freshness ceiling on the referenced-tip pointer per lineage**, not a
+  per-block coverage guarantee: it caps the *newest gap* a lineage can
+  ignore, but says nothing about which of the intermediate blocks in that
+  gap are ever directly referenced. Combined with the checkpoint stride
+  (`STEP = 10`), the walker can expect thread-0 to eventually reference
+  *some* block in each other thread within a bounded number of thread-0
+  productions after that thread advances — but that "some block" is
+  typically a checkpoint, not the specific event-block `X`.
+
 - **`helpers/proof_helper/` does not close the gap either.** `proof.rs`,
   `blockchain.rs` and `main.rs` build layer-0 / layer-N proofs *within a
   single thread's history*. There is no cross-thread walk-builder anywhere
@@ -148,28 +222,44 @@ locking `L_MAX` (§5).
 
 ## 4. What we would like to measure before landing this
 
-We plan to run the multithread test at
+We run the multithread test at
 `acki-nacki/tests/mt/cli.py test-multithread-cross-thread` with the
 sustained-load recipe from `acki-nacki/MULTITHREAD_TEST_SESSION.md:54-77`,
-query `proof_block_refs` via GQL, and compute:
+poll thread-0 tips via GQL, and let
+`bridge/multithreading/research/multipath_collector.py` do the
+work. The collector implements exactly the algorithm §2.3 sketches:
 
-- **anchor-latency distribution.** For every finalized non-thread-0 block X
-  in the observation window, measure the wall-clock delay `T_anchor(X)` from
-  X's finalization to the first thread-0 block Y whose ref-DAG transitively
-  reaches X within ≤ L_MAX hops. (User-visible latency also includes the
-  Y_anchor commit delay, but that lives outside this experiment.) This is
-  the witness-build latency.
-- **anchor-loss rate.** Fraction of finalized non-thread-0 blocks that
-  *never* gain a transitive thread-0 Y within the retention window of
-  `layerWindows[anchorLayer]` on Ethereum (i.e. no Y is committed via any
-  Y_anchor that is still on-chain). Any nonzero rate means the walk simply
-  has no path for some subset of events — see §4 asks 1/2/3.
-- **empirical L distribution** for those blocks that *do* have a walk —
-  informs `L_MAX` sizing and (since bundle verification cost scales
-  linearly in L at H = 1) the outer-aggregator threshold.
+- polls thread-0 GQL on a fixed cadence (~20 s), fetching `proof_block_refs`
+  for each new block plus its transitively-fetched predecessors, and
+  maintains a global block DAG in memory;
+- for every finalised non-thread-0 candidate `X` in the observation window
+  (default 300 s per candidate, matching the §2.3 5-minute budget), runs
+  BFS on the reverse graph rooted at `X` over *all* edge kinds (slot 0 and
+  slot ≥1), enumerating up to `K` shortest distinct paths;
+- emits one JSONL record per candidate with the shortest-path length,
+  path bodies, length histogram, and wall-clock timings.
 
-If either of the first two quantities is materially adverse, we come back
-to §4 asks (1)–(3).
+Aggregated over a session this gives us:
+
+- **shortest-`L` distribution** — the primary sizing input. Ideally the
+  bulk sits in `L ≤ 10` (§2.1 target); the far tail informs whether
+  `L_MAX = 300` is comfortable or tight.
+- **time-to-first-path distribution** `T_first_path_wall_s` — the
+  witness-build latency §2.3 discusses. This is what the relayer's build
+  pipeline has to accommodate per event.
+- **time-to-shortest-path distribution** `T_best_path_wall_s` — how much
+  extra delay a caller pays if they wait for a *good* path rather than the
+  first-any path.
+- **no-path-in-budget rate** — fraction of candidates for which the BFS
+  found no `Y ⇝ X` path inside the observation window. Any nonzero rate is
+  a hard operational problem (retention policy, node-side guarantee, or
+  same-thread walk-back — see §4 asks 1/2/3 below).
+- **edge-type breakdown of shortest paths** — how often the shortest path
+  uses slot-0 (parent-chain) edges vs slot-≥1 (cross-thread). Directly
+  motivates the circuit-side spec update to allow slot-0 openings.
+
+If either the shortest-`L` tail or the no-path rate is materially adverse,
+we come back to §4 asks (1)–(3).
 
 ## 5. Files cited
 
@@ -177,10 +267,16 @@ Acki-nacki, current tree:
 
 - `node/src/multithreading/thread_synchrinization_service.rs:67-77`
 - `node/src/block/producer/process.rs:458-633, 530-540, 578-628`
-- `node/src/protocol/cross_thread_ref_enforcement/mod.rs:105-114, 137-186`
+- `node/src/protocol/cross_thread_ref_enforcement/mod.rs:56` — `pub const MAX_UNREFERENCED_THREAD_LAG: u64 = 50;` (per-lineage referenced-tip freshness bound)
+- `node/src/protocol/cross_thread_ref_enforcement/mod.rs:10-45, 105-114, 137-186`
+- `helpers/proof_helper/src/gql_proof.rs:76,109` — `proof_block_refs[0]` is `parent_block_id`; slots ≥1 are cross-thread refs; all live in the same L7 tree
 - `helpers/proof_helper/src/{proof.rs, blockchain.rs, main.rs}` — walks single-thread layer trees only
 - `tests/mt/cli.py` — `test-multithread-cross-thread` entry
 - `MULTITHREAD_TEST_SESSION.md:54-77` — sustained-load recipe
+
+Bridge research, this tree:
+
+- `bridge/multithreading/research/multipath_collector.py` — polls thread-0 GQL, builds the global block-ref DAG, runs BFS-on-reverse-graph rooted at each candidate `X` to enumerate the shortest `Y ⇝ X` paths (all edge kinds), emits JSONL `direction_b_multipath.v1` with shortest length, path bodies, length histogram, and wall-clock timings.
 
 Bridge, current tree:
 

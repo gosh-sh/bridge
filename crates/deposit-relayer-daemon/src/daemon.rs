@@ -366,7 +366,6 @@ mod tests {
             state_path,
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
-            max_attempts_warn: 16,
             deployment: None,
             force_state: false,
             skip_after_attempts: None,

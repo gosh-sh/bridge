@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Direction (b) multi-path collector.
+multi-path collector.
 
 For each WithdrawalInitiated event X, enumerate every plausible walk
 

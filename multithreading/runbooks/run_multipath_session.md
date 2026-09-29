@@ -53,9 +53,13 @@ available; no collector changes needed.
 
 ## Pane layout (tmux, 5 panes)
 
-Order **A → B → (wait 2 min for split to stabilize) → D → C**. D
-before C so the collector has already primed the graph before the
-first event fires.
+Order **A → B → (wait 2 min for split to stabilize) → E → D → C**. E
+(thread-liveness monitor) before D so a wedged child thread is caught
+inside 30 s — the moment the extra thread dies, every subsequent event
+falls into `same_thread_trivial` and the collector produces nothing
+interesting; there is no point running the trigger loop until E shows
+both threads `LIVE`. D before C so the collector has already primed
+the graph before the first event fires.
 
 | Pane | Role                                                       | See |
 |------|------------------------------------------------------------|-----|
@@ -63,7 +67,7 @@ first event fires.
 | B    | Split-thread `cli.py` test                                 | This file |
 | C    | WithdrawalInitiated trigger loop (`trigger_loop.py`)       | This file |
 | D    | **Multi-path collector** (`multipath_collector.py`) | This file |
-| E    | Observability (`docker stats`, node logs)                  | — |
+| E    | **Thread-liveness monitor** (`thread_liveness_monitor.py`) | This file |
 
 ## Pane B — split-thread test
 
@@ -107,10 +111,52 @@ Want to see: at least two distinct `thread_id` values in the last 10
 blocks AND `refs_len ≥ 2` on thread-0 rows (slot 0 parent + at least
 one cross-thread ref).
 
+## Pane E — thread-liveness monitor
+
+`cli.py` reports "fan didn't advance" only after the fan timeout expires
+(tens of minutes). By then the child thread has already been dead for a
+long time and every event we fired since is in thread 0 → useless. The
+monitor scrapes `docker logs` for two signatures the node emits every
+few seconds:
+
+- `Incoming block candidate: … thread=ThreadIdentifier<HEX>` — a
+  candidate arrived from thread `HEX` → thread is producing.
+- `pulse_stall … thread=<T:HEX>` — that thread's producer missed its
+  chain-pulse deadline. Persistent stalls with zero candidates = wedged.
+
+Run *inside* the acki-nacki checkout (the monitor exec's `docker logs`
+against the compose project running there):
+
+```bash
+cd "${ACKI_NACKI_DIR:-../../../acki-nacki}"
+python3 "$OLDPWD/../multithreading/research/thread_liveness_monitor.py" \
+  --interval 5 \
+  --out "$OLDPWD/../multithreading/research/stats/thread-mon-$(date +%Y%m%d-%H%M).jsonl"
+```
+
+Each sample line looks like:
+
+```
+[2026-…] t0=LIVE cand=12 stall=0 seq=9421 | t1a2b=LIVE cand=8 stall=0 seq=1102
+```
+
+**Decision rule.**
+
+- Both threads `LIVE` with `cand > 0` → proceed to Pane D.
+- Any child thread `STALLED` (`cand=0, stall>0`) or `IDLE` after 90 s of
+  hold-mode → **abort the run**. Kill Pane B, tear down A, restart. The
+  session is not going to produce cross-thread events.
+- Child thread flips `LIVE → STALLED` mid-run → stop firing triggers
+  (kill C) and note the wall-clock in the run log; events fired after
+  that point will be `same_thread_trivial`.
+
+Keep E running for the full session — sampling is cheap (one `docker
+logs --since` per interval).
+
 ## Pane D — multi-path collector
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
+cd ../multithreading
 python3 research/multipath_collector.py \
   --graphql http://localhost/graphql \
   --out research/stats/dirb-mp-$(date +%Y%m%d-%H%M).jsonl \
@@ -151,7 +197,7 @@ a fresh multisig, minting ECC[3] via `USDCBridge.mintAndSend`, and
 calling `initiateWithdrawal`:
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
+cd ../multithreading    # or wherever this repo lives
 python3 research/trigger_loop.py --interval 60
 ```
 
@@ -177,7 +223,7 @@ D.
 ## Post-run analysis
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/multithreading
+cd ../multithreading
 python3 research/multipath_analyzer.py \
   research/stats/dirb-mp-*.jsonl
 # Machine-readable version:
@@ -200,11 +246,12 @@ The digest prints seven sections. The two most load-bearing:
 
 ## Teardown
 
-Stop panes in reverse: **C → wait ≥ observation-window-s → D → B →
+Stop panes in reverse: **C → wait ≥ observation-window-s → D → E → B →
 A**. Cutting D before the observation window elapses discards open
 events; give the collector time to close in-flight rows first
 (SIGINT triggers a best-effort emit but the shorter path may not
-have appeared yet).
+have appeared yet). E stays up until B is stopped so the monitor
+still captures whatever the node emits during shutdown.
 
 ## If X never leaves thread 0
 

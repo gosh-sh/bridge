@@ -628,16 +628,42 @@ assigns it when the release is tagged.
 
 ### Fixed
 
-- `deposit-relayer daemon` jumped `scanned_through_block` to the confirmed
-  head on every `eth_getLogs` tick, even when the target `depositId` was
-  missing or `finalizeDeposit` failed. The next scan started at that head
-  plus one, so a second deposit in the same window — and a retry of the
-  first — returned `None` forever. The cursor now moves only after AN
-  accepts that id, and only to the block before it, so a later deposit in
-  the same block is still found. Fresh start includes `--from-block` (it
-  used to skip it). If a running `state.json` already has a jumped
-  `scanned_through_block`, delete that field and restart, or finish the
-  stuck id with `prove-one` / `finalize-one`.
+- `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
+  cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
+  head on every poll, whether the target `depositId` was found or not. A
+  second deposit confirmed in the same poll window, and a deposit whose
+  proof or `finalizeDeposit` had failed, were never looked for again: the
+  daemon kept waiting as if they were not made yet, while the bridge's
+  `depositCounter()` was already past them. A fresh start also skipped the
+  `--from-block` block itself. Now each poll first reads `depositCounter()`
+  at the confirmed head (`--confirmations` below the head):
+  - while the next `depositId` is not made yet, the poll makes no
+    `eth_getLogs` call and moves the cursor up to the confirmed head;
+  - once it is made, the scan starts after the cursor and stops at the block
+    that holds the deposit. The cursor moves only after AN accepts the
+    deposit, and only to the block before it, so a retry finds the deposit
+    again and a later deposit in the same block is still found;
+  - if `depositCounter()` says the deposit is made but no scanned block holds
+    its log, the poll fails with an error naming the blocks it scanned: the
+    RPC returned incomplete logs, or `--from-block` is above the deposit.
+    `watch` and `prove-one` look deposits up the same way and fail with the
+    same error where they used to report the deposit as not visible yet.
+
+  The field is now `scan_done_through_block`. The old one is ignored and
+  dropped on the next save, so `state.json` needs no editing. After the
+  upgrade the first scan starts at `--from-block`, which must not be above
+  the oldest deposit the daemon has yet to deliver. The RPC must answer
+  `eth_call` at a block `--confirmations` below the head.
+- `deposit-relayer daemon --skip-after-attempts` counted every poll that
+  found no deposit as a failed attempt, so an idle daemon parked ids nobody
+  had deposited yet, and the deposits that later took those ids needed a
+  manual `finalize-one`. Waiting no longer counts; only a failed proof, an
+  AN rejection or a submit still pending does. The warning `no confirmed
+  deposit yet; relayer is idle` is gone with it. The flag now also reads
+  `SKIP_AFTER_ATTEMPTS`. The systemd unit does not pass
+  `--skip-after-attempts`, so a `SKIP_AFTER_ATTEMPTS` line in
+  `deposit-relayer.env` did nothing before and takes effect now: check it
+  before restarting the daemon.
 - `deposit-relayer` did not build against tvm-sdk `v3.0.6.an`: its
   `Cargo.toml` lacked the halo2 `[patch]` tables that pin `tvm_vm` to a
   single `halo2-axiom` (already present on `eth-light-client-relayer`),

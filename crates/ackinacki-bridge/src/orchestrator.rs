@@ -1033,6 +1033,8 @@ pub async fn run(
                     ),
                     source: Some(anyhow::Error::new(e)),
                 })?;
+        /// Byte offset of word 23 of the withdraw calldata, where the adapter
+        /// vkDigest sits.
         const DIGEST_OFF: usize = (12 + 11) * 32;
         let produced = proof_bytes
             .get(DIGEST_OFF..DIGEST_OFF + 32)

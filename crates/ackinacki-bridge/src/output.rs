@@ -159,6 +159,16 @@ fn print_deposit(s: &crate::deposit::DepositSuccess, json_mode: bool) {
         }
         return;
     }
+    emit(&deposit_summary(s), DEPOSIT_SUMMARY_TO_STDOUT);
+}
+
+/// Where the human deposit summary goes. Stdout, so a script wrapping a
+/// human run can still capture the one thing it prints; logs and the
+/// checklist stay on stderr.
+const DEPOSIT_SUMMARY_TO_STDOUT: bool = true;
+
+/// The human deposit summary as one block of text.
+fn deposit_summary(s: &crate::deposit::DepositSuccess) -> String {
     let field = |v: &Option<serde_json::Value>, k: &str| {
         v.as_ref()
             .and_then(|x| x.get(k))
@@ -189,26 +199,23 @@ fn print_deposit(s: &crate::deposit::DepositSuccess, json_mode: bool) {
         Some("light-client") => "  anchored by:  light client\n".to_string(),
         _ => String::new(),
     };
-    emit(
-        &format!(
-            "\n{head}:\n\x20 network:      {} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
-             {}\n\x20 operation:    {}\n\x20 deposit:      tx {} depositId {}\n{anchor}\x20 \
-             credited:     confirmDeposit {} delivery {}\n\x20 balance:      {} -> {} \
-             (diagnostic only)\n",
-            s.network,
-            s.chain_id,
-            s.amount,
-            s.to,
-            s.op_id.as_deref().unwrap_or("-"),
-            field(&s.deposit, "tx_hash"),
-            field(&s.deposit, "deposit_id"),
-            field(&s.confirmation, "confirm_tx"),
-            field(&s.confirmation, "delivery_tx"),
-            field(&s.balance, "before"),
-            field(&s.balance, "after"),
-        ),
-        false,
-    );
+    format!(
+        "\n{head}:\n\x20 network:      {} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
+         {}\n\x20 operation:    {}\n\x20 deposit:      tx {} depositId {}\n{anchor}\x20 \
+         credited:     confirmDeposit {} delivery {}\n\x20 balance:      {} -> {} \
+         (diagnostic only)\n",
+        s.network,
+        s.chain_id,
+        s.amount,
+        s.to,
+        s.op_id.as_deref().unwrap_or("-"),
+        field(&s.deposit, "tx_hash"),
+        field(&s.deposit, "deposit_id"),
+        field(&s.confirmation, "confirm_tx"),
+        field(&s.confirmation, "delivery_tx"),
+        field(&s.balance, "before"),
+        field(&s.balance, "after"),
+    )
 }
 
 /// Literal scan of argv for `--json`.
@@ -345,6 +352,48 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::from_str(&error_json(&e)).unwrap();
         assert!(v["error"].get("op_id").is_none());
+    }
+
+    fn sample() -> crate::deposit::DepositSuccess {
+        crate::deposit::DepositSuccess {
+            op_id: Some("op1".into()),
+            dry_run: false,
+            network: "sepolia".into(),
+            chain_id: 11155111,
+            amount: "5".into(),
+            to: "0:ab".into(),
+            deposit: Some(json!({"tx_hash": "0xt", "deposit_id": 7})),
+            anchor: Some(json!({"writer": "owner"})),
+            tx: None,
+            confirmation: Some(json!({"confirm_tx": "c", "delivery_tx": null})),
+            balance: None,
+            abandoned: false,
+        }
+    }
+
+    #[test]
+    fn the_deposit_summary_goes_to_stdout() {
+        assert!(DEPOSIT_SUMMARY_TO_STDOUT);
+    }
+
+    #[test]
+    fn the_deposit_summary_names_who_anchored() {
+        let mut d = sample();
+        let text = deposit_summary(&d);
+        assert!(text.contains("  anchored by:  bridge owner\n"), "{text}");
+        assert!(text.contains("deposit complete:"), "{text}");
+        assert!(text.contains("tx 0xt depositId 7"), "{text}");
+        assert!(text.contains("delivery -\n"), "{text}");
+        d.anchor = Some(json!({"writer": "light-client"}));
+        assert!(deposit_summary(&d).contains("  anchored by:  light client\n"));
+        d.anchor = Some(json!({"writer": null}));
+        assert!(!deposit_summary(&d).contains("anchored by"));
+        d.anchor = None;
+        let text = deposit_summary(&d);
+        assert!(
+            !text.contains("anchored by") && !text.contains("null"),
+            "{text}"
+        );
     }
 
     #[test]

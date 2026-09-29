@@ -1,0 +1,6 @@
+# Tool binaries are populated per-machine — see tools/README.md
+tools/*
+!tools/README.md
+
+# Session outputs
+research/stats/

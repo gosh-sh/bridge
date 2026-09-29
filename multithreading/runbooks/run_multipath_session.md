@@ -6,6 +6,91 @@ End-to-end recipe for the split-thread devnet run that measures, per
 shortest one ranked first. Model + math live in
 [`../docs/multipath_algorithm.md`](../docs/multipath_algorithm.md).
 
+## One-command entry point (recommended)
+
+```bash
+cd bridge/multithreading
+./runbooks/run_multipath.sh
+```
+
+The script orchestrates the whole session in one blocking foreground
+process (see the header comment in `run_multipath.sh` for the exact
+step-by-step). All outputs land under `research/stats/` with a shared
+`$TS` suffix — session log, monitor JSONL, cli.py log, collector
+JSONL, events JSONL, analyzer summary JSON.
+
+### Setup on a fresh machine (n14 / Linux)
+
+1. **Clone the two repos as siblings.** The wrapper expects
+   `acki-nacki` next to `bridge/` (or set `ACKI_NACKI_DIR` to override):
+
+   ```
+   ~/work/
+     ├── bridge/                ← this repo
+     └── acki-nacki/            ← branch feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on
+   ```
+
+2. **Populate `bridge/multithreading/tools/`** — see
+   [`../tools/README.md`](../tools/README.md) for exactly which binaries
+   go there and where to get the Linux release assets.
+
+3. **System deps:** `python3` (≥ 3.10), `docker` (Compose v2), `jq`,
+   `curl`, `make`, `git-lfs`. Docker VM ≥ 13 GiB RAM, ≥ 20 GB disk.
+
+4. **Run:**
+
+   ```bash
+   cd bridge/multithreading
+   ./runbooks/run_multipath.sh
+   ```
+
+   Or with overrides:
+
+   ```bash
+   ACKI_NACKI_DIR=/opt/acki-nacki \
+   TOOLS_DIR=/opt/bin \
+   NODE_CONTAINER=my-node0 \
+       ./runbooks/run_multipath.sh
+   ```
+
+The wrapper is idempotent on node bringup — if `docker ps` already
+shows a healthy node0 (GQL answering), it skips `make run` and moves
+straight to the test.
+
+### Why this recipe (params analysis)
+
+The `cli.py test-multithread-cross-thread` invocation matches the
+reference recipe recorded in memory `acki_nacki_mt_test_hold_recipe.md`:
+
+- `--threads 2 --total 20000` — 20 k funded senders across 2 threads.
+- `--hold-seconds 1800` — 30 min cyclic-hold window.
+- `--hold-burst-total 5000 --hold-quiet-seconds 0 --batch-size 200` —
+  keeps 5 000 tx in flight per cycle with no quiet period; cli.py's
+  `_wait_for_active_thread_count` self-heals if the split retracts.
+- `--deploy-value 12e12 --minimum-balance 8e12` — deploy budget + top-up
+  threshold sized so senders don't run out mid-burst.
+- `--timeout 2400` — 40 min hard ceiling, 10 min buffer beyond the hold.
+
+That combination stayed clean 27/28 cycles on the mac (memory
+snapshot). n14 is a Linux box with more headroom than the mac, so the
+same values should ride even easier — `pulse_stall` overshoot is the
+usual failure mode, and it's CPU-contention driven.
+
+Even so, the wrapper runs `thread_liveness_monitor.py` in-band and a
+watchdog polls it every 15 s: if any child thread flips to
+STALLED/IDLE after a 90 s grace, the trigger is SIGTERM'd and the run
+aborts with an explicit ABORTED banner. That is defence-in-depth over
+the cli.py's own health check, whose fan-timeout only fires after
+tens of minutes — well after events start falling into thread 0.
+
+The `smart_trigger.py --count 12` value assumes the current
+2-thread + `DEFAULT_DAPP_ID` USDCBridge setup routes ~100 % of events
+to thread 0. Each same-thread event costs ~60 s (15 s pause +
+resolve), so 12 events ≈ 12 min — well inside the 30 min hold. If a
+future setup routes many events off thread 0 (each cross-thread event
+consumes the full 300 s observation window), cut `--count` to 5; the
+wrapper has a comment marking the exact spot.
+
 ## What we're measuring
 
 Per event, one JSONL row with:

@@ -3,10 +3,10 @@
 #
 # What it does (one command, blocking, ~35–50 min wall time):
 #
-#   1. Validates the tool binaries in $MT_DIR/tools/ (or $TOOLS_DIR)
-#      and exports the CLI_NAME / TVM_CLI / SOLD / TVM_DEBUGGER /
-#      ZEROSTATE_HELPER / NODE_HELPER env vars that Michael's
-#      tests/mt/cli.py needs.
+#   1. Validates the tool binaries in $MT_DIR/bins_<OS>/ (auto-detected
+#      from `uname -s`; overridden by $TOOLS_DIR) and exports the
+#      CLI_NAME / TVM_CLI / SOLD / TVM_DEBUGGER / ZEROSTATE_HELPER /
+#      NODE_HELPER env vars that tests/mt/cli.py needs.
 #   2. If GQL at http://localhost/graphql answers → skip node bringup.
 #      Else brings up the acki-nacki devnet via `make generate_zerostate`
 #      (only if `docker/.env` is missing) + `make run`.
@@ -25,7 +25,8 @@
 #      collector for one observation window, then runs the analyzer
 #      and prints where every JSONL / log landed.
 #
-# Prereqs on a fresh box: see multithreading/tools/README.md.
+# Prereqs on a fresh box: see multithreading/bins_macOS/README.md
+# (macOS) or bins_linux/README.md (Linux).
 
 set -euo pipefail
 
@@ -34,8 +35,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ACKI_NACKI_DIR="${ACKI_NACKI_DIR:-$(cd "$MT_DIR/../../../acki-nacki" 2>/dev/null && pwd || echo)}"
-TOOLS_DIR="${TOOLS_DIR:-$MT_DIR/tools}"
+ACKI_NACKI_DIR="${ACKI_NACKI_DIR:-$(cd "$MT_DIR/../../acki-nacki" 2>/dev/null && pwd || echo)}"
+
+# Default tools dir is bins_<OS>/ next to runbooks/. Auto-detected from
+# `uname` so the same script works on macOS and Linux without arguments;
+# TOOLS_DIR overrides both.
+case "$(uname -s)" in
+  Darwin) _DEFAULT_TOOLS="$MT_DIR/bins_macOS" ;;
+  Linux)  _DEFAULT_TOOLS="$MT_DIR/bins_linux" ;;
+  *)      _DEFAULT_TOOLS="$MT_DIR/bins_$(uname -s)" ;;
+esac
+TOOLS_DIR="${TOOLS_DIR:-$_DEFAULT_TOOLS}"
+unset _DEFAULT_TOOLS
+
 STATS_DIR="$MT_DIR/research/stats"
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -91,7 +103,7 @@ check_deps() {
   for tool in tvm-cli sold tvm-debugger zerostate-helper node-helper; do
     if [ ! -x "$TOOLS_DIR/$tool" ]; then
       echo "MISSING or non-executable: $TOOLS_DIR/$tool" >&2
-      echo "See $MT_DIR/tools/README.md for how to populate." >&2
+      echo "See $TOOLS_DIR/README.md (or $MT_DIR/bins_macOS/README.md for the macOS recipe) for how to populate." >&2
       exit 1
     fi
   done

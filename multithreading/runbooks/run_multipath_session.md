@@ -30,9 +30,13 @@ JSONL, events JSONL, analyzer summary JSON.
      └── acki-nacki/            ← branch feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on
    ```
 
-2. **Populate `bridge/multithreading/tools/`** — see
-   [`../tools/README.md`](../tools/README.md) for exactly which binaries
-   go there and where to get the Linux release assets.
+2. **Populate `bridge/multithreading/bins_<OS>/`** — the wrapper
+   auto-detects: `bins_macOS/` on Darwin, `bins_linux/` on Linux. See
+   [`../bins_macOS/README.md`](../bins_macOS/README.md) for the five
+   binaries (`tvm-cli`, `sold`, `tvm-debugger`, `zerostate-helper`,
+   `node-helper`) and how to populate them from a local `acki-nacki`
+   checkout. For a Linux box, populate `bins_linux/` the same way from
+   Linux release assets or a Linux `cargo build --release`.
 
 3. **System deps:** `python3` (≥ 3.10), `docker` (Compose v2), `jq`,
    `curl`, `make`, `git-lfs`. Docker VM ≥ 13 GiB RAM, ≥ 20 GB disk.

@@ -15,6 +15,15 @@ use serde_json::json;
 
 use crate::{errors::CliError, orchestrator::WithdrawSuccess};
 
+/// What a successful run of either subcommand returns to `main`.
+#[derive(Debug)]
+pub enum RunSuccess {
+    /// A finished (or dry-run) withdrawal.
+    Withdraw(WithdrawSuccess),
+    /// A finished, dry-run or released deposit.
+    Deposit(crate::deposit::DepositSuccess),
+}
+
 /// Write a whole block to stdout without panicking on failure.
 ///
 /// `println!` panics when the write fails, which turns a full disk, a
@@ -84,7 +93,15 @@ fn emit(s: &str, to_stdout: bool) {
 
 /// Print a successful terminal summary. Chooses stderr-human or
 /// stdout-json based on `json`.
-pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
+pub fn print_success(summary: &RunSuccess, json_mode: bool) {
+    match summary {
+        RunSuccess::Withdraw(w) => print_withdraw(w, json_mode),
+        RunSuccess::Deposit(d) => print_deposit(d, json_mode),
+    }
+}
+
+/// The withdrawal summary, in the sink `json_mode` selects.
+fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     if json_mode {
         // One line to stdout. `WithdrawSuccess` is `Serialize` and holds
         // no key material.
@@ -125,6 +142,70 @@ pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
             summary.proof.calldata_bytes,
             summary.proof.pi_count,
             summary.proof.self_verified,
+        ),
+        false,
+    );
+}
+
+/// The deposit summary, in the sink `json_mode` selects.
+fn print_deposit(s: &crate::deposit::DepositSuccess, json_mode: bool) {
+    if json_mode {
+        match serde_json::to_string(s) {
+            Ok(line) => emit(&format!("{line}\n"), true),
+            Err(e) => emit(
+                &format!("output: failed to serialize success as JSON: {e}\n"),
+                false,
+            ),
+        }
+        return;
+    }
+    let field = |v: &Option<serde_json::Value>, k: &str| {
+        v.as_ref()
+            .and_then(|x| x.get(k))
+            .filter(|x| !x.is_null())
+            .map(|x| {
+                x.as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| x.to_string())
+            })
+            .unwrap_or_else(|| "-".into())
+    };
+    let head = if s.dry_run {
+        "deposit dry run: nothing was sent"
+    } else if s.abandoned {
+        "deposit operation released"
+    } else {
+        "deposit complete"
+    };
+    // The anchor line is left out when the writer is unknown, never
+    // printed as "null".
+    let anchor = match s
+        .anchor
+        .as_ref()
+        .and_then(|a| a.get("writer"))
+        .and_then(|w| w.as_str())
+    {
+        Some("owner") => "  anchored by:  bridge owner\n".to_string(),
+        Some("light-client") => "  anchored by:  light client\n".to_string(),
+        _ => String::new(),
+    };
+    emit(
+        &format!(
+            "\n{head}:\n\x20 network:      {} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
+             {}\n\x20 operation:    {}\n\x20 deposit:      tx {} depositId {}\n{anchor}\x20 \
+             credited:     confirmDeposit {} delivery {}\n\x20 balance:      {} -> {} \
+             (diagnostic only)\n",
+            s.network,
+            s.chain_id,
+            s.amount,
+            s.to,
+            s.op_id.as_deref().unwrap_or("-"),
+            field(&s.deposit, "tx_hash"),
+            field(&s.deposit, "deposit_id"),
+            field(&s.confirmation, "confirm_tx"),
+            field(&s.confirmation, "delivery_tx"),
+            field(&s.balance, "before"),
+            field(&s.balance, "after"),
         ),
         false,
     );
@@ -189,7 +270,7 @@ fn cause_chain(err: &CliError) -> Vec<String> {
 /// what their pattern matches. `causes` is `[]` for the many errors that
 /// carry no source.
 pub fn error_json(err: &CliError) -> String {
-    let value = json!({
+    let mut value = json!({
         "error": {
             "stage": err.stage(),
             "exit_code": err.exit_code().as_i32(),
@@ -197,6 +278,9 @@ pub fn error_json(err: &CliError) -> String {
             "causes": cause_chain(err),
         }
     });
+    if let Some(op) = err.op_id() {
+        value["error"]["op_id"] = json!(op);
+    }
     // Fall back to a raw string if serde ever fails (it won't for the shape
     // above; belt-and-suspenders).
     serde_json::to_string(&value).unwrap_or_else(|_| {
@@ -238,6 +322,29 @@ mod tests {
     // slice and yields owned Strings.
     fn argv<'a>(items: &'a [&str]) -> impl Iterator<Item = String> + 'a {
         items.iter().map(|s| s.to_string())
+    }
+
+    #[test]
+    fn the_deposit_envelope_names_the_operation() {
+        let e = CliError::deposit(
+            crate::errors::ExitCode::DepositOutcomeUnknown,
+            crate::errors::Stage::Deposit,
+            Some("01J9ZQ4X7T0000000000000000"),
+            "the wallet request went out and no transaction was found",
+        );
+        let v: serde_json::Value = serde_json::from_str(&error_json(&e)).unwrap();
+        assert_eq!(v["error"]["exit_code"], 30);
+        assert_eq!(v["error"]["stage"], "deposit");
+        assert_eq!(v["error"]["op_id"], "01J9ZQ4X7T0000000000000000");
+    }
+
+    #[test]
+    fn a_withdrawal_envelope_has_no_op_id_key() {
+        let e = CliError::Usage {
+            reason: "x".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&error_json(&e)).unwrap();
+        assert!(v["error"].get("op_id").is_none());
     }
 
     #[test]

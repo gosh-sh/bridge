@@ -1620,6 +1620,9 @@ fn refusal_reading_a_record_that_exists(e: CliError) -> CliError {
         }
         | CliError::EthSubmitFailed {
             ..
+        }
+        | CliError::Deposit {
+            ..
         } => return e,
     };
     CliError::BurnOutcomeUnknown {
@@ -1739,6 +1742,9 @@ fn refusal_before_a_recorded_burn(
             ..
         }
         | CliError::EthSubmitFailed {
+            ..
+        }
+        | CliError::Deposit {
             ..
         } => return e,
     };
@@ -1870,6 +1876,9 @@ fn resumed_refusal(e: CliError, observed: &idempotency::Record) -> CliError {
             ..
         }
         | CliError::EthSubmitFailed {
+            ..
+        }
+        | CliError::Deposit {
             ..
         } => e,
     }

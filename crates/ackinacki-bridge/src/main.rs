@@ -28,6 +28,7 @@
 
 mod args;
 mod burn;
+mod deposit;
 mod errors;
 mod idempotency;
 mod orchestrator;
@@ -213,7 +214,7 @@ fn main() -> ProcExitCode {
 /// Route the top-level subcommand. Kept as a thin async fn so
 /// exit-code mapping stays in `main` and the orchestrator stays free of
 /// process concerns.
-async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> {
+async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
     // --non-interactive alone means "refuse rather than block on a prompt".
     // Together with --yes there is no prompt to block on, so the run
     // proceeds. That pairing is the normal shape for a CI wrapper.
@@ -234,7 +235,9 @@ async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> 
                 });
             }
             let dry_run = args.dry_run;
-            orchestrator::run(args, dry_run, skip_prompt).await
+            orchestrator::run(args, dry_run, skip_prompt)
+                .await
+                .map(output::RunSuccess::Withdraw)
         },
     }
 }

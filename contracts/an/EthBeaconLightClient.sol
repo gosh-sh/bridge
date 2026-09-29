@@ -49,7 +49,7 @@ interface IAcceptedBlockHashSink {
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "0.1.0";
+    string constant version = "0.1.1";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -461,13 +461,14 @@ contract EthBeaconLightClient {
     /// @dev Anchors are keyed the way the step circuit publishes them, not the
     ///      way Ethereum writes them. `node_hi_lo` reads each 16-byte half of
     ///      the 32-byte hash little-endian, so `submitUpdate` stores
-    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`. `_piForm` is an involution:
-    ///      applying it again recovers the Ethereum-order keccak. Deposit
-    ///      public inputs carry that raw keccak (`hi << 128 | lo` of the two
-    ///      16-byte halves), so the sink is notified with `_piForm(stored)` —
-    ///      not the stored key. `EthKeccak` returns Ethereum byte order, so
-    ///      every keccak result must be re-packed before it reaches
-    ///      `_provenEthSlot`. Name and body match `acki-nacki` `181b0c6a`.
+    ///      `(LE(h[0..16]) << 128) | LE(h[16..32])`. `_piForm` is its own
+    ///      inverse: applied to a stored key it gives the Ethereum-order hash.
+    ///      The bridge keys its anchor set by that hash, the word
+    ///      `_parseBlockHash` rebuilds from the deposit public inputs, so both
+    ///      sink calls send `_piForm(stored)`, not the stored key. `EthKeccak`
+    ///      returns Ethereum byte order, so every keccak result must be
+    ///      re-packed before it reaches `_provenEthSlot`. Name and body match
+    ///      `contracts/an/exchange/EthBeaconLightClient.sol`.
     function _piForm(uint256 h) private pure returns (uint256) {
         return (_rev16(h >> 128) << 128) | _rev16(h & ((uint256(1) << 128) - 1));
     }
@@ -515,9 +516,9 @@ contract EthBeaconLightClient {
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
     ///         push that landed before `setLightClient`). Does not re-prove.
     ///         `blockHash` is the stored anchor key (`_piForm` packing), not
-    ///         the Ethereum byte order a block explorer shows. The sink is
-    ///         told `_piForm(blockHash)`, the raw keccak `finalizeDeposit`
-    ///         looks up.
+    ///         the Ethereum byte order a block explorer shows. The bridge is
+    ///         sent `_piForm(blockHash)`, the Ethereum-order hash
+    ///         `finalizeDeposit` looks up.
     function rePushAnchor(uint256 blockHash) public {
         require(_isLive(blockHash), ERR_NOT_PROVEN);
         tvm.accept();
@@ -743,9 +744,9 @@ contract EthBeaconLightClient {
 
     /// @notice True only for the followed L1 and a live (in-window) proven hash.
     ///         Takes the stored anchor key, like `isProvenExecutionBlockHash`.
-    ///         Not interchangeable with `USDCBridge.isAcceptedBlockHash`, which
-    ///         takes the Ethereum byte order: for the same block it is asked
-    ///         `_piForm` of the word this one is asked.
+    ///         Not interchangeable with `USDCBridge.isAcceptedBlockHash`: for
+    ///         the same block, the bridge's getter takes `_piForm` of the key
+    ///         passed here, the hash in Ethereum byte order.
     function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
         return chainId == _l1ChainId && _isLive(blockHash);
     }
@@ -789,7 +790,10 @@ contract EthBeaconLightClient {
     /// @dev Reads the 10 step public inputs out of the PROVEN blob (the proof was
     ///      verified over this exact byte string, so every value is proof-bound).
     ///      Layout = 10 × 32-byte LE Fr; 32-byte roots are split hi/lo (hi first)
-    ///      exactly as `USDCBridge._parseBlockHash` reassembles the deposit hash.
+    ///      and recombined `hi << 128 | lo`, as `USDCBridge._parseBlockHash`
+    ///      does. The step circuit fills each half little-endian (`node_hi_lo`),
+    ///      so `executionBlockHash` comes out as the stored key (`_piForm`), not
+    ///      the Ethereum-order hash the bridge reads out of a deposit.
     function _parsePublicInputs(bytes publicInputs) private pure returns (StepPI pi) {
         TvmSlice s = publicInputs.toSlice();
         uint256[] fr;

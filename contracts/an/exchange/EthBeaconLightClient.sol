@@ -698,9 +698,9 @@ contract EthBeaconLightClient {
 
     /// @notice True only for the followed L1 and a live (in-window) proven hash.
     ///         Takes the stored anchor key, like `isProvenExecutionBlockHash`.
-    ///         Not interchangeable with `USDCBridge.isAcceptedBlockHash`, which
-    ///         takes the Ethereum byte order: for the same block it is asked
-    ///         `_piForm` of the word this one is asked.
+    ///         Not interchangeable with `USDCBridge.isAcceptedBlockHash`: for
+    ///         the same block, the bridge's getter takes `_piForm` of the key
+    ///         passed here, the hash in Ethereum byte order.
     function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
         return chainId == _l1ChainId && _isLive(blockHash);
     }
@@ -744,7 +744,10 @@ contract EthBeaconLightClient {
     /// @dev Reads the 10 step public inputs out of the PROVEN blob (the proof was
     ///      verified over this exact byte string, so every value is proof-bound).
     ///      Layout = 10 × 32-byte LE Fr; 32-byte roots are split hi/lo (hi first)
-    ///      exactly as `USDCBridge._parseBlockHash` reassembles the deposit hash.
+    ///      and recombined `hi << 128 | lo`, as `USDCBridge._parseBlockHash`
+    ///      does. The step circuit fills each half little-endian (`node_hi_lo`),
+    ///      so `executionBlockHash` comes out as the stored key (`_piForm`), not
+    ///      the Ethereum-order hash the bridge reads out of a deposit.
     function _parsePublicInputs(bytes publicInputs) private pure returns (StepPI pi) {
         TvmSlice s = publicInputs.toSlice();
         uint256[] fr;

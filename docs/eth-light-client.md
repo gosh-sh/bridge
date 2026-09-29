@@ -117,12 +117,12 @@ sequenceDiagram
   R->>LC: submitUpdate(proof, publicInputs), signed external message
   LC->>LC: parse PI, participation >= 342 of 512, committee == _currentCommittee, slot advances
   LC->>LC: tvm.accept(), then zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)
-  LC-->>UB: acceptBlockHashFromLightClient(chainId, execHash), only when usdcBridge is set
+  LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(execHash)), only when usdcBridge is set
   LC-->>R: HeadUpdated event
   opt ETH_RPC_URL set
     R->>LC: rePushAnchor(execHash)
     R->>LC: submitAncestry(headerRlps, up to 32)
-    LC-->>UB: acceptBlockHashFromLightClient for each parent
+    LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(key)) for each parent
   end
 ```
 

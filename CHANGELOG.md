@@ -661,6 +661,20 @@ assigns it when the release is tagged.
   standalone `contracts/an/EthBeaconLightClient.sol` has the same fix and
   reports version `0.1.1`; a light client deployed from it has to be deployed
   again from this source.
+
+  A light client already deployed from the 1.4.0 `.tvc` is upgraded in place:
+  its owner calls `updateCode` (present since 1.4.0) with the rebuilt code.
+  The address, head, committee and proven set stay, and the bridge keeps
+  accepting it as the writer. Anchors it pushed before the upgrade do not
+  count; the daemon re-sends the checkpoint it proves next, and an older
+  block still needed by a deposit gets `rePushAnchor` with its stored key
+  (or, while owner anchors are enabled, `setAcceptedBlockHash` with the
+  Ethereum-order hash). The words pushed before the upgrade stay in the
+  bridge's anchor set; they match no block, so they admit nothing.
+  `EthBeaconLightClient_encoding_and_gas_notes.patch` is regenerated against
+  this copy: its `rePushAnchor` note is now in the source, the two remaining
+  hunks still apply, and the code hash stays `314ac6b8…6092f5` with them
+  applied.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's
@@ -871,7 +885,8 @@ assigns it when the release is tagged.
   `_piForm`, `provenQueue` and the rotate decider. So the delivery is now two
   narrow patches instead of a file — `EthKeccak_sold_fixes.patch` (behaviour)
   and `EthBeaconLightClient_encoding_and_gas_notes.patch` (comments only, code
-  hash verified unchanged at `78905cf7…9ed532`) — and the gate was rewritten to
+  hash verified unchanged at `78905cf7…9ed532`, then at `314ac6b8…6092f5` after
+  the QC-AN-13 rebuild) — and the gate was rewritten to
   assert scope: patches stay inside `contracts/exchange/`, carry no sink wiring
   in either direction, the keccak patch only moves their library toward
   `contracts/an/EthKeccak.sol`, and the notes patch adds nothing but comments.

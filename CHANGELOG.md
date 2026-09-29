@@ -237,6 +237,11 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`AckiNackiBridge` has `pause()` / `unpause()` again** (owner-only). While
+  paused, `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof`
+  revert `BridgePaused`. AAVE management stays available so the owner can
+  evacuate funds. Restored after it was dropped in #20; the AN-side
+  `eccUSDCBridge.setPaused` is a separate control.
 - **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
   read back with `isPaused()`.** While it is paused, the two cross-chain entry
   points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:

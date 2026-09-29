@@ -20,6 +20,7 @@
 //! - `status` — print the state file path.
 
 use std::{
+    net::SocketAddr,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -198,6 +199,11 @@ enum Cmd {
         /// the deposit allowlist either way.
         #[arg(long)]
         expect_chain_id: Option<u64>,
+        /// Bind address of the Prometheus text exporter (`GET /metrics`), e.g.
+        /// `127.0.0.1:9467`. Unset = no exporter. Metric names are listed in
+        /// `deposit_relayer_daemon::metrics`.
+        #[arg(long, env = "DEPOSIT_RELAYER_METRICS_ADDR")]
+        metrics_addr: Option<SocketAddr>,
     },
     /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
     /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
@@ -349,7 +355,11 @@ async fn main() -> anyhow::Result<()> {
             skip_after_attempts,
             allow_insecure_graphql,
             expect_chain_id,
+            metrics_addr,
         } => {
+            if let Some(addr) = metrics_addr {
+                install_metrics_exporter(addr)?;
+            }
             let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
                 .map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
@@ -680,6 +690,8 @@ async fn run_daemon(
         EthLogSource::new(provider, bridge_address, from_block, confirmations)
             .with_scan_cursor(scan_cursor.clone()),
     );
+    deposit_relayer_daemon::metrics::set_build_info();
+    spawn_deposit_counter_poller(source.clone());
     let prover = Arc::new(SubprocessProofGenerator::new(prover_cfg));
 
     let skip_after = if skip_after_attempts == 0 {
@@ -811,6 +823,51 @@ where
         .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "deposit daemon stopped");
     Ok(())
+}
+
+/// Serve the Prometheus text format at `http://<addr>/metrics` for the
+/// lifetime of the process. Every `metrics::*` macro in this binary and in
+/// `deposit_relayer_daemon` records into it. Same buckets as the AN→ETH
+/// relayer: sub-second RPC round-trips up to ten-minute proving stages.
+fn install_metrics_exporter(addr: SocketAddr) -> anyhow::Result<()> {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    const BUCKETS: &[f64] = &[
+        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    ];
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .set_buckets(BUCKETS)
+        .map_err(|e| anyhow::anyhow!("metrics exporter buckets: {e}"))?
+        .install()
+        .map_err(|e| anyhow::anyhow!("metrics exporter on {addr}: {e}"))?;
+    deposit_relayer_daemon::metrics::describe();
+    info!(%addr, "metrics exporter listening (GET /metrics)");
+    Ok(())
+}
+
+/// How often the daemon reads `depositCounter()` for the backlog gauge.
+const DEPOSIT_COUNTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keep `deposit_relayer_eth_deposit_counter` fresh: one `eth_call` a minute,
+/// independent of the tick loop, so the backlog is visible while a proof runs.
+fn spawn_deposit_counter_poller<P>(source: Arc<EthLogSource<P>>)
+where
+    P: alloy::providers::Provider<alloy::network::Ethereum> + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match source.deposit_counter().await {
+                Ok(counter) => {
+                    let value = u64::try_from(counter).unwrap_or(u64::MAX);
+                    metrics::gauge!(deposit_relayer_daemon::metrics::ETH_DEPOSIT_COUNTER)
+                        .set(value as f64);
+                },
+                Err(e) => warn!(error = %e, "depositCounter() poll failed"),
+            }
+            tokio::time::sleep(DEPOSIT_COUNTER_POLL_INTERVAL).await;
+        }
+    });
 }
 
 fn log_err(stage: &'static str) -> impl Fn(anyhow::Error) -> anyhow::Error {

@@ -23,8 +23,9 @@ use alloy::{
     sol_types::SolEvent,
 };
 use async_trait::async_trait;
+use metrics::{counter, gauge};
 
-use crate::{error::RelayerError, types::DepositEvent};
+use crate::{error::RelayerError, metrics as prom, types::DepositEvent};
 
 /// Asynchronous source of `Deposit` events.
 ///
@@ -362,6 +363,7 @@ where
             .await
             .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
         let safe_head = head.saturating_sub(self.confirmations);
+        gauge!(prom::ETH_SAFE_HEAD_BLOCK).set(safe_head as f64);
         if safe_head < self.from_block {
             // Nothing finalised in our window yet.
             return Ok(None);
@@ -373,6 +375,7 @@ where
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
         let mut logs = Vec::new();
         let mut chunk_start = self.effective_scan_from();
+        gauge!(prom::ETH_SCAN_FROM_BLOCK).set(chunk_start as f64);
         while chunk_start <= safe_head {
             let chunk_end = chunk_start
                 .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
@@ -384,6 +387,8 @@ where
                 .from_block(chunk_start)
                 .to_block(chunk_end);
             let chunk = get_logs_with_retry(&self.provider, &filter).await?;
+            counter!(prom::ETH_SCANNED_BLOCKS_TOTAL)
+                .increment(chunk_end.saturating_sub(chunk_start).saturating_add(1));
             logs.extend(chunk);
             chunk_start = chunk_end.saturating_add(1);
         }
@@ -445,12 +450,17 @@ where
     loop {
         attempt += 1;
         match provider.get_logs(filter).await {
-            Ok(logs) => return Ok(logs),
+            Ok(logs) => {
+                counter!(prom::ETH_GET_LOGS_TOTAL, "outcome" => "ok").increment(1);
+                return Ok(logs);
+            },
             Err(e) if is_retryable_eth_rpc_error(&e) && attempt < GET_LOGS_MAX_ATTEMPTS => {
+                counter!(prom::ETH_GET_LOGS_TOTAL, "outcome" => "retry").increment(1);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
             },
             Err(e) => {
+                counter!(prom::ETH_GET_LOGS_TOTAL, "outcome" => "error").increment(1);
                 return Err(RelayerError::eth(format!(
                     "get_logs failed after {attempt} attempt(s): {e}"
                 )));

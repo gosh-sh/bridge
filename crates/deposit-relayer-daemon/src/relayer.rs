@@ -26,6 +26,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     error::RelayerError,
+    metrics::{self as prom, StageTimer},
     prover::ProofGenerator,
     source::DepositSource,
     state::{DeploymentIdentity, RelayerState},
@@ -157,9 +158,13 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// is skipped via the nullifier pre-check rather than re-submitted.
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
         let target = self.state.next_target(self.config.start_deposit_id);
+        self.publish_state_gauges(target);
 
         // 1. Cheap nullifier pre-check — skip proving on replays.
-        if self.submitter.is_finalized(target).await? {
+        let timer = StageTimer::start("is_finalized");
+        let finalized = self.submitter.is_finalized(target).await;
+        timer.finish();
+        if finalized? {
             debug!(
                 deposit_id = target,
                 "already finalized on AN; advancing cursor"
@@ -173,7 +178,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
         // 2. Fetch the confirmed deposit event.
         debug!(deposit_id = target, "fetching deposit event");
-        let event = match self.source.fetch(target).await? {
+        let timer = StageTimer::start("fetch_event");
+        let fetched = self.source.fetch(target).await;
+        timer.finish();
+        let event = match fetched? {
             Some(e) => e,
             None => {
                 if let Some(outcome) =
@@ -203,7 +211,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
         // 3. Generate the proof triple. Treated as recoverable: a transient
         //    witness-fetch failure shouldn't crash the daemon.
-        let bundle = match self.prover.generate(&event).await {
+        let timer = StageTimer::start("prove");
+        let generated = self.prover.generate(&event).await;
+        timer.finish();
+        let bundle = match generated {
             Ok(b) => b,
             Err(e) => {
                 if let Some(outcome) =
@@ -221,7 +232,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         };
 
         // 4. Submit + finalise on AN.
-        match self.submitter.submit(&event, &bundle).await? {
+        let timer = StageTimer::start("submit");
+        let submitted = self.submitter.submit(&event, &bundle).await;
+        timer.finish();
+        match submitted? {
             SubmitOutcome::Finalized {
                 tx_hash,
             } => {
@@ -314,7 +328,20 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     .map_err(|e| RelayerError::other(e.to_string()))?,
             );
         }
-        self.state.save(&self.config.state_path)
+        let saved = self.state.save(&self.config.state_path);
+        let target = self.state.next_target(self.config.start_deposit_id);
+        self.publish_state_gauges(target);
+        saved
+    }
+
+    /// Mirror `state.json` and the current target into the Prometheus gauges.
+    fn publish_state_gauges(&self, target: u64) {
+        prom::set_state_gauges(
+            target,
+            self.state.attempts_since_progress,
+            self.state.parked_deposit_ids.len(),
+            self.state.scanned_through_block,
+        );
     }
 
     /// Record a failed attempt and optionally park the deposit when the skip

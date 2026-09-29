@@ -62,6 +62,7 @@
 pub mod an_config;
 pub mod daemon;
 pub mod error;
+pub mod metrics;
 pub mod prover;
 pub mod relayer;
 pub mod source;

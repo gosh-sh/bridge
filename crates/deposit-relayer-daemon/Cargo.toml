@@ -29,6 +29,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
+# Prometheus facade: the library records through `metrics::*` macros, the
+# `daemon` subcommand installs the text exporter (`--metrics-addr`). Same
+# versions as `bridge-relayer-daemon`, so one scrape config fits both.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 tempfile = "3"
 fs2 = "0.4"
 acki-nacki-interface = { path = "../acki-nacki-interface", features = ["tvm-sdk"] }

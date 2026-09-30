@@ -13,7 +13,11 @@ use std::{
 use alloy_primitives::{Address, Bytes, B256, U256};
 use async_trait::async_trait;
 
-use crate::deposit::evm::*;
+use crate::deposit::{
+    an::{AccountInfo, AnRead, AnSend, ExtDir, MsgView, Page, TxListItem, TxView},
+    evm::*,
+    refusals::FinalizeSend,
+};
 
 /// A queue that repeats its last element once drained.
 pub struct Script<T: Clone>(Mutex<VecDeque<T>>);
@@ -879,5 +883,220 @@ impl MockWalletPeer {
                 return Some((v, m.tag));
             }
         }
+    }
+}
+
+/// Scripted getter answers, keyed by `(account, function)`.
+pub type GetterScripts = HashMap<([u8; 32], String), Script<serde_json::Value>>;
+
+/// An Acki Nacki node that answers from what the test put in it.
+#[derive(Default)]
+pub struct FakeAn {
+    /// Accounts by id; absent is an account the node does not have.
+    pub accounts: Mutex<HashMap<[u8; 32], AccountInfo>>,
+    /// `(account, function)` → output, scripted per call.
+    pub getters: Mutex<GetterScripts>,
+    /// Inbound external messages by account, newest first.
+    pub ext_in: Mutex<HashMap<[u8; 32], Vec<MsgView>>>,
+    /// Outbound external messages (events) by account, newest first.
+    pub ext_out: Mutex<HashMap<[u8; 32], Vec<MsgView>>>,
+    /// Transactions by account, oldest first.
+    pub txs: Mutex<HashMap<[u8; 32], Vec<TxListItem>>>,
+    /// Messages by hash.
+    pub messages: Mutex<HashMap<String, MsgView>>,
+    /// Transactions by hash.
+    pub transactions: Mutex<HashMap<String, TxView>>,
+    /// Pre-decoded bodies: body string → (name, value).
+    pub bodies: Mutex<HashMap<String, (String, serde_json::Value)>>,
+    /// Answers to `send_finalize`, in order; `Unknown` once drained.
+    pub sends: Mutex<VecDeque<FinalizeSend>>,
+    /// How many times `send_finalize` was called.
+    pub sent: Mutex<u32>,
+    /// How long each send takes before it answers.
+    pub send_delay: Mutex<std::time::Duration>,
+    /// External messages that appear once a send was made: `(account,
+    /// message)`.
+    pub on_send_ext_out: Mutex<Vec<([u8; 32], MsgView)>>,
+    /// Getter name → how many more calls answer before every call hangs.
+    pub hang_getter_after: Mutex<HashMap<String, u32>>,
+    /// `isAcceptedBlockHash` by block: how many calls answer `false`
+    /// before the block turns accepted (0 = accepted from the start).
+    pub accepted: Mutex<HashMap<B256, usize>>,
+    /// `isAcceptedBlockHash` calls so far, by block.
+    accepted_calls: Mutex<HashMap<B256, usize>>,
+    /// Takes precedence over `accepted`: answers in order, the last one
+    /// repeating.
+    pub accepted_seq: Mutex<HashMap<B256, Script<bool>>>,
+    /// Make a whole family of reads fail, as a broken endpoint would.
+    pub fail_getters: AtomicBool,
+    /// Every `transactions` call fails.
+    pub fail_transactions: AtomicBool,
+    /// Every `ext_messages` call fails.
+    pub fail_ext_messages: AtomicBool,
+}
+
+impl FakeAn {
+    /// Scripts the answers of getter `f` on account `id`.
+    pub fn getter(&self, id: [u8; 32], f: &str, seq: Vec<serde_json::Value>) {
+        self.getters
+            .lock()
+            .unwrap()
+            .insert((id, f.into()), Script::new(seq));
+    }
+}
+
+#[async_trait]
+impl AnRead for FakeAn {
+    async fn rest_probe(&self, id: [u8; 32]) -> anyhow::Result<()> {
+        self.accounts
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|_| ())
+            .ok_or_else(|| anyhow::anyhow!("404"))
+    }
+
+    async fn account(&self, id: [u8; 32]) -> anyhow::Result<Option<AccountInfo>> {
+        Ok(self.accounts.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn run_getter(
+        &self,
+        id: [u8; 32],
+        _: &str,
+        f: &str,
+        input: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        if self.fail_getters.load(Ordering::SeqCst) {
+            anyhow::bail!("503 Service Unavailable");
+        }
+        let hang = match self.hang_getter_after.lock().unwrap().get_mut(f) {
+            Some(0) => true,
+            Some(n) => {
+                *n -= 1;
+                false
+            },
+            None => false,
+        };
+        if hang {
+            std::future::pending::<()>().await;
+        }
+        if f == "isAcceptedBlockHash" {
+            let h: B256 = input["blockHash"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+            if let Some(yes) = self
+                .accepted_seq
+                .lock()
+                .unwrap()
+                .get(&h)
+                .and_then(|s| s.next())
+            {
+                return Ok(serde_json::json!({ "value0": yes }));
+            }
+            let mut calls = self.accepted_calls.lock().unwrap();
+            let n = calls.entry(h).or_insert(0);
+            *n += 1;
+            let yes = self
+                .accepted
+                .lock()
+                .unwrap()
+                .get(&h)
+                .is_some_and(|k| *n > *k);
+            return Ok(serde_json::json!({ "value0": yes }));
+        }
+        self.getters
+            .lock()
+            .unwrap()
+            .get(&(id, f.to_string()))
+            .and_then(|s| s.next())
+            .ok_or_else(|| anyhow::anyhow!("no getter {f}"))
+    }
+
+    async fn ext_messages(
+        &self,
+        id: [u8; 32],
+        dir: ExtDir,
+        _: Option<String>,
+    ) -> anyhow::Result<Page<MsgView>> {
+        if self.fail_ext_messages.load(Ordering::SeqCst) {
+            anyhow::bail!("GraphQL timeout");
+        }
+        let m = match dir {
+            ExtDir::In => &self.ext_in,
+            ExtDir::Out => &self.ext_out,
+        };
+        Ok(Page {
+            items: m.lock().unwrap().get(&id).cloned().unwrap_or_default(),
+            cursor: None,
+        })
+    }
+
+    async fn transactions(
+        &self,
+        id: [u8; 32],
+        _: Option<String>,
+    ) -> anyhow::Result<Page<TxListItem>> {
+        if self.fail_transactions.load(Ordering::SeqCst) {
+            anyhow::bail!("GraphQL timeout");
+        }
+        Ok(Page {
+            items: self
+                .txs
+                .lock()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .unwrap_or_default(),
+            cursor: None,
+        })
+    }
+
+    async fn message(&self, h: &str) -> anyhow::Result<Option<MsgView>> {
+        Ok(self.messages.lock().unwrap().get(h).cloned())
+    }
+
+    async fn transaction(&self, h: &str) -> anyhow::Result<Option<TxView>> {
+        Ok(self.transactions.lock().unwrap().get(h).cloned())
+    }
+
+    fn decode(&self, _: &str, body: &str, _: bool) -> Option<(String, serde_json::Value)> {
+        self.bodies.lock().unwrap().get(body).cloned()
+    }
+}
+
+#[async_trait]
+impl AnSend for FakeAn {
+    async fn send_finalize(&self, _: [u8; 32], _: [u8; 32], _: &[u8], _: &[u8]) -> FinalizeSend {
+        *self.sent.lock().unwrap() += 1;
+        for (acc, m) in self.on_send_ext_out.lock().unwrap().drain(..) {
+            self.ext_out.lock().unwrap().entry(acc).or_default().push(m);
+        }
+        let delay = *self.send_delay.lock().unwrap();
+        tokio::time::sleep(delay).await;
+        self.sends
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(FinalizeSend::Unknown {
+                message: "no script".into(),
+            })
+    }
+}
+
+/// A message with no currencies and no resolved transactions.
+pub fn msg(hash: &str, kind: &str, src: &str, dst: &str, body: Option<&str>) -> MsgView {
+    MsgView {
+        hash: hash.into(),
+        msg_type: kind.into(),
+        src: src.into(),
+        dst: dst.into(),
+        body: body.map(String::from),
+        ecc: vec![],
+        bounce: None,
+        created_at: 0,
+        dst_tx: None,
+        src_tx: None,
     }
 }

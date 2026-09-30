@@ -5,6 +5,7 @@
 //! credit check — runs here, keyed by an operation id that survives a
 //! crash.
 
+pub mod an;
 pub mod args;
 pub mod binding;
 pub mod evm;

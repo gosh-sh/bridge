@@ -1281,9 +1281,11 @@ An operation that stopped in the anchor wait or after the anchor may have
 been finalized meanwhile, by the operator's relayer. A resume of it first
 passes its own checks, in this order: the command line against the record,
 then `--deposit-prover-dir` with its tools and the work directory (without
-reading either chain), then the chains and the Acki Nacki bridge. A refusal
-there takes the stage's exit code (31 in the anchor wait, 32 after the
-anchor) even if the deposit was finalized meanwhile. Then, in the anchor
+reading either chain), then the chains and the Acki Nacki bridge. A command
+line that contradicts the record, or an RPC on another chain, is exit 2 as
+above; any other refusal there takes the stage's exit code (31 in the anchor
+wait, 32 after the anchor), even if the deposit was finalized meanwhile.
+Then, in the anchor
 wait on every poll once the receipt is read, before the anchor and the
 pause, and after the anchor before a proof is built, the resume looks
 whether the deposit is finalized already. If it is, the resume only

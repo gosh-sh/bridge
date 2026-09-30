@@ -265,8 +265,8 @@ only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on 
 `_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
 the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
 chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit. That is why the daemon does not
-flip unless told to.
+delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts` is
+set. That is why the daemon does not flip unless told to.
 
 ## 4. Deployment
 
@@ -368,8 +368,8 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
 3. With the owner key, call `deployLightClient(pubkey, l1ChainId, 0, 0)` on the bridge (ABI in
    `contracts/an/0.80.0_compiled/exchange/`). The light client's constructor accepts only the
    bridge as sender, so a copy deployed with `sold` or `tvm-cli deploy` is not the one the bridge
-   listens to. Set `AN_LIGHT_CLIENT` to `getAnchorConfig().lightClient`, in `dapp_id::account_id`
-   form (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
+   listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
+   (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
 5. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
 6. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the

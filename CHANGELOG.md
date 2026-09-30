@@ -411,6 +411,7 @@ assigns it when the release is tagged.
   yet: afterwards deposits from the allowlisted L2s and from the 31
   non-checkpoint blocks of an epoch fail `finalizeDeposit` with
   `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer` stops at the first of them
+  unless `--skip-after-attempts` is set
   (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
   changes nothing. Relayer keys must be the owner pubkey of both contracts. The
   slim ABIs in `crates/eth-light-client-relayer/abi/` follow the compiled
@@ -418,8 +419,9 @@ assigns it when the release is tagged.
   `setLightClient`, and `EthBeaconLightClient.abi.json` has
   `setCommitteeCommitment`, which `set-committee` calls; point
   `AN_USDC_ABI_PATH` / `AN_LC_ABI_PATH` at these files. The light client is
-  deployed from the bridge with `deployLightClient`; `AN_LIGHT_CLIENT` is its
-  `getAnchorConfig().lightClient`. tvm-sdk#284 co-deploys with this contract.
+  deployed from the bridge with `deployLightClient`; for `getAnchorConfig()`
+  returning `lightClient = 0:<account>`, `AN_LIGHT_CLIENT` is
+  `<account>::<account>`. tvm-sdk#284 co-deploys with this contract.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
   proven checkpoint (≤ 31 parents), then pushes those hashes into

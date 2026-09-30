@@ -22,8 +22,8 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    bridge. The light client's constructor accepts only the bridge as sender, so
    a copy deployed with `sold` or `tvm-cli deploy` — including the standalone
    `contracts/an/EthBeaconLightClient.sol` — is not the one the bridge listens
-   to, and the flip refuses it. Set `AN_LIGHT_CLIENT` to
-   `getAnchorConfig().lightClient` in `dapp_id::account_id` form.
+   to, and the flip refuses it. `getAnchorConfig().lightClient` returns
+   `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`.
 3. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
    `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`). `--flip-owner`
    refuses to start without them.

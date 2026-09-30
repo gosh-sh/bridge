@@ -327,7 +327,7 @@ mod tests {
         let b = op("B", 7); // B requested with the same nonce_before and died before the hash
         let t = cand(9, 7);
         assert!(matches!(
-            decide(&a, &[t.clone()], &Claims::default()),
+            decide(&a, std::slice::from_ref(&t), &Claims::default()),
             Binding::Ambiguous { .. }
         ));
         // --resume A --tx-hash T: T is B's candidate by B's own rules.

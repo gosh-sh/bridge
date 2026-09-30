@@ -34,8 +34,6 @@ alloy::sol! {
     }
 }
 
-/// The selector of `deposit(uint256,int8,bytes32)`.
-pub const DEPOSIT_SELECTOR: [u8; 4] = [0xa4, 0x1d, 0x02, 0x29];
 /// A deposit's calldata: the selector and three words.
 pub const DEPOSIT_CALLDATA_LEN: usize = 100;
 /// topic0 of the bridge's `Deposit` event.
@@ -609,6 +607,9 @@ mod tests {
     use alloy_primitives::{address, B256, U256};
 
     use super::*;
+
+    /// The selector of `deposit(uint256,int8,bytes32)`.
+    const DEPOSIT_SELECTOR: [u8; 4] = [0xa4, 0x1d, 0x02, 0x29];
 
     #[test]
     fn deposit_calldata_is_the_selector_and_three_words() {

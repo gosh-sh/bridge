@@ -255,7 +255,7 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
             let params = args.validate(&g)?;
             crate::deposit::run(params)
                 .await
-                .map(output::RunSuccess::Deposit)
+                .map(|s| output::RunSuccess::Deposit(Box::new(s)))
         },
     }
 }

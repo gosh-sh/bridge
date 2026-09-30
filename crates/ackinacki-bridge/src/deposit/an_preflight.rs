@@ -170,8 +170,6 @@ pub struct AnPreflight {
     pub owner_anchors_enabled: bool,
     /// The code hash of the vouchers the bridge deploys.
     pub voucher_code_hash: [u8; 32],
-    /// The recipient; `None` when resuming.
-    pub recipient: Option<RecipientState>,
 }
 
 /// A preflight refusal (exit 2).
@@ -289,14 +287,13 @@ pub async fn run_with(
             light_client,
             owner_anchors_enabled,
             voucher_code_hash,
-            recipient: None,
         });
     }
     let r = transient(ui, "reading the recipient", || {
         an.account(target.account_id)
     })
     .await;
-    let (recipient, warning) = recipient_verdict(target, r.as_ref()).map_err(refuse)?;
+    let (_, warning) = recipient_verdict(target, r.as_ref()).map_err(refuse)?;
     if let Some(w) = warning {
         ui.warn(&w);
     }
@@ -306,7 +303,6 @@ pub async fn run_with(
         light_client,
         owner_anchors_enabled,
         voucher_code_hash,
-        recipient: Some(recipient),
     })
 }
 
@@ -383,12 +379,11 @@ mod tests {
         }; // not checked on resume
         let evm_bridge = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
         let min = Some(BridgeVersion(1, 5, 0));
-        let p = run_with(
+        run_with(
             &an, BRIDGE, 11_155_111, evm_bridge, &target, &ui, min, false, true,
         )
         .await
         .unwrap();
-        assert!(p.recipient.is_none());
         assert_eq!(ui.warnings().len(), 2);
         // The version is not relaxed: a resend is only safe on a fixed bridge.
         an.getter(BRIDGE, "getVersion", vec![

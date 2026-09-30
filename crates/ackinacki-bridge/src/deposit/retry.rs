@@ -154,7 +154,7 @@ mod tests {
             &ui,
             "reading",
             Some(tokio::time::Instant::now() + Duration::from_secs(5)),
-            || std::future::pending(),
+            std::future::pending,
         )
         .await;
         assert!(hang.is_none());

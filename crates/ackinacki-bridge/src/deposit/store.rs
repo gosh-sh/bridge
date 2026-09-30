@@ -167,10 +167,6 @@ impl OpRecord {
         matches!(self.stage, OpStage::Requested | OpStage::Signed)
     }
 
-    pub fn is_terminal(&self) -> bool {
-        matches!(self.stage, OpStage::Credited | OpStage::Failed)
-    }
-
     pub fn fail(
         &mut self,
         at: OpStage,

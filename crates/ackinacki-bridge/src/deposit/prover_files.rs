@@ -16,8 +16,6 @@ use crate::deposit::limits::PROVER_DEGREE;
 pub const FETCH_BIN: &str = "fetch_deposit_data";
 /// The binary that produces the proof.
 pub const PROVE_BIN: &str = "export_blake2b_proof";
-/// The binary that exports the verification key blob.
-pub const VK_BIN: &str = "export_vk_blob";
 /// The circuit config, relative to the prover directory.
 pub const CIRCUIT_PARAMS: &str = "configs/circuit_params.json";
 /// The SRS file, relative to the prover directory.
@@ -161,7 +159,7 @@ mod tests {
     }
 
     fn layout(dir: &Path, params: Option<&str>, srs: Option<Vec<u8>>) {
-        for b in [FETCH_BIN, PROVE_BIN, VK_BIN] {
+        for b in [FETCH_BIN, PROVE_BIN] {
             let p = dir.join(b);
             std::fs::write(&p, "#!/bin/sh\n").unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();

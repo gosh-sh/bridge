@@ -73,6 +73,8 @@ pub fn seal_type0(sym: &[u8; 32], iv: [u8; 12], plaintext: &[u8]) -> String {
 }
 
 /// A type 1 envelope: base64 of `0x01 || sender public || iv || ciphertext`.
+/// Only a wallet sends one; the mock wallet peer does.
+#[cfg(test)]
 pub fn seal_type1(
     sym: &[u8; 32],
     sender_public: [u8; 32],

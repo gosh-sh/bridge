@@ -5,7 +5,7 @@ use alloy_primitives::{Address, U256};
 use crate::{
     deposit::{
         args::Network,
-        evm::{read_allowance, read_balance, read_decimals, read_usdc, BlockTag, EvmRead, Header},
+        evm::{read_allowance, read_balance, read_decimals, read_usdc, BlockTag, EvmRead},
     },
     errors::{CliError, CliResult},
 };
@@ -15,12 +15,6 @@ use crate::{
 pub struct EvmPreflight {
     /// The token the bridge takes deposits in.
     pub usdc: Address,
-    /// The depositor's balance; `None` when the depositor is not known yet.
-    pub balance: Option<U256>,
-    /// The depositor's allowance to the bridge; `None` when not known yet.
-    pub allowance: Option<U256>,
-    /// The latest block the checks were made at.
-    pub head: Header,
 }
 
 /// A preflight refusal (exit 2).
@@ -95,26 +89,22 @@ pub async fn run(
             None,
         ));
     }
-    let (balance, allowance) = match from {
-        None => (None, None),
-        Some(f) => {
-            let b = read_balance(evm, usdc, f)
-                .await
-                .map_err(|e| refuse(format!("{usdc}.balanceOf failed"), Some(e)))?;
-            if b < U256::from(amount) {
-                return Err(refuse(
-                    format!(
-                        "{f} holds {b} USDC units, the deposit needs {amount}: balance too low"
-                    ),
-                    None,
-                ));
-            }
-            let a = read_allowance(evm, usdc, f, bridge)
-                .await
-                .map_err(|e| refuse(format!("{usdc}.allowance failed"), Some(e)))?;
-            (Some(b), Some(a))
-        },
-    };
+    if let Some(f) = from {
+        let b = read_balance(evm, usdc, f)
+            .await
+            .map_err(|e| refuse(format!("{usdc}.balanceOf failed"), Some(e)))?;
+        if b < U256::from(amount) {
+            return Err(refuse(
+                format!("{f} holds {b} USDC units, the deposit needs {amount}: balance too low"),
+                None,
+            ));
+        }
+        // The approve step reads it: a token that cannot answer is refused
+        // here, before the wallet is asked for anything.
+        read_allowance(evm, usdc, f, bridge)
+            .await
+            .map_err(|e| refuse(format!("{usdc}.allowance failed"), Some(e)))?;
+    }
     let head = evm
         .header(BlockTag::Latest)
         .await
@@ -133,9 +123,6 @@ pub async fn run(
         })?;
     Ok(EvmPreflight {
         usdc,
-        balance,
-        allowance,
-        head,
     })
 }
 
@@ -191,8 +178,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(p.usdc, USDC);
-        assert_eq!(p.balance, Some(U256::from(20_000_000u64)));
-        assert_eq!(p.allowance, Some(U256::ZERO));
     }
 
     #[tokio::test]

@@ -98,6 +98,7 @@ fn voucher_code(ctx: &Arc<ClientContext>) -> CliResult<String> {
 
 /// The hash of the bundled voucher code; a bridge whose
 /// `getDepositVoucherCodeHash()` differs deploys vouchers elsewhere.
+#[cfg(test)]
 pub fn voucher_code_hash(ctx: &Arc<ClientContext>) -> CliResult<[u8; 32]> {
     boc_hash(ctx, "voucher code hash", voucher_code(ctx)?)
 }

@@ -37,8 +37,6 @@ use crate::{
 pub struct LockFile {
     /// Kept open only for the lock it carries.
     _file: File,
-    /// Where the lock file lives.
-    pub path: PathBuf,
 }
 
 impl LockFile {
@@ -132,7 +130,6 @@ fn take(path: &Path) -> CliResult<Option<LockFile>> {
     let file = open(path)?;
     Ok(try_lock(&file, path)?.then(|| LockFile {
         _file: file,
-        path: path.to_path_buf(),
     }))
 }
 
@@ -144,14 +141,16 @@ async fn wait_for(path: PathBuf) -> CliResult<LockFile> {
     }
     Ok(LockFile {
         _file: file,
-        path,
     })
 }
 
 /// `$state_dir/deposit.lock`: one run at a time between "asked the wallet"
 /// and "the deposit is on chain".
 #[derive(Debug)]
-pub struct DirLock(pub LockFile);
+pub struct DirLock {
+    /// Held only: dropping it lets the lock go.
+    _lock: LockFile,
+}
 
 impl DirLock {
     /// The lock file's path inside `state_dir`.
@@ -161,23 +160,34 @@ impl DirLock {
 
     /// Takes the lock if it is free.
     pub fn try_take(state_dir: &Path) -> CliResult<Option<DirLock>> {
-        Ok(take(&Self::path(state_dir))?.map(DirLock))
+        Ok(take(&Self::path(state_dir))?.map(|l| DirLock {
+            _lock: l,
+        }))
     }
 
     /// Waits until the lock is free and takes it.
     pub async fn wait(state_dir: &Path) -> CliResult<DirLock> {
-        wait_for(Self::path(state_dir)).await.map(DirLock)
+        wait_for(Self::path(state_dir)).await.map(|l| DirLock {
+            _lock: l,
+        })
     }
 }
 
 /// `$state_dir/<op-id>.lock`: held by whichever process drives that operation.
 #[derive(Debug)]
-pub struct OpLock(pub LockFile);
+pub struct OpLock {
+    /// Held only: dropping it lets the lock go.
+    _lock: LockFile,
+}
 
 impl OpLock {
     /// Takes the operation's lock if it is free.
     pub fn try_take(state_dir: &Path, op: &str) -> CliResult<Option<OpLock>> {
-        Ok(take(&state_dir.join(format!("{op}.lock")))?.map(OpLock))
+        Ok(
+            take(&state_dir.join(format!("{op}.lock")))?.map(|l| OpLock {
+                _lock: l,
+            }),
+        )
     }
 }
 

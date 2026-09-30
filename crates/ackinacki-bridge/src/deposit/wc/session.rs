@@ -39,8 +39,12 @@ pub const EVENTS: [&str; 2] = ["chainChanged", "accountsChanged"];
 /// Relay tag of `wc_sessionPropose`.
 pub const TAG_PROPOSE: u32 = 1100;
 /// Relay tag of the answer to `wc_sessionPropose`.
+/// The wallet sends it; the mock wallet peer does.
+#[cfg(test)]
 pub const TAG_PROPOSE_RESP: u32 = 1101;
 /// Relay tag of `wc_sessionSettle`.
+/// The wallet sends it; the mock wallet peer does.
+#[cfg(test)]
 pub const TAG_SETTLE: u32 = 1102;
 /// Relay tag of the answer to `wc_sessionSettle`.
 pub const TAG_SETTLE_RESP: u32 = 1103;
@@ -51,6 +55,8 @@ pub const TAG_EXTEND: u32 = 1106;
 /// Relay tag of `wc_sessionRequest`.
 pub const TAG_REQUEST: u32 = 1108;
 /// Relay tag of the answer to `wc_sessionRequest`.
+/// The wallet sends it; the mock wallet peer does.
+#[cfg(test)]
 pub const TAG_REQUEST_RESP: u32 = 1109;
 /// Relay tag of `wc_sessionEvent`; its answer is one more.
 pub const TAG_EVENT: u32 = 1110;

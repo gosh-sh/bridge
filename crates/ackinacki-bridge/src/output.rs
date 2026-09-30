@@ -22,8 +22,9 @@ use crate::{errors::CliError, orchestrator::WithdrawSuccess};
 pub enum RunSuccess {
     /// A finished (or dry-run) withdrawal.
     Withdraw(WithdrawSuccess),
-    /// A finished, dry-run or released deposit.
-    Deposit(crate::deposit::DepositSuccess),
+    /// A finished, dry-run or released deposit; boxed, as it is several
+    /// times the size of a withdrawal's summary.
+    Deposit(Box<crate::deposit::DepositSuccess>),
 }
 
 /// Write a whole block to stdout without panicking on failure.
@@ -464,7 +465,7 @@ mod tests {
 
     #[test]
     fn the_deposit_summary_goes_to_stdout() {
-        assert!(DEPOSIT_SUMMARY_TO_STDOUT);
+        const { assert!(DEPOSIT_SUMMARY_TO_STDOUT) };
     }
 
     #[test]

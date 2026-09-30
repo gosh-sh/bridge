@@ -71,6 +71,7 @@ impl DepositPublicInputs {
     }
 
     /// The inverse of [`Self::decode`].
+    #[cfg(test)]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(PUBLIC_INPUT_BYTES);
         for fr in [
@@ -94,6 +95,7 @@ impl DepositPublicInputs {
 
     /// The public inputs an honest prover would produce for `e`, with a
     /// zero promise commitment; lets driver tests fake a prover.
+    #[cfg(test)]
     pub fn from_expected(e: &ExpectedInputs) -> Self {
         let lo_mask = (U256::from(1u8) << 128) - U256::from(1u8);
         let split = |v: U256| (v >> 128, v & lo_mask);

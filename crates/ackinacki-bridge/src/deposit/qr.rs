@@ -14,6 +14,7 @@ fn code(uri: &str) -> anyhow::Result<QrCode> {
 }
 
 /// The QR version (size class) `uri` needs at level M.
+#[cfg(test)]
 pub fn version(uri: &str) -> anyhow::Result<i16> {
     match code(uri)?.version() {
         qrcode::Version::Normal(v) => Ok(v),

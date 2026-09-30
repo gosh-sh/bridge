@@ -424,6 +424,7 @@ struct Codes {
 
 impl Codes {
     /// This process's stdout.
+    #[cfg(test)]
     fn stdout() -> Self {
         Self {
             terminal: std::io::stdout().is_terminal(),
@@ -477,6 +478,7 @@ struct Log {
 
 impl PlainLines {
     /// Lines on `out`, QR codes on stdout.
+    #[cfg(test)]
     pub fn new(out: Box<dyn Write + Send>, yes: bool, non_interactive: bool) -> Self {
         Self::build(out, Codes::stdout(), Settings {
             yes,
@@ -885,28 +887,6 @@ fn keep_ticking(board: &Weak<Mutex<Board>>, every: Duration) {
 }
 
 impl TtyBoard {
-    /// A board on `out` (a terminal), QR codes on stdout.
-    pub fn new(
-        out: Box<dyn Write + Send>,
-        uri_only: bool,
-        qr_invert: bool,
-        yes: bool,
-        non_interactive: bool,
-    ) -> Self {
-        Self::build(
-            out,
-            Codes::stdout(),
-            Settings {
-                uri_only,
-                invert: qr_invert,
-                yes,
-                non_interactive,
-            },
-            stderr_width,
-            Some(TICK),
-        )
-    }
-
     /// A board on `out`, QR codes on `codes`, rows cut to `width`,
     /// redrawn every `tick` while a step runs (never without one).
     fn build(

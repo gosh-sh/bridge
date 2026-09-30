@@ -1067,6 +1067,9 @@ pub struct FakeAn {
     pub fail_message_reads: AtomicBool,
     /// Accounts whose every read fails.
     pub failing_accounts: Mutex<HashSet<[u8; 32]>>,
+    /// Account id → how many more reads find no account before the one in
+    /// `accounts` shows.
+    pub accounts_hidden_for: Mutex<HashMap<[u8; 32], u32>>,
     /// External-message and transaction lists are served this many items
     /// a page, the cursor being where the next page starts; 0 serves each
     /// list as one page.
@@ -1117,6 +1120,10 @@ impl AnRead for FakeAn {
     async fn account(&self, id: [u8; 32]) -> anyhow::Result<Option<AccountInfo>> {
         if self.failing_accounts.lock().unwrap().contains(&id) {
             anyhow::bail!("503 Service Unavailable");
+        }
+        if let Some(n @ 1..) = self.accounts_hidden_for.lock().unwrap().get_mut(&id) {
+            *n -= 1;
+            return Ok(None);
         }
         Ok(self.accounts.lock().unwrap().get(&id).cloned())
     }

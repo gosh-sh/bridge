@@ -651,11 +651,16 @@ mod tests {
         an.getter([0x1a; 32], "isPaused", vec![
             serde_json::json!({"value0": false}),
         ]);
+        // The bridge keeps the recorded voucher code, so every poll's look
+        // reads the voucher, and finds none on the three polls up to the
+        // anchor; the grace period's first read finds it.
+        voucher_codes(&an, &[CODE]);
         an.accounts.lock().unwrap().insert([0xee; 32], AccountInfo {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
         });
+        an.accounts_hidden_for.lock().unwrap().insert([0xee; 32], 3);
         let cx = WaitCtx {
             tx_hash: B256::repeat_byte(7),
             block_hash: b.hash,

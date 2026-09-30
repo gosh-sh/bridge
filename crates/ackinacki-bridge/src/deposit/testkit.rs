@@ -944,6 +944,8 @@ pub struct FakeAn {
     /// External messages that appear once a send was made: `(account,
     /// message)`. Each lands in front of its account's list, as the newest.
     pub on_send_ext_out: Mutex<Vec<([u8; 32], MsgView)>>,
+    /// Accounts as they are once a send was made: `(account, state)`.
+    pub on_send_accounts: Mutex<Vec<([u8; 32], AccountInfo)>>,
     /// Getter name → how many more calls answer before every call hangs.
     pub hang_getter_after: Mutex<HashMap<String, u32>>,
     /// `isAcceptedBlockHash` by block: how many calls answer `false`
@@ -1142,6 +1144,9 @@ impl AnSend for FakeAn {
                 .entry(acc)
                 .or_default()
                 .insert(0, m);
+        }
+        for (acc, a) in self.on_send_accounts.lock().unwrap().drain(..) {
+            self.accounts.lock().unwrap().insert(acc, a);
         }
         let delay = *self.send_delay.lock().unwrap();
         tokio::time::sleep(delay).await;
@@ -2153,6 +2158,27 @@ impl World {
                 dapp_id: Some([0; 32]),
                 ecc3: 0,
             });
+    }
+
+    /// The recipient holds `before` micro-USDC until the first send; by the
+    /// time anything reads it after the send, it has spent everything, the
+    /// credit included.
+    pub fn recipient_spends_everything_after_the_send(&self, before: u128) {
+        let holding = |ecc3| AccountInfo {
+            status: crate::deposit::an::AccStatus::Active,
+            dapp_id: Some([0; 32]),
+            ecc3,
+        };
+        self.an
+            .accounts
+            .lock()
+            .unwrap()
+            .insert(W_ACC, holding(before));
+        self.an
+            .on_send_accounts
+            .lock()
+            .unwrap()
+            .push((W_ACC, holding(0)));
     }
 
     /// The first `finalizeDeposit` aborts with 224 (the anchor went away).

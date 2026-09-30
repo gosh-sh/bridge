@@ -1,11 +1,14 @@
 //! The deposit driver: one operation from preflight to credit, each state
 //! written before the step that could make it wrong. `drive` continues an
-//! operation from whatever state it is in; `--resume` uses it too.
+//! operation from whatever state it is in; `--resume` uses it too, and
+//! `--abandon` releases an operation whose outcome is unknown.
 //!
 //! Once the wallet may have been asked for the deposit, no error of this
 //! driver is exit 2: a failure that has no code of its own takes the one
 //! the operation's stage on disk calls for, the code an interrupt at that
-//! point would give ([`signals::exit_for`]).
+//! point would give ([`signals::exit_for`]). The one exception is a resume
+//! or an abandon under a command line that contradicts the operation's
+//! record: that is refused with exit 2 before anything is done.
 
 use std::{
     sync::{Mutex, MutexGuard, PoisonError},
@@ -22,10 +25,10 @@ use crate::{
     deposit::{
         an::{AccStatus, AnRead},
         anchor_wait::{self, WaitCtx, WaitExit},
-        args::{AnTarget, DepositParams, Network, RunMode},
-        binding::claims_of_others,
+        args::{an_network_id, AnTarget, DepositParams, Network, OpRef, RunMode},
+        binding::{check_explicit, claims_of_others},
         credit::{self, Identity},
-        evm::{deposit_calldata, parse_deposit_log, read_balance, DEPOSIT_CALLDATA_LEN},
+        evm::{deposit_calldata, parse_deposit_log, read_balance, BlockTag, DEPOSIT_CALLDATA_LEN},
         evm_confirm::{self, Expect, Negative, Outcome},
         evm_steps::{
             build_deposit_request, ensure_allowance, request_deposit, ApproveOutcome,
@@ -205,6 +208,84 @@ fn closed_before_request(
     }
     *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
     e
+}
+
+/// Once the operation is closed as failed on disk, that failure is the
+/// run's answer: an interrupt from here on (while the wallet session is
+/// being closed, say) must not report the operation as one to resume.
+fn forget_if_closed(d: &Deps, store: &Store, op: &str) {
+    if store.load(op).is_ok_and(|r| r.stage == OpStage::Failed) {
+        *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+/// The exits other than 2 that a closed operation can have recorded.
+const RECORDED_EXITS: [ExitCode; 11] = [
+    ExitCode::DuplicateRefused,
+    ExitCode::WalletFailed,
+    ExitCode::ApproveFailed,
+    ExitCode::DepositReverted,
+    ExitCode::DepositOutcomeUnknown,
+    ExitCode::AnWaitTimeout,
+    ExitCode::DepositProofFailed,
+    ExitCode::FinalizeRefused,
+    ExitCode::CreditUnconfirmed,
+    ExitCode::DepositUnprovable,
+    ExitCode::CreditAborted,
+];
+
+/// What a run of an operation closed as failed answers: the message and
+/// the exit code of the run that closed it (20 for a rejection in the
+/// wallet, 21 for a failed approve, 22 for a revert, 35 for a deposit
+/// other than the one requested, and so on), never a generic refusal.
+fn terminal(rec: &OpRecord) -> CliError {
+    let op = &rec.op_id;
+    let Some(f) = &rec.failure else {
+        return CliError::Preflight {
+            reason: format!("operation {op} failed without a recorded reason; nothing to continue"),
+            source: None,
+        };
+    };
+    let stage = match f.reason {
+        FailReason::Interrupted => Stage::Preflight,
+        FailReason::Refused => Stage::Wallet,
+        FailReason::ApproveFailed => Stage::Approve,
+        FailReason::CreditAborted => Stage::Credit,
+        FailReason::Rejected
+        | FailReason::NonceConsumed
+        | FailReason::Reverted
+        | FailReason::Mismatch
+        | FailReason::Unprovable => Stage::Deposit,
+    };
+    let said = format!("operation {op} has ended: {}", f.detail);
+    match RECORDED_EXITS.into_iter().find(|c| c.as_i32() == f.exit) {
+        Some(code) => err(code, stage, op, said),
+        None => CliError::Preflight {
+            reason: said,
+            source: None,
+        },
+    }
+}
+
+/// `e`, a record of operation `op` that exists and cannot be read: how far
+/// the operation got is unknown, which is exit 34, never "nothing was
+/// sent".
+fn unreadable(op: &str, e: CliError) -> CliError {
+    let why = match e {
+        CliError::Preflight {
+            reason, ..
+        } => reason,
+        other => other.to_string(),
+    };
+    err(
+        ExitCode::CreditUnconfirmed,
+        Stage::Deposit,
+        op,
+        format!(
+            "{why}; how far the operation got is unknown. Restore its record, then run --resume \
+             {op} again"
+        ),
+    )
 }
 
 /// A 32-byte id stored in a record as 64 hex digits; `None` for a
@@ -439,6 +520,7 @@ pub async fn run_fresh(
         from,
     };
     if let Err(e) = request(p, d, &board, &store, &mut rec, &cx, wallet, ask).await {
+        forget_if_closed(d, &store, &op);
         wallet.close().await;
         board.failed(&e);
         return Err(e.into());
@@ -990,6 +1072,9 @@ pub async fn drive(
 ) -> CliResult<DepositSuccess> {
     let board = Board::new(d.ui.as_ref());
     let r = walk(p, d, &board, store, rec, cx, &mut wallet, dir_lock).await;
+    if r.is_err() {
+        forget_if_closed(d, store, &rec.op_id);
+    }
     if let Some(w) = wallet.take() {
         w.close().await;
     }
@@ -1014,11 +1099,12 @@ async fn walk(
     let mut phase = match rec.stage {
         // A finished operation is reported from its record alone.
         OpStage::Credited => return Ok(summary(rec, None, (None, None))),
-        OpStage::Reserved | OpStage::Failed => {
+        // A closed operation answers with what the run that closed it said.
+        OpStage::Failed => return Err(terminal(rec)),
+        OpStage::Reserved => {
             return Err(CliError::Preflight {
                 reason: format!(
-                    "operation {op} is in stage {:?}; there is nothing to continue",
-                    rec.stage
+                    "operation {op} never asked the wallet; there is nothing to continue"
                 ),
                 source: None,
             })
@@ -1515,6 +1601,449 @@ pub fn summary(
     }
 }
 
+// ---- --resume, --tx-hash, --abandon ----
+
+/// Refuses a command line that contradicts the operation's record: another
+/// EVM network or bridge, another Acki Nacki bridge, or another Acki Nacki
+/// network (scheme, host and port of `--gql-endpoint`). Under another
+/// profile a resume could send the deposit's `finalizeDeposit` to a second
+/// Acki Nacki bridge that trusts the same EVM bridge, and the deposit would
+/// be minted twice. Exit 2, before anything is done.
+pub fn check_flags_against(p: &DepositParams, rec: &OpRecord) -> CliResult<()> {
+    let mut clash = Vec::new();
+    if let Some(n) = p.network {
+        if n.chain_id() != rec.params.chain_id {
+            clash.push(format!(
+                "--network is chain {}, the operation is on chain {}",
+                n.chain_id(),
+                rec.params.chain_id
+            ));
+        }
+    }
+    if let Some(b) = p.bridge {
+        if b != rec.params.bridge {
+            clash.push(format!(
+                "--bridge-address is {b}, the operation was made to bridge {}",
+                rec.params.bridge
+            ));
+        }
+    }
+    if let Some(acc) = p.usdc_bridge_account {
+        if !hex::encode(acc).eq_ignore_ascii_case(&rec.params.an_bridge) {
+            clash.push(format!(
+                "--usdc-bridge-account is {}, the operation was made to Acki Nacki bridge {}",
+                hex::encode(acc),
+                rec.params.an_bridge
+            ));
+        }
+    }
+    if let Some(g) = &p.gql_endpoint {
+        let n = an_network_id(g)?;
+        if n != rec.params.an_network {
+            clash.push(format!(
+                "--gql-endpoint is on {n}, the operation was made on Acki Nacki network {}",
+                rec.params.an_network
+            ));
+        }
+    }
+    if clash.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Preflight {
+        reason: format!(
+            "operation {} does not match this command line: {}. Use the profile it was made with \
+             (nothing was sent)",
+            rec.op_id,
+            clash.join("; ")
+        ),
+        source: None,
+    })
+}
+
+/// The operation `target` names: an operation id whose record is in the
+/// state directory, or the one operation of this bridge (and of
+/// `--network`, when given) that recorded the deposit id. Anything else is
+/// exit 2: nothing about it is known here.
+fn find_op(p: &DepositParams, store: &Store, target: &OpRef) -> CliResult<String> {
+    let refuse = |reason: String| CliError::Preflight {
+        reason,
+        source: None,
+    };
+    match target {
+        OpRef::Op(id) if store.record_path(id).exists() => Ok(id.clone()),
+        OpRef::Op(id) => Err(refuse(format!(
+            "no deposit operation {id} in {} (nothing was sent)",
+            store.dir().display()
+        ))),
+        OpRef::DepositId(n) => {
+            let bridge = p.bridge.ok_or_else(|| CliError::Usage {
+                reason: "deposit: --resume <depositId> needs --bridge-address".into(),
+            })?;
+            let recs = store.list()?;
+            let hits: Vec<&OpRecord> = recs
+                .iter()
+                .filter(|r| {
+                    r.params.bridge == bridge
+                        && p.network
+                            .is_none_or(|net| net.chain_id() == r.params.chain_id)
+                })
+                .filter(|r| r.deposit.as_ref().is_some_and(|x| x.deposit_id == *n))
+                .collect();
+            match hits.as_slice() {
+                [one] => Ok(one.op_id.clone()),
+                [] => Err(refuse(format!(
+                    "no operation in {} recorded depositId {n} of bridge {bridge} (nothing was \
+                     sent)",
+                    store.dir().display()
+                ))),
+                many => Err(refuse(format!(
+                    "depositId {n} is recorded by operations {}; resume one of them by its id",
+                    many.iter()
+                        .map(|r| r.op_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+            }
+        },
+    }
+}
+
+/// An operation a resume goes on with: locked by this process, its record
+/// read and checked against the command line.
+struct Opened {
+    /// The state directory.
+    store: Store,
+    /// The operation id.
+    op: String,
+    /// The operation's own lock, held until the resume ends.
+    lock: OpLock,
+    /// The record as it stands on disk.
+    rec: OpRecord,
+}
+
+/// What the record alone says about the operation a resume names. Both
+/// are boxed: each is built once, and neither is small.
+enum Resumable {
+    /// Credited: its summary.
+    Finished(Box<DepositSuccess>),
+    /// Somewhere between the deposit request and the credit.
+    Open(Box<Opened>),
+}
+
+/// The part of a resume that asks neither chain: finds and locks the
+/// operation, reads its record, checks the command line against it, and
+/// answers what the record answers alone. A credited operation answers
+/// with its summary, a failed one with its recorded code and message, and
+/// a reservation whose run died is closed as interrupted (exit 2: its
+/// wallet was never asked). `current_op` names the operation from the lock
+/// on, before its record is read, so that an interrupt reports on the
+/// record as it stands.
+async fn open_for_resume(
+    p: &DepositParams,
+    target: &OpRef,
+    ui: &dyn Ui,
+    current_op: &Mutex<Option<String>>,
+) -> CliResult<Resumable> {
+    let store = Store::open(&p.state_dir)?;
+    let op = find_op(p, &store, target)?;
+    let Some(lock) = OpLock::try_take(&p.state_dir, &op)? else {
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            Some(&op),
+            format!(
+                "operation {op} is being run by another process (nothing was sent by this run)"
+            ),
+        ));
+    };
+    let forget = || *current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
+    ui.op_id(&op);
+    let mut rec = store.load(&op).map_err(|e| unreadable(&op, e))?;
+    check_flags_against(p, &rec)?;
+    match rec.stage {
+        // Neither chain is asked for a finished operation.
+        OpStage::Credited => {
+            return Ok(Resumable::Finished(Box::new(summary(
+                &rec,
+                None,
+                (None, None),
+            ))))
+        },
+        OpStage::Failed => {
+            forget();
+            return Err(terminal(&rec));
+        },
+        OpStage::Reserved => {
+            // Its lock was free: the run that reserved it is gone, and it
+            // never asked the wallet. Closed as a new deposit's preflight
+            // closes such an operation, under the directory lock.
+            let _dir = DirLock::wait(store.dir()).await?;
+            rec.fail(
+                OpStage::Reserved,
+                FailReason::Interrupted,
+                ExitCode::PreflightRefused,
+                "the run that reserved it exited before asking the wallet",
+            );
+            store.write(&mut rec).map_err(nothing_sent)?;
+            forget();
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "operation {op} never asked the wallet, so there is nothing to continue; it \
+                     is closed now (nothing was sent)"
+                ),
+                source: None,
+            });
+        },
+        _ => {},
+    }
+    Ok(Resumable::Open(Box::new(Opened {
+        store,
+        op,
+        lock,
+        rec,
+    })))
+}
+
+/// The steps a run before this one finished, marked done on a resume's
+/// board so that it starts where the operation is.
+fn done_earlier(board: &Board<'_>, stage: OpStage) {
+    let reached = match stage {
+        OpStage::Requested | OpStage::Abandoned => StepId::Deposit,
+        OpStage::Signed => StepId::EvmConfirm,
+        OpStage::Confirmed => StepId::Anchor,
+        OpStage::Anchored => StepId::Prove,
+        OpStage::Proved | OpStage::Finalizing => StepId::Finalize,
+        OpStage::Reserved | OpStage::Credited | OpStage::Failed => return,
+    };
+    for s in StepId::ALL
+        .into_iter()
+        .skip(1)
+        .take_while(|s| *s != reached)
+    {
+        board.done(s, "earlier run");
+    }
+}
+
+/// Binds the transaction the user named with `--tx-hash`. It must be a
+/// successful bridge deposit from the operation's sender, made from the
+/// block the deposit was requested at, that no other operation has claimed
+/// and that no other operation whose outcome is unknown could take by its
+/// own rules; the nonce and uniqueness rules of the search are skipped. The
+/// chain is read first; the claims are checked and the binding written
+/// under the directory lock. A refusal leaves the record as it was, with
+/// the exit of an outcome still unknown.
+async fn bind_explicit(d: &Deps, store: &Store, rec: &mut OpRecord, h: B256) -> CliResult<()> {
+    let op = rec.op_id.clone();
+    let refused = |why: String| {
+        err(
+            ExitCode::DepositOutcomeUnknown,
+            Stage::Deposit,
+            &op,
+            format!("--tx-hash {h:#x}: {why}. Operation {op} is left as it was"),
+        )
+    };
+    if !matches!(
+        rec.stage,
+        OpStage::Requested | OpStage::Signed | OpStage::Abandoned
+    ) {
+        // Confirmed on chain already: only its own transaction is accepted.
+        return match rec.tx {
+            Some(t) if t.tx_hash == h => Ok(()),
+            _ => Err(after_request(store, &op, CliError::Preflight {
+                reason: format!(
+                    "--tx-hash {h:#x}: operation {op} is past its confirmation on chain, bound to \
+                     {}",
+                    rec.tx
+                        .map(|t| format!("{:#x}", t.tx_hash))
+                        .unwrap_or_else(|| "its transaction".into())
+                ),
+                source: None,
+            })),
+        };
+    }
+    let ui = d.ui.as_ref();
+    let head = transient(ui, "reading the chain head", || async {
+        d.evm
+            .header(BlockTag::Latest)
+            .await?
+            .map(|b| b.number)
+            .ok_or_else(|| anyhow!("no latest block"))
+    })
+    .await;
+    // A log whose transaction the node does not return right now leaves
+    // the list incomplete: it is read again, never judged on.
+    let view = rec.clone();
+    let cands = transient(ui, "reading the deposits of the operation's sender", || {
+        recovery::candidates(d.evm.as_ref(), &view, view.params.bridge, head)
+    })
+    .await;
+    let Some(c) = cands.into_iter().find(|c| c.tx_hash == h) else {
+        return Err(refused(format!(
+            "it is no Deposit to bridge {} from {} made since block {}",
+            rec.params.bridge,
+            rec.from
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "the sender".into()),
+            rec.request.as_ref().map(|q| q.from_block).unwrap_or(0)
+        )));
+    };
+    // Claims are read and written under the directory lock.
+    let _dir = DirLock::wait(store.dir())
+        .await
+        .map_err(|e| after_request(store, &op, e))?;
+    let recs = store.list().map_err(|e| after_request(store, &op, e))?;
+    let (chain_id, bridge) = (rec.params.chain_id, rec.params.bridge);
+    let others = claims_of_others(&recs, &op, chain_id, bridge);
+    let unresolved: Vec<&OpRecord> = recs
+        .iter()
+        .filter(|r| r.op_id != op && r.params.chain_id == chain_id && r.params.bridge == bridge)
+        .filter(|r| r.is_unresolved())
+        .collect();
+    check_explicit(rec, &c, &others, &unresolved).map_err(refused)?;
+    rec.stage = OpStage::Signed;
+    rec.tx = Some(TxClaim {
+        tx_hash: h,
+        tx_nonce: c.nonce,
+    });
+    persist(store, rec)
+}
+
+/// `--resume`: continues the operation `target` names from its first
+/// unfinished step, with the parameters from its record. A credited
+/// operation is reported from its record, a failed one answers with its
+/// recorded code and message; otherwise the resume checks only what the
+/// recorded stage still needs ([`preflight::context_for_resume`]) and
+/// drives the operation on. With `tx_hash` the named transaction is bound
+/// first ([`bind_explicit`]); without it, an abandoned operation goes back
+/// to the unknown outcome it was released in, and the record says so once
+/// a transaction is bound.
+pub async fn resume(
+    p: &DepositParams,
+    d: &Deps,
+    target: &OpRef,
+    tx_hash: Option<B256>,
+) -> CliResult<DepositSuccess> {
+    let ui = d.ui.as_ref();
+    let Opened {
+        store,
+        op,
+        lock,
+        mut rec,
+    } = match open_for_resume(p, target, ui, &d.current_op).await? {
+        Resumable::Finished(s) => return Ok(*s),
+        Resumable::Open(o) => *o,
+    };
+    let board = Board::new(ui);
+    board.start(
+        StepId::Preflight,
+        &format!("resuming operation {op} at {:?}", rec.stage),
+    );
+    let cx = board.answer(preflight::context_for_resume(p, d, &rec).await)?;
+    board.done(StepId::Preflight, "");
+    done_earlier(&board, rec.stage);
+    if let Some(h) = tx_hash {
+        bind_explicit(d, &store, &mut rec, h).await?;
+    } else if rec.stage == OpStage::Abandoned {
+        rec.stage = if rec.tx.is_some() {
+            OpStage::Signed
+        } else {
+            OpStage::Requested
+        };
+    }
+    drive(p, d, &store, &mut rec, &cx, None, None, lock).await
+}
+
+/// A resume whose chains could not even be set up: `why` is the endpoint
+/// its client rejected. What the record answers alone is still answered —
+/// a credited operation's summary, a failed one's code. Any other operation
+/// may be anywhere between the request and the credit, so `why` takes the
+/// exit its stage on disk calls for, never exit 2.
+pub async fn resume_without_chains(
+    p: &DepositParams,
+    target: &OpRef,
+    ui: &dyn Ui,
+    current_op: &Mutex<Option<String>>,
+    why: CliError,
+) -> CliResult<DepositSuccess> {
+    match open_for_resume(p, target, ui, current_op).await? {
+        Resumable::Finished(s) => Ok(*s),
+        Resumable::Open(o) => Err(after_request(&o.store, &o.op, why)),
+    }
+}
+
+/// `--abandon`: releases an operation whose EVM outcome is unknown, after
+/// the user checked in the wallet that its transaction does not exist. The
+/// operation stops blocking new deposits and becomes `Abandoned`; if its
+/// transaction appears after all, `--resume` still picks it up, and it is
+/// never again bound by the observed nonce alone. The command line is
+/// checked against the record first, and the record changes only after
+/// that check.
+pub async fn abandon(p: &DepositParams, op: &str, ui: &dyn Ui) -> CliResult<DepositSuccess> {
+    let store = Store::open(&p.state_dir)?;
+    let op = find_op(p, &store, &OpRef::Op(op.to_string()))?;
+    let Some(_lock) = OpLock::try_take(&p.state_dir, &op)? else {
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            Some(&op),
+            format!(
+                "operation {op} is being run by another process; stop it first (nothing was \
+                 changed)"
+            ),
+        ));
+    };
+    ui.op_id(&op);
+    // Read and written under the directory lock, like the claims.
+    let _dir = DirLock::wait(&p.state_dir).await?;
+    let mut rec = store.load(&op).map_err(|e| unreadable(&op, e))?;
+    // Under another profile an abandon would release an operation this
+    // command line cannot even see.
+    check_flags_against(p, &rec)?;
+    match rec.stage {
+        OpStage::Requested | OpStage::Signed => {
+            rec.stage = OpStage::Abandoned;
+            rec.abandoned_ever = true;
+            persist(&store, &mut rec)?;
+        },
+        OpStage::Abandoned => {},
+        other => {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "operation {op} is in stage {other:?}; only an operation whose outcome on the \
+                     EVM chain is unknown can be abandoned (nothing was changed)"
+                ),
+                source: None,
+            })
+        },
+    }
+    ui.warn(&format!(
+        "operation {op} released. If its transaction appears after all, `ackinacki-bridge deposit \
+         --resume {op}` still picks it up"
+    ));
+    Ok(DepositSuccess {
+        op_id: Some(op.clone()),
+        dry_run: false,
+        network: Network::from_chain_id(rec.params.chain_id)
+            .map(|n| n.name().to_string())
+            .unwrap_or_default(),
+        chain_id: rec.params.chain_id,
+        amount: UsdcAmount(u128::from(rec.params.amount_units)).display(),
+        to: rec.params.to.clone(),
+        deposit: rec.tx.map(|t| {
+            json!({
+                "tx_hash": format!("{:#x}", t.tx_hash),
+                "deposit_id": null,
+            })
+        }),
+        anchor: None,
+        tx: None,
+        confirmation: None,
+        balance: None,
+        abandoned: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1698,6 +2227,9 @@ mod tests {
             .unwrap();
         assert_eq!(rec.stage, OpStage::Credited);
         assert_eq!(w.prover_runs(), 1);
+        // The world shows DepositFinalized from the start: only the count
+        // tells that step 8 really sent.
+        assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
         assert_eq!(*d.current_op.lock().unwrap(), s.op_id);
         let j = serde_json::to_value(&s).unwrap();
         assert_eq!(j["deposit"]["tx_hash"], format!("{h:#x}"));
@@ -1770,6 +2302,11 @@ mod tests {
             .load(e.op_id().unwrap())
             .unwrap();
         assert_eq!(rec.failure.unwrap().reason, FailReason::Reverted);
+        assert_eq!(
+            *d.current_op.lock().unwrap(),
+            None,
+            "the operation is closed: an interrupt now must not offer --resume"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1845,6 +2382,10 @@ mod tests {
             !m.contains("the pipeline is not assembled"),
             "Task A2's stub must be replaced"
         );
+        assert!(
+            !m.contains("not available in this build yet"),
+            "--resume and --abandon reach the driver"
+        );
         let run = crate::source_guard::production_source("run.rs", include_str!("run.rs"));
         for bad in ["unimplemented!", "todo!", "panic!(", ".unwrap()"] {
             assert!(
@@ -1883,7 +2424,8 @@ mod tests {
             .send_results
             .extend([Ok(a), Err(WalletError::Rejected)]);
         let p = w.params(RunMode::Fresh);
-        let f = run_fresh(&p, &w.deps(), &mut w.wallet).await.unwrap_err();
+        let d = w.deps();
+        let f = run_fresh(&p, &d, &mut w.wallet).await.unwrap_err();
         assert_eq!(f.error.exit_code(), ExitCode::WalletFailed);
         assert!(
             !f.pairing_failed,
@@ -1894,6 +2436,11 @@ mod tests {
             .load(f.error.op_id().unwrap())
             .unwrap();
         assert_eq!(rec.failure.unwrap().reason, FailReason::Rejected);
+        assert_eq!(
+            *d.current_op.lock().unwrap(),
+            None,
+            "closed as rejected before the wallet session is closed"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2041,18 +2588,610 @@ mod tests {
         assert!(e.to_string().contains("nothing was sent"), "{e}");
     }
 
+    // ---- --resume, --tx-hash, --abandon ----
+
+    /// [`on_the_real_clock`] for a resume of `target`.
+    fn resuming_on_the_real_clock(w: &World, target: &OpRef) -> (DepositParams, Deps) {
+        let (mut p, d) = on_the_real_clock(w);
+        p.mode = RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        };
+        (p, d)
+    }
+
     #[tokio::test]
-    async fn resume_and_abandon_are_refused_until_they_are_wired() {
+    async fn resume_finds_a_transaction_mined_after_the_window() {
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        let op = w.left_requested_operation_from(from);
+        w.mined_deposit_for_operation(&op, 7);
+        w.anchor_after(1);
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let (p, d) = resuming_on_the_real_clock(&w, &target);
+        let s = resume(&p, &d, &target, None).await.unwrap();
+        assert!(s.confirmation.is_some());
+    }
+
+    #[tokio::test]
+    async fn abandon_then_resume_still_works_when_the_transaction_appears() {
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        let op = w.left_signed_operation_from(from, 7);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let p = w.params(RunMode::Abandon(op.clone()));
+        assert!(abandon(&p, &op, &ui).await.unwrap().abandoned);
+        assert!(
+            ui.warnings().iter().any(|w| w.contains("--resume")),
+            "{:?}",
+            ui.warnings()
+        );
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Abandoned);
+        assert!(!rec.is_unresolved(), "a new deposit is no longer blocked");
+        w.mined_deposit_for_operation(&op, 7);
+        w.anchor_after(1);
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let (p, d) = resuming_on_the_real_clock(&w, &target);
+        assert!(
+            resume(&p, &d, &target, None).await.is_ok(),
+            "tx_nonce was known before the abandon"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_refuses_flags_that_contradict_the_record() {
         let w = World::healthy();
-        for mode in [
-            RunMode::Resume {
-                target: OpRef::Op("01J0000000000000000000000A".into()),
-                tx_hash: None,
-            },
-            RunMode::Abandon("01J0000000000000000000000A".into()),
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let target = OpRef::Op(op);
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.bridge = Some(alloy_primitives::address!(
+            "8545129b215b248944a3ae40f711f34cab458644"
+        ));
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
+        assert!(e.to_string().contains("bridge"), "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_refuses_another_acki_nacki_bridge_or_network() {
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let target = OpRef::Op(op);
+        let mut other_bridge = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        other_bridge.usdc_bridge_account = Some([0x20; 32]);
+        let mut other_network = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        other_network.gql_endpoint = Some("https://mainnet.ackinacki.org/graphql".into());
+        // The same host on another port is another network.
+        let mut other_port = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        other_port.gql_endpoint = Some("http://gql.invalid:8700/graphql".into());
+        for (p, needle) in [
+            (other_bridge, "Acki Nacki bridge"),
+            (other_network, "Acki Nacki network"),
+            (other_port, "Acki Nacki network"),
         ] {
-            let e = crate::deposit::run(w.params(mode)).await.unwrap_err();
+            let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
             assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
+            assert!(e.to_string().contains(needle), "{e}");
         }
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_of_a_credited_operation_reads_only_its_record() {
+        let mut w = World::healthy();
+        let op = w.credited_operation();
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let mut d = w.deps();
+        // Neither chain answers anything.
+        d.evm = std::sync::Arc::new(FakeEvm::default());
+        d.an = std::sync::Arc::new(FakeAn::default());
+        let s = resume(&p, &d, &target, None).await.unwrap();
+        assert_eq!(s.confirmation.unwrap()["confirm_tx"], "btx");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_of_finalizing_on_a_paused_bridge_still_reads_the_credit() {
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        w.paused(true);
+        w.voucher_deployed();
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.prover_dir = Some("/nonexistent/prover".into()); // not needed: the voucher is there
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert!(s.confirmation.is_some());
+        assert_eq!(w.prover_runs(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_resume_of_one_operation_is_exit_3() {
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let target = OpRef::Op(op.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let _first = crate::deposit::locks::OpLock::try_take(&p.state_dir, &op)
+            .unwrap()
+            .unwrap();
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DuplicateRefused);
+        // Nor can the operation be released while another process runs it.
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = abandon(&p, &op, &ui).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DuplicateRefused);
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Signed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_operation_without_identity_needs_tx_hash_and_refuses_anothers() {
+        let mut w = World::healthy();
+        // A: Requested at nonce n, abandoned. B: Requested at nonce n, died
+        // before its hash. T: B's transaction.
+        let (a, b, t) = w.two_operations_one_slot(7);
+        let target = OpRef::Op(a.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositOutcomeUnknown);
+        assert!(e.to_string().contains("--tx-hash"));
+        let e = resume(&p, &w.deps(), &target, Some(t)).await.unwrap_err();
+        assert!(e.to_string().contains(&b), "must point at B: {e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&a).unwrap();
+        assert_eq!(rec.stage, OpStage::Abandoned, "A is left as it was");
+        assert!(rec.tx.is_none());
+        // B binds it by its own nonce_before. Nothing anchors the block, so
+        // the run stops in the anchor wait with the deposit confirmed.
+        let target = OpRef::Op(b.clone());
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.anchor_timeout = Some(Duration::from_secs(1));
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&b).unwrap();
+        assert_eq!(rec.stage, OpStage::Confirmed);
+        assert_eq!(rec.tx.map(|c| c.tx_hash), Some(t));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_explicit_hash_binds_an_abandoned_operation_without_identity() {
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        let op = w.left_requested_operation_from(from);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let p = w.params(RunMode::Abandon(op.clone()));
+        abandon(&p, &op, &ui).await.unwrap();
+        let t = w.mined_deposit(7);
+        let target = OpRef::Op(op.clone());
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: Some(t),
+        });
+        p.anchor_timeout = Some(Duration::from_secs(1));
+        let e = resume(&p, &w.deps(), &target, Some(t)).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Confirmed);
+        assert_eq!(
+            rec.tx,
+            Some(TxClaim {
+                tx_hash: t,
+                tx_nonce: 7
+            })
+        );
+        assert!(rec.abandoned_ever);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tx_hash_that_is_no_deposit_of_the_operation_changes_nothing() {
+        let w = World::healthy();
+        let op = w.left_requested_operation_from(w.wallet.account);
+        let a = w.approve_hash(); // mined, but no deposit
+        let target = OpRef::Op(op.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: Some(a),
+        });
+        let e = resume(&p, &w.deps(), &target, Some(a)).await.unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::DepositOutcomeUnknown,
+            "the deposit may be in flight: never exit 2: {e}"
+        );
+        assert!(e.to_string().contains(&format!("{a:#x}")), "{e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Requested);
+        assert!(rec.tx.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_between_the_wallet_hash_and_its_nonce_resumes_to_exit_22() {
+        let mut w = World::healthy();
+        let h = w.reverted_deposit_finalized(7);
+        let from = w.wallet.account;
+        let op = w.left_requested_operation_with_wallet_hash(from, h);
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::DepositReverted,
+            "not an endless search for a Deposit log"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_that_deposited_another_amount_is_exit_35_not_nothing_deposited() {
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        let op = w.left_signed_operation_from(from, 7);
+        w.mined_deposit_of_amount(7, W_AMOUNT / 2);
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let d = w.deps();
+        let e = resume(&p, &d, &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositUnprovable);
+        assert!(e.to_string().contains("differs from the request"), "{e}");
+        assert_eq!(
+            *d.current_op.lock().unwrap(),
+            None,
+            "closed for the operator: an interrupt now must not offer --resume"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abandon_refuses_a_profile_the_operation_was_not_made_with() {
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let mut p = w.params(RunMode::Abandon(op.clone()));
+        p.gql_endpoint = Some("https://mainnet.ackinacki.org/graphql".into());
+        let e = abandon(&p, &op, &ui).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
+        assert!(e.to_string().contains("Acki Nacki network"), "{e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Signed, "the record is untouched");
+        assert!(!rec.abandoned_ever);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_of_a_failed_operation_repeats_its_exit_code_and_message() {
+        let w = World::healthy();
+        for (reason, code) in [
+            (FailReason::Rejected, ExitCode::WalletFailed),
+            (FailReason::NonceConsumed, ExitCode::WalletFailed),
+            (FailReason::ApproveFailed, ExitCode::ApproveFailed),
+            (FailReason::Refused, ExitCode::WalletFailed),
+            (FailReason::Refused, ExitCode::PreflightRefused),
+            (FailReason::Refused, ExitCode::DuplicateRefused),
+            (FailReason::Interrupted, ExitCode::PreflightRefused),
+            (FailReason::Reverted, ExitCode::DepositReverted),
+            (FailReason::Mismatch, ExitCode::DepositUnprovable),
+            (FailReason::Unprovable, ExitCode::DepositUnprovable),
+            (FailReason::CreditAborted, ExitCode::CreditAborted),
+        ] {
+            let op = w.left_signed_operation_from(w.wallet.account, 7);
+            let target = OpRef::Op(op.clone());
+            let p = w.params(RunMode::Resume {
+                target: target.clone(),
+                tx_hash: None,
+            });
+            let store = Store::open(&p.state_dir).unwrap();
+            let mut rec = store.load(&op).unwrap();
+            rec.fail(
+                OpStage::Signed,
+                reason,
+                code,
+                format!("recorded for {reason:?}"),
+            );
+            store.write(&mut rec).unwrap();
+            let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+            assert_eq!(e.exit_code(), code, "{reason:?}");
+            assert!(
+                e.to_string().contains(&format!("recorded for {reason:?}")),
+                "{e}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_record_given_to_the_driver_answers_with_its_own_code() {
+        let w = World::healthy();
+        let store = Store::open(w.state.path()).unwrap();
+        let mut rec = record(&store, OpStage::Signed);
+        rec.fail(
+            OpStage::Signed,
+            FailReason::Mismatch,
+            ExitCode::DepositUnprovable,
+            "another amount",
+        );
+        store.write(&mut rec).unwrap();
+        let op_lock = OpLock::try_take(store.dir(), &rec.op_id).unwrap().unwrap();
+        let cx = RunCx {
+            plan: AnchorPlan::Owner {
+                lc_ready: false,
+            },
+            bridge_acc: W_BRIDGE_ACC,
+            bridge_dapp: [0; 32],
+            light_client: None,
+            prover: w.prover.1.clone(),
+            rpc_url: "http://rpc.invalid".into(),
+            usdc: W_USDC,
+        };
+        let p = w.params(RunMode::Fresh);
+        let e = drive(&p, &w.deps(), &store, &mut rec, &cx, None, None, op_lock)
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositUnprovable, "{e}");
+        assert!(e.to_string().contains("another amount"), "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_an_unknown_outcome_can_be_abandoned() {
+        let mut w = World::healthy();
+        let op = w.credited_operation();
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let p = w.params(RunMode::Abandon(op.clone()));
+        assert_eq!(
+            abandon(&p, &op, &ui).await.unwrap_err().exit_code(),
+            ExitCode::PreflightRefused
+        );
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Credited);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_operation_that_is_not_there_is_refused_without_a_trace() {
+        let w = World::healthy();
+        let op = "01J0000000000000000000000A".to_string();
+        let target = OpRef::Op(op.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = abandon(&p, &op, &ui).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
+        assert!(
+            !p.state_dir.join(format!("{op}.lock")).exists(),
+            "no lock file for an operation that does not exist"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_by_deposit_id_finds_the_operation_that_made_it() {
+        let mut w = World::healthy();
+        let op = w.credited_operation();
+        let id = Store::open(w.state.path())
+            .unwrap()
+            .load(&op)
+            .unwrap()
+            .deposit
+            .unwrap()
+            .deposit_id;
+        let target = OpRef::DepositId(id);
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.network = None; // optional for a lookup by deposit id
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(s.op_id.as_deref(), Some(op.as_str()));
+        let unknown = OpRef::DepositId(id + alloy_primitives::U256::from(1));
+        let e = resume(&p, &w.deps(), &unknown, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reservation_whose_run_died_is_closed_as_interrupted() {
+        let w = World::healthy();
+        let store = Store::open(w.state.path()).unwrap();
+        let rec = record(&store, OpStage::Reserved);
+        let target = OpRef::Op(rec.op_id.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
+        assert!(e.to_string().contains("nothing was sent"), "{e}");
+        let back = store.load(&rec.op_id).unwrap();
+        assert_eq!(back.failure.unwrap().reason, FailReason::Interrupted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_refuses_a_bridge_below_the_minimum_version_by_the_stage() {
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let target = OpRef::Op(op.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let mut d = w.deps();
+        d.min_bridge = Some(crate::deposit::an_preflight::BridgeVersion(1, 7, 0));
+        let e = resume(&p, &d, &target, None).await.unwrap_err();
+        assert!(e.to_string().contains("1.7.0"), "{e}");
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::DepositOutcomeUnknown,
+            "the deposit may be in flight: never exit 2: {e}"
+        );
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Signed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_whose_chains_cannot_be_set_up_answers_from_the_record() {
+        let mut w = World::healthy();
+        let signed = w.left_signed_operation_from(w.wallet.account, 7);
+        let credited = w.credited_operation();
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let current = std::sync::Mutex::new(None);
+        let why = || CliError::ArgInvalid {
+            flag: "rpc-url",
+            expected: "an http(s) URL".into(),
+            got: crate::args::redact("not a url"),
+        };
+        let t = OpRef::Op(signed);
+        let p = w.params(RunMode::Resume {
+            target: t.clone(),
+            tx_hash: None,
+        });
+        let e = resume_without_chains(&p, &t, &ui, &current, why())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::DepositOutcomeUnknown,
+            "the wallet was asked: never exit 2: {e}"
+        );
+        assert!(e.to_string().contains("--rpc-url"), "{e}");
+        let t = OpRef::Op(credited);
+        let s = resume_without_chains(&p, &t, &ui, &current, why())
+            .await
+            .unwrap();
+        assert!(
+            s.confirmation.is_some(),
+            "a credited operation needs no chain"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_after_a_voucher_code_change_confirms_by_events() {
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        w.voucher_code_moved();
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(s.confirmation.unwrap()["via_events"], true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_without_the_proof_after_a_voucher_code_change_needs_no_prover() {
+        // Finalized through the new voucher code: the stored voucher address
+        // stays empty, and only the bridge's events show the deposit is done.
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        w.voucher_code_moved();
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.prover_dir = Some("/nonexistent/prover".into());
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(s.confirmation.unwrap()["via_events"], true);
+        assert_eq!(w.prover_runs(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_reads_before_the_send_count_against_the_anchor_timeout() {
+        // The block time for the event search never comes; with a 1 s step 8
+        // the run must not wait a whole read cap on it first.
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        w.paused(true);
+        w.evm
+            .hang_headers_by_hash
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let target = OpRef::Op(op);
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.anchor_timeout = Some(Duration::from_secs(1));
+        let t0 = tokio::time::Instant::now();
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout);
+        assert!(t0.elapsed() <= Duration::from_secs(1), "{:?}", t0.elapsed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_proof_on_disk_does_not_hide_a_credit_through_the_new_voucher_code() {
+        // Credited through the new voucher code while the bridge is paused:
+        // with the proof on disk, step 8 would wait for the pause to lift
+        // before anything looked at the events.
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        w.voucher_code_moved();
+        w.paused(true);
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(s.confirmation.unwrap()["via_events"], true);
+        assert_eq!(
+            *w.an.sent.lock().unwrap(),
+            0,
+            "nothing to send: the deposit is credited"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_recipient_that_spent_the_funds_before_the_check_is_still_exit_0() {
+        // The credit is the delivered transfer, not the balance: the
+        // recipient may have spent it all before step 9 looked.
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        w.credit_chain_for_mined_deposit();
+        w.recipient_spends_everything_after_the_send(7_000_000);
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
+        assert!(s.confirmation.is_some());
+        let b = s.balance.unwrap();
+        assert_eq!(b["before"], "7000000");
+        assert_eq!(b["after"], "0", "less than before, and still exit 0");
     }
 }

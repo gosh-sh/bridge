@@ -4,6 +4,9 @@
 //! and the operations still open in the state directory. A failure is
 //! exit 2 (exit 3 for an open operation of the same deposit), and nothing
 //! has been sent. Nothing here asks the wallet or creates an operation.
+//!
+//! A resume passes a smaller set of checks, only those its operation's
+//! recorded stage still needs ([`context_for_resume`]).
 
 use std::{sync::Arc, time::Duration};
 
@@ -14,13 +17,16 @@ use crate::{
     deposit::{
         an::{AnRead, AnSend},
         an_preflight::{self, AnPreflight},
-        args::{an_network_id, DepositParams, Network},
+        args::{an_network_id, AnTarget, DepositParams, Network},
         evm::{approve_calldata, deposit_calldata, EvmRead},
         evm_preflight::{self, EvmPreflight},
         lc_readiness::{self, AnchorPlan, HistoryCapped, LcFailure},
         locks::ProverLock,
         prover_files::{check_prover_dir, ProverDir},
-        store::{blocking_by_params, close_interrupted, OpParams, Store},
+        retry::transient,
+        run::RunCx,
+        signals,
+        store::{blocking_by_params, close_interrupted, OpParams, OpRecord, OpStage, Store},
         ui::Ui,
         wallet::{eip681, TxPurpose},
         DepositSuccess,
@@ -238,6 +244,208 @@ async fn anchor_plan(
             "owner anchors are switched off and the light client cannot anchor this deposit: {f}"
         ))
     })
+}
+
+/// The checks of a resume: only what the operation's recorded stage still
+/// needs, with the parameters from its record. Continuing a deposit that
+/// may already be on chain must not depend on the checks that guard a new
+/// one: a paused Acki Nacki bridge, its lost trust in the EVM bridge or a
+/// moved voucher code is a warning, the recipient is not checked, the light
+/// client's readiness is read only before the anchor and is a warning, and
+/// the prover directory is checked only while a proof is still to be
+/// built. The bridge version is checked always: resending
+/// `finalizeDeposit` is safe only on a fixed bridge.
+///
+/// An RPC endpoint that serves another chain than the operation's is the
+/// command line pointing at another network: exit 2, as any other
+/// contradiction with the record. Every other refusal comes after the
+/// wallet was asked for the deposit and takes the exit an interrupt at the
+/// recorded stage would give, never exit 2.
+pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> CliResult<RunCx> {
+    let ui = d.ui.as_ref();
+    let op = &rec.op_id;
+    let held = |e: CliError| {
+        let why = match e {
+            CliError::Deposit {
+                ..
+            } => return e,
+            CliError::Preflight {
+                reason, ..
+            } => reason,
+            other => other.to_string(),
+        };
+        match signals::exit_for(Some(rec.stage)) {
+            // Only a record that never asked the wallet gets here with 2.
+            ExitCode::PreflightRefused => refuse(why),
+            exit => CliError::deposit(
+                exit,
+                Stage::Preflight,
+                Some(op),
+                format!(
+                    "{why}; operation {op} is unchanged: once that is fixed, run --resume {op} \
+                     again"
+                ),
+            ),
+        }
+    };
+    let net = Network::from_chain_id(rec.params.chain_id).ok_or_else(|| {
+        held(refuse(format!(
+            "operation {op} is on chain {}, which this build does not know",
+            rec.params.chain_id
+        )))
+    })?;
+    let id = transient(ui, "reading the EVM chain id", || d.evm.chain_id()).await;
+    if id != net.chain_id() {
+        return Err(refuse(format!(
+            "--rpc-url serves chain {id}; operation {op} is on chain {}. Use the profile it was \
+             made with (nothing was sent)",
+            net.chain_id()
+        )));
+    }
+    let mut bridge_acc = [0u8; 32];
+    hex::decode_to_slice(&rec.params.an_bridge, &mut bridge_acc).map_err(|e| {
+        held(refuse(format!(
+            "the record names a damaged Acki Nacki bridge id: {e}"
+        )))
+    })?;
+    // The recipient is not checked: the deposit is made, and it names it.
+    let to = AnTarget::parse(&rec.params.to).map_err(held)?;
+    let an = an_preflight::run_with(
+        d.an.as_ref(),
+        bridge_acc,
+        net.chain_id(),
+        rec.params.bridge,
+        &to,
+        ui,
+        d.min_bridge,
+        cfg!(feature = "dev-unfixed-bridge"),
+        true,
+    )
+    .await
+    .map_err(held)?;
+    let plan = match rec.stage {
+        OpStage::Requested | OpStage::Signed | OpStage::Abandoned | OpStage::Confirmed => {
+            resume_plan(d, bridge_acc, net.chain_id(), &an).await
+        },
+        // Past the anchor wait: only a 224 at step 8 brings the run back to
+        // it, and then the anchor is expected from whoever the bridge has.
+        _ if an.owner_anchors_enabled => AnchorPlan::Owner {
+            lc_ready: false,
+        },
+        _ => AnchorPlan::LightClient,
+    };
+    let prover = resume_prover(p, rec, ui).map_err(held)?;
+    let rpc_url = p
+        .rpc_url
+        .clone()
+        .ok_or_else(|| held(refuse("--rpc-url is required to resume".into())))?;
+    Ok(RunCx {
+        plan,
+        bridge_acc,
+        bridge_dapp: an.bridge_dapp,
+        light_client: an.light_client,
+        prover,
+        rpc_url,
+        // Only the steps before the deposit request read the token; a
+        // resumed operation is past them.
+        usdc: Address::ZERO,
+    })
+}
+
+/// Whom a resumed operation waits for at step 6. The light client's
+/// readiness only informs here: the deposit is made, and whatever the
+/// checks say there is nothing else to wait for, so a failed check or a
+/// failed read is a warning, never a refusal. With the owner's anchors on,
+/// the history reads are capped as in a new deposit's preflight.
+async fn resume_plan(
+    d: &Deps,
+    bridge_acc: [u8; 32],
+    chain_id: u64,
+    an: &AnPreflight,
+) -> AnchorPlan {
+    let ui = d.ui.as_ref();
+    let owner = an.owner_anchors_enabled;
+    let readiness = match an.light_client {
+        None => Err(LcFailure::NoLightClient),
+        Some(lc) => {
+            let cap = owner.then_some(lc_readiness::OWNER_MODE_PAGE_CAP);
+            match lc_readiness::observe(
+                d.an.as_ref(),
+                d.evm.as_ref(),
+                bridge_acc,
+                lc,
+                chain_id,
+                ui,
+                cap,
+            )
+            .await
+            {
+                Ok(o) => lc_readiness::judge(&o, chain_id),
+                Err(e) => {
+                    match e.downcast_ref::<HistoryCapped>() {
+                        Some(c) if owner => ui.status(&format!(
+                            "{c}; the anchor is expected from the bridge owner"
+                        )),
+                        _ => ui.warn(&format!(
+                            "{e:#}; whether the light client can anchor this deposit is unknown"
+                        )),
+                    }
+                    return if owner {
+                        AnchorPlan::Owner {
+                            lc_ready: false,
+                        }
+                    } else {
+                        AnchorPlan::LightClient
+                    };
+                },
+            }
+        },
+    };
+    lc_readiness::plan(owner, an.light_client, readiness).unwrap_or_else(|f| {
+        ui.warn(&format!(
+            "owner anchors are switched off and the light client cannot anchor this deposit yet \
+             ({f}); waiting for it anyway, as only the bridge operator can help"
+        ));
+        AnchorPlan::LightClient
+    })
+}
+
+/// The prover directory a resume needs. While a proof is still to be
+/// built it must pass its checks, and its lock is probed as a new
+/// deposit's preflight probes it. After the proof, a broken directory is
+/// only a warning: the proof may be on disk, or somebody may have
+/// finalized the deposit already.
+fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<ProverDir> {
+    let root = p.prover_dir.clone().unwrap_or_default();
+    match rec.stage {
+        OpStage::Requested
+        | OpStage::Signed
+        | OpStage::Abandoned
+        | OpStage::Confirmed
+        | OpStage::Anchored => {
+            let dir = check_prover_dir(&root).map_err(refuse)?;
+            drop(ProverLock::try_take(&dir)?);
+            Ok(dir)
+        },
+        _ => match check_prover_dir(&root) {
+            Ok(dir) => Ok(dir),
+            Err(e) => {
+                let work = rec
+                    .work_dir
+                    .clone()
+                    .unwrap_or_else(|| p.work_dir.join(&rec.op_id));
+                if crate::deposit::prover::load(&work).is_none() {
+                    ui.warn(&format!(
+                        "the proof is not on disk and the prover directory is unusable ({e}); it \
+                         is needed only if the deposit is not finalized yet"
+                    ));
+                }
+                Ok(ProverDir {
+                    root,
+                })
+            },
+        },
+    }
 }
 
 /// What `--dry-run` prints after a passed preflight: both transactions'

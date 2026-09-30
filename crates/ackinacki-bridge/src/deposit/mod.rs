@@ -38,23 +38,70 @@ pub mod ui;
 pub mod wallet;
 pub mod wc;
 
-/// Runs `ackinacki-bridge deposit` against the live chains. SIGINT,
-/// SIGTERM and SIGHUP end the run cleanly: the prover is killed, the locks
-/// are released, and the exit code follows the operation's recorded stage.
-/// The progress display is gone when this returns, so the caller prints the
-/// summary or the error on a quiet terminal.
-pub async fn run(p: args::DepositParams) -> crate::errors::CliResult<DepositSuccess> {
-    use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
-    use crate::errors::CliError;
-    if matches!(
-        p.mode,
-        args::RunMode::Resume { .. } | args::RunMode::Abandon(_)
-    ) {
-        return Err(CliError::Usage {
-            reason: "deposit: --resume and --abandon are not available in this build yet".into(),
-        });
+use crate::errors::{CliError, CliResult};
+
+/// Runs `ackinacki-bridge deposit` against the live chains: a new deposit,
+/// a dry run, `--resume` or `--abandon`. SIGINT, SIGTERM and SIGHUP end the
+/// run cleanly: the prover is killed, the locks are released, and the exit
+/// code follows the operation's recorded stage. The progress display is
+/// gone when this returns, so the caller prints the summary or the error on
+/// a quiet terminal.
+pub async fn run(p: args::DepositParams) -> CliResult<DepositSuccess> {
+    let current_op: Arc<Mutex<Option<String>>> = Arc::default();
+    // The step board lives inside `dispatch` and goes with it, before the
+    // summary or the error is printed.
+    match signals::until_signal(dispatch(&p, current_op.clone())).await {
+        Ok(r) => r,
+        Err(sig) => {
+            let op = current_op
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            Err(signals::interrupted(sig, &p.state_dir, op))
+        },
     }
+}
+
+/// The run `p.mode` asks for, with the progress display it prints to.
+async fn dispatch(
+    p: &args::DepositParams,
+    current_op: Arc<Mutex<Option<String>>>,
+) -> CliResult<DepositSuccess> {
+    let ui = ui::pick(&p.globals, p.uri_only, p.qr_invert);
+    match &p.mode {
+        // No chain is asked: the record is all there is to change.
+        args::RunMode::Abandon(op) => {
+            // An interrupt reports on the operation as its record stands.
+            *current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
+            run::abandon(p, op, ui.as_ref()).await
+        },
+        args::RunMode::Resume {
+            target,
+            tx_hash,
+        } => match live_deps(p, ui.clone(), current_op.clone()) {
+            Ok(d) => run::resume(p, &d, target, *tx_hash).await,
+            // The wallet may have been asked already: the refusal takes the
+            // exit of the operation's stage, and a finished operation is
+            // still answered from its record.
+            Err(e) => run::resume_without_chains(p, target, ui.as_ref(), &current_op, e).await,
+        },
+        args::RunMode::Fresh | args::RunMode::DryRun => {
+            let d = live_deps(p, ui, current_op)?;
+            start(p, &d).await
+        },
+    }
+}
+
+/// The live chains behind `--rpc-url` and `--gql-endpoint`, the progress
+/// display, and the slot the signal handler reads the operation from.
+/// Nothing is sent or read yet.
+fn live_deps(
+    p: &args::DepositParams,
+    ui: Arc<dyn ui::Ui>,
+    current_op: Arc<Mutex<Option<String>>>,
+) -> CliResult<preflight::Deps> {
     let usage = |what: &str| CliError::Usage {
         reason: format!("deposit: {what} missing"),
     };
@@ -63,39 +110,20 @@ pub async fn run(p: args::DepositParams) -> crate::errors::CliResult<DepositSucc
         .gql_endpoint
         .clone()
         .ok_or_else(|| usage("--gql-endpoint"))?;
-    let d = preflight::Deps {
+    Ok(preflight::Deps {
         evm: Arc::new(evm::AlloyEvm::connect(&rpc)?),
         an: Arc::new(an::LiveAn::connect(&gql)?),
-        ui: ui::pick(&p.globals, p.uri_only, p.qr_invert),
+        ui,
         polls: preflight::Polls::live(),
         min_bridge: an_preflight::MIN_BRIDGE_VERSION,
-        current_op: Default::default(),
-    };
-    let r = match signals::until_signal(start(&p, &d)).await {
-        Ok(r) => r,
-        Err(sig) => {
-            let op = d
-                .current_op
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            Err(signals::interrupted(sig, &p.state_dir, op))
-        },
-    };
-    // The step board redraws itself while it lives; it goes before the
-    // summary or the error is printed.
-    drop(d);
-    r
+        current_op,
+    })
 }
 
 /// A new deposit, or a dry run, through the wallet `--qr-mode` picks. With
 /// `both`, a WalletConnect pairing that fails falls back to the EIP-681
 /// codes; a failure after the pairing is the run's answer.
-async fn start(
-    p: &args::DepositParams,
-    d: &preflight::Deps,
-) -> crate::errors::CliResult<DepositSuccess> {
-    use crate::errors::CliError;
+async fn start(p: &args::DepositParams, d: &preflight::Deps) -> CliResult<DepositSuccess> {
     let usage = |what: &str| CliError::Usage {
         reason: format!("deposit: {what} missing"),
     };

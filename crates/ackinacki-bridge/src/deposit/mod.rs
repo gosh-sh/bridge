@@ -28,6 +28,7 @@ pub mod qr;
 pub mod recovery;
 pub mod refusals;
 pub mod retry;
+pub mod signals;
 pub mod store;
 #[cfg(test)]
 pub mod testkit;

@@ -637,4 +637,270 @@ mod tests {
         .unwrap();
         closer.join().unwrap();
     }
+
+    /// A fake prover that says who it is and then runs until killed. It
+    /// becomes `sleep` itself: a forked `sleep` would inherit the prover
+    /// lock and outlive a killed `sh`, which the real prover, having no
+    /// children, cannot do.
+    const RUNS_UNTIL_KILLED: &str = "echo $$ > data/pid; exec sleep 30";
+
+    /// Whether `pid` is a running process. A killed child stays a zombie
+    /// until its parent reaps it, and `kill(pid, 0)` still finds a zombie.
+    fn alive(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            // The state letter follows the command name, which is in
+            // parentheses.
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with(['Z', 'X']))
+        })
+    }
+
+    /// The pid the fake prover wrote to `data/pid` once it started.
+    async fn prover_pid(dir: &ProverDir) -> i32 {
+        let f = dir.data_dir().join("pid");
+        for _ in 0..500 {
+            if let Some(pid) = std::fs::read_to_string(&f)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the fake prover never started");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_run_leaves_no_prover_and_no_lock() {
+        let (_d, dir) = fake_prover_dir(RUNS_UNTIL_KILLED);
+        let w = tempfile::tempdir().unwrap();
+        let (dir2, r) = (dir.clone(), req(w.path()));
+        let task = tokio::spawn(async move {
+            prove(
+                &dir2,
+                &r,
+                &want(),
+                Duration::from_secs(60),
+                &RecordingUi::new(true),
+                "OP",
+            )
+            .await
+        });
+        let pid = prover_pid(&dir).await;
+        task.abort(); // what a signal does to the run's future
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            eventually(|| !alive(pid)).await,
+            "the prover outlived the CLI"
+        );
+        assert!(eventually(|| ProverLock::try_take(&dir).unwrap().is_some()).await);
+    }
+
+    #[tokio::test]
+    async fn two_deposits_on_one_cold_prover_directory_run_one_after_another() {
+        // The fake refuses to run concurrently and "generates the proving
+        // key" only when it is missing, logging each generation.
+        let extra = "set -C; : > data/.busy || exit 99; set +C\n[ -f data/deposit_prover_k18.x.pk \
+                     ] || { echo gen >> data/keygen.log; : > data/deposit_prover_k18.x.pk; \
+                     }\nsleep 0.3; rm -f data/.busy";
+        let (_d, dir) = fake_prover_dir(extra);
+        let (w1, w2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (d1, d2, r1, r2) = (dir.clone(), dir.clone(), req(w1.path()), req(w2.path()));
+        let a = tokio::spawn(async move {
+            prove(
+                &d1,
+                &r1,
+                &want(),
+                Duration::from_secs(10),
+                &RecordingUi::new(true),
+                "A",
+            )
+            .await
+        });
+        let b = tokio::spawn(async move {
+            prove(
+                &d2,
+                &r2,
+                &want(),
+                Duration::from_secs(10),
+                &RecordingUi::new(true),
+                "B",
+            )
+            .await
+        });
+        a.await.unwrap().unwrap();
+        b.await.unwrap().unwrap();
+        let lines = |f: &str| {
+            std::fs::read_to_string(dir.data_dir().join(f))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        assert_eq!(lines("keygen.log"), 1);
+        assert_eq!(lines("runs.log"), 2);
+    }
+
+    /// Not a test on its own: the body of the "CLI" process that the
+    /// process tests below start and signal. It proves the deposit of an
+    /// `Anchored` operation under `until_signal` and exits the way `main`
+    /// does, with the error's code. Does nothing unless ACKI_PROVE_HELPER
+    /// is set, so the test process itself never installs a signal handler.
+    #[tokio::test]
+    async fn helper_prove_until_signalled() {
+        use crate::deposit::{signals, store::OpStage};
+        let Ok(root) = std::env::var("ACKI_PROVE_HELPER") else {
+            return;
+        };
+        let dir = ProverDir {
+            root: root.into(),
+        };
+        let state = dir.root.join("state");
+        let op = signals::tests_support::record_at(&state, OpStage::Anchored);
+        let r = req(&dir.root.join("work"));
+        let (want, ui) = (want(), RecordingUi::new(true));
+        let run = prove(&dir, &r, &want, Duration::from_secs(120), &ui, &op);
+        let e = match signals::until_signal(run).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(e)) => e,
+            Err(sig) => signals::interrupted(sig, &state, Some(op)),
+        };
+        // The run is dropped by now and its prover killed. `main` returns
+        // the code; a test can only exit with it.
+        eprintln!("{e}");
+        std::process::exit(e.exit_code().as_i32());
+    }
+
+    /// Starts the helper above as a separate "CLI" process on `dir`.
+    fn start_helper(dir: &ProverDir) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "deposit::prover::tests::helper_prove_until_signalled",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("ACKI_PROVE_HELPER", &dir.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Waits up to ten seconds for the helper to exit; its status and what
+    /// it wrote to stderr.
+    async fn exit_of(mut cli: std::process::Child) -> (std::process::ExitStatus, String) {
+        for _ in 0..500 {
+            if let Some(status) = cli.try_wait().unwrap() {
+                let mut stderr = String::new();
+                std::io::Read::read_to_string(&mut cli.stderr.take().unwrap(), &mut stderr)
+                    .unwrap();
+                return (status, stderr);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cli.kill().unwrap();
+        cli.wait().unwrap();
+        panic!("the CLI did not exit");
+    }
+
+    /// Sends `sig` to the helper process.
+    fn send(cli: &std::process::Child, sig: libc::c_int) {
+        let pid = i32::try_from(cli.id()).unwrap();
+        // SAFETY: plain kill(2) on our own child.
+        assert_eq!(unsafe { libc::kill(pid, sig) }, 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_is_not_signalled_ends_on_its_own() {
+        let (_d, dir) = fake_prover_dir("");
+        let (status, stderr) = exit_of(start_helper(&dir)).await;
+        assert!(status.success(), "{status}: {stderr}");
+        assert!(dir.root.join("work").join(PROOF_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn sigterm_to_the_cli_stops_the_prover_and_frees_the_lock() {
+        let (_d, dir) = fake_prover_dir(RUNS_UNTIL_KILLED);
+        let cli = start_helper(&dir);
+        let pid = prover_pid(&dir).await;
+        send(&cli, libc::SIGTERM);
+        let (status, stderr) = exit_of(cli).await;
+        assert_eq!(status.code(), Some(32), "{stderr}");
+        assert!(
+            stderr.contains("interrupted by SIGTERM at stage Anchored;"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("--resume"), "{stderr}");
+        assert!(
+            eventually(|| !alive(pid)).await,
+            "the prover outlived the CLI it belonged to"
+        );
+        assert!(eventually(|| ProverLock::try_take(&dir).unwrap().is_some()).await);
+    }
+
+    #[tokio::test]
+    async fn sigint_and_sighup_end_the_run_the_same_way() {
+        for (sig, name) in [(libc::SIGINT, "SIGINT"), (libc::SIGHUP, "SIGHUP")] {
+            let (_d, dir) = fake_prover_dir(RUNS_UNTIL_KILLED);
+            let cli = start_helper(&dir);
+            let pid = prover_pid(&dir).await;
+            send(&cli, sig);
+            let (status, stderr) = exit_of(cli).await;
+            assert_eq!(status.code(), Some(32), "{name}: {stderr}");
+            assert!(
+                stderr.contains(&format!("interrupted by {name} at stage Anchored;")),
+                "{stderr}"
+            );
+            assert!(
+                eventually(|| !alive(pid)).await,
+                "{name}: the prover outlived the CLI"
+            );
+            assert!(
+                eventually(|| ProverLock::try_take(&dir).unwrap().is_some()).await,
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sigkill_to_the_cli_leaves_the_lock_with_the_running_prover() {
+        let (_d, dir) = fake_prover_dir(RUNS_UNTIL_KILLED);
+        let mut cli = start_helper(&dir);
+        let pid = prover_pid(&dir).await;
+        cli.kill().unwrap(); // SIGKILL: no handler, no destructor
+        cli.wait().unwrap();
+        assert!(alive(pid), "an orphaned prover keeps running...");
+        assert!(
+            ProverLock::try_take(&dir).unwrap().is_none(),
+            "...and keeps the lock, so no second prover starts on its key cache"
+        );
+        let w = tempfile::tempdir().unwrap();
+        let ui = RecordingUi::new(true);
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            prove(
+                &dir,
+                &req(w.path()),
+                &want(),
+                Duration::from_secs(10),
+                &ui,
+                "B",
+            ),
+        )
+        .await;
+        assert!(
+            second.is_err(),
+            "a second deposit got past the orphan's lock"
+        );
+        assert!(ui.statuses().iter().any(|s| s.contains("busy")));
+        assert!(
+            !w.path().join(INPUT_FILE).exists(),
+            "the second deposit's fetcher ran"
+        );
+        assert_eq!(prover_pid(&dir).await, pid);
+        // SAFETY: plain kill(2).
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        assert!(eventually(|| ProverLock::try_take(&dir).unwrap().is_some()).await);
+    }
 }

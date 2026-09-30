@@ -237,6 +237,32 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`deposit-relayer daemon` exports Prometheus metrics.** `--metrics-addr`
+  (`DEPOSIT_RELAYER_METRICS_ADDR`, e.g. `127.0.0.1:9467`) serves the text
+  format at `GET /metrics`, the same facade and histogram buckets as
+  `relayer daemon-live --metrics-addr` on the AN→ETH side, so one scrape
+  config fits both. Unset means no exporter, and the library's `metrics::*`
+  calls are no-ops without one. Names are operator API, listed with their
+  meaning in `deposit_relayer_daemon::metrics`:
+  `deposit_relayer_ticks_total{outcome}` (finalized, already_finalized,
+  not_yet_available, proof_failed, an_rejected, an_pending, skipped, error),
+  `deposit_relayer_stage_duration_seconds{stage}` (is_finalized, fetch_event,
+  prove, submit, tick), `deposit_relayer_prover_stage_duration_seconds{example}`
+  and `deposit_relayer_prover_stage_failures_total{example}` per
+  `deposit-prover` subprocess, `deposit_relayer_eth_get_logs_total{outcome}`
+  (ok, retry, error) and `deposit_relayer_eth_scanned_blocks_total` for the
+  `eth_getLogs` cost, gauges `deposit_relayer_eth_safe_head_block`,
+  `deposit_relayer_eth_scan_from_block`, `deposit_relayer_scan_done_through_block`,
+  `deposit_relayer_eth_deposit_counter` (`depositCounter()` on Ethereum,
+  polled once a minute; minus `last_finalized + 1` is the backlog),
+  `deposit_relayer_target_deposit_id`, `deposit_relayer_last_finalized_deposit_id`,
+  `deposit_relayer_last_finalized_timestamp_seconds`,
+  `deposit_relayer_last_tick_timestamp_seconds`,
+  `deposit_relayer_attempts_since_progress`, `deposit_relayer_parked_deposits`,
+  `deposit_relayer_backoff_seconds`, `deposit_relayer_build_info{version}` and
+  `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
+  counters and the shutdown snapshot are unchanged.
+
 - **`AckiNackiBridge` has `pause()` / `unpause()` again** (owner-only). While
   paused, `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof`
   revert `BridgePaused`. AAVE management stays available so the owner can

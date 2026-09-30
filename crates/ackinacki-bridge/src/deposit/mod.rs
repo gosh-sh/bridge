@@ -22,6 +22,7 @@ pub mod limits;
 pub mod locks;
 pub mod log_index;
 pub mod pi;
+pub mod preflight;
 pub mod prover;
 pub mod prover_files;
 pub mod qr;

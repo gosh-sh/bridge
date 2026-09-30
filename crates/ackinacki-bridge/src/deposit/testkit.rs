@@ -1205,3 +1205,900 @@ pub fn fake_prover_dir(
     };
     (d, dir)
 }
+
+// ---- the world of the end-to-end driver tests ----
+
+/// The EVM bridge of [`World`].
+pub const W_BRIDGE: Address =
+    alloy_primitives::address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
+/// The token the bridge of [`World`] takes.
+pub const W_USDC: Address = alloy_primitives::address!("1c7d4b196cb0c7b01d743fbc6116a902379c7238");
+/// The Acki Nacki bridge account of [`World`].
+pub const W_BRIDGE_ACC: [u8; 32] = [0x1a; 32];
+/// The light client the Acki Nacki bridge of [`World`] names.
+pub const W_LC: [u8; 32] = [0x20; 32];
+/// The recipient account of [`World`].
+pub const W_ACC: [u8; 32] = [0xa3; 32];
+/// The deposit of [`World`], in micro-USDC.
+pub const W_AMOUNT: u64 = 12_500_000;
+/// When the owner's anchors were switched off in [`World`].
+const W_T_FLIP: u64 = 1_786_000_000;
+
+/// A deposit transaction [`World`] put on its chain.
+#[derive(Clone)]
+pub struct Mined {
+    /// The transaction.
+    pub tx: B256,
+    /// The block that holds it.
+    pub block: Header,
+    /// The bridge's deposit id.
+    pub deposit_id: U256,
+    /// The sender.
+    pub from: Address,
+}
+
+/// One set of scripted chains, prover directory, state and work
+/// directories and wallet for the end-to-end tests of the driver. Its
+/// deposit uses the `W_*` values. The fake prover answers with the public
+/// inputs `World` writes for every deposit it mines (`expected_pi.bin`),
+/// so the check of the prover's inputs runs for real.
+pub struct World {
+    /// The EVM node.
+    pub evm: std::sync::Arc<FakeEvm>,
+    /// The Acki Nacki node.
+    pub an: std::sync::Arc<FakeAn>,
+    /// The prover directory and what `check_prover_dir` made of it.
+    pub prover: (tempfile::TempDir, crate::deposit::prover_files::ProverDir),
+    /// `--state-dir`.
+    pub state: tempfile::TempDir,
+    /// `--work-dir`.
+    pub work: tempfile::TempDir,
+    /// The wallet.
+    pub wallet: FakeWallet,
+    /// The deposit mined last.
+    pub mined: Option<Mined>,
+    /// The deposit id [`World::mined_deposit`] gives next, less one.
+    next_id: u64,
+}
+
+/// A block hash whose two byte orders differ: bytes `tag, tag+1, …`.
+fn seq_hash(tag: u8) -> B256 {
+    let mut b = [0u8; 32];
+    for (i, x) in b.iter_mut().enumerate() {
+        *x = tag.wrapping_add(i as u8);
+    }
+    B256::from(b)
+}
+
+/// A uint as the SDK renders it in a decoded body: a decimal string.
+fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!(v.to_string())
+}
+
+impl World {
+    /// Everything a deposit needs, healthy: the EVM bridge and its token,
+    /// a funded sender with nothing approved, and an Acki Nacki bridge
+    /// version 1.6.0, not paused, trusting the EVM bridge, anchored by its
+    /// owner, deploying the voucher this build knows. The light client's
+    /// head is no block on the chain.
+    pub fn healthy() -> World {
+        use alloy::sol_types::{SolCall, SolValue};
+
+        use crate::deposit::{
+            an::AccStatus,
+            evm::{IDeposit, IErc20},
+        };
+        let evm = FakeEvm::sepolia();
+        evm.codes
+            .lock()
+            .unwrap()
+            .insert(W_BRIDGE, Bytes::from(vec![0x60, 0x80]));
+        evm.set_call(
+            W_BRIDGE,
+            IDeposit::usdcCall::SELECTOR,
+            W_USDC.abi_encode().into(),
+        );
+        evm.set_call(
+            W_USDC,
+            IErc20::decimalsCall::SELECTOR,
+            U256::from(6u8).abi_encode().into(),
+        );
+        evm.set_call(
+            W_USDC,
+            IErc20::balanceOfCall::SELECTOR,
+            U256::from(1_000_000_000_000u64).abi_encode().into(),
+        );
+        // Nothing approved yet; the approve step's re-read sees the amount.
+        evm.script_call(W_USDC, IErc20::allowanceCall::SELECTOR, vec![
+            U256::ZERO.abi_encode().into(),
+            U256::from(W_AMOUNT).abi_encode().into(),
+        ]);
+        evm.latest.set([header(1000, 0xf0)]);
+        evm.finalized.set([Some(header(990, 0xf1))]);
+        let an = FakeAn::default();
+        let active = |dapp: [u8; 32]| AccountInfo {
+            status: AccStatus::Active,
+            dapp_id: Some(dapp),
+            ecc3: 0,
+        };
+        an.accounts
+            .lock()
+            .unwrap()
+            .insert(W_BRIDGE_ACC, active([0; 32]));
+        an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
+        an.getter(W_BRIDGE_ACC, "getVersion", vec![
+            serde_json::json!({ "value0": "1.6.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "isPaused", vec![
+            serde_json::json!({ "value0": false }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "isTrustedL1Bridge", vec![
+            serde_json::json!({ "value0": true }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
+            serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getDepositVoucherCodeHash", vec![
+            serde_json::json!({ "value0": format!("0x{}", hex::encode(crate::deposit::identity::EXPECTED_VOUCHER_CODE_HASH)) }),
+        ]);
+        an.getter(W_LC, "getConfig", vec![
+            serde_json::json!({ "l1ChainId": "11155111" }),
+        ]);
+        an.getter(W_LC, "getHead", vec![
+            serde_json::json!({ "executionBlockHash": format!("{:#x}", B256::repeat_byte(0xee)) }),
+        ]);
+        World {
+            evm: std::sync::Arc::new(evm),
+            an: std::sync::Arc::new(an),
+            prover: fake_prover_dir(""),
+            state: tempfile::tempdir().unwrap(),
+            work: tempfile::tempdir().unwrap(),
+            wallet: FakeWallet::eoa(),
+            mined: None,
+            next_id: 5,
+        }
+    }
+
+    /// `--to`: the recipient in dapp zero.
+    pub fn target() -> crate::deposit::args::AnTarget {
+        crate::deposit::args::AnTarget {
+            dapp_id: [0; 32],
+            account_id: W_ACC,
+        }
+    }
+
+    /// A validated command line for this world in `mode`.
+    pub fn params(
+        &self,
+        mode: crate::deposit::args::RunMode,
+    ) -> crate::deposit::args::DepositParams {
+        use std::time::Duration;
+        crate::deposit::args::DepositParams {
+            mode,
+            globals: Default::default(),
+            network: Some(crate::deposit::args::Network::Sepolia),
+            amount: Some(crate::args::UsdcAmount(u128::from(W_AMOUNT))),
+            to: Some(Self::target()),
+            rpc_url: Some("http://rpc.invalid/key".into()),
+            bridge: Some(W_BRIDGE),
+            gql_endpoint: Some("http://gql.invalid/graphql".into()),
+            usdc_bridge_account: Some(W_BRIDGE_ACC),
+            prover_dir: Some(self.prover.1.root.clone()),
+            confirmations: 12,
+            state_dir: self.state.path().to_path_buf(),
+            work_dir: self.work.path().to_path_buf(),
+            prover_timeout: Duration::from_secs(10),
+            anchor_timeout: Some(Duration::from_secs(3600)),
+            relayer_grace: Duration::from_secs(1),
+            recovery_window: Duration::from_secs(60),
+            credit_timeout: Duration::from_secs(300),
+            pair_timeout: Duration::from_secs(60),
+            qr_mode: crate::deposit::args::QrMode::Walletconnect,
+            qr_out: None,
+            uri_only: true,
+            qr_invert: false,
+            wc_project_id: Some("test".into()),
+            wc_relay_url: "ws://relay.invalid".into(),
+            from_address: None,
+        }
+    }
+
+    /// [`World::params`] for a deposit one micro-USDC larger.
+    pub fn params_with_other_amount(
+        &self,
+        mode: crate::deposit::args::RunMode,
+    ) -> crate::deposit::args::DepositParams {
+        let mut p = self.params(mode);
+        p.amount = Some(crate::args::UsdcAmount(u128::from(W_AMOUNT + 1)));
+        p
+    }
+
+    /// The driver's dependencies on this world's chains, with a recording
+    /// UI that answers yes, one-second polls and bridge 1.6.0 as the
+    /// minimum.
+    pub fn deps(&self) -> crate::deposit::preflight::Deps {
+        use std::time::Duration;
+        crate::deposit::preflight::Deps {
+            evm: self.evm.clone(),
+            an: self.an.clone(),
+            ui: std::sync::Arc::new(crate::deposit::ui::RecordingUi::new(true)),
+            polls: crate::deposit::preflight::Polls {
+                evm: Duration::from_secs(1),
+                anchor: Duration::from_secs(1),
+                credit: Duration::from_secs(1),
+                wallet: Duration::from_secs(1),
+            },
+            min_bridge: Some(crate::deposit::an_preflight::BridgeVersion(1, 6, 0)),
+            current_op: Default::default(),
+        }
+    }
+
+    /// Pauses or unpauses the Acki Nacki bridge.
+    pub fn paused(&self, yes: bool) {
+        self.an.getter(W_BRIDGE_ACC, "isPaused", vec![
+            serde_json::json!({ "value0": yes }),
+        ]);
+    }
+
+    /// Switches the owner's anchors on or off; the light client stays.
+    pub fn owner_anchors(&self, enabled: bool) {
+        self.an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
+            serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": enabled }),
+        ]);
+    }
+
+    /// Head H, checkpoint C (one epoch behind) and C's parent P, all after
+    /// the switch-off, all fresh, all on the EVM chain. Their hashes read
+    /// differently in the two byte orders.
+    fn light_client_blocks(&self) -> (Header, Header, Header) {
+        let fin_ts = self
+            .evm
+            .finalized
+            .next()
+            .flatten()
+            .map(|h| h.timestamp)
+            .unwrap_or(W_T_FLIP + 10_000);
+        let h = Header {
+            number: 980,
+            hash: seq_hash(0xe1),
+            parent_hash: seq_hash(0xe0),
+            timestamp: fin_ts - 100,
+        };
+        let c_ts = h.timestamp - 384;
+        let p = Header {
+            number: 947,
+            hash: seq_hash(0xc0),
+            parent_hash: seq_hash(0xbf),
+            timestamp: c_ts - 12,
+        };
+        let c = Header {
+            number: 948,
+            hash: seq_hash(0xc1),
+            parent_hash: p.hash,
+            timestamp: c_ts,
+        };
+        for b in [&h, &c, &p] {
+            self.evm.by_hash.lock().unwrap().insert(b.hash, b.clone());
+        }
+        (h, c, p)
+    }
+
+    /// A light client that can anchor a deposit alone: its head is
+    /// accepted by the bridge in Ethereum byte order, the owner switched
+    /// anchors off, and a fresh ancestry after that reached the bridge.
+    pub fn light_client_ready(&self) {
+        let (h, c, p) = self.light_client_blocks();
+        self.an.getter(W_LC, "getHead", vec![
+            serde_json::json!({ "executionBlockHash": format!("{:#x}", h.hash) }),
+        ]);
+        self.an.accepted.lock().unwrap().insert(h.hash, 0);
+        self.an.accepted.lock().unwrap().insert(p.hash, 0);
+        let mut flip = msg(
+            "flip",
+            "ExtIn",
+            "",
+            &format!("0:{}", hex::encode(W_BRIDGE_ACC)),
+            Some("B-disable"),
+        );
+        self.an
+            .ext_in
+            .lock()
+            .unwrap()
+            .entry(W_BRIDGE_ACC)
+            .or_default()
+            .push(flip.clone());
+        flip.dst_tx = Some(crate::deposit::an::TxRef {
+            hash: "flip-tx".into(),
+            aborted: false,
+            account: String::new(),
+            now: W_T_FLIP,
+        });
+        self.an.messages.lock().unwrap().insert("flip".into(), flip);
+        self.an.bodies.lock().unwrap().insert(
+            "B-disable".into(),
+            ("disableOwnerAnchors".into(), serde_json::json!({})),
+        );
+        let mut anc = msg(
+            "anc",
+            "ExtOut",
+            &format!("0:{}", hex::encode(W_LC)),
+            crate::deposit::lc_readiness::ANCESTRY_ACCEPTED_DST,
+            Some("B-anc"),
+        );
+        anc.created_at = h.timestamp;
+        self.an
+            .ext_out
+            .lock()
+            .unwrap()
+            .entry(W_LC)
+            .or_default()
+            .push(anc);
+        self.an.bodies.lock().unwrap().insert(
+            "B-anc".into(),
+            (
+                "AncestryAccepted".into(),
+                serde_json::json!({ "checkpointHash": format!("{:#x}", c.hash), "hashesAdded": "31" }),
+            ),
+        );
+    }
+
+    /// The state of 2026-09-28: the head is found only in the reversed-halves
+    /// form, and the bridge does not accept its real hash.
+    pub fn light_client_head_in_pi_form(&self) {
+        let (h, _, _) = self.light_client_blocks();
+        let pi = B256::from(crate::deposit::identity::pi_form(h.hash.0));
+        assert_ne!(pi, h.hash, "a head whose two forms differ");
+        self.an.getter(W_LC, "getHead", vec![
+            serde_json::json!({ "executionBlockHash": format!("{pi:#x}") }),
+        ]);
+    }
+
+    /// A mined `approve`; its hash.
+    pub fn approve_hash(&self) -> B256 {
+        let h = B256::repeat_byte(0xaa);
+        self.evm.script_receipt(h, vec![Some(deposit_receipt(
+            h,
+            &header(899, 0x89),
+            true,
+            vec![],
+        ))]);
+        h
+    }
+
+    /// Makes the fake prover answer with the public inputs of `m`.
+    fn write_expected_pi(&self, m: &Mined) {
+        let e = crate::deposit::pi::ExpectedInputs {
+            deposit_id: m.deposit_id,
+            sender: m.from,
+            amount: W_AMOUNT,
+            contract: W_BRIDGE,
+            chain_id: 11_155_111,
+            dapp_id: [0; 32],
+            account_id: W_ACC,
+            block_hash: m.block.hash,
+        };
+        let bytes = crate::deposit::pi::DepositPublicInputs::from_expected(&e).encode();
+        std::fs::write(self.prover.1.root.join("expected_pi.bin"), bytes).unwrap();
+    }
+
+    /// Puts a deposit transaction from the wallet's account at `nonce` in
+    /// `block`, with its receipt, its log (when it succeeded) and the
+    /// sender's nonce counts past it.
+    fn mine(
+        &mut self,
+        nonce: u64,
+        tx_type: u8,
+        status: bool,
+        block: Header,
+        deposit_id: U256,
+        amount: u64,
+    ) -> B256 {
+        let from = self.wallet.account;
+        let tx = B256::from(U256::from(0xdead_0000u64 + nonce));
+        let calldata = crate::deposit::evm::deposit_calldata(amount, B256::from(W_ACC));
+        let dlog = deposit_log(
+            W_BRIDGE,
+            deposit_id,
+            from,
+            amount,
+            B256::from(W_ACC),
+            Some(41),
+        );
+        let logs = if status {
+            vec![transfer_log(W_USDC), dlog.clone()]
+        } else {
+            vec![]
+        };
+        self.evm
+            .txs
+            .lock()
+            .unwrap()
+            .insert(tx, deposit_tx(tx, from, W_BRIDGE, nonce, tx_type, calldata));
+        self.evm
+            .script_receipt(tx, vec![Some(deposit_receipt(tx, &block, status, logs))]);
+        self.evm
+            .by_hash
+            .lock()
+            .unwrap()
+            .insert(block.hash, block.clone());
+        for (tag, n) in [
+            ("pending", nonce),
+            ("latest", nonce + 1),
+            ("finalized", nonce + 1),
+        ] {
+            self.evm.counts.lock().unwrap().insert((from, tag), n);
+        }
+        if status {
+            self.evm.logs.lock().unwrap().push(DepositLogRef {
+                tx_hash: tx,
+                block_number: block.number,
+                block_hash: block.hash,
+                log: dlog,
+            });
+        }
+        let m = Mined {
+            tx,
+            block,
+            deposit_id,
+            from,
+        };
+        self.write_expected_pi(&m);
+        self.mined = Some(m);
+        tx
+    }
+
+    /// A successful deposit at `nonce` with the next deposit id.
+    pub fn mined_deposit(&mut self, nonce: u64) -> B256 {
+        self.next_id += 1;
+        let id = U256::from(self.next_id);
+        self.mine(nonce, 2, true, header(900, 0x90), id, W_AMOUNT)
+    }
+
+    /// A deposit in the slot with another amount, as a wallet that changed
+    /// it would send.
+    pub fn mined_deposit_of_amount(&mut self, nonce: u64, amount: u64) -> B256 {
+        self.mine(nonce, 2, true, header(900, 0x90), U256::from(6), amount)
+    }
+
+    /// A successful deposit at `nonce` of transaction type `tx_type`.
+    pub fn mined_deposit_of_type(&mut self, nonce: u64, tx_type: u8) -> B256 {
+        self.mine(
+            nonce,
+            tx_type,
+            true,
+            header(900, 0x90),
+            U256::from(6),
+            W_AMOUNT,
+        )
+    }
+
+    /// A deposit at `nonce` that reverted.
+    pub fn reverted_deposit_finalized(&mut self, nonce: u64) -> B256 {
+        self.mine(nonce, 2, false, header(900, 0x90), U256::ZERO, W_AMOUNT)
+    }
+
+    /// The mined deposit's block turns accepted after `polls` reads.
+    pub fn anchor_after(&self, polls: usize) {
+        let m = self.mined.as_ref().expect("mine a deposit first");
+        self.an.accepted.lock().unwrap().insert(m.block.hash, polls);
+    }
+
+    /// After two readings in its first block, the transaction is found in
+    /// block 901 with depositId 8; only that block ever gets an anchor.
+    pub fn reorg_after_confirmation(&mut self, tx: B256, polls: usize) {
+        let old = self.mined.clone().expect("mine a deposit first");
+        let new_block = header(901, 0x91);
+        let from = self.wallet.account;
+        let log = deposit_log(
+            W_BRIDGE,
+            U256::from(8),
+            from,
+            W_AMOUNT,
+            B256::from(W_ACC),
+            Some(3),
+        );
+        let r = |b: &Header, logs| Some(deposit_receipt(tx, b, true, logs));
+        let old_logs = || {
+            vec![
+                transfer_log(W_USDC),
+                deposit_log(
+                    W_BRIDGE,
+                    old.deposit_id,
+                    from,
+                    W_AMOUNT,
+                    B256::from(W_ACC),
+                    Some(41),
+                ),
+            ]
+        };
+        self.evm.script_receipt(tx, vec![
+            r(&old.block, old_logs()),
+            r(&old.block, old_logs()),
+            r(&new_block, vec![transfer_log(W_USDC), log]),
+        ]);
+        self.evm
+            .by_hash
+            .lock()
+            .unwrap()
+            .insert(new_block.hash, new_block.clone());
+        let m = Mined {
+            tx,
+            block: new_block,
+            deposit_id: U256::from(8),
+            from,
+        };
+        self.write_expected_pi(&m);
+        self.an.accepted.lock().unwrap().insert(m.block.hash, polls);
+        self.mined = Some(m);
+    }
+
+    /// The Acki Nacki side of a successful finalize for the mined deposit:
+    /// the send is executed, and the voucher → confirmDeposit → transfer →
+    /// delivery chain and the DepositFinalized event are all visible.
+    pub fn credit_chain_for_mined_deposit(&self) {
+        use crate::deposit::{
+            an::{AccStatus, TxRef},
+            identity::{offline_context, voucher_account_id, DepositIdentity},
+        };
+        let m = self.mined.as_ref().expect("mine a deposit first");
+        let id = DepositIdentity {
+            deposit_id: m.deposit_id,
+            contract: W_BRIDGE,
+            chain_id: 11_155_111,
+        };
+        let voucher = voucher_account_id(&offline_context(), &id).unwrap();
+        let fields = serde_json::json!({
+            "depositId": uint_json(m.deposit_id), "contractAddr": uint_json(U256::from_be_slice(W_BRIDGE.as_slice())),
+            "dappId": "0", "chainId": "11155111", "amount": uint_json(W_AMOUNT), "anAccount": format!("0x{}", hex::encode(W_ACC)),
+        });
+        self.an
+            .sends
+            .lock()
+            .unwrap()
+            .push_back(FinalizeSend::Executed {
+                tx_id: "fin".into(),
+                aborted: false,
+                exit_code: Some(0),
+            });
+        self.an
+            .txs
+            .lock()
+            .unwrap()
+            .insert(voucher, vec![TxListItem {
+                hash: "deploy".into(),
+                now: 2,
+                orig_status: AccStatus::NonExist,
+                end_status: AccStatus::Active,
+                aborted: false,
+                out_msgs: vec!["confirm".into()],
+            }]);
+        let bridge = format!("0:{}", hex::encode(W_BRIDGE_ACC));
+        let mut confirm = msg(
+            "confirm",
+            "Internal",
+            &format!("0:{}", hex::encode(voucher)),
+            &bridge,
+            Some("B-confirm"),
+        );
+        confirm.dst_tx = Some(TxRef {
+            hash: "btx".into(),
+            aborted: false,
+            account: bridge.clone(),
+            now: 3,
+        });
+        self.an
+            .messages
+            .lock()
+            .unwrap()
+            .insert("confirm".into(), confirm);
+        self.an.bodies.lock().unwrap().insert(
+            "B-confirm".into(),
+            ("confirmDeposit".into(), fields.clone()),
+        );
+        let mut transfer = msg(
+            "xfer",
+            "Internal",
+            &bridge,
+            &format!("0:{}", hex::encode(W_ACC)),
+            None,
+        );
+        transfer.ecc = vec![(3, u128::from(W_AMOUNT))];
+        transfer.bounce = Some(false);
+        let mut event = msg(
+            "ev",
+            "ExtOut",
+            &bridge,
+            crate::deposit::credit::DEPOSIT_FINALIZED_DST,
+            Some("B-event"),
+        );
+        event.created_at = u64::MAX / 2;
+        self.an
+            .bodies
+            .lock()
+            .unwrap()
+            .insert("B-event".into(), ("DepositFinalized".into(), fields));
+        self.an
+            .transactions
+            .lock()
+            .unwrap()
+            .insert("btx".into(), TxView {
+                hash: "btx".into(),
+                aborted: false,
+                exit_code: Some(0),
+                account: bridge.clone(),
+                now: 3,
+                out: vec![transfer.clone(), event.clone()],
+                ecc_delta: vec![],
+            });
+        let mut delivered = transfer;
+        delivered.dst_tx = Some(TxRef {
+            hash: "rtx".into(),
+            aborted: false,
+            account: String::new(),
+            now: 4,
+        });
+        self.an
+            .messages
+            .lock()
+            .unwrap()
+            .insert("xfer".into(), delivered);
+        self.an
+            .transactions
+            .lock()
+            .unwrap()
+            .insert("rtx".into(), TxView {
+                hash: "rtx".into(),
+                aborted: false,
+                exit_code: Some(0),
+                account: String::new(),
+                now: 4,
+                out: vec![],
+                ecc_delta: vec![(3, i128::from(W_AMOUNT))],
+            });
+        event.src_tx = Some("btx".into());
+        self.an
+            .messages
+            .lock()
+            .unwrap()
+            .insert("ev".into(), event.clone());
+        self.an
+            .ext_out
+            .lock()
+            .unwrap()
+            .entry(W_BRIDGE_ACC)
+            .or_default()
+            .push(event);
+    }
+
+    /// A record of this world's deposit at `stage`, requested from `from`
+    /// at `nonce_before`.
+    fn record(
+        &self,
+        stage: crate::deposit::store::OpStage,
+        from: Address,
+        nonce_before: u64,
+    ) -> crate::deposit::store::OpRecord {
+        use crate::deposit::store::*;
+        let mut r = OpRecord::new(
+            Store::new_op_id(),
+            OpParams {
+                chain_id: 11_155_111,
+                bridge: W_BRIDGE,
+                to: Self::target().extended(),
+                amount_units: W_AMOUNT,
+                an_bridge: hex::encode(W_BRIDGE_ACC),
+                an_network: "http://gql.invalid:80".into(),
+            },
+            hex::encode(crate::deposit::identity::EXPECTED_VOUCHER_CODE_HASH),
+        );
+        r.from = Some(from);
+        r.stage = stage;
+        r.an_bridge_dapp = Some(hex::encode([0u8; 32]));
+        r.request = Some(RequestInfo {
+            nonce_before,
+            from_block: 800,
+            calldata: crate::deposit::evm::deposit_calldata(W_AMOUNT, B256::from(W_ACC)),
+            wallet_hash: None,
+        });
+        r
+    }
+
+    /// Writes `r` to the state directory; its operation id.
+    fn save(&self, r: &mut crate::deposit::store::OpRecord) -> String {
+        crate::deposit::store::Store::open(self.state.path())
+            .unwrap()
+            .write(r)
+            .unwrap();
+        r.op_id.clone()
+    }
+
+    /// An operation killed after its `Requested` write, before the wallet
+    /// answered.
+    pub fn left_requested_operation_from(&self, from: Address) -> String {
+        let mut r = self.record(crate::deposit::store::OpStage::Requested, from, 7);
+        self.save(&mut r)
+    }
+
+    /// Killed after the wallet answered with `h` and before its nonce was read.
+    pub fn left_requested_operation_with_wallet_hash(&self, from: Address, h: B256) -> String {
+        let mut r = self.record(crate::deposit::store::OpStage::Requested, from, 7);
+        if let Some(q) = r.request.as_mut() {
+            q.wallet_hash = Some(h);
+        }
+        self.save(&mut r)
+    }
+
+    /// An operation killed in `Signed` at `nonce`.
+    pub fn left_signed_operation_from(&self, from: Address, nonce: u64) -> String {
+        let mut r = self.record(crate::deposit::store::OpStage::Signed, from, nonce);
+        r.tx = Some(crate::deposit::store::TxClaim {
+            tx_hash: B256::repeat_byte(0x55),
+            tx_nonce: nonce,
+        });
+        self.save(&mut r)
+    }
+
+    /// The deposit of operation `_op`, mined at `nonce`.
+    pub fn mined_deposit_for_operation(&mut self, _op: &str, nonce: u64) -> B256 {
+        self.mined_deposit(nonce)
+    }
+
+    /// A: requested at nonce n and abandoned; B: requested at nonce n and
+    /// died before its hash; T: B's transaction, mined at nonce n.
+    pub fn two_operations_one_slot(&mut self, n: u64) -> (String, String, B256) {
+        let from = self.wallet.account;
+        let mut a = self.record(crate::deposit::store::OpStage::Abandoned, from, n);
+        a.abandoned_ever = true;
+        let a = self.save(&mut a);
+        let mut b = self.record(crate::deposit::store::OpStage::Requested, from, n);
+        let b = self.save(&mut b);
+        let t = self.mined_deposit(n);
+        (a, b, t)
+    }
+
+    /// What an operation records about the mined deposit `m`.
+    fn deposit_info(&self, m: &Mined) -> crate::deposit::store::DepositInfo {
+        use crate::deposit::identity::{offline_context, voucher_account_id, DepositIdentity};
+        let id = DepositIdentity {
+            deposit_id: m.deposit_id,
+            contract: W_BRIDGE,
+            chain_id: 11_155_111,
+        };
+        let voucher = voucher_account_id(&offline_context(), &id).unwrap();
+        crate::deposit::store::DepositInfo {
+            deposit_id: m.deposit_id,
+            block_number: m.block.number,
+            block_hash: m.block.hash,
+            block_log_index: 41,
+            receipt_log_index: 1,
+            access_list_rlp_len: 1,
+            voucher_account: hex::encode(voucher),
+        }
+    }
+
+    /// A finished operation, credited through its voucher.
+    pub fn credited_operation(&mut self) -> String {
+        self.mined_deposit(7);
+        let m = self.mined.clone().unwrap();
+        let mut r = self.record(crate::deposit::store::OpStage::Credited, m.from, 7);
+        r.tx = Some(crate::deposit::store::TxClaim {
+            tx_hash: m.tx,
+            tx_nonce: 7,
+        });
+        r.deposit = Some(self.deposit_info(&m));
+        r.credit = Some(crate::deposit::store::CreditInfo {
+            confirm_tx: "btx".into(),
+            delivery_tx: "rtx".into(),
+            via_events: false,
+        });
+        r.anchor_writer = Some("owner".into());
+        self.save(&mut r)
+    }
+
+    /// Finalize sent earlier, no proof left on disk.
+    pub fn finalizing_operation(&mut self) -> String {
+        self.mined_deposit(7);
+        let m = self.mined.clone().unwrap();
+        let mut r = self.record(crate::deposit::store::OpStage::Finalizing, m.from, 7);
+        r.tx = Some(crate::deposit::store::TxClaim {
+            tx_hash: m.tx,
+            tx_nonce: 7,
+        });
+        let info = self.deposit_info(&m);
+        r.finalize = Some(crate::deposit::store::FinalizeInfo {
+            voucher_code_hash: r.voucher_code_hash.clone(),
+            voucher_account: info.voucher_account.clone(),
+            sends: 1,
+        });
+        r.deposit = Some(info);
+        r.anchor_writer = Some("owner".into());
+        self.save(&mut r)
+    }
+
+    /// Proved, with the proof and its public inputs in the work directory.
+    pub fn proved_operation(&mut self) -> String {
+        self.mined_deposit(7);
+        let m = self.mined.clone().unwrap();
+        let mut r = self.record(crate::deposit::store::OpStage::Proved, m.from, 7);
+        r.tx = Some(crate::deposit::store::TxClaim {
+            tx_hash: m.tx,
+            tx_nonce: 7,
+        });
+        r.deposit = Some(self.deposit_info(&m));
+        let work = self.work.path().join(&r.op_id);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("proof.bin"), b"proof").unwrap();
+        std::fs::copy(
+            self.prover.1.root.join("expected_pi.bin"),
+            work.join("public_inputs.bin"),
+        )
+        .unwrap();
+        r.work_dir = Some(work);
+        self.save(&mut r)
+    }
+
+    /// The bridge now deploys vouchers from other code.
+    pub fn voucher_code_moved(&self) {
+        self.an
+            .getter(W_BRIDGE_ACC, "getDepositVoucherCodeHash", vec![
+                serde_json::json!({ "value0": format!("0x{}", "11".repeat(32)) }),
+            ]);
+    }
+
+    /// Accepted, withdrawn, accepted again, while the bridge is first paused.
+    pub fn anchor_flapping_while_paused(&self) {
+        let m = self.mined.as_ref().expect("mine a deposit first");
+        self.an
+            .accepted_seq
+            .lock()
+            .unwrap()
+            .insert(m.block.hash, Script::new([true, false, true]));
+        // preflight reads it once; the wait reads it only while anchored.
+        self.an.getter(W_BRIDGE_ACC, "isPaused", vec![
+            serde_json::json!({ "value0": false }),
+            serde_json::json!({ "value0": true }),
+            serde_json::json!({ "value0": false }),
+        ]);
+    }
+
+    /// The mined deposit's voucher is deployed.
+    pub fn voucher_deployed(&self) {
+        use crate::deposit::{
+            an::AccStatus,
+            identity::{offline_context, voucher_account_id, DepositIdentity},
+        };
+        let m = self.mined.as_ref().expect("mine a deposit first");
+        let id = DepositIdentity {
+            deposit_id: m.deposit_id,
+            contract: W_BRIDGE,
+            chain_id: 11_155_111,
+        };
+        let voucher = voucher_account_id(&offline_context(), &id).unwrap();
+        self.an
+            .accounts
+            .lock()
+            .unwrap()
+            .insert(voucher, AccountInfo {
+                status: AccStatus::Active,
+                dapp_id: Some([0; 32]),
+                ecc3: 0,
+            });
+    }
+
+    /// The first `finalizeDeposit` aborts with 224 (the anchor went away).
+    pub fn first_finalize_hits_224(&self) {
+        let mut s = self.an.sends.lock().unwrap();
+        s.push_front(FinalizeSend::Executed {
+            tx_id: "f224".into(),
+            aborted: true,
+            exit_code: Some(224),
+        });
+    }
+
+    /// How many times the fake prover ran.
+    pub fn prover_runs(&self) -> usize {
+        std::fs::read_to_string(self.prover.1.root.join("data/runs.log"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+}

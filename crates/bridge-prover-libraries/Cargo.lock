@@ -42,12 +42,14 @@ dependencies = [
  "libc",
  "rand 0.8.8",
  "rust_decimal",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber 0.3.23",
  "tvm_block",
@@ -55,6 +57,7 @@ dependencies = [
  "tvm_types",
  "ulid",
  "url",
+ "webpki-roots 1.0.9",
  "x25519-dalek",
 ]
 

@@ -483,3 +483,138 @@ impl crate::deposit::wallet::Wallet for FakeWallet {
 
     async fn close(&mut self) {}
 }
+
+/// A WalletConnect relay on loopback: `irn_subscribe`, `irn_publish` and
+/// delivery to every subscriber of the topic — the publisher included, as a
+/// real relay may do. It keeps every message and replays a topic's backlog
+/// to each new subscription, standing in for the relay's TTL storage.
+pub struct MockRelay {
+    /// Where it listens.
+    addr: std::net::SocketAddr,
+    /// Subscriptions and backlog, shared by all connections.
+    state: std::sync::Arc<Mutex<MockRelayState>>,
+    /// Tells every open connection to hang up.
+    kill: tokio::sync::broadcast::Sender<()>,
+}
+
+/// What [`MockRelay`] knows across connections.
+#[derive(Default)]
+struct MockRelayState {
+    /// Live subscriptions: topic → the outgoing queue of each subscribed
+    /// connection.
+    subs: HashMap<String, Vec<tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// Every message published so far, per topic, with its tag.
+    backlog: HashMap<String, Vec<(String, u64)>>,
+}
+
+impl MockRelay {
+    /// Starts the relay on a free loopback port.
+    pub async fn start() -> MockRelay {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = std::sync::Arc::new(Mutex::new(MockRelayState::default()));
+        let (kill, _) = tokio::sync::broadcast::channel(4);
+        let (st, k) = (state.clone(), kill.clone());
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                tokio::spawn(MockRelay::serve(tcp, st.clone(), k.subscribe()));
+            }
+        });
+        MockRelay {
+            addr,
+            state,
+            kill,
+        }
+    }
+
+    /// The `ws://` URL to connect to.
+    pub fn url(&self) -> String {
+        format!("ws://{}", self.addr)
+    }
+
+    /// Cuts every open connection. Subscriptions die with their connections;
+    /// the backlog stays.
+    pub fn drop_all(&self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "with no connection open there is nothing to cut"
+        )]
+        let _ = self.kill.send(());
+        self.state.lock().unwrap().subs.clear();
+    }
+
+    /// One client connection, until the client leaves or `killed` fires.
+    async fn serve(
+        tcp: tokio::net::TcpStream,
+        state: std::sync::Arc<Mutex<MockRelayState>>,
+        mut killed: tokio::sync::broadcast::Receiver<()>,
+    ) {
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else {
+            return;
+        };
+        let (mut sink, mut stream) = ws.split();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        loop {
+            tokio::select! {
+                _ = killed.recv() => return,
+                Some(o) = out_rx.recv() => {
+                    if sink.send(Message::Text(o.into())).await.is_err() {
+                        return;
+                    }
+                }
+                m = stream.next() => {
+                    let Some(Ok(Message::Text(t))) = m else { return };
+                    let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+                    let topic = v["params"]["topic"].as_str().unwrap_or_default().to_string();
+                    let mut s = state.lock().unwrap();
+                    match v["method"].as_str() {
+                        Some("irn_subscribe") => {
+                            s.subs.entry(topic.clone()).or_default().push(out_tx.clone());
+                            let ok = serde_json::json!({"id": v["id"], "jsonrpc": "2.0", "result": "sub"});
+                            MockRelay::push(&out_tx, ok);
+                            for (msg, tag) in s.backlog.get(&topic).cloned().unwrap_or_default() {
+                                MockRelay::push(&out_tx, MockRelay::delivery(1, &topic, &msg, tag));
+                            }
+                        }
+                        Some("irn_publish") => {
+                            let msg = v["params"]["message"].as_str().unwrap().to_string();
+                            let tag = v["params"]["tag"].as_u64().unwrap();
+                            s.backlog.entry(topic.clone()).or_default().push((msg.clone(), tag));
+                            for sub in s.subs.get(&topic).cloned().unwrap_or_default() {
+                                MockRelay::push(&sub, MockRelay::delivery(2, &topic, &msg, tag));
+                            }
+                            let ok = serde_json::json!({"id": v["id"], "jsonrpc": "2.0", "result": true});
+                            MockRelay::push(&out_tx, ok);
+                        }
+                        _ => {} // acks of `irn_subscription`
+                    }
+                }
+            }
+        }
+    }
+
+    /// Queues `frame` on a connection's outgoing queue.
+    fn push(to: &tokio::sync::mpsc::UnboundedSender<String>, frame: serde_json::Value) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a connection that has closed takes no more frames"
+        )]
+        let _ = to.send(frame.to_string());
+    }
+
+    /// An `irn_subscription` push carrying one published message.
+    fn delivery(id: u64, topic: &str, message: &str, tag: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "jsonrpc": "2.0",
+            "method": "irn_subscription",
+            "params": {
+                "id": "sub",
+                "data": {"topic": topic, "message": message, "tag": tag, "publishedAt": 0}
+            }
+        })
+    }
+}

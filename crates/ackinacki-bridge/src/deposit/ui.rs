@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
+
 /// One stage of a deposit run, in pipeline order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +89,7 @@ pub enum StepState {
 }
 
 /// The sink a deposit run reports its progress to.
+#[async_trait]
 pub trait Ui: Send + Sync {
     /// A step changed state; `detail` may be empty.
     fn step(&self, step: StepId, state: StepState, detail: &str);
@@ -100,8 +103,10 @@ pub trait Ui: Send + Sync {
     fn qr(&self, uri: &str, decoded: &[(String, String)]);
     /// The operation id, once reserved.
     fn op_id(&self, op_id: &str);
-    /// `false` when no answer can be had (`--non-interactive` without `--yes`).
-    fn confirm(&self, prompt: &str) -> bool;
+    /// `false` when no answer can be had (`--non-interactive` without
+    /// `--yes`). Dropping the future ends a wait for the answer at once, as
+    /// a signal that drops the run does.
+    async fn confirm(&self, prompt: &str) -> bool;
 }
 
 /// The checklist glyph of a step state.
@@ -399,18 +404,43 @@ fn answered(prompt: &str, s: &Settings) -> Option<(bool, String)> {
     None
 }
 
-/// Asks `prompt` on `out` and reads one line of stdin: yes only for `y` or
-/// `yes`; no answer at all is a no.
-fn ask(prompt: &str, out: &mut dyn Write) -> bool {
-    put(out, &format!("{prompt} [y/N] "));
+/// One line of this process's stdin; `None` at its end or on an error.
+fn stdin_line() -> Option<String> {
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(n) if n > 0 => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
-        _ => {
-            put(out, "\n");
-            false
-        },
+        Ok(n) if n > 0 => Some(line),
+        _ => None,
     }
+}
+
+/// The answer to a question: one line of stdin, read on a thread of its
+/// own; `None` when no line came. Dropping the future ends the wait at
+/// once, and the locks of the run that dropped it go with the run. The
+/// thread stays blocked in its read, but it is no task of the runtime:
+/// neither the runtime's shutdown nor the process's exit waits for it. A
+/// blocking-pool read would hold both until a line came.
+async fn stdin_answer() -> Option<String> {
+    let (sent, got) = tokio::sync::oneshot::channel();
+    let reader = std::thread::Builder::new()
+        .name("deposit-answer".into())
+        .spawn(move || {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a question given up on no longer listens"
+            )]
+            let _ = sent.send(stdin_line());
+        });
+    if let Err(e) = reader {
+        tracing::debug!("the answer could not be read: {e}");
+        return None;
+    }
+    got.await.ok().flatten()
+}
+
+/// Whether an answer says yes: `y` or `yes`, in any case; anything else,
+/// no answer included, is a no.
+fn says_yes(answer: Option<&str>) -> bool {
+    answer.is_some_and(|l| matches!(l.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Where a human run prints its QR codes: stdout, with the picture only
@@ -474,6 +504,8 @@ struct Log {
     last_status: String,
     /// When each running step started.
     started: HashMap<StepId, Instant>,
+    /// A question waits for its answer on the last line.
+    asking: bool,
 }
 
 impl PlainLines {
@@ -494,6 +526,7 @@ impl PlainLines {
                 out,
                 last_status: String::new(),
                 started: HashMap::new(),
+                asking: false,
             }),
             codes: Mutex::new(codes),
             settings,
@@ -511,6 +544,18 @@ impl PlainLines {
     }
 }
 
+impl Drop for PlainLines {
+    /// A run dropped at a question ends its line: what is printed next
+    /// starts on its own.
+    fn drop(&mut self) {
+        let mut log = self.log();
+        if log.asking {
+            put(log.out.as_mut(), "\n");
+        }
+    }
+}
+
+#[async_trait]
 impl Ui for PlainLines {
     fn step(&self, step: StepId, state: StepState, detail: &str) {
         let mut log = self.log();
@@ -580,15 +625,24 @@ impl Ui for PlainLines {
         ));
     }
 
-    fn confirm(&self, prompt: &str) -> bool {
+    async fn confirm(&self, prompt: &str) -> bool {
         let prompt = shown(prompt);
-        match answered(&prompt, &self.settings) {
-            Some((yes, line)) => {
-                self.line(&line);
-                yes
-            },
-            None => ask(&prompt, self.log().out.as_mut()),
+        if let Some((yes, line)) = answered(&prompt, &self.settings) {
+            self.line(&line);
+            return yes;
         }
+        {
+            let mut log = self.log();
+            log.asking = true;
+            put(log.out.as_mut(), &format!("{prompt} [y/N] "));
+        }
+        let answer = stdin_answer().await;
+        let mut log = self.log();
+        log.asking = false;
+        if answer.is_none() {
+            put(log.out.as_mut(), "\n");
+        }
+        says_yes(answer.as_deref())
     }
 }
 
@@ -635,6 +689,7 @@ impl JsonEvents {
     }
 }
 
+#[async_trait]
 impl Ui for JsonEvents {
     fn step(&self, step: StepId, state: StepState, detail: &str) {
         self.emit(serde_json::json!({
@@ -669,7 +724,7 @@ impl Ui for JsonEvents {
         self.emit(serde_json::json!({ "event": "op_id" }));
     }
 
-    fn confirm(&self, prompt: &str) -> bool {
+    async fn confirm(&self, prompt: &str) -> bool {
         self.emit(serde_json::json!({
             "event": "confirm", "prompt": redact(prompt), "answer": self.yes,
         }));
@@ -722,6 +777,8 @@ struct Board {
     width: fn() -> Option<usize>,
     /// The board is gone: its clock stops.
     closed: bool,
+    /// A question waits for its answer where the board stood.
+    asking: bool,
 }
 
 /// One step's row on the board.
@@ -908,6 +965,7 @@ impl TtyBoard {
             spin: 0,
             width,
             closed: false,
+            asking: false,
         }));
         if let Some(every) = tick {
             let weak = Arc::downgrade(&board);
@@ -934,6 +992,11 @@ impl Drop for TtyBoard {
     fn drop(&mut self) {
         let mut b = self.lock();
         b.closed = true;
+        // A run dropped at a question ends its line: what is printed next
+        // starts on its own.
+        if b.asking {
+            put(b.out.as_mut(), "\n");
+        }
         // The last frame stays on the screen, without the spinner.
         if b.drawn > 0 {
             b.draw("");
@@ -941,6 +1004,7 @@ impl Drop for TtyBoard {
     }
 }
 
+#[async_trait]
 impl Ui for TtyBoard {
     fn step(&self, step: StepId, state: StepState, detail: &str) {
         let detail = one_line(&shown(detail));
@@ -1022,18 +1086,29 @@ impl Ui for TtyBoard {
         self.lock().draw(&line);
     }
 
-    fn confirm(&self, prompt: &str) -> bool {
+    async fn confirm(&self, prompt: &str) -> bool {
         let prompt = shown(prompt);
-        let mut b = self.lock();
-        if let Some((yes, line)) = answered(&prompt, &b.settings) {
-            b.draw(&line);
-            return yes;
+        {
+            let mut b = self.lock();
+            if let Some((yes, line)) = answered(&prompt, &b.settings) {
+                b.draw(&line);
+                return yes;
+            }
+            // Asked where the board stood, which the clock leaves alone
+            // while it is off the screen; the board comes back under the
+            // answer.
+            b.erase();
+            b.asking = true;
+            put(b.out.as_mut(), &format!("{prompt} [y/N] "));
         }
-        // Asked where the board stood; the board comes back under the answer.
-        b.erase();
-        let yes = ask(&prompt, b.out.as_mut());
+        let answer = stdin_answer().await;
+        let mut b = self.lock();
+        b.asking = false;
+        if answer.is_none() {
+            put(b.out.as_mut(), "\n");
+        }
         b.draw("");
-        yes
+        says_yes(answer.as_deref())
     }
 }
 
@@ -1180,6 +1255,7 @@ impl RecordingUi {
 }
 
 #[cfg(test)]
+#[async_trait]
 impl Ui for RecordingUi {
     fn step(&self, step: StepId, state: StepState, detail: &str) {
         self.push(UiEvent::Step(step, state, detail.into()));
@@ -1199,7 +1275,7 @@ impl Ui for RecordingUi {
     fn op_id(&self, op_id: &str) {
         self.push(UiEvent::OpId(op_id.into()));
     }
-    fn confirm(&self, prompt: &str) -> bool {
+    async fn confirm(&self, prompt: &str) -> bool {
         self.push(UiEvent::Confirm(prompt.into()));
         self.answer
     }
@@ -1230,7 +1306,7 @@ mod tests {
             "waiting for the bridge owner".to_string()
         ]);
         assert_eq!(ui.warnings(), vec!["anchor withdrawn".to_string()]);
-        assert!(ui.confirm("go?"));
+        assert!(futures::executor::block_on(ui.confirm("go?")));
     }
 
     /// Everything written to a captured stream.
@@ -1397,12 +1473,98 @@ mod tests {
         assert!(text(&b).contains("no (--non-interactive)"), "{}", text(&b));
     }
 
+    #[tokio::test]
+    async fn non_interactive_without_yes_never_waits() {
+        let (_b, out) = capture();
+        assert!(!PlainLines::new(out, false, true).confirm("go?").await);
+        let (_b, out) = capture();
+        assert!(PlainLines::new(out, true, true).confirm("go?").await);
+    }
+
+    /// Not a test on its own: the body of the process the tests below
+    /// start with a piped stdin. Both human renderers ask a question. With
+    /// ACKI_ASK_HELPER=unanswered nobody writes to that stdin, a timeout
+    /// cuts each question short, as a signal does, and the runtime is
+    /// dropped: the process must exit all the same. With `answered` the
+    /// lines `y` and `no` come, one per question. Does nothing unless
+    /// ACKI_ASK_HELPER is set.
     #[test]
-    fn non_interactive_without_yes_never_waits() {
-        let (_b, out) = capture();
-        assert!(!PlainLines::new(out, false, true).confirm("go?"));
-        let (_b, out) = capture();
-        assert!(PlainLines::new(out, true, true).confirm("go?"));
+    fn helper_ask_on_a_piped_stdin() {
+        let Some(mode) = std::env::var_os("ACKI_ASK_HELPER") else {
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_log, out) = capture();
+        let plain = PlainLines::new(out, false, false);
+        let (_log, _codes, tty) = board(Settings::default(), true);
+        let renderers = [&plain as &dyn Ui, &tty];
+        if mode == "answered" {
+            for (ui, yes) in renderers.into_iter().zip([true, false]) {
+                assert_eq!(rt.block_on(ui.confirm("go?")), yes);
+            }
+            return;
+        }
+        for ui in renderers {
+            let asked = rt.block_on(async {
+                tokio::time::timeout(Duration::from_millis(200), ui.confirm("go?")).await
+            });
+            assert!(asked.is_err(), "nobody answered");
+        }
+        drop(rt);
+    }
+
+    /// Runs [`helper_ask_on_a_piped_stdin`] in `mode` with `input` written
+    /// to its stdin, which stays open; how it exited within ten seconds.
+    fn ask_in_a_process(mode: &str, input: &[u8]) -> Option<(std::process::ExitStatus, String)> {
+        use std::process::{Command, Stdio};
+        let _spawning = crate::test_forks::spawning();
+        let mut cli = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "deposit::ui::tests::helper_ask_on_a_piped_stdin",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("ACKI_ASK_HELPER", mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = cli.stdin.take().unwrap();
+        std::io::Write::write_all(&mut stdin, input).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(10) {
+            if let Some(status) = cli.try_wait().unwrap() {
+                let mut err = String::new();
+                std::io::Read::read_to_string(&mut cli.stderr.take().unwrap(), &mut err).unwrap();
+                return Some((status, err));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        cli.kill().unwrap();
+        cli.wait().unwrap();
+        None
+    }
+
+    #[test]
+    fn a_question_nobody_answers_ends_with_the_run_that_asked_it() {
+        // Ctrl-C drops the run's future while the EIP-681 question waits
+        // for a line. The wait must end with it, and the process must exit
+        // with the read still blocked, the deposit's locks let go.
+        let (status, err) = ask_in_a_process("unanswered", b"")
+            .expect("an unanswered question kept the process alive");
+        assert!(status.success(), "{status}: {err}");
+    }
+
+    #[test]
+    fn a_question_on_stdin_still_gets_its_answer() {
+        let (status, err) =
+            ask_in_a_process("answered", b"y\nno\n").expect("the answers were not read");
+        assert!(status.success(), "{status}: {err}");
     }
 
     #[test]
@@ -1833,7 +1995,7 @@ mod tests {
             ui.warn(&l[2]);
             ui.status(&l[1]);
             ui.step(StepId::EvmConfirm, StepState::Failed, &l[0]);
-            ui.confirm(&l[1]);
+            futures::executor::block_on(ui.confirm(&l[1]));
         };
         let (b1, _codes, tty) = board(
             Settings {

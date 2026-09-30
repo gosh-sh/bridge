@@ -90,7 +90,7 @@ impl Wallet for Eip681Wallet {
 
     async fn connect(&mut self, ui: &dyn Ui) -> Result<Address, WalletError> {
         ui.warn(RISK);
-        if !ui.confirm(RISK) {
+        if !ui.confirm(RISK).await {
             return Err(WalletError::Rejected);
         }
         Ok(self.from)

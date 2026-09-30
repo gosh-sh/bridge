@@ -15,6 +15,7 @@ pub mod evm;
 pub mod evm_confirm;
 pub mod evm_preflight;
 pub mod evm_steps;
+pub mod finalize;
 pub mod identity;
 pub mod lc_readiness;
 pub mod limits;

@@ -1,7 +1,10 @@
 //! Step 6: wait until the bridge accepts the deposit's block, the block
 //! is finalized, the receipt in it is still ours and the bridge is not
 //! paused. While the block is not final, every cycle re-reads the
-//! receipt: after a reorg the anchor for the old block never comes.
+//! receipt: after a reorg the anchor for the old block never comes. Then,
+//! before the anchor and the pause, every cycle looks whether somebody
+//! finalized the deposit already: a credited deposit must not wait for a
+//! pause or an anchor it no longer needs.
 //!
 //! `--anchor-timeout-s` bounds the whole wait, reads and their retries
 //! included; the grace period after the anchor has its own bound,
@@ -19,6 +22,7 @@ use serde_json::json;
 use crate::{
     deposit::{
         an::{AccStatus, AnRead},
+        credit::{self, FinalizedCheck, Look},
         evm::{BlockTag, EvmRead},
         identity::BRIDGE_ABI,
         lc_readiness::{self, AnchorPlan, LcFailure},
@@ -79,8 +83,10 @@ pub enum WaitStep {
     Proceed,
 }
 
-/// Decides one poll. The receipt is checked while the block is not final
+/// Decides one poll, as the wait does around its look for a deposit
+/// finalized already. The receipt is checked while the block is not final
 /// with the receipt in it; then the anchor, then finality, then the pause.
+#[cfg(test)]
 pub fn step(
     st: &mut WaitState,
     t: &Tick,
@@ -88,19 +94,42 @@ pub fn step(
     plan: &AnchorPlan,
     chain_id: u64,
 ) -> WaitStep {
-    if !st.finalized_same {
-        match t.receipt {
-            Some(None) => return WaitStep::Search,
-            Some(Some(h)) if h != stored => return WaitStep::BackToConfirm,
-            // Final only if the finalized chain has this very block at its height.
-            Some(Some(_)) if t.block_finalized => match t.canonical {
-                Some(c) if c == stored => st.finalized_same = true,
-                Some(_) => return WaitStep::BackToConfirm,
-                None => {},
-            },
-            _ => {},
-        }
+    receipt_step(st, t, stored).unwrap_or_else(|| anchor_step(st, t, stored, plan, chain_id))
+}
+
+/// The receipt's part of a poll: back to step 5 or to the search when the
+/// receipt moved or is gone, nothing while it is still ours. Once the
+/// block is final with the receipt in it, `st` says so and the receipt is
+/// no longer read.
+pub fn receipt_step(st: &mut WaitState, t: &Tick, stored: B256) -> Option<WaitStep> {
+    if st.finalized_same {
+        return None;
     }
+    match t.receipt {
+        Some(None) => Some(WaitStep::Search),
+        Some(Some(h)) if h != stored => Some(WaitStep::BackToConfirm),
+        // Final only if the finalized chain has this very block at its height.
+        Some(Some(_)) if t.block_finalized => match t.canonical {
+            Some(c) if c == stored => {
+                st.finalized_same = true;
+                None
+            },
+            Some(_) => Some(WaitStep::BackToConfirm),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+/// The rest of a poll, once the receipt is still ours: the anchor, then
+/// finality, then the pause.
+pub fn anchor_step(
+    st: &mut WaitState,
+    t: &Tick,
+    stored: B256,
+    plan: &AnchorPlan,
+    chain_id: u64,
+) -> WaitStep {
     if st.was_anchored && !t.anchored {
         st.was_anchored = false;
         return WaitStep::AnchorLost(format!(
@@ -159,6 +188,14 @@ pub enum WaitExit {
     /// The voucher was deployed in the grace period: the operator's
     /// relayer is finalizing; confirm the credit.
     VoucherDeployed,
+    /// Somebody finalized the deposit before the wait was through, found
+    /// on a poll before the anchor and the pause were read: confirm the
+    /// credit, by events when only they showed it.
+    Finalized {
+        /// Found by the bridge's `DepositFinalized` events: the recorded
+        /// voucher address is stale.
+        via_events: bool,
+    },
     /// The receipt moved to another block: back to the EVM confirmation.
     BackToConfirm,
     /// The node has no receipt: search for the transaction by its nonce.
@@ -178,8 +215,9 @@ pub struct WaitCtx {
     pub chain_id: u64,
     /// The Acki Nacki bridge.
     pub bridge: [u8; 32],
-    /// The deposit's voucher address.
-    pub voucher: [u8; 32],
+    /// What shows that the deposit was finalized already, the deposit's
+    /// voucher address among it.
+    pub finalized: FinalizedCheck,
     /// The bridge's light client, if it names one.
     pub light_client: Option<[u8; 32]>,
     /// Who is expected to anchor the block.
@@ -228,8 +266,9 @@ async fn flag(
 
 /// Waits for the anchor, then gives the operator's relayer the grace
 /// period. `--anchor-timeout-s` bounds everything up to the anchor —
-/// reads, their retries, the light-client re-checks — and ends it with
-/// exit 31; the grace period is bounded by `--relayer-grace-s` alone.
+/// reads, their retries, the light-client re-checks, the looks for a
+/// deposit finalized already — and ends it with exit 31; the grace period
+/// is bounded by `--relayer-grace-s` alone.
 pub async fn wait(
     evm: &dyn EvmRead,
     an: &dyn AnRead,
@@ -264,7 +303,7 @@ pub async fn wait(
             ui,
             "looking for the deposit voucher",
             Some(grace_end),
-            || an.account(cx.voucher),
+            || an.account(cx.finalized.voucher),
         )
         .await
         else {
@@ -341,6 +380,32 @@ async fn until_anchored(
             };
             (Some(r), canonical)
         };
+        let mut t = Tick {
+            receipt,
+            block_finalized,
+            canonical,
+            anchored: false,
+            paused: false,
+            lc: None,
+        };
+        // A receipt that moved goes back to step 5 first: the deposit id,
+        // and with it the voucher address, may be different there.
+        match receipt_step(&mut st, &t, cx.block_hash) {
+            Some(WaitStep::Search) => return Some(WaitExit::Search),
+            Some(_) => return Some(WaitExit::BackToConfirm),
+            None => {},
+        }
+        // Before the anchor and the pause: a deposit the operator's relayer
+        // finalized while this run was not looking needs neither. One
+        // attempt at each read; one that fails is looked at again next
+        // cycle.
+        if let Some(via_events) =
+            credit::finalized_already(an, ui, cx.bridge, &cx.finalized, Look::Poll, deadline).await
+        {
+            return Some(WaitExit::Finalized {
+                via_events,
+            });
+        }
         let block = json!({ "chainId": cx.chain_id.to_string(), "blockHash": format!("{:#x}", cx.block_hash) });
         let anchored = flag(an, ui, deadline, cx.bridge, "isAcceptedBlockHash", block).await?;
         let paused = anchored && flag(an, ui, deadline, cx.bridge, "isPaused", json!({})).await?;
@@ -366,15 +431,10 @@ async fn until_anchored(
                 }
             }
         }
-        let t = Tick {
-            receipt,
-            block_finalized,
-            canonical,
-            anchored,
-            paused,
-            lc: lc.clone(),
-        };
-        match step(&mut st, &t, cx.block_hash, &cx.plan, cx.chain_id) {
+        t.anchored = anchored;
+        t.paused = paused;
+        t.lc = lc.clone();
+        match anchor_step(&mut st, &t, cx.block_hash, &cx.plan, cx.chain_id) {
             WaitStep::BackToConfirm => return Some(WaitExit::BackToConfirm),
             WaitStep::Search => return Some(WaitExit::Search),
             WaitStep::AnchorLost(w) => ui.warn(&w),
@@ -602,7 +662,7 @@ mod tests {
             block_number: 100,
             chain_id: 11_155_111,
             bridge: [0x1a; 32],
-            voucher: [0xee; 32],
+            finalized: finalized_check(),
             light_client: None,
             plan: AnchorPlan::Owner {
                 lc_ready: false,
@@ -640,7 +700,7 @@ mod tests {
             block_number: 100,
             chain_id: 11_155_111,
             bridge: [0x1a; 32],
-            voucher: [0xee; 32],
+            finalized: finalized_check(),
             light_client: None,
             plan: AnchorPlan::Owner {
                 lc_ready: false,
@@ -688,7 +748,7 @@ mod tests {
             block_number: 100,
             chain_id: 11_155_111,
             bridge: [0x1a; 32],
-            voucher: [0xee; 32],
+            finalized: finalized_check(),
             light_client: None,
             plan: AnchorPlan::Owner {
                 lc_ready: false,
@@ -732,7 +792,7 @@ mod tests {
             block_number: 100,
             chain_id: 11_155_111,
             bridge: [0x1a; 32],
-            voucher: [0xee; 32],
+            finalized: finalized_check(),
             light_client: Some([0x1c; 32]),
             plan: AnchorPlan::LightClient,
             timeout: Some(std::time::Duration::from_secs(300)),
@@ -790,7 +850,7 @@ mod tests {
             block_number: 100,
             chain_id: 11_155_111,
             bridge: [0x1a; 32],
-            voucher: [0xee; 32],
+            finalized: finalized_check(),
             light_client: None,
             plan: AnchorPlan::Owner {
                 lc_ready: false,
@@ -842,7 +902,7 @@ mod tests {
             block_number: b.number,
             chain_id: 11_155_111,
             bridge: BRIDGE,
-            voucher: VOUCHER,
+            finalized: finalized_check(),
             light_client: matches!(plan, AnchorPlan::LightClient).then_some(LC),
             plan,
             timeout: timeout.map(Duration::from_secs),
@@ -858,6 +918,142 @@ mod tests {
             dapp_id: Some([0; 32]),
             ecc3: 0,
         });
+    }
+
+    /// The voucher code the operation recorded.
+    const CODE: &str = "c0de";
+
+    /// The voucher [`VOUCHER`] under [`CODE`], for a deposit whose events
+    /// no test here emits.
+    fn finalized_check() -> FinalizedCheck {
+        FinalizedCheck {
+            stored_code: CODE.into(),
+            voucher: VOUCHER,
+            identity: credit::Identity {
+                deposit_id: alloy_primitives::U256::from(6),
+                contract: alloy_primitives::U256::from(0xb1),
+                chain_id: 11_155_111,
+                amount: 12_500_000,
+                account: [0xa3; 32],
+            },
+            not_before: 0,
+        }
+    }
+
+    /// The bridge names `codes` as its voucher code, one per read, the
+    /// last one from then on.
+    fn voucher_codes(an: &FakeAn, codes: &[&str]) {
+        let answers = codes
+            .iter()
+            .map(|c| serde_json::json!({ "value0": format!("0x{c}") }))
+            .collect();
+        an.getter(BRIDGE, "getDepositVoucherCodeHash", answers);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deposit_finalized_before_the_anchor_ends_the_wait_at_the_first_poll() {
+        let (evm, b) = final_deposit();
+        let an = FakeAn::default(); // no block is ever accepted
+        voucher_codes(&an, &[CODE]);
+        deployed_voucher(&an);
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(
+            wait(
+                &evm,
+                &an,
+                &ctx(&b, OWNER, Some(300)),
+                &RecordingUi::new(true)
+            )
+            .await
+            .unwrap(),
+            WaitExit::Finalized {
+                via_events: false
+            }
+        );
+        assert_eq!(t0.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deposit_finalized_during_a_pause_ends_the_wait_without_it_being_lifted() {
+        // Anchored and paused for good; the voucher shows up on the third
+        // poll, once the bridge names the recorded code again.
+        let (evm, b) = final_deposit();
+        let an = FakeAn::default();
+        an.accepted.lock().unwrap().insert(b.hash, 0);
+        an.getter(BRIDGE, "isPaused", vec![
+            serde_json::json!({"value0": true}),
+        ]);
+        voucher_codes(&an, &["0ther", "0ther", CODE]);
+        deployed_voucher(&an);
+        let ui = RecordingUi::new(true);
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(
+            wait(&evm, &an, &ctx(&b, OWNER, None), &ui).await.unwrap(),
+            WaitExit::Finalized {
+                via_events: false
+            }
+        );
+        assert_eq!(t0.elapsed(), Duration::from_secs(60));
+        assert!(
+            ui.statuses().iter().any(|s| s.contains("paused")),
+            "{:?}",
+            ui.statuses()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_receipt_that_moved_goes_back_to_step_5_before_the_finalized_look() {
+        // The voucher at the recorded address belongs to the deposit id of
+        // the old block; step 5 reads the one the deposit has now.
+        let b = header(100, 1);
+        let evm = FakeEvm::sepolia();
+        evm.script_receipt(TX, vec![Some(deposit_receipt(
+            TX,
+            &header(101, 2),
+            true,
+            vec![],
+        ))]);
+        evm.finalized.set([Some(header(90, 8))]);
+        let an = FakeAn::default();
+        voucher_codes(&an, &[CODE]);
+        deployed_voucher(&an);
+        assert_eq!(
+            wait(
+                &evm,
+                &an,
+                &ctx(&b, OWNER, Some(300)),
+                &RecordingUi::new(true)
+            )
+            .await
+            .unwrap(),
+            WaitExit::BackToConfirm
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_voucher_read_that_fails_is_not_a_finalized_deposit() {
+        let (evm, b) = final_deposit();
+        let an = FakeAn::default();
+        an.accepted.lock().unwrap().insert(b.hash, 1);
+        an.getter(BRIDGE, "isPaused", vec![
+            serde_json::json!({"value0": false}),
+        ]);
+        voucher_codes(&an, &[CODE]);
+        deployed_voucher(&an);
+        an.failing_accounts.lock().unwrap().insert(VOUCHER);
+        // Not known is not finalized: the wait goes on to the anchor, and
+        // the grace period cannot read the voucher either.
+        assert_eq!(
+            wait(
+                &evm,
+                &an,
+                &ctx(&b, OWNER, Some(300)),
+                &RecordingUi::new(true)
+            )
+            .await
+            .unwrap(),
+            WaitExit::Proceed
+        );
     }
 
     #[tokio::test(start_paused = true)]

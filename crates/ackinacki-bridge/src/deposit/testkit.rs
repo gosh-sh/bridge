@@ -1065,6 +1065,8 @@ pub struct FakeAn {
     pub failing_ext: Mutex<HashSet<[u8; 32]>>,
     /// Every `message` call fails.
     pub fail_message_reads: AtomicBool,
+    /// Accounts whose every read fails.
+    pub failing_accounts: Mutex<HashSet<[u8; 32]>>,
     /// External-message and transaction lists are served this many items
     /// a page, the cursor being where the next page starts; 0 serves each
     /// list as one page.
@@ -1113,6 +1115,9 @@ impl AnRead for FakeAn {
     }
 
     async fn account(&self, id: [u8; 32]) -> anyhow::Result<Option<AccountInfo>> {
+        if self.failing_accounts.lock().unwrap().contains(&id) {
+            anyhow::bail!("503 Service Unavailable");
+        }
         Ok(self.accounts.lock().unwrap().get(&id).cloned())
     }
 
@@ -2183,6 +2188,32 @@ impl World {
         r.deposit = Some(info);
         r.anchor_writer = Some("owner".into());
         self.save(&mut r)
+    }
+
+    /// A mined deposit whose operation stopped at `stage` (`Confirmed` or
+    /// `Anchored`): confirmed on chain, its work directory recorded and
+    /// empty.
+    fn stopped_operation(&mut self, stage: crate::deposit::store::OpStage) -> String {
+        self.mined_deposit(7);
+        let m = self.mined.clone().unwrap();
+        let mut r = self.record(stage, m.from, 7);
+        r.tx = Some(crate::deposit::store::TxClaim {
+            tx_hash: m.tx,
+            tx_nonce: 7,
+        });
+        r.deposit = Some(self.deposit_info(&m));
+        r.work_dir = Some(self.work.path().join(&r.op_id));
+        self.save(&mut r)
+    }
+
+    /// Stopped in the anchor wait, the deposit confirmed on chain.
+    pub fn confirmed_operation(&mut self) -> String {
+        self.stopped_operation(crate::deposit::store::OpStage::Confirmed)
+    }
+
+    /// Stopped after the anchor, before a proof was written.
+    pub fn anchored_operation(&mut self) -> String {
+        self.stopped_operation(crate::deposit::store::OpStage::Anchored)
     }
 
     /// Proved, with the proof and its public inputs in the work directory.

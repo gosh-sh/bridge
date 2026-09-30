@@ -13,13 +13,13 @@
 use std::time::Duration;
 
 use alloy_primitives::U256;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     deposit::{
         an::{AccStatus, AnRead, ExtDir, TxView},
         identity::BRIDGE_ABI,
-        retry::deadline_after,
+        retry::{deadline_after, once, until},
         store::CreditInfo,
         ui::Ui,
     },
@@ -237,6 +237,108 @@ pub async fn finalized_event(
             _ => return Ok(None),
         }
     }
+}
+
+/// What shows that somebody finalized a deposit already: this run before
+/// it stopped, an earlier run, or the operator's relayer.
+#[derive(Debug, Clone)]
+pub struct FinalizedCheck {
+    /// The voucher code hash the operation recorded, as hex.
+    pub stored_code: String,
+    /// The voucher's address under that code.
+    pub voucher: [u8; 32],
+    /// The deposit.
+    pub identity: Identity,
+    /// The deposit block's time in seconds, which no `DepositFinalized` of
+    /// this deposit predates; 0 when it is not known, and the events are
+    /// then paged further back.
+    pub not_before: u64,
+}
+
+/// How hard [`finalized_already`] looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    /// Before a `finalizeDeposit` or a proof that has to be built again:
+    /// the events are read whenever the voucher code moved or no proof is
+    /// on disk (a new proof costs minutes), retried until the deadline.
+    BeforeSend {
+        /// A proof is on disk.
+        have_proof: bool,
+    },
+    /// On a poll of the anchor wait: one attempt at each read, and the
+    /// events only when the voucher code moved.
+    Poll,
+}
+
+/// Whether somebody finalized the deposit already, and if so whether step
+/// 9 confirms it by events (`Some(true)`) or through the voucher
+/// (`Some(false)`). The voucher at the stored address shows it while the
+/// bridge keeps the voucher code the address was computed with. After a
+/// code change the deposit is finalized through another address, and only
+/// the bridge's `DepositFinalized` events show it. Every read is bounded by
+/// `deadline`; one that fails or runs out is "not known", never
+/// "finalized".
+pub async fn finalized_already(
+    an: &dyn AnRead,
+    ui: &dyn Ui,
+    bridge: [u8; 32],
+    check: &FinalizedCheck,
+    look: Look,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<bool> {
+    let code = once(
+        deadline,
+        an.run_getter(bridge, BRIDGE_ABI, "getDepositVoucherCodeHash", json!({})),
+    )
+    .await;
+    // Unknown counts as moved: then the events decide, not a stale address.
+    let stored = check.stored_code.trim_start_matches("0x");
+    let moved = code.and_then(|c| {
+        c["value0"]
+            .as_str()
+            .map(|h| h.trim_start_matches("0x").to_ascii_lowercase())
+    }) != Some(stored.to_ascii_lowercase());
+    if !moved {
+        let v = once(deadline, an.account(check.voucher)).await.flatten();
+        if v.is_some_and(|a| a.status == AccStatus::Active) {
+            return Some(false);
+        }
+        // With a proof on disk, step 8's own look before every send is
+        // enough; in the anchor wait, the next poll looks again.
+        if !matches!(look, Look::BeforeSend {
+            have_proof: false
+        }) {
+            return None;
+        }
+    }
+    let event = || finalized_event(an, bridge, &check.identity, check.not_before);
+    // The event is enough to stop proving and sending; step 9 follows the
+    // rest of the chain to the delivered transfer.
+    let found = match look {
+        Look::Poll => once(deadline, event()).await,
+        Look::BeforeSend {
+            have_proof,
+        } => {
+            let found = until(
+                ui,
+                "reading the bridge's DepositFinalized events",
+                deadline,
+                event,
+            )
+            .await;
+            if found.is_none() {
+                ui.warn(if have_proof {
+                    "the bridge's DepositFinalized events could not be read; sending \
+                     finalizeDeposit"
+                } else {
+                    "the bridge's DepositFinalized events could not be read; building the proof \
+                     again"
+                });
+            }
+            found
+        },
+    };
+    found.flatten().map(|_| true)
 }
 
 /// The fallback path, which does not depend on the voucher's address: the

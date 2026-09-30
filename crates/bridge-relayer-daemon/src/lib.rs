@@ -33,10 +33,11 @@ pub use aggregator::{
 };
 pub use bridge::{
     classify_withdraw_revert, get_logs_chunks, paint_heights_from_events,
-    resolve_bridge_deploy_block, resolve_get_logs_chunk_blocks, BkSetUpdateSubmitOutcome,
-    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, MockBridgeClient,
-    SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
+    resolve_bridge_deploy_block, resolve_get_logs_chunk_blocks, resolve_get_logs_pause,
+    BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,
+    MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
     BRIDGE_DEPLOY_BLOCK_ENV, GET_LOGS_CHUNK_BLOCKS, GET_LOGS_CHUNK_BLOCKS_ENV,
+    GET_LOGS_PAUSE_MS_ENV,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,

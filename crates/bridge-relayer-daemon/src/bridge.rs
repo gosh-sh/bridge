@@ -80,6 +80,29 @@ pub const GET_LOGS_CHUNK_BLOCKS_ENV: &str = "BRIDGE_GET_LOGS_CHUNK_BLOCKS";
 
 /// The `eth_getLogs` span to use, from [`GET_LOGS_CHUNK_BLOCKS_ENV`] or the
 /// default.
+/// Environment variable: milliseconds to wait between two `eth_getLogs`
+/// calls of that scan (default 0). Rate-limited RPCs (Alchemy free tier:
+/// ~4 `eth_getLogs` per second) need a few hundred.
+pub const GET_LOGS_PAUSE_MS_ENV: &str = "BRIDGE_GET_LOGS_PAUSE_MS";
+
+/// The pause between two `eth_getLogs` calls, from [`GET_LOGS_PAUSE_MS_ENV`].
+pub fn resolve_get_logs_pause() -> Duration {
+    Duration::from_millis(
+        std::env::var(GET_LOGS_PAUSE_MS_ENV)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0),
+    )
+}
+
+/// Retries of one `eth_getLogs` call of that scan on any RPC error (429,
+/// 5xx, transport), with a doubling delay starting at half a second. The
+/// scan is a startup one-shot, so a wrong span (-32600) only costs the
+/// retries before the daemon stops with the RPC's message.
+const GET_LOGS_MAX_ATTEMPTS: u32 = 8;
+const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 500;
+const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
+
 pub fn resolve_get_logs_chunk_blocks() -> u64 {
     std::env::var(GET_LOGS_CHUNK_BLOCKS_ENV)
         .ok()
@@ -742,6 +765,9 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// Inclusive block span per `eth_getLogs` call in that scan. Read from
     /// [`GET_LOGS_CHUNK_BLOCKS_ENV`] in [`Self::new`].
     get_logs_chunk_blocks: u64,
+    /// Pause between two `eth_getLogs` calls of that scan. Read from
+    /// [`GET_LOGS_PAUSE_MS_ENV`] in [`Self::new`].
+    get_logs_pause: Duration,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -755,11 +781,18 @@ where
             provider,
             resolve_bridge_deploy_block(),
             resolve_get_logs_chunk_blocks(),
+            resolve_get_logs_pause(),
         )
     }
 
     pub fn with_deploy_block(address: Address, provider: P, deploy_block: u64) -> Self {
-        Self::with_scan_config(address, provider, deploy_block, GET_LOGS_CHUNK_BLOCKS)
+        Self::with_scan_config(
+            address,
+            provider,
+            deploy_block,
+            GET_LOGS_CHUNK_BLOCKS,
+            Duration::ZERO,
+        )
     }
 
     pub fn with_scan_config(
@@ -767,6 +800,7 @@ where
         provider: P,
         deploy_block: u64,
         get_logs_chunk_blocks: u64,
+        get_logs_pause: Duration,
     ) -> Self {
         let contract = AckiNackiBridge::new(address, provider);
         Self {
@@ -774,6 +808,7 @@ where
             address,
             deploy_block,
             get_logs_chunk_blocks: get_logs_chunk_blocks.max(1),
+            get_logs_pause,
         }
     }
 
@@ -1186,16 +1221,35 @@ where
                 .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
                 .from_block(start)
                 .to_block(end);
-            let logs = self
-                .contract
-                .provider()
-                .get_logs(&filter)
-                .await
-                .map_err(|e| {
-                    RelayerError::other(format!(
-                        "LayerAnchorAppended get_logs [{start},{end}]: {e}"
-                    ))
-                })?;
+            let mut attempt = 0u32;
+            let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+            let logs = loop {
+                attempt += 1;
+                match self.contract.provider().get_logs(&filter).await {
+                    Ok(logs) => break logs,
+                    Err(e) if attempt < GET_LOGS_MAX_ATTEMPTS => {
+                        tracing::warn!(
+                            start,
+                            end,
+                            attempt,
+                            backoff_ms,
+                            error = %e,
+                            "LayerAnchorAppended get_logs failed; retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+                    },
+                    Err(e) => {
+                        return Err(RelayerError::other(format!(
+                            "LayerAnchorAppended get_logs [{start},{end}] after {attempt} \
+                             attempts: {e}"
+                        )));
+                    },
+                }
+            };
+            if !self.get_logs_pause.is_zero() {
+                tokio::time::sleep(self.get_logs_pause).await;
+            }
             for log in logs {
                 let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
                     Ok(d) => d,

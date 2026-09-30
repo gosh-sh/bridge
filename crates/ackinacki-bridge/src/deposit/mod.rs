@@ -10,6 +10,7 @@ pub mod an_preflight;
 pub mod anchor_wait;
 pub mod args;
 pub mod binding;
+pub mod credit;
 pub mod evm;
 pub mod evm_confirm;
 pub mod evm_preflight;

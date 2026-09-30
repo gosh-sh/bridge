@@ -230,8 +230,20 @@ pub fn parse_account(v: &Value) -> Option<AccountInfo> {
     })
 }
 
-/// A message, with its transactions when the query resolved them.
+/// A message, with its transactions when the query resolved them; `None`
+/// when it has no hash, or a resolved receiving transaction lacks its hash,
+/// outcome or time. Those are read, never assumed: an aborted transaction
+/// can be a final verdict, and a missing time would date it to 1970.
 pub fn parse_msg(v: &Value) -> Option<MsgView> {
+    let dst_tx = match v.get("dst_transaction").filter(|t| !t.is_null()) {
+        None => None,
+        Some(t) => Some(TxRef {
+            hash: t["hash"].as_str()?.to_string(),
+            aborted: t["aborted"].as_bool()?,
+            account: t["account_addr"].as_str().unwrap_or_default().to_string(),
+            now: t["now"].as_u64()?,
+        }),
+    };
     Some(MsgView {
         hash: v["hash"].as_str()?.to_string(),
         msg_type: v["msg_type_name"].as_str().unwrap_or_default().to_string(),
@@ -244,15 +256,7 @@ pub fn parse_msg(v: &Value) -> Option<MsgView> {
             .collect(),
         bounce: v["bounce"].as_bool(),
         created_at: v["created_at"].as_u64().unwrap_or(0),
-        dst_tx: v
-            .get("dst_transaction")
-            .filter(|t| !t.is_null())
-            .map(|t| TxRef {
-                hash: t["hash"].as_str().unwrap_or_default().to_string(),
-                aborted: t["aborted"].as_bool().unwrap_or(true),
-                account: t["account_addr"].as_str().unwrap_or_default().to_string(),
-                now: t["now"].as_u64().unwrap_or(0),
-            }),
+        dst_tx,
         src_tx: v
             .pointer("/src_transaction/hash")
             .and_then(|h| h.as_str())
@@ -260,11 +264,12 @@ pub fn parse_msg(v: &Value) -> Option<MsgView> {
     })
 }
 
-/// A transaction with its outbound messages.
+/// A transaction with its outbound messages; `None` without its hash or
+/// its outcome.
 pub fn parse_tx(v: &Value) -> Option<TxView> {
     Some(TxView {
         hash: v["hash"].as_str()?.to_string(),
-        aborted: v["aborted"].as_bool().unwrap_or(true),
+        aborted: v["aborted"].as_bool()?,
         exit_code: v
             .pointer("/compute/exit_code")
             .and_then(|c| c.as_i64())
@@ -318,6 +323,48 @@ pub fn parse_tx_page(v: &Value) -> Option<Page<TxListItem>> {
         items,
         cursor,
     })
+}
+
+/// A page of an account's external messages, newest first; the node lists
+/// them oldest first and pages backwards. `None` for an answer that is not
+/// such a page: no list, no paging info, a message without its hash or
+/// time, or more pages without a cursor. Read as an empty page, any of
+/// these would say "no such message" when the answer was not read.
+pub fn parse_ext_page(v: &Value) -> Option<Page<MsgView>> {
+    let mut items = v["edges"]
+        .as_array()?
+        .iter()
+        .map(|e| {
+            e["node"]["created_at"].as_u64()?;
+            parse_msg(&e["node"])
+        })
+        .collect::<Option<Vec<_>>>()?;
+    items.reverse();
+    let cursor = if v.pointer("/pageInfo/hasPreviousPage")?.as_bool()? {
+        Some(v.pointer("/pageInfo/startCursor")?.as_str()?.to_string())
+    } else {
+        None
+    };
+    Some(Page {
+        items,
+        cursor,
+    })
+}
+
+/// A single-object answer at `pointer` of `d`: `None` when the node has no
+/// such object, an error when it answered one `parse` cannot read.
+fn single<T>(
+    d: &Value,
+    pointer: &str,
+    parse: impl Fn(&Value) -> Option<T>,
+    what: &str,
+) -> anyhow::Result<Option<T>> {
+    match d.pointer(pointer).filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => parse(v)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{what}: unexpected answer")),
+    }
 }
 
 /// What the deposit reads from Acki Nacki.
@@ -498,28 +545,9 @@ impl AnRead for LiveAn {
         let d = self.gql.query(&q).await?;
         let m = d
             .pointer("/blockchain/account/messages")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let mut items: Vec<MsgView> = m["edges"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|e| parse_msg(&e["node"])).collect())
-            .unwrap_or_default();
-        items.reverse();
-        let more = m
-            .pointer("/pageInfo/hasPreviousPage")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
-        let cursor = more
-            .then(|| {
-                m.pointer("/pageInfo/startCursor")
-                    .and_then(|c| c.as_str())
-                    .map(String::from)
-            })
-            .flatten();
-        Ok(Page {
-            items,
-            cursor,
-        })
+            .unwrap_or(&Value::Null);
+        parse_ext_page(m)
+            .ok_or_else(|| anyhow::anyhow!("{kind} messages of {h}: unexpected answer"))
     }
 
     async fn transactions(
@@ -547,9 +575,12 @@ impl AnRead for LiveAn {
             r#"{{ blockchain {{ message(hash: "{hash}") {{ hash: id msg_type_name src dst body bounce created_at value_other {{ currency value }} src_transaction {{ hash: id }} dst_transaction {{ hash: id aborted account_addr now }} }} }} }}"#
         );
         let d = self.gql.query(&q).await?;
-        Ok(d.pointer("/blockchain/message")
-            .filter(|m| !m.is_null())
-            .and_then(parse_msg))
+        single(
+            &d,
+            "/blockchain/message",
+            parse_msg,
+            &format!("message {hash}"),
+        )
     }
 
     async fn transaction(&self, hash: &str) -> anyhow::Result<Option<TxView>> {
@@ -557,9 +588,12 @@ impl AnRead for LiveAn {
             r#"{{ blockchain {{ transaction(hash: "{hash}") {{ hash: id aborted account_addr now compute {{ exit_code }} balance_delta_other {{ currency value }} out_messages {{ hash: id msg_type_name src dst body bounce created_at value_other {{ currency value }} }} }} }} }}"#
         );
         let d = self.gql.query(&q).await?;
-        Ok(d.pointer("/blockchain/transaction")
-            .filter(|t| !t.is_null())
-            .and_then(parse_tx))
+        single(
+            &d,
+            "/blockchain/transaction",
+            parse_tx,
+            &format!("transaction {hash}"),
+        )
     }
 
     fn decode(&self, abi: &str, body: &str, internal: bool) -> Option<(String, Value)> {
@@ -815,6 +849,90 @@ mod tests {
         assert_eq!(m.ecc, vec![(3, 1_000_000)]);
         assert_eq!(m.dst_tx.unwrap().hash, "t1");
         assert_eq!(m.src_tx.as_deref(), Some("t0"));
+    }
+
+    /// An external-message page as the node answers it: oldest first,
+    /// paged backwards.
+    fn ext_page(nodes: Value, more: bool) -> Value {
+        json!({ "edges": nodes, "pageInfo": { "hasPreviousPage": more, "startCursor": "c0" } })
+    }
+
+    #[test]
+    fn an_event_page_is_read_newest_first() {
+        let p = parse_ext_page(&ext_page(
+            json!([{ "node": { "hash": "old", "msg_type_name": "ExtOut", "dst": ":02c0", "created_at": 5 } },
+                   { "node": { "hash": "new", "msg_type_name": "ExtOut", "dst": ":02c0", "created_at": 9 } }]),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(
+            p.items.iter().map(|m| m.hash.as_str()).collect::<Vec<_>>(),
+            ["new", "old"]
+        );
+        assert_eq!(p.cursor.as_deref(), Some("c0"));
+        let last = parse_ext_page(&ext_page(json!([]), false)).unwrap();
+        assert_eq!((last.items.len(), last.cursor), (0, None));
+    }
+
+    /// An event list the node did not answer is a failed read: "no event"
+    /// would let the caller act on it.
+    #[test]
+    fn an_event_page_that_cannot_be_read_is_not_an_empty_one() {
+        let node = json!({ "node": { "hash": "a", "msg_type_name": "ExtOut", "dst": ":02c0", "created_at": 5 } });
+        for broken in [
+            json!(null),
+            json!({ "edges": null, "pageInfo": { "hasPreviousPage": false } }),
+            json!({ "edges": [node.clone()] }),
+            ext_page(
+                json!([{ "node": { "msg_type_name": "ExtOut", "created_at": 5 } }]),
+                false,
+            ),
+            ext_page(
+                json!([{ "node": { "hash": "a", "msg_type_name": "ExtOut" } }]),
+                false,
+            ),
+            json!({ "edges": [node], "pageInfo": { "hasPreviousPage": true } }),
+        ] {
+            assert!(parse_ext_page(&broken).is_none(), "{broken}");
+        }
+    }
+
+    /// A missing outcome is not an abort: an aborted confirmation is final,
+    /// and a malformed answer must not make it.
+    #[test]
+    fn a_transaction_whose_outcome_is_missing_is_not_read() {
+        let m = json!({ "hash": "m1", "dst": "0:bb", "dst_transaction": { "hash": "t1", "account_addr": "0:bb", "now": 9 } });
+        assert!(parse_msg(&m).is_none());
+        let m = json!({ "hash": "m1", "dst": "0:bb", "dst_transaction": { "hash": "t1", "aborted": false, "account_addr": "0:bb" } });
+        assert!(parse_msg(&m).is_none());
+        assert!(
+            parse_msg(&json!({ "hash": "m1", "dst": "0:bb", "dst_transaction": null }))
+                .unwrap()
+                .dst_tx
+                .is_none()
+        );
+        assert!(parse_tx(
+            &json!({ "hash": "t1", "account_addr": "0:bb", "now": 9, "out_messages": [] })
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_single_object_the_node_lacks_is_none_and_a_broken_one_an_error() {
+        let d = json!({ "blockchain": { "transaction": null } });
+        assert!(single(&d, "/blockchain/transaction", parse_tx, "t1")
+            .unwrap()
+            .is_none());
+        let d = json!({ "blockchain": { "transaction": { "hash": "t1" } } });
+        assert!(single(&d, "/blockchain/transaction", parse_tx, "t1").is_err());
+        let d = json!({ "blockchain": { "transaction": { "hash": "t1", "aborted": false } } });
+        assert_eq!(
+            single(&d, "/blockchain/transaction", parse_tx, "t1")
+                .unwrap()
+                .unwrap()
+                .hash,
+            "t1"
+        );
     }
 
     #[test]

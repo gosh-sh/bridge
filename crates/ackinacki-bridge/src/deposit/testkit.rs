@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Mutex,
     },
 };
@@ -927,7 +927,7 @@ pub struct FakeAn {
     /// How long each send takes before it answers.
     pub send_delay: Mutex<std::time::Duration>,
     /// External messages that appear once a send was made: `(account,
-    /// message)`.
+    /// message)`. Each lands in front of its account's list, as the newest.
     pub on_send_ext_out: Mutex<Vec<([u8; 32], MsgView)>>,
     /// Getter name → how many more calls answer before every call hangs.
     pub hang_getter_after: Mutex<HashMap<String, u32>>,
@@ -953,6 +953,12 @@ pub struct FakeAn {
     pub failing_ext: Mutex<HashSet<[u8; 32]>>,
     /// Every `message` call fails.
     pub fail_message_reads: AtomicBool,
+    /// External-message and transaction lists are served this many items
+    /// a page, the cursor being where the next page starts; 0 serves each
+    /// list as one page.
+    pub page_size: AtomicUsize,
+    /// How many list pages were served, both kinds of list together.
+    pub pages_read: AtomicU32,
 }
 
 impl FakeAn {
@@ -962,6 +968,24 @@ impl FakeAn {
             .lock()
             .unwrap()
             .insert((id, f.into()), Script::new(seq));
+    }
+
+    /// The page of `all` that starts at `cursor`, `page_size` items long.
+    fn page<T: Clone>(&self, all: Vec<T>, cursor: Option<String>) -> Page<T> {
+        self.pages_read.fetch_add(1, Ordering::SeqCst);
+        let size = self.page_size.load(Ordering::SeqCst);
+        let start = cursor
+            .map_or(0, |c| c.parse().expect("a cursor this fake handed out"))
+            .min(all.len());
+        let end = if size == 0 {
+            all.len()
+        } else {
+            (start + size).min(all.len())
+        };
+        Page {
+            cursor: (end < all.len()).then(|| end.to_string()),
+            items: all[start..end].to_vec(),
+        }
     }
 }
 
@@ -1043,7 +1067,7 @@ impl AnRead for FakeAn {
         &self,
         id: [u8; 32],
         dir: ExtDir,
-        _: Option<String>,
+        before: Option<String>,
     ) -> anyhow::Result<Page<MsgView>> {
         if self.fail_ext_messages.load(Ordering::SeqCst)
             || self.failing_ext.lock().unwrap().contains(&id)
@@ -1054,30 +1078,26 @@ impl AnRead for FakeAn {
             ExtDir::In => &self.ext_in,
             ExtDir::Out => &self.ext_out,
         };
-        Ok(Page {
-            items: m.lock().unwrap().get(&id).cloned().unwrap_or_default(),
-            cursor: None,
-        })
+        let all = m.lock().unwrap().get(&id).cloned().unwrap_or_default();
+        Ok(self.page(all, before))
     }
 
     async fn transactions(
         &self,
         id: [u8; 32],
-        _: Option<String>,
+        after: Option<String>,
     ) -> anyhow::Result<Page<TxListItem>> {
         if self.fail_transactions.load(Ordering::SeqCst) {
             anyhow::bail!("GraphQL timeout");
         }
-        Ok(Page {
-            items: self
-                .txs
-                .lock()
-                .unwrap()
-                .get(&id)
-                .cloned()
-                .unwrap_or_default(),
-            cursor: None,
-        })
+        let all = self
+            .txs
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(self.page(all, after))
     }
 
     async fn message(&self, h: &str) -> anyhow::Result<Option<MsgView>> {
@@ -1101,7 +1121,12 @@ impl AnSend for FakeAn {
     async fn send_finalize(&self, _: [u8; 32], _: [u8; 32], _: &[u8], _: &[u8]) -> FinalizeSend {
         *self.sent.lock().unwrap() += 1;
         for (acc, m) in self.on_send_ext_out.lock().unwrap().drain(..) {
-            self.ext_out.lock().unwrap().entry(acc).or_default().push(m);
+            self.ext_out
+                .lock()
+                .unwrap()
+                .entry(acc)
+                .or_default()
+                .insert(0, m);
         }
         let delay = *self.send_delay.lock().unwrap();
         tokio::time::sleep(delay).await;

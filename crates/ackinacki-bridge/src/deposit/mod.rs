@@ -13,6 +13,7 @@ pub mod evm_confirm;
 pub mod evm_preflight;
 pub mod evm_steps;
 pub mod identity;
+pub mod lc_readiness;
 pub mod limits;
 pub mod locks;
 pub mod log_index;

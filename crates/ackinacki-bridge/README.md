@@ -1242,7 +1242,9 @@ first `finalizeDeposit`. Ctrl-C, SIGTERM and SIGHUP end a run cleanly: the
 prover is stopped, the locks are released, the record keeps the last stage,
 and the exit code follows it — 2 before the deposit was requested, 30 while
 its transaction is unknown, 31 once it is confirmed, 32 once it is anchored,
-34 after that.
+34 after that. An operation that has already ended answers as its run did: a
+closed one with its recorded code and message (22, 35 and so on), a credited
+one with its summary and exit 0.
 
 `--resume <op-id>` continues from the first unfinished step and checks only
 what that step still needs. It first compares the command line and the

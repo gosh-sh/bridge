@@ -400,11 +400,26 @@ assigns it when the release is tagged.
   `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
   `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
   unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
-  default, `--no-rotate` opts out). After the first accepted `submitUpdate` the
-  daemon checks `getAnchorConfig().lightClient` against `AN_LIGHT_CLIENT`, then
-  `disableOwnerAnchors` + `disableOwnerRotation` (`--no-flip-owner` opts out;
-  one-shot: `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
-  `AN_USDC_BRIDGE` / `AN_USDC_ABI_PATH`. tvm-sdk#284 co-deploys with this contract.
+  default, `--no-rotate` opts out). The owner flip is **off** by default: only
+  `daemon --flip-owner` runs it, after the first accepted `submitUpdate`, and
+  the daemon refuses to start with the flag unless `AN_USDC_BRIDGE` and
+  `AN_USDC_ABI_PATH` are set. The flip reads `getAnchorConfig()` on the bridge
+  and sends nothing unless `lightClient` is `AN_LIGHT_CLIENT`; a failed read is
+  retried after the next accepted update. Then it calls `disableOwnerAnchors`
+  (skipped when `ownerAnchorsEnabled` is already false) and
+  `disableOwnerRotation`; one-shot: `eth-lc-relayer flip-owner`. Do not flip
+  yet: afterwards deposits from the allowlisted L2s and from the 31
+  non-checkpoint blocks of an epoch fail `finalizeDeposit` with
+  `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer` stops at the first of them
+  (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
+  changes nothing. Relayer keys must be the owner pubkey of both contracts. The
+  slim ABIs in `crates/eth-light-client-relayer/abi/` follow the compiled
+  contracts: `USDCBridge.abi.json` has `getAnchorConfig` and no
+  `setLightClient`, and `EthBeaconLightClient.abi.json` has
+  `setCommitteeCommitment`, which `set-committee` calls; point
+  `AN_USDC_ABI_PATH` / `AN_LC_ABI_PATH` at these files. The light client is
+  deployed from the bridge with `deployLightClient`; `AN_LIGHT_CLIENT` is its
+  `getAnchorConfig().lightClient`. tvm-sdk#284 co-deploys with this contract.
   Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
   headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
   proven checkpoint (≤ 31 parents), then pushes those hashes into
@@ -625,13 +640,10 @@ assigns it when the release is tagged.
 - `prove-one` and the daemon keep the prover transcript
   (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
   stderr tail on failure instead of a bare exit status.
-- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`)
-  and, after the first accepted `submitUpdate`, issues the one-way owner flip
-  (`USDCBridge.setLightClient` + `disableOwnerAnchors`,
-  `EthBeaconLightClient.disableOwnerRotation`). `--no-rotate` / `--no-flip-owner`
-  are the shadow/laptop opt-outs. Relayer keys must be the owner pubkey.
-  `disableOwnerAnchors` succeeds when `_lightClient` is set (not only when an
-  attester quorum exists). With `ETH_RPC_URL` the same tick then `rePushAnchor`s
+- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`);
+  `--no-rotate` is the shadow/laptop opt-out. The owner flip runs only with
+  `--flip-owner` (see the `eth-lc-relayer` entry under Added). With
+  `ETH_RPC_URL` each accepted `submitUpdate` then `rePushAnchor`s
   the checkpoint and runs `link_headers` locally. On-chain `submitAncestry`
   is `--submit-ancestry` (default off). `submitUpdate`
   late-registers a skipped checkpoint of the current committee (`CheckpointBackfilled`,

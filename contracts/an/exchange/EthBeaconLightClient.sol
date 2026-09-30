@@ -482,7 +482,8 @@ contract EthBeaconLightClient {
 
     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
-    ///         push that landed before `setLightClient`). Does not re-prove.
+    ///         push that landed before the bridge recognized this light
+    ///         client). Does not re-prove.
     ///         `blockHash` is the stored anchor key (`_piForm` packing), not
     ///         the Ethereum byte order a block explorer shows. The bridge is
     ///         sent `_piForm(blockHash)`, the Ethereum-order hash

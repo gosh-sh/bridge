@@ -123,9 +123,14 @@ tvm_types = { workspace = true }
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [features]
+# A release is built with no features at all; `.woodpecker/release.yaml` passes none.
+default = []
 # Development and e2e only, never in `default`: accept a bridge although this build
 # does not know the minimum version that is safe to resend to.
 dev-unfixed-bridge = []
+# Compiles the live end-to-end deposit test, which spends testnet funds. Never in
+# `default`.
+e2e = []
 
 [[bin]]
 name = "ackinacki-bridge"

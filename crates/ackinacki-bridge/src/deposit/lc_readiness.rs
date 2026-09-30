@@ -37,6 +37,11 @@ pub const HEAD_MAX_LAG_S: u64 = 4 * EPOCH_S;
 /// How far the checkpoint of the newest ancestry may trail the light
 /// client's head before ancestry counts as stopped.
 pub const ANCESTRY_MAX_LAG_S: u64 = 2 * EPOCH_S;
+/// The most pages [`observe`] reads of either history when owner anchors
+/// are on. The checks then only choose the status text, so a bounded read
+/// is enough, and every preflight and every re-check of the anchor wait
+/// stays cheap on a bridge with a long history.
+pub const OWNER_MODE_PAGE_CAP: usize = 10;
 /// External address `AncestryAccepted` is emitted to.
 pub const ANCESTRY_ACCEPTED_DST: &str =
     ":00000000000000000000000000000000000000000000000000000000000002c0";
@@ -394,10 +399,16 @@ async fn accepted(
 /// The time of the newest `disableOwnerAnchors` whose transaction did not
 /// abort; `None` when the bridge's history has none. A switch-off whose
 /// outcome cannot be read is an error, never a reason to fall back to an
-/// older one.
-async fn t_flip(an: &dyn AnRead, bridge: [u8; 32]) -> anyhow::Result<Option<u64>> {
+/// older one, and so is a history that runs past `page_cap` pages.
+async fn t_flip(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    page_cap: Option<usize>,
+) -> anyhow::Result<Option<u64>> {
     let mut before = None;
+    let mut read = 0;
     loop {
+        read += 1;
         let page = an
             .ext_messages(bridge, ExtDir::In, before.clone())
             .await
@@ -426,8 +437,12 @@ async fn t_flip(an: &dyn AnRead, bridge: [u8; 32]) -> anyhow::Result<Option<u64>
             }
         }
         match page.cursor {
-            Some(c) => before = Some(c),
             None => return Ok(None),
+            Some(_) if page_cap.is_some_and(|n| read >= n) => anyhow::bail!(
+                "the bridge's inbound history is longer than {read} pages; no successful \
+                 disableOwnerAnchors among the newest"
+            ),
+            Some(c) => before = Some(c),
         }
     }
 }
@@ -466,15 +481,19 @@ fn ancestry_of(an: &dyn AnRead, m: &crate::deposit::an::MsgView) -> anyhow::Resu
 /// The light client's `AncestryAccepted` events newer than `not_before`,
 /// newest first. Paging stops at the first page that reaches `not_before`:
 /// the list is newest first, so nothing past that page is newer. Older
-/// events are not decoded, so they cannot fail the read.
+/// events are not decoded, so they cannot fail the read. A history that
+/// runs past `page_cap` pages before it settles is an error.
 async fn ancestry_events(
     an: &dyn AnRead,
     lc: [u8; 32],
     not_before: u64,
+    page_cap: Option<usize>,
 ) -> anyhow::Result<Vec<Ancestry>> {
     let mut out = Vec::new();
     let mut before = None;
+    let mut read = 0;
     loop {
+        read += 1;
         let page = an
             .ext_messages(lc, ExtDir::Out, before.clone())
             .await
@@ -488,8 +507,12 @@ async fn ancestry_events(
             }
         }
         match (older, page.cursor) {
+            (true, _) | (_, None) => return Ok(out),
+            (false, Some(_)) if page_cap.is_some_and(|n| read >= n) => anyhow::bail!(
+                "the light client's event history is longer than {read} pages; the newest do not \
+                 reach back to the switch-off"
+            ),
             (false, Some(c)) => before = Some(c),
-            _ => return Ok(out),
         }
     }
 }
@@ -499,6 +522,13 @@ async fn ancestry_events(
 /// something that cannot be read, is an error naming it, and there is no
 /// verdict. The caller either refuses (preflight) or reads again later (the
 /// anchor wait).
+///
+/// `page_cap` bounds the two history searches, the switch-off in the
+/// bridge's inbound messages and the ancestry in the light client's
+/// events: `Some(n)` reads at most `n` pages of each, and a search that
+/// has not settled by then is an error saying so. `None` reads as far as
+/// each search needs. The caller picks the cap; this function does not
+/// know whether owner anchors are on.
 pub async fn observe(
     an: &dyn AnRead,
     evm: &dyn EvmRead,
@@ -506,6 +536,7 @@ pub async fn observe(
     lc: [u8; 32],
     chain_id: u64,
     ui: &dyn Ui,
+    page_cap: Option<usize>,
 ) -> anyhow::Result<LcObs> {
     ui.status("checking whether the light client can anchor this deposit");
     let cfg = an
@@ -561,9 +592,9 @@ pub async fn observe(
     if !accepts_head {
         return Ok(o);
     }
-    o.t_flip = t_flip(an, bridge).await?;
+    o.t_flip = t_flip(an, bridge, page_cap).await?;
     let Some(tf) = o.t_flip else { return Ok(o) };
-    o.ancestry = newest_ancestry_after(&ancestry_events(an, lc, tf).await?, tf);
+    o.ancestry = newest_ancestry_after(&ancestry_events(an, lc, tf, page_cap).await?, tf);
     let Some(a) = o.ancestry.clone() else {
         return Ok(o);
     };
@@ -1039,9 +1070,24 @@ mod tests {
     }
 
     async fn observed(evm: &FakeEvm, an: &dyn AnRead) -> LcObs {
-        observe(an, evm, BRIDGE, LC, SEPOLIA, &RecordingUi::new(true))
-            .await
-            .expect("every read answers")
+        capped(evm, an, None).await.expect("every read answers")
+    }
+
+    async fn capped(
+        evm: &FakeEvm,
+        an: &dyn AnRead,
+        page_cap: Option<usize>,
+    ) -> anyhow::Result<LcObs> {
+        observe(
+            an,
+            evm,
+            BRIDGE,
+            LC,
+            SEPOLIA,
+            &RecordingUi::new(true),
+            page_cap,
+        )
+        .await
     }
 
     /// Breaks one read of a ready light client and returns the text the
@@ -1148,7 +1194,7 @@ mod tests {
         for (case, break_one_read) in cases {
             let (evm, an, b) = ready_chains();
             let wanted = break_one_read(&evm, &an, &b);
-            let r = observe(&an, &evm, BRIDGE, LC, SEPOLIA, &RecordingUi::new(true)).await;
+            let r = capped(&evm, &an, None).await;
             let e = match r {
                 Ok(o) => panic!(
                     "{case}: a verdict from a failed read: {:?}",
@@ -1354,11 +1400,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn history_is_read_page_by_page_and_no_further_than_the_switch_off() {
+    /// A ready light client whose histories are served 2 messages a page.
+    /// The bridge has `newer_calls` inbound calls above the switch-off; the
+    /// light client's newest ancestry is 4th among its events and the first
+    /// event older than the switch-off 5th, so its search settles on page 3.
+    fn long_histories(newer_calls: usize) -> (FakeEvm, Paged, Blocks) {
         let (evm, an, b) = ready_chains();
-        // The bridge: the switch-off under three newer inbound calls.
-        let calls: Vec<MsgView> = (0..3)
+        let calls: Vec<MsgView> = (0..newer_calls)
             .map(|i| msg(&format!("fin{i}"), "ExtIn", "", "0:1a", Some("B-finalize")))
             .collect();
         an.ext_in
@@ -1371,8 +1419,8 @@ mod tests {
             .lock()
             .unwrap()
             .insert("B-finalize".into(), ("finalizeDeposit".into(), json!({})));
-        // The light client: the newest ancestry under head updates, then
-        // events older than the switch-off that must not be read.
+        // The newest ancestry under head updates, then events older than the
+        // switch-off that must not be read.
         let mut out: Vec<MsgView> = (0..3)
             .map(|i| {
                 let mut m = msg(&format!("head{i}"), "ExtOut", "0:20", ":01", Some("B-head"));
@@ -1392,14 +1440,68 @@ mod tests {
             size: 2,
             pages: AtomicU32::new(0),
         };
-        let o = observed(&evm, &paged).await;
+        (evm, paged, b)
+    }
+
+    #[tokio::test]
+    async fn history_is_read_page_by_page_and_no_further_than_the_switch_off() {
+        // Bridge: 2 pages to reach the switch-off. Light client: 3 of its 5
+        // pages. A cap of 3 is exactly enough.
+        for cap in [None, Some(3)] {
+            let (evm, paged, b) = long_histories(3);
+            let o = capped(&evm, &paged, cap).await.unwrap();
+            assert_eq!(o.t_flip, Some(T_FLIP));
+            assert_eq!(o.checkpoint.as_ref(), Some(&b.checkpoint));
+            assert_eq!(judge(&o, SEPOLIA), Ok(()));
+            assert_eq!(paged.pages.load(Ordering::SeqCst), 2 + 3, "{cap:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bridge_history_longer_than_the_cap_is_an_error() {
+        // 5 calls above the switch-off: it is on the 3rd page.
+        let (evm, paged, _) = long_histories(5);
+        let e = capped(&evm, &paged, Some(2)).await.unwrap_err();
+        assert!(
+            format!("{e:#}").contains("the bridge's inbound history is longer than 2 pages"),
+            "{e:#}"
+        );
+        assert_eq!(paged.pages.load(Ordering::SeqCst), 2);
+        // Unbounded, the same history settles.
+        let (evm, paged, _) = long_histories(5);
+        let o = capped(&evm, &paged, None).await.unwrap();
         assert_eq!(o.t_flip, Some(T_FLIP));
-        assert_eq!(o.checkpoint.as_ref(), Some(&b.checkpoint));
         assert_eq!(judge(&o, SEPOLIA), Ok(()));
-        // Bridge: 2 pages to reach the switch-off. Light client: the
-        // ancestry is 4th and the first older event 5th, so 3 of its 5
-        // pages.
-        assert_eq!(paged.pages.load(Ordering::SeqCst), 2 + 3);
+        assert_eq!(OWNER_MODE_PAGE_CAP, 10);
+    }
+
+    #[tokio::test]
+    async fn light_client_events_longer_than_the_cap_are_an_error() {
+        let (evm, paged, _) = long_histories(3);
+        let e = capped(&evm, &paged, Some(2)).await.unwrap_err();
+        assert!(
+            format!("{e:#}").contains("the light client's event history is longer than 2 pages"),
+            "{e:#}"
+        );
+        // The bridge settled on its 2nd page, the light client was cut at 2.
+        assert_eq!(paged.pages.load(Ordering::SeqCst), 2 + 2);
+    }
+
+    #[tokio::test]
+    async fn a_history_that_ends_on_the_last_allowed_page_settles() {
+        // 4 inbound calls and no switch-off: the history ends on page 2.
+        let (evm, paged, _) = long_histories(4);
+        paged
+            .inner
+            .ext_in
+            .lock()
+            .unwrap()
+            .get_mut(&BRIDGE)
+            .unwrap()
+            .retain(|m| m.hash != "flip");
+        let o = capped(&evm, &paged, Some(2)).await.unwrap();
+        assert_eq!(judge(&o, SEPOLIA), Err(LcFailure::NoFlip));
+        assert_eq!(paged.pages.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1450,7 +1552,7 @@ mod tests {
             .unwrap();
         let mut lc = [0u8; 32];
         hex::decode_to_slice(id, &mut lc).unwrap();
-        let o = observe(&an, &evm, bridge, lc, SEPOLIA, &ui)
+        let o = observe(&an, &evm, bridge, lc, SEPOLIA, &ui, None)
             .await
             .expect("every read answers");
         assert_eq!(o.lc_chain_id, SEPOLIA);

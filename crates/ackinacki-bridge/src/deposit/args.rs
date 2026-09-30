@@ -291,6 +291,36 @@ pub const MAX_PAIR_TIMEOUT_S: u64 = 30 * 86_400;
 /// Compiled-in WalletConnect Cloud project id, set by the release build.
 pub const DEFAULT_WC_PROJECT_ID: Option<&str> = option_env!("ACKINACKI_BRIDGE_WC_PROJECT_ID");
 
+/// The refusal of a command line that leaves `--state-dir` (`state`) or
+/// `--work-dir` (`work`) to its default while `HOME` is unset or empty.
+/// Both default under `HOME`, never under the current directory. Exit 2.
+fn no_default_dirs(state: bool, work: bool) -> CliError {
+    let mut flags = Vec::new();
+    let mut held = Vec::new();
+    if state {
+        flags.push("--state-dir (BRIDGE_DEPOSIT_STATE_DIR)");
+        held.push(
+            "the state directory holds the deposit operations and the locks that stop a second \
+             deposit while one is unresolved, and an earlier run with HOME set may have left an \
+             unresolved operation in $HOME/.bridge-deposit-state",
+        );
+    }
+    if work {
+        flags.push("--work-dir (BRIDGE_WORK_DIR)");
+        held.push("the work directory holds the proof files a --resume picks up");
+    }
+    CliError::Usage {
+        reason: format!(
+            "deposit: HOME is unset or empty, so there is no default for {}: {}. A default under \
+             the current directory would make them depend on where the command is run. Give {} an \
+             absolute path that persists between runs",
+            flags.join(" and "),
+            held.join("; "),
+            if flags.len() > 1 { "each" } else { "it" },
+        ),
+    }
+}
+
 /// Everything a run needs, validated once.
 #[derive(Debug, Clone)]
 pub struct DepositParams {
@@ -323,7 +353,18 @@ pub struct DepositParams {
 }
 
 impl DepositArgs {
+    /// The run this command line asks for, checked once, with `HOME` from
+    /// the process environment.
     pub fn validate(&self, g: &GlobalFlags) -> CliResult<DepositParams> {
+        self.validate_with_home(g, std::env::var_os("HOME"))
+    }
+
+    /// [`DepositArgs::validate`] with `home` as the value of `HOME`.
+    fn validate_with_home(
+        &self,
+        g: &GlobalFlags,
+        home: Option<std::ffi::OsString>,
+    ) -> CliResult<DepositParams> {
         let mode = match (&self.abandon, &self.resume) {
             (Some(op), _) => RunMode::Abandon(match OpRef::parse(op)? {
                 OpRef::Op(id) => id,
@@ -433,10 +474,21 @@ impl DepositArgs {
                 Some(out)
             },
         };
-        let home = || {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
+        // No default under the current directory: the operations, their
+        // locks and the proof files would then depend on where the command
+        // runs, and a run from elsewhere would not see a deposit that is
+        // still unresolved.
+        let home = home.filter(|h| !h.is_empty()).map(PathBuf::from);
+        let (state_dir, work_dir) = match (&home, &self.state_dir, &self.work_dir) {
+            (_, Some(state), Some(work)) => (state.clone(), work.clone()),
+            (Some(home), state, work) => (
+                state
+                    .clone()
+                    .unwrap_or_else(|| home.join(".bridge-deposit-state")),
+                work.clone()
+                    .unwrap_or_else(|| home.join(".bridge-deposit-work")),
+            ),
+            (None, state, work) => return Err(no_default_dirs(state.is_none(), work.is_none())),
         };
         // Absolute from here on: the prover runs with its own working
         // directory, where a relative path would point somewhere else.
@@ -464,18 +516,8 @@ impl DepositArgs {
                 .map(|d| abs(d, "deposit-prover-dir"))
                 .transpose()?,
             confirmations: self.confirmations,
-            state_dir: abs(
-                self.state_dir
-                    .clone()
-                    .unwrap_or_else(|| home().join(".bridge-deposit-state")),
-                "state-dir",
-            )?,
-            work_dir: abs(
-                self.work_dir
-                    .clone()
-                    .unwrap_or_else(|| home().join(".bridge-deposit-work")),
-                "work-dir",
-            )?,
+            state_dir: abs(state_dir, "state-dir")?,
+            work_dir: abs(work_dir, "work-dir")?,
             prover_timeout: secs(self.prover_timeout_s),
             anchor_timeout: (self.anchor_timeout_s > 0).then(|| secs(self.anchor_timeout_s)),
             relayer_grace: secs(self.relayer_grace_s),
@@ -682,7 +724,137 @@ mod tests {
         let crate::args::Command::Deposit(a) = cli.cmd else {
             panic!()
         };
-        a.validate(&GlobalFlags::default())
+        a.validate_with_home(&GlobalFlags::default(), Some(HOME.into()))
+    }
+
+    /// `HOME` of the tests that do not run without one.
+    const HOME: &str = "/home/tester";
+
+    /// `deposit <argv>` validated with `home` as `HOME`, nothing taken from
+    /// the environment.
+    fn validated_with_home(argv: &[&str], home: Option<&str>) -> CliResult<DepositParams> {
+        crate::deposit::testkit::deposit_args(argv)
+            .validate_with_home(&GlobalFlags::default(), home.map(Into::into))
+    }
+
+    /// Command lines of every mode, without `--state-dir` or `--work-dir`.
+    fn every_mode() -> Vec<Vec<String>> {
+        let op = "01J9ZQ4X7T8V5N6M3K2P1R0S9A";
+        let fresh = [
+            "--network",
+            "sepolia",
+            "--amount",
+            "1",
+            "--to",
+            &format!("{DAPP}::{ACC}"),
+            "--rpc-url",
+            "http://rpc.invalid",
+            "--bridge-address",
+            "0x0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7",
+            "--gql-endpoint",
+            "http://gql.invalid",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--wc-project-id",
+            "p",
+            "--deposit-prover-dir",
+            "/opt/deposit-prover",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut dry = fresh.clone();
+        dry.push("--dry-run".into());
+        vec![fresh, dry, vec!["--resume".into(), op.into()], vec![
+            "--abandon".into(),
+            op.into(),
+        ]]
+    }
+
+    /// `line` with `extra` appended.
+    fn with(line: &[String], extra: &[&'static str]) -> Vec<String> {
+        let mut out = line.to_vec();
+        out.extend(extra.iter().map(|s| s.to_string()));
+        out
+    }
+
+    #[test]
+    fn without_home_a_missing_state_directory_is_refused_in_every_mode() {
+        // Under the current directory, the operations and the locks that
+        // stop a second deposit would depend on where the command runs.
+        for home in [None, Some("")] {
+            for line in every_mode() {
+                let line = with(&line, &["--work-dir", "/var/lib/deposit-work"]);
+                let argv: Vec<&str> = line.iter().map(String::as_str).collect();
+                let e = validated_with_home(&argv, home).unwrap_err();
+                assert_eq!(
+                    e.exit_code(),
+                    crate::errors::ExitCode::PreflightRefused,
+                    "{home:?} {line:?}"
+                );
+                let msg = e.to_string();
+                for said in [
+                    "--state-dir (BRIDGE_DEPOSIT_STATE_DIR)",
+                    "a second deposit while one is unresolved",
+                    "$HOME/.bridge-deposit-state",
+                    "an absolute path that persists between runs",
+                ] {
+                    assert!(msg.contains(said), "{home:?} {line:?}: {said}: {msg}");
+                }
+                assert!(!msg.contains("--work-dir"), "it was given: {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn without_home_a_missing_work_directory_is_refused_in_every_mode() {
+        for line in every_mode() {
+            let line = with(&line, &["--state-dir", "/var/lib/deposits"]);
+            let argv: Vec<&str> = line.iter().map(String::as_str).collect();
+            let e = validated_with_home(&argv, None).unwrap_err();
+            assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+            let msg = e.to_string();
+            for said in [
+                "--work-dir (BRIDGE_WORK_DIR)",
+                "proof files",
+                "an absolute path that persists between runs",
+            ] {
+                assert!(msg.contains(said), "{line:?}: {said}: {msg}");
+            }
+            assert!(!msg.contains("--state-dir"), "it was given: {msg}");
+        }
+    }
+
+    #[test]
+    fn without_home_both_directories_given_are_used() {
+        for line in every_mode() {
+            let line = with(&line, &[
+                "--state-dir",
+                "/var/lib/deposits",
+                "--work-dir",
+                "/var/lib/deposit-work",
+            ]);
+            let argv: Vec<&str> = line.iter().map(String::as_str).collect();
+            let p = validated_with_home(&argv, None).unwrap_or_else(|e| panic!("{line:?}: {e}"));
+            assert_eq!(p.state_dir, PathBuf::from("/var/lib/deposits"));
+            assert_eq!(p.work_dir, PathBuf::from("/var/lib/deposit-work"));
+        }
+    }
+
+    #[test]
+    fn with_home_both_directories_default_under_it() {
+        for line in every_mode() {
+            let argv: Vec<&str> = line.iter().map(String::as_str).collect();
+            let p =
+                validated_with_home(&argv, Some(HOME)).unwrap_or_else(|e| panic!("{line:?}: {e}"));
+            assert_eq!(
+                p.state_dir,
+                PathBuf::from("/home/tester/.bridge-deposit-state")
+            );
+            assert_eq!(
+                p.work_dir,
+                PathBuf::from("/home/tester/.bridge-deposit-work")
+            );
+        }
     }
 
     #[test]
@@ -733,13 +905,16 @@ mod tests {
     fn a_resume_validates_with_the_state_directory_alone() {
         // Whether the chains or the prover are needed depends on the
         // operation's stage, which only its record knows.
-        let a = crate::deposit::testkit::deposit_args(&[
-            "--resume",
-            "01J9ZQ4X7T8V5N6M3K2P1R0S9A",
-            "--state-dir",
-            "/var/lib/deposits",
-        ]);
-        let p = a.validate(&GlobalFlags::default()).unwrap();
+        let p = validated_with_home(
+            &[
+                "--resume",
+                "01J9ZQ4X7T8V5N6M3K2P1R0S9A",
+                "--state-dir",
+                "/var/lib/deposits",
+            ],
+            Some(HOME),
+        )
+        .unwrap();
         assert!(matches!(p.mode, RunMode::Resume { .. }), "{:?}", p.mode);
         assert_eq!(p.state_dir, PathBuf::from("/var/lib/deposits"));
         assert_eq!(

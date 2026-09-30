@@ -861,3 +861,35 @@ fn deposit_help_does_not_print_secrets_from_the_environment() {
         );
     }
 }
+
+#[test]
+fn deposit_without_home_refuses_to_default_its_directories() {
+    // `bin()` clears the environment, so HOME is unset here, as it often is
+    // under systemd, cron or in a container.
+    let out = run(&["deposit", "--resume", "01J9ZQ4X7T8V5N6M3K2P1R0S9A"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(e.contains("--state-dir (BRIDGE_DEPOSIT_STATE_DIR)"), "{e}");
+    assert!(e.contains("--work-dir (BRIDGE_WORK_DIR)"), "{e}");
+}
+
+#[test]
+fn deposit_resume_looks_its_operation_up_with_only_the_directories() {
+    // No endpoint, bridge or prover is given, and none is needed to learn
+    // that the state directory has no such operation.
+    let state = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let op = "01J9ZQ4X7T8V5N6M3K2P1R0S9A";
+    let out = run(&[
+        "deposit",
+        "--resume",
+        op,
+        "--state-dir",
+        state.path().to_str().unwrap(),
+        "--work-dir",
+        work.path().to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(e.contains(&format!("no deposit operation {op}")), "{e}");
+}

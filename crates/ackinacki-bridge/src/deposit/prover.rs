@@ -144,6 +144,142 @@ async fn spawn(cmd: &mut Command) -> std::io::Result<tokio::process::Child> {
     }
 }
 
+/// How long each prover tool gets to answer `--help` in a preflight.
+pub const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a probe looks whether its tool has exited.
+const PROBE_POLL: Duration = Duration::from_millis(10);
+
+/// The environment a probe passes on: the search paths a tool needs to
+/// start at all, nothing else of this process's.
+const PROBE_ENV: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
+
+/// Runs each prover tool once with `--help` in the prover directory, as
+/// the installer does: an executable file is not yet a tool that runs. A
+/// binary the dynamic loader refuses — a newer glibc than this host's, a
+/// loader that is not here — or a script with a bad interpreter line is
+/// refused now, before the deposit, not at step 7 with the USDC in the
+/// bridge. `--help` needs no network, and a tool gets no secret: only
+/// [`PROBE_ENV`]. Each tool has `timeout` and is killed past it.
+///
+/// The probe waits by the wall clock on the blocking pool; bounded by
+/// `timeout` per tool, it can delay the end of an interrupted run by that
+/// much at most. The error names the tool and quotes the end of its
+/// stderr.
+pub async fn probe_tools(dir: &ProverDir, timeout: Duration) -> Result<(), String> {
+    let root = dir.root.clone();
+    tokio::task::spawn_blocking(move || {
+        for tool in [FETCH_BIN, PROVE_BIN] {
+            probe(&root.join(tool), &root, timeout)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("the prover tools could not be tried: {e}"))?
+}
+
+/// Runs `tool --help` in `root` for at most `timeout`: `Ok` when it exits 0.
+fn probe(tool: &Path, root: &Path, timeout: Duration) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(tool);
+    cmd.arg("--help")
+        .current_dir(root)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    for key in PROBE_ENV {
+        if let Some(v) = std::env::var_os(key) {
+            cmd.env(key, v);
+        }
+    }
+    let mut child = start_retrying(|| cmd.spawn()).map_err(|e| {
+        // An executable file that exec "does not find" is a script whose
+        // interpreter, or a binary whose dynamic loader, is not here.
+        let why = if e.kind() == std::io::ErrorKind::NotFound && tool.is_file() {
+            format!("{e}: its interpreter or dynamic loader is not on this host")
+        } else {
+            e.to_string()
+        };
+        format!("{} cannot be started on this host ({why})", tool.display())
+    })?;
+    // Read on a thread of its own: a tool that fills the pipe must not stall.
+    let stderr = child.stderr.take().and_then(|mut out| {
+        let (sent, got) = std::sync::mpsc::channel();
+        let reader = std::thread::Builder::new()
+            .name("prover-probe".into())
+            .spawn(move || {
+                let mut buf = Vec::new();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "what could be read of it is what is quoted"
+                )]
+                let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "a probe that gave up no longer listens"
+                )]
+                let _ = sent.send(buf);
+            });
+        reader.ok().map(|_| got)
+    });
+    let end = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < end => std::thread::sleep(PROBE_POLL),
+            waited => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "a tool that exited meanwhile needs no kill"
+                )]
+                let _ = child.kill();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "only reaps it; the refusal is already decided"
+                )]
+                let _ = child.wait();
+                return Err(match waited {
+                    Err(e) => format!("{}: {e}", tool.display()),
+                    _ => format!(
+                        "{} --help did not answer within {} s and was stopped",
+                        tool.display(),
+                        timeout.as_secs_f32()
+                    ),
+                });
+            },
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let out = stderr
+        .and_then(|got| {
+            got.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+                .ok()
+        })
+        .unwrap_or_default();
+    Err(format!(
+        "{} --help failed ({status}): it does not run on this host\nlast lines of its stderr:\n{}",
+        tool.display(),
+        last_lines(&out, STDERR_TAIL_LINES)
+    ))
+}
+
+/// Starts a tool with `start`, trying again on ETXTBSY and on nothing
+/// else, as [`spawn`] does, for a caller that may block.
+fn start_retrying<T>(mut start: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tries = 1;
+    loop {
+        match start() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < SPAWN_TRIES => {
+                tries += 1;
+                std::thread::sleep(SPAWN_RETRY_PAUSE);
+            },
+            started => return started,
+        }
+    }
+}
+
 /// Runs one tool to completion by `deadline`, handing it the prover lock
 /// `lock_fd`. `limit` is the whole attempt's budget, for the message.
 async fn run(
@@ -370,6 +506,39 @@ mod tests {
         assert_eq!(p.public_inputs, PI);
         assert_eq!(load(w.path()).unwrap(), p);
         assert_eq!(load(w.path()).unwrap().proof, b"proof");
+    }
+
+    #[tokio::test]
+    async fn the_probe_passes_tools_that_answer_help_and_runs_no_proof() {
+        let (_d, dir) = fake_prover_dir("");
+        probe_tools(&dir, TOOL_PROBE_TIMEOUT).await.unwrap();
+        assert!(!dir.data_dir().join("runs.log").exists(), "a proof ran");
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_hangs_on_help_is_refused_within_the_timeout() {
+        let (_d, dir) = fake_prover_dir("");
+        std::fs::write(dir.bin(PROVE_BIN), "#!/bin/sh\nexec sleep 30\n").unwrap();
+        let t0 = std::time::Instant::now();
+        let e = probe_tools(&dir, Duration::from_millis(500))
+            .await
+            .unwrap_err();
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(e.contains(PROVE_BIN) && e.contains("did not answer"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_gets_no_secret_from_the_environment() {
+        // `--help` needs nothing but the search paths.
+        let (_d, dir) = fake_prover_dir("");
+        std::fs::write(
+            dir.bin(FETCH_BIN),
+            "#!/bin/sh\n[ -z \"$HOME$RPC_URL$ETH_RPC_URL\" ] || { env >&2; exit 9; }\n",
+        )
+        .unwrap();
+        probe_tools(&dir, TOOL_PROBE_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[test]

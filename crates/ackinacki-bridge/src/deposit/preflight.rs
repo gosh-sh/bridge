@@ -1,14 +1,15 @@
 //! The checks a new deposit passes before the wallet is asked for
 //! anything, in order: the EVM chain and bridge, the Acki Nacki bridge,
-//! whether the light client can anchor the deposit, the prover directory,
-//! and the operations still open in the state directory. A failure is
+//! whether the light client can anchor the deposit, the prover directory
+//! and whether its tools run on this host, and the operations still open
+//! in the state directory. A failure is
 //! exit 2 (exit 3 for an open operation of the same deposit), and nothing
 //! has been sent. Nothing here asks the wallet or creates an operation.
 //!
 //! A resume passes a smaller set of checks, only those its operation's
 //! recorded stage still needs ([`context_for_resume`]).
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, U256};
 use serde_json::json;
@@ -22,6 +23,7 @@ use crate::{
         evm_preflight::{self, EvmPreflight},
         lc_readiness::{self, AnchorPlan, HistoryCapped, LcFailure},
         locks::ProverLock,
+        prover::{probe_tools, TOOL_PROBE_TIMEOUT},
         prover_files::{check_prover_dir, ProverDir},
         retry::transient,
         run::RunCx,
@@ -151,12 +153,7 @@ pub async fn check(
     )
     .await?;
     let plan = anchor_plan(d, bridge_acc, net.chain_id(), &an).await?;
-    let prover = check_prover_dir(p.prover_dir.as_deref().expect("validated")).map_err(refuse)?;
-    // The prover's lock is probed now: a filesystem without flock is
-    // refused here, before the wallet, not when the proof is due with the
-    // USDC already in the bridge. Held means another deposit is proving,
-    // which is fine; the lock is let go at once.
-    drop(ProverLock::try_take(&prover)?);
+    let prover = usable_prover(p.prover_dir.as_deref().expect("validated")).await?;
     let params = OpParams {
         chain_id: net.chain_id(),
         bridge,
@@ -182,6 +179,23 @@ pub async fn check(
         prover,
         params,
     })
+}
+
+/// The prover directory at `root`, checked as a proof needs it: its files
+/// ([`check_prover_dir`]), its lock, and its two tools, run once. A refusal
+/// names what failed.
+async fn usable_prover(root: &Path) -> CliResult<ProverDir> {
+    let dir = check_prover_dir(root).map_err(refuse)?;
+    // The prover's lock is probed now: a filesystem without flock is
+    // refused here, before the wallet, not when the proof is due with the
+    // USDC already in the bridge. Held means another deposit is proving,
+    // which is fine; the lock is let go at once.
+    drop(ProverLock::try_take(&dir)?);
+    // Executable is not yet runnable on this host.
+    probe_tools(&dir, TOOL_PROBE_TIMEOUT)
+        .await
+        .map_err(refuse)?;
+    Ok(dir)
 }
 
 /// Who anchors the deposit's block. With the owner's anchors on, the
@@ -290,7 +304,7 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
     };
     // Flags and a local directory only: known before any chain is read,
     // and those reads retry for as long as an endpoint is down.
-    let prover = resume_prover(p, rec, ui).map_err(held)?;
+    let prover = resume_prover(p, rec, ui).await.map_err(held)?;
     let net = Network::from_chain_id(rec.params.chain_id).ok_or_else(|| {
         held(refuse(format!(
             "operation {op} is on chain {}, which this build does not know",
@@ -412,22 +426,27 @@ async fn resume_plan(
     })
 }
 
-/// The prover directory a resume needs. While a proof is still to be
-/// built it must be given and pass its checks, and its lock is probed as a
-/// new deposit's preflight probes it. After the proof, a broken or missing
-/// directory is only a warning: the proof may be on disk, or somebody may
-/// have finalized the deposit already. Without `--deposit-prover-dir` the
-/// directory is the empty path, which the prover refuses by naming the
-/// flag should the proof have to be built again.
-fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<ProverDir> {
-    let to_prove = matches!(
-        rec.stage,
+/// Whether an operation at `stage` still has its proof to build.
+fn proof_to_build(stage: OpStage) -> bool {
+    matches!(
+        stage,
         OpStage::Requested
             | OpStage::Signed
             | OpStage::Abandoned
             | OpStage::Confirmed
             | OpStage::Anchored
-    );
+    )
+}
+
+/// The prover directory a resume needs. While a proof is still to be
+/// built it must be given and pass the checks of a new deposit's preflight
+/// ([`usable_prover`]), its tools run once included. After the proof, a
+/// broken or missing directory is only a warning: the proof may be on
+/// disk, or somebody may have finalized the deposit already. Without
+/// `--deposit-prover-dir` the directory is the empty path, which the prover
+/// refuses by naming the flag should the proof have to be built again.
+async fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<ProverDir> {
+    let to_prove = proof_to_build(rec.stage);
     let no_prover = |why: String| {
         let on_disk = crate::deposit::run::work_dir_of(p, rec)
             .and_then(|w| crate::deposit::prover::load(&w))
@@ -455,12 +474,13 @@ fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<Pr
         ));
     };
     if to_prove {
-        let dir = check_prover_dir(root).map_err(refuse)?;
-        drop(ProverLock::try_take(&dir)?);
-        return Ok(dir);
+        return usable_prover(root).await;
     }
-    Ok(check_prover_dir(root)
-        .unwrap_or_else(|e| no_prover(format!("the prover directory is unusable ({e})"))))
+    let checked = match check_prover_dir(root) {
+        Ok(dir) => probe_tools(&dir, TOOL_PROBE_TIMEOUT).await.map(|()| dir),
+        Err(e) => Err(e),
+    };
+    Ok(checked.unwrap_or_else(|e| no_prover(format!("the prover directory is unusable ({e})"))))
 }
 
 /// What `--dry-run` prints after a passed preflight: both transactions'

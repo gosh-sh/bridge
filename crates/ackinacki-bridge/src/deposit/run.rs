@@ -3924,4 +3924,101 @@ mod tests {
         assert_eq!(w.prover_runs(), 0, "no proof for a finalized deposit");
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
     }
+
+    // ---- prover tools that are executable and still do not run ----
+
+    /// A tool the dynamic loader refuses, as a binary built against a newer
+    /// glibc than the host's.
+    const LOADER_REFUSES: &str = "#!/bin/sh\necho \"./fetch_deposit_data: \
+                                  /lib/x86_64-linux-gnu/libc.so.6: version \\`GLIBC_2.38' not \
+                                  found\" >&2\nexit 127\n";
+
+    /// Makes the world's prover tool `tool` an executable script `body`.
+    fn replace_tool(w: &World, tool: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = w.prover.1.bin(tool);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prover_tool_that_cannot_run_here_is_refused_before_the_wallet() {
+        use crate::deposit::prover_files::{FETCH_BIN, PROVE_BIN};
+        for (tool, body, said, mode) in [
+            (
+                FETCH_BIN,
+                LOADER_REFUSES,
+                "GLIBC_2.38' not found",
+                RunMode::Fresh,
+            ),
+            (
+                FETCH_BIN,
+                LOADER_REFUSES,
+                "GLIBC_2.38' not found",
+                RunMode::DryRun,
+            ),
+            (
+                PROVE_BIN,
+                "#!/nonexistent/interpreter\n",
+                "cannot be started",
+                RunMode::Fresh,
+            ),
+        ] {
+            let w = World::healthy();
+            replace_tool(&w, tool, body);
+            let p = w.params(mode.clone());
+            let e = run_with(&p, &w.deps(), &mut NeverPairs).await.unwrap_err();
+            assert_eq!(
+                e.exit_code(),
+                ExitCode::PreflightRefused,
+                "{tool} {mode:?}: {e}"
+            );
+            assert!(e.to_string().contains(tool), "{e}");
+            assert!(e.to_string().contains(said), "{e}");
+            assert!(
+                Store::open(&p.state_dir)
+                    .unwrap()
+                    .list()
+                    .unwrap()
+                    .is_empty(),
+                "no operation: the wallet was asked for nothing"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_that_has_to_prove_refuses_a_prover_tool_that_cannot_run_by_its_stage() {
+        // Named before any chain is read: the EVM node is down, and a
+        // resume must not wait for it to say that the prover cannot run.
+        use crate::deposit::prover_files::FETCH_BIN;
+        for (at, exit) in [
+            (OpStage::Confirmed, ExitCode::AnWaitTimeout),
+            (OpStage::Anchored, ExitCode::DepositProofFailed),
+        ] {
+            let mut w = World::healthy();
+            let op = if at == OpStage::Confirmed {
+                w.confirmed_operation()
+            } else {
+                w.anchored_operation()
+            };
+            w.anchor_after(0);
+            replace_tool(&w, FETCH_BIN, LOADER_REFUSES);
+            w.evm
+                .fail_chain_id
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let (p, target) = resuming(&w, &op);
+            let e = tokio::time::timeout(
+                Duration::from_secs(600),
+                resume(&p, &w.deps(), &target, None),
+            )
+            .await
+            .expect("refused without reading the EVM chain")
+            .unwrap_err();
+            assert_eq!(e.exit_code(), exit, "{at:?}: {e}");
+            assert!(e.to_string().contains("GLIBC_2.38' not found"), "{e}");
+            assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
+            let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+            assert_eq!(rec.stage, at, "the record is unchanged");
+        }
+    }
 }

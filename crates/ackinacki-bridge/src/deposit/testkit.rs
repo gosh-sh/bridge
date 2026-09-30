@@ -1291,7 +1291,8 @@ pub struct FakeProverHome {
 /// the `proof_00` fixture's public inputs until then) into place. `extra`
 /// runs inside `export_blake2b_proof` before it writes. Each run of it
 /// appends a line to `data/runs.log`. The fetcher exits 7 without
-/// `ETH_RPC_URL` in its environment.
+/// `ETH_RPC_URL` in its environment. Both tools answer `--help` with exit
+/// 0 before anything else, as the preflight's probe expects.
 ///
 /// Whoever has one may start its tools, so it holds
 /// [`crate::test_forks::spawning`] until it is dropped: its test runs
@@ -1318,15 +1319,19 @@ pub fn fake_prover_dir(extra: &str) -> (FakeProverHome, crate::deposit::prover_f
         crate::deposit::pi::tests_support::fixture_pi(),
     )
     .unwrap();
-    let fetch = "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in --output) out=$2; shift;; esac; \
-                 shift; done\n[ -n \"$ETH_RPC_URL\" ] || exit 7\necho '{}' > \"$out\"\n";
+    // `--help` answers at once, as a clap tool does, and is no run.
+    let help = "[ \"$1\" = --help ] && { echo usage; exit 0; }";
+    let fetch = format!(
+        "#!/bin/sh\n{help}\nwhile [ $# -gt 0 ]; do case $1 in --output) out=$2; shift;; esac; \
+         shift; done\n[ -n \"$ETH_RPC_URL\" ] || exit 7\necho '{{}}' > \"$out\"\n"
+    );
     let prove = format!(
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in --proof-out) p=$2; shift;; --pubin-out) \
-         i=$2; shift;; esac; shift; done\n{extra}\nprintf proof > \"$p\"\ncp expected_pi.bin \
-         \"$i\"\necho run >> data/runs.log\n"
+        "#!/bin/sh\n{help}\nwhile [ $# -gt 0 ]; do case $1 in --proof-out) p=$2; shift;; \
+         --pubin-out) i=$2; shift;; esac; shift; done\n{extra}\nprintf proof > \"$p\"\ncp \
+         expected_pi.bin \"$i\"\necho run >> data/runs.log\n"
     );
     for (name, body) in [
-        (crate::deposit::prover_files::FETCH_BIN, fetch.to_string()),
+        (crate::deposit::prover_files::FETCH_BIN, fetch),
         (crate::deposit::prover_files::PROVE_BIN, prove),
     ] {
         let p = d.path().join(name);

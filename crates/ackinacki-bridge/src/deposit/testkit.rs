@@ -3,7 +3,7 @@
 //! next (receipts, block headers), which is how reorgs are simulated.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Mutex,
@@ -97,6 +97,10 @@ pub struct FakeEvm {
     pub hang_finalized: AtomicBool,
     /// `header_by_hash` never answers.
     pub hang_headers_by_hash: AtomicBool,
+    /// `header(Finalized)` fails, as a flaky RPC does.
+    pub fail_finalized: AtomicBool,
+    /// `header_by_hash` fails for these hashes.
+    pub failing_headers: Mutex<HashSet<B256>>,
 }
 
 impl Default for FakeEvm {
@@ -123,6 +127,8 @@ impl Default for FakeEvm {
             vanish_tx_after: Mutex::default(),
             hang_finalized: AtomicBool::default(),
             hang_headers_by_hash: AtomicBool::default(),
+            fail_finalized: AtomicBool::default(),
+            failing_headers: Mutex::default(),
         }
     }
 }
@@ -207,6 +213,9 @@ impl EvmRead for FakeEvm {
         if tag == BlockTag::Finalized && self.hang_finalized.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
+        if tag == BlockTag::Finalized && self.fail_finalized.load(Ordering::SeqCst) {
+            anyhow::bail!("503 Service Unavailable");
+        }
         Ok(match tag {
             BlockTag::Latest | BlockTag::Pending => self.latest.next(),
             BlockTag::Finalized => self.finalized.next().flatten(),
@@ -223,6 +232,9 @@ impl EvmRead for FakeEvm {
     async fn header_by_hash(&self, h: B256) -> anyhow::Result<Option<Header>> {
         if self.hang_headers_by_hash.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        if self.failing_headers.lock().unwrap().contains(&h) {
+            anyhow::bail!("503 Service Unavailable");
         }
         Ok(self.by_hash.lock().unwrap().get(&h).cloned())
     }
@@ -933,6 +945,14 @@ pub struct FakeAn {
     pub fail_transactions: AtomicBool,
     /// Every `ext_messages` call fails.
     pub fail_ext_messages: AtomicBool,
+    /// Getters, by name, whose every call fails.
+    pub failing_getters: Mutex<HashSet<String>>,
+    /// Blocks whose `isAcceptedBlockHash` read fails.
+    pub failing_accepted: Mutex<HashSet<B256>>,
+    /// Accounts whose external-message lists fail to read.
+    pub failing_ext: Mutex<HashSet<[u8; 32]>>,
+    /// Every `message` call fails.
+    pub fail_message_reads: AtomicBool,
 }
 
 impl FakeAn {
@@ -967,7 +987,9 @@ impl AnRead for FakeAn {
         f: &str,
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        if self.fail_getters.load(Ordering::SeqCst) {
+        if self.fail_getters.load(Ordering::SeqCst)
+            || self.failing_getters.lock().unwrap().contains(f)
+        {
             anyhow::bail!("503 Service Unavailable");
         }
         let hang = match self.hang_getter_after.lock().unwrap().get_mut(f) {
@@ -986,6 +1008,9 @@ impl AnRead for FakeAn {
                 .as_str()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_default();
+            if self.failing_accepted.lock().unwrap().contains(&h) {
+                anyhow::bail!("503 Service Unavailable");
+            }
             if let Some(yes) = self
                 .accepted_seq
                 .lock()
@@ -1020,7 +1045,9 @@ impl AnRead for FakeAn {
         dir: ExtDir,
         _: Option<String>,
     ) -> anyhow::Result<Page<MsgView>> {
-        if self.fail_ext_messages.load(Ordering::SeqCst) {
+        if self.fail_ext_messages.load(Ordering::SeqCst)
+            || self.failing_ext.lock().unwrap().contains(&id)
+        {
             anyhow::bail!("GraphQL timeout");
         }
         let m = match dir {
@@ -1054,6 +1081,9 @@ impl AnRead for FakeAn {
     }
 
     async fn message(&self, h: &str) -> anyhow::Result<Option<MsgView>> {
+        if self.fail_message_reads.load(Ordering::SeqCst) {
+            anyhow::bail!("GraphQL timeout");
+        }
         Ok(self.messages.lock().unwrap().get(h).cloned())
     }
 

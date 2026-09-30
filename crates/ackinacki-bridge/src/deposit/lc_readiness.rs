@@ -12,8 +12,13 @@
 //! byte order those keys are in has changed between its versions. Every
 //! hash it reports is therefore looked up on the EVM chain in both
 //! orders, and only the real block hash found there is put to the bridge.
+//!
+//! A read that fails is an error that names the read, never a verdict:
+//! [`observe`] does not retry, and its caller decides whether to refuse
+//! or to read again.
 
 use alloy_primitives::B256;
+use anyhow::{anyhow, Context as _};
 use serde_json::json;
 
 use crate::deposit::{
@@ -186,15 +191,21 @@ pub struct Ancestry {
     pub created_at: u64,
 }
 
-/// What [`observe`] read; `None` for what it could not find or did not
-/// get to.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What [`observe`] read. Every read that answered is here; `None` is
+/// something the chains do not have (no such block, no switch-off, no
+/// ancestry since it) or a read [`observe`] did not make because an
+/// earlier check already failed. A failed read is never in here.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LcObs {
     /// `getConfig().l1ChainId`.
-    pub lc_chain_id: Option<u64>,
+    pub lc_chain_id: u64,
+    /// The finalized head of the deposit's chain, read up front so that
+    /// the freshness bounds always have it.
+    pub finalized_evm: Header,
     /// The real block the light client's head names.
     pub head: Option<Header>,
-    /// `getHead().executionBlockHash` as the light client reports it.
+    /// `getHead().executionBlockHash` as the light client reports it; zero
+    /// when check 1 failed and the head was not read.
     pub head_raw: B256,
     /// The bridge's `isAcceptedBlockHash` for the head's real hash.
     pub bridge_accepts_head: Option<bool>,
@@ -208,8 +219,6 @@ pub struct LcObs {
     pub parent: Option<Header>,
     /// The bridge's `isAcceptedBlockHash` for the parent.
     pub bridge_accepts_parent: Option<bool>,
-    /// The finalized EVM head.
-    pub finalized_evm: Option<Header>,
 }
 
 /// The newest event that added hashes after `t_flip`, by event time.
@@ -239,12 +248,12 @@ pub fn freshness(head: &Header, checkpoint: &Header, finalized: &Header) -> Resu
     Ok(())
 }
 
-/// The three checks in order; the first that fails is the verdict.
+/// The three checks in order, on an observation [`observe`] completed;
+/// the first that fails is the verdict.
 pub fn judge(o: &LcObs, chain_id: u64) -> Result<(), LcFailure> {
-    let lc = o.lc_chain_id.unwrap_or(0);
-    if lc != chain_id {
+    if o.lc_chain_id != chain_id {
         return Err(LcFailure::Network {
-            lc,
+            lc: o.lc_chain_id,
             deposit: chain_id,
         });
     }
@@ -275,10 +284,7 @@ pub fn judge(o: &LcObs, chain_id: u64) -> Result<(), LcFailure> {
             parent: p.hash,
         });
     }
-    let fin = o.finalized_evm.as_ref().ok_or(LcFailure::HeadStale {
-        lag_s: u64::MAX,
-    })?;
-    freshness(head, c, fin)
+    freshness(head, c, &o.finalized_evm)
 }
 
 /// Who the anchor wait expects to accept the deposit's block.
@@ -344,21 +350,33 @@ fn uint(v: &serde_json::Value) -> Option<alloy_primitives::U256> {
 }
 
 /// The real block a hash from the light client names: `h` itself, or `h`
-/// with each 16-byte half reversed.
-async fn find_block(evm: &dyn EvmRead, h: B256) -> Option<Header> {
-    if let Ok(Some(b)) = evm.header_by_hash(h).await {
-        return Some(b);
+/// with each 16-byte half reversed. `None` when the chain has neither.
+async fn find_block(evm: &dyn EvmRead, h: B256) -> anyhow::Result<Option<Header>> {
+    if let Some(b) = evm
+        .header_by_hash(h)
+        .await
+        .with_context(|| format!("block {h}"))?
+    {
+        return Ok(Some(b));
     }
     let other = B256::from(pi_form(h.0));
     if other == h {
-        return None;
+        return Ok(None);
     }
-    evm.header_by_hash(other).await.ok().flatten()
+    evm.header_by_hash(other)
+        .await
+        .with_context(|| format!("block {other}"))
 }
 
 /// The bridge's `isAcceptedBlockHash(chain_id, h)`; `h` goes in the byte
 /// order a deposit proof uses.
-async fn accepted(an: &dyn AnRead, bridge: [u8; 32], chain_id: u64, h: B256) -> Option<bool> {
+async fn accepted(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    chain_id: u64,
+    h: B256,
+) -> anyhow::Result<bool> {
+    let what = || format!("could not read the bridge's isAcceptedBlockHash for {h}");
     let v = an
         .run_getter(
             bridge,
@@ -367,20 +385,23 @@ async fn accepted(an: &dyn AnRead, bridge: [u8; 32], chain_id: u64, h: B256) -> 
             json!({ "chainId": chain_id.to_string(), "blockHash": format!("{h:#x}") }),
         )
         .await
-        .ok()?;
-    v["value0"].as_bool()
+        .with_context(what)?;
+    v["value0"]
+        .as_bool()
+        .ok_or_else(|| anyhow!("{}: it answered {v}", what()))
 }
 
 /// The time of the newest `disableOwnerAnchors` whose transaction did not
-/// abort. A read that fails gives `None`: the switch-off stays unknown,
-/// never an older one.
-async fn t_flip(an: &dyn AnRead, bridge: [u8; 32]) -> Option<u64> {
+/// abort; `None` when the bridge's history has none. A switch-off whose
+/// outcome cannot be read is an error, never a reason to fall back to an
+/// older one.
+async fn t_flip(an: &dyn AnRead, bridge: [u8; 32]) -> anyhow::Result<Option<u64>> {
     let mut before = None;
     loop {
         let page = an
             .ext_messages(bridge, ExtDir::In, before.clone())
             .await
-            .ok()?;
+            .context("could not read the bridge's inbound external messages")?;
         for m in &page.items {
             let Some(body) = &m.body else { continue };
             if an.decode(BRIDGE_ABI, body, false).map(|(n, _)| n)
@@ -388,63 +409,96 @@ async fn t_flip(an: &dyn AnRead, bridge: [u8; 32]) -> Option<u64> {
             {
                 continue;
             }
-            let full = an.message(&m.hash).await.ok()??;
-            if let Some(tx) = full.dst_tx.filter(|t| !t.aborted) {
-                return Some(tx.now);
+            let what = || format!("could not read the disableOwnerAnchors message {}", m.hash);
+            let full = an
+                .message(&m.hash)
+                .await
+                .with_context(what)?
+                .ok_or_else(|| anyhow!("{}: the node does not find it", what()))?;
+            let tx = full.dst_tx.ok_or_else(|| {
+                anyhow!(
+                    "could not read the transaction of the disableOwnerAnchors message {}",
+                    m.hash
+                )
+            })?;
+            if !tx.aborted {
+                return Ok(Some(tx.now));
             }
         }
-        before = Some(page.cursor?);
+        match page.cursor {
+            Some(c) => before = Some(c),
+            None => return Ok(None),
+        }
     }
 }
 
-/// The light client's `AncestryAccepted` events, newest first, down to the
-/// first page that reaches `not_before`: the list is newest first, so
-/// nothing past that page is newer.
-async fn ancestry_events(an: &dyn AnRead, lc: [u8; 32], not_before: u64) -> Vec<Ancestry> {
+/// One `AncestryAccepted` event from its decoded body.
+fn ancestry_of(an: &dyn AnRead, m: &crate::deposit::an::MsgView) -> anyhow::Result<Ancestry> {
+    let what = || {
+        format!(
+            "could not read the light client's AncestryAccepted event {}",
+            m.hash
+        )
+    };
+    let (name, v) = m
+        .body
+        .as_deref()
+        .and_then(|b| an.decode(LIGHT_CLIENT_ABI, b, false))
+        .ok_or_else(|| anyhow!("{}: its body does not decode", what()))?;
+    anyhow::ensure!(
+        name == "AncestryAccepted",
+        "{}: it decodes as {name}",
+        what()
+    );
+    let checkpoint = uint(&v["checkpointHash"])
+        .map(B256::from)
+        .ok_or_else(|| anyhow!("{}: no checkpointHash in {v}", what()))?;
+    let hashes_added = uint(&v["hashesAdded"])
+        .and_then(|u| u64::try_from(u).ok())
+        .ok_or_else(|| anyhow!("{}: no hashesAdded in {v}", what()))?;
+    Ok(Ancestry {
+        checkpoint,
+        hashes_added,
+        created_at: m.created_at,
+    })
+}
+
+/// The light client's `AncestryAccepted` events newer than `not_before`,
+/// newest first. Paging stops at the first page that reaches `not_before`:
+/// the list is newest first, so nothing past that page is newer. Older
+/// events are not decoded, so they cannot fail the read.
+async fn ancestry_events(
+    an: &dyn AnRead,
+    lc: [u8; 32],
+    not_before: u64,
+) -> anyhow::Result<Vec<Ancestry>> {
     let mut out = Vec::new();
     let mut before = None;
     loop {
-        let Ok(page) = an.ext_messages(lc, ExtDir::Out, before.clone()).await else {
-            break;
-        };
+        let page = an
+            .ext_messages(lc, ExtDir::Out, before.clone())
+            .await
+            .context("could not read the light client's events")?;
         let mut older = false;
         for m in &page.items {
-            older |= m.created_at <= not_before;
-            if !m.dst.ends_with(ANCESTRY_ACCEPTED_DST) {
-                continue;
+            if m.created_at <= not_before {
+                older = true;
+            } else if m.dst.ends_with(ANCESTRY_ACCEPTED_DST) {
+                out.push(ancestry_of(an, m)?);
             }
-            let Some((name, v)) = m
-                .body
-                .as_deref()
-                .and_then(|b| an.decode(LIGHT_CLIENT_ABI, b, false))
-            else {
-                continue;
-            };
-            if name != "AncestryAccepted" {
-                continue;
-            }
-            let Some(c) = uint(&v["checkpointHash"]).map(B256::from) else {
-                continue;
-            };
-            let added = uint(&v["hashesAdded"])
-                .map(|u| u.saturating_to::<u64>())
-                .unwrap_or(0);
-            out.push(Ancestry {
-                checkpoint: c,
-                hashes_added: added,
-                created_at: m.created_at,
-            });
         }
         match (older, page.cursor) {
             (false, Some(c)) => before = Some(c),
-            _ => break,
+            _ => return Ok(out),
         }
     }
-    out
 }
 
 /// Reads what [`judge`] decides on, check by check, and stops at the first
-/// check that fails. A read that fails leaves its field `None`.
+/// check that fails. Each read is made once: a read that fails, or answers
+/// something that cannot be read, is an error naming it, and there is no
+/// verdict. The caller either refuses (preflight) or reads again later (the
+/// anchor wait).
 pub async fn observe(
     an: &dyn AnRead,
     evm: &dyn EvmRead,
@@ -452,54 +506,90 @@ pub async fn observe(
     lc: [u8; 32],
     chain_id: u64,
     ui: &dyn Ui,
-) -> LcObs {
+) -> anyhow::Result<LcObs> {
     ui.status("checking whether the light client can anchor this deposit");
-    let mut o = LcObs::default();
     let cfg = an
         .run_getter(lc, LIGHT_CLIENT_ABI, "getConfig", json!({}))
         .await
-        .ok();
-    o.lc_chain_id = cfg
-        .and_then(|c| uint(&c["l1ChainId"]))
-        .map(|u| u.saturating_to::<u64>());
-    if o.lc_chain_id != Some(chain_id) {
-        return o;
+        .context("could not read the light client's getConfig")?;
+    let lc_chain_id = uint(&cfg["l1ChainId"])
+        .and_then(|u| u64::try_from(u).ok())
+        .ok_or_else(|| {
+            anyhow!("could not read the light client's chain: getConfig answered {cfg}")
+        })?;
+    let fin = "could not read the finalized block of the deposit's chain";
+    let finalized_evm = evm
+        .header(BlockTag::Finalized)
+        .await
+        .context(fin)?
+        .ok_or_else(|| anyhow!("{fin}: the node has none"))?;
+    let mut o = LcObs {
+        lc_chain_id,
+        finalized_evm,
+        head: None,
+        head_raw: B256::ZERO,
+        bridge_accepts_head: None,
+        t_flip: None,
+        ancestry: None,
+        checkpoint: None,
+        parent: None,
+        bridge_accepts_parent: None,
+    };
+    if lc_chain_id != chain_id {
+        return Ok(o);
     }
     let head = an
         .run_getter(lc, LIGHT_CLIENT_ABI, "getHead", json!({}))
         .await
-        .ok();
-    o.head_raw = head
-        .and_then(|h| uint(&h["executionBlockHash"]))
+        .context("could not read the light client's getHead")?;
+    o.head_raw = uint(&head["executionBlockHash"])
         .map(B256::from)
-        .unwrap_or_default();
-    o.head = find_block(evm, o.head_raw).await;
-    let Some(h) = o.head.clone() else { return o };
-    o.bridge_accepts_head = accepted(an, bridge, chain_id, h.hash).await;
-    if o.bridge_accepts_head != Some(true) {
-        return o;
+        .ok_or_else(|| {
+            anyhow!("could not read the light client's head: getHead answered {head}")
+        })?;
+    o.head = find_block(evm, o.head_raw).await.with_context(|| {
+        format!(
+            "could not look up the light client's head {} on the deposit's chain",
+            o.head_raw
+        )
+    })?;
+    let Some(h) = o.head.clone() else {
+        return Ok(o);
+    };
+    let accepts_head = accepted(an, bridge, chain_id, h.hash).await?;
+    o.bridge_accepts_head = Some(accepts_head);
+    if !accepts_head {
+        return Ok(o);
     }
-    o.t_flip = t_flip(an, bridge).await;
-    let Some(tf) = o.t_flip else { return o };
-    o.ancestry = newest_ancestry_after(&ancestry_events(an, lc, tf).await, tf);
+    o.t_flip = t_flip(an, bridge).await?;
+    let Some(tf) = o.t_flip else { return Ok(o) };
+    o.ancestry = newest_ancestry_after(&ancestry_events(an, lc, tf).await?, tf);
     let Some(a) = o.ancestry.clone() else {
-        return o;
+        return Ok(o);
     };
-    o.checkpoint = find_block(evm, a.checkpoint).await;
+    o.checkpoint = find_block(evm, a.checkpoint).await.with_context(|| {
+        format!(
+            "could not look up the ancestry checkpoint {} on the deposit's chain",
+            a.checkpoint
+        )
+    })?;
     let Some(c) = o.checkpoint.clone() else {
-        return o;
+        return Ok(o);
     };
-    o.parent = evm.header_by_hash(c.parent_hash).await.ok().flatten();
-    let Some(p) = o.parent.clone() else { return o };
+    o.parent = evm.header_by_hash(c.parent_hash).await.with_context(|| {
+        format!(
+            "could not look up the block before the checkpoint, {}",
+            c.parent_hash
+        )
+    })?;
+    let Some(p) = o.parent.clone() else {
+        return Ok(o);
+    };
     if p.timestamp <= tf {
-        return o;
+        return Ok(o);
     }
-    o.bridge_accepts_parent = accepted(an, bridge, chain_id, p.hash).await;
-    if o.bridge_accepts_parent != Some(true) {
-        return o;
-    }
-    o.finalized_evm = evm.header(BlockTag::Finalized).await.ok().flatten();
-    o
+    o.bridge_accepts_parent = Some(accepted(an, bridge, chain_id, p.hash).await?);
+    Ok(o)
 }
 
 #[cfg(test)]
@@ -527,7 +617,7 @@ mod tests {
         let head = hdr(1000, 0xaa, T_FLIP + 5000, 0xa9);
         let ckpt = hdr(968, 0xcc, T_FLIP + 5000 - 384, 0xcb);
         LcObs {
-            lc_chain_id: Some(11_155_111),
+            lc_chain_id: 11_155_111,
             head: Some(head.clone()),
             head_raw: head.hash,
             bridge_accepts_head: Some(true),
@@ -540,7 +630,7 @@ mod tests {
             checkpoint: Some(ckpt.clone()),
             parent: Some(hdr(967, 0xcb, T_FLIP + 5000 - 396, 0xca)),
             bridge_accepts_parent: Some(true),
-            finalized_evm: Some(hdr(1010, 0xff, T_FLIP + 5000 + 120, 0xfe)),
+            finalized_evm: hdr(1010, 0xff, T_FLIP + 5000 + 120, 0xfe),
         }
     }
 
@@ -616,7 +706,7 @@ mod tests {
     #[test]
     fn a_head_far_behind_finalized_is_stale() {
         let mut o = ready();
-        o.finalized_evm.as_mut().unwrap().timestamp = o.head.as_ref().unwrap().timestamp + 1537;
+        o.finalized_evm.timestamp = o.head.as_ref().unwrap().timestamp + 1537;
         assert!(matches!(
             judge(&o, 11_155_111),
             Err(LcFailure::HeadStale {
@@ -685,7 +775,7 @@ mod tests {
         let mut o = ready();
         let head_ts = o.head.as_ref().unwrap().timestamp;
         o.checkpoint.as_mut().unwrap().timestamp = head_ts - ANCESTRY_MAX_LAG_S;
-        o.finalized_evm.as_mut().unwrap().timestamp = head_ts + HEAD_MAX_LAG_S;
+        o.finalized_evm.timestamp = head_ts + HEAD_MAX_LAG_S;
         assert_eq!(judge(&o, 11_155_111), Ok(()));
         assert_eq!(
             (EPOCH_S, HEAD_MAX_LAG_S, ANCESTRY_MAX_LAG_S),
@@ -949,7 +1039,125 @@ mod tests {
     }
 
     async fn observed(evm: &FakeEvm, an: &dyn AnRead) -> LcObs {
-        observe(an, evm, BRIDGE, LC, SEPOLIA, &RecordingUi::new(true)).await
+        observe(an, evm, BRIDGE, LC, SEPOLIA, &RecordingUi::new(true))
+            .await
+            .expect("every read answers")
+    }
+
+    /// Breaks one read of a ready light client and returns the text the
+    /// error must carry.
+    type BreakOneRead = fn(&FakeEvm, &FakeAn, &Blocks) -> String;
+
+    #[tokio::test]
+    async fn a_read_that_fails_is_an_error_not_a_verdict() {
+        let cases: Vec<(&str, BreakOneRead)> = vec![
+            ("getConfig fails", |_, an, _| {
+                an.failing_getters
+                    .lock()
+                    .unwrap()
+                    .insert("getConfig".into());
+                "could not read the light client's getConfig".into()
+            }),
+            ("getConfig names no chain", |_, an, _| {
+                an.getter(LC, "getConfig", vec![json!({ "usdcBridge": "0:1a" })]);
+                "could not read the light client's chain".into()
+            }),
+            ("the finalized head fails", |evm, _, _| {
+                evm.fail_finalized.store(true, Ordering::SeqCst);
+                "could not read the finalized block".into()
+            }),
+            ("the node has no finalized head", |evm, _, _| {
+                evm.finalized.set([None]);
+                "could not read the finalized block".into()
+            }),
+            ("getHead fails", |_, an, _| {
+                an.failing_getters.lock().unwrap().insert("getHead".into());
+                "could not read the light client's getHead".into()
+            }),
+            ("getHead names no block", |_, an, _| {
+                an.getter(LC, "getHead", vec![json!({ "finalizedSlot": "7" })]);
+                "could not read the light client's head".into()
+            }),
+            ("the head's block lookup fails", |evm, _, b| {
+                evm.failing_headers.lock().unwrap().insert(b.head.hash);
+                "could not look up the light client's head".into()
+            }),
+            ("the head's acceptance fails", |_, an, b| {
+                an.failing_accepted.lock().unwrap().insert(b.head.hash);
+                format!(
+                    "could not read the bridge's isAcceptedBlockHash for {}",
+                    b.head.hash
+                )
+            }),
+            ("the bridge's inbound messages fail", |_, an, _| {
+                an.failing_ext.lock().unwrap().insert(BRIDGE);
+                "could not read the bridge's inbound external messages".into()
+            }),
+            ("the switch-off message fails", |_, an, _| {
+                an.fail_message_reads.store(true, Ordering::SeqCst);
+                "could not read the disableOwnerAnchors message flip".into()
+            }),
+            ("the switch-off message is not found", |_, an, _| {
+                an.messages.lock().unwrap().remove("flip");
+                "could not read the disableOwnerAnchors message flip".into()
+            }),
+            ("the switch-off transaction is not known", |_, an, _| {
+                an.messages.lock().unwrap().get_mut("flip").unwrap().dst_tx = None;
+                "could not read the transaction of the disableOwnerAnchors message flip".into()
+            }),
+            ("the light client's events fail", |_, an, _| {
+                an.failing_ext.lock().unwrap().insert(LC);
+                "could not read the light client's events".into()
+            }),
+            ("an AncestryAccepted event does not decode", |_, an, _| {
+                an.bodies.lock().unwrap().remove("B-anc");
+                "could not read the light client's AncestryAccepted event anc".into()
+            }),
+            ("an AncestryAccepted event lacks hashesAdded", |_, an, b| {
+                an.bodies.lock().unwrap().insert(
+                    "B-anc".into(),
+                    (
+                        "AncestryAccepted".into(),
+                        json!({ "checkpointHash": format!("{:#x}", pi(b.checkpoint.hash)) }),
+                    ),
+                );
+                "could not read the light client's AncestryAccepted event anc".into()
+            }),
+            ("the checkpoint's block lookup fails", |evm, _, b| {
+                evm.failing_headers
+                    .lock()
+                    .unwrap()
+                    .insert(b.checkpoint.hash);
+                "could not look up the ancestry checkpoint".into()
+            }),
+            ("the parent's block lookup fails", |evm, _, b| {
+                evm.failing_headers.lock().unwrap().insert(b.parent.hash);
+                format!(
+                    "could not look up the block before the checkpoint, {}",
+                    b.parent.hash
+                )
+            }),
+            ("the parent's acceptance fails", |_, an, b| {
+                an.failing_accepted.lock().unwrap().insert(b.parent.hash);
+                format!(
+                    "could not read the bridge's isAcceptedBlockHash for {}",
+                    b.parent.hash
+                )
+            }),
+        ];
+        for (case, break_one_read) in cases {
+            let (evm, an, b) = ready_chains();
+            let wanted = break_one_read(&evm, &an, &b);
+            let r = observe(&an, &evm, BRIDGE, LC, SEPOLIA, &RecordingUi::new(true)).await;
+            let e = match r {
+                Ok(o) => panic!(
+                    "{case}: a verdict from a failed read: {:?}",
+                    judge(&o, SEPOLIA)
+                ),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(e.contains(&wanted), "{case}: {e}");
+        }
     }
 
     #[tokio::test]
@@ -1242,8 +1450,10 @@ mod tests {
             .unwrap();
         let mut lc = [0u8; 32];
         hex::decode_to_slice(id, &mut lc).unwrap();
-        let o = observe(&an, &evm, bridge, lc, SEPOLIA, &ui).await;
-        assert_eq!(o.lc_chain_id, Some(SEPOLIA));
+        let o = observe(&an, &evm, bridge, lc, SEPOLIA, &ui)
+            .await
+            .expect("every read answers");
+        assert_eq!(o.lc_chain_id, SEPOLIA);
         let head = o
             .head
             .as_ref()

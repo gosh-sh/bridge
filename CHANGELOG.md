@@ -260,7 +260,9 @@ assigns it when the release is tagged.
     (`--confirmations`, 12) and `BRIDGE_WC_PROJECT_ID` (`--wc-project-id`;
     a release build compiles one in, a build from source has none).
     `bridge_config.shellnet` and `bridge_config.local` set the first three
-    to `./deposit-prover`, `./deposit-state` and 12.
+    to `./deposit-prover`, `./deposit-state` and 12. With `HOME` unset or
+    empty, `--state-dir` and `--work-dir` have no default, and `deposit`
+    refuses with exit 2 until both are given.
   - **Other flags:** `--pair-timeout-s` (300), `--recovery-window-s` (600),
     `--anchor-timeout-s` (0, no limit), `--relayer-grace-s` (120),
     `--prover-timeout-s` (1800), `--credit-timeout-s` (300), `--qr-out`,

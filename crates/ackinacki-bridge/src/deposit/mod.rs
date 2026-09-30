@@ -6,6 +6,7 @@
 //! crash.
 
 pub mod args;
+pub mod binding;
 pub mod identity;
 pub mod limits;
 pub mod locks;

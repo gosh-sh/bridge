@@ -287,7 +287,8 @@ assigns it when the release is tagged.
     transaction that should have minted the credit aborted. 30–34 are
     resumable; for 35 and 37 only the operator can finalize, return or pay
     out the USDC, and the CLI prints what to give them. `0` is success, `2`
-    a refusal before anything was sent, `3` a run blocked by another run or
+    a refusal before the deposit was requested (an `approve` may have been
+    sent by then), `3` a run blocked by another run or
     by an operation whose outcome is unknown. `withdraw`'s `10`–`13` are
     unchanged.
   - **Requirements.** `--state-dir` and the prover directory must be on a
@@ -298,7 +299,8 @@ assigns it when the release is tagged.
     transaction of a block, and the `--gql-endpoint` host must serve
     GraphQL and `POST /v2/messages`.
   - **Refusals before any transaction:** Safe and other smart-contract
-    accounts, and ERC-4337 accounts (their deposits cannot be proven); a
+    accounts, and ERC-4337 accounts (their deposits cannot be proven; with
+    `--qr-mode eip681` only those that already have code); a
     paused EVM bridge (`paused()`) or Acki Nacki bridge (`isPaused()`); an
     Acki Nacki bridge that does not trust the EVM bridge; a voucher code the
     CLI does not know. An EIP-7702 account passes with a warning to turn off
@@ -559,8 +561,8 @@ assigns it when the release is tagged.
     — the Hermez [s]·G2, the verification key it derives against
     `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (the one
     the Acki Nacki bridge embeds), and a proof of the fixture deposit
-    against its public inputs. Nothing is published if it fails. It costs
-    about 2 minutes and 4 GB of RAM.
+    against its public inputs. Nothing is published if it fails. On a
+    20-thread workstation it took about 2 minutes and 4 GB of RAM.
   - New secret `WC_PROJECT_ID`, with the `tag` event ticked: the
     WalletConnect Cloud project id compiled in as the default
     `--wc-project-id`. Without it the release has no default, and a

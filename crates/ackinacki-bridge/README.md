@@ -1150,7 +1150,9 @@ time limit, which covers the retries too.
   the network either, and some wallets drop the call data. The CLI asks you to
   accept that risk: `--yes` accepts it, `--non-interactive` without `--yes`
   declines it (exit 20). There is no signature check in this mode, only the
-  check of the account's code.
+  check of the account's code, so an ERC-4337 account that is not deployed yet
+  is not caught: its deposit goes through the account's contract and ends at
+  exit 35.
 - **`both`** — WalletConnect first, and the EIP-681 codes only if pairing
   itself fails.
 
@@ -1216,7 +1218,7 @@ prints the owner's call to pass on:
 | Relayer grace | up to 2 min |
 | Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) |
 | `finalizeDeposit` and the credit | under a minute; at most `--credit-timeout-s` |
-| **End to end** | **~17 min, plus the owner's reaction** |
+| **End to end** | **~17 min, plus the owner's reaction** — an estimate summed from the rows above, not a measured run |
 
 With owner anchors disabled, the light client anchors a block once it is
 finalized and the next checkpoint is proven: at least two epochs (~13 minutes
@@ -1283,7 +1285,7 @@ unfinished.
 | Code | Meaning | Your USDC | What to do |
 |------|---------|-----------|------------|
 | 0 | The credit is confirmed by the deposit's identity, by this run or an earlier one; or `--dry-run` passed | on Acki Nacki | — |
-| 2 | Refused before anything was sent: preflight, including a paused bridge on either side and a USDC balance below the amount; the EVM bridge paused, or the deposit's gas estimate reverting, right before the request; a filesystem without `flock`; a `--resume` or `--abandon` whose command line contradicts the operation's record | untouched | fix what the message names, run again |
+| 2 | Refused before the deposit was requested: preflight, including a paused bridge on either side and a USDC balance below the amount; a filesystem without `flock`; a `--resume` or `--abandon` whose command line contradicts the operation's record. Also the EVM bridge paused, or the deposit's gas estimate reverting, right before the request — by then an `approve` may have been sent | not moved; `approve` gas may be spent | fix what the message names, run again |
 | 3 | Another deposit holds the state directory; an operation with an unknown outcome exists for the same deposit or the same sender; the operation is being run by another process | untouched by this run | wait for the other run, or `--resume` / `--abandon` the operation the message names |
 | 20 | Wallet: not paired, rejected, timed out; a smart-contract account (code, or a signature not made with the account's key); or the wallet replaced the deposit transaction in a finalized block | untouched | pair again, from a plain account |
 | 21 | `approve` reverted, was rejected or would revert; or the wallet set a spending limit below the amount | not moved; `approve` gas may be spent | fix the cause, run again |
@@ -1321,16 +1323,30 @@ record.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
   The operator pays it out (`mintAndSend`).
 
-Give the operator the deposit's transaction hash, its `depositId`, the amount,
-the EVM bridge address and the operation id; for exit 37 also the Acki Nacki
-bridge transaction the message names. The record holds all of it
-(`amount_units` is in micro-USDC):
+Give the operator the deposit's transaction hash, its `depositId`, the amount
+and recipient actually deposited, the EVM bridge address and the operation id;
+for exit 37 also the Acki Nacki bridge transaction the message names. The
+record holds all of it, though not all in the same place:
 
 ```bash
-jq '{op_id, bridge: .params.bridge, amount_units: .params.amount_units,
-     to: .params.to, tx: .tx.tx_hash, deposit_id: .deposit.deposit_id,
-     failure: .failure.detail}' <state-dir>/<op-id>.json
+jq '{op_id, bridge: .params.bridge, tx: .tx.tx_hash,
+     requested_units: .params.amount_units, requested_to: .params.to,
+     deposit_id: .deposit.deposit_id, detail: .failure.detail}' <state-dir>/<op-id>.json
 ```
+
+- `detail` is the message the run ended with. After exit 35 its `Give the
+  bridge operator:` line carries the transaction, the `depositId`, an amount,
+  the bridge and the operation; after exit 37 it names the operation and the
+  Acki Nacki bridge transaction that aborted.
+- `deposit_id` is set only after exit 37. After exit 35 it is `null`: the
+  operation was closed before the deposit was recorded, so take the
+  `depositId` from `detail`.
+- `requested_units` (micro-USDC) and `requested_to` are what was asked for,
+  and so is the amount on the `Give the bridge operator:` line. For exit 37
+  and for an unprovable shape that is also what was deposited. When the
+  amount, recipient or sender differs from the request, the ones actually
+  deposited are in the sentence before that line: `… units to account … from …
+  were deposited, … were requested`.
 
 ### When a bridge is paused
 
@@ -1339,7 +1355,8 @@ Each side has an owner switch.
 - **The EVM bridge** (`AckiNackiBridge.paused()`): `deposit()` reverts with
   `BridgePaused` while it is on. Preflight refuses (exit 2), and the CLI checks
   again right before it asks the wallet for the deposit, so a pause set during
-  pairing or `approve` ends the run with exit 2 and nothing requested. A pause
+  pairing or `approve` ends the run with exit 2 before the deposit is
+  requested; an `approve` already mined stays, and the next run skips it. A pause
   that lands between that check and the transaction reverts it: exit 22, gas
   spent, no USDC taken. Run again once the owner lifts it.
 - **The Acki Nacki bridge** (`isPaused()`): preflight refuses a new deposit

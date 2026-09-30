@@ -6,8 +6,8 @@ The short path for both directions:
   to an address on an EVM chain. About 50 minutes, most of it waiting for
   the bundle that covers your burn.
 - **[Depositing](#depositing-usdc)** moves USDC from an EVM wallet to an Acki
-  Nacki account. About 17 minutes, plus however long the bridge owner takes
-  to anchor your block.
+  Nacki account. About 17 minutes by estimate, plus however long the bridge
+  owner takes to anchor your block.
 
 Both start with the same install, section 1. [README.md](README.md) is the
 full reference, and
@@ -181,9 +181,10 @@ the four — a different recipient, or an amount one micro-USDC apart.
 ## Depositing USDC
 
 Moves USDC from an EVM wallet to an Acki Nacki account, where it arrives as
-eccUSDC. Your wallet signs; the CLI never sees its key. One deposit takes
-**about 17 minutes**, plus however long the bridge owner takes to anchor
-your block by hand; the proof itself takes under a minute.
+eccUSDC. Your wallet signs; the CLI never sees its key. One deposit should
+take **about 17 minutes** — an estimate from its parts, not a timed run —
+plus however long the bridge owner takes to anchor your block by hand; the
+proof itself takes under a minute.
 
 **Once the deposit transaction is sent, the USDC is in the bridge.**
 Everything before it refuses instead of guessing. Everything after it can
@@ -288,7 +289,7 @@ recipient's balance before and after.
 | Code | Meaning | Your USDC |
 |------|---------|-----------|
 | 0 | credited | on Acki Nacki |
-| 2 | refused before sending | untouched |
+| 2 | refused before the deposit was requested; an `approve` may have been sent | not moved |
 | 3 | another deposit is in the way; the message names it | untouched |
 | 20 | the wallet did not pair; you rejected the connection, the check or the deposit; or it is a smart-contract account | untouched |
 | 21 | `approve` failed or was rejected, or the limit was lowered | untouched |
@@ -328,11 +329,14 @@ operation id.
 
 Refused before any transaction is sent (exit 20):
 
-- **Safe and other smart-contract accounts, and ERC-4337 accounts**, deployed
-  or not. Their transactions go through a contract or an EntryPoint, and the
-  deposit circuit cannot prove them. The CLI refuses an account that holds
-  code, and one whose signature on the check message is not made with the
-  account's own key.
+- **Safe and other smart-contract accounts, and ERC-4337 accounts.** Their
+  transactions go through a contract or an EntryPoint, and the deposit
+  circuit cannot prove them. The CLI refuses an account that holds code, and,
+  with WalletConnect, one whose signature on the check message is not made
+  with the account's own key — which catches an ERC-4337 account that is not
+  deployed yet. `--qr-mode eip681` has no signature check: there an
+  undeployed ERC-4337 account is not caught, and its deposit ends at exit 35
+  with the USDC in the bridge. Deposit from a plain account.
 
 Accepted, with a warning:
 

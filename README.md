@@ -31,9 +31,11 @@ TVL limit.
 | `applyBkSetUpdate` | Rotates the AN validator-set (BK-set) commitment through a 16-leaf, depth-4 block-id tree. |
 | `withdrawByProof` | Pays out USDC against a Circuit-4 proof of a `WithdrawalInitiated` event, anchored into state that `verifyBlock` already recorded. Nullifier-guarded and chain-id scoped. |
 
-There is no refund-style `withdraw(depositId, …)`; it was retired. There is no pause switch and no
-upgrade path — every verifier binding is `immutable`, so replacing a verifier means deploying a new
-bridge.
+There is no refund-style `withdraw(depositId, …)`; it was retired. The owner can pause the bridge
+(`pause()` / `unpause()`, read back with `paused()`): while it is paused, `deposit`, `verifyBlock`,
+`applyBkSetUpdate` and `withdrawByProof` revert with `BridgePaused()`, and the owner's AAVE
+management stays available. There is no upgrade path — every verifier binding is `immutable`, so
+replacing a verifier means deploying a new bridge.
 
 Idle USDC can be routed into AAVE V3 by the owner. That module cannot reach user principal: yield
 collection is bounded by the surplus above the book value of user deposits, and the functions that

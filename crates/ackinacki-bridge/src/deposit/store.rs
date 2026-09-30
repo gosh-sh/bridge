@@ -430,8 +430,13 @@ fn is_driven_by_someone(store: &Store, op: &str) -> CliResult<bool> {
     Ok(crate::deposit::locks::OpLock::try_take(store.dir(), op)?.is_none())
 }
 
+/// Why a `Reserved` operation whose run is gone was closed.
+pub const INTERRUPTED_BEFORE_REQUEST: &str = "the run that reserved it exited before the deposit \
+                                              was requested (an approve may have been sent; no \
+                                              USDC moved)";
+
 /// Closes every `Reserved` operation whose lock is free: the run that
-/// reserved it is gone and never asked the wallet. Callers hold the
+/// reserved it is gone and never requested the deposit. Callers hold the
 /// directory lock.
 pub fn close_interrupted(store: &Store, recs: &mut [OpRecord]) -> CliResult<()> {
     for r in recs.iter_mut().filter(|r| r.stage == OpStage::Reserved) {
@@ -443,11 +448,12 @@ pub fn close_interrupted(store: &Store, recs: &mut [OpRecord]) -> CliResult<()> 
             OpStage::Reserved,
             FailReason::Interrupted,
             ExitCode::PreflightRefused,
-            "the run that reserved it exited before asking the wallet",
+            INTERRUPTED_BEFORE_REQUEST,
         );
         store.write(r).map_err(|e| {
             preflight(format!(
-                "cannot close interrupted operation {}: {e} (nothing was sent)",
+                "cannot close interrupted operation {}: {e} (its deposit was never requested; no \
+                 USDC moved)",
                 r.op_id
             ))
         })?;

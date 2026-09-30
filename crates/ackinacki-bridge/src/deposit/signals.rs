@@ -12,8 +12,12 @@ use std::{future::Future, path::Path};
 use tokio::signal::unix::{signal, Signal as Stream, SignalKind};
 
 use crate::{
-    deposit::store::{OpStage, Store},
-    errors::{CliError, ExitCode, Stage},
+    deposit::{
+        run,
+        store::{OpStage, Store},
+        DepositSuccess,
+    },
+    errors::{CliError, CliResult, ExitCode, Stage},
 };
 
 /// A signal that ends a deposit run.
@@ -89,25 +93,26 @@ pub fn exit_for(stage: Option<OpStage>) -> ExitCode {
     }
 }
 
-/// The error a run stopped by `sig` ends with. `op` is the operation the
-/// run was driving, if it had created or resumed one by then; its exit
-/// code follows the stage its record in `state_dir` says.
+/// What a run stopped by `sig` answers. `op` is the operation the run was
+/// driving, if it had created or resumed one by then. An operation that
+/// has ended answers as the run that ended it did: a credited one with its
+/// summary, a closed one with its recorded code and message. Otherwise the
+/// exit code follows the stage its record in `state_dir` says.
 ///
 /// A record that cannot be read leaves the stage unknown: that is exit 34,
 /// the code for an outcome that is not known, and never "nothing was sent".
-pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliError {
-    let nothing_sent = || CliError::Preflight {
-        reason: format!(
-            "interrupted by {} before the wallet was asked (nothing was sent)",
-            sig.name()
-        ),
-        source: None,
-    };
+pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliResult<DepositSuccess> {
     let Some(op) = op else {
-        return nothing_sent();
+        return Err(CliError::Preflight {
+            reason: format!(
+                "interrupted by {} before the wallet was asked (nothing was sent)",
+                sig.name()
+            ),
+            source: None,
+        });
     };
-    let stage = match Store::open(state_dir).and_then(|s| s.load(&op)) {
-        Ok(rec) => rec.stage,
+    let rec = match Store::open(state_dir).and_then(|s| s.load(&op)) {
+        Ok(rec) => rec,
         Err(e) => {
             let why = match e {
                 CliError::Preflight {
@@ -115,7 +120,7 @@ pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliErro
                 } => reason,
                 other => other.to_string(),
             };
-            return CliError::deposit(
+            return Err(CliError::deposit(
                 ExitCode::CreditUnconfirmed,
                 Stage::Deposit,
                 Some(&op),
@@ -124,11 +129,24 @@ pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliErro
                      operation got is unknown; continue with --resume {op}",
                     sig.name()
                 ),
-            );
+            ));
         },
     };
-    match exit_for(Some(stage)) {
-        ExitCode::PreflightRefused => nothing_sent(),
+    let stage = rec.stage;
+    match stage {
+        OpStage::Credited => return Ok(run::summary(&rec, None, (None, None))),
+        OpStage::Failed => return Err(run::terminal(&rec)),
+        _ => {},
+    }
+    Err(match exit_for(Some(stage)) {
+        ExitCode::PreflightRefused => CliError::Preflight {
+            reason: format!(
+                "interrupted by {} before the deposit was requested (an approve may have been \
+                 sent; no USDC moved)",
+                sig.name()
+            ),
+            source: None,
+        },
         exit => CliError::deposit(
             exit,
             Stage::Deposit,
@@ -139,7 +157,7 @@ pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliErro
                 sig.name()
             ),
         ),
-    }
+    })
 }
 
 /// Operation records at a chosen stage, for this module's tests and for
@@ -273,7 +291,7 @@ mod tests {
     #[test]
     fn an_interruption_before_any_operation_sent_nothing() {
         let d = tempfile::tempdir().unwrap();
-        let e = interrupted(Signal::Int, d.path(), None);
+        let e = interrupted(Signal::Int, d.path(), None).unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
         let m = e.to_string();
         assert!(m.contains("SIGINT"), "{m}");
@@ -282,15 +300,27 @@ mod tests {
 
     #[test]
     fn an_interruption_answers_with_the_recorded_stage_and_how_to_resume() {
-        for stage in STAGES {
+        // An operation that has ended answers from its record: see below.
+        for stage in STAGES
+            .into_iter()
+            .filter(|s| !matches!(s, OpStage::Credited | OpStage::Failed))
+        {
             let d = tempfile::tempdir().unwrap();
             let op = record_at(d.path(), stage);
-            let e = interrupted(Signal::Term, d.path(), Some(op.clone()));
+            let e = interrupted(Signal::Term, d.path(), Some(op.clone())).unwrap_err();
             assert_eq!(e.exit_code(), exit_for(Some(stage)), "{stage:?}");
             let m = e.to_string();
             assert!(m.contains("SIGTERM"), "{m}");
             if stage == OpStage::Reserved {
-                assert!(m.contains("nothing was sent"), "{m}");
+                // The deposit was not requested, but an approve may have been.
+                assert!(
+                    m.contains(
+                        "before the deposit was requested (an approve may have been sent; no USDC \
+                         moved)"
+                    ),
+                    "{m}"
+                );
+                assert!(!m.contains("nothing was sent"), "{m}");
                 continue;
             }
             assert!(!m.contains("nothing was sent"), "{m}");
@@ -301,10 +331,37 @@ mod tests {
     }
 
     #[test]
+    fn an_interruption_after_the_operation_was_closed_answers_with_its_recorded_exit() {
+        let d = tempfile::tempdir().unwrap();
+        let op = record_at(d.path(), OpStage::Failed); // exit 35, recorded
+        let e = interrupted(Signal::Int, d.path(), Some(op.clone())).unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositUnprovable);
+        let m = e.to_string();
+        assert!(
+            m.contains("the transaction's shape cannot be proven"),
+            "{m}"
+        );
+        assert!(!m.contains("--resume"), "{m}");
+        assert!(!m.contains("nothing was sent"), "{m}");
+        assert_eq!(e.op_id(), Some(op.as_str()));
+    }
+
+    #[test]
+    fn an_interruption_after_the_credit_answers_with_the_summary() {
+        let d = tempfile::tempdir().unwrap();
+        let op = record_at(d.path(), OpStage::Credited);
+        let s = interrupted(Signal::Int, d.path(), Some(op.clone())).unwrap();
+        assert_eq!(s.op_id.as_deref(), Some(op.as_str()));
+        assert!(!s.dry_run && !s.abandoned);
+        let c = s.confirmation.expect("the credit's confirmation");
+        assert_eq!(c["confirm_tx"], "c1".repeat(32));
+    }
+
+    #[test]
     fn an_operation_whose_record_cannot_be_read_is_not_said_to_have_sent_nothing() {
         let d = tempfile::tempdir().unwrap();
         let op = crate::deposit::store::Store::new_op_id(); // never written
-        let e = interrupted(Signal::Hup, d.path(), Some(op.clone()));
+        let e = interrupted(Signal::Hup, d.path(), Some(op.clone())).unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::CreditUnconfirmed);
         let m = e.to_string();
         assert!(m.contains("SIGHUP"), "{m}");

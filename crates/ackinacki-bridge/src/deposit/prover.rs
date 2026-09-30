@@ -767,7 +767,10 @@ mod tests {
         let e = match signals::until_signal(run).await {
             Ok(Ok(_)) => return,
             Ok(Err(e)) => e,
-            Err(sig) => signals::interrupted(sig, &state, Some(op)),
+            Err(sig) => match signals::interrupted(sig, &state, Some(op)) {
+                Ok(_) => return,
+                Err(e) => e,
+            },
         };
         // The run is dropped by now and its prover killed. `main` returns
         // the code; a test can only exit with it.

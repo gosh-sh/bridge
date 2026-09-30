@@ -63,7 +63,7 @@ pub async fn run(p: args::DepositParams) -> CliResult<DepositSuccess> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            Err(signals::interrupted(sig, &p.state_dir, op))
+            signals::interrupted(sig, &p.state_dir, op)
         },
     }
 }
@@ -154,6 +154,9 @@ async fn start(p: &args::DepositParams, d: &preflight::Deps) -> CliResult<Deposi
                     let Some(from) = p.from_address else {
                         return Err(*f.error);
                     };
+                    // That operation ended before the wallet was asked for
+                    // anything; an interrupt from here on is about the next.
+                    *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
                     d.ui.warn(&format!("{}; showing the EIP-681 codes instead", f.error));
                     run::run_with(p, d, &mut eip681(from)).await
                 },

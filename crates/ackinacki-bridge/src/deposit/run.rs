@@ -191,8 +191,8 @@ fn close(store: &Store, rec: &mut OpRecord, reason: FailReason, exit: ExitCode, 
 }
 
 /// A refusal before the deposit was requested: the operation is closed,
-/// nothing was sent, and `e` is the answer. This run no longer drives an
-/// operation an interrupt could report on.
+/// no USDC moved, and `e` is the answer. An interrupt from here on answers
+/// with the closed record, as `e` does.
 fn closed_before_request(
     d: &Deps,
     store: &Store,
@@ -206,17 +206,7 @@ fn closed_before_request(
             rec.op_id
         ));
     }
-    *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
     e
-}
-
-/// Once the operation is closed as failed on disk, that failure is the
-/// run's answer: an interrupt from here on (while the wallet session is
-/// being closed, say) must not report the operation as one to resume.
-fn forget_if_closed(d: &Deps, store: &Store, op: &str) {
-    if store.load(op).is_ok_and(|r| r.stage == OpStage::Failed) {
-        *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
 }
 
 /// The exits other than 2 that a closed operation can have recorded.
@@ -237,8 +227,9 @@ const RECORDED_EXITS: [ExitCode; 11] = [
 /// What a run of an operation closed as failed answers: the message and
 /// the exit code of the run that closed it (20 for a rejection in the
 /// wallet, 21 for a failed approve, 22 for a revert, 35 for a deposit
-/// other than the one requested, and so on), never a generic refusal.
-fn terminal(rec: &OpRecord) -> CliError {
+/// other than the one requested, and so on), never a generic refusal. An
+/// interrupt after the operation was closed answers with it too.
+pub(crate) fn terminal(rec: &OpRecord) -> CliError {
     let op = &rec.op_id;
     let Some(f) = &rec.failure else {
         return CliError::Preflight {
@@ -520,7 +511,6 @@ pub async fn run_fresh(
         from,
     };
     if let Err(e) = request(p, d, &board, &store, &mut rec, &cx, wallet, ask).await {
-        forget_if_closed(d, &store, &op);
         wallet.close().await;
         board.failed(&e);
         return Err(e.into());
@@ -1072,9 +1062,6 @@ pub async fn drive(
 ) -> CliResult<DepositSuccess> {
     let board = Board::new(d.ui.as_ref());
     let r = walk(p, d, &board, store, rec, cx, &mut wallet, dir_lock).await;
-    if r.is_err() {
-        forget_if_closed(d, store, &rec.op_id);
-    }
     if let Some(w) = wallet.take() {
         w.close().await;
     }
@@ -1104,7 +1091,8 @@ async fn walk(
         OpStage::Reserved => {
             return Err(CliError::Preflight {
                 reason: format!(
-                    "operation {op} never asked the wallet; there is nothing to continue"
+                    "operation {op} ended before its deposit was requested (an approve may have \
+                     been sent; no USDC moved); there is nothing to continue"
                 ),
                 source: None,
             })
@@ -1735,8 +1723,8 @@ enum Resumable {
 /// answers what the record answers alone. A credited operation answers
 /// with its summary, a failed one with its recorded code and message, and
 /// a reservation whose run died is closed as interrupted (exit 2: its
-/// wallet was never asked). `current_op` names the operation from the lock
-/// on, before its record is read, so that an interrupt reports on the
+/// deposit was never requested). `current_op` names the operation from the
+/// lock on, before its record is read, so that an interrupt reports on the
 /// record as it stands.
 async fn open_for_resume(
     p: &DepositParams,
@@ -1756,7 +1744,6 @@ async fn open_for_resume(
             ),
         ));
     };
-    let forget = || *current_op.lock().unwrap_or_else(PoisonError::into_inner) = None;
     *current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
     ui.op_id(&op);
     let mut rec = store.load(&op).map_err(|e| unreadable(&op, e))?;
@@ -1770,27 +1757,23 @@ async fn open_for_resume(
                 (None, None),
             ))))
         },
-        OpStage::Failed => {
-            forget();
-            return Err(terminal(&rec));
-        },
+        OpStage::Failed => return Err(terminal(&rec)),
         OpStage::Reserved => {
             // Its lock was free: the run that reserved it is gone, and it
-            // never asked the wallet. Closed as a new deposit's preflight
-            // closes such an operation, under the directory lock.
+            // never requested the deposit. Closed as a new deposit's
+            // preflight closes such an operation, under the directory lock.
             let _dir = DirLock::wait(store.dir()).await?;
             rec.fail(
                 OpStage::Reserved,
                 FailReason::Interrupted,
                 ExitCode::PreflightRefused,
-                "the run that reserved it exited before asking the wallet",
+                crate::deposit::store::INTERRUPTED_BEFORE_REQUEST,
             );
             store.write(&mut rec).map_err(nothing_sent)?;
-            forget();
             return Err(CliError::Preflight {
                 reason: format!(
-                    "operation {op} never asked the wallet, so there is nothing to continue; it \
-                     is closed now (nothing was sent)"
+                    "operation {op} ended before its deposit was requested (an approve may have \
+                     been sent; no USDC moved), so there is nothing to continue; it is closed now"
                 ),
                 source: None,
             });
@@ -2205,6 +2188,9 @@ mod tests {
     struct Counted {
         inner: FakeWallet,
         closed: u32,
+        /// Closing the session never finishes, as with a relay that does
+        /// not answer.
+        hang_on_close: bool,
     }
 
     #[async_trait]
@@ -2235,6 +2221,9 @@ mod tests {
 
         async fn close(&mut self) {
             self.closed += 1;
+            if self.hang_on_close {
+                std::future::pending::<()>().await;
+            }
         }
     }
 
@@ -2247,7 +2236,18 @@ mod tests {
         Counted {
             inner,
             closed: 0,
+            hang_on_close: false,
         }
+    }
+
+    /// What the run would answer if SIGINT arrived now.
+    fn interrupted_now(p: &DepositParams, d: &Deps) -> CliResult<DepositSuccess> {
+        let op = d
+            .current_op
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        signals::interrupted(signals::Signal::Int, &p.state_dir, op)
     }
 
     fn record(store: &Store, stage: OpStage) -> OpRecord {
@@ -2316,6 +2316,10 @@ mod tests {
         // tells that step 8 really sent.
         assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
         assert_eq!(*d.current_op.lock().unwrap(), s.op_id);
+        // An interrupt after the credit answers with the summary: exit 0.
+        let now = interrupted_now(&p, &d).unwrap();
+        assert_eq!(now.op_id, s.op_id);
+        assert!(now.confirmation.is_some());
         let j = serde_json::to_value(&s).unwrap();
         assert_eq!(j["deposit"]["tx_hash"], format!("{h:#x}"));
         assert_eq!(j["anchor"]["writer"], "owner");
@@ -2387,11 +2391,36 @@ mod tests {
             .load(e.op_id().unwrap())
             .unwrap();
         assert_eq!(rec.failure.unwrap().reason, FailReason::Reverted);
-        assert_eq!(
-            *d.current_op.lock().unwrap(),
-            None,
-            "the operation is closed: an interrupt now must not offer --resume"
-        );
+        // The operation is closed: an interrupt now answers with the verdict,
+        // neither --resume nor "nothing was sent".
+        let now = interrupted_now(&p, &d).unwrap_err();
+        assert_eq!(now.exit_code(), ExitCode::DepositReverted, "{now}");
+        assert!(now.to_string().contains("reverted"), "{now}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupt_while_the_wallet_closes_after_a_verdict_answers_with_the_verdict() {
+        // A legacy transaction is closed as exit 35; then the wallet session
+        // takes forever to close, and the run is interrupted meanwhile.
+        let mut w = World::healthy();
+        let h = w.mined_deposit_of_type(7, 0);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        let mut wallet = counted(&mut w);
+        wallet.hang_on_close = true;
+        let p = w.params(RunMode::Fresh);
+        let d = w.deps();
+        tokio::select! {
+            r = run_with(&p, &d, &mut wallet) => panic!("the session never closes: {r:?}"),
+            () = tokio::time::sleep(Duration::from_secs(24 * 3600)) => {},
+        }
+        assert_eq!(wallet.closed, 1, "interrupted while closing the session");
+        let now = interrupted_now(&p, &d).unwrap_err();
+        assert_eq!(now.exit_code(), ExitCode::DepositUnprovable, "{now}");
+        let m = now.to_string();
+        assert!(m.contains("Give the bridge operator:"), "{m}");
+        assert!(!m.contains("nothing was sent"), "{m}");
+        assert!(!m.contains("--resume"), "{m}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2492,11 +2521,10 @@ mod tests {
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Failed);
         assert_eq!(rec.failure.unwrap().reason, FailReason::Refused);
-        assert_eq!(
-            *d.current_op.lock().unwrap(),
-            None,
-            "nothing was requested, so an interrupt now is exit 2"
-        );
+        // An interrupt now answers as the run does.
+        let now = interrupted_now(&p, &d).unwrap_err();
+        assert_eq!(now.exit_code(), ExitCode::WalletFailed, "{now}");
+        assert!(now.to_string().contains("did not pair"), "{now}");
         assert!(DirLock::try_take(&p.state_dir).unwrap().is_some());
     }
 
@@ -2521,11 +2549,11 @@ mod tests {
             .load(f.error.op_id().unwrap())
             .unwrap();
         assert_eq!(rec.failure.unwrap().reason, FailReason::Rejected);
-        assert_eq!(
-            *d.current_op.lock().unwrap(),
-            None,
-            "closed as rejected before the wallet session is closed"
-        );
+        // Closed as rejected before the wallet session is closed: an
+        // interrupt during that close answers as the run does.
+        let now = interrupted_now(&p, &d).unwrap_err();
+        assert_eq!(now.exit_code(), ExitCode::WalletFailed, "{now}");
+        assert!(now.to_string().contains("rejected in the wallet"), "{now}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3274,11 +3302,11 @@ mod tests {
         let e = resume(&p, &d, &target, None).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::DepositUnprovable);
         assert!(e.to_string().contains("differs from the request"), "{e}");
-        assert_eq!(
-            *d.current_op.lock().unwrap(),
-            None,
-            "closed for the operator: an interrupt now must not offer --resume"
-        );
+        // Closed for the operator: an interrupt now answers with the verdict
+        // and does not offer --resume.
+        let now = interrupted_now(&p, &d).unwrap_err();
+        assert_eq!(now.exit_code(), ExitCode::DepositUnprovable, "{now}");
+        assert!(!now.to_string().contains("--resume"), "{now}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3438,9 +3466,21 @@ mod tests {
         });
         let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
-        assert!(e.to_string().contains("nothing was sent"), "{e}");
+        // Its run may have sent an approve before it died.
+        assert!(
+            e.to_string().contains(
+                "before its deposit was requested (an approve may have been sent; no USDC moved)"
+            ),
+            "{e}"
+        );
         let back = store.load(&rec.op_id).unwrap();
-        assert_eq!(back.failure.unwrap().reason, FailReason::Interrupted);
+        let f = back.failure.unwrap();
+        assert_eq!(f.reason, FailReason::Interrupted);
+        assert!(
+            f.detail.contains("an approve may have been sent"),
+            "{}",
+            f.detail
+        );
     }
 
     #[tokio::test(start_paused = true)]

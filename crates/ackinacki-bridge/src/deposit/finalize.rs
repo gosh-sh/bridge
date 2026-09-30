@@ -146,8 +146,8 @@ fn not_sent(op: &str, earlier_in_doubt: bool, what: String) -> CliError {
             Stage::Finalize,
             Some(op),
             format!(
-                "{what}; an earlier finalizeDeposit of this run has no known outcome and may have \
-                 executed. Continue with --resume {op}"
+                "{what}; an earlier finalizeDeposit of this operation has no known outcome and \
+                 may have executed. Continue with --resume {op}"
             ),
         )
     } else {
@@ -156,7 +156,7 @@ fn not_sent(op: &str, earlier_in_doubt: bool, what: String) -> CliError {
             Stage::Finalize,
             Some(op),
             format!(
-                "{what}; nothing reached Acki Nacki and the deposit is on the EVM bridge. \
+                "{what}; nothing executed on Acki Nacki and the deposit is on the EVM bridge. \
                  Continue with --resume {op}"
             ),
         )
@@ -193,7 +193,9 @@ async fn is_paused(an: &dyn AnRead, bridge: [u8; 32]) -> anyhow::Result<bool> {
 /// 34 after a send in doubt. The whole step — reads, pauses, sends — is
 /// under `cx.deadline`: out of time with a send in flight or in doubt is
 /// exit 34, otherwise exit 31. The record says Finalizing before every
-/// send, so --resume starts with the voucher check either way.
+/// send, so --resume starts with the voucher check either way, and a step
+/// that starts from Finalizing starts in doubt: a send of an earlier run may
+/// have executed.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize(
     an: &dyn AnRead,
@@ -208,7 +210,10 @@ pub async fn finalize(
     let op = rec.op_id.clone();
     // The whole step is under the deadline: the reads, the pauses, the
     // backoff and the sends themselves. A send cut by it may still execute.
-    let in_doubt = AtomicBool::new(false);
+    // A record already in Finalizing means an earlier run may have sent, and
+    // its send may have executed without showing yet; only a refusal before
+    // accept in this run settles that.
+    let in_doubt = AtomicBool::new(rec.stage == OpStage::Finalizing);
     let steps = attempts(an, send, store, rec, cx, proof, pi, ui, &in_doubt);
     match cx.deadline {
         None => steps.await,
@@ -220,8 +225,9 @@ pub async fn finalize(
 }
 
 /// The checks and sends of step 8, until one decides. `in_doubt` says
-/// whether a send of this step may have executed: set when a send starts,
-/// kept after an answer without a verdict, and cleared by a refusal before
+/// whether a send may have executed: set on entry from Finalizing and when
+/// a send starts, kept after an answer without a verdict and through a
+/// pause seen before a send, and cleared only by a refusal before
 /// accept — that send did not execute, and the checks before it found no
 /// earlier one executed.
 #[allow(clippy::too_many_arguments)]
@@ -874,6 +880,13 @@ mod tests {
                 .contains("encode finalizeDeposit: bad proof bytes"),
             "{e}"
         );
+        // A send reached the bridge and was refused: nothing executed, but
+        // something did reach it.
+        assert!(
+            e.to_string().contains("nothing executed on Acki Nacki"),
+            "{e}"
+        );
+        assert!(!e.to_string().contains("nothing reached"), "{e}");
         assert_eq!(*an.sent.lock().unwrap(), 3);
     }
 
@@ -1141,5 +1154,110 @@ mod tests {
         );
         assert!(e.to_string().contains("--resume"), "{e}");
         assert_eq!(*an.sent.lock().unwrap(), 0);
+    }
+
+    /// A record a previous run left in `Finalizing`: a send of that run may
+    /// have gone out and executed.
+    fn finalizing(store: &crate::deposit::store::Store) -> crate::deposit::store::OpRecord {
+        use crate::deposit::store::*;
+        let mut rec = proved(store);
+        rec.stage = OpStage::Finalizing;
+        rec.finalize = Some(FinalizeInfo {
+            voucher_code_hash: hex::encode(H),
+            voucher_account: hex::encode([0xee; 32]),
+            sends: 1,
+        });
+        store.write(&mut rec).unwrap();
+        rec
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resumed_step_held_by_a_pause_is_exit_34() {
+        // The previous run's send may have executed and not be visible yet;
+        // this run sends nothing before its deadline.
+        use crate::deposit::store::*;
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).unwrap();
+        let mut rec = finalizing(&store);
+        let (an, cx) = plain([], 10);
+        an.getter([0x1a; 32], "isPaused", vec![
+            serde_json::json!({"value0": true}),
+        ]);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            crate::errors::ExitCode::CreditUnconfirmed,
+            "{e}"
+        );
+        assert!(e.to_string().contains("--resume"), "{e}");
+        assert_eq!(*an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resumed_step_whose_message_never_left_is_exit_34() {
+        use crate::deposit::{refusals::FinalizeSend, store::*};
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).unwrap();
+        let mut rec = finalizing(&store);
+        let (an, cx) = plain(
+            [FinalizeSend::NotSent {
+                message: "encode finalizeDeposit: bad proof bytes".into(),
+            }],
+            600,
+        );
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            crate::errors::ExitCode::CreditUnconfirmed,
+            "{e}"
+        );
+        assert!(
+            e.to_string()
+                .contains("encode finalizeDeposit: bad proof bytes"),
+            "{e}"
+        );
+        assert_eq!(*an.sent.lock().unwrap(), 1);
+        assert_eq!(store.load(&rec.op_id).unwrap().finalize.unwrap().sends, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_in_doubt_stays_in_doubt_while_the_bridge_is_paused() {
+        // The pause is seen by the checks before the next send, not by a
+        // refusal of it: the first send still has no verdict.
+        use crate::deposit::{refusals::FinalizeSend, store::*};
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).unwrap();
+        let mut rec = proved(&store);
+        let (an, cx) = plain(
+            [FinalizeSend::Unknown {
+                message: "timeout".into(),
+            }],
+            60,
+        );
+        an.getter([0x1a; 32], "isPaused", vec![
+            serde_json::json!({"value0": false}),
+            serde_json::json!({"value0": true}),
+        ]);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            crate::errors::ExitCode::CreditUnconfirmed,
+            "{e}"
+        );
+        assert_eq!(*an.sent.lock().unwrap(), 1);
+        assert!(
+            ui.statuses().iter().any(|s| s.contains("paused")),
+            "{:?}",
+            ui.statuses()
+        );
     }
 }

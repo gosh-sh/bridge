@@ -8,6 +8,7 @@
 pub mod args;
 pub mod binding;
 pub mod evm;
+pub mod evm_confirm;
 pub mod evm_preflight;
 pub mod identity;
 pub mod limits;

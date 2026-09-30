@@ -11,12 +11,16 @@ pub mod anchor_wait;
 pub mod args;
 pub mod binding;
 pub mod credit;
+#[cfg(all(test, feature = "e2e"))]
+mod e2e;
 pub mod evm;
 pub mod evm_confirm;
 pub mod evm_preflight;
 pub mod evm_steps;
 pub mod finalize;
 pub mod identity;
+#[cfg(test)]
+mod it_anvil;
 pub mod lc_readiness;
 pub mod limits;
 pub mod locks;

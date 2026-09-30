@@ -500,6 +500,95 @@ impl crate::deposit::wallet::Wallet for FakeWallet {
     async fn close(&mut self) {}
 }
 
+/// Signs with a key the test holds and broadcasts through the RPC. Test
+/// builds only: the shipped CLI never holds an EVM key.
+pub struct LocalKeyWallet {
+    /// The key it signs with.
+    pub signer: alloy::signers::local::PrivateKeySigner,
+    /// Where it broadcasts.
+    pub rpc_url: String,
+    /// Sends legacy (type 0) transactions, as some wallets do.
+    pub legacy: bool,
+    /// Signs `approve` with this limit instead of the requested one, as a
+    /// wallet does when its user lowers the spending limit.
+    pub approve_cap: Option<U256>,
+}
+
+#[async_trait]
+impl crate::deposit::wallet::Wallet for LocalKeyWallet {
+    fn kind(&self) -> crate::deposit::wallet::WalletKind {
+        crate::deposit::wallet::WalletKind::WalletConnect
+    }
+
+    async fn connect(
+        &mut self,
+        _: &dyn crate::deposit::ui::Ui,
+    ) -> Result<Address, crate::deposit::wallet::WalletError> {
+        Ok(self.signer.address())
+    }
+
+    async fn personal_sign(
+        &mut self,
+        _: Address,
+        m: &str,
+    ) -> Result<Bytes, crate::deposit::wallet::WalletError> {
+        use alloy::signers::SignerSync as _;
+        Ok(Bytes::from(
+            self.signer
+                .sign_message_sync(m.as_bytes())
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        ))
+    }
+
+    async fn capabilities(&mut self, _: Address) -> Option<serde_json::Value> {
+        None
+    }
+
+    async fn send_transaction(
+        &mut self,
+        _: &dyn crate::deposit::ui::Ui,
+        tx: &crate::deposit::wallet::TxRequest,
+    ) -> Result<B256, crate::deposit::wallet::WalletError> {
+        use alloy::{
+            network::{EthereumWallet, TransactionBuilder},
+            providers::{Provider, ProviderBuilder},
+            rpc::types::TransactionRequest,
+        };
+        let p = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.signer.clone()))
+            .connect_http(self.rpc_url.parse().unwrap());
+        let data = match (&tx.purpose, self.approve_cap) {
+            (
+                crate::deposit::wallet::TxPurpose::Approve {
+                    spender, ..
+                },
+                Some(cap),
+            ) => approve_calldata(*spender, cap),
+            _ => tx.data.clone(),
+        };
+        let mut req = TransactionRequest::default()
+            .with_from(tx.from)
+            .with_to(tx.to)
+            .with_input(data)
+            .with_gas_limit(tx.gas);
+        if self.legacy {
+            req = req.with_gas_price(tx.fees.max_fee_per_gas);
+        } else {
+            req = req
+                .with_max_fee_per_gas(tx.fees.max_fee_per_gas)
+                .with_max_priority_fee_per_gas(tx.fees.max_priority_fee_per_gas);
+        }
+        p.send_transaction(req)
+            .await
+            .map(|pending| *pending.tx_hash())
+            .map_err(|e| crate::deposit::wallet::WalletError::Other(e.to_string()))
+    }
+
+    async fn close(&mut self) {}
+}
+
 /// A WalletConnect relay on loopback: `irn_subscribe`, `irn_publish` and
 /// delivery to every subscriber of the topic — the publisher included, as a
 /// real relay may do. It keeps every message and replays a topic's backlog

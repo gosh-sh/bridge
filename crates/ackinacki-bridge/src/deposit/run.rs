@@ -2130,11 +2130,12 @@ pub async fn abandon(p: &DepositParams, op: &str, ui: &dyn Ui) -> CliResult<Depo
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use alloy_primitives::{Address, Bytes, B256};
     use async_trait::async_trait;
     use serde_json::json;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::{
@@ -2144,7 +2145,7 @@ mod tests {
             preflight::Polls,
             store::{FailReason, OpParams, OpRecord, OpStage, RequestInfo, TxClaim},
             testkit::*,
-            ui::Ui,
+            ui::{RecordingUi, Ui, UiEvent},
             wallet::{TxRequest, Wallet, WalletError, WalletKind},
         },
         errors::ExitCode,
@@ -2626,6 +2627,264 @@ mod tests {
             rec.stage,
             OpStage::Finalizing,
             "a resume must know a send may have executed"
+        );
+    }
+
+    // ---- steps 6 to 9 against the scripted Acki Nacki node ----
+
+    /// A deposit that goes all the way — approved, mined, anchored at once,
+    /// credited — with `setup` applied to its world, run on the real clock
+    /// because it may reach the fake prover. The world, the result and what
+    /// the run showed.
+    async fn happy_world(
+        setup: impl FnOnce(&mut World),
+    ) -> (World, CliResult<DepositSuccess>, Arc<RecordingUi>) {
+        let mut w = World::healthy();
+        let h = w.mined_deposit(7);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        w.anchor_after(0);
+        w.credit_chain_for_mined_deposit();
+        setup(&mut w);
+        let ui = Arc::new(RecordingUi::new(true));
+        let (p, mut d) = on_the_real_clock(&w);
+        d.ui = ui.clone();
+        let r = run_with(&p, &d, &mut w.wallet).await;
+        (w, r, ui)
+    }
+
+    #[tokio::test]
+    async fn a_pause_and_a_withdrawn_anchor_during_the_wait_are_waited_out() {
+        let (w, r, ui) = happy_world(|w| w.anchor_flapping_while_paused()).await;
+        let s = r.unwrap();
+        assert!(s.confirmation.is_some());
+        // Both are waited out before the proof, in the order they came.
+        let events = ui.events();
+        let at = |f: &dyn Fn(&UiEvent) -> bool| events.iter().position(f);
+        let paused = at(&|e| matches!(e, UiEvent::Status(s) if s.contains("paused")));
+        let lost = at(&|e| matches!(e, UiEvent::Warn(s) if s.contains("no longer accepts")));
+        let proving = at(&|e| matches!(e, UiEvent::Step(StepId::Prove, StepState::Running, _)));
+        assert!(
+            matches!((paused, lost, proving), (Some(a), Some(b), Some(c)) if a < b && b < c),
+            "{events:#?}"
+        );
+        assert_eq!(w.prover_runs(), 1);
+        assert_eq!(*w.an.sent.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_224_at_finalize_goes_back_to_the_anchor_and_reuses_the_proof() {
+        let (w, r, ui) = happy_world(|w| w.first_finalize_hits_224()).await;
+        r.unwrap();
+        assert!(
+            ui.warnings()
+                .iter()
+                .any(|s| s.contains("no longer accepts")),
+            "{:#?}",
+            ui.events()
+        );
+        assert_eq!(w.prover_runs(), 1, "the proof for the same block is reused");
+        assert_eq!(*w.an.sent.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_voucher_that_appears_during_the_grace_period_skips_the_proof() {
+        let (w, r, ui) = happy_world(|w| w.voucher_deployed()).await;
+        let s = r.unwrap();
+        assert!(s.confirmation.is_some());
+        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        assert!(
+            ui.events().iter().any(|e| matches!(
+                e,
+                UiEvent::Step(StepId::Prove, StepState::Skipped, why) if why.contains("relayer")
+            )),
+            "{:#?}",
+            ui.events()
+        );
+    }
+
+    // ---- two runs at once ----
+
+    /// A wallet whose pairing tells `asked` it was reached, then waits for
+    /// `gate` and fails. It counts the pairings it was asked for.
+    struct AtTheGate {
+        asked: Arc<Notify>,
+        gate: Arc<Notify>,
+        pairings: u32,
+    }
+
+    impl AtTheGate {
+        /// One whose gate is open: its pairing fails at once.
+        fn open() -> AtTheGate {
+            let gate = Arc::new(Notify::new());
+            gate.notify_one();
+            AtTheGate {
+                asked: Arc::new(Notify::new()),
+                gate,
+                pairings: 0,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Wallet for AtTheGate {
+        fn kind(&self) -> WalletKind {
+            WalletKind::WalletConnect
+        }
+
+        async fn connect(&mut self, _: &dyn Ui) -> Result<Address, WalletError> {
+            self.pairings += 1;
+            self.asked.notify_one();
+            self.gate.notified().await;
+            Err(WalletError::Timeout)
+        }
+
+        async fn personal_sign(&mut self, _: Address, _: &str) -> Result<Bytes, WalletError> {
+            Err(WalletError::Timeout)
+        }
+
+        async fn capabilities(&mut self, _: Address) -> Option<serde_json::Value> {
+            None
+        }
+
+        async fn send_transaction(
+            &mut self,
+            _: &dyn Ui,
+            _: &TxRequest,
+        ) -> Result<B256, WalletError> {
+            Err(WalletError::Timeout)
+        }
+
+        async fn close(&mut self) {}
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn of_two_runs_at_once_only_one_reaches_the_wallet_and_the_other_is_exit_3() {
+        let w = World::healthy();
+        let (asked, gate) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let mut first = AtTheGate {
+            asked: asked.clone(),
+            gate: gate.clone(),
+            pairings: 0,
+        };
+        let (p, d) = (w.params(RunMode::Fresh), w.deps());
+        let others = async {
+            // The first run is at its wallet, holding the directory.
+            asked.notified().await;
+            // The same deposit, and another one.
+            for p in [
+                w.params(RunMode::Fresh),
+                w.params_with_other_amount(RunMode::Fresh),
+            ] {
+                let mut second = AtTheGate::open();
+                let e = run_with(&p, &w.deps(), &mut second).await.unwrap_err();
+                assert_eq!(e.exit_code(), ExitCode::DuplicateRefused, "{e}");
+                assert_eq!(
+                    second.pairings, 0,
+                    "the second run never reached its wallet"
+                );
+            }
+            gate.notify_one();
+        };
+        let (r, ()) = tokio::join!(run_with(&p, &d, &mut first), others);
+        assert_eq!(first.pairings, 1);
+        let e = r.unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::WalletFailed,
+            "the first run went on, here to a pairing that failed: {e}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn of_two_resumes_of_one_operation_at_once_the_second_is_exit_3() {
+        let mut w = World::healthy();
+        // The first resume lets go of the directory lock at the
+        // confirmation; the second may take it.
+        let _relocking = crate::test_forks::relocking();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        // Mined, never anchored: the first resume waits for the anchor.
+        w.mined_deposit_for_operation(&op, 7);
+        let target = OpRef::Op(op);
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        // Long enough for the second resume to come and go.
+        p.anchor_timeout = Some(Duration::from_secs(120));
+        let ui = Arc::new(RecordingUi::new(true));
+        let mut d = w.deps();
+        d.ui = ui.clone();
+        let second = async {
+            while !ui
+                .statuses()
+                .iter()
+                .any(|s| s.contains("setAcceptedBlockHash"))
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            resume(&p, &w.deps(), &target, None).await
+        };
+        tokio::select! {
+            r = resume(&p, &d, &target, None) => panic!("the first resume ended: {r:?}"),
+            r = second => assert_eq!(r.unwrap_err().exit_code(), ExitCode::DuplicateRefused),
+        }
+    }
+
+    #[tokio::test]
+    async fn two_deposits_with_their_own_state_share_a_cold_prover_and_build_its_key_once() {
+        // The fake prover refuses to run twice at once, and "builds the
+        // proving key" only when it is missing, logging each build.
+        let extra = "set -C; : > data/.busy || exit 99; set +C\n[ -f data/deposit_prover_k18.x.pk \
+                     ] || { echo gen >> data/keygen.log; : > data/deposit_prover_k18.x.pk; \
+                     }\nsleep 0.3; rm -f data/.busy";
+        let mut one = World::healthy();
+        one.prover = fake_prover_dir(extra);
+        // One sender and one deposit, seen from two state directories: the
+        // fake prover can hand out only one set of public inputs, and each
+        // run checks them against its own record of the deposit.
+        let mut two = World::healthy();
+        two.wallet.account = one.wallet.account;
+        two.wallet.signer = one.wallet.signer.clone();
+        for w in [&mut one, &mut two] {
+            let h = w.mined_deposit(7);
+            let a = w.approve_hash();
+            w.wallet.send_results.extend([Ok(a), Ok(h)]);
+            w.anchor_after(0);
+            w.credit_chain_for_mined_deposit();
+        }
+        let (ui1, ui2) = (
+            Arc::new(RecordingUi::new(true)),
+            Arc::new(RecordingUi::new(true)),
+        );
+        let (p1, mut d1) = on_the_real_clock(&one);
+        let (mut p2, mut d2) = on_the_real_clock(&two);
+        p2.prover_dir = p1.prover_dir.clone();
+        d1.ui = ui1.clone();
+        d2.ui = ui2.clone();
+        let (r1, r2) = tokio::join!(
+            run_with(&p1, &d1, &mut one.wallet),
+            run_with(&p2, &d2, &mut two.wallet)
+        );
+        r1.unwrap();
+        r2.unwrap();
+        let lines = |f: &str| {
+            std::fs::read_to_string(one.prover.1.data_dir().join(f))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        assert_eq!(lines("keygen.log"), 1, "the proving key is built once");
+        assert_eq!(lines("runs.log"), 2, "each deposit got its own proof");
+        let waited = |ui: &RecordingUi| {
+            ui.statuses()
+                .iter()
+                .any(|s| s.contains("busy with another deposit"))
+        };
+        assert!(
+            waited(&ui1) || waited(&ui2),
+            "both reached the prover at the same time"
         );
     }
 

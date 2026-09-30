@@ -291,9 +291,10 @@ pub const MAX_PAIR_TIMEOUT_S: u64 = 30 * 86_400;
 /// Compiled-in WalletConnect Cloud project id, set by the release build.
 pub const DEFAULT_WC_PROJECT_ID: Option<&str> = option_env!("ACKINACKI_BRIDGE_WC_PROJECT_ID");
 
-/// The refusal of a command line that leaves `--state-dir` (`state`) or
-/// `--work-dir` (`work`) to its default while `HOME` is unset or empty.
-/// Both default under `HOME`, never under the current directory. Exit 2.
+/// The refusal of a command line that leaves `--state-dir` (`state`), or
+/// for a new deposit `--work-dir` (`work`), to its default while `HOME` is
+/// unset or empty. Both default under `HOME`, never under the current
+/// directory. Exit 2.
 fn no_default_dirs(state: bool, work: bool) -> CliError {
     let mut flags = Vec::new();
     let mut held = Vec::new();
@@ -336,7 +337,10 @@ pub struct DepositParams {
     pub prover_dir: Option<PathBuf>,
     pub confirmations: u64,
     pub state_dir: PathBuf,
-    pub work_dir: PathBuf,
+    /// Where a new operation keeps its proof files. `None` only for a
+    /// resume or an abandon run without `HOME` and without `--work-dir`:
+    /// every operation records its own before its first write.
+    pub work_dir: Option<PathBuf>,
     pub prover_timeout: Duration,
     pub anchor_timeout: Option<Duration>,
     pub relayer_grace: Duration,
@@ -360,7 +364,7 @@ impl DepositArgs {
     }
 
     /// [`DepositArgs::validate`] with `home` as the value of `HOME`.
-    fn validate_with_home(
+    pub(crate) fn validate_with_home(
         &self,
         g: &GlobalFlags,
         home: Option<std::ffi::OsString>,
@@ -477,18 +481,18 @@ impl DepositArgs {
         // No default under the current directory: the operations, their
         // locks and the proof files would then depend on where the command
         // runs, and a run from elsewhere would not see a deposit that is
-        // still unresolved.
+        // still unresolved. Only a new operation needs a work directory: a
+        // resumed one has recorded its own.
         let home = home.filter(|h| !h.is_empty()).map(PathBuf::from);
-        let (state_dir, work_dir) = match (&home, &self.state_dir, &self.work_dir) {
-            (_, Some(state), Some(work)) => (state.clone(), work.clone()),
-            (Some(home), state, work) => (
-                state
-                    .clone()
-                    .unwrap_or_else(|| home.join(".bridge-deposit-state")),
-                work.clone()
-                    .unwrap_or_else(|| home.join(".bridge-deposit-work")),
-            ),
-            (None, state, work) => return Err(no_default_dirs(state.is_none(), work.is_none())),
+        let under_home = |dir: &Option<PathBuf>, name: &str| {
+            dir.clone().or_else(|| home.as_ref().map(|h| h.join(name)))
+        };
+        let state_dir = under_home(&self.state_dir, ".bridge-deposit-state");
+        let work_dir = under_home(&self.work_dir, ".bridge-deposit-work");
+        let no_state_dir = state_dir.is_none();
+        let no_work_dir = starts_new && work_dir.is_none();
+        let (Some(state_dir), false) = (state_dir, no_work_dir) else {
+            return Err(no_default_dirs(no_state_dir, no_work_dir));
         };
         // Absolute from here on: the prover runs with its own working
         // directory, where a relative path would point somewhere else.
@@ -517,7 +521,7 @@ impl DepositArgs {
                 .transpose()?,
             confirmations: self.confirmations,
             state_dir: abs(state_dir, "state-dir")?,
-            work_dir: abs(work_dir, "work-dir")?,
+            work_dir: work_dir.map(|w| abs(w, "work-dir")).transpose()?,
             prover_timeout: secs(self.prover_timeout_s),
             anchor_timeout: (self.anchor_timeout_s > 0).then(|| secs(self.anchor_timeout_s)),
             relayer_grace: secs(self.relayer_grace_s),
@@ -682,7 +686,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         for (got, name) in [
             (p.prover_dir.unwrap(), "deposit-prover"),
-            (p.work_dir, "work"),
+            (p.work_dir.unwrap(), "work"),
             (p.state_dir, "state"),
         ] {
             assert!(
@@ -806,8 +810,9 @@ mod tests {
     }
 
     #[test]
-    fn without_home_a_missing_work_directory_is_refused_in_every_mode() {
-        for line in every_mode() {
+    fn without_home_a_new_deposit_and_a_dry_run_need_the_work_directory() {
+        // Their operation records the work directory it proves in.
+        for line in every_mode().into_iter().take(2) {
             let line = with(&line, &["--state-dir", "/var/lib/deposits"]);
             let argv: Vec<&str> = line.iter().map(String::as_str).collect();
             let e = validated_with_home(&argv, None).unwrap_err();
@@ -825,6 +830,19 @@ mod tests {
     }
 
     #[test]
+    fn without_home_a_resume_and_an_abandon_need_no_work_directory() {
+        // Every operation records its own work directory before its first
+        // write; an abandon writes no proof at all.
+        for line in every_mode().into_iter().skip(2) {
+            let line = with(&line, &["--state-dir", "/var/lib/deposits"]);
+            let argv: Vec<&str> = line.iter().map(String::as_str).collect();
+            let p = validated_with_home(&argv, None).unwrap_or_else(|e| panic!("{line:?}: {e}"));
+            assert_eq!(p.state_dir, PathBuf::from("/var/lib/deposits"));
+            assert_eq!(p.work_dir, None, "{line:?}");
+        }
+    }
+
+    #[test]
     fn without_home_both_directories_given_are_used() {
         for line in every_mode() {
             let line = with(&line, &[
@@ -836,7 +854,7 @@ mod tests {
             let argv: Vec<&str> = line.iter().map(String::as_str).collect();
             let p = validated_with_home(&argv, None).unwrap_or_else(|e| panic!("{line:?}: {e}"));
             assert_eq!(p.state_dir, PathBuf::from("/var/lib/deposits"));
-            assert_eq!(p.work_dir, PathBuf::from("/var/lib/deposit-work"));
+            assert_eq!(p.work_dir, Some(PathBuf::from("/var/lib/deposit-work")));
         }
     }
 
@@ -852,7 +870,7 @@ mod tests {
             );
             assert_eq!(
                 p.work_dir,
-                PathBuf::from("/home/tester/.bridge-deposit-work")
+                Some(PathBuf::from("/home/tester/.bridge-deposit-work"))
             );
         }
     }

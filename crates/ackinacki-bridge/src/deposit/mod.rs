@@ -209,7 +209,7 @@ mod tests {
     use super::*;
     use crate::{
         deposit::{
-            args::{DepositParams, GlobalFlags, OpRef},
+            args::{DepositParams, GlobalFlags, OpRef, RunMode},
             store::{FailReason, OpStage, Store},
             testkit::{deposit_args, World},
             ui::RecordingUi,
@@ -250,6 +250,60 @@ mod tests {
     /// `op`'s stage on disk.
     fn stage(w: &World, op: &str) -> OpStage {
         Store::open(w.state.path()).unwrap().load(op).unwrap().stage
+    }
+
+    /// Moves `op`'s record to stage `at`.
+    fn restage(w: &World, op: &str, at: OpStage) {
+        let store = Store::open(w.state.path()).unwrap();
+        let mut rec = store.load(op).unwrap();
+        rec.stage = at;
+        store.write(&mut rec).unwrap();
+    }
+
+    /// `deposit <argv>` validated with `HOME` unset, as under systemd or
+    /// cron. Nothing else is set.
+    fn without_home(argv: &[&str]) -> DepositParams {
+        deposit_args(argv)
+            .validate_with_home(&GlobalFlags::default(), None)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_home_a_resume_and_an_abandon_need_only_the_state_directory() {
+        let w = World::healthy();
+        let state = w.state.path().to_str().unwrap();
+        let failed = w.left_signed_operation_from(w.wallet.account, 7);
+        close(
+            &w,
+            &failed,
+            FailReason::Reverted,
+            ExitCode::DepositReverted,
+            "the deposit reverted in block 900",
+        );
+        let e = dispatched(&without_home(&["--resume", &failed, "--state-dir", state]))
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositReverted, "{e}");
+        assert!(
+            e.to_string().contains("the deposit reverted in block 900"),
+            "{e}"
+        );
+        let open = w.left_signed_operation_from(w.wallet.account, 8);
+        let e = dispatched(&without_home(&["--resume", &open, "--state-dir", state]))
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositOutcomeUnknown, "{e}");
+        for flag in [
+            "--rpc-url (RPC_URL)",
+            "--gql-endpoint (BRIDGE_GQL_ENDPOINT)",
+        ] {
+            assert!(e.to_string().contains(flag), "{flag}: {e}");
+        }
+        let s = dispatched(&without_home(&["--abandon", &open, "--state-dir", state]))
+            .await
+            .unwrap();
+        assert!(s.abandoned);
+        assert_eq!(stage(&w, &open), OpStage::Abandoned);
     }
 
     #[tokio::test(start_paused = true)]
@@ -308,10 +362,7 @@ mod tests {
         ] {
             let mut w = World::healthy();
             let op = w.proved_operation();
-            let store = Store::open(w.state.path()).unwrap();
-            let mut rec = store.load(&op).unwrap();
-            rec.stage = at;
-            store.write(&mut rec).unwrap();
+            restage(&w, &op, at);
             let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
             assert!(p.prover_dir.is_none());
             let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
@@ -329,6 +380,32 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_missing_prover_is_named_before_a_chain_is_read() {
+        // A flag and a local directory: nothing waits for an RPC that is
+        // down before saying the prover is missing.
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        restage(&w, &op, OpStage::Confirmed);
+        w.evm
+            .fail_chain_id
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
+        let e = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None),
+        )
+        .await
+        .expect("the missing prover is named without reading the EVM chain")
+        .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
+        assert!(
+            e.to_string()
+                .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_proved_operation_goes_on_without_the_prover() {
         let mut w = World::healthy();
         let op = w.proved_operation();
@@ -340,6 +417,56 @@ mod tests {
             .unwrap();
         assert!(s.confirmation.is_some());
         assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
+        assert_eq!(w.prover_runs(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_proved_operation_without_its_proof_or_the_prover_is_exit_32_naming_it() {
+        // The proof is gone and has to be built again: that step fails, and
+        // nothing was sent yet.
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        let work = w.work.path().join(&op);
+        std::fs::remove_file(work.join("proof.bin")).unwrap();
+        std::fs::remove_file(work.join("public_inputs.bin")).unwrap();
+        let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
+        let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
+        assert!(
+            e.to_string()
+                .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
+            "{e}"
+        );
+        assert_eq!(stage(&w, &op), OpStage::Proved);
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        assert_eq!(w.prover_runs(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_proof_to_build_again_without_a_work_directory_names_it() {
+        // The record names no work directory, and none is given: the proof
+        // cannot be written anywhere.
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        let target = OpRef::Op(op.clone());
+        let mut p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        p.work_dir = None;
+        let e = run::resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::CreditUnconfirmed,
+            "a send may have executed: {e}"
+        );
+        assert!(
+            e.to_string().contains("--work-dir (BRIDGE_WORK_DIR)"),
+            "{e}"
+        );
+        assert_eq!(stage(&w, &op), OpStage::Finalizing);
         assert_eq!(w.prover_runs(), 0);
     }
 

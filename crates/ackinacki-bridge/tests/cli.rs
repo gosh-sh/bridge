@@ -870,15 +870,48 @@ fn deposit_without_home_refuses_to_default_its_directories() {
     assert_eq!(code(&out), 2, "{}", stderr(&out));
     let e = stderr(&out);
     assert!(e.contains("--state-dir (BRIDGE_DEPOSIT_STATE_DIR)"), "{e}");
+    assert!(
+        !e.contains("--work-dir"),
+        "a resumed operation has its own: {e}"
+    );
+    // A new deposit records the work directory it proves in.
+    let account = "1a".repeat(32);
+    let to = format!("{}::{}", "0".repeat(64), "a3".repeat(32));
+    let out = run(&[
+        "deposit",
+        "--network",
+        "sepolia",
+        "--amount",
+        "1",
+        "--to",
+        &to,
+        "--rpc-url",
+        "http://rpc.invalid",
+        "--bridge-address",
+        "0x0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7",
+        "--gql-endpoint",
+        "http://gql.invalid",
+        "--usdc-bridge-account",
+        &account,
+        "--deposit-prover-dir",
+        "/nonexistent/deposit-prover",
+        "--wc-project-id",
+        "p",
+        "--state-dir",
+        "/nonexistent/deposit-state",
+    ]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let e = stderr(&out);
     assert!(e.contains("--work-dir (BRIDGE_WORK_DIR)"), "{e}");
+    assert!(!e.contains("--state-dir"), "it was given: {e}");
 }
 
 #[test]
-fn deposit_resume_looks_its_operation_up_with_only_the_directories() {
-    // No endpoint, bridge or prover is given, and none is needed to learn
-    // that the state directory has no such operation.
+fn deposit_resume_looks_its_operation_up_with_only_the_state_dir() {
+    // HOME is unset, and no endpoint, bridge, prover or work directory is
+    // given: none is needed to learn that the state directory has no such
+    // operation.
     let state = tempfile::TempDir::new().unwrap();
-    let work = tempfile::TempDir::new().unwrap();
     let op = "01J9ZQ4X7T8V5N6M3K2P1R0S9A";
     let out = run(&[
         "deposit",
@@ -886,8 +919,6 @@ fn deposit_resume_looks_its_operation_up_with_only_the_directories() {
         op,
         "--state-dir",
         state.path().to_str().unwrap(),
-        "--work-dir",
-        work.path().to_str().unwrap(),
     ]);
     assert_eq!(code(&out), 2, "{}", stderr(&out));
     let e = stderr(&out);

@@ -282,6 +282,15 @@ fn unreadable(op: &str, e: CliError) -> CliError {
     )
 }
 
+/// Where the proof files of `rec` are: the work directory its record names,
+/// or `<--work-dir>/<op-id>` for a record that names none; `None` when
+/// neither is known.
+pub(crate) fn work_dir_of(p: &DepositParams, rec: &OpRecord) -> Option<std::path::PathBuf> {
+    rec.work_dir
+        .clone()
+        .or_else(|| p.work_dir.as_ref().map(|w| w.join(&rec.op_id)))
+}
+
 /// A 32-byte id stored in a record as 64 hex digits; `None` for a
 /// damaged record.
 fn hex32(s: &str) -> Option<[u8; 32]> {
@@ -397,16 +406,17 @@ pub async fn run_fresh(
 ) -> Result<DepositSuccess, FreshError> {
     let ui = d.ui.as_ref();
     let board = Board::new(ui);
-    let (Some(net), Some(amount), Some(to), Some(bridge_acc), Some(rpc_url)) = (
+    let (Some(net), Some(amount), Some(to), Some(bridge_acc), Some(rpc_url), Some(work_dir)) = (
         p.network,
         p.amount,
         p.to,
         p.usdc_bridge_account,
         p.rpc_url.clone(),
+        p.work_dir.as_ref(),
     ) else {
         return Err(CliError::Usage {
-            reason: "deposit: a new deposit needs --network, --amount, --to, --rpc-url and \
-                     --usdc-bridge-account"
+            reason: "deposit: a new deposit needs --network, --amount, --to, --rpc-url, \
+                     --usdc-bridge-account and --work-dir"
                 .into(),
         }
         .into());
@@ -467,7 +477,7 @@ pub async fn run_fresh(
         }
         .into());
     };
-    rec.work_dir = Some(p.work_dir.join(&op));
+    rec.work_dir = Some(work_dir.join(&op));
     rec.an_bridge_dapp = Some(hex::encode(checked.an.bridge_dapp));
     store.write(&mut rec).map_err(nothing_sent)?;
     ui.op_id(&op);
@@ -1332,7 +1342,21 @@ async fn walk(
                     return Err(damaged(store, &op, "no confirmed deposit"));
                 };
                 board.start(StepId::Prove, "");
-                let work = rec.work_dir.clone().unwrap_or_else(|| p.work_dir.join(&op));
+                let Some(work) = work_dir_of(p, rec) else {
+                    // Only a record that names no work directory, resumed
+                    // without --work-dir and without HOME, gets here.
+                    let e = err(
+                        ExitCode::DepositProofFailed,
+                        Stage::Prove,
+                        &op,
+                        format!(
+                            "the proof has to be built, and operation {op} records no work \
+                             directory and no --work-dir (BRIDGE_WORK_DIR) was given. The deposit \
+                             is on the EVM bridge; retry with --resume {op}"
+                        ),
+                    );
+                    return Err(in_doubt(rec, e));
+                };
                 let want = ExpectedInputs {
                     deposit_id: dep.deposit_id,
                     sender: from,
@@ -1389,8 +1413,7 @@ async fn walk(
                     .ok_or_else(|| damaged(store, &op, "the voucher address"))?;
                 let stored_code = hex32(&rec.voucher_code_hash)
                     .ok_or_else(|| damaged(store, &op, "the voucher code hash"))?;
-                let work = rec.work_dir.clone().unwrap_or_else(|| p.work_dir.join(&op));
-                let files = prover::load(&work);
+                let files = work_dir_of(p, rec).and_then(|w| prover::load(&w));
                 // With a proof on disk this is step 8, and its deadline
                 // starts now: the reads before the send count against it
                 // too. Without one, the look below decides whether to prove

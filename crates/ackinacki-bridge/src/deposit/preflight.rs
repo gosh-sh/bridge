@@ -288,6 +288,9 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
             ),
         }
     };
+    // Flags and a local directory only: known before any chain is read,
+    // and those reads retry for as long as an endpoint is down.
+    let prover = resume_prover(p, rec, ui).map_err(held)?;
     let net = Network::from_chain_id(rec.params.chain_id).ok_or_else(|| {
         held(refuse(format!(
             "operation {op} is on chain {}, which this build does not know",
@@ -334,7 +337,6 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
         },
         _ => AnchorPlan::LightClient,
     };
-    let prover = resume_prover(p, rec, ui).map_err(held)?;
     let rpc_url = p
         .rpc_url
         .clone()
@@ -427,11 +429,10 @@ fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<Pr
             | OpStage::Anchored
     );
     let no_prover = |why: String| {
-        let work = rec
-            .work_dir
-            .clone()
-            .unwrap_or_else(|| p.work_dir.join(&rec.op_id));
-        if crate::deposit::prover::load(&work).is_none() {
+        let on_disk = crate::deposit::run::work_dir_of(p, rec)
+            .and_then(|w| crate::deposit::prover::load(&w))
+            .is_some();
+        if !on_disk {
             ui.warn(&format!(
                 "the proof is not on disk and {why}; it is needed only if the deposit is not \
                  finalized yet"

@@ -101,6 +101,8 @@ pub struct FakeEvm {
     pub fail_finalized: AtomicBool,
     /// `header_by_hash` fails for these hashes.
     pub failing_headers: Mutex<HashSet<B256>>,
+    /// `chain_id` fails, as an RPC that is down does.
+    pub fail_chain_id: AtomicBool,
 }
 
 impl Default for FakeEvm {
@@ -129,6 +131,7 @@ impl Default for FakeEvm {
             hang_headers_by_hash: AtomicBool::default(),
             fail_finalized: AtomicBool::default(),
             failing_headers: Mutex::default(),
+            fail_chain_id: AtomicBool::default(),
         }
     }
 }
@@ -169,6 +172,9 @@ impl FakeEvm {
 #[async_trait]
 impl EvmRead for FakeEvm {
     async fn chain_id(&self) -> anyhow::Result<u64> {
+        if self.fail_chain_id.load(Ordering::SeqCst) {
+            anyhow::bail!("connection refused");
+        }
         Ok(self.chain_id)
     }
 
@@ -1536,7 +1542,7 @@ impl World {
             prover_dir: Some(self.prover.1.root.clone()),
             confirmations: 12,
             state_dir: self.state.path().to_path_buf(),
-            work_dir: self.work.path().to_path_buf(),
+            work_dir: Some(self.work.path().to_path_buf()),
             prover_timeout: Duration::from_secs(10),
             anchor_timeout: Some(Duration::from_secs(3600)),
             relayer_grace: Duration::from_secs(1),

@@ -1041,8 +1041,9 @@ mod tests {
         voucher_codes(&an, &[CODE]);
         deployed_voucher(&an);
         an.failing_accounts.lock().unwrap().insert(VOUCHER);
-        // Not known is not finalized: the wait goes on to the anchor, and
-        // the grace period cannot read the voucher either.
+        // Not known is not finalized: no event shows it either, so the wait
+        // goes on to the anchor, and the grace period cannot read the
+        // voucher.
         assert_eq!(
             wait(
                 &evm,

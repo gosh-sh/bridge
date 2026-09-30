@@ -266,7 +266,8 @@ pub enum Look {
         have_proof: bool,
     },
     /// On a poll of the anchor wait: one attempt at each read, and the
-    /// events only when the voucher code moved.
+    /// events only when the voucher code moved or the voucher could not be
+    /// read.
     Poll,
 }
 
@@ -277,7 +278,8 @@ pub enum Look {
 /// code change the deposit is finalized through another address, and only
 /// the bridge's `DepositFinalized` events show it. Every read is bounded by
 /// `deadline`; one that fails or runs out is "not known", never
-/// "finalized".
+/// "finalized", and the answer is "not known" only when nothing that could
+/// show it was read.
 pub async fn finalized_already(
     an: &dyn AnRead,
     ui: &dyn Ui,
@@ -299,15 +301,23 @@ pub async fn finalized_already(
             .map(|h| h.trim_start_matches("0x").to_ascii_lowercase())
     }) != Some(stored.to_ascii_lowercase());
     if !moved {
-        let v = once(deadline, an.account(check.voucher)).await.flatten();
-        if v.is_some_and(|a| a.status == AccStatus::Active) {
+        let v = once(deadline, an.account(check.voucher)).await;
+        if v.as_ref()
+            .is_some_and(|a| a.as_ref().is_some_and(|a| a.status == AccStatus::Active))
+        {
             return Some(false);
         }
-        // With a proof on disk, step 8's own look before every send is
-        // enough; in the anchor wait, the next poll looks again.
-        if !matches!(look, Look::BeforeSend {
-            have_proof: false
-        }) {
+        let events_too = match look {
+            // With a proof on disk, step 8's own look before every send is
+            // enough; without one, a new proof costs minutes.
+            Look::BeforeSend {
+                have_proof,
+            } => !have_proof,
+            // A voucher read and not deployed: the next poll looks again.
+            // One that could not be read leaves it to the events.
+            Look::Poll => v.is_none(),
+        };
+        if !events_too {
             return None;
         }
     }

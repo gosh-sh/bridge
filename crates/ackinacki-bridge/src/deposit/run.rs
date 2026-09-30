@@ -3888,12 +3888,13 @@ mod tests {
         assert!(s.confirmation.is_some());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_voucher_that_cannot_be_read_is_not_taken_for_a_finalized_deposit() {
-        // The bridge keeps the voucher code, the voucher is deployed, but
-        // every read of it fails: that is not known, and the wait goes on.
+    /// A confirmed operation whose deposit the relayer finalized, on a
+    /// paused bridge, with every read of its voucher failing; its resume.
+    fn a_voucher_nobody_can_read() -> (World, String, DepositParams, OpRef) {
         let mut w = World::healthy();
         let op = w.confirmed_operation();
+        w.anchor_after(0);
+        w.paused(true);
         w.voucher_deployed();
         w.credit_chain_for_mined_deposit();
         let rec = Store::open(w.state.path()).unwrap().load(&op).unwrap();
@@ -3901,6 +3902,27 @@ mod tests {
         w.an.failing_accounts.lock().unwrap().insert(voucher);
         let (mut p, target) = resuming(&w, &op);
         p.anchor_timeout = Some(Duration::from_secs(60));
+        (w, op, p, target)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_voucher_that_cannot_be_read_leaves_the_events_to_show_the_finalized_deposit() {
+        let (w, op, p, target) = a_voucher_nobody_can_read();
+        let s = resume(&p, &w.deps(), &target, None)
+            .await
+            .unwrap_or_else(|e| panic!("credited by its event: {e}"));
+        assert_eq!(s.confirmation.unwrap()["via_events"], true);
+        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Credited);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_voucher_and_events_that_cannot_be_read_are_not_taken_for_a_finalized_deposit() {
+        // Nothing can be read: that is not known, and the wait goes on.
+        let (w, op, p, target) = a_voucher_nobody_can_read();
+        w.an.failing_ext.lock().unwrap().insert(W_BRIDGE_ACC);
         let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();

@@ -300,14 +300,26 @@ pub struct AlloyEvm {
 
 impl AlloyEvm {
     /// A reader for the `--rpc-url` endpoint. Nothing is sent yet.
+    ///
+    /// Every request is cut after
+    /// [`ONE_READ`](crate::deposit::retry::ONE_READ): a node that stops
+    /// answering mid-read gives an error, which the caller's retry reads
+    /// again, instead of a read that never returns.
     pub fn connect(url: &str) -> CliResult<AlloyEvm> {
         let u = url.parse().map_err(|e| CliError::ArgInvalid {
             flag: "rpc-url",
             expected: format!("an http(s) URL ({e})"),
             got: crate::args::redact(url),
         })?;
+        let client = alloy::transports::http::reqwest::Client::builder()
+            .timeout(crate::deposit::retry::ONE_READ)
+            .build()
+            .map_err(|e| CliError::Preflight {
+                reason: format!("cannot set up the HTTP client for the EVM RPC: {e}"),
+                source: None,
+            })?;
         Ok(AlloyEvm {
-            p: ProviderBuilder::new().connect_http(u).erased(),
+            p: ProviderBuilder::new().connect_reqwest(client, u).erased(),
         })
     }
 }
@@ -743,6 +755,26 @@ mod tests {
                 "case {i}: {err:#}"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_node_that_never_answers_is_an_error_after_one_read() {
+        use crate::deposit::retry::ONE_READ;
+        // The kernel accepts the connection into the backlog and nobody ever
+        // answers: without a per-request timeout the read would hang, and a
+        // hung read is retried by nothing.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let evm = AlloyEvm::connect(&format!("http://{}", silent.local_addr().unwrap())).unwrap();
+        let t0 = tokio::time::Instant::now();
+        let got = tokio::time::timeout(ONE_READ * 2, evm.chain_id())
+            .await
+            .expect("the transport gives up by itself");
+        let waited = t0.elapsed();
+        let err = got.unwrap_err();
+        assert!(
+            waited >= ONE_READ && waited < ONE_READ * 2,
+            "{waited:?}: {err:#}"
+        );
     }
 
     #[tokio::test]

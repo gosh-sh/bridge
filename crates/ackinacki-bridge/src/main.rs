@@ -44,10 +44,10 @@ mod test_forks;
 #[cfg(test)]
 mod test_keys;
 
-use std::{io::IsTerminal, process::ExitCode as ProcExitCode};
+use std::{borrow::Cow, io::IsTerminal, process::ExitCode as ProcExitCode};
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
 
 use crate::args::{Cli, Command};
 
@@ -284,8 +284,144 @@ fn init_tracing() {
     )]
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(Redacting(std::io::stderr))
         .with_ansi(is_tty)
         .with_target(false)
         .try_init();
+}
+
+/// Log output that hides what a deposit run registered as secret (see
+/// [`deposit::ui::hide_url_secrets`]): an HTTP client's error quotes the
+/// whole RPC or relay URL, API key and project id included. The secrets are
+/// looked up as each line is written, so the ones registered after tracing
+/// started are hidden too. With none registered — any run but a deposit —
+/// every line goes out byte for byte.
+struct Redacting<M>(M);
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Redacting<M> {
+    /// One line, held until it is complete.
+    type Writer = RedactedLine<M::Writer>;
+
+    /// A holder for the next line, in front of the stream `M` makes.
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactedLine {
+            out: self.0.make_writer(),
+            buf: Vec::new(),
+        }
+    }
+}
+
+/// One log line on its way to `out`, held whole so that it is redacted
+/// whole, and written when it is dropped.
+struct RedactedLine<W: std::io::Write> {
+    /// Where the line goes.
+    out: W,
+    /// The line so far.
+    buf: Vec<u8>,
+}
+
+impl<W: std::io::Write> std::io::Write for RedactedLine<W> {
+    /// Adds `b` to the line.
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    /// Nothing to do: the line is written when it is complete.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<W: std::io::Write> Drop for RedactedLine<W> {
+    /// Writes the line, redacted.
+    fn drop(&mut self) {
+        let line = line_out(&self.buf, deposit::ui::redact_in_deposit_run);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a log line that cannot be written has nowhere else to go"
+        )]
+        let _ = self.out.write_all(&line).and_then(|()| self.out.flush());
+    }
+}
+
+/// `buf` as it goes out after `hide`: the hidden text when `hide` changed
+/// anything, else `buf` itself, byte for byte.
+fn line_out(buf: &[u8], hide: fn(&str) -> Cow<'_, str>) -> Cow<'_, [u8]> {
+    let text = String::from_utf8_lossy(buf);
+    match hide(&text) {
+        Cow::Borrowed(_) => Cow::Borrowed(buf),
+        Cow::Owned(s) => Cow::Owned(s.into_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// A stream that keeps what is written to it.
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_log_line_hides_the_secrets_of_the_configured_urls() {
+        const URL: &str =
+            "https://Relay.Example.COM/v1/LogPathKey-3b2a1c0d?projectId=LogProject-9f8e7d6c";
+        crate::deposit::ui::hide_url_secrets([URL]);
+        let written = Capture(Arc::new(Mutex::new(Vec::new())));
+        let sink = written.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Redacting(move || sink.clone()))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("relay publish failed: {URL}");
+            tracing::error!(
+                error = "error sending request for url (https://relay.example.com/v1/\
+                         LogPathKey-3b2a1c0d/?projectId=LogProject-9f8e7d6c)",
+                "retrying"
+            );
+            tracing::error!("{:?}", url::Url::parse(URL).unwrap());
+        });
+        let out = String::from_utf8(written.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(out.lines().count(), 3, "{out}");
+        for key in ["LogPathKey-3b2a1c0d", "LogProject-9f8e7d6c"] {
+            assert!(!out.contains(key), "{out}");
+        }
+        assert!(
+            out.contains("relay publish failed: https://Relay.Example.COM"),
+            "{out}"
+        );
+        assert!(
+            out.contains("error sending request for url (https://relay.example.com)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn with_nothing_to_hide_a_log_line_goes_out_byte_for_byte() {
+        let line = b"\x1b[2m2026-09-30\x1b[0m WARN at https://h.example/k?x=1 \xff\n";
+        assert_eq!(
+            line_out(line, |s| Cow::Borrowed(s)),
+            Cow::Borrowed(&line[..])
+        );
+        let hidden = line_out(line, |s| Cow::Owned(crate::deposit::ui::redact(s)));
+        assert!(
+            String::from_utf8_lossy(&hidden).contains("at https://h.example "),
+            "{hidden:?}"
+        );
+    }
 }

@@ -3,12 +3,11 @@
 //! Equal `(sender, recipient, amount)` does not make two deposits the
 //! same one: after `--abandon`, the user may have made the same deposit
 //! again as another operation. So an operation is bound to a nonce slot,
-//! and a transaction or a deposit another operation has claimed is never
-//! a candidate.
+//! and a transaction another operation has claimed is never a candidate.
 
 use std::collections::HashSet;
 
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256};
 
 use crate::deposit::store::OpRecord;
 
@@ -27,8 +26,6 @@ pub struct Candidate {
     pub status_ok: bool,
     /// The receipt holds a `Deposit` log of the bridge.
     pub has_bridge_deposit: bool,
-    /// The id of the deposit the log carries, when it has been read.
-    pub deposit_id: Option<U256>,
 }
 
 /// What the other operations have already claimed.
@@ -36,8 +33,6 @@ pub struct Candidate {
 pub struct Claims {
     /// Transaction hashes known to belong to another operation.
     pub tx_hashes: HashSet<B256>,
-    /// Deposit ids known to belong to another operation.
-    pub deposit_ids: HashSet<U256>,
 }
 
 /// The claims of every operation except `me` on the same chain and bridge.
@@ -52,9 +47,6 @@ pub fn claims_of_others(recs: &[OpRecord], me: &str, chain_id: u64, bridge: Addr
         }
         if let Some(h) = r.request.as_ref().and_then(|q| q.wallet_hash) {
             c.tx_hashes.insert(h);
-        }
-        if let Some(d) = &r.deposit {
-            c.deposit_ids.insert(d.deposit_id);
         }
     }
     c
@@ -78,7 +70,7 @@ pub enum Binding {
 }
 
 /// A successful bridge deposit from this operation's sender that no other
-/// operation has claimed, by transaction or by deposit id. Whether it
+/// operation has claimed. Whether it
 /// matches the request is NOT part of this: the nonce slot is the identity,
 /// and a deposit in the slot with another amount or recipient is still this
 /// operation's transaction — the later check reports it as a mismatch,
@@ -88,9 +80,6 @@ fn is_candidate(op: &OpRecord, c: &Candidate, others: &Claims) -> bool {
         && c.status_ok
         && c.has_bridge_deposit
         && !others.tx_hashes.contains(&c.tx_hash)
-        && !c
-            .deposit_id
-            .is_some_and(|d| others.deposit_ids.contains(&d))
 }
 
 /// Only for naming deposits outside the slot that look like this request.
@@ -185,10 +174,10 @@ pub fn check_explicit(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{address, Address, Bytes, B256, U256};
+    use alloy_primitives::{address, Address, Bytes, B256};
 
     use super::*;
-    use crate::deposit::store::{DepositInfo, OpParams, OpRecord, OpStage, RequestInfo, TxClaim};
+    use crate::deposit::store::{OpParams, OpRecord, OpStage, RequestInfo, TxClaim};
 
     const FROM: Address = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
@@ -229,7 +218,6 @@ mod tests {
             input: calldata(),
             status_ok: true,
             has_bridge_deposit: true,
-            deposit_id: None,
         }
     }
 
@@ -360,33 +348,5 @@ mod tests {
         let mut claimed = Claims::default();
         claimed.tx_hashes.insert(B256::repeat_byte(1));
         assert!(check_explicit(&a, &cand(1, 42), &claimed, &[]).is_err());
-    }
-
-    #[test]
-    fn a_candidate_whose_deposit_id_another_operation_claimed_is_excluded() {
-        let mut b = op("B", 7);
-        b.stage = OpStage::Credited;
-        b.deposit = Some(DepositInfo {
-            deposit_id: U256::from(77u64),
-            block_number: 5,
-            block_hash: B256::repeat_byte(8),
-            block_log_index: 0,
-            receipt_log_index: 0,
-            access_list_rlp_len: 0,
-            voucher_account: "v".into(),
-        });
-        let others = claims_of_others(&[op("A", 7), b], "A", 11_155_111, BRIDGE);
-        assert!(others.deposit_ids.contains(&U256::from(77u64)));
-        let mut t = cand(6, 7);
-        t.deposit_id = Some(U256::from(77u64));
-        assert_eq!(decide(&op("A", 7), &[t.clone()], &others), Binding::NotYet);
-        assert!(check_explicit(&op("A", 7), &t, &others, &[]).is_err());
-        // Another deposit id in the same slot is still bound.
-        let mut free = cand(6, 7);
-        free.deposit_id = Some(U256::from(78u64));
-        assert_eq!(
-            decide(&op("A", 7), &[free], &others),
-            Binding::Bind(B256::repeat_byte(6))
-        );
     }
 }

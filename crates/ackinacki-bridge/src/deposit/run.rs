@@ -1687,7 +1687,8 @@ fn find_op(p: &DepositParams, store: &Store, target: &OpRef) -> CliResult<String
         ))),
         OpRef::DepositId(n) => {
             let bridge = p.bridge.ok_or_else(|| CliError::Usage {
-                reason: "deposit: --resume <depositId> needs --bridge-address".into(),
+                reason: "deposit: --resume <depositId> needs --bridge-address (BRIDGE_ADDRESS)"
+                    .into(),
             })?;
             let recs = store.list()?;
             let hits: Vec<&OpRecord> = recs
@@ -2050,10 +2051,11 @@ pub async fn resume(
 }
 
 /// A resume whose chains could not even be set up: `why` is the endpoint
-/// its client rejected. What the record answers alone is still answered —
-/// a credited operation's summary, a failed one's code. Any other operation
-/// may be anywhere between the request and the credit, so `why` takes the
-/// exit its stage on disk calls for, never exit 2.
+/// that was not given or that its client rejected. What the record answers
+/// alone is still answered — a credited operation's summary, a failed
+/// one's code. Any other operation may be anywhere between the request and
+/// the credit, so `why` takes the exit its stage on disk calls for, never
+/// exit 2.
 pub async fn resume_without_chains(
     p: &DepositParams,
     target: &OpRef,

@@ -196,7 +196,8 @@ async fn run(
 /// The prover lock is taken before the fetcher starts and held until the
 /// prover exits; a held lock is waited for, and the status says why.
 /// `timeout` bounds both tools together, from the moment the lock is
-/// taken. Every failure is exit 32.
+/// taken. Every failure is exit 32. The empty path is a resume given no
+/// prover directory, and the refusal names the flag.
 pub async fn prove(
     dir: &ProverDir,
     req: &ProveRequest,
@@ -205,6 +206,13 @@ pub async fn prove(
     ui: &dyn Ui,
     op_id: &str,
 ) -> CliResult<ProofFiles> {
+    if dir.root.as_os_str().is_empty() {
+        return Err(failed(
+            op_id,
+            "the proof has to be built again, and no --deposit-prover-dir \
+             (BRIDGE_DEPOSIT_PROVER_DIR) was given",
+        ));
+    }
     // Both tools run with the prover directory as their working directory
     // (the prover's own paths are relative to it), so no path handed to
     // them may depend on ours.

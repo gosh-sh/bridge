@@ -54,9 +54,10 @@ use crate::errors::{CliError, CliResult};
 /// a quiet terminal.
 pub async fn run(p: args::DepositParams) -> CliResult<DepositSuccess> {
     let current_op: Arc<Mutex<Option<String>>> = Arc::default();
-    // The step board lives inside `dispatch` and goes with it, before the
+    // The step board moves into `dispatch` and goes with it, before the
     // summary or the error is printed.
-    match signals::until_signal(dispatch(&p, current_op.clone())).await {
+    let ui = ui::pick(&p.globals, p.uri_only, p.qr_invert);
+    match signals::until_signal(dispatch(&p, ui, current_op.clone())).await {
         Ok(r) => r,
         Err(sig) => {
             let op = current_op
@@ -68,12 +69,12 @@ pub async fn run(p: args::DepositParams) -> CliResult<DepositSuccess> {
     }
 }
 
-/// The run `p.mode` asks for, with the progress display it prints to.
+/// The run `p.mode` asks for, printing its progress to `ui`.
 async fn dispatch(
     p: &args::DepositParams,
+    ui: Arc<dyn ui::Ui>,
     current_op: Arc<Mutex<Option<String>>>,
 ) -> CliResult<DepositSuccess> {
-    let ui = ui::pick(&p.globals, p.uri_only, p.qr_invert);
     match &p.mode {
         // No chain is asked: the record is all there is to change.
         args::RunMode::Abandon(op) => {
@@ -100,23 +101,31 @@ async fn dispatch(
 
 /// The live chains behind `--rpc-url` and `--gql-endpoint`, the progress
 /// display, and the slot the signal handler reads the operation from.
-/// Nothing is sent or read yet.
+/// Nothing is sent or read yet. A resume may come without either endpoint;
+/// the refusal names each one missing.
 fn live_deps(
     p: &args::DepositParams,
     ui: Arc<dyn ui::Ui>,
     current_op: Arc<Mutex<Option<String>>>,
 ) -> CliResult<preflight::Deps> {
-    let usage = |what: &str| CliError::Usage {
-        reason: format!("deposit: {what} missing"),
+    let (Some(rpc), Some(gql)) = (&p.rpc_url, &p.gql_endpoint) else {
+        let missing: Vec<&str> = [
+            (p.rpc_url.is_none(), "--rpc-url (RPC_URL)"),
+            (
+                p.gql_endpoint.is_none(),
+                "--gql-endpoint (BRIDGE_GQL_ENDPOINT)",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(absent, flag)| absent.then_some(flag))
+        .collect();
+        return Err(CliError::Usage {
+            reason: format!("deposit: missing {}", missing.join(", ")),
+        });
     };
-    let rpc = p.rpc_url.clone().ok_or_else(|| usage("--rpc-url"))?;
-    let gql = p
-        .gql_endpoint
-        .clone()
-        .ok_or_else(|| usage("--gql-endpoint"))?;
     Ok(preflight::Deps {
-        evm: Arc::new(evm::AlloyEvm::connect(&rpc)?),
-        an: Arc::new(an::LiveAn::connect(&gql)?),
+        evm: Arc::new(evm::AlloyEvm::connect(rpc)?),
+        an: Arc::new(an::LiveAn::connect(gql)?),
         ui,
         polls: preflight::Polls::live(),
         min_bridge: an_preflight::MIN_BRIDGE_VERSION,
@@ -193,4 +202,168 @@ pub struct DepositSuccess {
     pub balance: Option<serde_json::Value>,
     /// The operation was released instead of completed.
     pub abandoned: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        deposit::{
+            args::{DepositParams, GlobalFlags, OpRef},
+            store::{FailReason, OpStage, Store},
+            testkit::{deposit_args, World},
+            ui::RecordingUi,
+        },
+        errors::ExitCode,
+    };
+
+    /// The world's EVM node, as `--rpc-url` names it.
+    const RPC: &str = "http://rpc.invalid/key";
+    /// The world's Acki Nacki node, as `--gql-endpoint` names it.
+    const GQL: &str = "http://gql.invalid/graphql";
+
+    /// `deposit --resume <op> <argv>` with the world's state and work
+    /// directories, validated as `main` validates it. Nothing else is set.
+    fn resume_line(w: &World, op: &str, argv: &[&str]) -> DepositParams {
+        let state = w.state.path().to_str().unwrap();
+        let work = w.work.path().to_str().unwrap();
+        let mut line = vec!["--resume", op, "--state-dir", state, "--work-dir", work];
+        line.extend_from_slice(argv);
+        deposit_args(&line)
+            .validate(&GlobalFlags::default())
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `p` run as `main` runs it, without the signal handler.
+    async fn dispatched(p: &DepositParams) -> CliResult<DepositSuccess> {
+        dispatch(p, Arc::new(RecordingUi::new(true)), Arc::default()).await
+    }
+
+    /// Closes `op` as failed with `exit` and `detail`.
+    fn close(w: &World, op: &str, reason: FailReason, exit: ExitCode, detail: &str) {
+        let store = Store::open(w.state.path()).unwrap();
+        let mut rec = store.load(op).unwrap();
+        rec.fail(rec.stage, reason, exit, detail);
+        store.write(&mut rec).unwrap();
+    }
+
+    /// `op`'s stage on disk.
+    fn stage(w: &World, op: &str) -> OpStage {
+        Store::open(w.state.path()).unwrap().load(op).unwrap().stage
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_operation_repeats_its_exit_given_only_the_state_directory() {
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        close(
+            &w,
+            &op,
+            FailReason::Reverted,
+            ExitCode::DepositReverted,
+            "the deposit reverted in block 900",
+        );
+        let e = dispatched(&resume_line(&w, &op, &[])).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositReverted, "{e}");
+        assert!(
+            e.to_string().contains("the deposit reverted in block 900"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_credited_operation_answers_its_summary_given_only_the_state_directory() {
+        let mut w = World::healthy();
+        let op = w.credited_operation();
+        let s = dispatched(&resume_line(&w, &op, &[])).await.unwrap();
+        assert_eq!(s.op_id.as_deref(), Some(op.as_str()));
+        assert_eq!(s.confirmation.unwrap()["confirm_tx"], "btx");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_open_operation_without_the_chains_takes_its_stage_exit_naming_them() {
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let e = dispatched(&resume_line(&w, &op, &[])).await.unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::DepositOutcomeUnknown,
+            "the wallet was asked: never exit 2: {e}"
+        );
+        for flag in [
+            "--rpc-url (RPC_URL)",
+            "--gql-endpoint (BRIDGE_GQL_ENDPOINT)",
+        ] {
+            assert!(e.to_string().contains(flag), "{flag}: {e}");
+        }
+        assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
+        assert_eq!(stage(&w, &op), OpStage::Signed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_before_the_proof_without_the_prover_takes_its_exit_naming_it() {
+        for (at, exit) in [
+            (OpStage::Confirmed, ExitCode::AnWaitTimeout),
+            (OpStage::Anchored, ExitCode::DepositProofFailed),
+        ] {
+            let mut w = World::healthy();
+            let op = w.proved_operation();
+            let store = Store::open(w.state.path()).unwrap();
+            let mut rec = store.load(&op).unwrap();
+            rec.stage = at;
+            store.write(&mut rec).unwrap();
+            let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
+            assert!(p.prover_dir.is_none());
+            let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
+                .await
+                .unwrap_err();
+            assert_eq!(e.exit_code(), exit, "{at:?}: {e}");
+            assert!(
+                e.to_string()
+                    .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
+                "{at:?}: {e}"
+            );
+            assert_eq!(stage(&w, &op), at, "the record is unchanged");
+            assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_proved_operation_goes_on_without_the_prover() {
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        w.credit_chain_for_mined_deposit();
+        let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
+        assert!(p.prover_dir.is_none());
+        let s = run::resume(&p, &w.deps(), &OpRef::Op(op), None)
+            .await
+            .unwrap();
+        assert!(s.confirmation.is_some());
+        assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
+        assert_eq!(w.prover_runs(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_proof_to_build_again_without_the_prover_names_it() {
+        // Sent before, the proof gone, nothing finalized: the proof is
+        // built again, and that needs the prover.
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
+        let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::CreditUnconfirmed,
+            "a send may have executed: {e}"
+        );
+        assert!(
+            e.to_string()
+                .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
+            "{e}"
+        );
+        assert_eq!(stage(&w, &op), OpStage::Finalizing);
+        assert_eq!(w.prover_runs(), 0);
+    }
 }

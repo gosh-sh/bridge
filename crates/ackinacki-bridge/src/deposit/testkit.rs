@@ -2288,6 +2288,48 @@ impl World {
     }
 }
 
+/// `ackinacki-bridge deposit <argv>` as clap parses it, with nothing taken
+/// from the environment: a setting clap would read from an environment
+/// variable is unset unless `argv` gives its flag, whatever the shell
+/// running the tests exports.
+pub fn deposit_args(argv: &[&str]) -> crate::deposit::args::DepositArgs {
+    use clap::Parser as _;
+    let cli = crate::args::Cli::try_parse_from(["ackinacki-bridge", "deposit"].iter().chain(argv))
+        .unwrap();
+    let crate::args::Command::Deposit(mut a) = cli.cmd else {
+        panic!("not a deposit command line")
+    };
+    let given = |flag: &str| argv.contains(&flag);
+    if !given("--rpc-url") {
+        a.rpc_url = None;
+    }
+    if !given("--bridge-address") {
+        a.bridge_address = None;
+    }
+    if !given("--gql-endpoint") {
+        a.gql_endpoint = None;
+    }
+    if !given("--usdc-bridge-account") {
+        a.usdc_bridge_account = None;
+    }
+    if !given("--deposit-prover-dir") {
+        a.deposit_prover_dir = None;
+    }
+    if !given("--state-dir") {
+        a.state_dir = None;
+    }
+    if !given("--work-dir") {
+        a.work_dir = None;
+    }
+    if !given("--wc-project-id") {
+        a.wc_project_id = None;
+    }
+    if !given("--confirmations") {
+        a.confirmations = 12;
+    }
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

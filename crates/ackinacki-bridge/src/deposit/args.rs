@@ -343,7 +343,6 @@ impl DepositArgs {
             (None, None) => RunMode::Fresh,
         };
         let starts_new = matches!(mode, RunMode::Fresh | RunMode::DryRun);
-        let touches_chains = !matches!(mode, RunMode::Abandon(_));
         // Shapes first: a malformed value is the user's first problem, not
         // the profile keys that happen to be missing as well.
         let amount = self.amount.as_deref().map(parse_amount).transpose()?;
@@ -377,7 +376,11 @@ impl DepositArgs {
                 missing.push("--to");
             }
         }
-        if touches_chains {
+        // A resume takes the chain, both bridges and the recipient from the
+        // operation's record, and needs the endpoints and the prover only
+        // for the steps its stage has left: a finished operation answers
+        // from the record alone. What a stage needs is asked for there.
+        if starts_new {
             if self.rpc_url.is_none() {
                 missing.push("--rpc-url (RPC_URL)");
             }
@@ -724,6 +727,62 @@ mod tests {
             OpRef::DepositId(U256::from(42))
         );
         assert!(OpRef::parse("not-an-id").is_err());
+    }
+
+    #[test]
+    fn a_resume_validates_with_the_state_directory_alone() {
+        // Whether the chains or the prover are needed depends on the
+        // operation's stage, which only its record knows.
+        let a = crate::deposit::testkit::deposit_args(&[
+            "--resume",
+            "01J9ZQ4X7T8V5N6M3K2P1R0S9A",
+            "--state-dir",
+            "/var/lib/deposits",
+        ]);
+        let p = a.validate(&GlobalFlags::default()).unwrap();
+        assert!(matches!(p.mode, RunMode::Resume { .. }), "{:?}", p.mode);
+        assert_eq!(p.state_dir, PathBuf::from("/var/lib/deposits"));
+        assert_eq!(
+            (p.rpc_url, p.bridge, p.gql_endpoint),
+            (None, None, None),
+            "nothing is made up for a setting that was not given"
+        );
+        assert!(p.usdc_bridge_account.is_none() && p.prover_dir.is_none());
+    }
+
+    #[test]
+    fn a_new_deposit_and_a_dry_run_still_need_the_chains_and_the_prover() {
+        let to = format!("{DAPP}::{ACC}");
+        for extra in [None, Some("--dry-run")] {
+            let mut argv = vec![
+                "--network",
+                "sepolia",
+                "--amount",
+                "1",
+                "--to",
+                &to,
+                "--wc-project-id",
+                "p",
+                "--state-dir",
+                "/var/lib/deposits",
+                "--work-dir",
+                "/var/lib/deposit-work",
+            ];
+            argv.extend(extra);
+            let e = crate::deposit::testkit::deposit_args(&argv)
+                .validate(&GlobalFlags::default())
+                .unwrap_err();
+            assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+            for flag in [
+                "--rpc-url (RPC_URL)",
+                "--bridge-address (BRIDGE_ADDRESS)",
+                "--gql-endpoint (BRIDGE_GQL_ENDPOINT)",
+                "--usdc-bridge-account (USDC_BRIDGE_ACCOUNT_ID)",
+                "--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)",
+            ] {
+                assert!(e.to_string().contains(flag), "{extra:?}, {flag}: {e}");
+            }
+        }
     }
 
     #[test]

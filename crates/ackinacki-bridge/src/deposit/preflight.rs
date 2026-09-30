@@ -338,7 +338,7 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
     let rpc_url = p
         .rpc_url
         .clone()
-        .ok_or_else(|| held(refuse("--rpc-url is required to resume".into())))?;
+        .ok_or_else(|| held(refuse("--rpc-url (RPC_URL) is required to resume".into())))?;
     Ok(RunCx {
         plan,
         bridge_acc,
@@ -411,41 +411,55 @@ async fn resume_plan(
 }
 
 /// The prover directory a resume needs. While a proof is still to be
-/// built it must pass its checks, and its lock is probed as a new
-/// deposit's preflight probes it. After the proof, a broken directory is
-/// only a warning: the proof may be on disk, or somebody may have
-/// finalized the deposit already.
+/// built it must be given and pass its checks, and its lock is probed as a
+/// new deposit's preflight probes it. After the proof, a broken or missing
+/// directory is only a warning: the proof may be on disk, or somebody may
+/// have finalized the deposit already. Without `--deposit-prover-dir` the
+/// directory is the empty path, which the prover refuses by naming the
+/// flag should the proof have to be built again.
 fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<ProverDir> {
-    let root = p.prover_dir.clone().unwrap_or_default();
-    match rec.stage {
+    let to_prove = matches!(
+        rec.stage,
         OpStage::Requested
-        | OpStage::Signed
-        | OpStage::Abandoned
-        | OpStage::Confirmed
-        | OpStage::Anchored => {
-            let dir = check_prover_dir(&root).map_err(refuse)?;
-            drop(ProverLock::try_take(&dir)?);
-            Ok(dir)
-        },
-        _ => match check_prover_dir(&root) {
-            Ok(dir) => Ok(dir),
-            Err(e) => {
-                let work = rec
-                    .work_dir
-                    .clone()
-                    .unwrap_or_else(|| p.work_dir.join(&rec.op_id));
-                if crate::deposit::prover::load(&work).is_none() {
-                    ui.warn(&format!(
-                        "the proof is not on disk and the prover directory is unusable ({e}); it \
-                         is needed only if the deposit is not finalized yet"
-                    ));
-                }
-                Ok(ProverDir {
-                    root,
-                })
-            },
-        },
+            | OpStage::Signed
+            | OpStage::Abandoned
+            | OpStage::Confirmed
+            | OpStage::Anchored
+    );
+    let no_prover = |why: String| {
+        let work = rec
+            .work_dir
+            .clone()
+            .unwrap_or_else(|| p.work_dir.join(&rec.op_id));
+        if crate::deposit::prover::load(&work).is_none() {
+            ui.warn(&format!(
+                "the proof is not on disk and {why}; it is needed only if the deposit is not \
+                 finalized yet"
+            ));
+        }
+        ProverDir {
+            root: p.prover_dir.clone().unwrap_or_default(),
+        }
+    };
+    let Some(root) = &p.prover_dir else {
+        if to_prove {
+            return Err(refuse(
+                "--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR) is needed to build the proof of \
+                 this deposit, and none was given"
+                    .into(),
+            ));
+        }
+        return Ok(no_prover(
+            "no --deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR) was given".into(),
+        ));
+    };
+    if to_prove {
+        let dir = check_prover_dir(root).map_err(refuse)?;
+        drop(ProverLock::try_take(&dir)?);
+        return Ok(dir);
     }
+    Ok(check_prover_dir(root)
+        .unwrap_or_else(|e| no_prover(format!("the prover directory is unusable ({e})"))))
 }
 
 /// What `--dry-run` prints after a passed preflight: both transactions'

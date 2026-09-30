@@ -7,6 +7,7 @@
 
 pub mod args;
 pub mod binding;
+pub mod evm;
 pub mod identity;
 pub mod limits;
 pub mod locks;
@@ -16,6 +17,8 @@ pub mod prover_files;
 pub mod refusals;
 pub mod retry;
 pub mod store;
+#[cfg(test)]
+pub mod testkit;
 pub mod ui;
 
 /// Replaced by the driver in `run.rs`.

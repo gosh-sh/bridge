@@ -42,6 +42,9 @@ alloy = { version = "2.0", features = [
     "signers",
     "network",
     "sol-types",
+    # `Filter`, `TransactionRequest` and the RPC log type the deposit's
+    # EVM reads are written against.
+    "rpc-types",
 ] }
 alloy-primitives = "1"
 

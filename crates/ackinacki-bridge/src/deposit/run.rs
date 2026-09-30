@@ -4021,4 +4021,113 @@ mod tests {
             assert_eq!(rec.stage, at, "the record is unchanged");
         }
     }
+
+    // ---- a work directory that cannot hold the proof files ----
+
+    /// A regular file in the world's work directory.
+    fn a_file_in(w: &World) -> std::path::PathBuf {
+        let file = w.work.path().join("not-a-directory");
+        std::fs::write(&file, b"").unwrap();
+        file
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_work_directory_that_is_a_file_is_refused_before_the_wallet() {
+        for mode in [RunMode::Fresh, RunMode::DryRun] {
+            let w = World::healthy();
+            let mut p = w.params(mode.clone());
+            p.work_dir = Some(a_file_in(&w));
+            let e = run_with(&p, &w.deps(), &mut NeverPairs).await.unwrap_err();
+            assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{mode:?}: {e}");
+            assert!(
+                e.to_string().contains("--work-dir (BRIDGE_WORK_DIR)"),
+                "{e}"
+            );
+            assert!(e.to_string().contains("os error"), "{e}");
+            assert!(
+                Store::open(&p.state_dir)
+                    .unwrap()
+                    .list()
+                    .unwrap()
+                    .is_empty(),
+                "no operation: the wallet was asked for nothing"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_work_directory_that_cannot_be_written_is_refused_before_the_wallet() {
+        use std::os::unix::fs::PermissionsExt;
+        let w = World::healthy();
+        let read_only = w.work.path().join("read-only");
+        std::fs::create_dir(&read_only).unwrap();
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut p = w.params(RunMode::Fresh);
+        p.work_dir = Some(read_only.clone());
+        let r = run_with(&p, &w.deps(), &mut NeverPairs).await;
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // SAFETY: geteuid(2) only reads this process's effective user id.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes there all the same
+        }
+        let e = r.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
+        assert!(
+            e.to_string().contains("--work-dir (BRIDGE_WORK_DIR)"),
+            "{e}"
+        );
+        assert!(e.to_string().contains("Permission denied"), "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_work_directory_is_created_and_left_without_a_probe_file() {
+        let w = World::healthy();
+        let base = w.work.path().join("new").join("work");
+        let mut p = w.params(RunMode::DryRun);
+        p.work_dir = Some(base.clone());
+        run_with(&p, &w.deps(), &mut NeverPairs).await.unwrap();
+        assert!(base.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&base).unwrap().count(),
+            0,
+            "no probe file is left"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_that_has_to_prove_refuses_a_work_directory_that_cannot_hold_the_proof() {
+        // Named before any chain is read, with the exit of the stage.
+        for (at, exit) in [
+            (OpStage::Confirmed, ExitCode::AnWaitTimeout),
+            (OpStage::Anchored, ExitCode::DepositProofFailed),
+        ] {
+            let mut w = World::healthy();
+            let op = if at == OpStage::Confirmed {
+                w.confirmed_operation()
+            } else {
+                w.anchored_operation()
+            };
+            // The recorded work directory lies under a regular file now.
+            let file = a_file_in(&w);
+            let store = Store::open(w.state.path()).unwrap();
+            let mut rec = store.load(&op).unwrap();
+            rec.work_dir = Some(file.join(&op));
+            store.write(&mut rec).unwrap();
+            w.evm
+                .fail_chain_id
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let (p, target) = resuming(&w, &op);
+            let e = tokio::time::timeout(
+                Duration::from_secs(600),
+                resume(&p, &w.deps(), &target, None),
+            )
+            .await
+            .expect("refused without reading the EVM chain")
+            .unwrap_err();
+            assert_eq!(e.exit_code(), exit, "{at:?}: {e}");
+            assert!(e.to_string().contains(&*file.to_string_lossy()), "{e}");
+            assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
+            assert_eq!(store.load(&op).unwrap().stage, at, "unchanged");
+        }
+    }
 }

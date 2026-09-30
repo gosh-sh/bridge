@@ -1,15 +1,15 @@
 //! The checks a new deposit passes before the wallet is asked for
 //! anything, in order: the EVM chain and bridge, the Acki Nacki bridge,
 //! whether the light client can anchor the deposit, the prover directory
-//! and whether its tools run on this host, and the operations still open
-//! in the state directory. A failure is
+//! and whether its tools run on this host, the work directory, and the
+//! operations still open in the state directory. A failure is
 //! exit 2 (exit 3 for an open operation of the same deposit), and nothing
 //! has been sent. Nothing here asks the wallet or creates an operation.
 //!
 //! A resume passes a smaller set of checks, only those its operation's
 //! recorded stage still needs ([`context_for_resume`]).
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{io::Write as _, path::Path, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, U256};
 use serde_json::json;
@@ -154,6 +154,10 @@ pub async fn check(
     .await?;
     let plan = anchor_plan(d, bridge_acc, net.chain_id(), &an).await?;
     let prover = usable_prover(p.prover_dir.as_deref().expect("validated")).await?;
+    // The proof files go there: a path that cannot hold them is refused
+    // now, not at step 7 with the USDC already in the bridge.
+    writable_work_dir(p.work_dir.as_deref().expect("validated for a fresh run"))
+        .map_err(|e| refuse(format!("--work-dir (BRIDGE_WORK_DIR): {e}")))?;
     let params = OpParams {
         chain_id: net.chain_id(),
         bridge,
@@ -196,6 +200,22 @@ async fn usable_prover(root: &Path) -> CliResult<ProverDir> {
         .await
         .map_err(refuse)?;
     Ok(dir)
+}
+
+/// Creates the work directory `dir` if it is missing and proves that a
+/// file can be written there: a probe file is created, written, synced and
+/// removed. The error names the directory and quotes the OS.
+fn writable_work_dir(dir: &Path) -> Result<(), String> {
+    let failed = |what: &str, e: std::io::Error| format!("{} {what}: {e}", dir.display());
+    std::fs::create_dir_all(dir).map_err(|e| failed("cannot be created", e))?;
+    let probe = dir.join(format!(".write-probe-{}", std::process::id()));
+    let written = std::fs::File::create(&probe).and_then(|mut f| {
+        f.write_all(b"probe")?;
+        f.sync_all()
+    });
+    let removed = std::fs::remove_file(&probe);
+    written.map_err(|e| failed("cannot be written", e))?;
+    removed.map_err(|e| failed("keeps a file it cannot remove", e))
 }
 
 /// Who anchors the deposit's block. With the owner's anchors on, the
@@ -266,9 +286,9 @@ async fn anchor_plan(
 /// one: a paused Acki Nacki bridge, its lost trust in the EVM bridge or a
 /// moved voucher code is a warning, the recipient is not checked, the light
 /// client's readiness is read only before the anchor and is a warning, and
-/// the prover directory is checked only while a proof is still to be
-/// built. The bridge version is checked always: resending
-/// `finalizeDeposit` is safe only on a fixed bridge.
+/// the prover directory and the work directory are checked only while a
+/// proof is still to be built. The bridge version is checked always:
+/// resending `finalizeDeposit` is safe only on a fixed bridge.
 ///
 /// An RPC endpoint that serves another chain than the operation's is the
 /// command line pointing at another network: exit 2, as any other
@@ -305,6 +325,17 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
     // Flags and a local directory only: known before any chain is read,
     // and those reads retry for as long as an endpoint is down.
     let prover = resume_prover(p, rec, ui).await.map_err(held)?;
+    // The proof files go to the work directory the operation records.
+    if proof_to_build(rec.stage) {
+        if let Some(work) = crate::deposit::run::work_dir_of(p, rec) {
+            writable_work_dir(&work).map_err(|e| {
+                held(refuse(format!(
+                    "the work directory of operation {op}, set by --work-dir (BRIDGE_WORK_DIR) \
+                     when it was made: {e}"
+                )))
+            })?;
+        }
+    }
     let net = Network::from_chain_id(rec.params.chain_id).ok_or_else(|| {
         held(refuse(format!(
             "operation {op} is on chain {}, which this build does not know",

@@ -10,6 +10,7 @@ pub mod binding;
 pub mod evm;
 pub mod evm_confirm;
 pub mod evm_preflight;
+pub mod evm_steps;
 pub mod identity;
 pub mod limits;
 pub mod locks;

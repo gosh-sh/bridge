@@ -509,6 +509,8 @@ struct MockRelayState {
     subs: HashMap<String, Vec<tokio::sync::mpsc::UnboundedSender<String>>>,
     /// Every message published so far, per topic, with its tag.
     backlog: HashMap<String, Vec<(String, u64)>>,
+    /// Every publication so far, in order: topic, tag and TTL.
+    published: Vec<(String, u64, u64)>,
 }
 
 impl MockRelay {
@@ -549,6 +551,11 @@ impl MockRelay {
     /// Connections accepted so far, reconnects included.
     pub fn connections(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Every publication so far, in order: topic, tag and TTL in seconds.
+    pub fn published(&self) -> Vec<(String, u64, u64)> {
+        self.state.lock().unwrap().published.clone()
     }
 
     /// Makes every open connection half-open: from now on it reads and
@@ -630,6 +637,8 @@ impl MockRelay {
                             let msg = v["params"]["message"].as_str().unwrap().to_string();
                             let tag = v["params"]["tag"].as_u64().unwrap();
                             s.backlog.entry(topic.clone()).or_default().push((msg.clone(), tag));
+                            let ttl = v["params"]["ttl"].as_u64().unwrap();
+                            s.published.push((topic.clone(), tag, ttl));
                             for sub in s.subs.get(&topic).cloned().unwrap_or_default() {
                                 MockRelay::push(&sub, MockRelay::delivery(2, &topic, &msg, tag));
                             }
@@ -663,5 +672,182 @@ impl MockRelay {
                 "data": {"topic": topic, "message": message, "tag": tag, "publishedAt": 0}
             }
         })
+    }
+}
+
+/// How a [`MockWalletPeer`] answers.
+pub struct PeerBehaviour {
+    /// The CAIP-10 accounts it shares, e.g. `eip155:11155111:0x…`.
+    pub accounts: Vec<String>,
+    /// Signs `personal_sign`.
+    pub signer: alloy::signers::local::PrivateKeySigner,
+    /// What `eth_sendTransaction` answers: a hash, or an error code.
+    pub send_result: Result<B256, i64>,
+    /// Settles with the signer on chain 1 only; `wallet_switchEthereumChain`
+    /// then answers 4902, and `wallet_addEthereumChain` updates the session
+    /// to `accounts` before it answers.
+    pub missing_chain_then_add: bool,
+}
+
+/// The wallet side of WalletConnect, on the same primitives as the dApp
+/// side. Like a wallet whose relay client retried its publish, it sends
+/// everything twice, each copy sealed with its own nonce; like a wallet, it
+/// answers each request id once.
+pub struct MockWalletPeer;
+
+impl MockWalletPeer {
+    /// How long a peer waits for the next message before it leaves.
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Scans `uri` on the relay at `url`, approves the session and answers
+    /// requests until nothing arrives for [`Self::IDLE`].
+    pub fn spawn(
+        url: String,
+        uri: crate::deposit::wc::session::PairingUri,
+        b: PeerBehaviour,
+    ) -> tokio::task::JoinHandle<()> {
+        use alloy::signers::SignerSync as _;
+        use serde_json::json;
+
+        use crate::deposit::wc::{relay::Relay, session::*};
+
+        tokio::spawn(async move {
+            let mut r = Relay::connect(url).await.unwrap();
+            let mut accounts = if b.missing_chain_then_add {
+                vec![format!("eip155:1:{:#x}", b.signer.address())]
+            } else {
+                b.accounts.clone()
+            };
+            let (topic, sym) = Self::pair(&mut r, &uri, &accounts).await;
+            let mut answered = std::collections::HashSet::new();
+            while let Some((v, _)) = Self::next(&mut r, &topic, &sym, Self::IDLE).await {
+                if v["method"] != "wc_sessionRequest" || !answered.insert(v["id"].as_u64().unwrap())
+                {
+                    continue;
+                }
+                let req = &v["params"]["request"];
+                let ok = |result: serde_json::Value| json!({"id": v["id"], "jsonrpc": "2.0", "result": result});
+                let err = |code: i64, message: &str| json!({"id": v["id"], "jsonrpc": "2.0", "error": {"code": code, "message": message}});
+                let reply = match req["method"].as_str().unwrap() {
+                    "personal_sign" => {
+                        let msg = hex::decode(
+                            req["params"][0].as_str().unwrap().trim_start_matches("0x"),
+                        )
+                        .unwrap();
+                        let sig = b.signer.sign_message_sync(&msg).unwrap();
+                        ok(json!(format!("0x{}", hex::encode(sig.as_bytes()))))
+                    },
+                    "eth_sendTransaction" => match &b.send_result {
+                        Ok(h) => ok(json!(format!("{h:#x}"))),
+                        Err(code) => err(*code, "User rejected"),
+                    },
+                    "eth_accounts" => {
+                        let addresses: Vec<&str> = accounts
+                            .iter()
+                            .filter_map(|a| a.rsplit_once(':').map(|(_, x)| x))
+                            .collect();
+                        ok(json!(addresses))
+                    },
+                    "wallet_switchEthereumChain" => err(4902, "Unrecognized chain"),
+                    "wallet_addEthereumChain" => {
+                        accounts = b.accounts.clone();
+                        let update = json!({"id": 98, "jsonrpc": "2.0", "method": "wc_sessionUpdate",
+                            "params": {"namespaces": {"eip155": {"accounts": accounts, "methods": METHODS, "events": EVENTS}}}});
+                        Self::send(&r, &topic, &sym, update, TAG_UPDATE).await;
+                        ok(serde_json::Value::Null)
+                    },
+                    _ => err(-32601, "unsupported"),
+                };
+                Self::send(&r, &topic, &sym, reply, TAG_REQUEST_RESP).await;
+            }
+        })
+    }
+
+    /// The wallet's half of pairing: reads the proposal on `uri`'s topic,
+    /// settles a session that shares `accounts`, then answers the proposal
+    /// — in that order, as some wallets do, so the dApp picks the settlement
+    /// up from what the relay kept. Returns the session topic and its key.
+    pub async fn pair(
+        r: &mut crate::deposit::wc::relay::Relay,
+        uri: &crate::deposit::wc::session::PairingUri,
+        accounts: &[String],
+    ) -> (String, [u8; 32]) {
+        use serde_json::json;
+
+        use crate::deposit::wc::{crypto::*, session::*};
+
+        r.subscribe(&uri.topic).await.unwrap();
+        let propose = loop {
+            let (v, _) = Self::next(r, &uri.topic, &uri.sym_key, Self::IDLE)
+                .await
+                .expect("a session proposal");
+            if v["method"] == "wc_sessionPropose" {
+                break v;
+            }
+        };
+        let dapp: [u8; 32] =
+            hex::decode(propose["params"]["proposer"]["publicKey"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let me = KeyPair::generate();
+        let sym = derive_sym_key(&me.secret, &dapp);
+        let topic = topic_of(&sym);
+        r.subscribe(&topic).await.unwrap();
+        let week = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 7 * 86_400;
+        let settle = json!({"id": 99, "jsonrpc": "2.0", "method": "wc_sessionSettle",
+            "params": {"relay": {"protocol": "irn"},
+                       "namespaces": {"eip155": {"accounts": accounts, "methods": METHODS, "events": EVENTS}},
+                       "controller": {"publicKey": hex::encode(me.public)}, "expiry": week}});
+        Self::send(r, &topic, &sym, settle, TAG_SETTLE).await;
+        let answer = json!({"id": propose["id"], "jsonrpc": "2.0",
+            "result": {"relay": {"protocol": "irn"}, "responderPublicKey": hex::encode(me.public)}});
+        Self::send(r, &uri.topic, &uri.sym_key, answer, TAG_PROPOSE_RESP).await;
+        (topic, sym)
+    }
+
+    /// Publishes `v` on `topic` under `sym` twice, each copy sealed with its
+    /// own nonce, the way a relay client that retried would.
+    pub async fn send(
+        r: &crate::deposit::wc::relay::Relay,
+        topic: &str,
+        sym: &[u8; 32],
+        v: serde_json::Value,
+        tag: u32,
+    ) {
+        use crate::deposit::wc::crypto::{random_bytes, seal_type0};
+
+        for _ in 0..2 {
+            let sealed = seal_type0(sym, random_bytes(), v.to_string().as_bytes());
+            r.publish(topic, &sealed, 300, tag).await.unwrap();
+        }
+    }
+
+    /// The next message on `topic` that opens under `sym` as JSON, with its
+    /// tag; `None` once `idle` passes without one.
+    pub async fn next(
+        r: &mut crate::deposit::wc::relay::Relay,
+        topic: &str,
+        sym: &[u8; 32],
+        idle: std::time::Duration,
+    ) -> Option<(serde_json::Value, u32)> {
+        use crate::deposit::wc::crypto::{open, parse};
+
+        loop {
+            let m = r.recv(idle).await?;
+            if m.topic != topic {
+                continue;
+            }
+            let Some(plain) = parse(&m.message).ok().and_then(|e| open(sym, &e).ok()) else {
+                continue;
+            };
+            if let Ok(v) = serde_json::from_slice(&plain) {
+                return Some((v, m.tag));
+            }
+        }
     }
 }

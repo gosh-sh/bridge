@@ -122,6 +122,11 @@ rqrr = "0.10"
 tvm_types = { workspace = true }
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 
+[features]
+# Development and e2e only, never in `default`: accept a bridge although this build
+# does not know the minimum version that is safe to resend to.
+dev-unfixed-bridge = []
+
 [[bin]]
 name = "ackinacki-bridge"
 path = "src/main.rs"

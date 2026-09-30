@@ -6,6 +6,7 @@
 //! crash.
 
 pub mod an;
+pub mod an_preflight;
 pub mod args;
 pub mod binding;
 pub mod evm;

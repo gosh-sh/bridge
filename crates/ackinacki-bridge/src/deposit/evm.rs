@@ -356,6 +356,42 @@ fn revert_data(e: &TransportError) -> Option<Bytes> {
         .then(|| p.as_revert_data().unwrap_or_default())
 }
 
+/// The text for a revert: a bridge error has no text of its own, so it is
+/// named; anything else is the node's message.
+fn revert_text(e: &TransportError, data: &Bytes) -> String {
+    match IDeposit::IDepositErrors::abi_decode(data) {
+        Ok(IDeposit::IDepositErrors::BridgePaused(_)) => "BridgePaused".to_string(),
+        Err(_) => e
+            .as_error_resp()
+            .map(|p| p.message.to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// A gas estimate that the node says reverts: the call would fail on chain.
+/// Retrying does not help, unlike a transport error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EstimateReverted(pub String);
+
+impl std::fmt::Display for EstimateReverted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the call would revert: {}", self.0)
+    }
+}
+
+impl std::error::Error for EstimateReverted {}
+
+/// The revert reason inside `e` when `e` says a call reverted, `None` for
+/// every other failure (transport, rate limit, a node that cannot run the
+/// call), which a caller may retry.
+pub fn revert_of(e: &anyhow::Error) -> Option<String> {
+    if let Some(r) = e.downcast_ref::<EstimateReverted>() {
+        return Some(r.0.clone());
+    }
+    let t = e.downcast_ref::<TransportError>()?;
+    revert_data(t).map(|d| revert_text(t, &d))
+}
+
 /// `eth_getLogs` ranges that public providers accept.
 const LOG_CHUNK: u64 = 5_000;
 
@@ -390,14 +426,7 @@ impl EvmRead for AlloyEvm {
         match self.p.call(req).block(BlockId::number(block)).await {
             Ok(_) => Ok(None),
             Err(e) => match revert_data(&e) {
-                // A bridge error has no text of its own: name it.
-                Some(d) => Ok(Some(match IDeposit::IDepositErrors::abi_decode(&d) {
-                    Ok(IDeposit::IDepositErrors::BridgePaused(_)) => "BridgePaused".to_string(),
-                    Err(_) => e
-                        .as_error_resp()
-                        .map(|p| p.message.to_string())
-                        .unwrap_or_default(),
-                })),
+                Some(d) => Ok(Some(revert_text(&e, &d))),
                 None => Err(e.into()),
             },
         }
@@ -552,15 +581,17 @@ impl EvmRead for AlloyEvm {
     }
 
     async fn estimate_gas(&self, from: Address, to: Address, data: Bytes) -> anyhow::Result<u64> {
-        Ok(self
-            .p
-            .estimate_gas(
-                TransactionRequest::default()
-                    .from(from)
-                    .to(to)
-                    .input(data.into()),
-            )
-            .await?)
+        let req = TransactionRequest::default()
+            .from(from)
+            .to(to)
+            .input(data.into());
+        match self.p.estimate_gas(req).await {
+            Ok(g) => Ok(g),
+            Err(e) => match revert_data(&e) {
+                Some(d) => Err(EstimateReverted(revert_text(&e, &d)).into()),
+                None => Err(e.into()),
+            },
+        }
     }
 
     async fn fees(&self) -> anyhow::Result<Fees> {
@@ -837,5 +868,46 @@ mod tests {
         // A node that cannot run the call has not said it reverts.
         rpc_error(&rpc, r#"{"code":-32000,"message":"missing trie node"}"#);
         assert!(evm.revert_reason(from, BRIDGE, data, 9).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn only_a_reverting_estimate_is_classified_as_a_revert() {
+        let (evm, rpc) = mocked();
+        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let data = deposit_calldata(1, B256::repeat_byte(0xa3));
+        let paused = alloy::sol_types::SolError::abi_encode(&IDeposit::BridgePaused {});
+        rpc_error(
+            &rpc,
+            &format!(
+                r#"{{"code":3,"message":"execution reverted","data":"0x{}"}}"#,
+                alloy_primitives::hex::encode(paused)
+            ),
+        );
+        let e = evm
+            .estimate_gas(from, BRIDGE, data.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(revert_of(&e).as_deref(), Some("BridgePaused"));
+        rpc_error(
+            &rpc,
+            r#"{"code":3,"message":"execution reverted: ERC20: transfer amount exceeds balance","data":"0x08c379a0"}"#,
+        );
+        let e = evm
+            .estimate_gas(from, BRIDGE, data.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            revert_of(&e).as_deref(),
+            Some("execution reverted: ERC20: transfer amount exceeds balance")
+        );
+        rpc_error(&rpc, r#"{"code":-32005,"message":"rate limit exceeded"}"#);
+        let e = evm
+            .estimate_gas(from, BRIDGE, data.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(revert_of(&e), None, "a rate limit is retried");
+        assert_eq!(revert_of(&anyhow::anyhow!("connection reset")), None);
+        rpc.push_success(&U256::from(21_000u64));
+        assert_eq!(evm.estimate_gas(from, BRIDGE, data).await.unwrap(), 21_000);
     }
 }

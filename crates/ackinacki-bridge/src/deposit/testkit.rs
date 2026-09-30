@@ -78,6 +78,10 @@ pub struct FakeEvm {
     pub revert: Mutex<Option<String>>,
     /// What `bridge_paused` answers; `None` is a bridge without `paused()`.
     pub paused: Mutex<Option<bool>>,
+    /// `estimate_gas` reverts with this reason when set.
+    pub estimate_revert: Mutex<Option<String>>,
+    /// The next this-many `estimate_gas` calls fail with a transport error.
+    pub estimate_transport_failures: AtomicU32,
     /// The next N `transaction` calls fail, as a flaky RPC does.
     pub fail_tx_reads: AtomicU32,
     /// The next N `transaction` calls answer `None`, as a lagging backend does.
@@ -108,6 +112,8 @@ impl Default for FakeEvm {
             probe_error: Mutex::default(),
             revert: Mutex::default(),
             paused: Mutex::new(Some(false)),
+            estimate_revert: Mutex::default(),
+            estimate_transport_failures: AtomicU32::new(0),
             fail_tx_reads: AtomicU32::default(),
             miss_tx_reads: AtomicU32::default(),
             vanish_tx_after: Mutex::default(),
@@ -292,6 +298,15 @@ impl EvmRead for FakeEvm {
     }
 
     async fn estimate_gas(&self, _: Address, _: Address, _: Bytes) -> anyhow::Result<u64> {
+        let left = self.estimate_transport_failures.load(Ordering::SeqCst);
+        if left > 0 {
+            self.estimate_transport_failures
+                .store(left - 1, Ordering::SeqCst);
+            anyhow::bail!("connection reset by peer");
+        }
+        if let Some(r) = self.estimate_revert.lock().unwrap().clone() {
+            return Err(EstimateReverted(r).into());
+        }
         Ok(80_000)
     }
 

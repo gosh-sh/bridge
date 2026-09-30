@@ -6,7 +6,7 @@ use alloy_primitives::{Address, B256, U256};
 
 use crate::{
     deposit::{
-        evm::{read_allowance, EvmRead},
+        evm::{read_allowance, revert_of, EvmRead},
         retry::transient,
         ui::Ui,
         wallet::{TxPurpose, TxRequest, Wallet, WalletError},
@@ -37,6 +37,28 @@ fn approve_failed(op_id: &str, why: String) -> CliError {
     )
 }
 
+/// Builds the request for `purpose`, retrying what a retry can fix. A node
+/// that says the call would revert is an answer, not a failure: the reason
+/// comes back as `Err`, and nothing is retried.
+async fn build_or_revert(
+    evm: &dyn EvmRead,
+    ui: &dyn Ui,
+    what: &str,
+    from: Address,
+    purpose: TxPurpose,
+) -> Result<TxRequest, String> {
+    transient(ui, what, || async {
+        match TxRequest::build(evm, from, purpose.clone()).await {
+            Ok(r) => Ok(Ok(r)),
+            Err(e) => match revert_of(&e) {
+                Some(reason) => Ok(Err(reason)),
+                None => Err(e),
+            },
+        }
+    })
+    .await
+}
+
 /// Asks the wallet for one `approve(bridge, amount)` and waits until it is
 /// mined (a hash) or its effect is visible in the allowance (no hash).
 #[allow(clippy::too_many_arguments)]
@@ -57,10 +79,15 @@ async fn send_approve(
         spender: bridge,
         amount,
     };
-    let req = transient(ui, "estimating approve", || {
-        TxRequest::build(evm, from, purpose.clone())
-    })
-    .await;
+    let req = match build_or_revert(evm, ui, "estimating approve", from, purpose).await {
+        Ok(r) => r,
+        Err(reason) => {
+            return Err(approve_failed(
+                op_id,
+                format!("approve would revert: {reason}"),
+            ))
+        },
+    };
     match wallet.send_transaction(ui, &req).await {
         Ok(h) => {
             // One confirmation: an approve that is reorged out and replayed moves no money.
@@ -178,6 +205,186 @@ pub async fn ensure_allowance(
     Ok(ApproveOutcome::Approved {
         tx,
     })
+}
+
+/// What the deposit request step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestOutcome {
+    /// The wallet returned the hash and the chain shows the transaction.
+    Signed(crate::deposit::store::TxClaim),
+    /// The outcome is unknown; the driver searches the chain for it.
+    Search,
+}
+
+/// Closes the operation as refused before anything was requested and
+/// returns the exit-2 error. A record that cannot be written is reported in
+/// the same error: nothing was sent either way.
+fn refuse_before_request(
+    store: &crate::deposit::store::Store,
+    rec: &mut crate::deposit::store::OpRecord,
+    why: String,
+) -> CliError {
+    use crate::deposit::store::FailReason;
+    let at = rec.stage;
+    rec.fail(
+        at,
+        FailReason::Refused,
+        ExitCode::PreflightRefused,
+        why.clone(),
+    );
+    let reason = match store.write(rec) {
+        Ok(()) => format!("{why}; nothing was sent"),
+        Err(e) => format!("{why}; nothing was sent (the record could not be updated: {e})"),
+    };
+    CliError::Preflight {
+        reason,
+        source: None,
+    }
+}
+
+/// Builds the deposit request, estimating gas and fees. A deposit the node
+/// says would revert is refused before the wallet is asked (exit 2, the
+/// operation closed as refused); any other estimate failure is retried.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_deposit_request(
+    evm: &dyn EvmRead,
+    ui: &dyn Ui,
+    store: &crate::deposit::store::Store,
+    rec: &mut crate::deposit::store::OpRecord,
+    from: Address,
+    bridge: Address,
+    amount: u64,
+    account: B256,
+) -> CliResult<TxRequest> {
+    let purpose = TxPurpose::Deposit {
+        bridge,
+        amount,
+        account,
+    };
+    build_or_revert(evm, ui, "estimating the deposit", from, purpose)
+        .await
+        .map_err(|reason| {
+            refuse_before_request(store, rec, format!("deposit() would revert: {reason}"))
+        })
+}
+
+/// Step 4: asks the wallet for the deposit. `Requested` reaches the disk
+/// before the wallet is asked, so a crash in between is found by the
+/// search, and never repeated blindly.
+pub async fn request_deposit(
+    evm: &dyn EvmRead,
+    wallet: &mut dyn Wallet,
+    ui: &dyn Ui,
+    store: &crate::deposit::store::Store,
+    rec: &mut crate::deposit::store::OpRecord,
+    tx: &TxRequest,
+) -> CliResult<RequestOutcome> {
+    use crate::deposit::{
+        evm::BlockTag,
+        store::{FailReason, OpStage, RequestInfo, TxClaim},
+    };
+    // The owner may have paused the bridge since the preflight; deposit()
+    // would revert and the user would pay gas for it.
+    let paused = transient(ui, "reading the bridge pause flag", || {
+        evm.bridge_paused(tx.to)
+    })
+    .await;
+    if paused == Some(true) {
+        return Err(refuse_before_request(
+            store,
+            rec,
+            "the EVM bridge is paused by its owner: deposit() would revert".into(),
+        ));
+    }
+    let from = tx.from;
+    let nonce_before = transient(ui, "reading the account nonce", || {
+        evm.tx_count(from, BlockTag::Pending)
+    })
+    .await;
+    let from_block = transient(ui, "reading the chain head", || async {
+        evm.header(BlockTag::Latest)
+            .await?
+            .map(|h| h.number)
+            .ok_or_else(|| anyhow::anyhow!("no latest block"))
+    })
+    .await;
+    rec.stage = OpStage::Requested;
+    rec.request = Some(RequestInfo {
+        nonce_before,
+        from_block,
+        calldata: tx.data.clone(),
+        wallet_hash: None,
+    });
+    store.write(rec).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "cannot record operation {} before asking the wallet: {e} (nothing was sent)",
+            rec.op_id
+        ),
+        source: None,
+    })?;
+    let op = rec.op_id.clone();
+    let post_send = |e: std::io::Error| {
+        CliError::deposit(
+            ExitCode::DepositOutcomeUnknown,
+            Stage::Deposit,
+            Some(&op),
+            format!(
+                "the deposit was requested but its state could not be written: {e}; run --resume \
+                 {op}"
+            ),
+        )
+    };
+    match wallet.send_transaction(ui, tx).await {
+        Ok(h) => {
+            if let Some(q) = rec.request.as_mut() {
+                q.wallet_hash = Some(h);
+            }
+            store.write(rec).map_err(post_send)?;
+            let seen = transient(ui, "reading the deposit transaction", || async {
+                evm.transaction(h)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("{h} is not visible yet"))
+            })
+            .await;
+            let claim = TxClaim {
+                tx_hash: h,
+                tx_nonce: seen.nonce,
+            };
+            rec.stage = OpStage::Signed;
+            rec.tx = Some(claim);
+            store.write(rec).map_err(post_send)?;
+            Ok(RequestOutcome::Signed(claim))
+        },
+        Err(WalletError::Rejected) => {
+            let why = "the deposit was rejected in the wallet; nothing was sent";
+            rec.fail(
+                OpStage::Requested,
+                FailReason::Rejected,
+                ExitCode::WalletFailed,
+                why,
+            );
+            store.write(rec).map_err(post_send)?;
+            Err(CliError::deposit(
+                ExitCode::WalletFailed,
+                Stage::Deposit,
+                Some(&op),
+                why,
+            ))
+        },
+        Err(WalletError::NoHash)
+        | Err(WalletError::Disconnected(_))
+        | Err(WalletError::Timeout)
+        | Err(WalletError::Other(_)) => {
+            ui.status("the wallet did not return a transaction hash; searching the chain for it");
+            Ok(RequestOutcome::Search)
+        },
+        Err(WalletError::Unsupported(what)) => Err(CliError::deposit(
+            ExitCode::DepositOutcomeUnknown,
+            Stage::Deposit,
+            Some(&op),
+            format!("the wallet cannot {what}; run --resume {op} once the transaction is sent"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -323,5 +530,242 @@ mod tests {
             go(&evm, &mut w).await.unwrap_err().exit_code(),
             ExitCode::ApproveFailed
         );
+    }
+
+    use crate::deposit::{
+        store::{FailReason, OpParams, OpRecord, OpStage, Store, TxClaim},
+        wallet::TxRequest,
+    };
+
+    struct Setup {
+        _dir: tempfile::TempDir,
+        store: Store,
+        evm: FakeEvm,
+        w: FakeWallet,
+        rec: OpRecord,
+        tx: TxRequest,
+    }
+
+    fn setup() -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let evm = FakeEvm::sepolia();
+        evm.latest.set([header(100, 1)]);
+        let w = FakeWallet::eoa();
+        let from = w.account;
+        evm.counts.lock().unwrap().insert((from, "pending"), 7);
+        let mut rec = OpRecord::new(
+            Store::new_op_id(),
+            OpParams {
+                chain_id: 11_155_111,
+                bridge: BRIDGE,
+                to: "x".into(),
+                amount_units: 1,
+                an_bridge: "1a".repeat(32),
+                an_network: "https://shellnet.ackinacki.org:443".into(),
+            },
+            "bd44".into(),
+        );
+        rec.from = Some(from);
+        store.write(&mut rec).unwrap();
+        let tx = TxRequest {
+            from,
+            to: BRIDGE,
+            data: Bytes::new(),
+            gas: 1,
+            fees: crate::deposit::evm::Fees {
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 1,
+            },
+            purpose: TxPurpose::Deposit {
+                bridge: BRIDGE,
+                amount: 1,
+                account: B256::ZERO,
+            },
+        };
+        Setup {
+            _dir: dir,
+            store,
+            evm,
+            w,
+            rec,
+            tx,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requested_is_on_disk_before_the_wallet_is_asked() {
+        use std::sync::{Arc, Mutex};
+        let mut s = setup();
+        let seen = Arc::new(Mutex::new(None));
+        let (path, seen2) = (s.store.record_path(&s.rec.op_id), seen.clone());
+        s.w.before_send = Some(Box::new(move || {
+            let r: OpRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            *seen2.lock().unwrap() = Some(r.stage);
+        }));
+        let h = B256::repeat_byte(3);
+        s.w.send_results.push_back(Ok(h));
+        s.evm
+            .txs
+            .lock()
+            .unwrap()
+            .insert(h, deposit_tx(h, s.w.account, BRIDGE, 7, 2, Bytes::new()));
+        let ui = RecordingUi::new(true);
+        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(OpStage::Requested));
+        assert_eq!(
+            out,
+            RequestOutcome::Signed(TxClaim {
+                tx_hash: h,
+                tx_nonce: 7
+            })
+        );
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(back.stage, OpStage::Signed);
+        assert_eq!(back.request.unwrap().nonce_before, 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_deposit_closes_the_operation_with_exit_20() {
+        let mut s = setup();
+        s.w.send_results
+            .push_back(Err(crate::deposit::wallet::WalletError::Rejected));
+        let ui = RecordingUi::new(true);
+        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::WalletFailed);
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(back.stage, OpStage::Failed);
+        assert_eq!(back.failure.unwrap().reason, FailReason::Rejected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_hash_hands_over_to_the_search_and_keeps_the_lock_state() {
+        let mut s = setup();
+        s.w.send_results
+            .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
+        let ui = RecordingUi::new(true);
+        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+            .await
+            .unwrap();
+        assert_eq!(out, RequestOutcome::Search);
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(
+            back.stage,
+            OpStage::Requested,
+            "the outcome is unknown until the search decides"
+        );
+        assert!(back.is_unresolved());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_paused_since_the_preflight_refuses_before_the_request() {
+        let mut s = setup();
+        *s.evm.paused.lock().unwrap() = Some(true);
+        let ui = RecordingUi::new(true);
+        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
+        assert!(e.to_string().contains("paused by its owner"), "{e}");
+        assert!(s.w.sent.is_empty(), "the wallet was never asked");
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(back.stage, OpStage::Failed);
+        assert_eq!(back.failure.unwrap().reason, FailReason::Refused);
+        assert!(back.request.is_none());
+        for absent in [None, Some(false)] {
+            let mut s = setup();
+            *s.evm.paused.lock().unwrap() = absent;
+            s.w.send_results
+                .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
+            let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+                .await
+                .unwrap();
+            assert_eq!(out, RequestOutcome::Search, "{absent:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deposit_estimate_that_reverts_is_refused_before_the_request() {
+        let mut s = setup();
+        *s.evm.estimate_revert.lock().unwrap() = Some("BridgePaused".into());
+        let ui = RecordingUi::new(true);
+        let from = s.w.account;
+        let e = build_deposit_request(
+            &s.evm,
+            &ui,
+            &s.store,
+            &mut s.rec,
+            from,
+            BRIDGE,
+            1,
+            B256::ZERO,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
+        assert!(e.to_string().contains("BridgePaused"), "{e}");
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(back.stage, OpStage::Failed);
+        assert_eq!(back.failure.unwrap().reason, FailReason::Refused);
+        // Without the revert the request is built.
+        let mut s = setup();
+        let from = s.w.account;
+        let tx = build_deposit_request(
+            &s.evm,
+            &ui,
+            &s.store,
+            &mut s.rec,
+            from,
+            BRIDGE,
+            1,
+            B256::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tx.gas, 100_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_estimate_that_fails_in_transport_is_retried_not_refused() {
+        let mut s = setup();
+        s.evm
+            .estimate_transport_failures
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let ui = RecordingUi::new(true);
+        let from = s.w.account;
+        let tx = build_deposit_request(
+            &s.evm,
+            &ui,
+            &s.store,
+            &mut s.rec,
+            from,
+            BRIDGE,
+            1,
+            B256::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tx.gas, 100_000);
+        assert_eq!(s.store.load(&s.rec.op_id).unwrap().stage, OpStage::Reserved);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_approve_estimate_that_reverts_is_exit_21_and_sends_nothing() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        *evm.estimate_revert.lock().unwrap() = Some("ERC20: paused".into());
+        let mut w = FakeWallet::eoa();
+        let e = go(&evm, &mut w).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed);
+        assert!(
+            e.to_string()
+                .contains("approve would revert: ERC20: paused"),
+            "{e}"
+        );
+        assert!(w.sent.is_empty());
     }
 }

@@ -73,6 +73,21 @@ pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
 /// must set [`BRIDGE_DEPLOY_BLOCK_ENV`] close to the last append.
 pub const GET_LOGS_CHUNK_BLOCKS: u64 = 2_000;
 
+/// Environment variable that overrides [`GET_LOGS_CHUNK_BLOCKS`]: the
+/// inclusive block span of one `eth_getLogs` call. Set it to the RPC's cap
+/// (Alchemy free tier: 10). Unset / unparseable / 0 → the default.
+pub const GET_LOGS_CHUNK_BLOCKS_ENV: &str = "BRIDGE_GET_LOGS_CHUNK_BLOCKS";
+
+/// The `eth_getLogs` span to use, from [`GET_LOGS_CHUNK_BLOCKS_ENV`] or the
+/// default.
+pub fn resolve_get_logs_chunk_blocks() -> u64 {
+    std::env::var(GET_LOGS_CHUNK_BLOCKS_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(GET_LOGS_CHUNK_BLOCKS)
+}
+
 /// Lower bound for `LayerAnchorAppended` scans. Unset / unparseable → 0
 /// (genesis). Avoid that on a long-lived chain.
 pub fn resolve_bridge_deploy_block() -> u64 {
@@ -724,6 +739,9 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// starts at genesis. Must be set in production — a 2_000-block
     /// chunk from block 0 is a denial of service against the RPC.
     deploy_block: u64,
+    /// Inclusive block span per `eth_getLogs` call in that scan. Read from
+    /// [`GET_LOGS_CHUNK_BLOCKS_ENV`] in [`Self::new`].
+    get_logs_chunk_blocks: u64,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -732,15 +750,30 @@ where
     N: Network,
 {
     pub fn new(address: Address, provider: P) -> Self {
-        Self::with_deploy_block(address, provider, resolve_bridge_deploy_block())
+        Self::with_scan_config(
+            address,
+            provider,
+            resolve_bridge_deploy_block(),
+            resolve_get_logs_chunk_blocks(),
+        )
     }
 
     pub fn with_deploy_block(address: Address, provider: P, deploy_block: u64) -> Self {
+        Self::with_scan_config(address, provider, deploy_block, GET_LOGS_CHUNK_BLOCKS)
+    }
+
+    pub fn with_scan_config(
+        address: Address,
+        provider: P,
+        deploy_block: u64,
+        get_logs_chunk_blocks: u64,
+    ) -> Self {
         let contract = AckiNackiBridge::new(address, provider);
         Self {
             contract,
             address,
             deploy_block,
+            get_logs_chunk_blocks: get_logs_chunk_blocks.max(1),
         }
     }
 
@@ -1147,7 +1180,7 @@ where
             .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
         let from = self.deploy_block.min(to);
         let mut events: Vec<(u8, u64)> = Vec::new();
-        for (start, end) in get_logs_chunks(from, to, GET_LOGS_CHUNK_BLOCKS) {
+        for (start, end) in get_logs_chunks(from, to, self.get_logs_chunk_blocks) {
             let filter = Filter::new()
                 .address(self.address)
                 .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)

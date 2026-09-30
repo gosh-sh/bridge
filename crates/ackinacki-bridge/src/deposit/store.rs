@@ -338,7 +338,10 @@ impl Store {
         self.dir.join(format!("{op}.json"))
     }
 
+    /// Writes `rec` atomically and durably. A record that `load` would
+    /// refuse is not written: one such file would fail every later listing.
     pub fn write(&self, rec: &mut OpRecord) -> std::io::Result<()> {
+        rec.validate().map_err(std::io::Error::other)?;
         rec.updated_at = crate::idempotency::rfc3339_now();
         let bytes = serde_json::to_vec_pretty(rec).map_err(std::io::Error::other)?;
         let mut tmp = tempfile::Builder::new()
@@ -563,6 +566,25 @@ mod tests {
         std::fs::write(s.record_path(&r.op_id), serde_json::to_vec(&r).unwrap()).unwrap();
         let e = s.load(&r.op_id).unwrap_err();
         assert!(e.to_string().contains(&r.op_id), "{e}");
+    }
+
+    #[test]
+    fn a_record_that_would_not_load_is_never_written() {
+        // Written, it would make every later listing fail closed and stop
+        // every deposit from this directory until repaired by hand.
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let mut r = OpRecord::new(Store::new_op_id(), params(), "bd44".into());
+        s.write(&mut r).unwrap();
+        r.stage = OpStage::Signed; // no request, no tx
+        let e = s.write(&mut r).unwrap_err();
+        assert!(e.to_string().contains("Signed"), "{e}");
+        assert_eq!(
+            s.load(&r.op_id).unwrap().stage,
+            OpStage::Reserved,
+            "the record on disk is the last valid one"
+        );
+        assert_eq!(s.list().unwrap().len(), 1);
     }
 
     #[test]

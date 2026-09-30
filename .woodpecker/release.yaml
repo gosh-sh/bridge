@@ -88,10 +88,10 @@ steps:
              --pattern kzg_bn254_21.srs --output kzg_bn254_21.srs; then
           echo "Ceremony carried over from $PREVIOUS."
         else
-          echo "No kzg_bn254_21.srs on ${PREVIOUS:-any earlier release}. The deposit prover's"
+          echo "No kzg_bn254_21.srs on $${PREVIOUS:-any earlier release}. The deposit prover's"
           echo "kzg_params_18.srs is derived from it, so no release goes out without it."
-          echo "Upload it once by hand to ${PREVIOUS:-an earlier release}, then re-run this pipeline:"
-          echo "  gh release upload ${PREVIOUS:-<tag>} kzg_bn254_21.srs -R $REPO"
+          echo "Upload it once by hand to $${PREVIOUS:-an earlier release}, then re-run this pipeline:"
+          echo "  gh release upload $${PREVIOUS:-<tag>} kzg_bn254_21.srs -R $REPO"
           exit 1
         fi
 

@@ -89,9 +89,10 @@ pub const ONE_READ: Duration = Duration::from_secs(60);
 /// no run reaches the end of.
 const FAR: Duration = Duration::from_secs(30 * 365 * 86_400);
 
-/// `d` from now. A `d` the clock cannot add is cut to [`FAR`]: the command
-/// line refuses such values, and a step after the deposit must not panic
-/// on one either.
+/// `d` from now. A `d` the clock cannot add is cut to [`FAR`], or to now
+/// should not even that fit (the step then times out and can be resumed):
+/// the command line refuses such values, and a step after the deposit must
+/// not panic on one either.
 pub fn deadline_after(d: Duration) -> tokio::time::Instant {
     let now = tokio::time::Instant::now();
     now.checked_add(d)

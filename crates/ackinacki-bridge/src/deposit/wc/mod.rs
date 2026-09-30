@@ -156,30 +156,14 @@ impl Wallet for WalletConnectWallet {
                 },
                 Err(e) => return Err(e),
             }
-            let deadline = tokio::time::Instant::now() + t;
-            while s.accounts_on(&net.caip2()).is_empty() {
-                if tokio::time::Instant::now() > deadline {
-                    return Err(WalletError::Other(format!(
-                        "the wallet did not add {}",
-                        net.name()
-                    )));
-                }
-                // A harmless request lets `request` process the pending
-                // session update.
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "only the session update matters here"
-                )]
-                let _ = session::request(
-                    &mut r,
-                    &mut s,
-                    &any_chain,
-                    "eth_accounts",
-                    json!([]),
-                    Duration::from_secs(5),
-                )
-                .await;
-            }
+            session::wait_for_accounts_on(&mut r, &mut s, &net.caip2(), t)
+                .await
+                .map_err(|e| match e {
+                    WalletError::Timeout => {
+                        WalletError::Other(format!("the wallet did not add {}", net.name()))
+                    },
+                    other => other,
+                })?;
         }
         let accounts = s.accounts_on(&net.caip2());
         let account = match self.cfg.expect_from {
@@ -301,6 +285,7 @@ mod tests {
             signer: signer.clone(),
             send_result: Ok(B256::repeat_byte(0x77)),
             missing_chain_then_add,
+            add_update: AddUpdate::Before,
         }
     }
 
@@ -395,5 +380,45 @@ mod tests {
             .map(|(_, _, ttl)| ttl)
             .collect();
         assert_eq!(ttls, vec![600]);
+    }
+
+    /// A wallet that adds Sepolia but announces it as `add_update` says.
+    async fn connect_with(
+        add_update: AddUpdate,
+        request_timeout: Duration,
+    ) -> Result<Address, WalletError> {
+        let relay = MockRelay::start().await;
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        let ui = Arc::new(RecordingUi::new(true));
+        let mut c = cfg(&relay, Duration::from_secs(10));
+        c.request_timeout = request_timeout;
+        let mut w = WalletConnectWallet::new(c);
+        let mut b = behaviour(&signer, true);
+        b.add_update = add_update;
+        let watcher = scan_when_shown(ui.clone(), relay.url(), b);
+        let r = tokio::time::timeout(Duration::from_secs(30), w.connect(ui.as_ref()))
+            .await
+            .expect("connect must end in bounded time");
+        watcher.abort();
+        r
+    }
+
+    #[tokio::test]
+    async fn a_chain_announced_after_the_add_answer_is_waited_for() {
+        let account = connect_with(AddUpdate::After, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_ne!(account, Address::ZERO);
+    }
+
+    #[tokio::test]
+    async fn a_wallet_that_never_announces_the_chain_ends_the_wait_without_asking_again() {
+        let e = connect_with(AddUpdate::Never, Duration::from_millis(600))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            WalletError::Other("the wallet did not add Sepolia".into())
+        );
     }
 }

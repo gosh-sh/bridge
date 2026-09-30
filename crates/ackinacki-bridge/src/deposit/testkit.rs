@@ -675,6 +675,18 @@ impl MockRelay {
     }
 }
 
+/// When a [`MockWalletPeer`] tells the session about the chain it just
+/// added.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AddUpdate {
+    /// `wc_sessionUpdate` first, then the answer.
+    Before,
+    /// The answer first, then `wc_sessionUpdate`.
+    After,
+    /// Answers and never updates the session.
+    Never,
+}
+
 /// How a [`MockWalletPeer`] answers.
 pub struct PeerBehaviour {
     /// The CAIP-10 accounts it shares, e.g. `eip155:11155111:0x…`.
@@ -687,6 +699,8 @@ pub struct PeerBehaviour {
     /// then answers 4902, and `wallet_addEthereumChain` updates the session
     /// to `accounts` before it answers.
     pub missing_chain_then_add: bool,
+    /// When the update that follows `wallet_addEthereumChain` is sent.
+    pub add_update: AddUpdate,
 }
 
 /// The wallet side of WalletConnect, on the same primitives as the dApp
@@ -753,7 +767,23 @@ impl MockWalletPeer {
                         accounts = b.accounts.clone();
                         let update = json!({"id": 98, "jsonrpc": "2.0", "method": "wc_sessionUpdate",
                             "params": {"namespaces": {"eip155": {"accounts": accounts, "methods": METHODS, "events": EVENTS}}}});
-                        Self::send(&r, &topic, &sym, update, TAG_UPDATE).await;
+                        match b.add_update {
+                            AddUpdate::Before => {
+                                Self::send(&r, &topic, &sym, update, TAG_UPDATE).await;
+                            },
+                            AddUpdate::After => {
+                                Self::send(
+                                    &r,
+                                    &topic,
+                                    &sym,
+                                    ok(serde_json::Value::Null),
+                                    TAG_REQUEST_RESP,
+                                )
+                                .await;
+                                Self::send(&r, &topic, &sym, update, TAG_UPDATE).await;
+                            },
+                            AddUpdate::Never => {},
+                        }
                         ok(serde_json::Value::Null)
                     },
                     _ => err(-32601, "unsupported"),

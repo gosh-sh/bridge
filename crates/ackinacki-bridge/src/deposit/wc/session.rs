@@ -514,6 +514,26 @@ pub async fn request(
     }
 }
 
+/// Waits, sending nothing, until the session shares an account on the
+/// CAIP-2 chain `caip2` — a `wc_sessionUpdate` from the wallet — and
+/// returns `Timeout` if that does not happen within `timeout`. Updates,
+/// pings and events are applied and acknowledged as in [`request`].
+pub async fn wait_for_accounts_on(
+    relay: &mut Relay,
+    s: &mut Session,
+    caip2: &str,
+    timeout: Duration,
+) -> Result<(), WalletError> {
+    let deadline = deadline_after(timeout);
+    while s.accounts_on(caip2).is_empty() {
+        let v = next_on(relay, &s.topic, &s.sym_key, deadline).await?;
+        if let Some(m) = v["method"].as_str() {
+            from_wallet(relay, s, m, &v).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Ends the session for the wallet too: `wc_sessionDelete`, kept by the
 /// relay for a day. Best effort, and no longer than [`DELETE_WAIT`]: a
 /// session the relay cannot carry the delete for expires on its own.
@@ -546,6 +566,7 @@ mod tests {
 
     fn peer(signer: &alloy::signers::local::PrivateKeySigner) -> PeerBehaviour {
         PeerBehaviour {
+            add_update: AddUpdate::Before,
             accounts: vec![format!("eip155:11155111:{:#x}", signer.address())],
             signer: signer.clone(),
             send_result: Ok(B256::repeat_byte(0x42)),

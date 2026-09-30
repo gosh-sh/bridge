@@ -1459,10 +1459,11 @@ async fn walk(
                                 }
                             },
                             FinalizeExit::BackToAnchor => {
-                                ui.warn(
+                                ui.warn(&format!(
                                     "the bridge no longer accepts the deposit's block (224); \
-                                     waiting for the anchor again",
-                                );
+                                     waiting for the anchor again. Possible causes: {}",
+                                    anchor_wait::ANCHOR_LOST_CAUSES
+                                ));
                                 board.again(StepId::Finalize, "");
                                 Phase::anchor(p)
                             },
@@ -2834,13 +2835,22 @@ mod tests {
     async fn a_224_at_finalize_goes_back_to_the_anchor_and_reuses_the_proof() {
         let (w, r, ui) = happy_world(|w| w.first_finalize_hits_224()).await;
         r.unwrap();
-        assert!(
-            ui.warnings()
-                .iter()
-                .any(|s| s.contains("no longer accepts")),
-            "{:#?}",
-            ui.events()
-        );
+        let warned = ui
+            .warnings()
+            .into_iter()
+            .find(|s| s.contains("no longer accepts"));
+        let Some(warned) = warned else {
+            panic!("{:#?}", ui.events())
+        };
+        // The same causes as an anchor lost during the wait.
+        for cause in [
+            "(224)",
+            "the owner withdrew the anchor",
+            "an updateCode of the bridge wiped all anchors",
+            "a light-client anchor older than a year expired",
+        ] {
+            assert!(warned.contains(cause), "{cause}: {warned}");
+        }
         assert_eq!(w.prover_runs(), 1, "the proof for the same block is reused");
         assert_eq!(*w.an.sent.lock().unwrap(), 2);
     }

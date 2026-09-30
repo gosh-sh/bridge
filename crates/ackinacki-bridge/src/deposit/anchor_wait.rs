@@ -59,6 +59,11 @@ pub struct Tick {
     pub lc: Option<Result<(), LcFailure>>,
 }
 
+/// Why the bridge can stop accepting a block it had accepted.
+pub const ANCHOR_LOST_CAUSES: &str = "the owner withdrew the anchor; an updateCode of the bridge \
+                                      wiped all anchors, the allowlist and the pause flag; a \
+                                      light-client anchor older than a year expired";
+
 /// What one poll decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitStep {
@@ -98,12 +103,10 @@ pub fn step(
     }
     if st.was_anchored && !t.anchored {
         st.was_anchored = false;
-        return WaitStep::AnchorLost(
+        return WaitStep::AnchorLost(format!(
             "the bridge no longer accepts the deposit's block; waiting again. Possible causes: \
-             the owner withdrew the anchor; an updateCode of the bridge wiped all anchors, the \
-             allowlist and the pause flag; a light-client anchor older than a year expired"
-                .into(),
-        );
+             {ANCHOR_LOST_CAUSES}"
+        ));
     }
     if !t.anchored {
         let base = plan.status_line(stored);

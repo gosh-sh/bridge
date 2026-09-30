@@ -9,7 +9,7 @@
 #
 # Options:
 #   --prefix PATH   where to install (default ~/.local/share/ackinacki-bridge)
-#   --check         report what is missing; download nothing, change nothing
+#   --check         report what is missing, download nothing
 #   --yes           do not ask before each download
 #
 # Overrides, for a mirror or an internal build:
@@ -348,7 +348,7 @@ fi
 
 # A profile written before deposits existed has none of their keys. It is
 # not rewritten, so the user's own settings survive: the deposit keys are
-# appended. --check promises to change nothing, so there it is only reported.
+# appended. --check leaves the user's profile alone and only reports it.
 if have_profile && ! have_deposit_settings; then
   if [ "$MODE" = check ]; then
     gap "$PROFILE: no deposit settings; a run without --check appends them"

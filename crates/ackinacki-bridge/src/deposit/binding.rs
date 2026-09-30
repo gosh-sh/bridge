@@ -172,6 +172,55 @@ pub fn check_explicit(
     Ok(())
 }
 
+/// Transaction counts: `eth_getTransactionCount` is the NEXT nonce, so
+/// slot `n` is used once the count is above `n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonceObs {
+    /// Count at the `latest` tag.
+    pub latest_count: u64,
+    /// `None` when the RPC does not answer for the `finalized` tag.
+    pub finalized_count: Option<u64>,
+}
+
+/// What the nonce counts say about the slot of a signed transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceVerdict {
+    /// Nothing executed in the slot yet: pending or dropped.
+    NotExecuted,
+    /// Something executed in the slot, and it could still be reorged out.
+    UsedAwaitFinality,
+    /// Something executed in the slot in finalized state.
+    ConsumedFinal,
+}
+
+impl NonceVerdict {
+    /// One-line status for the operator, naming slot `n`.
+    pub fn status_text(self, n: u64) -> String {
+        match self {
+            NonceVerdict::NotExecuted => {
+                format!("nonce {n} not used yet: the transaction is pending or was dropped")
+            },
+            NonceVerdict::UsedAwaitFinality => {
+                format!("nonce {n} is used; waiting for finality to decide")
+            },
+            NonceVerdict::ConsumedFinal => format!("nonce {n} is used in a finalized block"),
+        }
+    }
+}
+
+/// Verdict on slot `tx_nonce`: consumed only when the finalized count
+/// is above it; an RPC that does not answer for `finalized` never
+/// yields a negative verdict.
+pub fn nonce_verdict(tx_nonce: u64, obs: NonceObs) -> NonceVerdict {
+    if obs.latest_count <= tx_nonce {
+        return NonceVerdict::NotExecuted;
+    }
+    match obs.finalized_count {
+        Some(f) if f > tx_nonce => NonceVerdict::ConsumedFinal,
+        _ => NonceVerdict::UsedAwaitFinality,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, Address, Bytes, B256};
@@ -348,5 +397,33 @@ mod tests {
         let mut claimed = Claims::default();
         claimed.tx_hashes.insert(B256::repeat_byte(1));
         assert!(check_explicit(&a, &cand(1, 42), &claimed, &[]).is_err());
+    }
+
+    #[test]
+    fn a_slot_is_consumed_only_in_finalized_state() {
+        let v = |latest, fin| {
+            nonce_verdict(7, NonceObs {
+                latest_count: latest,
+                finalized_count: fin,
+            })
+        };
+        assert_eq!(v(7, Some(7)), NonceVerdict::NotExecuted);
+        assert_eq!(
+            v(8, Some(7)),
+            NonceVerdict::UsedAwaitFinality,
+            "a cancel in one block can be reorged out"
+        );
+        assert_eq!(v(8, Some(8)), NonceVerdict::ConsumedFinal);
+    }
+
+    #[test]
+    fn an_rpc_without_finalized_never_yields_a_negative_verdict() {
+        assert_eq!(
+            nonce_verdict(7, NonceObs {
+                latest_count: 100,
+                finalized_count: None
+            }),
+            NonceVerdict::UsedAwaitFinality
+        );
     }
 }

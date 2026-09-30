@@ -14,6 +14,7 @@ pub mod log_index;
 pub mod pi;
 pub mod prover_files;
 pub mod refusals;
+pub mod retry;
 pub mod store;
 pub mod ui;
 

@@ -105,7 +105,6 @@ bs58 = "0.5"
 # different dependencies), so rustls cannot pick a process default and the
 # relay client names `ring` itself, with the Mozilla roots from
 # `webpki-roots` — the pairing the GraphQL client's reqwest already uses.
-# All three are already in this workspace's lock file.
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"

@@ -495,6 +495,10 @@ pub struct MockRelay {
     state: std::sync::Arc<Mutex<MockRelayState>>,
     /// Tells every open connection to hang up.
     kill: tokio::sync::broadcast::Sender<()>,
+    /// Tells every open connection to go silent without closing.
+    stall: tokio::sync::broadcast::Sender<()>,
+    /// Connections accepted so far.
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// What [`MockRelay`] knows across connections.
@@ -514,16 +518,26 @@ impl MockRelay {
         let addr = listener.local_addr().unwrap();
         let state = std::sync::Arc::new(Mutex::new(MockRelayState::default()));
         let (kill, _) = tokio::sync::broadcast::channel(4);
-        let (st, k) = (state.clone(), kill.clone());
+        let (stall, _) = tokio::sync::broadcast::channel(4);
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (st, k, sl, n) = (state.clone(), kill.clone(), stall.clone(), accepted.clone());
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
-                tokio::spawn(MockRelay::serve(tcp, st.clone(), k.subscribe()));
+                n.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(MockRelay::serve(
+                    tcp,
+                    st.clone(),
+                    k.subscribe(),
+                    sl.subscribe(),
+                ));
             }
         });
         MockRelay {
             addr,
             state,
             kill,
+            stall,
+            accepted,
         }
     }
 
@@ -532,8 +546,25 @@ impl MockRelay {
         format!("ws://{}", self.addr)
     }
 
-    /// Cuts every open connection. Subscriptions die with their connections;
-    /// the backlog stays.
+    /// Connections accepted so far, reconnects included.
+    pub fn connections(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Makes every open connection half-open: from now on it reads and
+    /// writes nothing — not even a pong — and it does not close. The
+    /// relay still counts its subscriptions, so what is published to them
+    /// meanwhile is only in the backlog.
+    pub fn stall_all(&self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "with no connection open there is nothing to stall"
+        )]
+        let _ = self.stall.send(());
+    }
+
+    /// Cuts every open connection, stalled ones included. Subscriptions die
+    /// with their connections; the backlog stays.
     pub fn drop_all(&self) {
         #[expect(
             clippy::let_underscore_must_use,
@@ -544,10 +575,12 @@ impl MockRelay {
     }
 
     /// One client connection, until the client leaves or `killed` fires.
+    /// After `stalled` fires it only waits for `killed`.
     async fn serve(
         tcp: tokio::net::TcpStream,
         state: std::sync::Arc<Mutex<MockRelayState>>,
         mut killed: tokio::sync::broadcast::Receiver<()>,
+        mut stalled: tokio::sync::broadcast::Receiver<()>,
     ) {
         use futures::{SinkExt as _, StreamExt as _};
         use tokio_tungstenite::tungstenite::Message;
@@ -560,13 +593,27 @@ impl MockRelay {
         loop {
             tokio::select! {
                 _ = killed.recv() => return,
+                _ = stalled.recv() => {
+                    // The socket stays open and untouched until `drop_all`.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "a closed kill channel ends the stall just the same"
+                    )]
+                    let _ = killed.recv().await;
+                    return;
+                }
                 Some(o) = out_rx.recv() => {
                     if sink.send(Message::Text(o.into())).await.is_err() {
                         return;
                     }
                 }
                 m = stream.next() => {
-                    let Some(Ok(Message::Text(t))) = m else { return };
+                    let t = match m {
+                        Some(Ok(Message::Text(t))) => t,
+                        // Pings are answered by tungstenite on the next read.
+                        Some(Ok(_)) => continue,
+                        _ => return,
+                    };
                     let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
                     let topic = v["params"]["topic"].as_str().unwrap_or_default().to_string();
                     let mut s = state.lock().unwrap();

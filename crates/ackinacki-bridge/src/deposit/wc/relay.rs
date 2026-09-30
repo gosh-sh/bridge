@@ -1,9 +1,12 @@
 //! A WalletConnect relay client: one websocket, JSON-RPC 2.0, the three
 //! `irn_*` calls this CLI needs. The socket lives in a background task
 //! that reconnects with backoff and resubscribes every topic; the relay
-//! keeps messages for their TTL, so a reconnect loses nothing. A message
-//! is handed out at most once: a redelivery after a reconnect and an echo
-//! of this client's own publication are both dropped.
+//! keeps messages for their TTL, so a reconnect loses nothing. A socket
+//! that goes silent without closing — a network switch, a sleep, a
+//! middlebox that dropped the flow — is caught by pinging it and giving up
+//! on it when nothing at all comes back. A message is handed out at most
+//! once: a redelivery after a reconnect and an echo of this client's own
+//! publication are both dropped.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -53,6 +56,13 @@ pub struct Relay {
 
 /// How long one attempt to open the websocket may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the client pings the relay.
+const PING_INTERVAL: Duration = Duration::from_secs(25);
+
+/// How long the socket may stay silent — not even a pong — before it is
+/// taken for dead and replaced: two missed pings.
+const READ_DEADLINE: Duration = Duration::from_secs(2 * PING_INTERVAL.as_secs());
 
 /// A fresh JSON-RPC id: milliseconds since the epoch times 1000 plus a
 /// counter, the shape WalletConnect peers use.
@@ -192,14 +202,20 @@ fn answer(reply: oneshot::Sender<anyhow::Result<Value>>, result: anyhow::Result<
     let _ = reply.send(result);
 }
 
+/// A JSON-RPC frame as a websocket text message.
+fn text(frame: Value) -> Message {
+    Message::Text(frame.to_string().into())
+}
+
 /// Writes a frame nobody waits on. A failed write needs no handling here:
-/// the broken socket ends the next read, and that read reconnects.
-async fn send_unanswered(ws: &mut Ws, frame: Value) {
+/// a broken socket ends the next read, and a silent one misses the read
+/// deadline; either way it is replaced.
+async fn send_unanswered(ws: &mut Ws, frame: Message) {
     #[expect(
         clippy::let_underscore_must_use,
-        reason = "a broken socket shows up on the next read, which reconnects"
+        reason = "a broken socket shows up on the next read or at the read deadline"
     )]
-    let _ = ws.send(Message::Text(frame.to_string().into())).await;
+    let _ = ws.send(frame).await;
 }
 
 /// Opens the websocket again, pausing before each attempt: 1 s doubling to
@@ -219,9 +235,33 @@ async fn reconnect(url: &str, tls: &Connector) -> Ws {
     }
 }
 
+/// Replaces a dead socket: every call waiting on it fails (it may or may
+/// not have reached the relay), a new socket is opened, and every
+/// confirmed topic is subscribed again, which makes the relay hand over
+/// what it kept for them.
+async fn recover(
+    url: &str,
+    tls: &Connector,
+    topics: &HashSet<String>,
+    pending: &mut HashMap<u64, (Option<String>, oneshot::Sender<anyhow::Result<Value>>)>,
+) -> Ws {
+    for (_, (_, reply)) in pending.drain() {
+        answer(reply, Err(dropped()));
+    }
+    let mut ws = reconnect(url, tls).await;
+    for t in topics {
+        let frame = json!({
+            "id": next_id(), "jsonrpc": "2.0", "method": "irn_subscribe",
+            "params": { "topic": t }
+        });
+        send_unanswered(&mut ws, text(frame)).await;
+    }
+    ws
+}
+
 /// The socket task: sends calls, matches results to them by id, acks and
-/// forwards `irn_subscription` pushes, and reconnects when the socket
-/// breaks. Ends when the [`Relay`] is gone.
+/// forwards `irn_subscription` pushes, pings, and replaces the socket when
+/// it breaks or goes silent. Ends when the [`Relay`] is gone.
 async fn run(
     url: String,
     tls: Connector,
@@ -229,6 +269,8 @@ async fn run(
     mut cmds: mpsc::UnboundedReceiver<Cmd>,
     inbox: mpsc::UnboundedSender<Incoming>,
 ) {
+    use tokio::time::{interval_at, sleep_until, Instant, MissedTickBehavior};
+
     // Topics with a confirmed subscription, renewed after each reconnect.
     let mut topics: HashSet<String> = HashSet::new();
     // Calls sent and not yet answered, by id; a subscribe carries its topic.
@@ -236,10 +278,20 @@ async fn run(
         HashMap::new();
     // sha256 of every message delivered or published by this client.
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    let mut ping = interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // When the socket last delivered any frame, pongs included.
+    let mut heard = Instant::now();
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
                 let Some(Cmd::Call { method, params, reply }) = cmd else { return };
+                if reply.is_closed() {
+                    // The caller gave up, typically while a reconnect held
+                    // this call in the queue. Sent now, a request could
+                    // reach the wallet after the run has moved on.
+                    continue;
+                }
                 if method == "irn_publish" {
                     // A relay may hand our own publication back to us on a
                     // topic we are subscribed to; it is never an answer.
@@ -250,35 +302,40 @@ async fn run(
                 let topic = (method == "irn_subscribe")
                     .then(|| params["topic"].as_str().unwrap_or_default().to_string());
                 let frame = json!({ "id": id, "jsonrpc": "2.0", "method": method, "params": params });
-                if ws.send(Message::Text(frame.to_string().into())).await.is_err() {
+                if ws.send(text(frame)).await.is_err() {
                     answer(reply, Err(dropped()));
                     continue;
                 }
                 pending.insert(id, (topic, reply));
             }
+            _ = ping.tick() => send_unanswered(&mut ws, Message::Ping(Default::default())).await,
+            () = sleep_until(heard + READ_DEADLINE) => {
+                ws = recover(&url, &tls, &topics, &mut pending).await;
+                heard = Instant::now();
+                ping.reset();
+            }
             frame = ws.next() => {
-                let text = match frame {
-                    Some(Ok(Message::Text(t))) => t,
-                    // Pings are answered by tungstenite itself on the next read.
-                    Some(Ok(_)) => continue,
+                let body = match frame {
+                    Some(Ok(m)) => {
+                        heard = Instant::now();
+                        match m {
+                            Message::Text(t) => t,
+                            // Pings are answered by tungstenite itself on the
+                            // next read; pongs only count as a sign of life.
+                            _ => continue,
+                        }
+                    }
                     Some(Err(_)) | None => {
-                        for (_, (_, reply)) in pending.drain() {
-                            answer(reply, Err(dropped()));
-                        }
-                        ws = reconnect(&url, &tls).await;
-                        for t in &topics {
-                            let frame = json!({
-                                "id": next_id(), "jsonrpc": "2.0", "method": "irn_subscribe",
-                                "params": { "topic": t }
-                            });
-                            send_unanswered(&mut ws, frame).await;
-                        }
+                        ws = recover(&url, &tls, &topics, &mut pending).await;
+                        heard = Instant::now();
+                        ping.reset();
                         continue;
                     }
                 };
-                let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(body.as_str()) else { continue };
                 if v["method"] == "irn_subscription" {
-                    send_unanswered(&mut ws, json!({ "id": v["id"], "jsonrpc": "2.0", "result": true })).await;
+                    let ack = json!({ "id": v["id"], "jsonrpc": "2.0", "result": true });
+                    send_unanswered(&mut ws, text(ack)).await;
                     let d = &v["params"]["data"];
                     let Some(message) = d["message"].as_str() else { continue };
                     if seen.insert(Sha256::digest(message.as_bytes()).into()) {
@@ -374,6 +431,57 @@ mod tests {
         assert!(a.recv(Duration::from_secs(5)).await.is_some());
         relay.drop_all(); // the relay redelivers its backlog on resubscribe
         assert!(a.recv(Duration::from_secs(3)).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stalled_connection_is_replaced_and_loses_nothing() {
+        let relay = MockRelay::start().await;
+        let mut a = Relay::connect(relay.url()).await.unwrap();
+        a.subscribe("t1").await.unwrap();
+        tokio::time::pause();
+        // Half-open: nothing closes the socket, it just goes silent.
+        relay.stall_all();
+        let b = Relay::connect(relay.url()).await.unwrap();
+        b.publish("t1", "after", 300, 1108).await.unwrap();
+        let got = a.recv(Duration::from_secs(600)).await.unwrap();
+        assert_eq!(got.message, "after");
+        assert_eq!(
+            relay.connections(),
+            3,
+            "`a` reconnected once, `b` connected once"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_connection_is_kept_alive_by_pings() {
+        let relay = MockRelay::start().await;
+        let mut a = Relay::connect(relay.url()).await.unwrap();
+        a.subscribe("t1").await.unwrap();
+        tokio::time::pause();
+        // Ten quiet minutes: the pongs alone must keep the socket.
+        assert!(a.recv(Duration::from_secs(600)).await.is_none());
+        assert_eq!(relay.connections(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_call_given_up_during_a_reconnect_is_never_sent() {
+        let relay = MockRelay::start().await;
+        let a = Relay::connect(relay.url()).await.unwrap();
+        relay.drop_all();
+        // `a` has seen the socket close and waits about a second to reconnect.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(100),
+            a.publish("t1", "stale", 300, 1108),
+        )
+        .await;
+        assert!(gave_up.is_err());
+        let mut b = Relay::connect(relay.url()).await.unwrap();
+        b.subscribe("t1").await.unwrap();
+        // Queued after the stale call, so it would arrive second.
+        a.publish("t1", "fresh", 300, 1108).await.unwrap();
+        let got = b.recv(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(got.message, "fresh");
     }
 
     #[test]

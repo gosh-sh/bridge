@@ -96,6 +96,10 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
 
+# WalletConnect relay authorization: did:key and the EdDSA JWT.
+ed25519-dalek = "2"
+bs58 = "0.5"
+
 [dev-dependencies]
 tempfile = "3"
 # Test-only: building a real deployed-multisig account BOC offline, so a

@@ -181,9 +181,12 @@ mod tests {
         include_bytes!("../../tests/fixtures/deposit/bridge_shellnet_account.boc");
     const ERR_INVALID_SENDER: i64 = 207;
 
-    fn proof_00() -> DepositIdentity {
+    /// A deposit whose id differs from the zero dapp id beside it in
+    /// `_depositHash`, so a hash with the two slots swapped or the id left
+    /// out is another voucher address.
+    fn deposit_7() -> DepositIdentity {
         DepositIdentity {
-            deposit_id: U256::ZERO,
+            deposit_id: U256::from(7),
             contract: address!("cdfd6cef70f68d0849310cd970f8ef8f8e4b4fdb"),
             chain_id: 11_155_111,
         }
@@ -215,7 +218,7 @@ mod tests {
     /// says whether the address computed here is the voucher's.
     fn confirm_deposit_exit_code(src_account: [u8; 32]) -> i64 {
         let ctx = offline_context();
-        let id = proof_00();
+        let id = deposit_7();
         let msg = encode_internal_message(ctx.clone(), ParamsOfEncodeInternalMessage {
             abi: Some(Abi::Json(BRIDGE_ABI.to_string())),
             address: Some(format!("0:{BRIDGE_ACC}")),
@@ -249,22 +252,23 @@ mod tests {
             ..Default::default()
         }))
         .unwrap();
+        // A skipped compute phase has no exit code: that is no answer.
         res.transaction["compute"]["exit_code"]
             .as_i64()
-            .unwrap_or(0)
+            .expect("the compute phase ran")
     }
 
     #[test]
     fn the_bridge_accepts_the_computed_voucher_as_sender() {
         let ctx = offline_context();
-        let voucher = voucher_account_id(&ctx, &proof_00()).unwrap();
+        let voucher = voucher_account_id(&ctx, &deposit_7()).unwrap();
         assert_ne!(confirm_deposit_exit_code(voucher), ERR_INVALID_SENDER);
     }
 
     #[test]
     fn the_bridge_refuses_any_other_sender() {
         let ctx = offline_context();
-        let mut other = voucher_account_id(&ctx, &proof_00()).unwrap();
+        let mut other = voucher_account_id(&ctx, &deposit_7()).unwrap();
         other[31] ^= 1;
         assert_eq!(confirm_deposit_exit_code(other), ERR_INVALID_SENDER);
     }

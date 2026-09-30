@@ -135,8 +135,8 @@ fn out_of_time(op: &str, in_doubt: bool) -> CliError {
     }
 }
 
-/// Nothing left this process on this attempt. Exit 32 — unless an earlier
-/// send of this step has no verdict: that one may have executed, exit 34.
+/// Nothing left this process on this attempt. Exit 32 — unless the send
+/// before it is still in doubt: that one may have executed, exit 34.
 /// Either way the record says Finalizing, so --resume starts with the
 /// checks before a send.
 fn not_sent(op: &str, earlier_in_doubt: bool, what: String) -> CliError {
@@ -221,8 +221,9 @@ pub async fn finalize(
 
 /// The checks and sends of step 8, until one decides. `in_doubt` says
 /// whether a send of this step may have executed: set when a send starts,
-/// kept after an answer without a verdict, and put back to what it was
-/// only by a refusal before accept, which settles the one send it answers.
+/// kept after an answer without a verdict, and cleared by a refusal before
+/// accept — that send did not execute, and the checks before it found no
+/// earlier one executed.
 #[allow(clippy::too_many_arguments)]
 async fn attempts(
     an: &dyn AnRead,
@@ -357,9 +358,9 @@ async fn attempts(
             },
             Reaction::BackToAnchor => return Ok(FinalizeExit::BackToAnchor),
             Reaction::WaitPaused => {
-                // Refused before accept: this send did not execute. An earlier
-                // one without a verdict still may have.
-                in_doubt.store(earlier, Ordering::SeqCst);
+                // Refused before accept: this send did not execute, and the
+                // checks before it found no earlier one executed.
+                in_doubt.store(false, Ordering::SeqCst);
                 ui.status("the bridge is paused by its owner; deposits finalize once it is lifted");
                 tokio::time::sleep(cx.poll).await;
             },
@@ -837,9 +838,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_refusal_before_accept_does_not_settle_an_earlier_send_in_doubt() {
-        // The 231 answers the second send only; the first, without a verdict,
-        // may still have executed.
+    async fn a_refusal_before_accept_ends_the_doubt_before_a_message_that_never_left() {
+        // The checks before the second send found the first one not executed,
+        // and the 231 refused the second: nothing is in doubt, exit 32.
         use crate::deposit::{refusals::FinalizeSend, store::*};
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path()).unwrap();
@@ -865,16 +866,22 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             e.exit_code(),
-            crate::errors::ExitCode::CreditUnconfirmed,
+            crate::errors::ExitCode::DepositProofFailed,
+            "{e}"
+        );
+        assert!(
+            e.to_string()
+                .contains("encode finalizeDeposit: bad proof bytes"),
             "{e}"
         );
         assert_eq!(*an.sent.lock().unwrap(), 3);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_deadline_after_a_send_in_doubt_and_a_refusal_is_exit_34() {
-        // The pause wait after the 231 is cut by the deadline; the first send
-        // still has no verdict.
+    async fn a_deadline_after_a_send_in_doubt_and_a_refusal_is_exit_31() {
+        // The pause wait after the 231 is cut by the deadline. The last send
+        // was refused before accept, and the checks before it found the first
+        // one, without a verdict, not executed.
         use crate::deposit::{refusals::FinalizeSend, store::*};
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path()).unwrap();
@@ -892,14 +899,12 @@ mod tests {
             20,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
+        let t0 = tokio::time::Instant::now();
         let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
             .await
             .unwrap_err();
-        assert_eq!(
-            e.exit_code(),
-            crate::errors::ExitCode::CreditUnconfirmed,
-            "{e}"
-        );
+        assert_eq!(e.exit_code(), crate::errors::ExitCode::AnWaitTimeout, "{e}");
+        assert_eq!(t0.elapsed(), std::time::Duration::from_secs(20));
         assert_eq!(*an.sent.lock().unwrap(), 2);
     }
 

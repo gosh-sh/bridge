@@ -39,10 +39,13 @@ pub enum SearchOutcome {
     NonceConsumed,
 }
 
-/// Every bridge `Deposit` of the operation's sender from the block the
-/// request was made at through `to_block`, with its transaction and receipt.
-/// A log whose transaction or receipt the node does not return right now is
-/// an error: the search is incomplete, and the caller reads again.
+/// Every transaction with a bridge `Deposit` of the operation's sender
+/// from the block the request was made at through `to_block`, once each,
+/// with its transaction and receipt. A log whose transaction or receipt the
+/// node does not return right now is an error: the search is incomplete,
+/// and the caller reads again. So is a record without a sender or a
+/// request: there is nothing to search from, and an empty list would read
+/// as "nothing was deposited".
 pub async fn candidates(
     evm: &dyn EvmRead,
     op: &OpRecord,
@@ -50,13 +53,21 @@ pub async fn candidates(
     to_block: u64,
 ) -> anyhow::Result<Vec<Candidate>> {
     let (Some(from), Some(q)) = (op.from, op.request.as_ref()) else {
-        return Ok(vec![]);
+        anyhow::bail!(
+            "operation {} has no sender or no deposit request to search from",
+            op.op_id
+        );
     };
-    let mut out = Vec::new();
+    let mut out: Vec<Candidate> = Vec::new();
     for l in evm
         .deposit_logs(bridge, from, q.from_block, to_block)
         .await?
     {
+        // A transaction with two Deposit logs is one transaction in the
+        // slot; step 5 judges it.
+        if out.iter().any(|c| c.tx_hash == l.tx_hash) {
+            continue;
+        }
         // Skipping such a log could turn a found deposit into "nothing was
         // deposited" once the slot is used in finalized state. A log that a
         // reorg removed is gone from the next log query anyway.
@@ -110,6 +121,9 @@ pub async fn search(
     let from = op
         .from
         .ok_or_else(|| anyhow::anyhow!("operation {} has no sender", op.op_id))?;
+    if op.request.is_none() {
+        anyhow::bail!("operation {} has no deposit request", op.op_id);
+    }
     let wallet_hash = match op.tx {
         None => op.request.as_ref().and_then(|q| q.wallet_hash),
         Some(_) => None,
@@ -305,6 +319,63 @@ mod tests {
             deposit_tx(h, FROM, BRIDGE, nonce, 2, deposit_calldata(5, ACC)),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![log]))]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transaction_with_two_bridge_deposits_is_one_candidate() {
+        // Two Deposit logs of one transaction: one transaction in the slot,
+        // bound here and judged by step 5 (exit 35), not "several deposits
+        // use this nonce".
+        let evm = FakeEvm::sepolia();
+        evm.latest.set([header(200, 1)]);
+        let h = B256::repeat_byte(0x45);
+        let b = header(150, 0x15);
+        let one = deposit_log(BRIDGE, U256::from(1), FROM, 5, ACC, Some(0));
+        let two = deposit_log(BRIDGE, U256::from(2), FROM, 5, ACC, Some(1));
+        for log in [&one, &two] {
+            evm.logs.lock().unwrap().push(DepositLogRef {
+                tx_hash: h,
+                block_number: 150,
+                block_hash: b.hash,
+                log: log.clone(),
+            });
+        }
+        evm.txs.lock().unwrap().insert(
+            h,
+            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC)),
+        );
+        evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![one, two]))]);
+        let cands = candidates(&evm, &op(7, None), BRIDGE, 200).await.unwrap();
+        assert_eq!(cands.len(), 1, "{cands:?}");
+        assert_eq!(cands[0].tx_hash, h);
+        let ui = RecordingUi::new(true);
+        let got = search(
+            &evm,
+            &op(7, None),
+            &Claims::default(),
+            BRIDGE,
+            None,
+            &ui,
+            Duration::from_secs(12),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, SearchOutcome::Bound {
+            tx_hash: h,
+            nonce: 7
+        });
+    }
+
+    #[tokio::test]
+    async fn a_record_without_a_sender_or_a_request_has_no_answer_not_an_empty_one() {
+        // An empty list could turn into "nothing was deposited".
+        let evm = FakeEvm::sepolia();
+        let mut no_sender = op(7, None);
+        no_sender.from = None;
+        assert!(candidates(&evm, &no_sender, BRIDGE, 200).await.is_err());
+        let mut no_request = op(7, None);
+        no_request.request = None;
+        assert!(candidates(&evm, &no_request, BRIDGE, 200).await.is_err());
     }
 
     #[tokio::test(start_paused = true)]

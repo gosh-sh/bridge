@@ -1849,6 +1849,9 @@ async fn released_without_identity(
     rec: &OpRecord,
 ) -> CliError {
     let op = &rec.op_id;
+    if rec.from.is_none() {
+        return damaged(store, op, "no sender");
+    }
     let (chain_id, bridge) = (rec.params.chain_id, rec.params.bridge);
     let found = match sender_deposits(d, rec, Instant::now().checked_add(p.recovery_window)).await {
         None => "the chain could not be read for deposits like it".to_string(),
@@ -1928,6 +1931,9 @@ async fn bind_explicit(d: &Deps, store: &Store, rec: &mut OpRecord, h: B256) -> 
                 source: None,
             })),
         };
+    }
+    if rec.from.is_none() {
+        return Err(damaged(store, &op, "no sender"));
     }
     let view = rec.clone();
     let Some(cands) = sender_deposits(d, &view, None).await else {

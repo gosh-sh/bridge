@@ -407,6 +407,115 @@ impl Store {
     }
 }
 
+// -- queries. Callers hold the directory lock.
+
+/// An operation that stops a new deposit from starting, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocking {
+    pub op_id: String,
+    pub stage: OpStage,
+    pub why: &'static str,
+}
+
+impl std::fmt::Display for Blocking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "deposit operation {} {} (stage {:?}); nothing was sent by this run. Continue it with \
+             `ackinacki-bridge deposit --resume {}`, or, after checking in the wallet that its \
+             transaction does not exist, release it with `--abandon {}`",
+            self.op_id, self.why, self.stage, self.op_id, self.op_id
+        )
+    }
+}
+
+/// True when another process holds the operation's lock.
+fn is_driven_by_someone(store: &Store, op: &str) -> CliResult<bool> {
+    Ok(crate::deposit::locks::OpLock::try_take(store.dir(), op)?.is_none())
+}
+
+/// Closes every `Reserved` operation whose lock is free: the run that
+/// reserved it is gone and never asked the wallet. Callers hold the
+/// directory lock.
+pub fn close_interrupted(store: &Store, recs: &mut [OpRecord]) -> CliResult<()> {
+    for r in recs.iter_mut().filter(|r| r.stage == OpStage::Reserved) {
+        // Taking the lock proves nobody drives it; keep it while writing.
+        let Some(_held) = crate::deposit::locks::OpLock::try_take(store.dir(), &r.op_id)? else {
+            continue;
+        };
+        r.fail(
+            OpStage::Reserved,
+            FailReason::Interrupted,
+            ExitCode::PreflightRefused,
+            "the run that reserved it exited before asking the wallet",
+        );
+        store.write(r).map_err(|e| {
+            preflight(format!(
+                "cannot close interrupted operation {}: {e} (nothing was sent)",
+                r.op_id
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// The operation that blocks a new one with the same chain, bridge,
+/// recipient and amount: an unknown EVM outcome, or a live reservation.
+/// The Acki Nacki endpoint is not part of the key. Callers hold the
+/// directory lock.
+pub fn blocking_by_params(
+    store: &Store,
+    recs: &[OpRecord],
+    p: &OpParams,
+) -> CliResult<Option<Blocking>> {
+    let same = |q: &OpParams| {
+        q.chain_id == p.chain_id
+            && q.bridge == p.bridge
+            && q.to == p.to
+            && q.amount_units == p.amount_units
+    };
+    for r in recs.iter().filter(|r| same(&r.params)) {
+        if r.is_unresolved() {
+            return Ok(Some(Blocking {
+                op_id: r.op_id.clone(),
+                stage: r.stage,
+                why: "requested the same deposit and its outcome is still unknown",
+            }));
+        }
+        if r.stage == OpStage::Reserved && is_driven_by_someone(store, &r.op_id)? {
+            return Ok(Some(Blocking {
+                op_id: r.op_id.clone(),
+                stage: r.stage,
+                why: "is being run by another process",
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The operation, other than `except`, requested from `from` on this chain
+/// and bridge whose EVM outcome is still unknown. Callers hold the
+/// directory lock.
+pub fn blocking_by_sender(
+    _store: &Store,
+    recs: &[OpRecord],
+    chain_id: u64,
+    bridge: Address,
+    from: Address,
+    except: &str,
+) -> CliResult<Option<Blocking>> {
+    Ok(recs
+        .iter()
+        .filter(|r| r.op_id != except && r.params.chain_id == chain_id && r.params.bridge == bridge)
+        .filter(|r| r.from == Some(from) && r.is_unresolved())
+        .map(|r| Blocking {
+            op_id: r.op_id.clone(),
+            stage: r.stage,
+            why: "was requested from the same account and its outcome is still unknown",
+        })
+        .next())
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -517,5 +626,101 @@ mod tests {
         let fresh = d.path().join("a").join("b");
         Store::open(&fresh).unwrap();
         assert_eq!(mode(&fresh), 0o700);
+    }
+
+    fn requested(s: &Store, p: OpParams, from: Address) -> OpRecord {
+        let mut r = OpRecord::new(Store::new_op_id(), p, "bd44".into());
+        r.from = Some(from);
+        r.stage = OpStage::Requested;
+        r.request = Some(RequestInfo {
+            nonce_before: 5,
+            from_block: 1,
+            calldata: Bytes::new(),
+            wallet_hash: None,
+        });
+        s.write(&mut r).unwrap();
+        r
+    }
+
+    #[test]
+    fn a_dead_runs_reservation_is_closed_as_interrupted() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let mut r = OpRecord::new(Store::new_op_id(), params(), "bd44".into());
+        s.write(&mut r).unwrap();
+        let mut recs = s.list().unwrap();
+        close_interrupted(&s, &mut recs).unwrap();
+        assert_eq!(s.load(&r.op_id).unwrap().stage, OpStage::Failed);
+        assert_eq!(
+            s.load(&r.op_id).unwrap().failure.unwrap().reason,
+            FailReason::Interrupted
+        );
+    }
+
+    #[test]
+    fn a_live_runs_reservation_is_left_alone_and_blocks() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let mut r = OpRecord::new(Store::new_op_id(), params(), "bd44".into());
+        s.write(&mut r).unwrap();
+        let _live = crate::deposit::locks::OpLock::try_take(d.path(), &r.op_id)
+            .unwrap()
+            .unwrap();
+        let mut recs = s.list().unwrap();
+        close_interrupted(&s, &mut recs).unwrap();
+        assert_eq!(s.load(&r.op_id).unwrap().stage, OpStage::Reserved);
+        assert!(blocking_by_params(&s, &recs, &params()).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_unknown_outcome_blocks_the_same_parameters_and_the_same_sender() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let r = requested(&s, params(), from);
+        let recs = s.list().unwrap();
+        let b = blocking_by_params(&s, &recs, &params()).unwrap().unwrap();
+        assert_eq!(b.op_id, r.op_id);
+        assert!(b.to_string().contains(&format!("--resume {}", r.op_id)));
+        let mut other = params();
+        other.amount_units += 1;
+        assert!(blocking_by_params(&s, &recs, &other).unwrap().is_none());
+        assert!(
+            blocking_by_sender(&s, &recs, 11_155_111, params().bridge, from, "none")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn another_an_endpoint_does_not_lift_the_block() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let r = requested(&s, params(), from);
+        let recs = s.list().unwrap();
+        let mut moved = params();
+        moved.an_bridge = "2b".repeat(32);
+        moved.an_network = "https://other.example:443".into();
+        let b = blocking_by_params(&s, &recs, &moved).unwrap().unwrap();
+        assert_eq!(b.op_id, r.op_id);
+    }
+
+    #[test]
+    fn an_abandoned_operation_no_longer_blocks() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let mut r = requested(&s, params(), from);
+        r.stage = OpStage::Abandoned;
+        r.abandoned_ever = true;
+        s.write(&mut r).unwrap();
+        let recs = s.list().unwrap();
+        assert!(blocking_by_params(&s, &recs, &params()).unwrap().is_none());
+        assert!(
+            blocking_by_sender(&s, &recs, 11_155_111, params().bridge, from, "none")
+                .unwrap()
+                .is_none()
+        );
     }
 }

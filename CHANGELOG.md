@@ -458,7 +458,8 @@ assigns it when the release is tagged.
 
 - The AN→ETH relayer reconstructs per-slot window heights from
   `LayerAnchorAppended` between `BRIDGE_DEPLOY_BLOCK` and latest, in
-  2 000-block `eth_getLogs` chunks. A scan with no from/to block used
+  2 000-block `eth_getLogs` chunks (`BRIDGE_GET_LOGS_CHUNK_BLOCKS` overrides
+  the span; Alchemy's free tier caps it at 10). A scan with no from/to block used
   to default both ends to `latest` and fail resurrect on any contract
   that already had history (ETH-31). Set the env var; leaving it unset
   still scans from genesis.

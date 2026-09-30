@@ -266,9 +266,11 @@ assigns it when the release is tagged.
     `--prover-timeout-s` (1800), `--credit-timeout-s` (300), `--qr-out`,
     `--uri-only`, `--qr-invert`, `--wc-relay-url` (default
     `wss://relay.walletconnect.org`), `--from-address` (required by
-    `eip681` and `both`) and `--dry-run`. `--help` does not echo the values
-    of `--rpc-url`, `--gql-endpoint` and `--wc-project-id`, and a deposit
-    run prints configured URLs without their path, query or credentials.
+    `eip681` and `both`) and `--dry-run`. A time limit takes at most ten
+    years, `--pair-timeout-s` at most 30 days; a larger value is exit 2.
+    `--help` does not echo the values of `--rpc-url`, `--gql-endpoint` and
+    `--wc-project-id`, and a deposit run prints configured URLs without their
+    path, query or credentials.
   - **Operations.** Each deposit gets an operation id and a record,
     `<state-dir>/<op-id>.json`. `--resume <op-id>` (or `--resume
     <depositId>` once the deposit is confirmed) continues it; `--tx-hash`

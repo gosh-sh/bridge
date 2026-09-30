@@ -1117,11 +1117,15 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 | Flag | Default | What it limits | When it runs out |
 |------|---------|----------------|------------------|
 | `--pair-timeout-s` | 300 | pairing with the wallet | exit 20 |
-| `--recovery-window-s` | 600 | the search for the deposit transaction when the wallet did not return its hash or the session dropped | exit 30 |
+| `--recovery-window-s` | 600 | the search for the deposit transaction when the wallet did not return its hash, the session dropped, or the node does not show the hash the wallet returned | exit 30 |
 | `--anchor-timeout-s` | 0 = no limit | the anchor wait and the whole of step 8, pauses and sends included | exit 31; exit 34 if a `finalizeDeposit` was in doubt |
 | `--relayer-grace-s` | 120 | how long after the anchor the deposit is left to the operator's relayer | the CLI proves it itself |
 | `--prover-timeout-s` | 1800 | one proving attempt, both tools | exit 32 |
 | `--credit-timeout-s` | 300 | the credit confirmation of step 9 | exit 34 |
+
+Each limit takes at most 315360000 s (ten years), `--pair-timeout-s` at most
+2592000 s (30 days, the longest the WalletConnect relay keeps a message); a
+larger value is refused with exit 2.
 
 A read that fails is retried without a limit, backing off from 1 to 60 s,
 and every attempt is logged as `ERROR` — except inside a step with its own

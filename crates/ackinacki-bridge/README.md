@@ -1108,7 +1108,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID` | — | Account id of the Acki Nacki bridge; its dapp is resolved live |
 | `--deposit-prover-dir` | `BRIDGE_DEPOSIT_PROVER_DIR` | — | The deposit prover, see [below](#the-deposit-prover) |
 | `--state-dir` | `BRIDGE_DEPOSIT_STATE_DIR` | `$HOME/.bridge-deposit-state`; none when `HOME` is unset or empty | Operation records, their locks and claims. Keep it the same for one sender: [why](#operations-resume-and-abandon) |
-| `--work-dir` | `BRIDGE_WORK_DIR` | `$HOME/.bridge-deposit-work`; none when `HOME` is unset or empty | `<op-id>/input.json`, `proof.bin` and `public_inputs.bin` of each operation |
+| `--work-dir` | `BRIDGE_WORK_DIR` | `$HOME/.bridge-deposit-work`; none when `HOME` is unset or empty | `<op-id>/input.json`, `proof.bin` and `public_inputs.bin` of each operation. Each operation records its own, so only a new deposit needs this setting |
 | `--confirmations` | `BRIDGE_DEPOSIT_CONFIRMATIONS` | `12` | How deep the receipt must be before step 5 decides |
 | `--wc-project-id` | `BRIDGE_WC_PROJECT_ID` | compiled into release builds | WalletConnect Cloud project id. A build from source has none: pass it, or set `ACKINACKI_BRIDGE_WC_PROJECT_ID` when building |
 
@@ -1255,15 +1255,17 @@ under another profile, a resume could finalize the same deposit through
 another bridge. A finished operation answers from its record: a credited one
 with its summary, a failed one with its exit code and message.
 
-The EVM chain and bridge, the Acki Nacki bridge and the recipient come from
-the record, so a finished or failed operation is answered with `--state-dir`
-alone (with `HOME` unset, `--work-dir` too; see below). The other settings are
-asked for only when the operation's stage needs them: `--rpc-url` and
-`--gql-endpoint` to go on with an operation that has not ended,
-`--deposit-prover-dir` while its proof is still to be built (or has to be
-built again). A missing one is named in the message, with the exit code of the
-operation's stage. `--resume <depositId>` needs `--bridge-address` as well: a
-deposit id is unique only within its bridge.
+The EVM chain and bridge, the Acki Nacki bridge, the recipient and the work
+directory come from the record, so a finished or failed operation is answered
+with `--state-dir` alone, and `--abandon` needs nothing else either. The other
+settings are asked for only when the operation needs them: `--rpc-url` and
+`--gql-endpoint` to go on with an operation that has not ended, and
+`--deposit-prover-dir` while its proof is still to be built. A missing one is
+named in the message, with the exit code an interrupt at the operation's stage
+gives (30 to 34), except for a proof that is gone and has to be built again:
+without `--deposit-prover-dir` that step fails, with exit 32, or 34 once a
+`finalizeDeposit` was sent. `--resume <depositId>` needs `--bridge-address` as
+well: a deposit id is unique only within its bridge.
 
 **After exit 30.** The wallet was asked for the deposit and its transaction
 was not found within `--recovery-window-s`: it may be pending, stuck, or never
@@ -1295,9 +1297,10 @@ find it, and the checks that stop a second deposit while the first one's
 outcome is unknown do not see it. Keep one state directory per sender, and do
 not move it or point the profile elsewhere while an operation in it is
 unfinished. For the same reason neither `--state-dir` nor `--work-dir` falls
-back to the current directory: with `HOME` unset or empty (systemd, cron,
-many containers) `deposit` refuses with exit 2 until both are given, as
-absolute paths that persist between runs.
+back to the current directory. With `HOME` unset or empty (systemd, cron, many
+containers) every `deposit` run needs `--state-dir`, and a new deposit or a
+dry run `--work-dir` too, as absolute paths that persist between runs;
+without them it is refused with exit 2.
 
 ### Deposit exit codes
 

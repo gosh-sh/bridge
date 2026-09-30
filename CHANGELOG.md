@@ -261,8 +261,9 @@ assigns it when the release is tagged.
     a release build compiles one in, a build from source has none).
     `bridge_config.shellnet` and `bridge_config.local` set the first three
     to `./deposit-prover`, `./deposit-state` and 12. With `HOME` unset or
-    empty, `--state-dir` and `--work-dir` have no default, and `deposit`
-    refuses with exit 2 until both are given.
+    empty, `--state-dir` and `--work-dir` have no default: every `deposit`
+    run needs `--state-dir`, and a new deposit or a dry run `--work-dir`
+    too, or it is refused with exit 2.
   - **Other flags:** `--pair-timeout-s` (300), `--recovery-window-s` (600),
     `--anchor-timeout-s` (0, no limit), `--relayer-grace-s` (120),
     `--prover-timeout-s` (1800), `--credit-timeout-s` (300), `--qr-out`,

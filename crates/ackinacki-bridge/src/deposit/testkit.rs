@@ -1155,3 +1155,53 @@ pub fn msg(hash: &str, kind: &str, src: &str, dst: &str, body: Option<&str>) -> 
         src_tx: None,
     }
 }
+
+/// A prover directory that passes `check_prover_dir` and whose
+/// `export_blake2b_proof` copies `expected_pi.bin` (written by the test,
+/// the `proof_00` fixture's public inputs until then) into place. `extra`
+/// runs inside `export_blake2b_proof` before it writes. Each run of it
+/// appends a line to `data/runs.log`. The fetcher exits 7 without
+/// `ETH_RPC_URL` in its environment.
+pub fn fake_prover_dir(
+    extra: &str,
+) -> (tempfile::TempDir, crate::deposit::prover_files::ProverDir) {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("configs")).unwrap();
+    std::fs::create_dir_all(d.path().join("data")).unwrap();
+    std::fs::write(
+        d.path().join(crate::deposit::prover_files::CIRCUIT_PARAMS),
+        include_str!("../../../../deposit-prover/configs/circuit_params.json"),
+    )
+    .unwrap();
+    let mut srs = vec![0u8; 4096];
+    let mut tail = [0u8; 128];
+    tail[..6].copy_from_slice(&crate::deposit::prover_files::HERMEZ_SG2_HEAD);
+    tail[122..].copy_from_slice(&crate::deposit::prover_files::HERMEZ_SG2_TAIL);
+    srs.extend_from_slice(&tail);
+    std::fs::write(d.path().join(crate::deposit::prover_files::SRS_FILE), srs).unwrap();
+    std::fs::write(
+        d.path().join("expected_pi.bin"),
+        crate::deposit::pi::tests_support::fixture_pi(),
+    )
+    .unwrap();
+    let fetch = "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in --output) out=$2; shift;; esac; \
+                 shift; done\n[ -n \"$ETH_RPC_URL\" ] || exit 7\necho '{}' > \"$out\"\n";
+    let prove = format!(
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in --proof-out) p=$2; shift;; --pubin-out) \
+         i=$2; shift;; esac; shift; done\n{extra}\nprintf proof > \"$p\"\ncp expected_pi.bin \
+         \"$i\"\necho run >> data/runs.log\n"
+    );
+    for (name, body) in [
+        (crate::deposit::prover_files::FETCH_BIN, fetch.to_string()),
+        (crate::deposit::prover_files::PROVE_BIN, prove),
+    ] {
+        let p = d.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let dir = crate::deposit::prover_files::ProverDir {
+        root: d.path().to_path_buf(),
+    };
+    (d, dir)
+}

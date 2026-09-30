@@ -179,11 +179,19 @@ pub struct DepositArgs {
     #[arg(long, value_name = "dapp_id::account_id")]
     pub to: Option<String>,
 
-    #[arg(long, env = "RPC_URL", value_name = "URL")]
+    // `hide_env_values` here and on the endpoint and project id below:
+    // `--help` must not echo a value taken from the environment or the
+    // profile. Provider URLs carry API keys; the project id is a credential.
+    #[arg(long, env = "RPC_URL", value_name = "URL", hide_env_values = true)]
     pub rpc_url: Option<String>,
     #[arg(long, env = "BRIDGE_ADDRESS")]
     pub bridge_address: Option<Address>,
-    #[arg(long, env = "BRIDGE_GQL_ENDPOINT", value_name = "URL")]
+    #[arg(
+        long,
+        env = "BRIDGE_GQL_ENDPOINT",
+        value_name = "URL",
+        hide_env_values = true
+    )]
     pub gql_endpoint: Option<String>,
     #[arg(long, env = "USDC_BRIDGE_ACCOUNT_ID")]
     pub usdc_bridge_account: Option<String>,
@@ -221,7 +229,7 @@ pub struct DepositArgs {
     pub uri_only: bool,
     #[arg(long)]
     pub qr_invert: bool,
-    #[arg(long, env = "BRIDGE_WC_PROJECT_ID")]
+    #[arg(long, env = "BRIDGE_WC_PROJECT_ID", hide_env_values = true)]
     pub wc_project_id: Option<String>,
     #[arg(long, default_value = "wss://relay.walletconnect.org")]
     pub wc_relay_url: String,

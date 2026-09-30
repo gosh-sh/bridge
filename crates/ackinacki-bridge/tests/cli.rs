@@ -832,3 +832,32 @@ fn deposit_refuses_a_malformed_to_as_exit_2() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--to"));
 }
+
+#[test]
+fn deposit_help_does_not_print_secrets_from_the_environment() {
+    let secrets = [
+        ("RPC_URL", "https://rpc.example/v2/HelpRpcKey-1a2b3c"),
+        (
+            "BRIDGE_GQL_ENDPOINT",
+            "https://gql.example/graphql?token=HelpGqlToken-4d5e6f",
+        ),
+        ("BRIDGE_WC_PROJECT_ID", "HelpProjectId-7a8b9c"),
+    ];
+    let mut c = bin();
+    for (k, v) in secrets {
+        c.env(k, v);
+    }
+    let out = c
+        .args(["deposit", "--help"])
+        .output()
+        .expect("the binary must be runnable");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = format!("{}{}", stdout(&out), stderr(&out));
+    for (k, v) in secrets {
+        assert!(!printed.contains(v), "{k}'s value is printed: {printed}");
+        assert!(
+            printed.contains(k),
+            "the variable is still named: {printed}"
+        );
+    }
+}

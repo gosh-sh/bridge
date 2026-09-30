@@ -132,7 +132,8 @@ fn elapsed(d: Duration) -> String {
 /// What stands where a secret part of a configured URL was.
 const HIDDEN: &str = "<hidden>";
 
-/// The shortest configured URL part hidden where it appears on its own.
+/// The shortest configured URL part, or registered secret value, hidden
+/// where it appears on its own.
 const MIN_SECRET_LEN: usize = 8;
 
 /// Takes the secrets out of text on its way to the screen.
@@ -169,7 +170,24 @@ impl Redactor {
                     && p.contains(|c: char| c.is_ascii_digit())
                     && p.contains(|c: char| c.is_ascii_alphabetic())
             }));
-        // Longest first, so a whole query goes before a value inside it.
+        self.order();
+    }
+
+    /// Adds `values` as they are: secrets that are not URLs, such as a
+    /// WalletConnect project id.
+    fn add_values<'a>(&mut self, values: impl IntoIterator<Item = &'a str>) {
+        self.parts.extend(
+            values
+                .into_iter()
+                .filter(|v| v.chars().count() >= MIN_SECRET_LEN)
+                .map(str::to_string),
+        );
+        self.order();
+    }
+
+    /// Longest first, so a whole query goes before a value inside it; each
+    /// part once.
+    fn order(&mut self) {
         self.parts
             .sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         self.parts.dedup();
@@ -192,8 +210,10 @@ impl Redactor {
 fn secret_parts(url: &str) -> Vec<String> {
     let mut out = Vec::new();
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let before_query = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
-    let after_userinfo = match before_query.rfind('@') {
+    // Userinfo ends at an `@` inside the authority; an `@` further on is
+    // part of the path or the query.
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let after_userinfo = match authority.rfind('@') {
         Some(at) => {
             let userinfo = &rest[..at];
             out.push(userinfo.to_string());
@@ -205,7 +225,7 @@ fn secret_parts(url: &str) -> Vec<String> {
     if let Some(at) = after_userinfo.find(['/', '?', '#']) {
         let tail = &after_userinfo[at..];
         out.push(tail.trim_start_matches('/').to_string());
-        for piece in tail.split(['/', '?', '&', '#']) {
+        for piece in tail.split(['/', '?', '&', '#', '@']) {
             out.push(piece.to_string());
             if let Some((_, value)) = piece.split_once('=') {
                 out.push(value.to_string());
@@ -230,6 +250,8 @@ fn secret_parts(url: &str) -> Vec<String> {
 /// `text` with every `scheme://…` URL cut to `scheme://host[:port]`. A URL
 /// runs to the next space, quote or brace; the punctuation that ends a
 /// sentence or a bracket around it (`.`, `,`, `)`, …) is kept after the cut.
+/// Userinfo is what precedes an `@` before the first `/`, `?` or `#`; an
+/// `@` after them belongs to the path or query and goes with it.
 fn cut_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -262,9 +284,8 @@ fn cut_urls(text: &str) -> String {
             .unwrap_or(body.len());
         let url = &body[..end];
         let kept = url.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']']);
-        let before_query = &kept[..kept.find(['?', '#']).unwrap_or(kept.len())];
-        let host = &kept[before_query.rfind('@').map_or(0, |at| at + 1)..];
-        out.push_str(&host[..host.find(['/', '?', '#']).unwrap_or(host.len())]);
+        let authority = &kept[..kept.find(['/', '?', '#']).unwrap_or(kept.len())];
+        out.push_str(&authority[authority.rfind('@').map_or(0, |at| at + 1)..]);
         out.push_str(&url[kept.len()..]);
         rest = &body[end..];
     }
@@ -285,6 +306,17 @@ pub fn hide_url_secrets<'a>(urls: impl IntoIterator<Item = &'a str>) {
         .unwrap_or_else(|p| p.into_inner())
         .get_or_insert_with(Redactor::default)
         .add(urls);
+}
+
+/// Adds `values`, secrets that are not URLs (a WalletConnect project id),
+/// to what this process's output hides wherever they appear, and marks the
+/// process as a deposit run as [`hide_url_secrets`] does.
+pub fn hide_secret_values<'a>(values: impl IntoIterator<Item = &'a str>) {
+    DEPOSIT_RUN
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(Redactor::default)
+        .add_values(values);
 }
 
 /// `text` as a deposit renderer prints it: every URL cut to
@@ -1355,21 +1387,27 @@ mod tests {
                 .connect(ui.as_ref())
                 .await
         };
-        let (_b, out) = capture();
-        assert_eq!(
-            connect(Box::new(TtyBoard::new(out, false, false, true, false))).await,
-            Ok(from)
+        let (_log, _codes, ui) = board(
+            Settings {
+                yes: true,
+                ..Settings::default()
+            },
+            true,
         );
+        assert_eq!(connect(Box::new(ui)).await, Ok(from));
         let (_b, out) = capture();
         assert_eq!(
             connect(Box::new(PlainLines::new(out, true, false))).await,
             Ok(from)
         );
-        let (b, out) = capture();
-        assert_eq!(
-            connect(Box::new(TtyBoard::new(out, false, false, false, true))).await,
-            Err(WalletError::Rejected)
+        let (b, _codes, ui) = board(
+            Settings {
+                non_interactive: true,
+                ..Settings::default()
+            },
+            true,
         );
+        assert_eq!(connect(Box::new(ui)).await, Err(WalletError::Rejected));
         assert!(text(&b).contains("no (--non-interactive)"), "{}", text(&b));
         let (b, out) = capture();
         assert_eq!(
@@ -1389,8 +1427,13 @@ mod tests {
 
     #[test]
     fn the_board_keeps_a_finished_steps_detail_and_puts_warnings_above() {
-        let (buf, out) = capture();
-        let ui = TtyBoard::new(out, false, false, true, false);
+        let (buf, _codes, ui) = board(
+            Settings {
+                yes: true,
+                ..Settings::default()
+            },
+            true,
+        );
         ui.step(
             StepId::Preflight,
             StepState::Done,
@@ -1772,6 +1815,35 @@ mod tests {
     }
 
     #[test]
+    fn an_at_sign_in_the_path_is_not_taken_for_userinfo() {
+        const AT: &str = "https://rpc.example/v2/x@SecretKey99";
+        assert_eq!(
+            Redactor::default().apply(&format!("url ({AT})")),
+            "url (https://rpc.example)"
+        );
+        let r = Redactor::new([AT]);
+        assert_eq!(r.apply(&format!("url ({AT})")), "url (https://rpc.example)");
+        for bare in ["SecretKey99 was refused", r#"path: "/v2/x@SecretKey99""#] {
+            assert!(!r.apply(bare).contains("SecretKey99"), "{}", r.apply(bare));
+        }
+        assert!(r.apply("rpc.example").contains("rpc.example"));
+        // Userinfo before the host still goes.
+        assert_eq!(
+            Redactor::default().apply("https://u:PassWord99@rpc.example/v2/k"),
+            "https://rpc.example"
+        );
+    }
+
+    #[test]
+    fn a_registered_secret_value_is_hidden_wherever_it_appears() {
+        hide_secret_values(["WcProject-0f1e2d3c"]);
+        assert_eq!(
+            redact("projectId: WcProject-0f1e2d3c, relay"),
+            "projectId: <hidden>, relay"
+        );
+    }
+
+    #[test]
     fn every_renderer_prints_the_rpc_url_without_its_key() {
         hide_url_secrets([KEYED]);
         let feed = |ui: &dyn Ui| {
@@ -1783,8 +1855,14 @@ mod tests {
             ui.step(StepId::EvmConfirm, StepState::Failed, &l[0]);
             ui.confirm(&l[1]);
         };
-        let (b1, out) = capture();
-        feed(&TtyBoard::new(out, false, false, true, false));
+        let (b1, _codes, tty) = board(
+            Settings {
+                yes: true,
+                ..Settings::default()
+            },
+            true,
+        );
+        feed(&tty);
         let (b2, out) = capture();
         feed(&PlainLines::new(out, true, false));
         let (b3, out) = capture();

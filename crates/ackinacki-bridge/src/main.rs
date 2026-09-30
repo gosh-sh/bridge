@@ -243,18 +243,10 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
         },
         Command::Deposit(args) => {
             // From here on nothing this process prints carries the path,
-            // query or userinfo of a configured URL: RPC providers put
-            // their API keys there, and HTTP clients quote the whole URL
-            // in their errors.
-            crate::deposit::ui::hide_url_secrets(
-                [
-                    args.rpc_url.as_deref(),
-                    args.gql_endpoint.as_deref(),
-                    Some(args.wc_relay_url.as_str()),
-                ]
-                .into_iter()
-                .flatten(),
-            );
+            // query or userinfo of a configured URL, or the WalletConnect
+            // project id: RPC providers put their API keys in the URL, and
+            // HTTP clients quote the whole URL in their errors.
+            hide_deposit_secrets(&args);
             let g = crate::deposit::args::GlobalFlags {
                 json: cli.json,
                 yes: cli.yes,
@@ -266,6 +258,25 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
                 .map(output::RunSuccess::Deposit)
         },
     }
+}
+
+/// Registers what a deposit run's output must never print: the secret
+/// parts of its endpoint URLs and its WalletConnect project id.
+fn hide_deposit_secrets(args: &deposit::args::DepositArgs) {
+    deposit::ui::hide_url_secrets(
+        [
+            args.rpc_url.as_deref(),
+            args.gql_endpoint.as_deref(),
+            Some(args.wc_relay_url.as_str()),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    deposit::ui::hide_secret_values(
+        args.wc_project_id
+            .as_deref()
+            .or(deposit::args::DEFAULT_WC_PROJECT_ID),
+    );
 }
 
 /// Tracing → stderr. Respects `RUST_LOG`; defaults to `info` for our crate
@@ -409,6 +420,37 @@ mod tests {
             out.contains("error sending request for url (https://relay.example.com)"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_deposit_run_hides_its_endpoints_and_its_walletconnect_project_id() {
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "deposit",
+            "--rpc-url",
+            "https://rpc.example/v2/MainRpcKey-5e6f7a",
+            "--gql-endpoint",
+            "https://gql.example/graphql?token=MainGqlToken-8b9c0d",
+            "--wc-relay-url",
+            "wss://relay.example/?auth=MainRelayAuth-1c2d3e",
+            "--wc-project-id",
+            "MainProject-4f5a6b",
+        ])
+        .unwrap();
+        let Command::Deposit(args) = cli.cmd else {
+            panic!("parsed as another subcommand");
+        };
+        hide_deposit_secrets(&args);
+        let secrets = [
+            "MainRpcKey-5e6f7a",
+            "MainGqlToken-8b9c0d",
+            "MainRelayAuth-1c2d3e",
+            "MainProject-4f5a6b",
+        ];
+        let out = deposit::ui::redact(&secrets.join(" "));
+        for s in secrets {
+            assert!(!out.contains(s), "{out}");
+        }
     }
 
     #[test]

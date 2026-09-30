@@ -9,11 +9,11 @@
 //!   (weak-subjectivity bootstrap / manual hop while `--no-rotate`)
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
-//!   `--no-rotate` / `--no-flip-owner` opt out of the production defaults.
-//!   `ETH_RPC_URL` fetches epoch headers after each accepted checkpoint and
-//!   runs `link_headers` locally. On-chain `submitAncestry` stays off unless
-//!   `--submit-ancestry` is set (the call cannot succeed until a keccak-256
-//!   builtin lands).
+//!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
+//!   flip. `ETH_RPC_URL` fetches epoch headers after each accepted checkpoint
+//!   and runs `link_headers` locally. On-chain `submitAncestry` stays off
+//!   unless `--submit-ancestry` is set (the call cannot succeed until a
+//!   keccak-256 builtin lands).
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -149,9 +149,10 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
-    /// Owner one-way flip: check `getAnchorConfig().lightClient`, then
+    /// Owner flip: check `getAnchorConfig().lightClient`, then
     /// `disableOwnerAnchors` + `disableOwnerRotation`. Relayer keys must be the
-    /// owner pubkey.
+    /// owner pubkey. Afterwards the light client is the only anchor writer,
+    /// and it anchors one checkpoint block per epoch and no L2.
     FlipOwner {
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
@@ -187,7 +188,13 @@ enum Cmd {
         /// (tvm-sdk#284 co-deploys with this contract).
         #[arg(long, default_value_t = false)]
         no_rotate: bool,
-        /// Skip the one-way owner flip after the first accepted `submitUpdate`.
+        /// After the first accepted `submitUpdate`, run the owner flip
+        /// (`disableOwnerAnchors` + `disableOwnerRotation`). Default **off**.
+        /// Needs `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`.
+        #[arg(long, default_value_t = false, conflicts_with = "no_flip_owner")]
+        flip_owner: bool,
+        /// No owner flip. This is the default; the flag is kept so existing
+        /// units keep starting.
         #[arg(long, default_value_t = false)]
         no_flip_owner: bool,
         /// Execution JSON-RPC. When set, each accepted `submitUpdate` fetches
@@ -378,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
             mock_prove,
             dry_run,
             no_rotate,
+            flip_owner,
             no_flip_owner,
             eth_rpc_url,
             submit_ancestry,
@@ -426,7 +434,7 @@ async fn main() -> anyhow::Result<()> {
                 mock_prove,
                 dry_run,
                 !no_rotate,
-                !no_flip_owner,
+                flip_owner && !no_flip_owner,
                 eth_rpc_url,
                 submit_ancestry,
                 owner_hop,
@@ -943,6 +951,8 @@ async fn run_daemon(
     #[cfg(feature = "live-submit")]
     {
         an.validate_live_graphql_endpoint(allow_insecure)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        an.validate_flip_owner(cfg.flip_owner)
             .map_err(|e| anyhow::anyhow!(e))?;
         if !an.is_live_submit_ready() {
             anyhow::bail!(

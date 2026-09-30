@@ -24,9 +24,10 @@ pub struct RelayerConfig {
     /// instead. Rotate prove is still a ~40 GB n14 job.
     pub enable_rotate: bool,
     /// After the first accepted `submitUpdate`, call `disableOwnerAnchors` +
-    /// `disableOwnerRotation` with the relayer keys
-    /// (must be the owner pubkey). Default **true**. `--no-flip-owner` opts
-    /// out.
+    /// `disableOwnerRotation` with the relayer keys (must be the owner
+    /// pubkey). Default **false**; `--flip-owner` opts in. While the light
+    /// client anchors only one checkpoint block per epoch and no L2, the flip
+    /// leaves every other deposit block without a writer.
     pub flip_owner: bool,
     /// With `enable_rotate = false`: on a period jump, prove a step of the
     /// new period and advance the committee with the owner key
@@ -49,7 +50,7 @@ impl RelayerConfig {
             state_path,
             poll_interval: Duration::from_secs(64),
             enable_rotate: true,
-            flip_owner: true,
+            flip_owner: false,
             owner_hop: false,
             submit_ancestry: false,
         }
@@ -655,7 +656,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(r.state().last_finalized_slot, Some(96));
-        assert!(r.state().owner_flip_done);
+        assert!(!r.state().owner_flip_done);
     }
 
     #[tokio::test]
@@ -664,6 +665,7 @@ mod tests {
         let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
         cfg.poll_interval = Duration::from_millis(1);
         cfg.enable_rotate = false;
+        cfg.flip_owner = true;
         let mock = Arc::new(MockAnSubmitter::accepting());
         let mut r = Relayer::new(
             cfg,
@@ -674,19 +676,55 @@ mod tests {
         .unwrap();
         r.tick().await.unwrap();
         assert!(r.state().owner_flip_done);
-        assert!(mock.light_client_set());
         assert!(!mock.owner_anchors_enabled());
         assert!(!mock.owner_rotation_enabled());
         assert_eq!(mock.re_push_count(), 1);
     }
 
     #[tokio::test]
-    async fn no_flip_owner_leaves_owner_path() {
+    async fn rejected_flip_keeps_the_tick_and_retries_on_the_next_update() {
         let dir = Box::leak(Box::new(tempdir().unwrap()));
         let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
         cfg.poll_interval = Duration::from_millis(1);
         cfg.enable_rotate = false;
-        cfg.flip_owner = false;
+        cfg.flip_owner = true;
+        let mock = Arc::new(MockAnSubmitter::rejecting_flip());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update(100, 96),
+                update(132, 128),
+            ])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { .. }),
+            "{out:?}"
+        );
+        assert!(!r.state().owner_flip_done);
+        assert!(mock.owner_anchors_enabled());
+        assert_eq!(mock.re_push_count(), 1);
+
+        mock.accept_flip();
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { .. }),
+            "{out:?}"
+        );
+        assert!(r.state().owner_flip_done);
+        assert!(!mock.owner_anchors_enabled());
+        assert_eq!(mock.re_push_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn default_config_leaves_owner_path() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
         let mock = Arc::new(MockAnSubmitter::accepting());
         let mut r = Relayer::new(
             cfg,

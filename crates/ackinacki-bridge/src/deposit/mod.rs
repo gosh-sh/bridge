@@ -23,6 +23,7 @@ pub mod store;
 #[cfg(test)]
 pub mod testkit;
 pub mod ui;
+pub mod wallet;
 
 /// Replaced by the driver in `run.rs`.
 pub async fn run(_params: args::DepositParams) -> crate::errors::CliResult<DepositSuccess> {

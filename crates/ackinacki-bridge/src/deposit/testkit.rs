@@ -382,3 +382,89 @@ pub fn deposit_tx(
         block_number: None,
     }
 }
+
+/// A wallet that answers from what the test put in it.
+pub struct FakeWallet {
+    /// The account `connect` reports.
+    pub account: Address,
+    /// Signs `personal_sign` requests.
+    pub signer: Option<alloy::signers::local::PrivateKeySigner>,
+    /// Returned by `personal_sign` instead of a signature.
+    pub sign_override: Option<Bytes>,
+    /// Answers to `send_transaction`, in order; `Timeout` once drained.
+    pub send_results: VecDeque<Result<B256, crate::deposit::wallet::WalletError>>,
+    /// Every request `send_transaction` received.
+    pub sent: Vec<crate::deposit::wallet::TxRequest>,
+    /// Runs at the start of every `send_transaction`.
+    pub before_send: Option<Box<dyn Fn() + Send + Sync>>,
+    /// What `capabilities` answers.
+    pub caps: Option<serde_json::Value>,
+}
+
+impl FakeWallet {
+    /// An EOA whose key the wallet holds.
+    pub fn eoa() -> Self {
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        FakeWallet {
+            account: signer.address(),
+            signer: Some(signer),
+            sign_override: None,
+            send_results: Default::default(),
+            sent: vec![],
+            before_send: None,
+            caps: None,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::deposit::wallet::Wallet for FakeWallet {
+    fn kind(&self) -> crate::deposit::wallet::WalletKind {
+        crate::deposit::wallet::WalletKind::WalletConnect
+    }
+
+    async fn connect(
+        &mut self,
+        _: &dyn crate::deposit::ui::Ui,
+    ) -> Result<Address, crate::deposit::wallet::WalletError> {
+        Ok(self.account)
+    }
+
+    async fn personal_sign(
+        &mut self,
+        _: Address,
+        message: &str,
+    ) -> Result<Bytes, crate::deposit::wallet::WalletError> {
+        use alloy::signers::SignerSync as _;
+        if let Some(b) = &self.sign_override {
+            return Ok(b.clone());
+        }
+        let s = self.signer.as_ref().expect("a signer or an override");
+        Ok(Bytes::from(
+            s.sign_message_sync(message.as_bytes())
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        ))
+    }
+
+    async fn capabilities(&mut self, _: Address) -> Option<serde_json::Value> {
+        self.caps.clone()
+    }
+
+    async fn send_transaction(
+        &mut self,
+        _: &dyn crate::deposit::ui::Ui,
+        tx: &crate::deposit::wallet::TxRequest,
+    ) -> Result<B256, crate::deposit::wallet::WalletError> {
+        if let Some(h) = &self.before_send {
+            h();
+        }
+        self.sent.push(tx.clone());
+        self.send_results
+            .pop_front()
+            .unwrap_or(Err(crate::deposit::wallet::WalletError::Timeout))
+    }
+
+    async fn close(&mut self) {}
+}

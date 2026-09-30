@@ -10,6 +10,7 @@ pub mod identity;
 pub mod limits;
 pub mod log_index;
 pub mod pi;
+pub mod prover_files;
 pub mod refusals;
 
 /// Replaced by the driver in `run.rs`.

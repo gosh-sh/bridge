@@ -77,11 +77,17 @@ pub fn refusal_for(errno: Option<i32>, path: &Path) -> Option<CliError> {
 /// A lock failure after the wallet was asked: the deposit may be on chain,
 /// so it is not exit 2, and the operation is resumable.
 pub fn after_send(e: CliError, exit: ExitCode, stage: Stage, op_id: &str) -> CliError {
+    let reason = match e {
+        CliError::Preflight {
+            reason, ..
+        } => reason,
+        other => other.to_string(),
+    };
     CliError::deposit(
         exit,
         stage,
         Some(op_id),
-        format!("{e}; fix it and continue with --resume {op_id}"),
+        format!("{reason}; fix it and continue with --resume {op_id}"),
     )
 }
 
@@ -249,6 +255,7 @@ mod tests {
         );
         assert_eq!(e.exit_code(), crate::errors::ExitCode::DepositProofFailed);
         assert!(e.to_string().contains("--resume OP"));
+        assert!(!e.to_string().starts_with("preflight"), "{e}");
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ pub mod log_index;
 pub mod pi;
 pub mod prover_files;
 pub mod refusals;
+pub mod store;
 pub mod ui;
 
 /// Replaced by the driver in `run.rs`.

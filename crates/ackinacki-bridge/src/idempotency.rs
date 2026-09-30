@@ -1895,7 +1895,7 @@ fn write_record_atomic(state_dir: &Path, dst: &Path, record: &Record) -> CliResu
 /// Epoch-seconds RFC 3339 UTC timestamp without a dep on `chrono`/`time`.
 /// Format: `1970-01-01T00:00:00Z` (no fractional seconds — this record is
 /// for reconciliation, not perf tracing).
-fn rfc3339_now() -> String {
+pub(crate) fn rfc3339_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

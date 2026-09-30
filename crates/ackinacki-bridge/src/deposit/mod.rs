@@ -7,6 +7,7 @@
 
 pub mod an;
 pub mod an_preflight;
+pub mod anchor_wait;
 pub mod args;
 pub mod binding;
 pub mod evm;

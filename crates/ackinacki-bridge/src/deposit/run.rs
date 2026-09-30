@@ -28,7 +28,10 @@ use crate::{
         args::{an_network_id, AnTarget, DepositParams, Network, OpRef, RunMode},
         binding::{check_explicit, claims_of_others, decide, Binding, Candidate},
         credit::{self, Identity},
-        evm::{deposit_calldata, parse_deposit_log, read_balance, BlockTag, DEPOSIT_CALLDATA_LEN},
+        evm::{
+            deposit_calldata, parse_deposit_log, read_balance, BlockTag, ReceiptLite,
+            DEPOSIT_CALLDATA_LEN,
+        },
         evm_confirm::{self, Expect, Negative, Outcome},
         evm_steps::{
             build_deposit_request, ensure_allowance, request_deposit, ApproveOutcome,
@@ -885,6 +888,32 @@ async fn finalized_already(
     }
 }
 
+/// What the transaction deposited, as the bridge's `Deposit` events in its
+/// receipt say: every depositId with its amount and recipient. The
+/// operator acts on these, not on the request.
+fn deposited(receipt: Option<&ReceiptLite>, bridge: Address) -> String {
+    let Some(r) = receipt else {
+        return "deposited: unknown, the receipt could not be read".into();
+    };
+    let each: Vec<String> = r
+        .logs
+        .iter()
+        .filter(|l| l.address == bridge)
+        .filter_map(parse_deposit_log)
+        .map(|e| {
+            format!(
+                "depositId {}, {} USDC units to account {:#x}",
+                e.deposit_id, e.amount, e.an_account
+            )
+        })
+        .collect();
+    if each.is_empty() {
+        "deposited: nothing".into()
+    } else {
+        format!("deposited: {}", each.join("; "))
+    }
+}
+
 /// Step 5's negative verdict, in a finalized block: the operation is
 /// closed, and the error says what to give the bridge operator.
 async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> CliError {
@@ -896,19 +925,11 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
         Some(h) => once(None, d.evm.receipt(h)).await.flatten(),
         None => None,
     };
-    let dep_id = receipt.as_ref().and_then(|r| {
-        r.logs
-            .iter()
-            .filter(|l| l.address == bridge)
-            .find_map(parse_deposit_log)
-            .map(|e| e.deposit_id.to_string())
-    });
     let facts = format!(
-        "tx {}, depositId {}, amount {} USDC units, bridge {bridge:#x}, operation {op}",
+        "tx {}, {}, bridge {bridge:#x}, operation {op}",
         tx.map(|h| format!("{h:#x}"))
             .unwrap_or_else(|| "none".into()),
-        dep_id.as_deref().unwrap_or("none"),
-        rec.params.amount_units,
+        deposited(receipt.as_ref(), bridge),
     );
     let (reason, exit, what) = match &n {
         Negative::Reverted => {
@@ -2445,6 +2466,77 @@ mod tests {
                 && msg.contains("depositId")
                 && msg.contains("operator"),
             "{msg}"
+        );
+    }
+
+    #[test]
+    fn the_operator_line_lists_every_deposit_of_the_transaction() {
+        let from = Address::repeat_byte(0xb5);
+        let b = header(900, 0x90);
+        let one = deposit_log(
+            W_BRIDGE,
+            U256::from(5),
+            from,
+            1,
+            B256::repeat_byte(1),
+            Some(0),
+        );
+        let elsewhere = deposit_log(
+            Address::repeat_byte(9),
+            U256::from(9),
+            from,
+            9,
+            B256::ZERO,
+            Some(1),
+        );
+        let two = deposit_log(
+            W_BRIDGE,
+            U256::from(6),
+            from,
+            2,
+            B256::repeat_byte(2),
+            Some(2),
+        );
+        let r = deposit_receipt(B256::ZERO, &b, true, vec![one, elsewhere, two]);
+        assert_eq!(
+            deposited(Some(&r), W_BRIDGE),
+            format!(
+                "deposited: depositId 5, 1 USDC units to account {:#x}; depositId 6, 2 USDC units \
+                 to account {:#x}",
+                B256::repeat_byte(1),
+                B256::repeat_byte(2)
+            )
+        );
+        let none = deposit_receipt(B256::ZERO, &b, false, vec![]);
+        assert_eq!(deposited(Some(&none), W_BRIDGE), "deposited: nothing");
+        assert_eq!(
+            deposited(None, W_BRIDGE),
+            "deposited: unknown, the receipt could not be read"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_operator_is_given_what_was_deposited_not_what_was_requested() {
+        let mut w = World::healthy();
+        let h = w.mined_deposit_of_amount(7, W_AMOUNT / 2);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        let p = w.params(RunMode::Fresh);
+        let d = w.deps();
+        let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositUnprovable, "{e}");
+        let m = e.to_string();
+        let (_, line) = m.split_once("Give the bridge operator: ").expect(&m);
+        let deposited = format!(
+            "deposited: depositId 6, {} USDC units to account {:#x}",
+            W_AMOUNT / 2,
+            B256::from(W_ACC)
+        );
+        assert!(line.contains(&deposited), "{line}");
+        assert!(line.contains(&format!("{h:#x}")), "{line}");
+        assert!(
+            !line.contains(&W_AMOUNT.to_string()),
+            "the requested amount is not what the operator acts on: {line}"
         );
     }
 

@@ -1038,7 +1038,7 @@ under `--json`:
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. |
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(amount, 0, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
 | 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2, input exactly the 100 bytes requested, an access list of at most 64 bytes RLP, sent straight to the bridge. The wallet session is closed after this step. |
-| 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. |
+| 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. A read that fails there counts as not finalized, and the wait goes on. |
 | 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
 | 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
@@ -1062,11 +1062,18 @@ Preflight, in order:
   (otherwise the CLI cannot compute the voucher's address, and a newer CLI is
   needed); and the recipient: an active account must live in the dapp `--to`
   names, while a missing or undeployed one only gets a warning.
-- **Prover** (`--deposit-prover-dir`): both tools are executable,
-  `configs/circuit_params.json` has `base.k = 18` and `base.lookup_bits = 8`,
-  `data/` is writable, and `data/kzg_params_18.srs` carries the Hermez
-  ceremony's [s]·G2. A proof made with another SRS would be refused on chain,
-  after the deposit.
+- **Prover** (`--deposit-prover-dir`): both tools are executable and run on
+  this host — each is started once with `--help`, without the network and
+  with nothing of the environment but `PATH` and `LD_LIBRARY_PATH`, and must
+  exit 0 within 10 s; a binary the loader refuses (`GLIBC_2.38' not found`,
+  a missing loader) is refused here with the end of its stderr, not at step
+  7 with the USDC in the bridge. `configs/circuit_params.json` has
+  `base.k = 18` and `base.lookup_bits = 8`, `data/` is writable, and
+  `data/kzg_params_18.srs` carries the Hermez ceremony's [s]·G2. A proof made
+  with another SRS would be refused on chain, after the deposit.
+- **Work directory** (`--work-dir`): created if it is missing, and a file is
+  written, synced and removed there. A path that is a file, or a directory
+  that cannot be written, is refused with the error the system gave.
 - **Unfinished operations** in `--state-dir`: none whose EVM outcome is
   unknown for the same network, bridge, `--to` and amount. Otherwise exit 3,
   with the `--resume` command to run instead. The same check by sender runs
@@ -1153,7 +1160,8 @@ time limit, which covers the retries too.
   legacy one makes the deposit unprovable (exit 35). The wallet will not add
   the network either, and some wallets drop the call data. The CLI asks you to
   accept that risk: `--yes` accepts it, `--non-interactive` without `--yes`
-  declines it (exit 20). There is no signature check in this mode, only the
+  declines it (exit 20), and Ctrl-C at the question ends the run at once, as
+  anywhere else. There is no signature check in this mode, only the
   check of the account's code, so an ERC-4337 account that is not deployed yet
   is not caught: its deposit goes through the account's contract and ends at
   exit 35.
@@ -1260,12 +1268,20 @@ directory come from the record, so a finished or failed operation is answered
 with `--state-dir` alone, and `--abandon` needs nothing else either. The other
 settings are asked for only when the operation needs them: `--rpc-url` and
 `--gql-endpoint` to go on with an operation that has not ended, and
-`--deposit-prover-dir` while its proof is still to be built. A missing one is
+`--deposit-prover-dir` while its proof is still to be built — then the prover's
+tools are run once and the operation's work directory is checked, as for a
+new deposit, before either chain is read. A missing or failed one is
 named in the message, with the exit code an interrupt at the operation's stage
 gives (30 to 34), except for a proof that is gone and has to be built again:
 without `--deposit-prover-dir` that step fails, with exit 32, or 34 once a
 `finalizeDeposit` was sent. `--resume <depositId>` needs `--bridge-address` as
 well: a deposit id is unique only within its bridge.
+
+An operation that stopped in the anchor wait or after the anchor may have
+been finalized meanwhile, by the operator's relayer. A resume looks for that
+first — in the anchor wait on every poll, before the anchor and the pause —
+and then only confirms the credit: it builds no proof, and a bridge paused
+since, or an anchor withdrawn since, does not hold it.
 
 **After exit 30.** The wallet was asked for the deposit and its transaction
 was not found within `--recovery-window-s`: it may be pending, stuck, or never
@@ -1387,7 +1403,9 @@ Each side has an owner switch.
   deposit is made, a pause is waited out, in step 6 and before every
   `finalizeDeposit`, with the status `the bridge is paused by its owner;
   deposits finalize once it is lifted` — within `--anchor-timeout-s` (exit 31,
-  resumable).
+  resumable). A deposit somebody finalized before the pause — the operator's
+  relayer, while the run was stopped — does not wait for it: the CLI looks for
+  that before the pause, and confirms the credit.
 
 ### The deposit prover
 

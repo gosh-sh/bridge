@@ -308,14 +308,20 @@ assigns it when the release is tagged.
     `--qr-mode eip681` only those that already have code); a
     paused EVM bridge (`paused()`) or Acki Nacki bridge (`isPaused()`); an
     Acki Nacki bridge that does not trust the EVM bridge; a voucher code the
-    CLI does not know. An EIP-7702 account passes with a warning to turn off
-    gas sponsoring and batched calls. With owner anchors disabled a deposit
+    CLI does not know; prover tools that do not run on this host (each is
+    started once with `--help` and must exit 0 within 10 s, so a binary
+    built against a newer glibc is refused here); a `--work-dir` that cannot
+    be created or written. A `--resume` whose proof is still to be built
+    checks the last two as well, with the exit code of its stage. An
+    EIP-7702 account passes with a warning to turn off gas sponsoring and
+    batched calls. With owner anchors disabled a deposit
     is allowed only if the light client demonstrably anchors blocks a
     deposit can use; ancestry does not run on Acki Nacki today, so such a
     bridge takes no deposits from the CLI.
   - `--qr-mode eip681` cannot ask the wallet for a type-2 transaction, and
     a legacy one makes the deposit unprovable (exit 35). The CLI asks you to
-    accept that risk; `--yes` accepts it.
+    accept that risk; `--yes` accepts it, and Ctrl-C at the question ends the
+    run.
 - **`deposit` requires an Acki Nacki bridge at or above
   `MIN_BRIDGE_VERSION`.** The CLI sends `finalizeDeposit` again when an
   earlier send's outcome is unknown, which is safe only on a bridge that

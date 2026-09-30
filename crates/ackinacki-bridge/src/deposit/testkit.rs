@@ -858,6 +858,13 @@ impl MockWalletPeer {
 
     /// Publishes `v` on `topic` under `sym` twice, each copy sealed with its
     /// own nonce, the way a relay client that retried would.
+    ///
+    /// A copy whose publish fails is published again, as a wallet does: the
+    /// relay client fails every call in flight when it replaces its socket.
+    /// Under paused time that happens without any fault. Every time the
+    /// runtime waits, for a relay's answer too, the clock jumps to the next
+    /// timer, so the peer's read deadline can pass before the acknowledgment
+    /// of its own publish is read.
     pub async fn send(
         r: &crate::deposit::wc::relay::Relay,
         topic: &str,
@@ -867,9 +874,17 @@ impl MockWalletPeer {
     ) {
         use crate::deposit::wc::crypto::{random_bytes, seal_type0};
 
+        /// Publishes of one copy before the peer gives up.
+        const TRIES: u32 = 10;
         for _ in 0..2 {
             let sealed = seal_type0(sym, random_bytes(), v.to_string().as_bytes());
-            r.publish(topic, &sealed, 300, tag).await.unwrap();
+            let mut tries = 1;
+            while let Err(e) = r.publish(topic, &sealed, 300, tag).await {
+                assert!(tries < TRIES, "the wallet peer could not publish: {e:#}");
+                tries += 1;
+                // Lets the relay client notice a broken socket first.
+                tokio::task::yield_now().await;
+            }
         }
     }
 
@@ -1156,16 +1171,29 @@ pub fn msg(hash: &str, kind: &str, src: &str, dst: &str, body: Option<&str>) -> 
     }
 }
 
+/// The temporary directory of a [`fake_prover_dir`], deleted when this is
+/// dropped, and the hold on [`crate::test_forks::spawning`] that its test
+/// keeps for as long as it can start the fake tools.
+pub struct FakeProverHome {
+    /// The directory.
+    _dir: tempfile::TempDir,
+    /// Taken before the tools were written.
+    _spawning: crate::test_forks::Hold,
+}
+
 /// A prover directory that passes `check_prover_dir` and whose
 /// `export_blake2b_proof` copies `expected_pi.bin` (written by the test,
 /// the `proof_00` fixture's public inputs until then) into place. `extra`
 /// runs inside `export_blake2b_proof` before it writes. Each run of it
 /// appends a line to `data/runs.log`. The fetcher exits 7 without
 /// `ETH_RPC_URL` in its environment.
-pub fn fake_prover_dir(
-    extra: &str,
-) -> (tempfile::TempDir, crate::deposit::prover_files::ProverDir) {
+///
+/// Whoever has one may start its tools, so it holds
+/// [`crate::test_forks::spawning`] until it is dropped: its test runs
+/// while no other test starts a subprocess or takes a released lock again.
+pub fn fake_prover_dir(extra: &str) -> (FakeProverHome, crate::deposit::prover_files::ProverDir) {
     use std::os::unix::fs::PermissionsExt;
+    let spawning = crate::test_forks::spawning();
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join("configs")).unwrap();
     std::fs::create_dir_all(d.path().join("data")).unwrap();
@@ -1203,7 +1231,11 @@ pub fn fake_prover_dir(
     let dir = crate::deposit::prover_files::ProverDir {
         root: d.path().to_path_buf(),
     };
-    (d, dir)
+    let home = FakeProverHome {
+        _dir: d,
+        _spawning: spawning,
+    };
+    (home, dir)
 }
 
 // ---- the world of the end-to-end driver tests ----
@@ -1248,7 +1280,7 @@ pub struct World {
     /// The Acki Nacki node.
     pub an: std::sync::Arc<FakeAn>,
     /// The prover directory and what `check_prover_dir` made of it.
-    pub prover: (tempfile::TempDir, crate::deposit::prover_files::ProverDir),
+    pub prover: (FakeProverHome, crate::deposit::prover_files::ProverDir),
     /// `--state-dir`.
     pub state: tempfile::TempDir,
     /// `--work-dir`.

@@ -204,6 +204,7 @@ mod tests {
 
     #[test]
     fn a_second_taker_sees_the_lock_held() {
+        let _relocking = crate::test_forks::relocking();
         let d = tempfile::tempdir().unwrap();
         let a = DirLock::try_take(d.path()).unwrap();
         assert!(a.is_some());

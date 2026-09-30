@@ -2458,6 +2458,7 @@ mod tests {
         // hash, because the hash is written only after the send returns.
         // Run B arrives with --allow-retry. Nothing in the record says
         // "someone is mid-send"; only the reservation's provenance does.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let (_a, da, _lock_a) = reserve_and_decide(
             dir.path(),
@@ -2640,6 +2641,7 @@ mod tests {
         // refusals, the first sending the operator to the second, and the
         // only escape either of them left to find was deleting the record,
         // which is what permits a second burn.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let (r, d, lock_a) = reserve_and_decide(
             dir.path(),
@@ -2684,6 +2686,7 @@ mod tests {
         // Once A's hash IS on the record, B resumes at capture instead of
         // burning again — the same refusal would strand a recoverable
         // withdrawal.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let (mut r, _, _lock) = reserve_and_decide(
             dir.path(),
@@ -4216,6 +4219,7 @@ mod tests {
         // A hash-less record cannot say whether a burn is on the wire, so
         // its refusal must carry what the lock can say instead. A record
         // with a hash can, so its refusal talks about resuming.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
 
         // 1. Hash-less, left by a run that has exited.
@@ -4331,6 +4335,7 @@ mod tests {
         // invisible to the liveness probe the exit-3 refusal promises, and
         // two concurrent resumes both reached the submit stage — where the
         // loser's revert writes `Failed` over the winner's `Confirmed`.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let hash = format!("0x{}", "ab".repeat(32));
         let observed = burned_record(dir.path(), &hash);
@@ -4389,6 +4394,7 @@ mod tests {
         // `an_tx_hash: None` — a shape `read_record` refuses FOREVER as
         // "acting on it would broadcast a SECOND burn". A completed
         // withdrawal and an unrecoverable record.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let hash = format!("0x{}", "cd".repeat(32));
         let r = burned_record(dir.path(), &hash);
@@ -4432,6 +4438,7 @@ mod tests {
         // lock; the peek is stale. Capturing against the stale hash waits
         // out the timeout for an event belonging to a transaction nobody
         // is looking for.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let stale = format!("0x{}", "11".repeat(32));
         let real = format!("0x{}", "22".repeat(32));
@@ -4478,6 +4485,7 @@ mod tests {
         // The window is not incidental. Deleting the record is what the
         // CLI's own exit-3 message tells a reconciled operator to do, so
         // the gate was being lifted by the documented recovery.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let hash = format!("0x{}", "3d".repeat(32));
         let r = burned_record(dir.path(), &hash);
@@ -4536,6 +4544,7 @@ mod tests {
         // The other half: the gate is a gate, not a wall. With the flag,
         // the restored record resumes exactly as one that never went
         // missing would.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let hash = format!("0x{}", "4e".repeat(32));
         let r = burned_record(dir.path(), &hash);
@@ -4570,6 +4579,7 @@ mod tests {
         // `burned` and was carried through capture, prove and a SECOND
         // `withdrawByProof`. The concurrent route to that end state was
         // closed a round ago; this is the sequential one.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let an = format!("0x{}", "ef".repeat(32));
         let eth = format!("0x{}", "12".repeat(32));
@@ -4833,6 +4843,7 @@ mod tests {
         // unreachable by construction TODAY, and the exit code it carries
         // is what a future caller inherits. Two is the answer that gets a
         // second burn fired by a retry wrapper.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let an = format!("0x{}", "ab".repeat(32));
         let r = burned_record(dir.path(), &an);
@@ -4886,6 +4897,7 @@ mod tests {
         // hash it was resuming from has a burn on the wire it can no
         // longer name, and exit 2 there invites a retry wrapper to make a
         // second one.
+        let _relocking = crate::test_forks::relocking();
         let dir = tempfile::TempDir::new().unwrap();
         let an = format!("0x{}", "ba".repeat(32));
         let r = burned_record(dir.path(), &an);

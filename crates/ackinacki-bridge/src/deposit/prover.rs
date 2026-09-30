@@ -620,10 +620,15 @@ mod tests {
             .append(true)
             .open(dir.bin(FETCH_BIN))
             .unwrap();
-        let closer = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            drop(writer);
-        });
+        let refused = std::process::Command::new(dir.bin(FETCH_BIN))
+            .status()
+            .expect_err("a tool open for writing does not start");
+        assert_eq!(refused.raw_os_error(), Some(libc::ETXTBSY), "{refused}");
+        // This test's runtime runs one task at a time, so the writer is
+        // closed at the first pause of `prove`: the one after its first
+        // start was refused. The next start finds the tool closed, however
+        // long this host takes to get there.
+        let closer = tokio::spawn(async move { drop(writer) });
         let w = tempfile::tempdir().unwrap();
         prove(
             &dir,
@@ -635,7 +640,7 @@ mod tests {
         )
         .await
         .unwrap();
-        closer.join().unwrap();
+        closer.await.unwrap();
     }
 
     /// A fake prover that says who it is and then runs until killed. It

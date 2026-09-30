@@ -2209,6 +2209,7 @@ mod tests {
         // everything, and tells an operator whose withdrawal is mid-send
         // that the holder has already exited — two lines above the
         // refusal's offer to delete the record.
+        let _relocking = crate::test_forks::relocking();
         let dir = TempDir::new().unwrap();
         let k = key(&sample_from(), &sample_to(), &UsdcAmount(1));
 
@@ -2602,6 +2603,7 @@ mod tests {
 
     #[test]
     fn the_permit_to_send_is_issued_only_to_a_run_that_still_holds_the_lock() {
+        let _relocking = crate::test_forks::relocking();
         let dir = TempDir::new().unwrap();
         let key = "test-key-lock";
 
@@ -2745,6 +2747,7 @@ mod tests {
         // rule is read off the kernel's answer: the moment the probe says
         // somebody holds this identity, no remedy may authorise touching
         // the record.
+        let _relocking = crate::test_forks::relocking();
         let dir = TempDir::new().unwrap();
         let key = "test-key-replace";
 

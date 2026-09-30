@@ -42,6 +42,49 @@ pub const ANCESTRY_MAX_LAG_S: u64 = 2 * EPOCH_S;
 /// is enough, and every preflight and every re-check of the anchor wait
 /// stays cheap on a bridge with a long history.
 pub const OWNER_MODE_PAGE_CAP: usize = 10;
+/// A history [`observe`] searches page by page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum History {
+    /// The bridge's inbound external messages, searched for the newest
+    /// successful `disableOwnerAnchors`.
+    BridgeInbound,
+    /// The light client's events, searched for `AncestryAccepted` after the
+    /// switch-off.
+    LightClientEvents,
+}
+
+/// A history search that read its whole page cap without settling. Not a
+/// failed read: every page answered, and the history is longer than the
+/// caller chose to read. [`observe`] returns it as its error, and callers
+/// tell it from a failed read with `downcast_ref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryCapped {
+    /// The history that was cut.
+    pub history: History,
+    /// How many pages were read, the cap.
+    pub pages: usize,
+}
+
+impl std::fmt::Display for HistoryCapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pages = self.pages;
+        match self.history {
+            History::BridgeInbound => write!(
+                f,
+                "the bridge's inbound history is longer than {pages} pages; no successful \
+                 disableOwnerAnchors among the newest"
+            ),
+            History::LightClientEvents => write!(
+                f,
+                "the light client's event history is longer than {pages} pages; the newest do not \
+                 reach back to the switch-off"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HistoryCapped {}
+
 /// External address `AncestryAccepted` is emitted to.
 pub const ANCESTRY_ACCEPTED_DST: &str =
     ":00000000000000000000000000000000000000000000000000000000000002c0";
@@ -399,7 +442,8 @@ async fn accepted(
 /// The time of the newest `disableOwnerAnchors` whose transaction did not
 /// abort; `None` when the bridge's history has none. A switch-off whose
 /// outcome cannot be read is an error, never a reason to fall back to an
-/// older one, and so is a history that runs past `page_cap` pages.
+/// older one; a history that runs past `page_cap` pages is a
+/// [`HistoryCapped`] error.
 async fn t_flip(
     an: &dyn AnRead,
     bridge: [u8; 32],
@@ -438,10 +482,13 @@ async fn t_flip(
         }
         match page.cursor {
             None => return Ok(None),
-            Some(_) if page_cap.is_some_and(|n| read >= n) => anyhow::bail!(
-                "the bridge's inbound history is longer than {read} pages; no successful \
-                 disableOwnerAnchors among the newest"
-            ),
+            Some(_) if page_cap.is_some_and(|n| read >= n) => {
+                return Err(HistoryCapped {
+                    history: History::BridgeInbound,
+                    pages: read,
+                }
+                .into())
+            },
             Some(c) => before = Some(c),
         }
     }
@@ -482,7 +529,8 @@ fn ancestry_of(an: &dyn AnRead, m: &crate::deposit::an::MsgView) -> anyhow::Resu
 /// newest first. Paging stops at the first page that reaches `not_before`:
 /// the list is newest first, so nothing past that page is newer. Older
 /// events are not decoded, so they cannot fail the read. A history that
-/// runs past `page_cap` pages before it settles is an error.
+/// runs past `page_cap` pages before it settles is a [`HistoryCapped`]
+/// error.
 async fn ancestry_events(
     an: &dyn AnRead,
     lc: [u8; 32],
@@ -508,10 +556,13 @@ async fn ancestry_events(
         }
         match (older, page.cursor) {
             (true, _) | (_, None) => return Ok(out),
-            (false, Some(_)) if page_cap.is_some_and(|n| read >= n) => anyhow::bail!(
-                "the light client's event history is longer than {read} pages; the newest do not \
-                 reach back to the switch-off"
-            ),
+            (false, Some(_)) if page_cap.is_some_and(|n| read >= n) => {
+                return Err(HistoryCapped {
+                    history: History::LightClientEvents,
+                    pages: read,
+                }
+                .into())
+            },
             (false, Some(c)) => before = Some(c),
         }
     }
@@ -526,7 +577,8 @@ async fn ancestry_events(
 /// `page_cap` bounds the two history searches, the switch-off in the
 /// bridge's inbound messages and the ancestry in the light client's
 /// events: `Some(n)` reads at most `n` pages of each, and a search that
-/// has not settled by then is an error saying so. `None` reads as far as
+/// has not settled by then is a [`HistoryCapped`] error, which is not a
+/// failed read. `None` reads as far as
 /// each search needs. The caller picks the cap; this function does not
 /// know whether owner anchors are on.
 pub async fn observe(
@@ -1191,18 +1243,27 @@ mod tests {
                 )
             }),
         ];
-        for (case, break_one_read) in cases {
-            let (evm, an, b) = ready_chains();
-            let wanted = break_one_read(&evm, &an, &b);
-            let r = capped(&evm, &an, None).await;
-            let e = match r {
-                Ok(o) => panic!(
-                    "{case}: a verdict from a failed read: {:?}",
-                    judge(&o, SEPOLIA)
-                ),
-                Err(e) => format!("{e:#}"),
-            };
-            assert!(e.contains(&wanted), "{case}: {e}");
+        // With a cap or without, a failed read is never mistaken for a
+        // history that only ran past the cap.
+        for cap in [None, Some(OWNER_MODE_PAGE_CAP)] {
+            for (case, break_one_read) in &cases {
+                let (evm, an, b) = ready_chains();
+                let wanted = break_one_read(&evm, &an, &b);
+                let r = capped(&evm, &an, cap).await;
+                let e = match r {
+                    Ok(o) => panic!(
+                        "{case}: a verdict from a failed read: {:?}",
+                        judge(&o, SEPOLIA)
+                    ),
+                    Err(e) => e,
+                };
+                assert!(
+                    e.downcast_ref::<HistoryCapped>().is_none(),
+                    "{case} ({cap:?}): {e:#}"
+                );
+                let e = format!("{e:#}");
+                assert!(e.contains(&wanted), "{case} ({cap:?}): {e}");
+            }
         }
     }
 
@@ -1466,6 +1527,13 @@ mod tests {
             format!("{e:#}").contains("the bridge's inbound history is longer than 2 pages"),
             "{e:#}"
         );
+        assert_eq!(
+            e.downcast_ref::<HistoryCapped>(),
+            Some(&HistoryCapped {
+                history: History::BridgeInbound,
+                pages: 2
+            })
+        );
         assert_eq!(paged.pages.load(Ordering::SeqCst), 2);
         // Unbounded, the same history settles.
         let (evm, paged, _) = long_histories(5);
@@ -1482,6 +1550,13 @@ mod tests {
         assert!(
             format!("{e:#}").contains("the light client's event history is longer than 2 pages"),
             "{e:#}"
+        );
+        assert_eq!(
+            e.downcast_ref::<HistoryCapped>(),
+            Some(&HistoryCapped {
+                history: History::LightClientEvents,
+                pages: 2
+            })
         );
         // The bridge settled on its 2nd page, the light client was cut at 2.
         assert_eq!(paged.pages.load(Ordering::SeqCst), 2 + 2);

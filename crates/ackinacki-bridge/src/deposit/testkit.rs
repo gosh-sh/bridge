@@ -1270,6 +1270,30 @@ fn seq_hash(tag: u8) -> B256 {
     B256::from(b)
 }
 
+/// Block `number` of [`World`]'s chain, timed like [`header`]'s, but with
+/// a [`seq_hash`] hash: it reads differently in the light client's key
+/// form and with its halves swapped, so a test that passes the hash in the
+/// wrong byte order finds no anchor and no matching public input.
+fn world_header(number: u64, tag: u8) -> Header {
+    let h = Header {
+        number,
+        hash: seq_hash(tag),
+        parent_hash: seq_hash(tag.wrapping_sub(1)),
+        timestamp: header(number, tag).timestamp,
+    };
+    assert_ne!(
+        B256::from(crate::deposit::identity::pi_form(h.hash.0)),
+        h.hash,
+        "a block whose two forms differ"
+    );
+    assert_ne!(
+        h.hash[..16],
+        h.hash[16..],
+        "a block whose halves differ, so swapping them changes it"
+    );
+    h
+}
+
 /// A uint as the SDK renders it in a decoded body: a decimal string.
 fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
     serde_json::json!(v.to_string())
@@ -1558,7 +1582,7 @@ impl World {
         let h = B256::repeat_byte(0xaa);
         self.evm.script_receipt(h, vec![Some(deposit_receipt(
             h,
-            &header(899, 0x89),
+            &world_header(899, 0x89),
             true,
             vec![],
         ))]);
@@ -1651,13 +1675,20 @@ impl World {
     pub fn mined_deposit(&mut self, nonce: u64) -> B256 {
         self.next_id += 1;
         let id = U256::from(self.next_id);
-        self.mine(nonce, 2, true, header(900, 0x90), id, W_AMOUNT)
+        self.mine(nonce, 2, true, world_header(900, 0x90), id, W_AMOUNT)
     }
 
     /// A deposit in the slot with another amount, as a wallet that changed
     /// it would send.
     pub fn mined_deposit_of_amount(&mut self, nonce: u64, amount: u64) -> B256 {
-        self.mine(nonce, 2, true, header(900, 0x90), U256::from(6), amount)
+        self.mine(
+            nonce,
+            2,
+            true,
+            world_header(900, 0x90),
+            U256::from(6),
+            amount,
+        )
     }
 
     /// A successful deposit at `nonce` of transaction type `tx_type`.
@@ -1666,7 +1697,7 @@ impl World {
             nonce,
             tx_type,
             true,
-            header(900, 0x90),
+            world_header(900, 0x90),
             U256::from(6),
             W_AMOUNT,
         )
@@ -1674,7 +1705,14 @@ impl World {
 
     /// A deposit at `nonce` that reverted.
     pub fn reverted_deposit_finalized(&mut self, nonce: u64) -> B256 {
-        self.mine(nonce, 2, false, header(900, 0x90), U256::ZERO, W_AMOUNT)
+        self.mine(
+            nonce,
+            2,
+            false,
+            world_header(900, 0x90),
+            U256::ZERO,
+            W_AMOUNT,
+        )
     }
 
     /// The mined deposit's block turns accepted after `polls` reads.
@@ -1687,7 +1725,7 @@ impl World {
     /// block 901 with depositId 8; only that block ever gets an anchor.
     pub fn reorg_after_confirmation(&mut self, tx: B256, polls: usize) {
         let old = self.mined.clone().expect("mine a deposit first");
-        let new_block = header(901, 0x91);
+        let new_block = world_header(901, 0x91);
         let from = self.wallet.account;
         let log = deposit_log(
             W_BRIDGE,
@@ -2100,5 +2138,48 @@ impl World {
         std::fs::read_to_string(self.prover.1.root.join("data/runs.log"))
             .map(|s| s.lines().count())
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deposit::identity::pi_form;
+
+    /// `h` with its two 16-byte halves swapped.
+    fn halves_swapped(h: B256) -> B256 {
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(&h[16..]);
+        b[16..].copy_from_slice(&h[..16]);
+        B256::from(b)
+    }
+
+    /// What the world recorded for its deposit block, everywhere a
+    /// deposit's block hash is read: the chain, the log, the anchor and
+    /// the prover's public inputs.
+    fn assert_one_hash_everywhere(w: &World) {
+        let m = w.mined.as_ref().unwrap();
+        let h = m.block.hash;
+        assert_ne!(B256::from(pi_form(h.0)), h, "key form");
+        assert_ne!(halves_swapped(h), h, "halves swapped");
+        assert_eq!(w.evm.by_hash.lock().unwrap().get(&h), Some(&m.block));
+        assert!(w.an.accepted.lock().unwrap().contains_key(&h));
+        let pi = std::fs::read(w.prover.1.root.join("expected_pi.bin")).unwrap();
+        let pi = crate::deposit::pi::DepositPublicInputs::decode(&pi).unwrap();
+        assert_eq!(pi.block_hash(), h);
+    }
+
+    #[test]
+    fn the_worlds_deposit_blocks_read_differently_in_every_byte_order() {
+        let mut w = World::healthy();
+        let tx = w.mined_deposit(7);
+        w.anchor_after(0);
+        assert_one_hash_everywhere(&w);
+        assert_eq!(
+            w.evm.logs.lock().unwrap().last().unwrap().block_hash,
+            w.mined.as_ref().unwrap().block.hash
+        );
+        w.reorg_after_confirmation(tx, 0);
+        assert_one_hash_everywhere(&w);
     }
 }

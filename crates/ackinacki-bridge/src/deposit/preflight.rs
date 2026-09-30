@@ -17,7 +17,7 @@ use crate::{
         args::{an_network_id, DepositParams, Network},
         evm::{approve_calldata, deposit_calldata, EvmRead},
         evm_preflight::{self, EvmPreflight},
-        lc_readiness::{self, AnchorPlan, LcFailure},
+        lc_readiness::{self, AnchorPlan, HistoryCapped, LcFailure},
         locks::ProverLock,
         prover_files::{check_prover_dir, ProverDir},
         store::{blocking_by_params, close_interrupted, OpParams, Store},
@@ -206,11 +206,20 @@ async fn anchor_plan(
             .await
             {
                 Ok(o) => lc_readiness::judge(&o, chain_id),
+                // A long history is what owner mode normally looks like: the
+                // bridge's inbound messages only grow, and there may be no
+                // switch-off in them at all. Only a read that failed is
+                // worth a warning.
                 Err(e) if owner => {
-                    d.ui.warn(&format!(
-                        "{e:#}; whether the light client can anchor this deposit is unknown, so \
-                         the anchor is expected from the bridge owner"
-                    ));
+                    match e.downcast_ref::<HistoryCapped>() {
+                        Some(c) => d.ui.status(&format!(
+                            "{c}; the anchor is expected from the bridge owner"
+                        )),
+                        None => d.ui.warn(&format!(
+                            "{e:#}; whether the light client can anchor this deposit is unknown, \
+                             so the anchor is expected from the bridge owner"
+                        )),
+                    }
                     return Ok(AnchorPlan::Owner {
                         lc_ready: false,
                     });
@@ -232,8 +241,10 @@ async fn anchor_plan(
 }
 
 /// What `--dry-run` prints after a passed preflight: both transactions'
-/// calldata, their EIP-681 URIs and who would anchor the deposit. No
-/// operation exists, and nothing was sent.
+/// calldata, their EIP-681 URIs and who would anchor the deposit — the
+/// writer, and whether the light client passed its checks, which with the
+/// owner's anchors on tells "the bridge owner or the light client" from
+/// "the bridge owner" alone. No operation exists, and nothing was sent.
 pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
     let net: Network = p.network.expect("validated for a fresh run");
     let to = p.to.expect("validated for a fresh run");
@@ -248,12 +259,13 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         amount,
         account: to.account_b256(),
     };
-    // The anchor's writer as the summary names it.
-    let writer = match c.plan {
-        AnchorPlan::LightClient => "light-client",
+    // The anchor's writer as the summary names it, and whether the light
+    // client can anchor the deposit.
+    let (writer, light_client_ready) = match c.plan {
+        AnchorPlan::LightClient => ("light-client", true),
         AnchorPlan::Owner {
-            ..
-        } => "owner",
+            lc_ready,
+        } => ("owner", lc_ready),
     };
     DepositSuccess {
         op_id: None,
@@ -263,7 +275,7 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         amount: p.amount.expect("validated for a fresh run").display(),
         to: to.extended(),
         deposit: None,
-        anchor: Some(json!({ "writer": writer })),
+        anchor: Some(json!({ "writer": writer, "light_client_ready": light_client_ready })),
         tx: Some(json!({
             "approve_calldata": format!("0x{}", hex::encode(approve_calldata(c.params.bridge, U256::from(amount)))),
             "deposit_calldata": format!("0x{}", hex::encode(deposit_calldata(amount, to.account_b256()))),
@@ -316,6 +328,8 @@ mod tests {
         assert!(uris[0].as_str().unwrap().contains("/approve?"), "{uris:?}");
         assert!(uris[1].as_str().unwrap().contains("/deposit?"), "{uris:?}");
         assert_eq!(j["anchor"]["writer"], "owner");
+        // The light client's head is no block on the chain: owner only.
+        assert_eq!(j["anchor"]["light_client_ready"], false);
         assert_eq!(j["to"], World::target().extended());
         assert_eq!(j["amount"], "12.500000");
     }
@@ -356,6 +370,7 @@ mod tests {
             (false, false, true, true),
             (true, true, false, false),
             (false, false, false, false),
+            (true, false, true, false),
         ] {
             let world = World::healthy();
             world.paused(paused);
@@ -396,6 +411,7 @@ mod tests {
             assert_eq!(c.plan, plan, "owner={owner}");
             let j = serde_json::to_value(dry_run_summary(&p, &c)).unwrap();
             assert_eq!(j["anchor"]["writer"], writer, "owner={owner}");
+            assert_eq!(j["anchor"]["light_client_ready"], true, "owner={owner}");
         }
     }
 
@@ -482,12 +498,21 @@ mod tests {
             owner.an.pages_read.load(Ordering::SeqCst) as usize,
             OWNER_MODE_PAGE_CAP
         );
+        // A history longer than the cap is what owner mode normally
+        // looks like: a status line, not a warning.
         assert!(
-            ui.warnings()
+            !ui.warnings()
                 .iter()
-                .any(|w| w.contains("longer than") && w.contains("pages")),
+                .any(|w| w.contains("longer than") || w.contains("light client")),
             "{:?}",
             ui.warnings()
+        );
+        assert!(
+            ui.statuses().iter().any(|s| s.contains("longer than")
+                && s.contains("pages")
+                && s.contains("bridge owner")),
+            "{:?}",
+            ui.statuses()
         );
 
         let lc = World::healthy();
@@ -501,6 +526,35 @@ mod tests {
         assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
         assert!(e.to_string().contains("check 3"), "{e}");
         assert_eq!(lc.an.pages_read.load(Ordering::SeqCst) as usize, pages);
+    }
+
+    #[tokio::test]
+    async fn in_owner_mode_a_history_that_cannot_be_read_warns() {
+        let world = World::healthy();
+        world.light_client_ready();
+        world.an.failing_ext.lock().unwrap().insert(W_BRIDGE_ACC);
+        let ui = Arc::new(RecordingUi::new(true));
+        let mut d = world.deps();
+        d.ui = ui.clone();
+        let p = world.params(RunMode::Fresh);
+        let store = Store::open(&p.state_dir).unwrap();
+        let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
+        let c = check(&p, &d, &store, None).await.unwrap();
+        assert_eq!(c.plan, AnchorPlan::Owner {
+            lc_ready: false
+        });
+        assert!(
+            ui.warnings()
+                .iter()
+                .any(|w| w.contains("could not read the bridge's inbound external messages")),
+            "{:?}",
+            ui.warnings()
+        );
+        assert!(
+            !ui.statuses().iter().any(|s| s.contains("longer than")),
+            "{:?}",
+            ui.statuses()
+        );
     }
 
     #[tokio::test]

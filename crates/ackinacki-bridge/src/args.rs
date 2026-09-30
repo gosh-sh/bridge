@@ -48,14 +48,19 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
     name = "ackinacki-bridge",
     version,
     about = "Acki Nacki ↔ EVM bridge CLI. Ships the `withdraw` and `deposit` subcommands.",
-    long_about = "Composes a single-custodian multisig sendTransaction that calls \
-                  USDCBridge.initiateWithdrawal, waits for the WithdrawalInitiated event, \
-                  resurrects the prover's mirror of `AckiNackiBridge` state from the on-chain \
-                  contract at --bridge-address, waits for the covering L1/L2 anchor bundle to \
-                  land (fed by a relayer running on some other host), produces the Circuit-4 \
-                  SHPLONK proof, and submits withdrawByProof on the EVM side.\n\nThird-party \
-                  end-user CLI: expects only an EVM RPC URL and the deployed AckiNackiBridge \
-                  address — no local `prover_state.json`, no daemon on this machine."
+    long_about = "withdraw (Acki Nacki → EVM): composes a single-custodian multisig \
+                  sendTransaction that calls USDCBridge.initiateWithdrawal, waits for the \
+                  WithdrawalInitiated event, resurrects the prover's mirror of `AckiNackiBridge` \
+                  state from the on-chain contract at --bridge-address, waits for the covering \
+                  L1/L2 anchor bundle to land (fed by a relayer running on some other host), \
+                  produces the Circuit-4 SHPLONK proof, and submits withdrawByProof on the EVM \
+                  side.\n\ndeposit (EVM → Acki Nacki): an EVM wallet signs `approve` and \
+                  `deposit` from a QR code (WalletConnect v2 or EIP-681) and keeps its keys; the \
+                  CLI waits for the deposit block's anchor on Acki Nacki, proves the deposit on \
+                  this machine, sends finalizeDeposit and confirms the credit by the deposit's \
+                  identity.\n\nThird-party end-user CLI: expects only an EVM RPC URL, the \
+                  deployed AckiNackiBridge address and an Acki Nacki endpoint — no local \
+                  `prover_state.json`, no daemon on this machine."
 )]
 /// The command line, as clap parses it. The long description above
 /// this attribute is what `--help` prints.
@@ -83,9 +88,8 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
-/// The subcommands this binary ships. One today; the enum is what
-/// keeps `withdraw` from becoming the implicit default when a
-/// second one lands.
+/// The subcommands this binary ships, one per direction. There is no
+/// implicit default: a command line names the direction it moves money in.
 pub enum Command {
     /// Withdraw USDC from an AN multisig to an EVM recipient.
     Withdraw(WithdrawArgs),

@@ -14,7 +14,7 @@
 #   aggregate-proof      the prover subprocess the CLI shells out to
 #   verifiers/*.bin      the bytecode stage 1 compares with the deployed verifier
 #   verifiers/*.sol      the source the proof is self-checked against
-#   bridge_config        the profile it writes as <prefix>/profile.release
+#   bridge_config        the profile it writes as <prefix>/bridge_config.release
 #   deposit-prover/      the deposit prover, the working directory of its tools:
 #                        fetch_deposit_data, export_blake2b_proof and
 #                        export_vk_blob, configs/circuit_params.json, and an

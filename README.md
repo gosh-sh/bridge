@@ -84,7 +84,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 | `crates/deposit-chain-ids/` | The single allowlist of deposit source chains, shared by prover and relayer. |
 | `crates/bridge-prover-libraries/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |
 | `crates/bridge-relayer-daemon/` | AN → ETH relayer. `src/withdraw_e2e/` is the in-process withdrawal pipeline behind `relayer withdraw-e2e`. |
-| `crates/ackinacki-bridge/` | End-user CLI: withdraws USDC from an Acki Nacki multisig to an EVM recipient. Counterpart to the relayer — the daemon owns bundle proving, this owns one withdrawal. Installed from published releases, see [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md). |
+| `crates/ackinacki-bridge/` | End-user CLI: `withdraw` moves USDC from an Acki Nacki multisig to an EVM recipient, `deposit` from an EVM wallet to an Acki Nacki account. Counterpart to the relayers — the daemons own the continuous streams, this owns one withdrawal or one deposit. Installed from published releases, see [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md). |
 | `crates/bridge-snark-utils/`, `crates/bridge-evm-aggregator/` | Prover orchestration and the R15 SHPLONK aggregator. |
 | `frontend/` | WASM deposit UI (Yew). |
 | `docs/` | [`EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) and the rest of the current documentation; the register is [`DOCS.md`](DOCS.md). |
@@ -93,7 +93,7 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
 forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `crates/bridge-prover-libraries/`
 (gosh-fork halo2-base), `crates/bridge-snark-utils/`, `crates/deposit-relayer-daemon/`, and `frontend/`.
-The AN→ETH relayer `crates/bridge-relayer-daemon/` and the withdrawal CLI `crates/ackinacki-bridge/`
+The AN→ETH relayer `crates/bridge-relayer-daemon/` and the end-user CLI `crates/ackinacki-bridge/`
 are symlinked members of `crates/bridge-prover-libraries/` and build only from there.
 
 ---
@@ -112,10 +112,10 @@ Run `make pre-push` before pushing: on top of `make check` it covers the relayer
 `forge coverage`, none of which any GitHub pipeline runs. The CI section of [AGENTS.md](AGENTS.md)
 lists what it does and does not cover.
 
-The end-user withdrawal CLI is not built from here at all —
+The end-user CLI is not built from here at all —
 [`crates/ackinacki-bridge/scripts/install.sh`](crates/ackinacki-bridge/scripts/install.sh) downloads
-the published binaries (the CLI, the prover subprocess it shells out to, and the verifier bytecode
-and sources), so an operator needs neither Rust nor a checkout. Start at
+the published binaries (the CLI, the prover subprocess it shells out to, the verifier bytecode
+and sources, and the deposit prover), so an operator needs neither Rust nor a checkout. Start at
 [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md).
 
 Contracts on their own:
@@ -132,7 +132,7 @@ The suite is inventoried per file, with what each one covers, in
 deliberate and worth knowing before you touch them: `optimizer_runs = 1` and `via_ir = true`. The
 bridge sits close to the EIP-170 size limit, and several functions are otherwise stack-too-deep.
 
-Standalone crates build from their own directories; the relayer and the withdrawal CLI from the
+Standalone crates build from their own directories; the relayer and the end-user CLI from the
 prover workspace they belong to:
 
 ```bash

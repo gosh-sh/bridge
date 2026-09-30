@@ -2,7 +2,7 @@
 name = "ackinacki-bridge"
 version = "0.2.0"
 edition = "2021"
-description = "End-user CLI for the Acki Nacki ↔ EVM bridge. Ships the `withdraw` and `deposit` subcommands. `withdraw`: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side. Additional subcommands (e.g. deposit) will land here."
+description = "End-user CLI for the Acki Nacki ↔ EVM bridge: `withdraw` (Acki Nacki → EVM) and `deposit` (EVM → Acki Nacki)."
 
 # Build via the bridge-prover-libraries workspace (member symlink
 # crates/bridge-prover-libraries/ackinacki-bridge → ../ackinacki-bridge):

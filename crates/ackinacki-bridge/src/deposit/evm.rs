@@ -487,16 +487,22 @@ impl EvmRead for AlloyEvm {
                 .from_block(lo)
                 .to_block(hi);
             for l in self.p.get_logs(&f).await? {
-                if let (Some(tx_hash), Some(block_number), Some(block_hash)) =
+                // Skipping such a log would make an incomplete answer look
+                // like "no deposit here".
+                let (Some(tx_hash), Some(block_number), Some(block_hash)) =
                     (l.transaction_hash, l.block_number, l.block_hash)
-                {
-                    out.push(DepositLogRef {
-                        tx_hash,
-                        block_number,
-                        block_hash,
-                        log: log_lite(&l),
-                    });
-                }
+                else {
+                    anyhow::bail!(
+                        "the node lists a Deposit log without its block or transaction; searching \
+                         again"
+                    );
+                };
+                out.push(DepositLogRef {
+                    tx_hash,
+                    block_number,
+                    block_hash,
+                    log: log_lite(&l),
+                });
             }
             if hi == to_block {
                 break;
@@ -674,6 +680,69 @@ mod tests {
         // An address that runs no code returns nothing: not a bool.
         rpc.push_success(&Bytes::new());
         assert!(evm.bridge_paused(BRIDGE).await.is_err());
+    }
+
+    /// The RPC form of a bridge `Deposit` log from `sender`, mined in block
+    /// 16 by transaction `0x11…`.
+    fn rpc_deposit_log(sender: Address) -> alloy::rpc::types::Log {
+        let l = crate::deposit::testkit::deposit_log(
+            BRIDGE,
+            U256::from(7),
+            sender,
+            12_500_000,
+            B256::repeat_byte(0xa3),
+            Some(3),
+        );
+        alloy::rpc::types::Log {
+            inner: alloy_primitives::Log {
+                address: l.address,
+                data: alloy_primitives::LogData::new_unchecked(l.topics, l.data),
+            },
+            block_hash: Some(B256::repeat_byte(0x16)),
+            block_number: Some(16),
+            block_timestamp: None,
+            transaction_hash: Some(B256::repeat_byte(0x11)),
+            transaction_index: Some(0),
+            log_index: Some(3),
+            removed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deposit_log_comes_back_with_where_it_was_mined() {
+        let (evm, rpc) = mocked();
+        let sender = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        rpc.push_success(&vec![rpc_deposit_log(sender)]);
+        let got = evm.deposit_logs(BRIDGE, sender, 10, 20).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].tx_hash, B256::repeat_byte(0x11));
+        assert_eq!(got[0].block_number, 16);
+        assert_eq!(got[0].block_hash, B256::repeat_byte(0x16));
+        assert_eq!(got[0].log.block_log_index, Some(3));
+        assert_eq!(parse_deposit_log(&got[0].log).unwrap().sender, sender);
+    }
+
+    #[tokio::test]
+    async fn a_deposit_log_without_its_block_or_transaction_fails_the_search() {
+        // Dropping such a log would turn "the node did not say" into "there
+        // is no deposit".
+        let sender = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let strip: [fn(&mut alloy::rpc::types::Log); 3] = [
+            |l| l.transaction_hash = None,
+            |l| l.block_number = None,
+            |l| l.block_hash = None,
+        ];
+        for (i, strip) in strip.into_iter().enumerate() {
+            let (evm, rpc) = mocked();
+            let mut bare = rpc_deposit_log(sender);
+            strip(&mut bare);
+            rpc.push_success(&vec![rpc_deposit_log(sender), bare]);
+            let err = evm.deposit_logs(BRIDGE, sender, 10, 20).await.unwrap_err();
+            assert!(
+                err.to_string().contains("without its block or transaction"),
+                "case {i}: {err:#}"
+            );
+        }
     }
 
     #[tokio::test]

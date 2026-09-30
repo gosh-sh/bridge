@@ -225,11 +225,96 @@ impl OpRecord {
     }
 }
 
+fn preflight(reason: String) -> CliError {
+    CliError::Preflight {
+        reason,
+        source: None,
+    }
+}
+
+/// The directory that holds `path`'s entry; `None` for a root or an empty
+/// parent (the current directory always exists).
+fn entry_parent(path: &Path) -> Option<&Path> {
+    match path.parent() {
+        Some(p) if p.as_os_str().is_empty() => Some(Path::new(".")),
+        other => other,
+    }
+}
+
+/// Make `path`'s own directory entry durable.
+fn sync_entry_of(path: &Path) -> CliResult<()> {
+    let Some(parent) = entry_parent(path) else {
+        return Ok(());
+    };
+    std::fs::File::open(parent)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| {
+            preflight(format!(
+                "deposit state: could not make {} durable (fsync of {}): {e}",
+                path.display(),
+                parent.display()
+            ))
+        })
+}
+
+/// Create the levels that do not exist yet, sync each new level's entry
+/// (outermost first) and restrict the innermost one to 0700. Does nothing
+/// to a directory that already exists.
+fn create_missing_levels(dir: &Path) -> CliResult<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    let mut created: Vec<&Path> = Vec::new();
+    let mut probe = dir;
+    while !probe.exists() {
+        created.push(probe);
+        match probe.parent() {
+            Some(p) if !p.as_os_str().is_empty() => probe = p,
+            _ => break,
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| {
+        preflight(format!(
+            "cannot create the deposit state directory {}: {e}",
+            dir.display()
+        ))
+    })?;
+    for level in created.iter().rev() {
+        sync_entry_of(level)?;
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+        preflight(format!(
+            "created {} but could not restrict it to 0700: {e}",
+            dir.display()
+        ))
+    })
+}
+
+/// Say, never fix, a state directory that others can reach: the records
+/// carry amounts and destination addresses.
+fn report_permissive_mode(dir: &Path) {
+    let Ok(md) = std::fs::metadata(dir) else {
+        return;
+    };
+    let mode = md.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            state_dir = %dir.display(),
+            mode = format!("{mode:04o}"),
+            "the deposit state directory can be reached by more than its owner; `chmod 700` is the fix if it was not deliberate",
+        );
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
 }
 
 impl Store {
+    /// Open the store, creating the directory if it is missing. Only
+    /// directories created here are restricted to 0700 (a failure to do so
+    /// is an error); an existing one keeps its mode and is reported when
+    /// others can reach it. Every created level is made durable.
     pub fn open(dir: &Path) -> CliResult<Store> {
         if let Some(c) = crate::args::first_control_character(dir) {
             return Err(CliError::Preflight {
@@ -237,19 +322,9 @@ impl Store {
                 source: None,
             });
         }
-        std::fs::create_dir_all(dir).map_err(|e| CliError::Preflight {
-            reason: format!(
-                "cannot create the deposit state directory {}: {e}",
-                dir.display()
-            ),
-            source: None,
-        })?;
-        // Created 0700 on first use; an existing directory keeps its mode.
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "a directory we do not own keeps its mode"
-        )]
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        create_missing_levels(dir)?;
+        sync_entry_of(dir)?;
+        report_permissive_mode(dir);
         Ok(Store {
             dir: dir.to_path_buf(),
         })
@@ -428,5 +503,19 @@ mod tests {
             sends: 1,
         });
         assert!(!r.is_unresolved(), "Finalizing does not block new deposits");
+    }
+
+    #[test]
+    fn an_existing_directory_keeps_its_mode_and_a_new_one_is_owner_only() {
+        let d = tempfile::tempdir().unwrap();
+        let existing = d.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Store::open(&existing).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&existing), 0o755);
+        let fresh = d.path().join("a").join("b");
+        Store::open(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
     }
 }

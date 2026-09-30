@@ -12,13 +12,12 @@
 use std::{future::Future, time::Duration};
 
 use alloy_primitives::Address;
-use rand::Rng as _;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use crate::deposit::{
     args::Network,
-    retry::{base_delay, jittered},
+    retry::until_with,
     wallet::WalletError,
     wc::{
         crypto::{derive_sym_key, open, parse, random_bytes, seal_type0, topic_of, KeyPair},
@@ -271,40 +270,44 @@ fn eip155_accounts(params: &Value) -> Option<Vec<String>> {
 }
 
 /// Runs the relay call `f` until it succeeds or `deadline` passes, pausing
-/// 1 s doubling to 60 s, ±20 %, between attempts; the relay client
-/// reconnects meanwhile. Out of time after a failure, the failure is the
-/// reason; out of time with none, the wait ran out.
-async fn with_retries<F, Fut>(deadline: Instant, mut f: F) -> Result<(), WalletError>
+/// 1 s doubling to 60 s, ±20 %, between attempts while the relay client
+/// reconnects, and hands every failed attempt to `on_retry`. Out of time
+/// after a failure, the last failure is the reason; out of time with none,
+/// the wait ran out.
+async fn with_retries<F, Fut, R>(deadline: Instant, f: F, on_retry: R) -> Result<(), WalletError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
+    R: FnMut(u32, &anyhow::Error),
 {
-    let unreachable =
-        |e: anyhow::Error| WalletError::Disconnected(format!("the WalletConnect relay: {e:#}"));
-    let mut attempt = 0u32;
-    let mut last = None;
-    loop {
-        let e = match tokio::time::timeout_at(deadline, f()).await {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(e)) => e,
-            Err(_) => return Err(last.map_or(WalletError::Timeout, unreachable)),
-        };
-        let pause = jittered(
-            base_delay(attempt),
-            rand::thread_rng().gen_range(-1.0..=1.0),
-        );
-        attempt = attempt.saturating_add(1);
-        if Instant::now() + pause >= deadline {
-            return Err(unreachable(e));
-        }
-        last = Some(e);
-        tokio::time::sleep(pause).await;
-    }
+    until_with(Some(deadline), f, on_retry)
+        .await
+        .map_err(|last| match last {
+            Some(e) => WalletError::Disconnected(format!("the WalletConnect relay: {e:#}")),
+            None => WalletError::Timeout,
+        })
+}
+
+/// Logs a failed relay call as an error: every attempt leaves a trace, the
+/// ones a later attempt made good included.
+fn log_failure(call: &str, topic: &str, attempt: u32, e: &anyhow::Error) {
+    tracing::error!(
+        call,
+        topic,
+        attempt,
+        error = %format!("{e:#}"),
+        "a WalletConnect relay call failed",
+    );
 }
 
 /// Subscribes to `topic`, retrying until `deadline`.
 async fn subscribe_by(relay: &Relay, topic: &str, deadline: Instant) -> Result<(), WalletError> {
-    with_retries(deadline, move || relay.subscribe(topic)).await
+    with_retries(
+        deadline,
+        move || relay.subscribe(topic),
+        |attempt, e| log_failure("irn_subscribe", topic, attempt, e),
+    )
+    .await
 }
 
 /// Publishes the sealed `envelope` on `topic`, retrying the very same
@@ -317,7 +320,12 @@ async fn publish_by(
     tag: u32,
     deadline: Instant,
 ) -> Result<(), WalletError> {
-    with_retries(deadline, move || relay.publish(topic, envelope, ttl_s, tag)).await
+    with_retries(
+        deadline,
+        move || relay.publish(topic, envelope, ttl_s, tag),
+        |attempt, e| log_failure(&format!("irn_publish (tag {tag})"), topic, attempt, e),
+    )
+    .await
 }
 
 /// The next message on `topic` that opens under `sym` as JSON; `Timeout`
@@ -667,6 +675,82 @@ mod tests {
             ids[9_999] < 1 << 53,
             "a JavaScript wallet reads the id as a number"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_failed_relay_call_is_reported_even_when_a_later_one_succeeds() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let mut reported = vec![];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+        let done = with_retries(
+            deadline,
+            || async {
+                match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 | 1 => anyhow::bail!("relay connection dropped"),
+                    _ => Ok(()),
+                }
+            },
+            |attempt, e| reported.push((attempt, e.to_string())),
+        )
+        .await;
+        assert_eq!(done, Ok(()));
+        let dropped = "relay connection dropped".to_string();
+        assert_eq!(reported, vec![(1, dropped.clone()), (2, dropped)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn out_of_time_the_relay_error_is_the_last_one() {
+        // Attempts at 0, ~1, ~3 and ~7 s; the pause after the fourth would
+        // end past the deadline, so the fourth error is the answer.
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let mut reported = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let e = with_retries(
+            deadline,
+            || async {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                anyhow::bail!("failure {n}")
+            },
+            |_, _| reported += 1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reported, 4);
+        assert_eq!(
+            e,
+            crate::deposit::wallet::WalletError::Disconnected(
+                "the WalletConnect relay: failure 4".into()
+            )
+        );
+
+        // An attempt the deadline cuts short leaves the failure before it.
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let e = with_retries(
+            deadline,
+            || async {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    anyhow::bail!("failure 1")
+                }
+                std::future::pending().await
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            e,
+            crate::deposit::wallet::WalletError::Disconnected(
+                "the WalletConnect relay: failure 1".into()
+            )
+        );
+
+        // With no failure at all, the wait just ran out.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let e = with_retries(deadline, std::future::pending, |_, _| {})
+            .await
+            .unwrap_err();
+        assert_eq!(e, crate::deposit::wallet::WalletError::Timeout);
     }
 
     #[tokio::test]

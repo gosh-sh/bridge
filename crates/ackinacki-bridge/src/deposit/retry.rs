@@ -21,39 +21,65 @@ pub fn jittered(base: Duration, unit: f64) -> Duration {
     base.mul_f64(1.0 + 0.2 * unit.clamp(-1.0, 1.0))
 }
 
-/// Retries `f` until it succeeds or `deadline` passes. The deadline covers
-/// the calls themselves and the pauses between them. `None` means the read
-/// never succeeded and there is no time left to wait.
+/// Retries `f` until it succeeds or `deadline` passes, and hands every
+/// failed attempt — its number, counted from 1, and its error — to
+/// `on_retry`. The deadline covers the calls themselves and the pauses
+/// between them. When time runs out, the error is the last failed
+/// attempt's, or `None` when the deadline cut the first attempt short.
+pub async fn until_with<T, F, Fut, R>(
+    deadline: Option<tokio::time::Instant>,
+    mut f: F,
+    mut on_retry: R,
+) -> Result<T, Option<anyhow::Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+    R: FnMut(u32, &anyhow::Error),
+{
+    let mut attempt = 0u32;
+    let mut last = None;
+    loop {
+        let r = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, f()).await {
+                Ok(r) => r,
+                Err(_) => return Err(last),
+            },
+            None => f().await,
+        };
+        let e = match r {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        };
+        attempt = attempt.saturating_add(1);
+        on_retry(attempt, &e);
+        let unit: f64 = rand::thread_rng().gen_range(-1.0..=1.0);
+        let pause = jittered(base_delay(attempt - 1), unit);
+        if deadline.is_some_and(|d| tokio::time::Instant::now() + pause >= d) {
+            return Err(Some(e));
+        }
+        last = Some(e);
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// Retries `f` until it succeeds or `deadline` passes, reporting every
+/// failed attempt through `ui`. `None` means the read never succeeded and
+/// there is no time left to wait.
 pub async fn until<T, F, Fut>(
     ui: &dyn Ui,
     what: &str,
     deadline: Option<tokio::time::Instant>,
-    mut f: F,
+    f: F,
 ) -> Option<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    let mut attempt = 0u32;
-    loop {
-        let r = match deadline {
-            Some(d) => tokio::time::timeout_at(d, f()).await.ok()?,
-            None => f().await,
-        };
-        match r {
-            Ok(v) => return Some(v),
-            Err(e) => {
-                attempt += 1;
-                ui.retry(what, attempt, &format!("{e:#}"));
-                let unit: f64 = rand::thread_rng().gen_range(-1.0..=1.0);
-                let pause = jittered(base_delay(attempt - 1), unit);
-                if deadline.is_some_and(|d| tokio::time::Instant::now() + pause >= d) {
-                    return None;
-                }
-                tokio::time::sleep(pause).await;
-            },
-        }
-    }
+    until_with(deadline, f, |attempt, e| {
+        ui.retry(what, attempt, &format!("{e:#}"))
+    })
+    .await
+    .ok()
 }
 
 /// The longest a single optional read may take.

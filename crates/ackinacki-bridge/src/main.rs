@@ -242,6 +242,19 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
                 .map(output::RunSuccess::Withdraw)
         },
         Command::Deposit(args) => {
+            // From here on nothing this process prints carries the path,
+            // query or userinfo of a configured URL: RPC providers put
+            // their API keys there, and HTTP clients quote the whole URL
+            // in their errors.
+            crate::deposit::ui::hide_url_secrets(
+                [
+                    args.rpc_url.as_deref(),
+                    args.gql_endpoint.as_deref(),
+                    Some(args.wc_relay_url.as_str()),
+                ]
+                .into_iter()
+                .flatten(),
+            );
             let g = crate::deposit::args::GlobalFlags {
                 json: cli.json,
                 yes: cli.yes,

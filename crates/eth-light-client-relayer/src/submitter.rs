@@ -33,8 +33,8 @@ pub trait AnSubmitter: Send + Sync {
         -> Result<SubmitOutcome, RelayerError>;
 
     /// Re-send an already-proven hash to `USDCBridge` (`rePushAnchor`).
-    /// `block_hash` is Ethereum byte order, like everything else in this
-    /// crate; [`anchor_key_hex`] re-packs it at the ABI boundary.
+    /// `block_hash` is Ethereum byte order, as the relayer carries hashes;
+    /// [`anchor_key_hex`] re-packs it into the stored key at the ABI boundary.
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
     /// Owner one-way flip: check `getAnchorConfig().lightClient` against

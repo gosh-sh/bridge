@@ -45,7 +45,7 @@ AN_KECCAK = root / "contracts/an/EthKeccak.sol"
 # In the acki-nacki tree the sink is a constant and the constructor checks the
 # sender, so a patch that mentions either side of that split is rewriting
 # deployed wiring rather than delivering a fix.
-LOCAL_ONLY = ("IAcceptedBlockHashSink", "_usdcBridge", "setUsdcBridge", '"0.1.0"')
+LOCAL_ONLY = ("IAcceptedBlockHashSink", "_usdcBridge", "setUsdcBridge", '"0.1.1"')
 THEIRS_ONLY = ("USDC_BRIDGE_ADDRESS", "eccUSDCBridge")
 
 failures: list[str] = []

@@ -11,8 +11,8 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/b
 # NOTE: no --dry-run — this actually submits finalizeDeposit on AN.
 # --start-deposit-id is the fresh-start cursor (ignored once state.json has
 # progress); bump it past already-finalized deposits so the daemon doesn't
-# waste ticks re-checking them. --from-block (FROM_BLOCK) must stay near head —
-# see the 429 warning in deposit-relayer.env.example.
+# waste ticks re-checking them. --from-block (FROM_BLOCK) must not be above the
+# oldest deposit still to deliver — see deposit-relayer.env.example.
 ExecStart=/home/ubuntu/bridge-e2e/bin/deposit-relayer daemon \
   --rpc-url ${RPC_URL} \
   --bridge-address ${BRIDGE_ADDRESS} \

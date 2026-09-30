@@ -997,7 +997,7 @@ impl LockAttempt {
 
 /// How to read the errno `flock` reported.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum FlockVerdict {
+pub(crate) enum FlockVerdict {
     /// Somebody holds it.
     Contended,
     /// The call cannot work on this filesystem, whoever runs it.
@@ -1016,7 +1016,7 @@ enum FlockVerdict {
 /// build has never seen — is fatal. Being wrong in this direction costs a
 /// refusal with nothing sent; being wrong in the other direction costs a
 /// second burn.
-fn classify_flock_error(raw: Option<i32>) -> FlockVerdict {
+pub(crate) fn classify_flock_error(raw: Option<i32>) -> FlockVerdict {
     match raw {
         // A guard rather than two patterns: the constants are equal on
         // Linux, so the second would be unreachable, and both are named

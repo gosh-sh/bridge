@@ -26,7 +26,7 @@ use crate::{
         an::{AccStatus, AnRead},
         anchor_wait::{self, WaitCtx, WaitExit},
         args::{an_network_id, AnTarget, DepositParams, Network, OpRef, RunMode},
-        binding::{check_explicit, claims_of_others},
+        binding::{check_explicit, claims_of_others, decide, Binding, Candidate},
         credit::{self, Identity},
         evm::{deposit_calldata, parse_deposit_log, read_balance, BlockTag, DEPOSIT_CALLDATA_LEN},
         evm_confirm::{self, Expect, Negative, Outcome},
@@ -1825,6 +1825,90 @@ fn done_earlier(board: &Board<'_>, stage: OpStage) {
     }
 }
 
+/// The bridge deposits of the operation's sender from the block its
+/// deposit was requested at, read until `deadline` (`None`: until they are
+/// read); `None` when the time ran out first. A log whose transaction the
+/// node does not return right now leaves the list incomplete: it is read
+/// again, never judged on.
+async fn sender_deposits(
+    d: &Deps,
+    rec: &OpRecord,
+    deadline: Option<Instant>,
+) -> Option<Vec<Candidate>> {
+    let ui = d.ui.as_ref();
+    let head = until(ui, "reading the chain head", deadline, || async {
+        d.evm
+            .header(BlockTag::Latest)
+            .await?
+            .map(|b| b.number)
+            .ok_or_else(|| anyhow!("no latest block"))
+    })
+    .await?;
+    until(
+        ui,
+        "reading the deposits of the operation's sender",
+        deadline,
+        || recovery::candidates(d.evm.as_ref(), rec, rec.params.bridge, head),
+    )
+    .await
+}
+
+/// The answer to a resume of an operation released with `--abandon`
+/// before its transaction was known, when no `--tx-hash` names one. No
+/// transaction is ever bound to it automatically, so there is nothing to
+/// search for: the deposits that look like its request are read once,
+/// within `--recovery-window-s`, and listed (possibly none) with the way to
+/// name one. Exit 30; the record is left as it was.
+async fn released_without_identity(
+    p: &DepositParams,
+    d: &Deps,
+    store: &Store,
+    rec: &OpRecord,
+) -> CliError {
+    let op = &rec.op_id;
+    let (chain_id, bridge) = (rec.params.chain_id, rec.params.bridge);
+    let found = match sender_deposits(d, rec, Instant::now().checked_add(p.recovery_window)).await {
+        None => "the chain could not be read for deposits like it".to_string(),
+        Some(cands) => {
+            let recs = match store.list() {
+                Ok(r) => r,
+                Err(e) => return after_request(store, op, e),
+            };
+            // The same rules as the search, claims of other operations
+            // included; none of them binds this operation by itself.
+            let hashes = match decide(rec, &cands, &claims_of_others(&recs, op, chain_id, bridge)) {
+                Binding::Ambiguous {
+                    hashes, ..
+                } => hashes,
+                Binding::Bind(h) => vec![h],
+                Binding::NotYet => vec![],
+            };
+            if hashes.is_empty() {
+                "no deposit like it is on chain".to_string()
+            } else {
+                format!(
+                    "deposits like it on chain: {}",
+                    hashes
+                        .iter()
+                        .map(|h| format!("{h:#x}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        },
+    };
+    err(
+        ExitCode::DepositOutcomeUnknown,
+        Stage::Deposit,
+        op,
+        format!(
+            "operation {op} was released with --abandon before its transaction was known, so no \
+             transaction is bound to it automatically; {found}. Check in the wallet which one is \
+             its transaction and continue with `--resume {op} --tx-hash <hash>`"
+        ),
+    )
+}
+
 /// Binds the transaction the user named with `--tx-hash`. It must be a
 /// successful bridge deposit from the operation's sender, made from the
 /// block the deposit was requested at, that no other operation has claimed
@@ -1862,22 +1946,10 @@ async fn bind_explicit(d: &Deps, store: &Store, rec: &mut OpRecord, h: B256) -> 
             })),
         };
     }
-    let ui = d.ui.as_ref();
-    let head = transient(ui, "reading the chain head", || async {
-        d.evm
-            .header(BlockTag::Latest)
-            .await?
-            .map(|b| b.number)
-            .ok_or_else(|| anyhow!("no latest block"))
-    })
-    .await;
-    // A log whose transaction the node does not return right now leaves
-    // the list incomplete: it is read again, never judged on.
     let view = rec.clone();
-    let cands = transient(ui, "reading the deposits of the operation's sender", || {
-        recovery::candidates(d.evm.as_ref(), &view, view.params.bridge, head)
-    })
-    .await;
+    let Some(cands) = sender_deposits(d, &view, None).await else {
+        return Err(refused("the chain could not be read".into()));
+    };
     let Some(c) = cands.into_iter().find(|c| c.tx_hash == h) else {
         return Err(refused(format!(
             "it is no Deposit to bridge {} from {} made since block {}",
@@ -1942,9 +2014,21 @@ pub async fn resume(
     let cx = board.answer(preflight::context_for_resume(p, d, &rec).await)?;
     board.done(StepId::Preflight, "");
     done_earlier(&board, rec.stage);
+    let identity = rec.tx.is_some()
+        || rec
+            .request
+            .as_ref()
+            .is_some_and(|q| q.wallet_hash.is_some());
     if let Some(h) = tx_hash {
         bind_explicit(d, &store, &mut rec, h).await?;
+    } else if rec.stage == OpStage::Abandoned && !identity {
+        board.start(StepId::EvmConfirm, "looking for deposits like this one");
+        let e = released_without_identity(p, d, &store, &rec).await;
+        board.failed(&e);
+        return Err(e);
     } else if rec.stage == OpStage::Abandoned {
+        // Its transaction, or the hash the wallet answered with, is known:
+        // the search binds by them.
         rec.stage = if rec.tx.is_some() {
             OpStage::Signed
         } else {
@@ -2780,6 +2864,70 @@ mod tests {
         let rec = Store::open(&p.state_dir).unwrap().load(&b).unwrap();
         assert_eq!(rec.stage, OpStage::Confirmed);
         assert_eq!(rec.tx.map(|c| c.tx_hash), Some(t));
+    }
+
+    /// An operation requested at nonce 7 and released with `--abandon`
+    /// before its transaction was known.
+    async fn released_before_its_hash(w: &World) -> String {
+        let op = w.left_requested_operation_from(w.wallet.account);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        abandon(&w.params(RunMode::Abandon(op.clone())), &op, &ui)
+            .await
+            .unwrap();
+        op
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_released_operation_without_identity_and_nothing_on_chain_is_exit_30_at_once() {
+        let mut w = World::healthy();
+        let op = released_before_its_hash(&w).await;
+        // A deposit of the sender with another calldata is not like it.
+        w.mined_deposit_of_amount(9, W_AMOUNT / 2);
+        let target = OpRef::Op(op.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let e = tokio::time::timeout(
+            Duration::from_secs(60),
+            resume(&p, &w.deps(), &target, None),
+        )
+        .await
+        .expect("nothing can bind it: no search that never ends")
+        .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositOutcomeUnknown, "{e}");
+        let msg = e.to_string();
+        assert!(msg.contains(&format!("--resume {op} --tx-hash")), "{msg}");
+        assert!(msg.contains("no deposit like it"), "{msg}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Abandoned, "the record is unchanged");
+        assert!(rec.tx.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_released_operation_without_identity_lists_the_deposit_like_it() {
+        let mut w = World::healthy();
+        let op = released_before_its_hash(&w).await;
+        let t = w.mined_deposit(7);
+        let target = OpRef::Op(op.clone());
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let e = tokio::time::timeout(
+            Duration::from_secs(60),
+            resume(&p, &w.deps(), &target, None),
+        )
+        .await
+        .expect("nothing can bind it: no search that never ends")
+        .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositOutcomeUnknown, "{e}");
+        let msg = e.to_string();
+        assert!(msg.contains(&format!("{t:#x}")), "{msg}");
+        assert!(msg.contains(&format!("--resume {op} --tx-hash")), "{msg}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Abandoned, "the record is unchanged");
+        assert!(rec.tx.is_none());
     }
 
     #[tokio::test(start_paused = true)]

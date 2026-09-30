@@ -1339,18 +1339,19 @@ jq '{op_id, bridge: .params.bridge, tx: .tx.tx_hash,
 ```
 
 - `detail` is the message the run ended with. After exit 35 its `Give the
-  bridge operator:` line carries the transaction, the `depositId`, an amount,
-  the bridge and the operation; after exit 37 it names the operation and the
-  Acki Nacki bridge transaction that aborted.
+  bridge operator:` line carries the transaction, what it deposited — every
+  `depositId` with its amount and recipient, as `deposited: depositId …, …
+  USDC units to account …` — the bridge and the operation; after exit 37 it
+  names the operation and the Acki Nacki bridge transaction that aborted.
 - `deposit_id` is set only after exit 37. After exit 35 it is `null`: the
   operation was closed before the deposit was recorded, so take the
   `depositId` from `detail`.
-- `requested_units` (micro-USDC) and `requested_to` are what was asked for,
-  and so is the amount on the `Give the bridge operator:` line. For exit 37
-  and for an unprovable shape that is also what was deposited. When the
-  amount, recipient or sender differs from the request, the ones actually
-  deposited are in the sentence before that line: `… units to account … from …
-  were deposited, … were requested`.
+- `requested_units` (micro-USDC) and `requested_to` are what was asked for.
+  For exit 37 and for an unprovable shape that is also what was deposited.
+  When the amount, recipient or sender differs from the request, the `Give
+  the bridge operator:` line has what was deposited, and the sentence before
+  it has both: `… units to account … from … were deposited, … were
+  requested`.
 
 ### When a bridge is paused
 

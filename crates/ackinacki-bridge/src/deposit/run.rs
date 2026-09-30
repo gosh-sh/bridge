@@ -645,11 +645,11 @@ async fn request(
         ask.to.account_b256(),
     )
     .await?;
-    let claim = match request_deposit(evm, wallet, ui, store, rec, &tx).await? {
+    let claim = match request_deposit(evm, wallet, ui, store, rec, &tx, p.recovery_window).await? {
         RequestOutcome::Signed(c) => c,
-        RequestOutcome::Search => {
-            bind_by_search(d, store, rec, Some(p.recovery_window), false).await?
-        },
+        RequestOutcome::Search {
+            window,
+        } => bind_by_search(d, store, rec, Some(window), false).await?,
     };
     board.done(StepId::Deposit, &format!("{:#x}", claim.tx_hash));
     Ok(())
@@ -2487,6 +2487,38 @@ mod tests {
         assert_eq!(claim.tx_nonce, 7);
         assert!(t0.elapsed() <= Duration::from_secs(1), "{:?}", t0.elapsed());
         assert_eq!(store.load(&op).unwrap().stage, OpStage::Signed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wallet_hash_the_node_never_shows_is_exit_30_within_the_recovery_window() {
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        w.evm.counts.lock().unwrap().insert((from, "pending"), 7);
+        let a = w.approve_hash();
+        let h = B256::repeat_byte(0x77); // never on chain
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        let p = w.params(RunMode::Fresh);
+        let d = w.deps();
+        let t0 = tokio::time::Instant::now();
+        let e = tokio::time::timeout(Duration::from_secs(3600), run_with(&p, &d, &mut w.wallet))
+            .await
+            .expect("--recovery-window-s must end the run")
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositOutcomeUnknown, "{e}");
+        assert!(
+            t0.elapsed() <= p.recovery_window + Duration::from_secs(1),
+            "{:?}",
+            t0.elapsed()
+        );
+        let op = e.op_id().unwrap().to_string();
+        assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Requested);
+        assert_eq!(rec.request.unwrap().wallet_hash, Some(h));
+        assert!(
+            DirLock::try_take(&p.state_dir).unwrap().is_some(),
+            "the directory lock is let go"
+        );
     }
 
     #[test]

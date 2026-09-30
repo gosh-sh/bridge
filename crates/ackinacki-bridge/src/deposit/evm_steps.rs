@@ -7,7 +7,7 @@ use alloy_primitives::{Address, B256, U256};
 use crate::{
     deposit::{
         evm::{read_allowance, revert_of, EvmRead},
-        retry::transient,
+        retry::{transient, until},
         ui::Ui,
         wallet::{TxPurpose, TxRequest, Wallet, WalletError},
     },
@@ -213,7 +213,11 @@ pub enum RequestOutcome {
     /// The wallet returned the hash and the chain shows the transaction.
     Signed(crate::deposit::store::TxClaim),
     /// The outcome is unknown; the driver searches the chain for it.
-    Search,
+    Search {
+        /// What is left of `--recovery-window-s` for the search. The window
+        /// starts with the wallet's answer.
+        window: Duration,
+    },
 }
 
 /// Closes the operation as refused before anything was requested and
@@ -270,7 +274,9 @@ pub async fn build_deposit_request(
 
 /// Step 4: asks the wallet for the deposit. `Requested` reaches the disk
 /// before the wallet is asked, so a crash in between is found by the
-/// search, and never repeated blindly.
+/// search, and never repeated blindly. `window` is `--recovery-window-s`:
+/// a transaction the node does not show before it ends is left to the
+/// search, which starts from the hash the wallet returned.
 pub async fn request_deposit(
     evm: &dyn EvmRead,
     wallet: &mut dyn Wallet,
@@ -278,6 +284,7 @@ pub async fn request_deposit(
     store: &crate::deposit::store::Store,
     rec: &mut crate::deposit::store::OpRecord,
     tx: &TxRequest,
+    window: Duration,
 ) -> CliResult<RequestOutcome> {
     use crate::deposit::{
         evm::BlockTag,
@@ -334,18 +341,37 @@ pub async fn request_deposit(
             ),
         )
     };
-    match wallet.send_transaction(ui, tx).await {
+    let sent = wallet.send_transaction(ui, tx).await;
+    let answered = tokio::time::Instant::now();
+    let deadline = answered.checked_add(window);
+    let left = || {
+        deadline.map_or(window, |d| {
+            d.saturating_duration_since(tokio::time::Instant::now())
+        })
+    };
+    match sent {
         Ok(h) => {
             if let Some(q) = rec.request.as_mut() {
                 q.wallet_hash = Some(h);
             }
             store.write(rec).map_err(post_send)?;
-            let seen = transient(ui, "reading the deposit transaction", || async {
+            // The wallet may have broadcast it elsewhere, dropped or
+            // replaced it: the node may never show it.
+            let Some(seen) = until(ui, "reading the deposit transaction", deadline, || async {
                 evm.transaction(h)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("{h} is not visible yet"))
             })
-            .await;
+            .await
+            else {
+                ui.warn(&format!(
+                    "the node does not show the transaction {h:#x} the wallet returned; searching \
+                     the chain for it"
+                ));
+                return Ok(RequestOutcome::Search {
+                    window: left(),
+                });
+            };
             let claim = TxClaim {
                 tx_hash: h,
                 tx_nonce: seen.nonce,
@@ -376,7 +402,9 @@ pub async fn request_deposit(
         | Err(WalletError::Timeout)
         | Err(WalletError::Other(_)) => {
             ui.status("the wallet did not return a transaction hash; searching the chain for it");
-            Ok(RequestOutcome::Search)
+            Ok(RequestOutcome::Search {
+                window: left(),
+            })
         },
         Err(WalletError::Unsupported(what)) => Err(CliError::deposit(
             ExitCode::DepositOutcomeUnknown,
@@ -402,6 +430,8 @@ mod tests {
 
     const USDC: Address = address!("1c7d4b196cb0c7b01d743fbc6116a902379c7238");
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
+    /// `--recovery-window-s`.
+    const WINDOW: Duration = Duration::from_secs(60);
 
     fn allowance_seq(evm: &FakeEvm, seq: &[u64]) {
         evm.script_call(
@@ -611,7 +641,7 @@ mod tests {
             .unwrap()
             .insert(h, deposit_tx(h, s.w.account, BRIDGE, 7, 2, Bytes::new()));
         let ui = RecordingUi::new(true);
-        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
             .await
             .unwrap();
         assert_eq!(*seen.lock().unwrap(), Some(OpStage::Requested));
@@ -628,12 +658,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_hash_the_node_never_shows_goes_to_the_search_when_the_window_ends() {
+        // The wallet broadcast elsewhere, dropped or replaced it: the read
+        // must not hold the run, and the directory lock, without end.
+        let mut s = setup();
+        let h = B256::repeat_byte(3);
+        s.w.send_results.push_back(Ok(h));
+        let ui = RecordingUi::new(true);
+        let t0 = tokio::time::Instant::now();
+        let out = tokio::time::timeout(
+            Duration::from_secs(3600),
+            request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW),
+        )
+        .await
+        .expect("--recovery-window-s must end the read")
+        .unwrap();
+        let RequestOutcome::Search {
+            window,
+        } = out
+        else {
+            panic!("{out:?}")
+        };
+        assert!(
+            t0.elapsed() + window <= WINDOW,
+            "the read and the search share the window: {:?} + {window:?}",
+            t0.elapsed()
+        );
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(back.stage, OpStage::Requested, "the outcome is unknown");
+        assert_eq!(
+            back.request.unwrap().wallet_hash,
+            Some(h),
+            "the search starts from it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_rejected_deposit_closes_the_operation_with_exit_20() {
         let mut s = setup();
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::Rejected));
         let ui = RecordingUi::new(true);
-        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::WalletFailed);
@@ -648,10 +714,12 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
         let ui = RecordingUi::new(true);
-        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
             .await
             .unwrap();
-        assert_eq!(out, RequestOutcome::Search);
+        assert_eq!(out, RequestOutcome::Search {
+            window: WINDOW
+        });
         let back = s.store.load(&s.rec.op_id).unwrap();
         assert_eq!(
             back.stage,
@@ -666,7 +734,7 @@ mod tests {
         let mut s = setup();
         *s.evm.paused.lock().unwrap() = Some(true);
         let ui = RecordingUi::new(true);
-        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
@@ -681,10 +749,16 @@ mod tests {
             *s.evm.paused.lock().unwrap() = absent;
             s.w.send_results
                 .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
-            let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx)
+            let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
                 .await
                 .unwrap();
-            assert_eq!(out, RequestOutcome::Search, "{absent:?}");
+            assert_eq!(
+                out,
+                RequestOutcome::Search {
+                    window: WINDOW
+                },
+                "{absent:?}"
+            );
         }
     }
 

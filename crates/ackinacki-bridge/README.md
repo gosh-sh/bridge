@@ -1375,8 +1375,18 @@ shipped profiles point. The SRS then goes into `./deposit-prover/data/`: take
 `SHA256SUMS`. The release pipeline derives the file from the Hermez k=21
 `kzg_bn254_21.srs` with `deposit-prover`'s `downsize_srs` instead of
 downloading it, because the storage `deposit-prover/download_trusted_setup.sh`
-points at refuses access. Whatever its source, preflight refuses a file
-without the Hermez [s]·G2.
+points at refuses access. From a release that does not carry it yet, derive
+it the same way from that release's `kzg_bn254_21.srs`; the staging script
+has already built `downsize_srs`:
+
+```bash
+../../deposit-prover/target/release/examples/downsize_srs \
+  --input kzg_bn254_21.srs --output ./deposit-prover/data/kzg_params_18.srs --k 18
+sha256sum ./deposit-prover/data/kzg_params_18.srs
+# from v0.2.0's kzg_bn254_21.srs: ca97cea5566cec45421f7b2a945c462da6cb759fd8d22791b41b4a3d479ffefc
+```
+
+Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 
 **Memory, disk and time**, next to `withdraw`:
 

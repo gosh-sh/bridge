@@ -85,6 +85,20 @@ where
 /// The longest a single optional read may take.
 pub const ONE_READ: Duration = Duration::from_secs(60);
 
+/// How far away a deadline beyond what the clock can hold is put: a wait
+/// no run reaches the end of.
+const FAR: Duration = Duration::from_secs(30 * 365 * 86_400);
+
+/// `d` from now. A `d` the clock cannot add is cut to [`FAR`]: the command
+/// line refuses such values, and a step after the deposit must not panic
+/// on one either.
+pub fn deadline_after(d: Duration) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(d)
+        .or_else(|| now.checked_add(FAR))
+        .unwrap_or(now)
+}
+
 /// One attempt, no longer than `deadline` or [`ONE_READ`]. An error and a
 /// timeout both give `None`: "not known", never "no".
 pub async fn once<T, Fut>(deadline: Option<tokio::time::Instant>, fut: Fut) -> Option<T>
@@ -158,6 +172,16 @@ mod tests {
         )
         .await;
         assert!(hang.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deadline_beyond_the_clock_is_far_away_not_a_panic() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(
+            deadline_after(Duration::from_secs(5)),
+            now + Duration::from_secs(5)
+        );
+        assert_eq!(deadline_after(Duration::MAX), now + FAR);
     }
 
     #[tokio::test(start_paused = true)]

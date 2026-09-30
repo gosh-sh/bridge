@@ -19,6 +19,7 @@ use crate::{
     deposit::{
         an::{AccStatus, AnRead, ExtDir, TxView},
         identity::BRIDGE_ABI,
+        retry::deadline_after,
         store::CreditInfo,
         ui::Ui,
     },
@@ -284,7 +285,7 @@ pub async fn confirm(
     // One attempt per path per round, both bounded by one deadline: a path
     // that keeps failing (or hangs) must neither hide the other's answer nor
     // outlive --credit-timeout-s.
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = deadline_after(timeout);
     let mut failures = 0u32;
     loop {
         let (v, e) = tokio::join!(

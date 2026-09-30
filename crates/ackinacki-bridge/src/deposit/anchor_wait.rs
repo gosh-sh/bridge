@@ -22,7 +22,7 @@ use crate::{
         evm::{BlockTag, EvmRead},
         identity::BRIDGE_ABI,
         lc_readiness::{self, AnchorPlan, LcFailure},
-        retry::{once, until},
+        retry::{deadline_after, once, until},
         ui::Ui,
     },
     errors::{CliError, CliResult, ExitCode, Stage},
@@ -237,7 +237,7 @@ pub async fn wait(
     // must not make the timeout unreachable. The whole wait is under the
     // deadline, not only the reads that retry: the light-client check pages
     // through messages, and one hung call must not outlive it either.
-    let deadline = cx.timeout.map(|t| tokio::time::Instant::now() + t);
+    let deadline = cx.timeout.map(deadline_after);
     let last = Mutex::new(None);
     let anchor = until_anchored(evm, an, cx, ui, deadline, &last);
     let reached = match deadline {
@@ -254,7 +254,7 @@ pub async fn wait(
     }
     // The operator's relayer may finalize it; do not spend 20 minutes proving in
     // parallel.
-    let grace_end = tokio::time::Instant::now() + cx.grace;
+    let grace_end = deadline_after(cx.grace);
     while tokio::time::Instant::now() < grace_end {
         // An unreadable voucher only ends the grace period early: we prove.
         let Some(v) = until(

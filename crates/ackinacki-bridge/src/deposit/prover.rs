@@ -26,6 +26,7 @@ use crate::{
         locks::{after_send, ProverLock},
         pi::{verify, DepositPublicInputs, ExpectedInputs},
         prover_files::{ProverDir, FETCH_BIN, PROVE_BIN},
+        retry::deadline_after,
         ui::Ui,
     },
     errors::{CliError, CliResult, ExitCode, Stage},
@@ -227,7 +228,7 @@ pub async fn prove(
         },
     };
     let lock_fd = lock.0.raw_fd();
-    let deadline = Instant::now() + timeout;
+    let deadline = deadline_after(timeout);
     let input = work.join(INPUT_FILE);
     ui.status("fetching the deposit's receipt and transaction proofs");
     run(

@@ -8,7 +8,7 @@ use alloy_primitives::{Address, B256};
 use crate::deposit::{
     binding::{decide, nonce_verdict, Binding, Candidate, Claims, NonceObs, NonceVerdict},
     evm::{BlockTag, EvmRead, DEPOSIT_TOPIC0},
-    retry::{once, until},
+    retry::{deadline_after, once, until},
     store::OpRecord,
     ui::Ui,
 };
@@ -106,7 +106,7 @@ pub async fn search(
 ) -> anyhow::Result<SearchOutcome> {
     // The window bounds the reads too: an RPC that keeps failing must not
     // keep an interactive run past --recovery-window-s.
-    let deadline = window.map(|w| tokio::time::Instant::now() + w);
+    let deadline = window.map(deadline_after);
     let from = op
         .from
         .ok_or_else(|| anyhow::anyhow!("operation {} has no sender", op.op_id))?;

@@ -278,6 +278,16 @@ pub fn an_network_id(endpoint: &str) -> CliResult<String> {
         })
 }
 
+/// The longest wait a `--*-timeout-s`, `--recovery-window-s` or
+/// `--relayer-grace-s` may ask for: ten years. No one means a longer one,
+/// and a far longer one does not fit the clock a run measures it on.
+pub const MAX_WAIT_S: u64 = 10 * 365 * 86_400;
+
+/// The longest `--pair-timeout-s`: 30 days, the longest the WalletConnect
+/// relay keeps a message. The pairing proposal waits on the relay that
+/// long.
+pub const MAX_PAIR_TIMEOUT_S: u64 = 30 * 86_400;
+
 /// Compiled-in WalletConnect Cloud project id, set by the release build.
 pub const DEFAULT_WC_PROJECT_ID: Option<&str> = option_env!("ACKINACKI_BRIDGE_WC_PROJECT_ID");
 
@@ -338,6 +348,22 @@ impl DepositArgs {
         // the profile keys that happen to be missing as well.
         let amount = self.amount.as_deref().map(parse_amount).transpose()?;
         let to = self.to.as_deref().map(AnTarget::parse).transpose()?;
+        for (flag, secs, max) in [
+            ("prover-timeout-s", self.prover_timeout_s, MAX_WAIT_S),
+            ("anchor-timeout-s", self.anchor_timeout_s, MAX_WAIT_S),
+            ("relayer-grace-s", self.relayer_grace_s, MAX_WAIT_S),
+            ("recovery-window-s", self.recovery_window_s, MAX_WAIT_S),
+            ("credit-timeout-s", self.credit_timeout_s, MAX_WAIT_S),
+            ("pair-timeout-s", self.pair_timeout_s, MAX_PAIR_TIMEOUT_S),
+        ] {
+            if secs > max {
+                return Err(CliError::ArgInvalid {
+                    flag,
+                    expected: format!("at most {max} seconds"),
+                    got: redact(&secs.to_string()),
+                });
+            }
+        }
 
         let mut missing = Vec::new();
         if starts_new {
@@ -620,6 +646,71 @@ mod tests {
                 got.display()
             );
         }
+    }
+
+    /// A complete fresh deposit command line, with `extra` appended.
+    fn fresh_with(extra: &[&str]) -> CliResult<DepositParams> {
+        let to = format!("{DAPP}::{ACC}");
+        let account = "1a".repeat(32);
+        let mut argv = vec![
+            "ackinacki-bridge",
+            "deposit",
+            "--network",
+            "sepolia",
+            "--amount",
+            "1",
+            "--to",
+            &to,
+            "--rpc-url",
+            "http://rpc.invalid",
+            "--bridge-address",
+            "0x0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7",
+            "--gql-endpoint",
+            "http://gql.invalid",
+            "--usdc-bridge-account",
+            &account,
+            "--wc-project-id",
+            "p",
+            "--deposit-prover-dir",
+            "/tmp/deposit-prover",
+        ];
+        argv.extend_from_slice(extra);
+        let cli = crate::args::Cli::try_parse_from(argv).unwrap();
+        let crate::args::Command::Deposit(a) = cli.cmd else {
+            panic!()
+        };
+        a.validate(&GlobalFlags::default())
+    }
+
+    #[test]
+    fn a_wait_longer_than_the_clock_can_hold_is_refused_at_validation() {
+        // Refused here, not a panic at the step that adds it to the clock,
+        // which may come after the deposit is on chain.
+        let max = u64::MAX.to_string();
+        for flag in [
+            "prover-timeout-s",
+            "anchor-timeout-s",
+            "relayer-grace-s",
+            "recovery-window-s",
+            "credit-timeout-s",
+            "pair-timeout-s",
+        ] {
+            let e = fresh_with(&[&format!("--{flag}"), &max]).unwrap_err();
+            assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+            assert!(
+                matches!(e, CliError::ArgInvalid { flag: f, .. } if f == flag),
+                "{flag}: {e}"
+            );
+        }
+        // Ten years is still a wait.
+        let p = fresh_with(&["--credit-timeout-s", "315360000"]).unwrap();
+        assert_eq!(p.credit_timeout, Duration::from_secs(315_360_000));
+        assert!(fresh_with(&["--credit-timeout-s", "315360001"]).is_err());
+        // The pairing proposal lives on the relay as long as the wait: no
+        // longer than the relay keeps a message.
+        let p = fresh_with(&["--pair-timeout-s", "2592000"]).unwrap();
+        assert_eq!(p.pair_timeout, Duration::from_secs(2_592_000));
+        assert!(fresh_with(&["--pair-timeout-s", "2592001"]).is_err());
     }
 
     #[test]

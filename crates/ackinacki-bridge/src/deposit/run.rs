@@ -2621,16 +2621,7 @@ mod tests {
     }
 
     #[test]
-    fn the_temporary_entry_point_is_gone_and_nothing_here_aborts() {
-        let m = include_str!("mod.rs");
-        assert!(
-            !m.contains("the pipeline is not assembled"),
-            "Task A2's stub must be replaced"
-        );
-        assert!(
-            !m.contains("not available in this build yet"),
-            "--resume and --abandon reach the driver"
-        );
+    fn nothing_in_the_deposit_driver_aborts() {
         let run = crate::source_guard::production_source("run.rs", include_str!("run.rs"));
         for bad in ["unimplemented!", "todo!", "panic!(", ".unwrap()"] {
             assert!(

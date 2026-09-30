@@ -784,9 +784,12 @@ mod flip_owner_tests {
     }
 
     /// Records `(account_id, function)` for every getter and call, in order,
-    /// across both contracts.
+    /// in one log shared by the light-client and the bridge client. Each
+    /// client stands for one contract's ABI; a call it is asked to send to
+    /// the other contract is logged as `"<function> via <account> client"`.
     struct RecordingClient {
-        calls: Mutex<Vec<(String, String)>>,
+        serves: String,
+        calls: Arc<Mutex<Vec<(String, String)>>>,
         getter: std::result::Result<Value, String>,
         replies: HashMap<&'static str, Reply>,
         sent: Mutex<HashMap<[u8; 32], String>>,
@@ -795,7 +798,8 @@ mod flip_owner_tests {
     impl RecordingClient {
         fn new(getter: std::result::Result<Value, String>) -> Self {
             Self {
-                calls: Mutex::new(Vec::new()),
+                serves: String::new(),
+                calls: Arc::new(Mutex::new(Vec::new())),
                 getter,
                 replies: HashMap::new(),
                 sent: Mutex::new(HashMap::new()),
@@ -805,6 +809,28 @@ mod flip_owner_tests {
         fn reply(mut self, function: &'static str, reply: Reply) -> Self {
             self.replies.insert(function, reply);
             self
+        }
+
+        /// A client for `account`'s contract sharing this one's log and script.
+        fn serving(&self, account: String) -> Self {
+            Self {
+                serves: account,
+                calls: self.calls.clone(),
+                getter: self.getter.clone(),
+                replies: self.replies.clone(),
+                sent: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn record(&self, account: &str, function: &str) -> usize {
+            let entry = if account == self.serves {
+                function.to_string()
+            } else {
+                format!("{function} via {} client", self.serves)
+            };
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((account.to_string(), entry));
+            calls.len()
         }
 
         fn calls(&self) -> Vec<(String, String)> {
@@ -826,12 +852,11 @@ mod flip_owner_tests {
             call: ContractCallRequest,
         ) -> acki_nacki_interface::Result<[u8; 32]> {
             let function = call.function.clone();
-            let mut calls = self.calls.lock().unwrap();
-            calls.push((call.to.account_id().to_string(), function.clone()));
+            let n = self.record(call.to.account_id(), &function);
             if let Some(Reply::Err(msg)) = self.replies.get(function.as_str()) {
                 return Err(AckiNackiError::ContractError(msg.clone()));
             }
-            let hash = [calls.len() as u8; 32];
+            let hash = [n as u8; 32];
             self.sent.lock().unwrap().insert(hash, function);
             Ok(hash)
         }
@@ -880,32 +905,38 @@ mod flip_owner_tests {
             function: &str,
             _params: Value,
         ) -> acki_nacki_interface::Result<Value> {
-            let account = ExtendedAddress::parse(to).unwrap().account_id().to_string();
-            self.calls
-                .lock()
-                .unwrap()
-                .push((account, function.to_string()));
+            self.record(ExtendedAddress::parse(to).unwrap().account_id(), function);
             self.getter.clone().map_err(AckiNackiError::NetworkError)
         }
     }
 
     fn submitter(
-        client: RecordingClient,
+        script: RecordingClient,
         with_usdc: bool,
     ) -> (AnInterfaceSubmitter<RecordingClient>, Arc<RecordingClient>) {
-        let client = Arc::new(client);
-        let s = AnInterfaceSubmitter::new(client.clone(), AnSubmitConfig {
+        submitter_for(script, with_usdc, lc())
+    }
+
+    /// `light_client` is `AN_LIGHT_CLIENT`'s account. The returned client is
+    /// the light-client one; its log also holds the bridge client's calls.
+    fn submitter_for(
+        script: RecordingClient,
+        with_usdc: bool,
+        light_client: String,
+    ) -> (AnInterfaceSubmitter<RecordingClient>, Arc<RecordingClient>) {
+        let lc_client = Arc::new(script.serving(light_client.clone()));
+        let s = AnInterfaceSubmitter::new(lc_client.clone(), AnSubmitConfig {
             from: extended(&"33".repeat(32)),
-            light_client: extended(&lc()),
+            light_client: extended(&light_client),
             confirm_timeout_secs: 1,
             usdc_bridge: with_usdc.then(|| extended(&bridge())),
         });
         let s = if with_usdc {
-            s.with_usdc(extended(&bridge()), client.clone())
+            s.with_usdc(extended(&bridge()), Arc::new(script.serving(bridge())))
         } else {
             s
         };
-        (s, client)
+        (s, lc_client)
     }
 
     fn anchor_config(light_client: &str, owner_anchors_enabled: bool) -> Value {
@@ -951,8 +982,13 @@ mod flip_owner_tests {
 
     #[tokio::test]
     async fn light_client_code_not_installed_sends_nothing() {
+        // `AN_LIGHT_CLIENT` is zero too, so only the zero check can refuse.
         let zero = "00".repeat(32);
-        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&zero, true))), true);
+        let (s, client) = submitter_for(
+            RecordingClient::new(Ok(anchor_config(&zero, true))),
+            true,
+            zero.clone(),
+        );
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Rejected { .. }

@@ -129,8 +129,11 @@ pub fn check_prover_dir(root: &Path) -> Result<ProverDir, String> {
     let probe = dir.data_dir().join(".write-probe");
     std::fs::write(&probe, b"")
         .map_err(|e| format!("{} is not writable: {e}", dir.data_dir().display()))?;
-    // A leftover probe file is harmless.
-    std::fs::remove_file(&probe).ok();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a leftover probe file is harmless"
+    )]
+    let _ = std::fs::remove_file(&probe);
     check_srs_ceremony(&root.join(SRS_FILE))?;
     Ok(dir)
 }

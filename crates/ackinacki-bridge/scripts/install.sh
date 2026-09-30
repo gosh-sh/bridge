@@ -9,7 +9,7 @@
 #
 # Options:
 #   --prefix PATH   where to install (default ~/.local/share/ackinacki-bridge)
-#   --check         report what is missing, download nothing
+#   --check         report what is missing; download nothing, change nothing
 #   --yes           do not ask before each download
 #
 # Overrides, for a mirror or an internal build:
@@ -23,18 +23,28 @@
 #   3. verifier files     the bytecode stage 1 compares with the chain, and the
 #                         source the proof is self-checked against, ~400 KB
 #   4. kzg_bn254_21.srs   the Hermez ceremony, ~257 MB
-#   5. a profile          with absolute paths into the prefix
+#   5. deposit-prover/    the deposit prover's tools and circuit config, ~26 MB;
+#                         `deposit` runs them with it as their working directory
+#   6. kzg_params_18.srs  the same ceremony at degree 18, for deposits, ~33 MB;
+#                         it goes into deposit-prover/data/
+#   7. a profile          with absolute paths into the prefix. A profile from
+#                         before deposits gets the deposit settings appended;
+#                         nothing else in it is changed
 #
-# Every release asset is checked against the release's SHA256SUMS. No
-# compiler is installed: the self-check compares verifier source, not bytecode.
+# Every release asset is checked against the release's SHA256SUMS, and the
+# deposit SRS also against the Hermez ceremony's [s]·G2. No compiler is
+# installed: the self-check compares verifier source, not bytecode.
 
 set -euo pipefail
 
 readonly RELEASE_BASE="${BRIDGE_RELEASE_BASE:-https://github.com/gosh-sh/bridge/releases/latest/download}"
 readonly BUNDLE="ackinacki-bridge-linux-x86_64.tar.gz"
 readonly CEREMONY="kzg_bn254_21.srs"
+readonly DEPOSIT_CEREMONY="kzg_params_18.srs"
 readonly SUMS="SHA256SUMS"
-readonly DISK_NEED_KB=$((6 * 1024 * 1024))   # ceremony + binaries + keygen headroom
+# Withdrawals: ceremony, binaries and keygen headroom, ~6 GB. Deposits: the
+# prover's data/ after its first proof (SRS and proving key), ~1.3 GB.
+readonly DISK_NEED_KB=$((8 * 1024 * 1024))
 readonly RAM_WARN_GB=48                      # Circuit 4 peaks around 40 GB
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -82,6 +92,8 @@ CLI_BIN="$BIN_DIR/ackinacki-bridge"
 VERIFIERS="$PREFIX/verifiers"
 PARAMS="$PREFIX/params"
 SRS="$PARAMS/$CEREMONY"
+DEPOSIT_PROVER="$PREFIX/deposit-prover"
+DEPOSIT_SRS="$DEPOSIT_PROVER/data/$DEPOSIT_CEREMONY"
 PROFILE="$PREFIX/bridge_config"
 WITHDRAW_VERIFIER="$VERIFIERS/BridgeWithdrawalAggregatorVerifier.bin"
 WITHDRAW_VERIFIER_SOL="$VERIFIERS/BridgeWithdrawalAggregatorVerifier.sol"
@@ -118,6 +130,26 @@ have_verifiers() {
 have_ceremony()  { [ -s "$SRS" ]; }
 have_profile()   { [ -s "$PROFILE" ]; }
 
+# `deposit` refuses a prover directory without both tools and the circuit
+# config. Like the binaries above, the tools are run rather than only looked
+# at (see can_run); `--help` returns before any proving work.
+have_deposit_prover() {
+  can_run "$DEPOSIT_PROVER/fetch_deposit_data" --help &&
+    can_run "$DEPOSIT_PROVER/export_blake2b_proof" --help &&
+    [ -s "$DEPOSIT_PROVER/configs/circuit_params.json" ]
+}
+have_deposit_srs()      { [ -s "$DEPOSIT_SRS" ] && check_hermez "$DEPOSIT_SRS"; }
+have_deposit_settings() { grep -q '^BRIDGE_DEPOSIT_PROVER_DIR=' "$PROFILE"; }
+
+# [s]·G2 is the last 128 bytes of a raw halo2 SRS; these are its first and
+# last six bytes for the Hermez ceremony the bridge's verifying key is keyed on.
+check_hermez() {
+  local head tail
+  head=$(tail -c 128 "$1" | head -c 6 | od -An -tx1 | tr -d ' \n')
+  tail=$(tail -c 6 "$1" | od -An -tx1 | tr -d ' \n')
+  [ "$head" = "928fafb3d0cc" ] && [ "$tail" = "b3be595c6900" ]
+}
+
 printf 'ackinacki-bridge — install\n'
 printf '  mode        %s\n' "$MODE"
 printf '  prefix      %s\n' "$PREFIX"
@@ -144,7 +176,7 @@ if [ -d "$PREFIX" ]; then
   if [ -n "$avail" ] && [ "$avail" -ge "$DISK_NEED_KB" ]; then
     ok "$((avail / 1024 / 1024)) GB free on $PREFIX"
   elif [ -n "$avail" ]; then
-    warn "$((avail / 1024 / 1024)) GB free on $PREFIX; ~6 GB wanted"
+    warn "$((avail / 1024 / 1024)) GB free on $PREFIX; ~$((DISK_NEED_KB / 1024 / 1024)) GB wanted"
   fi
 fi
 
@@ -195,15 +227,19 @@ fetch_verified() {   # fetch_verified <asset> <destination>
 }
 
 # ---------------------------------------------------------------------------
-step "Binaries and verifier files"
+step "Binaries, verifier files and the deposit prover"
 # ---------------------------------------------------------------------------
-if have_cli && have_agg && have_verifiers; then
+# The deposit prover counts too: an installation made before deposits has
+# everything else, and the bundle that brings the prover also brings a CLI
+# that has the `deposit` subcommand.
+if have_cli && have_agg && have_verifiers && have_deposit_prover; then
   ok "$CLI_BIN"
   ok "$AGG_BIN"
   ok "$VERIFIERS"
+  ok "$DEPOSIT_PROVER"
 else
   gap "$BUNDLE"
-  note "the CLI, the aggregator subprocess, the verifier .bin and .sol files and a profile"
+  note "the CLI, the aggregator subprocess, the verifier .bin and .sol files, the deposit prover and a profile"
   if confirm "download $BUNDLE (~60 MB) from $RELEASE_BASE?"; then
     if [ -z "$WORK" ]; then WORK=$(mktemp -d); fi
     if fetch_verified "$BUNDLE" "$WORK/bundle.tar.gz"; then
@@ -220,12 +256,24 @@ else
         warn "the release bundle has no verifier .sol files — it predates the verifier-source self-check"
         note "no compatible release may be published yet; point BRIDGE_RELEASE_BASE at a bundle built from a newer revision"
       fi
+      # Merged into an existing directory: data/ is empty in the bundle, so
+      # the SRS and the proving key already there are left alone.
+      if [ -d "$unpack/deposit-prover" ]; then
+        cp -R "$unpack/deposit-prover" "$PREFIX/"
+        mkdir -p "$DEPOSIT_PROVER/data"
+      else
+        warn "the release bundle has no deposit prover — it predates the deposit subcommand"
+        note "withdrawals work; for deposits point BRIDGE_RELEASE_BASE at a release that ships it"
+      fi
       cp "$unpack/bridge_config" "$PROFILE.release"
       ok "unpacked into $PREFIX"
       if have_cli && have_agg; then
         ok "both binaries run on this system"
       else
         warn "unpacked, but a binary does not run here: ${LAST_RUN_ERROR:-unknown}"
+      fi
+      if [ -d "$unpack/deposit-prover" ] && ! have_deposit_prover; then
+        warn "unpacked, but the deposit prover is incomplete or does not run here: ${LAST_RUN_ERROR:-a tool or its circuit config is missing}"
       fi
     fi
   fi
@@ -245,6 +293,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+step "Deposit prover SRS"
+# ---------------------------------------------------------------------------
+# A checksum only says the file is the one the release lists. The [s]·G2
+# check says it is the ceremony the bridge's verifying key was made with:
+# a proof made with another one is refused on chain, after the deposit.
+if have_deposit_srs; then
+  ok "$DEPOSIT_SRS"
+else
+  if [ -s "$DEPOSIT_SRS" ]; then
+    gap "$DEPOSIT_SRS: not the Hermez ceremony; a proof keyed on it is rejected by the bridge"
+  else
+    gap "$DEPOSIT_SRS"
+  fi
+  note "the same Hermez ceremony at degree 18; deposits are proved with it"
+  if confirm "download $DEPOSIT_CEREMONY (Hermez k=18, ~33 MB)?"; then
+    if fetch_verified "$DEPOSIT_CEREMONY" "$DEPOSIT_SRS"; then
+      if check_hermez "$DEPOSIT_SRS"; then
+        ok "$DEPOSIT_SRS"
+      else
+        rm -f "$DEPOSIT_SRS"
+        gap "$DEPOSIT_SRS: not the Hermez ceremony; a proof keyed on it is rejected by the bridge"
+      fi
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 step "Profile"
 # ---------------------------------------------------------------------------
 # The release ships a profile whose paths are relative to a source checkout.
@@ -253,7 +328,7 @@ step "Profile"
 if have_profile; then
   ok "$PROFILE"
 elif [ -s "$PROFILE.release" ]; then
-  mkdir -p "$PREFIX/work_dir" "$PREFIX/withdraw-state" "$PARAMS/pk_cache"
+  mkdir -p "$PREFIX/work_dir" "$PREFIX/withdraw-state" "$PREFIX/deposit-state" "$PARAMS/pk_cache"
   sed -E \
     -e "s#^BRIDGE_PARAMS_DIR=.*#BRIDGE_PARAMS_DIR=$PARAMS#" \
     -e "s#^BRIDGE_PK_CACHE_DIR=.*#BRIDGE_PK_CACHE_DIR=$PARAMS/pk_cache#" \
@@ -262,11 +337,31 @@ elif [ -s "$PROFILE.release" ]; then
     -e "s#^BRIDGE_WITHDRAW_STATE_DIR=.*#BRIDGE_WITHDRAW_STATE_DIR=$PREFIX/withdraw-state#" \
     -e "s#^BRIDGE_AGGREGATOR_DIR=.*#BRIDGE_AGGREGATOR_DIR=$AGG_DIR#" \
     -e "s#^BRIDGE_VERIFIERS_DIR=.*#BRIDGE_VERIFIERS_DIR=$VERIFIERS#" \
+    -e "s#^BRIDGE_DEPOSIT_PROVER_DIR=.*#BRIDGE_DEPOSIT_PROVER_DIR=$DEPOSIT_PROVER#" \
+    -e "s#^BRIDGE_DEPOSIT_STATE_DIR=.*#BRIDGE_DEPOSIT_STATE_DIR=$PREFIX/deposit-state#" \
     "$PROFILE.release" > "$PROFILE"
   ok "$PROFILE"
   note "endpoints and the bridge address are the release's; only paths were rewritten"
 else
   gap "$PROFILE"
+fi
+
+# A profile written before deposits existed has none of their keys. It is
+# not rewritten, so the user's own settings survive: the deposit keys are
+# appended. --check promises to change nothing, so there it is only reported.
+if have_profile && ! have_deposit_settings; then
+  if [ "$MODE" = check ]; then
+    gap "$PROFILE: no deposit settings; a run without --check appends them"
+  else
+    mkdir -p "$PREFIX/deposit-state"
+    {
+      printf '\n# --- Deposit (EVM → Acki Nacki), added by install.sh ---\n'
+      printf 'BRIDGE_DEPOSIT_PROVER_DIR=%s\n' "$DEPOSIT_PROVER"
+      printf 'BRIDGE_DEPOSIT_STATE_DIR=%s\n' "$PREFIX/deposit-state"
+      printf 'BRIDGE_DEPOSIT_CONFIRMATIONS=12\n'
+    } >> "$PROFILE"
+    ok "$PROFILE: deposit settings added; your other settings are unchanged"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -290,22 +385,35 @@ if ! have_agg; then
 fi
 have_verifiers || { gap "$WITHDRAW_VERIFIER, $WITHDRAW_VERIFIER_SOL and $WITHDRAW_VERIFIER_CALLDATA"; missing=$((missing + 1)); }
 have_ceremony  || { gap "$SRS"; missing=$((missing + 1)); }
-have_profile   || { gap "$PROFILE"; missing=$((missing + 1)); }
+if ! have_deposit_prover; then
+  gap "$DEPOSIT_PROVER"
+  if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
+  missing=$((missing + 1))
+fi
+have_deposit_srs || { gap "$DEPOSIT_SRS"; missing=$((missing + 1)); }
+if ! have_profile; then
+  gap "$PROFILE"
+  missing=$((missing + 1))
+elif ! have_deposit_settings; then
+  gap "$PROFILE: no deposit settings"
+  missing=$((missing + 1))
+fi
 
 if [ "$missing" -eq 0 ]; then
   cat <<EOF
-  This host can run a real withdrawal.
+  This host can run a real withdrawal and a real deposit.
 
     export PATH="$BIN_DIR:\$PATH"
     export BRIDGE_CONFIG="$PROFILE"
     ackinacki-bridge withdraw --help
+    ackinacki-bridge deposit --help
 
   Then read QUICKSTART.md.
 EOF
   exit 0
 fi
 
-printf '  %d of 5 still missing.\n' "$missing"
+printf '  %d of 7 still missing.\n' "$missing"
 if [ "$MODE" = check ]; then
   printf '  Re-run without --check to download them.\n'
 fi

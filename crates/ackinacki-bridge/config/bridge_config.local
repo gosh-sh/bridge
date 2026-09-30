@@ -52,6 +52,12 @@ BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state
 BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
 BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
+# --- Deposit (EVM → Acki Nacki) -----------------------------------------------
+# See `bridge_config.shellnet` for what each key holds.
+BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover
+BRIDGE_DEPOSIT_STATE_DIR=./deposit-state
+BRIDGE_DEPOSIT_CONFIRMATIONS=12
+
 # --- Deploy target ------------------------------------------------------------
 # NO DEFAULT — a local devnet redeploys the bridge on every run. Fill
 # this in from `crates/bridge-prover-libraries/L1_config/env` (or

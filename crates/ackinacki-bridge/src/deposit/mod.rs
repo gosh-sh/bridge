@@ -17,6 +17,7 @@ pub mod locks;
 pub mod log_index;
 pub mod pi;
 pub mod prover_files;
+pub mod qr;
 pub mod recovery;
 pub mod refusals;
 pub mod retry;

@@ -109,8 +109,14 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 
+# The pairing URI as a QR code: in the terminal, and as `--qr-out` SVG or PNG.
+qrcode = { version = "0.14", default-features = false, features = ["svg", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 tempfile = "3"
+# Test-only: reads a rendered QR code back.
+rqrr = "0.10"
 # Test-only: building a real deployed-multisig account BOC offline, so a
 # fake node has something `tvm_block::Account` will actually parse.
 tvm_types = { workspace = true }

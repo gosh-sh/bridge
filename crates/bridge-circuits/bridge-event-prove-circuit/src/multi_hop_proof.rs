@@ -69,14 +69,17 @@
 //! # Constraints (per active hop)
 //!
 //! - `is_active ∈ {0, 1}` (`gate.assert_bit`).
-//! - `ref_index ∈ (0, 2^MAX_PROOF_BLOCK_REFS_DEPTH)` via
-//!   `walk_dense_merkle_bind_pos` (range-check + `num_to_bits`), plus
-//!   `ref_index != 0` (spec §5.1 forbids opening slot 0, the same-thread
-//!   parent).
+//! - `ref_index ∈ [0, 2^MAX_PROOF_BLOCK_REFS_DEPTH)` via
+//!   `walk_dense_merkle_bind_pos` (range-check + `num_to_bits`). Slot 0
+//!   (`parent_block_id`) and slots ≥1 (`refs[k]`) are both valid hop edges.
 //! - `refs_tree_depth ∈ [0, 16)` via 4-bit range check.
-//! - **Ref-tree** — `ref_leaf = Poseidon([c0, c1, c2])` derived from the
-//!   byte-flat `REFERENCED_REF_BLOCK_TAG (34 B) ‖ hop_end_block_id` layout
-//!   (chunks 31+31+4). Walked to `computed_l7_fr` via variable-depth
+//! - **Ref-tree** — `ref_leaf = Poseidon([c0, c1, c2])`. The three Fr chunks
+//!   are selected per hop on `is_zero(ref_index)`:
+//!     - `ref_index == 0` ⇒ byte-flat `REFERENCED_PARENT_BLOCK_TAG (37 B) ‖
+//!       hop_end_block_id` layout (chunks 31+31+7).
+//!     - `ref_index ≥ 1`  ⇒ byte-flat `REFERENCED_REF_BLOCK_TAG (34 B) ‖
+//!       hop_end_block_id` layout (chunks 31+31+4).
+//!   Walked to `computed_l7_fr` via variable-depth
 //!   [`walk_dense_merkle_bind_pos`] over `MAX_PROOF_BLOCK_REFS_DEPTH = 8`
 //!   levels. Gated equality: `(computed_l7_fr - l7_fr) · is_active == 0`.
 //! - **SHA-256** — 4 compressions lift L7 to `block_id_bytes` at leaf index 7.
@@ -120,8 +123,9 @@ use halo2_base::{
 use crate::{
     dense_merkle_bound::walk_dense_merkle_bind_pos,
     multi_hop_witness::{
-        ref_leaf_hash_native, ref_leaf_ref_tag_chunk0_fr, ref_leaf_ref_tag_chunk1_lo_fr,
-        BlockWitness, HopWitness, BLOCK_MERKLE_DEPTH, H_HOPS_PER_PROOF, MAX_PROOF_BLOCK_REFS_DEPTH,
+        ref_leaf_hash_native, ref_leaf_parent_tag_chunk0_fr, ref_leaf_parent_tag_chunk1_lo_fr,
+        ref_leaf_ref_tag_chunk0_fr, ref_leaf_ref_tag_chunk1_lo_fr, BlockWitness, HopWitness,
+        BLOCK_MERKLE_DEPTH, H_HOPS_PER_PROOF, MAX_PROOF_BLOCK_REFS_DEPTH,
     },
     poseidon::{RATE, R_F, R_P, T},
 };
@@ -183,14 +187,19 @@ impl BridgeMultiHopProof {
 /// Prove one hop's variable-depth L7 ref-tree opening.
 ///
 /// Layers onto `ctx`:
-/// * `ref_index != 0` (spec §5.1 — slot 0 is same-thread parent and never
-///   opened as a hop edge).
 /// * `ref_index ∈ [0, 2^MAX_PROOF_BLOCK_REFS_DEPTH)` via
 ///   `walk_dense_merkle_bind_pos`'s internal `range_check + num_to_bits`.
+///   Slot 0 (same-thread `parent_block_id`) and slots ≥1 (`refs[k]`) are
+///   both valid hop edges.
 /// * `refs_tree_depth ∈ [0, 16)` via 4-bit range check.
-/// * `ref_leaf_fr = Poseidon([c0, c1, c2])` from `REFERENCED_REF_BLOCK_TAG ‖
-///   hop_end_block_id` (chunks 31+31+4). `hop_end_block_id` is the older
-///   ref extracted from the current block's `proof_block_refs[ref_index]`.
+/// * `ref_leaf_fr = Poseidon([c0, c1, c2])`. The three Fr chunks are
+///   selected per hop keyed on `is_zero(ref_index)`:
+///     - `ref_index == 0` ⇒ `REFERENCED_PARENT_BLOCK_TAG ‖ hop_end_block_id`
+///       (chunks 31+31+7).
+///     - `ref_index ≥ 1`  ⇒ `REFERENCED_REF_BLOCK_TAG ‖ hop_end_block_id`
+///       (chunks 31+31+4).
+///   `hop_end_block_id` is the older block the current block references
+///   through `proof_block_refs[ref_index]`.
 /// * Variable-depth dense-merkle walk (`MAX_PROOF_BLOCK_REFS_DEPTH` levels,
 ///   gated per-level by `refs_tree_depth`) with direction bits bound to
 ///   `ref_index`'s bit-decomposition.
@@ -199,26 +208,28 @@ impl BridgeMultiHopProof {
 /// Returns `(l7_bytes, ref_block_id_bytes)` — both 32-cell views, both
 /// 8-bit range-checked. Downstream consumers: SHA-256 block-merkle walk
 /// (`l7_bytes`) and endpoint binding (`ref_block_id_bytes`).
+#[allow(clippy::too_many_arguments)]
 fn prove_hop_ref_tree_opening(
     ctx: &mut Context<Fr>,
     range: &RangeChip<Fr>,
     hasher: &PoseidonHasher<Fr, T, RATE>,
     hop: &HopWitness,
     is_active: AssignedValue<Fr>,
+    parent_leaf_c0_const: AssignedValue<Fr>,
+    parent_leaf_c1_tag_const: AssignedValue<Fr>,
     ref_leaf_c0_const: AssignedValue<Fr>,
     ref_leaf_c1_tag_const: AssignedValue<Fr>,
     pow_256_3: AssignedValue<Fr>,
+    pow_256_6: AssignedValue<Fr>,
     powers_le_32: &[QuantumCell<Fr>],
 ) -> (Vec<AssignedValue<Fr>>, Vec<AssignedValue<Fr>>) {
     let gate = range.gate();
 
-    // ref_index witness — must be nonzero (slot 0 = same-thread parent, spec §5.1).
-    // The range check itself happens inside `walk_dense_merkle_bind_pos` below.
+    // ref_index witness. Range check happens inside
+    // `walk_dense_merkle_bind_pos` below; `is_zero_ref_index` selects between
+    // the parent-tag and ref-tag Poseidon-leaf layouts.
     let ref_index_assigned = ctx.load_witness(Fr::from(hop.ref_index as u64));
-    {
-        let is_zero_ref_index = gate.is_zero(ctx, ref_index_assigned);
-        gate.assert_is_const(ctx, &is_zero_ref_index, &Fr::zero());
-    }
+    let is_zero_ref_index = gate.is_zero(ctx, ref_index_assigned);
 
     // L7 bytes + LE Fr packing.
     let l7_native = hop.block.block_merkle_tree_leaves[7];
@@ -246,10 +257,18 @@ fn prove_hop_ref_tree_opening(
         range.range_check(ctx, *cell, 8);
     }
 
-    // Byte-flat ref-leaf chunks — ref-tag layout only (34 B tag): 31+31+4.
-    //   c0 = tag_r_hi (31 B)               ← ref_leaf_c0_const
-    //   c1 = tag_r_lo (3 B) + ref_block_id_lo28 · 256^3
-    //   c2 = LE(ref_block_id[28..32])
+    // Byte-flat ref-leaf chunks. Two layouts are supported — selected per
+    // hop by `is_zero_ref_index`:
+    //   Parent-tag (37 B tag, ref_index == 0): 31+31+7.
+    //     c0 = tag_p[0..31]                         ← parent_leaf_c0_const
+    //     c1 = tag_p[31..37] (6 B) + ref_block_id[0..25] · 256^6
+    //     c2 = LE(ref_block_id[25..32]) (7 B)
+    //   Ref-tag    (34 B tag, ref_index ≥ 1):  31+31+4.
+    //     c0 = tag_r[0..31]                         ← ref_leaf_c0_const
+    //     c1 = tag_r[31..34] (3 B) + ref_block_id[0..28] · 256^3
+    //     c2 = LE(ref_block_id[28..32]) (4 B)
+
+    // --- Ref-tag chunk1 / chunk2 ---
     let ref_block_id_lo28 = {
         let cells: Vec<QuantumCell<Fr>> = ref_block_id_bytes[0..28]
             .iter()
@@ -262,20 +281,66 @@ fn prove_hop_ref_tree_opening(
         QuantumCell::Existing(ref_block_id_lo28),
         QuantumCell::Existing(pow_256_3),
     );
-    let ref_leaf_c1 = gate.add(
+    let ref_tag_c1 = gate.add(
         ctx,
         QuantumCell::Existing(ref_leaf_c1_tag_const),
         QuantumCell::Existing(ref_block_id_lo28_shifted),
     );
-    let ref_leaf_c2 = {
+    let ref_tag_c2 = {
         let cells: Vec<QuantumCell<Fr>> = ref_block_id_bytes[28..32]
             .iter()
             .map(|c| QuantumCell::Existing(*c))
             .collect();
         gate.inner_product(ctx, cells, powers_le_32[..4].iter().cloned())
     };
+
+    // --- Parent-tag chunk1 / chunk2 ---
+    let ref_block_id_lo25 = {
+        let cells: Vec<QuantumCell<Fr>> = ref_block_id_bytes[0..25]
+            .iter()
+            .map(|c| QuantumCell::Existing(*c))
+            .collect();
+        gate.inner_product(ctx, cells, powers_le_32[..25].iter().cloned())
+    };
+    let ref_block_id_lo25_shifted = gate.mul(
+        ctx,
+        QuantumCell::Existing(ref_block_id_lo25),
+        QuantumCell::Existing(pow_256_6),
+    );
+    let parent_tag_c1 = gate.add(
+        ctx,
+        QuantumCell::Existing(parent_leaf_c1_tag_const),
+        QuantumCell::Existing(ref_block_id_lo25_shifted),
+    );
+    let parent_tag_c2 = {
+        let cells: Vec<QuantumCell<Fr>> = ref_block_id_bytes[25..32]
+            .iter()
+            .map(|c| QuantumCell::Existing(*c))
+            .collect();
+        gate.inner_product(ctx, cells, powers_le_32[..7].iter().cloned())
+    };
+
+    // --- Select layout keyed on is_zero_ref_index (sel==1 ⇒ parent) ---
+    let ref_leaf_c0 = gate.select(
+        ctx,
+        QuantumCell::Existing(parent_leaf_c0_const),
+        QuantumCell::Existing(ref_leaf_c0_const),
+        QuantumCell::Existing(is_zero_ref_index),
+    );
+    let ref_leaf_c1 = gate.select(
+        ctx,
+        QuantumCell::Existing(parent_tag_c1),
+        QuantumCell::Existing(ref_tag_c1),
+        QuantumCell::Existing(is_zero_ref_index),
+    );
+    let ref_leaf_c2 = gate.select(
+        ctx,
+        QuantumCell::Existing(parent_tag_c2),
+        QuantumCell::Existing(ref_tag_c2),
+        QuantumCell::Existing(is_zero_ref_index),
+    );
     let ref_leaf_fr =
-        hasher.hash_fix_len_array(ctx, gate, &[ref_leaf_c0_const, ref_leaf_c1, ref_leaf_c2]);
+        hasher.hash_fix_len_array(ctx, gate, &[ref_leaf_c0, ref_leaf_c1, ref_leaf_c2]);
 
     // Byte-flat ref-tree walk — gated variable-depth fold.
     //
@@ -503,10 +568,9 @@ impl Circuit<Fr> for BridgeMultiHopProof {
                 proof_block_refs: vec![[0u8; 32], [0u8; 32]],
             },
             block_merkle_leaf_proof_l7: [[0u8; 32]; BLOCK_MERKLE_DEPTH],
-            // Slot 0 is same-thread parent — excluded from L7 walk (spec §5.1).
-            // Even for inactive padding, ref_index must be ≥ 1 because the
-            // in-circuit range + nonzero constraints on ref_index are
-            // unconditional.
+            // Any slot ∈ [0, 2) is a valid dummy — the inactive-hop gate
+            // discards the walker's output anyway. We use 1 as a neutral
+            // non-boundary value.
             ref_index: 1,
             // depth=1 keeps ref_index=1 within the live-flag window; the
             // walker's output is discarded by `is_active` anyway.
@@ -565,12 +629,15 @@ impl Circuit<Fr> for BridgeMultiHopProof {
                 hasher.initialize_consts(ctx, gate);
 
                 // === Byte-flat constants (reused across all hops) ===
-                // Ref-tag (34 B) chunk constants. Slot 0 (parent) is excluded
-                // from the L7 walk (spec §5.1), so only the ref-tag layout is
-                // used.
+                // Both parent-tag (37 B) and ref-tag (34 B) chunk constants.
+                // The per-hop gadget selects between the two layouts keyed on
+                // `is_zero(ref_index)`.
+                let parent_leaf_c0_const = ctx.load_constant(ref_leaf_parent_tag_chunk0_fr());
+                let parent_leaf_c1_tag_const = ctx.load_constant(ref_leaf_parent_tag_chunk1_lo_fr());
                 let ref_leaf_c0_const = ctx.load_constant(ref_leaf_ref_tag_chunk0_fr());
                 let ref_leaf_c1_tag_const = ctx.load_constant(ref_leaf_ref_tag_chunk1_lo_fr());
                 let pow_256_3 = ctx.load_constant(Fr::from(256u64).pow([3u64]));
+                let pow_256_6 = ctx.load_constant(Fr::from(256u64).pow([6u64]));
                 // LE byte→Fr power-of-256 table, shared by every inner_product
                 // in the per-hop loop (L7 pack, ref-leaf chunk math) and by
                 // the head/tail Fr repack.
@@ -600,9 +667,12 @@ impl Circuit<Fr> for BridgeMultiHopProof {
                         &hasher,
                         hop,
                         is_active,
+                        parent_leaf_c0_const,
+                        parent_leaf_c1_tag_const,
                         ref_leaf_c0_const,
                         ref_leaf_c1_tag_const,
                         pow_256_3,
+                        pow_256_6,
                         &powers_le_32,
                     );
 
@@ -697,9 +767,10 @@ mod tests {
         proof_block_refs_root_native, BLOCK_MERKLE_LEAF_COUNT,
     };
 
-    /// Deterministic placeholder for the slot-0 same-thread parent — never
-    /// opened by the circuit (spec §5.1) but must be a well-defined value
-    /// so native `proof_block_refs_root_native` is reproducible.
+    /// Deterministic placeholder for the slot-0 same-thread `parent_block_id`
+    /// — a valid hop edge, but tests that walk slot ≥1 still need a
+    /// well-defined byte string so native `proof_block_refs_root_native` is
+    /// reproducible.
     const SLOT0_PARENT_PLACEHOLDER: [u8; 32] = [0xF0; 32];
 
     /// Build one active hop opening `older_ref_id` (which will sit at slot 1
@@ -818,6 +889,86 @@ mod tests {
             lookup_bits: Some(16),
             num_instance_columns: 1,
         }
+    }
+
+    /// Build one active hop that opens the slot-0 `parent_block_id` edge
+    /// (same-thread parent). The "current" block's `proof_block_refs` has
+    /// `parent_block_id = older_parent_id` at slot 0 and one cross-thread
+    /// sibling at slot 1; we open slot 0. Returns the hop + the derived
+    /// `current_block_id`.
+    fn make_active_hop_parent_slot(
+        older_parent_id: [u8; 32],
+        sentinel_byte: u8,
+    ) -> (HopWitness, [u8; 32]) {
+        // Slot 1 content is arbitrary — the circuit does not open it. Give it
+        // a deterministic byte string so the native L7 root is reproducible.
+        let sibling_ref: [u8; 32] = [sentinel_byte.wrapping_add(0x20); 32];
+        let proof_block_refs: Vec<[u8; 32]> = vec![older_parent_id, sibling_ref];
+        let l7 = proof_block_refs_root_native(&proof_block_refs);
+
+        let mut leaves = [[0u8; 32]; BLOCK_MERKLE_LEAF_COUNT];
+        for (j, slot) in leaves.iter_mut().enumerate().take(7) {
+            *slot = [sentinel_byte; 32];
+            slot[0] = j as u8;
+        }
+        leaves[7] = l7;
+
+        let block_id = block_merkle_root(&leaves);
+        let block_merkle_leaf_proof_l7 = block_merkle_leaf_proof(&leaves, 7);
+        let ref_index = 0usize;
+        let (proof_block_ref_inner_path, refs_tree_depth) =
+            proof_block_ref_inner_path_native(&proof_block_refs, ref_index);
+
+        let hop = HopWitness {
+            is_active: true,
+            block: BlockWitness {
+                block_id,
+                block_merkle_tree_leaves: leaves,
+                proof_block_refs,
+            },
+            block_merkle_leaf_proof_l7,
+            ref_index,
+            refs_tree_depth,
+            proof_block_ref_inner_path,
+            hop_start_block_id: block_id,
+            hop_end_block_id: older_parent_id,
+        };
+        (hop, block_id)
+    }
+
+    /// Positive: one active hop opening the slot-0 `parent_block_id` edge.
+    /// Exercises the parent-tag Poseidon-leaf layout (chunks 31+31+7) and
+    /// the `is_zero(ref_index)` select wiring that routes `ref_index == 0`
+    /// away from the ref-tag layout.
+    #[test]
+    fn parent_slot_hop_mock_prover() {
+        let older_parent_id: [u8; 32] = [0x11; 32];
+        let (hop, current_block_id) = make_active_hop_parent_slot(older_parent_id, 0x30);
+
+        // Build the full `H_HOPS_PER_PROOF` chain. At H=1 this is just the
+        // single parent-slot hop; at H>1 we pad with inactive hops carrying
+        // `older_parent_id` on both endpoints so the terminal end stays
+        // consistent.
+        let mut chain: Vec<HopWitness> = vec![hop];
+        while chain.len() < H_HOPS_PER_PROOF {
+            chain.push(make_inactive_hop(older_parent_id));
+        }
+        let hops: [HopWitness; H_HOPS_PER_PROOF] = chain
+            .try_into()
+            .unwrap_or_else(|v: Vec<HopWitness>| panic!("hop slot count {}", v.len()));
+
+        let first_start = hops[0].hop_start_block_id;
+        let last_end = hops[H_HOPS_PER_PROOF - 1].hop_end_block_id;
+        assert_eq!(first_start, current_block_id);
+        assert_eq!(last_end, older_parent_id);
+        assert_eq!(hops[0].ref_index, 0);
+
+        const K: usize = 17;
+        let params = test_params(K);
+        let circuit = BridgeMultiHopProof::new(hops, params);
+        let instances = vec![vec![bytes_to_fr(&first_start), bytes_to_fr(&last_end)]];
+        let prover = MockProver::<Fr>::run(K as u32, &circuit, instances).unwrap();
+        prover.assert_satisfied();
     }
 
     /// Positive: all `H_HOPS_PER_PROOF` hops active, chain fully packed.

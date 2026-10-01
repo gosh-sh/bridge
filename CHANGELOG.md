@@ -83,6 +83,33 @@ assigns it when the release is tagged.
   bridge; a live 0.2.0 bridge cannot accept bundle-shape calldata and
   cannot be patched into acceptance.
 
+- **`BridgeMultiHopProof` admits `ref_index = 0` (same-thread
+  `parent_block_id`) as a valid hop edge.** The circuit now selects
+  between the parent-tag (`REFERENCED_PARENT_BLOCK_TAG`, 37 B,
+  chunks 31+31+7) and ref-tag (`REFERENCED_REF_BLOCK_TAG`, 34 B,
+  chunks 31+31+4) Poseidon-leaf layouts per hop keyed on
+  `is_zero(ref_index)`. The previous hard
+  `assert_is_const(is_zero_ref_index, 0)` constraint and the
+  `assert_ref_index_is_cross_thread` native helper are removed. Witness
+  schema impact: `HopWitnessJson.ref_index` is no longer required to be
+  `≥ 1`; `bridge_event_witness::enrich::build_hop_witness` accepts
+  slot 0 and succeeds the native L7 Poseidon re-check against the
+  parent-tag leaf. The cross-thread walker
+  (`resolve_cross_thread_chain`) still skips slot 0 as a performance
+  choice (same-thread parent cannot progress a cross-thread walk).
+  Consequences:
+    - `BridgeMultiHopProof` verifying and proving keys are rotated
+      (`MULTI_HOP_CIRCUIT_REVISION` bumped to 5). On-disk
+      `multi_hop_pk*.bin` / `multi_hop_vk*.bin` cache files invalidate
+      on first daemon start; keygen runs automatically.
+    - `BridgeMultiHopAggregatorVerifier.sol` must be regenerated with
+      `bridge-evm-aggregator export-inner-aggregator --name
+      BridgeMultiHopAggregatorVerifier` and redeployed on Ethereum.
+    - Public API break on `bridge-event-prove-circuit`: the public
+      `multi_hop_witness::assert_ref_index_is_cross_thread` function is
+      deleted. Downstream callers (if any outside this workspace) that
+      imported it must drop the call.
+
 - **`BridgeMultiHopProof` hop count dropped from 5 to 1 per snark.**
   `H_HOPS_PER_PROOF` in `bridge_event_prove_circuit::multi_hop_witness`
   (and its mirror in `bridge_event_witness::schema`) is now `1`;

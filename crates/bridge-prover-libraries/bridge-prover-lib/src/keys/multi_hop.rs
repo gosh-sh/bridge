@@ -55,7 +55,7 @@ pub(super) const PREFIX: &str = "multi_hop";
 /// change: old PK/VK on disk are invalidated, `N_BUNDLE_MAX` doubles from 10
 /// to 20, the outer verifier YUL must be regenerated and the on-chain
 /// `BridgeMultiHopAggregatorVerifier` redeployed.
-pub(super) const MULTI_HOP_CIRCUIT_REVISION: u32 = 4;
+pub(super) const MULTI_HOP_CIRCUIT_REVISION: u32 = 5;
 
 /// Deterministic seed for the synthetic-witness keygen path. Any seed
 /// produces the same VK/PK shape.

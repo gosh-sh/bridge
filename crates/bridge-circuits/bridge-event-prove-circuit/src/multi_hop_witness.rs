@@ -140,27 +140,6 @@ pub const REFERENCED_PARENT_BLOCK_TAG: &[u8] = b"acki-nacki:referenced-block:par
 /// Must equal `history-proof::REFERENCED_REF_BLOCK_TAG`.
 pub const REFERENCED_REF_BLOCK_TAG: &[u8] = b"acki-nacki:referenced-block:ref:v1";
 
-/// Assert that a hop's `ref_index` targets a cross-thread `refs` slot
-/// (index ≥ 1). Slot 0 (`parent_block_id`) is same-thread by producer
-/// construction (spec §2.3, §4); the bridge L7 walk never opens it.
-///
-/// Called by `test_helpers::synth_chain*` on every active hop so that
-/// mis-populated witnesses fail loudly *before* the circuit's stricter
-/// in-gate check fires (`ref_index != 0` in `multi_hop_proof.rs`).
-pub fn assert_ref_index_is_cross_thread(ref_index: usize) {
-    assert!(
-        ref_index >= 1,
-        "hop ref_index must be ≥ 1 (slot 0 is same-thread parent, excluded per spec §4); got {}",
-        ref_index,
-    );
-    assert!(
-        ref_index < MAX_PROOF_BLOCK_REFS,
-        "hop ref_index {} exceeds MAX_PROOF_BLOCK_REFS {}",
-        ref_index,
-        MAX_PROOF_BLOCK_REFS,
-    );
-}
-
 /// Native: `refs_tree_depth` for a variable-width L7 tree. Matches the
 /// chain's `dense_merkle_tree` width convention
 /// (`width = leaves.len().next_power_of_two()`, `depth = log2(width)`).
@@ -232,9 +211,11 @@ pub struct HopWitness {
     /// each level, cf. `gql_proof.rs::block_merkle_leaf_proof`.
     pub block_merkle_leaf_proof_l7: [[u8; 32]; BLOCK_MERKLE_DEPTH],
 
-    /// Index of the *referenced parent* block within `block.proof_block_refs`.
-    /// The bridge L7 walk requires `ref_index >= 1` (slot 0 is same-thread
-    /// parent — spec §4).
+    /// Index of the referenced block within `block.proof_block_refs`. Both
+    /// slot 0 (same-thread `parent_block_id`) and slots ≥1 (cross-thread
+    /// `refs[k]`) are valid hop edges; the circuit's per-hop Poseidon-leaf
+    /// gadget selects the parent or ref tag layout keyed on
+    /// `is_zero(ref_index)`.
     pub ref_index: usize,
 
     /// Real depth of the L7 dense-merkle tree for this hop, matching the
@@ -768,15 +749,4 @@ mod tests {
         }
     }
 
-    #[test]
-    #[should_panic(expected = "hop ref_index must be ≥ 1")]
-    fn assert_ref_index_rejects_parent_slot() {
-        assert_ref_index_is_cross_thread(0);
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeds MAX_PROOF_BLOCK_REFS")]
-    fn assert_ref_index_rejects_overflow() {
-        assert_ref_index_is_cross_thread(MAX_PROOF_BLOCK_REFS);
-    }
 }

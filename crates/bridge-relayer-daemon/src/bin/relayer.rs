@@ -2576,10 +2576,12 @@ mod withdraw_scan_tests {
             Ok(self.nullifier_used)
         }
 
-        async fn dry_run_withdraw(
+        async fn dry_run_withdraw_bundle(
             &self,
-            _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
+            _p: &alloy::primitives::Bytes,
+            _hop_pis: &[Vec<alloy::primitives::U256>],
+            _hop_proofs: &[alloy::primitives::Bytes],
         ) -> Result<DryRunOutcome, RelayerError> {
             self.calls.lock().unwrap().dry_run += 1;
             match &self.dry_run_reason {
@@ -2590,10 +2592,12 @@ mod withdraw_scan_tests {
             }
         }
 
-        async fn submit_withdraw(
+        async fn submit_withdraw_bundle(
             &self,
-            _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
+            _p: &alloy::primitives::Bytes,
+            _hop_pis: &[Vec<alloy::primitives::U256>],
+            _hop_proofs: &[alloy::primitives::Bytes],
         ) -> Result<WithdrawSubmitOutcome, RelayerError> {
             self.calls.lock().unwrap().submit += 1;
             match &self.submit_reason {

@@ -173,15 +173,19 @@ pub trait BridgeClient: Send + Sync {
 #[async_trait]
 pub trait WithdrawBridge: Send + Sync {
     async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError>;
-    async fn dry_run_withdraw(
+    async fn dry_run_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<DryRunOutcome, RelayerError>;
-    async fn submit_withdraw(
+    async fn submit_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<WithdrawSubmitOutcome, RelayerError>;
 }
 
@@ -195,20 +199,38 @@ where
         EthBridgeClient::is_nullifier_used(self, nullifier).await
     }
 
-    async fn dry_run_withdraw(
+    async fn dry_run_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<DryRunOutcome, RelayerError> {
-        EthBridgeClient::dry_run_withdraw(self, proof, pub_inputs).await
+        EthBridgeClient::dry_run_withdraw_bundle(
+            self,
+            pub_inputs,
+            proof,
+            hop_public_inputs,
+            hop_proofs,
+        )
+        .await
     }
 
-    async fn submit_withdraw(
+    async fn submit_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-        EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
+        EthBridgeClient::submit_withdraw_bundle(
+            self,
+            pub_inputs,
+            proof,
+            hop_public_inputs,
+            hop_proofs,
+        )
+        .await
     }
 }
 
@@ -1597,6 +1619,65 @@ fn decode_bundle_revert(e: &AlloyContractError) -> String {
                 "MultiHopProofRejected at hop {}: BridgeMultiHopAggregatorVerifier rejected the SHPLONK proof",
                 v.at
             ),
+            // Shared withdrawal-validation errors (main PR #67). These are
+            // declared under `withdrawByProof` historically but `withdrawByProofBundle`
+            // runs the same validation (identity/amount/anchor/nullifier/etc.)
+            // and reverts with the same selectors.
+            E::WithdrawalProofRejected(_) => {
+                "WithdrawalProofRejected: the SHPLONK outer proof failed verification \
+                 against BridgeWithdrawalAggregatorVerifier (bad inner proof, wrong \
+                 VK digest, or re-exposed instance mismatch)".to_string()
+            }
+            E::NullifierAlreadyUsed(v) => format!(
+                "NullifierAlreadyUsed: nullifier {} is already spent on this bridge",
+                v.nullifier
+            ),
+            E::FieldElementOutOfRange(v) => format!(
+                "FieldElementOutOfRange: public input {} is ≥ BN254 scalar modulus",
+                v.value
+            ),
+            E::DstChainIdMismatch(v) => format!(
+                "DstChainIdMismatch: proof carries dstChainId={}, this bridge expects {}",
+                v.supplied, v.expected
+            ),
+            E::RecipientHalfOutOfRange(v) => format!(
+                "RecipientHalfOutOfRange: recipientHi/Lo half {} does not fit the 160-bit \
+                 Ethereum address encoding",
+                v.value
+            ),
+            E::WithdrawIdentityMismatch(_) => {
+                "WithdrawIdentityMismatch: proof's (dappFr, accFr) do not match this bridge's \
+                 immutable identity pair".to_string()
+            }
+            E::UnknownAnchor(v) => format!(
+                "UnknownAnchor: finalRoot {} is not in any _layerWindows[L] buffer — the \
+                 verifyBlock lane has not yet registered an anchor for this layer, retry",
+                v.finalRoot
+            ),
+            E::InvalidNumLayers(v) => format!(
+                "InvalidNumLayers: anchorLayer {} is outside the supported range",
+                v.anchorLayer
+            ),
+            E::UnsupportedTokenId(v) => format!(
+                "UnsupportedTokenId: tokenId {} is not registered on this bridge",
+                v.tokenId
+            ),
+            E::InvalidRecipient(_) => {
+                "InvalidRecipient: recipient address is zero or otherwise malformed".to_string()
+            }
+            E::WithdrawTreasuryShortfall(v) => format!(
+                "WithdrawTreasuryShortfall: requested {}, treasury holds {} — the Aave sink \
+                 may be slow to redeem; retry once the treasury refills",
+                v.requested, v.available
+            ),
+            // Legacy: the pre-bundle `withdrawByProof` entry point was
+            // removed on multi-thread; this error only reaches live callers
+            // if a stale ABI is talking to a current bridge.
+            E::WithdrawByProofDisabled(_) => {
+                "WithdrawByProofDisabled (legacy): the on-chain bridge has removed the \
+                 pre-bundle withdrawByProof entry point — the current entry is \
+                 withdrawByProofBundle, your binding is stale".to_string()
+            }
         };
         return format!("{head} [raw: {e}]");
     }

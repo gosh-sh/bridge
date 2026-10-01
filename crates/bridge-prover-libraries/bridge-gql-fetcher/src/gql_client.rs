@@ -316,6 +316,22 @@ pub struct GqlProofBlock {
     pub block_merkle_tree_leaves: Option<[[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT]>,
 }
 
+/// Minimal finalized-block topology returned by the graph resolver's rolling
+/// window query. The endpoint is expected to expose finalized blocks only;
+/// the current schema has no finality filter or finality field to verify.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GqlGraphBlock {
+    pub block_id: [u8; 32],
+    pub thread_id: ThreadIdentifier,
+    pub height: u64,
+    /// Block generation timestamp in Unix milliseconds. The current GraphQL
+    /// schema exposes whole-second `gen_utime`, so live values are scaled by
+    /// 1000 and have no sub-second precision.
+    pub gen_utime_ms: Option<u64>,
+    /// Slot 0 is the parent; slots 1+ are cross-thread references.
+    pub proof_block_refs: Vec<[u8; 32]>,
+}
+
 /// Single-endpoint client with the historical one-attempt semantics
 /// ([`GqlClientConfig::single_attempt`]): a failed request returns an error
 /// to the caller instead of retrying.
@@ -360,6 +376,102 @@ pub fn create_client_with_failover(
 }
 
 impl GqlClient {
+    /// Fetch a lightweight rolling topology window across all threads.
+    ///
+    /// The node schema currently exposes no finality predicate on this
+    /// connection. Callers rely on the configured endpoint serving finalized
+    /// blocks, as required by the graph resolver's `BlockProvider` contract.
+    pub async fn query_latest_graph_blocks(
+        &self,
+        count: u32,
+    ) -> anyhow::Result<Vec<GqlGraphBlock>> {
+        let q = format!(
+            r#"{{ blockchain {{ blocks(last: {count}) {{ edges {{ node {{ block_id thread_id height gen_utime proof_block_refs }} }} }} }} }}"#
+        );
+        let data = self
+            .query_op("latest_graph_blocks", &q, &["/blockchain/blocks"])
+            .await?;
+        let edges = data
+            .pointer("/blockchain/blocks/edges")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::format_err!("blocks.edges is missing or not an array"))?;
+        edges
+            .iter()
+            .enumerate()
+            .map(|(index, edge)| {
+                let node = edge
+                    .get("node")
+                    .ok_or_else(|| anyhow::format_err!("blocks.edges[{index}].node is missing"))?;
+                parse_graph_block(node).with_context(|| format!("blocks.edges[{index}].node"))
+            })
+            .collect()
+    }
+
+    /// Fetch lightweight graph metadata by canonical block id. A null block
+    /// is reported as `None`; GraphQL errors remain errors.
+    pub async fn query_graph_block_by_id(
+        &self,
+        block_id_hex: &str,
+    ) -> anyhow::Result<Option<GqlGraphBlock>> {
+        let q = format!(
+            r#"{{ blockchain {{ block(hash: "{block_id_hex}") {{ block_id thread_id height gen_utime proof_block_refs }} }} }}"#
+        );
+        let data = self
+            .query_op("graph_block_by_id", &q, &["/blockchain"])
+            .await?;
+        match data.pointer("/blockchain/block") {
+            Some(Value::Null) | None => Ok(None),
+            Some(block) => parse_graph_block(block).map(Some),
+        }
+    }
+
+    /// Fetch lightweight graph metadata by thread and height.
+    pub async fn query_graph_block_by_height(
+        &self,
+        thread_id_hex: &str,
+        height: u64,
+    ) -> anyhow::Result<Option<GqlGraphBlock>> {
+        let q = format!(
+            r#"{{ blockchain {{ blockByHeight(thread_id: "{thread_id_hex}", height: {height}) {{ block_id thread_id height gen_utime proof_block_refs }} }} }}"#
+        );
+        let data = self
+            .query_op("graph_block_by_height", &q, &["/blockchain"])
+            .await?;
+        match data.pointer("/blockchain/blockByHeight") {
+            Some(Value::Null) | None => Ok(None),
+            Some(block) => parse_graph_block(block).map(Some),
+        }
+    }
+
+    /// Fetch the highest canonical block currently available in one thread.
+    pub async fn query_latest_graph_block_in_thread(
+        &self,
+        thread_id_hex: &str,
+    ) -> anyhow::Result<Option<GqlGraphBlock>> {
+        let q = format!(
+            r#"{{ blockchain {{ blocks(last: 1, thread_id: "{thread_id_hex}") {{ edges {{ node {{ block_id thread_id height gen_utime proof_block_refs }} }} }} }} }}"#
+        );
+        let data = self
+            .query_op("latest_graph_block_in_thread", &q, &["/blockchain/blocks"])
+            .await?;
+        let edges = data
+            .pointer("/blockchain/blocks/edges")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::format_err!("blocks.edges is missing or not an array"))?;
+        anyhow::ensure!(
+            edges.len() <= 1,
+            "blocks(last: 1) returned more than one edge"
+        );
+        edges
+            .first()
+            .map(|edge| {
+                edge.get("node")
+                    .ok_or_else(|| anyhow::format_err!("blocks.edges[0].node is missing"))
+                    .and_then(parse_graph_block)
+            })
+            .transpose()
+    }
+
     /// Ordered endpoint list; `[0]` is the primary.
     pub fn endpoints(&self) -> &[String] {
         &self.endpoints
@@ -1051,9 +1163,9 @@ impl GqlClient {
         let data = self
             .query_op("proof_block_by_id", &q, &["/blockchain/block"])
             .await?;
-        let block = data.pointer("/blockchain/block").ok_or_else(|| {
-            anyhow::format_err!("block(hash={block_id_hex}) returned no field")
-        })?;
+        let block = data
+            .pointer("/blockchain/block")
+            .ok_or_else(|| anyhow::format_err!("block(hash={block_id_hex}) returned no field"))?;
         if block.is_null() {
             anyhow::bail!("block(hash={block_id_hex}) not found");
         }
@@ -1593,9 +1705,9 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
     let mut proof_block_refs: Vec<[u8; 32]> = Vec::new();
     if let Some(arr) = value.get("proof_block_refs").and_then(|v| v.as_array()) {
         for (i, item) in arr.iter().enumerate() {
-            let s = item.as_str().ok_or_else(|| {
-                anyhow::format_err!("proof_block_refs[{i}] is not a string")
-            })?;
+            let s = item
+                .as_str()
+                .ok_or_else(|| anyhow::format_err!("proof_block_refs[{i}] is not a string"))?;
             proof_block_refs
                 .push(decode_hash32(s).with_context(|| format!("proof_block_refs[{i}]"))?);
         }
@@ -1634,6 +1746,45 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
         history_proofs,
         proof_block_refs,
         block_merkle_tree_leaves,
+    })
+}
+
+fn parse_graph_block(value: &serde_json::Value) -> anyhow::Result<GqlGraphBlock> {
+    let block_id = decode_hash32(required_string(value, "block_id")?).context("block_id")?;
+    let thread_id = ThreadIdentifier::try_from(required_string(value, "thread_id")?.to_string())
+        .context("thread_id")?;
+    let height = parse_u64_field(value, "height")?;
+    let gen_utime_ms = value
+        .get("gen_utime")
+        .filter(|value| !value.is_null())
+        .map(|_| parse_u64_field(value, "gen_utime"))
+        .transpose()?
+        .map(|seconds| {
+            seconds
+                .checked_mul(1_000)
+                .ok_or_else(|| anyhow::anyhow!("gen_utime milliseconds overflow u64"))
+        })
+        .transpose()?;
+    let refs = value
+        .get("proof_block_refs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::format_err!("proof_block_refs is missing or not an array"))?;
+    let proof_block_refs = refs
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| anyhow::format_err!("proof_block_refs[{index}] is not a string"))?;
+            decode_hash32(value).with_context(|| format!("proof_block_refs[{index}]"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(GqlGraphBlock {
+        block_id,
+        thread_id,
+        height,
+        gen_utime_ms,
+        proof_block_refs,
     })
 }
 
@@ -1710,6 +1861,10 @@ mod failover_tests {
     const NULL_BLOCK: &str = r#"{"data":{"blockchain":{"blockByHeight":null}}}"#;
     const SOME_BLOCK: &str = r#"{"data":{"blockchain":{"blockByHeight":{"seq_no":7}}}}"#;
     const GQL_ERRORS: &str = r#"{"errors":[{"message":"boom"}],"data":null}"#;
+    const GRAPH_BLOCKS: &str = r#"{"data":{"blockchain":{"blocks":{"edges":[{"node":{"block_id":"0101010101010101010101010101010101010101010101010101010101010101","thread_id":"00000000000000000000000000000000000000000000000000000000000000000000","height":7,"gen_utime":1770201296,"proof_block_refs":["0202020202020202020202020202020202020202020202020202020202020202","0303030303030303030303030303030303030303030303030303030303030303"],"chain_order":"cursor-1"}}]}}}}"#;
+    const GRAPH_BLOCK_BY_HEIGHT: &str = r#"{"data":{"blockchain":{"blockByHeight":{"block_id":"0101010101010101010101010101010101010101010101010101010101010101","thread_id":"00000000000000000000000000000000000000000000000000000000000000000000","height":7,"gen_utime":1770201296,"proof_block_refs":[],"chain_order":"cursor-1"}}}}"#;
+    const MALFORMED_GRAPH_BLOCKS: &str = r#"{"data":{"blockchain":{"blocks":{"edges":[{"node":{"block_id":"bad","thread_id":"00","height":7,"proof_block_refs":[],"chain_order":"cursor-1"}}]}}}}"#;
+    const MALFORMED_THREAD_GRAPH_BLOCKS: &str = r#"{"data":{"blockchain":{"blocks":{"edges":[{"node":{"block_id":"0101010101010101010101010101010101010101010101010101010101010101","thread_id":"00","height":7,"proof_block_refs":[],"chain_order":"cursor-1"}}]}}}}"#;
 
     #[derive(Clone)]
     enum Reply {
@@ -1949,6 +2104,73 @@ mod failover_tests {
         assert_eq!(only.hits.load(Ordering::SeqCst), 1);
         gql.query_latest_blocks(1).await.unwrap();
         assert_eq!(only.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn latest_graph_blocks_parses_parent_and_cross_refs() {
+        let server = spawn(vec![Reply::Json(GRAPH_BLOCKS)]).await;
+        let blocks = create_client(&server.url)
+            .unwrap()
+            .query_latest_graph_blocks(1)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].height, 7);
+        assert_eq!(blocks[0].gen_utime_ms, Some(1_770_201_296_000));
+        assert_eq!(blocks[0].proof_block_refs, vec![[2; 32], [3; 32]]);
+    }
+
+    #[tokio::test]
+    async fn graph_height_and_thread_tip_queries_return_timed_blocks() {
+        let by_height = spawn(vec![Reply::Json(GRAPH_BLOCK_BY_HEIGHT)]).await;
+        let block = create_client(&by_height.url)
+            .unwrap()
+            .query_graph_block_by_height(DEFAULT_THREAD_ID_HEX, 7)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (block.height, block.gen_utime_ms),
+            (7, Some(1_770_201_296_000))
+        );
+
+        let tip = spawn(vec![Reply::Json(GRAPH_BLOCKS)]).await;
+        let block = create_client(&tip.url)
+            .unwrap()
+            .query_latest_graph_block_in_thread(DEFAULT_THREAD_ID_HEX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (block.height, block.gen_utime_ms),
+            (7, Some(1_770_201_296_000))
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_graph_blocks_rejects_malformed_ids_and_graphql_errors() {
+        let malformed = spawn(vec![Reply::Json(MALFORMED_GRAPH_BLOCKS)]).await;
+        assert!(create_client(&malformed.url)
+            .unwrap()
+            .query_latest_graph_blocks(1)
+            .await
+            .is_err());
+
+        let malformed_thread = spawn(vec![Reply::Json(MALFORMED_THREAD_GRAPH_BLOCKS)]).await;
+        assert!(create_client(&malformed_thread.url)
+            .unwrap()
+            .query_latest_graph_blocks(1)
+            .await
+            .is_err());
+
+        let errors = spawn(vec![Reply::Json(GQL_ERRORS)]).await;
+        assert!(create_client(&errors.url)
+            .unwrap()
+            .query_latest_graph_blocks(1)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("GraphQL errors"));
     }
 
     #[test]

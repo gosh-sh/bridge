@@ -327,6 +327,32 @@ assigns it when the release is tagged.
 
 ### Added
 
+- Added the `bridge-block-graph-resolver` CLI for operators to scan a finalized
+  Acki Nacki GraphQL block window and resolve a deterministic minimum-hop path
+  from a thread-0 anchor to an event block. `resolve` emits lowercase block IDs
+  and the parent/cross-reference `ref_index` for every hop; `sync` validates and
+  reports on the rolling window. Use `--gql-url`, `--scan-window`,
+  `--per-thread-window`, `--max-hops`, and `--max-visited-blocks` to bind the
+  endpoint and resource limits. Pass `--database <PATH>` to persist graph and
+  positive-cache state across invocations in SQLite; the database is bound to
+  its normalized GraphQL endpoint and refuses reuse with another endpoint. The
+  `serve` command keeps that graph hot with periodic polling and exposes
+  `/healthz`, `/v1/status`, `/v1/sync`, and `/v1/resolve` over HTTP.
+  Targets outside the rolling window are located without a full-history scan:
+  the resolver uses the target timestamp to binary-search thread 0 by height,
+  then walks newer thread-0 candidates and lazily fetches referenced blocks by
+  ID. `--max-anchor-candidates` bounds this historical search.
+  `resolve` and `serve` also accept `--algorithm forward-thread` as an
+  alternative to the default `reverse-index` strategy. The forward strategy
+  starts at the last thread-0 block at or before the target time, scans newer
+  thread-0 blocks without reading the stored reverse index, enters the target
+  thread through ordinary block references, and follows parent references to
+  the exact target. Its visited-block limit applies across the complete
+  resolution, including all examined anchor candidates. Both strategies reuse
+  expanded branches and known path suffixes across historical anchor
+  candidates; `reverse-index` retains its store-first reverse-BFS attempt and
+  uses the incremental forward search only on a miss.
+
 - **Offline keygen bins for the multi-thread Circuit-4 pair —
   `keygen_bridge_final` and `keygen_bridge_multi_hop` under
   `bridge-prover-lib/src/bin/`.** Both accept `--params-dir <PATH>` (required)

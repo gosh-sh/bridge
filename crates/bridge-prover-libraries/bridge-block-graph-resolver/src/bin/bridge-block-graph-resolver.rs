@@ -2,8 +2,8 @@ use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duratio
 
 use anyhow::Context;
 use bridge_block_graph_resolver::{
-    BlockId, BlockProvider, GraphResolver, GraphqlBlockProvider, HistoricalSearchConfig,
-    MemoryStore, ResolutionAlgorithm, ResolutionPolicy, ResolutionRequest, ResolvedPath,
+    BlockId, BlockProvider, EdgePolicy, GraphResolver, GraphqlBlockProvider,
+    HistoricalSearchConfig, MemoryStore, ResolutionPolicy, ResolutionRequest, ResolvedPath,
     ResolverApi, ResolverLimits, ResolverStore, SqliteStore, SyncStats,
 };
 use clap::{Parser, Subcommand, ValueEnum};
@@ -40,8 +40,9 @@ enum Command {
         max_anchor_candidates: usize,
         #[arg(long, value_enum, default_value_t = CliPolicy::ShortestCurrent)]
         policy: CliPolicy,
-        #[arg(long, value_enum, default_value_t = CliAlgorithm::ReverseIndex)]
-        algorithm: CliAlgorithm,
+        /// Allowed hop kinds; changing this clears a persistent store.
+        #[arg(long, value_enum, default_value_t = CliEdgePolicy::AllReferences)]
+        edge_policy: CliEdgePolicy,
         #[arg(long)]
         pretty: bool,
     },
@@ -57,6 +58,9 @@ enum Command {
         /// run.
         #[arg(long)]
         database: Option<PathBuf>,
+        /// Allowed hop kinds; changing this clears a persistent store.
+        #[arg(long, value_enum, default_value_t = CliEdgePolicy::AllReferences)]
+        edge_policy: CliEdgePolicy,
         #[arg(long)]
         pretty: bool,
     },
@@ -77,8 +81,9 @@ enum Command {
         /// Maximum thread-0 blocks examined per cold historical resolution.
         #[arg(long, default_value_t = 1000)]
         max_anchor_candidates: usize,
-        #[arg(long, value_enum, default_value_t = CliAlgorithm::ReverseIndex)]
-        algorithm: CliAlgorithm,
+        /// Allowed hop kinds; changing this clears the persistent store.
+        #[arg(long, value_enum, default_value_t = CliEdgePolicy::AllReferences)]
+        edge_policy: CliEdgePolicy,
     },
 }
 
@@ -98,16 +103,16 @@ impl From<CliPolicy> for ResolutionPolicy {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum CliAlgorithm {
-    ReverseIndex,
-    ForwardThread,
+enum CliEdgePolicy {
+    AllReferences,
+    CrossThreadOnly,
 }
 
-impl From<CliAlgorithm> for ResolutionAlgorithm {
-    fn from(value: CliAlgorithm) -> Self {
+impl From<CliEdgePolicy> for EdgePolicy {
+    fn from(value: CliEdgePolicy) -> Self {
         match value {
-            CliAlgorithm::ReverseIndex => Self::ReverseIndex,
-            CliAlgorithm::ForwardThread => Self::ForwardThread,
+            CliEdgePolicy::AllReferences => Self::AllReferences,
+            CliEdgePolicy::CrossThreadOnly => Self::CrossThreadOnly,
         }
     }
 }
@@ -132,20 +137,16 @@ async fn resolve_with_store<S: ResolverStore>(
     per_thread_window: usize,
     scan_window: usize,
     max_anchor_candidates: usize,
-    algorithm: ResolutionAlgorithm,
     request: ResolutionRequest,
 ) -> anyhow::Result<ResolvedPath> {
     let resolver = GraphResolver::new(provider, store, per_thread_window)
         .with_historical_search_config(HistoricalSearchConfig {
             max_anchor_candidates,
-        })
-        .with_algorithm(algorithm);
-    if algorithm == ResolutionAlgorithm::ReverseIndex {
-        resolver
-            .sync_latest(scan_window)
-            .await
-            .context("sync graph window")?;
-    }
+        });
+    resolver
+        .sync_latest(scan_window)
+        .await
+        .context("sync graph window")?;
     resolver
         .resolve(request)
         .await
@@ -182,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
             max_visited_blocks,
             max_anchor_candidates,
             policy,
-            algorithm,
+            edge_policy,
             pretty,
         } => {
             let provider =
@@ -197,9 +198,13 @@ async fn main() -> anyhow::Result<()> {
             };
             let path = if let Some(database) = database {
                 let store = Arc::new(
-                    SqliteStore::open(database, provider.namespace())
-                        .await
-                        .context("open resolver database")?,
+                    SqliteStore::open_with_edge_policy(
+                        database,
+                        provider.namespace(),
+                        edge_policy.into(),
+                    )
+                    .await
+                    .context("open resolver database")?,
                 );
                 resolve_with_store(
                     provider,
@@ -207,18 +212,16 @@ async fn main() -> anyhow::Result<()> {
                     per_thread_window,
                     scan_window,
                     max_anchor_candidates,
-                    algorithm.into(),
                     request,
                 )
                 .await?
             } else {
                 resolve_with_store(
                     provider,
-                    Arc::new(MemoryStore::new()),
+                    Arc::new(MemoryStore::with_edge_policy(edge_policy.into())),
                     per_thread_window,
                     scan_window,
                     max_anchor_candidates,
-                    algorithm.into(),
                     request,
                 )
                 .await?
@@ -230,21 +233,26 @@ async fn main() -> anyhow::Result<()> {
             scan_window,
             per_thread_window,
             database,
+            edge_policy,
             pretty,
         } => {
             let provider =
                 Arc::new(GraphqlBlockProvider::new(&gql_url).context("create GraphQL provider")?);
             let stats = if let Some(database) = database {
                 let store = Arc::new(
-                    SqliteStore::open(database, provider.namespace())
-                        .await
-                        .context("open resolver database")?,
+                    SqliteStore::open_with_edge_policy(
+                        database,
+                        provider.namespace(),
+                        edge_policy.into(),
+                    )
+                    .await
+                    .context("open resolver database")?,
                 );
                 sync_with_store(provider, store, per_thread_window, scan_window).await?
             } else {
                 sync_with_store(
                     provider,
-                    Arc::new(MemoryStore::new()),
+                    Arc::new(MemoryStore::with_edge_policy(edge_policy.into())),
                     per_thread_window,
                     scan_window,
                 )
@@ -260,14 +268,14 @@ async fn main() -> anyhow::Result<()> {
             per_thread_window,
             sync_interval_secs,
             max_anchor_candidates,
-            algorithm,
+            edge_policy,
         } => {
             anyhow::ensure!(sync_interval_secs > 0, "--sync-interval-secs must be > 0");
             let provider =
                 Arc::new(GraphqlBlockProvider::new(&gql_url).context("create GraphQL provider")?);
             let namespace = provider.namespace().to_owned();
             let store = Arc::new(
-                SqliteStore::open(database, &namespace)
+                SqliteStore::open_with_edge_policy(database, &namespace, edge_policy.into())
                     .await
                     .context("open resolver database")?,
             );
@@ -275,8 +283,7 @@ async fn main() -> anyhow::Result<()> {
                 GraphResolver::new(provider, store, per_thread_window)
                     .with_historical_search_config(HistoricalSearchConfig {
                         max_anchor_candidates,
-                    })
-                    .with_algorithm(algorithm.into()),
+                    }),
             );
             let api = ResolverApi::new(resolver, scan_window, namespace);
             api.sync_once().await.context("initial graph sync")?;
@@ -348,6 +355,8 @@ mod tests {
             "node:8600",
             "--database",
             "resolver.sqlite",
+            "--edge-policy",
+            "cross-thread-only",
         ])
         .unwrap();
     }

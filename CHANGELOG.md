@@ -342,16 +342,16 @@ assigns it when the release is tagged.
   the resolver uses the target timestamp to binary-search thread 0 by height,
   then walks newer thread-0 candidates and lazily fetches referenced blocks by
   ID. `--max-anchor-candidates` bounds this historical search.
-  `resolve` and `serve` also accept `--algorithm forward-thread` as an
-  alternative to the default `reverse-index` strategy. The forward strategy
-  starts at the last thread-0 block at or before the target time, scans newer
-  thread-0 blocks without reading the stored reverse index, enters the target
-  thread through ordinary block references, and follows parent references to
-  the exact target. Its visited-block limit applies across the complete
-  resolution, including all examined anchor candidates. Both strategies reuse
-  expanded branches and known path suffixes across historical anchor
-  candidates; `reverse-index` retains its store-first reverse-BFS attempt and
-  uses the incremental forward search only on a miss.
+  On a reverse-index miss, the resolver incrementally scans historical
+  thread-0 candidates, enters the target thread through ordinary block
+  references, and follows parent references to the exact target. The fallback
+  reuses expanded branches and known path suffixes across anchor candidates;
+  its visited-block limit applies across the complete resolution.
+  `--edge-policy all-references|cross-thread-only` selects whether paths may
+  use slot-0 parent transitions or only slots `1+`. This policy belongs to the
+  memory/SQLite store and is reported by the HTTP status endpoints. Reopening
+  an existing SQLite database with a different edge policy atomically clears
+  its graph and positive path cache before synchronization.
 
 - **Offline keygen bins for the multi-thread Circuit-4 pair —
   `keygen_bridge_final` and `keygen_bridge_multi_hop` under

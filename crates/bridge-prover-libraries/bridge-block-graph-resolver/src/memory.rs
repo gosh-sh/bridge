@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::{
-    ApplyStats, BlockEdge, BlockId, BlockNode, PathCacheKey, PruneStats, ResolvedPath,
+    ApplyStats, BlockEdge, BlockId, BlockNode, EdgePolicy, PathCacheKey, PruneStats, ResolvedPath,
     ResolverStore, StoreBatch, StoreVersion, ThreadId,
 };
 
@@ -17,14 +17,27 @@ struct MemoryState {
     anchor_epoch: u64,
 }
 
-#[derive(Default)]
 pub struct MemoryStore {
     state: RwLock<MemoryState>,
+    edge_policy: EdgePolicy,
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::with_edge_policy(EdgePolicy::default())
+    }
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_edge_policy(edge_policy: EdgePolicy) -> Self {
+        Self {
+            state: RwLock::new(MemoryState::default()),
+            edge_policy,
+        }
     }
 }
 
@@ -57,6 +70,10 @@ fn add_outgoing(state: &mut MemoryState, block: &BlockNode) {
 
 #[async_trait]
 impl ResolverStore for MemoryStore {
+    fn edge_policy(&self) -> EdgePolicy {
+        self.edge_policy
+    }
+
     async fn version(&self) -> anyhow::Result<StoreVersion> {
         let state = self.state.read().await;
         Ok(StoreVersion {
@@ -82,9 +99,20 @@ impl ResolverStore for MemoryStore {
         ids: &[BlockId],
     ) -> anyhow::Result<HashMap<BlockId, Vec<BlockEdge>>> {
         let state = self.state.read().await;
+        let edge_policy = self.edge_policy;
         Ok(ids
             .iter()
-            .filter_map(|id| state.incoming.get(id).cloned().map(|edges| (*id, edges)))
+            .filter_map(|id| {
+                state.incoming.get(id).map(|edges| {
+                    let edges = edges
+                        .iter()
+                        .copied()
+                        .filter(|edge| edge_policy.allows(edge.ref_index))
+                        .collect::<Vec<_>>();
+                    (*id, edges)
+                })
+            })
+            .filter(|(_, edges)| !edges.is_empty())
             .collect())
     }
 
@@ -244,6 +272,23 @@ mod tests {
         assert_eq!(
             store.incoming_edges(&[id(4)]).await.unwrap()[&id(4)][0].ref_index,
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_thread_only_filters_parent_edges() {
+        let store = MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly);
+        store
+            .apply(StoreBatch {
+                blocks: vec![block(1, 1, 1, &[2, 3])],
+                anchor_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert!(store.incoming_edges(&[id(2)]).await.unwrap().is_empty());
+        assert_eq!(
+            store.incoming_edges(&[id(3)]).await.unwrap()[&id(3)][0].ref_index,
+            1
         );
     }
 

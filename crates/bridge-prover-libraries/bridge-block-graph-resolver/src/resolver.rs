@@ -6,7 +6,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    BlockEdge, BlockId, BlockNode, BlockProvider, PathCacheKey, ResolutionPolicy,
+    BlockEdge, BlockId, BlockNode, BlockProvider, EdgePolicy, PathCacheKey, ResolutionPolicy,
     ResolutionRequest, ResolvedPath, ResolverStore, StoreBatch, SyncStats,
 };
 
@@ -17,20 +17,8 @@ pub struct HistoricalSearchConfig {
     pub max_anchor_candidates: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ResolutionAlgorithm {
-    /// Resolve through the reverse index already present in the store, falling
-    /// back to the incremental forward historical search on a miss.
-    #[default]
-    ReverseIndex,
-    /// Scan thread 0 forward from the block immediately left of the target
-    /// time, follow ordinary references into the target thread, then follow
-    /// parent references to the exact target.
-    ForwardThread,
-}
-
 #[derive(Default)]
-struct ForwardSearchState {
+struct HistoricalSearchState {
     /// Greatest remaining hop budget with which a block's references have
     /// already been expanded. Re-expand only when a later anchor reaches the
     /// block with a strictly larger budget.
@@ -99,7 +87,6 @@ pub struct GraphResolver<P, S> {
     store: Arc<S>,
     per_thread_window: usize,
     historical_search: HistoricalSearchConfig,
-    algorithm: ResolutionAlgorithm,
 }
 
 impl<P, S> GraphResolver<P, S>
@@ -113,7 +100,6 @@ where
             store,
             per_thread_window,
             historical_search: HistoricalSearchConfig::default(),
-            algorithm: ResolutionAlgorithm::default(),
         }
     }
 
@@ -125,13 +111,12 @@ where
         self
     }
 
-    pub fn with_algorithm(mut self, algorithm: ResolutionAlgorithm) -> Self {
-        self.algorithm = algorithm;
-        self
-    }
-
     pub async fn store_version(&self) -> anyhow::Result<crate::StoreVersion> {
         self.store.version().await
+    }
+
+    pub fn edge_policy(&self) -> EdgePolicy {
+        self.store.edge_policy()
     }
 
     pub async fn sync_latest(&self, limit: usize) -> anyhow::Result<SyncStats> {
@@ -174,12 +159,6 @@ where
             if usable {
                 return Ok(path);
             }
-        }
-
-        if self.algorithm == ResolutionAlgorithm::ForwardThread {
-            let path = self.forward_thread_resolve(&request).await?;
-            self.cache(&key, &path).await?;
-            return Ok(path);
         }
 
         let target = match self.store.block(&request.target).await? {
@@ -270,16 +249,16 @@ where
             .await?;
         let mut globally_visited = HashSet::from([request.target]);
         let mut depth_reached = 0;
-        let mut search = ForwardSearchState::default();
+        let mut search = HistoricalSearchState::default();
         search.suffixes.insert(request.target, Vec::new());
         let mut examined_anchors = Vec::new();
         for (candidates, height) in (start_height..=tip.block.height).enumerate() {
             if candidates >= self.historical_search.max_anchor_candidates {
                 if let Some((anchor, hops)) =
-                    best_forward_anchor(&examined_anchors, &search.suffixes)
+                    best_historical_anchor(&examined_anchors, &search.suffixes)
                 {
                     return self
-                        .forward_resolved_path(request, &anchor, hops)
+                        .resolved_path_from_anchor(request, &anchor, hops)
                         .await?
                         .ok_or_else(|| {
                             anyhow::anyhow!("historical path unexpectedly disappeared")
@@ -328,8 +307,8 @@ where
                 }
             }
         }
-        if let Some((anchor, hops)) = best_forward_anchor(&examined_anchors, &search.suffixes) {
-            self.forward_resolved_path(request, &anchor, hops)
+        if let Some((anchor, hops)) = best_historical_anchor(&examined_anchors, &search.suffixes) {
+            self.resolved_path_from_anchor(request, &anchor, hops)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("historical path unexpectedly disappeared"))
         } else {
@@ -365,181 +344,6 @@ where
         Ok(low)
     }
 
-    async fn forward_thread_resolve(
-        &self,
-        request: &ResolutionRequest,
-    ) -> anyhow::Result<ResolvedPath> {
-        let Some(target_timed) = self.provider.timed_block_by_id(&request.target).await? else {
-            return match self.provider.block_by_id(&request.target).await? {
-                Some(_) => Err(anyhow::anyhow!(
-                    "provider {} does not expose generation time for target {}",
-                    self.provider.namespace(),
-                    request.target
-                )),
-                None => Err(ResolutionError::TargetNotFound {
-                    target: request.target,
-                    namespace: self.provider.namespace().to_owned(),
-                }
-                .into()),
-            };
-        };
-        validate_blocks(std::slice::from_ref(&target_timed.block))?;
-        self.store
-            .apply(StoreBatch {
-                blocks: vec![target_timed.block.clone()],
-                anchor_epoch: None,
-            })
-            .await?;
-
-        if target_timed.block.thread_id.is_zero() {
-            let version = self.store.version().await?;
-            return Ok(ResolvedPath {
-                anchor: request.target,
-                anchor_height: target_timed.block.height,
-                target: request.target,
-                hops: vec![],
-                graph_version: version.graph_version,
-                anchor_epoch: version.anchor_epoch,
-            });
-        }
-
-        let max_visited = request.limits.max_visited_blocks;
-        if max_visited == 0 {
-            let version = self.store.version().await?;
-            return Err(ResolutionError::MaxVisited {
-                target: request.target,
-                graph_version: version.graph_version,
-                visited: 0,
-                depth_reached: 0,
-                max_hops: request.limits.max_hops,
-                max_visited_blocks: max_visited,
-            }
-            .into());
-        }
-        let mut globally_visited = HashSet::from([request.target]);
-        let mut depth_reached = 0;
-        let mut search = ForwardSearchState::default();
-        search.suffixes.insert(request.target, Vec::new());
-
-        let thread_zero = crate::ThreadId::ZERO;
-        let Some(tip) = self
-            .provider
-            .latest_timed_block_in_thread(&thread_zero)
-            .await?
-        else {
-            return self
-                .forward_no_path(request, globally_visited.len(), depth_reached)
-                .await;
-        };
-        if tip.gen_utime_ms < target_timed.gen_utime_ms {
-            return self
-                .forward_no_path(request, globally_visited.len(), depth_reached)
-                .await;
-        }
-        let start_height = self
-            .thread_zero_floor(target_timed.gen_utime_ms, tip.block.height)
-            .await?;
-
-        let mut examined_anchors = Vec::new();
-        for (candidates, height) in (start_height..=tip.block.height).enumerate() {
-            if candidates >= self.historical_search.max_anchor_candidates {
-                if let Some((anchor, hops)) =
-                    best_forward_anchor(&examined_anchors, &search.suffixes)
-                {
-                    return self
-                        .forward_resolved_path(request, &anchor, hops)
-                        .await?
-                        .ok_or_else(|| anyhow::anyhow!("forward path unexpectedly disappeared"));
-                }
-                let version = self.store.version().await?;
-                return Err(ResolutionError::HistoricalSearchLimit {
-                    target: request.target,
-                    graph_version: version.graph_version,
-                    candidates,
-                    max_anchor_candidates: self.historical_search.max_anchor_candidates,
-                }
-                .into());
-            }
-            let anchor = if height == tip.block.height {
-                tip.clone()
-            } else {
-                self.provider
-                    .timed_block_by_height(&thread_zero, height)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("thread 0 has no block at height {height}"))?
-            };
-            validate_blocks(std::slice::from_ref(&anchor.block))?;
-            self.store
-                .apply(StoreBatch {
-                    blocks: vec![anchor.block.clone()],
-                    anchor_epoch: None,
-                })
-                .await?;
-
-            // The floor block is a scan cursor, not an anchor candidate: a
-            // block strictly older than the target cannot commit to it.
-            if anchor.gen_utime_ms < target_timed.gen_utime_ms {
-                continue;
-            }
-            examined_anchors.push(anchor.block.clone());
-
-            if let Some(path) = self
-                .incremental_path_from_anchor(
-                    request,
-                    Some(&target_timed.block),
-                    target_timed.gen_utime_ms,
-                    anchor.block,
-                    &mut globally_visited,
-                    &mut depth_reached,
-                    &mut search,
-                )
-                .await?
-            {
-                if request.policy == ResolutionPolicy::FirstValid {
-                    return Ok(path);
-                }
-            }
-        }
-
-        if let Some((anchor, hops)) = best_forward_anchor(&examined_anchors, &search.suffixes) {
-            self.forward_resolved_path(request, &anchor, hops)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("forward path unexpectedly disappeared"))
-        } else {
-            self.forward_no_path(request, globally_visited.len(), depth_reached)
-                .await
-        }
-    }
-
-    async fn thread_zero_floor(&self, target_time: u64, tip_height: u64) -> anyhow::Result<u64> {
-        let thread_zero = crate::ThreadId::ZERO;
-        let first = self
-            .provider
-            .timed_block_by_height(&thread_zero, 0)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("thread 0 has no block at height 0"))?;
-        if first.gen_utime_ms > target_time {
-            return Ok(0);
-        }
-
-        let mut low = 0u64;
-        let mut high = tip_height;
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            let block = self
-                .provider
-                .timed_block_by_height(&thread_zero, middle)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("thread 0 has no block at height {middle}"))?;
-            if block.gen_utime_ms <= target_time {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
-        }
-        Ok(low)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn incremental_path_from_anchor(
         &self,
@@ -549,13 +353,13 @@ where
         anchor: BlockNode,
         globally_visited: &mut HashSet<BlockId>,
         depth_reached: &mut u32,
-        search: &mut ForwardSearchState,
+        search: &mut HistoricalSearchState,
     ) -> anyhow::Result<Option<ResolvedPath>> {
         let _ = self
-            .record_forward_visit(request, globally_visited, anchor.block_id, *depth_reached)
+            .record_historical_visit(request, globally_visited, anchor.block_id, *depth_reached)
             .await?;
         if let Some(hops) = search.suffixes.get(&anchor.block_id).cloned() {
-            return self.forward_resolved_path(request, &anchor, hops).await;
+            return self.resolved_path_from_anchor(request, &anchor, hops).await;
         }
 
         let mut frontier = vec![anchor.clone()];
@@ -566,37 +370,39 @@ where
             frontier.sort_by_key(|block| block.block_id);
 
             for block in &frontier {
-                if let Some(target) = target_thread_entry {
-                    if search.terminal_checked.insert(block.block_id)
-                        && block.thread_id == target.thread_id
-                        && block.height >= target.height
-                    {
-                        if let Some(tail) = self
-                            .parent_path_to_target(
-                                request,
-                                target,
-                                block.clone(),
-                                0,
-                                globally_visited,
-                                depth_reached,
-                            )
-                            .await?
+                if self.store.edge_policy() == EdgePolicy::AllReferences {
+                    if let Some(target) = target_thread_entry {
+                        if search.terminal_checked.insert(block.block_id)
+                            && block.thread_id == target.thread_id
+                            && block.height >= target.height
                         {
-                            for index in (0..tail.len()).rev() {
-                                relax_forward_suffix(
-                                    search,
-                                    tail[index].from,
-                                    tail[index..].to_vec(),
-                                    request.limits.max_hops,
-                                );
-                            }
-                            if tail.is_empty() {
-                                relax_forward_suffix(
-                                    search,
-                                    block.block_id,
-                                    tail,
-                                    request.limits.max_hops,
-                                );
+                            if let Some(tail) = self
+                                .parent_path_to_target(
+                                    request,
+                                    target,
+                                    block.clone(),
+                                    0,
+                                    globally_visited,
+                                    depth_reached,
+                                )
+                                .await?
+                            {
+                                for index in (0..tail.len()).rev() {
+                                    relax_historical_suffix(
+                                        search,
+                                        tail[index].from,
+                                        tail[index..].to_vec(),
+                                        request.limits.max_hops,
+                                    );
+                                }
+                                if tail.is_empty() {
+                                    relax_historical_suffix(
+                                        search,
+                                        block.block_id,
+                                        tail,
+                                        request.limits.max_hops,
+                                    );
+                                }
                             }
                         }
                     }
@@ -605,7 +411,7 @@ where
 
             if request.policy == ResolutionPolicy::FirstValid {
                 if let Some(hops) = search.suffixes.get(&anchor.block_id).cloned() {
-                    return self.forward_resolved_path(request, &anchor, hops).await;
+                    return self.resolved_path_from_anchor(request, &anchor, hops).await;
                 }
             }
 
@@ -625,11 +431,15 @@ where
                 }
                 search.expanded_remaining.insert(block.block_id, remaining);
                 for (ref_index, to) in block.refs.iter().copied().enumerate() {
+                    let ref_index = u32::try_from(ref_index)
+                        .map_err(|_| anyhow::anyhow!("reference index exceeds u32"))?;
+                    if !self.store.edge_policy().allows(ref_index) {
+                        continue;
+                    }
                     let edge = BlockEdge {
                         from: block.block_id,
                         to,
-                        ref_index: u32::try_from(ref_index)
-                            .map_err(|_| anyhow::anyhow!("reference index exceeds u32"))?,
+                        ref_index,
                     };
                     let dependents = search.dependents.entry(to).or_default();
                     if !dependents.contains(&edge) {
@@ -639,7 +449,7 @@ where
                         let mut candidate = Vec::with_capacity(child_suffix.len() + 1);
                         candidate.push(edge);
                         candidate.extend_from_slice(child_suffix);
-                        relax_forward_suffix(
+                        relax_historical_suffix(
                             search,
                             block.block_id,
                             candidate,
@@ -647,7 +457,7 @@ where
                         );
                     }
                     if self
-                        .record_forward_visit(request, globally_visited, to, depth)
+                        .record_historical_visit(request, globally_visited, to, depth)
                         .await?
                     {
                         first_seen_ids.insert(to);
@@ -660,7 +470,7 @@ where
 
             if request.policy == ResolutionPolicy::FirstValid {
                 if let Some(hops) = search.suffixes.get(&anchor.block_id).cloned() {
-                    return self.forward_resolved_path(request, &anchor, hops).await;
+                    return self.resolved_path_from_anchor(request, &anchor, hops).await;
                 }
             }
 
@@ -708,7 +518,7 @@ where
         }
 
         match search.suffixes.get(&anchor.block_id).cloned() {
-            Some(hops) => self.forward_resolved_path(request, &anchor, hops).await,
+            Some(hops) => self.resolved_path_from_anchor(request, &anchor, hops).await,
             None => Ok(None),
         }
     }
@@ -750,7 +560,7 @@ where
                 return Ok(Some(path));
             }
             let first_seen = self
-                .record_forward_visit(request, globally_visited, parent_id, *depth_reached)
+                .record_historical_visit(request, globally_visited, parent_id, *depth_reached)
                 .await?;
             let parent = match self.store.block(&parent_id).await? {
                 Some(block) => block,
@@ -776,7 +586,7 @@ where
         }
     }
 
-    async fn record_forward_visit(
+    async fn record_historical_visit(
         &self,
         request: &ResolutionRequest,
         globally_visited: &mut HashSet<BlockId>,
@@ -802,7 +612,7 @@ where
         Ok(true)
     }
 
-    async fn forward_resolved_path(
+    async fn resolved_path_from_anchor(
         &self,
         request: &ResolutionRequest,
         anchor: &BlockNode,
@@ -817,24 +627,6 @@ where
             graph_version: version.graph_version,
             anchor_epoch: version.anchor_epoch,
         }))
-    }
-
-    async fn forward_no_path(
-        &self,
-        request: &ResolutionRequest,
-        visited: usize,
-        depth_reached: u32,
-    ) -> anyhow::Result<ResolvedPath> {
-        let version = self.store.version().await?;
-        Err(ResolutionError::NoPath {
-            target: request.target,
-            graph_version: version.graph_version,
-            visited,
-            depth_reached,
-            max_hops: request.limits.max_hops,
-            max_visited_blocks: request.limits.max_visited_blocks,
-        }
-        .into())
     }
 
     async fn bfs(
@@ -972,7 +764,7 @@ where
     }
 }
 
-fn best_forward_anchor(
+fn best_historical_anchor(
     anchors: &[BlockNode],
     suffixes: &HashMap<BlockId, Vec<BlockEdge>>,
 ) -> Option<(BlockNode, Vec<BlockEdge>)> {
@@ -995,8 +787,8 @@ fn best_forward_anchor(
     best
 }
 
-fn relax_forward_suffix(
-    search: &mut ForwardSearchState,
+fn relax_historical_suffix(
+    search: &mut HistoricalSearchState,
     start: BlockId,
     suffix: Vec<BlockEdge>,
     max_hops: u32,
@@ -1239,6 +1031,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_thread_only_rejects_parent_hops_but_accepts_cross_refs() {
+        let provider = Arc::new(FakeProvider::default());
+        provider.replace(vec![
+            block(1, 1, 1, &[]),
+            block(2, 1, 2, &[1]),
+            block(3, 0, 3, &[8, 2]),
+        ]);
+        let store = Arc::new(MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly));
+        let resolver = GraphResolver::new(provider, store, 0);
+        resolver.sync_latest(100).await.unwrap();
+        assert!(resolver
+            .resolve(request(1, ResolutionPolicy::ShortestCurrent))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no path"));
+
+        let provider = Arc::new(FakeProvider::default());
+        provider.replace(vec![
+            block(1, 1, 1, &[]),
+            block(2, 2, 2, &[9, 1]),
+            block(3, 0, 3, &[8, 2]),
+        ]);
+        let store = Arc::new(MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly));
+        let resolver = GraphResolver::new(provider, store, 0);
+        resolver.sync_latest(100).await.unwrap();
+        let path = resolver
+            .resolve(request(1, ResolutionPolicy::ShortestCurrent))
+            .await
+            .unwrap();
+        assert_eq!(
+            path.hops
+                .iter()
+                .map(|edge| edge.ref_index)
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+    }
+
+    #[tokio::test]
     async fn chooses_shortest_then_highest_anchor_then_lexicographically_smallest_id() {
         let (_, _, resolver) = setup(vec![
             block(1, 1, 1, &[]),
@@ -1387,7 +1219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_thread_scans_from_left_anchor_then_follows_parents() {
+    async fn historical_fallback_enters_target_thread_then_follows_parents() {
         let provider = Arc::new(FakeProvider::default());
         provider.enable_historical();
         let mut blocks = vec![block(1, 1, 15, &[]), block(2, 1, 16, &[1])];
@@ -1396,8 +1228,7 @@ mod tests {
             blocks.push(block(100 + height, 0, u64::from(height), &refs));
         }
         provider.replace(blocks);
-        let resolver = GraphResolver::new(provider.clone(), Arc::new(MemoryStore::new()), 0)
-            .with_algorithm(ResolutionAlgorithm::ForwardThread);
+        let resolver = GraphResolver::new(provider.clone(), Arc::new(MemoryStore::new()), 0);
         let path = resolver
             .resolve(request(1, ResolutionPolicy::FirstValid))
             .await
@@ -1418,5 +1249,25 @@ mod tests {
             },
         ]);
         assert!(provider.height_queries.lock().unwrap().contains(&15));
+    }
+
+    #[tokio::test]
+    async fn historical_fallback_respects_cross_thread_only_policy() {
+        let provider = Arc::new(FakeProvider::default());
+        provider.enable_historical();
+        let mut blocks = vec![block(1, 1, 15, &[]), block(2, 1, 16, &[1])];
+        for height in 0u8..=31 {
+            let refs = if height == 17 { vec![116, 2] } else { vec![] };
+            blocks.push(block(100 + height, 0, u64::from(height), &refs));
+        }
+        provider.replace(blocks);
+        let store = Arc::new(MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly));
+        let resolver = GraphResolver::new(provider, store, 0);
+        assert!(resolver
+            .resolve(request(1, ResolutionPolicy::FirstValid))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no path"));
     }
 }

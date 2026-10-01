@@ -14,8 +14,8 @@ use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    GraphResolver, GraphqlBlockProvider, ResolutionError, ResolutionRequest, ResolvedPath,
-    SqliteStore, StoreVersion, SyncStats,
+    EdgePolicy, GraphResolver, GraphqlBlockProvider, ResolutionError, ResolutionRequest,
+    ResolvedPath, SqliteStore, StoreVersion, SyncStats,
 };
 
 type PersistentResolver = GraphResolver<GraphqlBlockProvider, SqliteStore>;
@@ -40,6 +40,7 @@ struct MutableStatus {
 pub struct ServiceStatus {
     pub healthy: bool,
     pub namespace: String,
+    pub edge_policy: EdgePolicy,
     pub store_version: StoreVersion,
     pub last_sync: Option<SyncStats>,
     pub last_sync_unix_seconds: Option<u64>,
@@ -88,6 +89,7 @@ impl ResolverApi {
         Ok(ServiceStatus {
             healthy: status.last_error.is_none(),
             namespace: self.namespace.to_string(),
+            edge_policy: self.resolver.edge_policy(),
             store_version: version,
             last_sync: status.last_sync,
             last_sync_unix_seconds: status.last_sync_unix_seconds,
@@ -296,6 +298,7 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status["healthy"], true);
         assert_eq!(status["namespace"], "test-network");
+        assert_eq!(status["edge_policy"], "all-references");
         assert_eq!(status["store_version"]["graph_version"], 1);
     }
 

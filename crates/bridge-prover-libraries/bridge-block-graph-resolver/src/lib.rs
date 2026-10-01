@@ -20,12 +20,12 @@ pub use model::{BlockEdge, BlockId, BlockNode, ThreadId};
 pub use provider::{BlockProvider, TimedBlock};
 #[cfg(feature = "graphql")]
 pub use providers::graphql::GraphqlBlockProvider;
-pub use resolver::{GraphResolver, HistoricalSearchConfig, ResolutionAlgorithm, ResolutionError};
+pub use resolver::{GraphResolver, HistoricalSearchConfig, ResolutionError};
 #[cfg(feature = "server")]
 pub use server::{router as http_router, ResolverApi, ServiceStatus};
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStore;
 pub use store::{
-    ApplyStats, PathCacheKey, PruneStats, ResolutionPolicy, ResolutionRequest, ResolvedPath,
-    ResolverLimits, ResolverStore, StoreBatch, StoreVersion, SyncStats,
+    ApplyStats, EdgePolicy, PathCacheKey, PruneStats, ResolutionPolicy, ResolutionRequest,
+    ResolvedPath, ResolverLimits, ResolverStore, StoreBatch, StoreVersion, SyncStats,
 };

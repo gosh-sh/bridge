@@ -228,7 +228,7 @@ L7 is populated for **every** block and provides the outgoing edges the L7 walk 
 
 ## 3. Per-thread layer-N batch tree (thread 0 only)
 
-The per-layer batch tree is a **Poseidon dense-Merkle** of width `BWS = 128`. It is built independently per batch per layer for thread 0 only; thread 0's layer-N tree roots are the values mirrored into the Ethereum-side `layerWindows[N]`. **No other thread produces layer trees under this protocol.** See [`GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md) for the on-chain window semantics and [`BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md) for the anchoring cadence.
+The per-layer batch tree is a **Poseidon dense-Merkle** of width `BWS = 128`. It is built independently per batch per layer for thread 0 only; thread 0's layer-N tree roots are the values mirrored into the Ethereum-side `layerWindows[N]`. **No other thread produces layer trees under this protocol.** See [`GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md) for both the on-chain window semantics and the production anchoring cadence — a layer-N root is appended on each thread-0 key block of order N, i.e. at heights where `height % W^N == 0`, so layer 2 anchors roughly every `W² = 128² = 16384` source blocks and higher layers correspondingly less often. [`BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md) documents an earlier fixed-stride (`W·P`) thinning model that is still partially reflected in `crates/bridge-relayer-daemon`; it is retained for background on the relayer code paths and should not be read as the current production cadence.
 
 ### 3.1 Layer-1 leaf: `block_leaf`
 
@@ -988,7 +988,7 @@ Every existing public-input slot 0..10 keeps its current byte-for-byte semantics
 - **Bridge single-thread circuit being extended:** `crates/bridge-circuits/bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs`.
 - **Bridge block-id doc:** [`crates/bridge-circuits/docs/BLOCK_ID_ALG_NEW.md`](../../docs/BLOCK_ID_ALG_NEW.md).
 - **Bridge global-history-data doc (Y-side anchor infrastructure):** [`crates/bridge-circuits/docs/GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md).
-- **Bridge thinning spec (window / anchor cadence context):** [`crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md).
+- **Bridge thinning spec (earlier fixed-stride model; superseded for the circuit by the layer-N key-block cadence in `GLOBAL_HISTORY_DATA_SPEC.md`, still partially reflected in `crates/bridge-relayer-daemon`):** [`crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md).
 - **Bridge SHA-256 accounting:** [`crates/bridge-circuits/docs/SHA256_INVOCATIONS.md`](../../docs/SHA256_INVOCATIONS.md).
 - **Bridge circuit complexity analysis:** [`crates/bridge-circuits/docs/CIRCUIT_COMPLEXITY_COMPARISON.md`](../../docs/CIRCUIT_COMPLEXITY_COMPARISON.md).
 - **AN node source of truth for block Merkle leaves:** `node/src/types/ackinacki_block/{mod.rs, merkle.rs}`.

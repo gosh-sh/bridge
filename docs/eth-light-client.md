@@ -44,7 +44,7 @@ different language dialect and a different chain.
 |---|---|---|---|
 | `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. Everything else is the same code — both carry `_piForm`, `provenQueue` and the rotate decider — so the only things this repo hands over are fixes and comments, as `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch`; `scripts/check_eth_beacon_lc_sources.sh` asserts neither of them carries the local sink wiring. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
-| `USDCBridge` | `acki-nacki` repo, patches `USDCBridge_12pi_chainid_allowlist.patch`, `USDCBridge_disable_owner_allows_light_client.patch`, `USDCBridge_forget_block_hash_from_light_client.patch` | Acki Nacki | Consumer. Gains `setLightClient`, `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (one-year window; same sender gate, idempotent `delete`), and `disableOwnerAnchors` that accepts a configured light client. |
+| `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge (`deployLightClient`), and the bridge derives its address from that code (`getAnchorConfig().lightClient`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash`. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | Invoked as `cargo run --release --example export_step_vk_blob` with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
 | Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
@@ -235,9 +235,10 @@ writer of that map changes.
 ### 3.5 The trust switches
 
 Two one-way switches move the deployment from key-trusted to proof-trusted. The daemon issues
-them after its first accepted `submitUpdate` unless started with `--no-flip-owner`
-(`src/relayer.rs:326`); `eth-lc-relayer flip-owner` does the same in one shot. The relayer key
-must be the owner key of both contracts.
+them after its first accepted `submitUpdate` only when started with `--flip-owner`
+(`src/relayer.rs:335`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
+that `getAnchorConfig().lightClient` on the bridge is `AN_LIGHT_CLIENT` and refuse otherwise.
+The relayer key must be the owner key of both contracts.
 
 ```mermaid
 stateDiagram-v2
@@ -245,7 +246,7 @@ stateDiagram-v2
   state "USDCBridge anchors" as UBA {
     OwnerAnchors: owner or attesters write _acceptedBlockHash
     LightClientAnchors: only EthBeaconLightClient writes
-    OwnerAnchors --> LightClientAnchors: setLightClient, then disableOwnerAnchors (one way)
+    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way; light client already derived from code)
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
@@ -257,6 +258,15 @@ stateDiagram-v2
 Before the flip the light client is advisory: it pushes hashes, but the owner key can still push
 anything. After the flip nothing but a valid proof adds a block hash. There is no way back; the
 only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on chain.
+
+**Do not flip yet.** After `disableOwnerAnchors` the light client is the only writer of
+`_acceptedBlockHash`, and today it writes one block per epoch of one chain: the checkpoint of its
+`l1ChainId`. Ancestry does not fit the gas limit (§3.4), and the light client proves no L2.
+`_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
+the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
+chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
+delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts` is
+set. That is why the daemon does not flip unless told to.
 
 ## 4. Deployment
 
@@ -346,24 +356,31 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `AN_USDC_BRIDGE`, `AN_USDC_ABI_PATH` | `USDCBridge` address and slim ABI | set | empty |
 | `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
 | `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain (will OOG until keccak builtin) | unset | unset |
-| daemon flags | | none (rotate on, flip on) | `--no-rotate --no-flip-owner --owner-hop` |
+| daemon flags | | none (rotate on, flip off; `--flip-owner` only once §3.5 no longer applies) | `--no-rotate --no-flip-owner --owner-hop` |
 
 ### 4.5 Procedure
 
 Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_to_light_client.md`):
 
 1. Nodes run a tvm-sdk with the rotate decider (PR #284).
-2. `USDCBridge` carries the two patches; note its owner key.
-3. Compile and deploy `EthBeaconLightClient(pubkey, l1ChainId, 0, 0)` with `sold`; fund it.
+2. The bridge is `eccUSDCBridge` from the zerostate, which installs the light-client code
+   (`setLightClientCode`) and with it the light-client address. Note the bridge owner key.
+3. With the owner key, call `deployLightClient(pubkey, l1ChainId, 0, 0)` on the bridge (ABI in
+   `contracts/an/0.80.0_compiled/exchange/`). The light client's constructor accepts only the
+   bridge as sender, so a copy deployed with `sold` or `tvm-cli deploy` is not the one the bridge
+   listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
+   (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
 5. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
-6. Start the systemd unit. After the first accepted update the daemon calls `setLightClient`,
-   `disableOwnerAnchors`, `disableOwnerRotation`. From here on the owner key cannot add hashes.
+6. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
+   flag, after the first accepted update the daemon checks `getAnchorConfig().lightClient`
+   against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchors` and `disableOwnerRotation`; from
+   then on the bridge refuses `setAcceptedBlockHash`.
 
-Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): same steps 3 to 5
-with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`, `deploy-contract.sh`,
-`status.sh`), no `USDCBridge`, unit started with `--no-rotate --no-flip-owner --owner-hop`.
-Nothing it does reaches the bridge.
+Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light
+client deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,
+`deploy-contract.sh`, `status.sh`) instead of step 3, then steps 4 and 5; no `USDCBridge`, unit
+started with `--no-rotate --no-flip-owner --owner-hop`. Nothing it does reaches the bridge.
 
 ### 4.6 Modes
 
@@ -371,7 +388,7 @@ Nothing it does reaches the bridge.
 |---|---|---|
 | Contract | the one `USDCBridge` points at | a private one, `usdcBridge` unset |
 | Period change | `submitRotate` (proof) | owner hop (key, logged) |
-| Owner flip | issued by the daemon | never |
+| Owner flip | only with `--flip-owner` (§3.5) | never |
 | Reaches `finalizeDeposit` | yes | no |
 | Needs tvm-sdk #284 on nodes | yes | no |
 | Purpose | trustless canonicality for deposits | prove the pipeline beacon → proof → opcode → head on a live network |

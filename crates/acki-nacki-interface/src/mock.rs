@@ -27,6 +27,8 @@ pub struct MockAckiNacki {
     block_number: Arc<Mutex<u64>>,
     /// Whether to simulate failures
     fail_mode: Arc<Mutex<bool>>,
+    /// What `run_getter` returns; `None` makes it fail.
+    getter_response: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 impl MockAckiNacki {
@@ -37,7 +39,13 @@ impl MockAckiNacki {
             receipts: Arc::new(Mutex::new(HashMap::new())),
             block_number: Arc::new(Mutex::new(1)),
             fail_mode: Arc::new(Mutex::new(false)),
+            getter_response: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Set the decoded output every `run_getter` call returns.
+    pub fn set_getter_response(&self, output: serde_json::Value) {
+        *self.getter_response.lock().unwrap() = Some(output);
     }
 
     /// Enable failure mode (all transactions will fail)
@@ -159,6 +167,19 @@ impl IAckiNacki for MockAckiNacki {
 
     async fn get_balance(&self, _address: &str) -> Result<u64> {
         Ok(1_000_000) // Mock balance
+    }
+
+    async fn run_getter(
+        &self,
+        _to: &str,
+        function: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.getter_response.lock().unwrap().clone().ok_or_else(|| {
+            AckiNackiError::NetworkError(format!(
+                "MockAckiNacki: no getter response set for {function}"
+            ))
+        })
     }
 }
 
@@ -288,5 +309,22 @@ mod tests {
         // Should succeed
         let result = sender.send_with_retry(tx, 2).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_getter_returns_the_set_response() {
+        let mock = MockAckiNacki::new();
+        let to = format!("{0}::{0}", "1a".repeat(32));
+        assert!(mock
+            .run_getter(&to, "getAnchorConfig", serde_json::json!({}))
+            .await
+            .is_err());
+        let output = serde_json::json!({ "ownerAnchorsEnabled": false });
+        mock.set_getter_response(output.clone());
+        let got = mock
+            .run_getter(&to, "getAnchorConfig", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(got, output);
     }
 }

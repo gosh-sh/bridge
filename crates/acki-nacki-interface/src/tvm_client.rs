@@ -12,11 +12,12 @@ use std::{
 use async_trait::async_trait;
 use serde_json::Value;
 use tvm_client::{
-    abi::{Abi, CallSet, ParamsOfEncodeMessage, Signer},
+    abi::{encode_message, Abi, CallSet, ParamsOfEncodeMessage, Signer},
     account::{get_account, ParamsOfGetAccount},
     crypto::KeyPair,
     net::{query, NetworkConfig, ParamsOfQuery},
     processing::{process_message, ParamsOfProcessMessage},
+    tvm::{run_tvm, ParamsOfRunTvm},
     ClientConfig, ClientContext,
 };
 
@@ -276,6 +277,41 @@ impl IAckiNacki for TvmAckiNacki {
         // Balance decoding is deployment-specific; return non-zero when account
         // exists.
         Ok(1)
+    }
+
+    async fn run_getter(&self, to: &str, function: &str, params: Value) -> Result<Value> {
+        let addr = ExtendedAddress::parse(to)?;
+        let boc = self.fetch_account_boc(&addr).await?;
+        if boc.is_empty() {
+            return Err(AckiNackiError::NetworkError(format!(
+                "run_getter {function}: account {to} has empty boc"
+            )));
+        }
+        let encoded = encode_message(self.context.clone(), ParamsOfEncodeMessage {
+            abi: self.bridge_abi.clone(),
+            address: Some(addr.workchain_address()),
+            call_set: Some(CallSet {
+                function_name: function.to_string(),
+                header: None,
+                input: Some(params),
+            }),
+            signer: Signer::None,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(format!("encode {function}: {e}")))?;
+        let run = run_tvm(self.context.clone(), ParamsOfRunTvm {
+            message: encoded.message,
+            account: boc,
+            abi: Some(self.bridge_abi.clone()),
+            return_updated_account: Some(false),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(format!("run_tvm {function}: {e}")))?;
+        run.decoded.and_then(|d| d.output).ok_or_else(|| {
+            AckiNackiError::NetworkError(format!("run_tvm {function}: no decoded output"))
+        })
     }
 }
 

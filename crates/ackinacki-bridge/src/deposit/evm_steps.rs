@@ -280,11 +280,14 @@ pub async fn ensure_allowance(
     })
     .await
     .map_err(|last| {
+        let last = last
+            .map(|e| format!(" (last error: {e})"))
+            .unwrap_or_default();
         approve_failed(
             op_id,
             format!(
-                "the approve could not be confirmed in time: the allowance could not be read: {}",
-                last.unwrap_or_else(|| "the node did not answer".into())
+                "the approve could not be confirmed: the allowance could not be read back within \
+                 --pair-timeout-s{last}"
             ),
         )
     })?;
@@ -698,8 +701,31 @@ mod tests {
         assert_eq!(e.exit_code(), ExitCode::ApproveFailed, "{e}");
         assert!(took <= Duration::from_secs(60), "{took:?}");
         let m = e.to_string();
-        assert!(m.contains("could not be confirmed in time"), "{m}");
+        assert!(
+            m.contains("could not be read back within --pair-timeout-s"),
+            "{m}"
+        );
         assert!(m.contains("503"), "{m}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_allowance_read_back_after_the_deadline_names_the_time_limit() {
+        // The approve is mined at once; the node answers every call, only
+        // slower than what is left of --pair-timeout-s.
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0, 12_500_000]);
+        *evm.call_delay.lock().unwrap() = Duration::from_secs(120);
+        let mut w = FakeWallet::eoa();
+        w.send_results.push_back(Ok(B256::repeat_byte(1)));
+        mined_ok(&evm, B256::repeat_byte(1));
+        let e = go(&evm, &mut w).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed, "{e}");
+        let m = e.to_string();
+        assert!(
+            m.contains("could not be read back within --pair-timeout-s"),
+            "{m}"
+        );
+        assert!(!m.contains("did not answer"), "{m}");
     }
 
     #[tokio::test(start_paused = true)]

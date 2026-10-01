@@ -218,6 +218,31 @@ of `B_i_newer.proof_block_refs` at any slot `k ∈ [0, refs.len())` (see
 }
 ```
 
+**On wire-format redundancy.** The JSON record intentionally carries
+fields that are derivable from other fields in the same record — the
+circuit does not need both halves, but the native builder uses the
+redundancy as a defense-in-depth gate:
+
+- `block_merkle_leaf_proof_l7_hex` (4 SHA siblings) is derivable from
+  `block_merkle_tree_leaves_hex` via `block_merkle_leaf_proof(leaves, 7)`
+  (`multi_hop_witness.rs:309-323`). The native builder re-derives it
+  and verifies against `block_id_hex` before shipping
+  (`enrich.rs:915-927`).
+- `proof_block_ref_inner_path_hex` (8-level Poseidon siblings,
+  zero-padded) is derivable from `proof_block_refs_hex` + `ref_index`
+  via `proof_block_ref_inner_path_native(refs, ref_index)`. The native
+  builder re-derives it and verifies against L7 (`enrich.rs:928-936`).
+
+The circuit itself reads only `block_merkle_tree_leaves_hex[7]` (= L7),
+the two sibling paths, `ref_index`, `refs_tree_depth`, and the clear
+endpoints (`multi_hop_proof.rs:235, 697`). The other 15 leaves of
+`block_merkle_tree_leaves_hex` and the full `proof_block_refs_hex` list
+are **not consumed in-circuit** — they stay on the wire so the Rust
+builder can recompute both openings and bail with a clear error if the
+chain data is inconsistent. If a slimmer JSON (siblings-only, no leaves
+/ no full refs list) is preferable on the service side, flag it before
+trimming — the current Rust ingest expects the full fields.
+
 ### 3.3 Field-level sourcing notes
 
 | Field | How to derive it |

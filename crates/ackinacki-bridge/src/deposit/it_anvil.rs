@@ -209,6 +209,7 @@ async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
             rpc_url: a.url.clone(),
             legacy,
             approve_cap: None,
+            request_timeout: crate::deposit::retry::ONE_READ,
         };
         let tx = TxRequest::build(&evm, signer.address(), TxPurpose::Deposit {
             bridge,
@@ -264,6 +265,7 @@ async fn a_wallet_that_lowers_the_limit_stops_the_deposit_with_exit_21() {
         rpc_url: a.url.clone(),
         legacy: false,
         approve_cap: Some(U256::from(1u64)),
+        request_timeout: crate::deposit::retry::ONE_READ,
     };
     let ui = RecordingUi::new(true);
     let e = ensure_allowance(
@@ -336,6 +338,7 @@ async fn the_driver_takes_a_deposit_through_steps_1_to_5_and_a_legacy_one_is_exi
         rpc_url: a.url.clone(),
         legacy: false,
         approve_cap: None,
+        request_timeout: crate::deposit::retry::ONE_READ,
     };
     let e = run_with(&p, &d, &mut wallet).await.unwrap_err();
     assert_eq!(
@@ -368,6 +371,7 @@ async fn the_driver_takes_a_deposit_through_steps_1_to_5_and_a_legacy_one_is_exi
         rpc_url: a.url.clone(),
         legacy: true,
         approve_cap: None,
+        request_timeout: crate::deposit::retry::ONE_READ,
     };
     let e = run_with(&p, &d, &mut wallet).await.unwrap_err();
     assert_eq!(

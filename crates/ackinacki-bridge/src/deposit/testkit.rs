@@ -553,6 +553,9 @@ pub struct LocalKeyWallet {
     /// Signs `approve` with this limit instead of the requested one, as a
     /// wallet does when its user lowers the spending limit.
     pub approve_cap: Option<U256>,
+    /// How long one request to the node may take: a node that never answers
+    /// ends the send with an error, as a wallet's own timeout would.
+    pub request_timeout: std::time::Duration,
 }
 
 #[async_trait]
@@ -597,9 +600,13 @@ impl crate::deposit::wallet::Wallet for LocalKeyWallet {
             providers::{Provider, ProviderBuilder},
             rpc::types::TransactionRequest,
         };
+        let client = alloy::transports::http::reqwest::Client::builder()
+            .timeout(self.request_timeout)
+            .build()
+            .map_err(|e| crate::deposit::wallet::WalletError::Other(e.to_string()))?;
         let p = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.signer.clone()))
-            .connect_http(self.rpc_url.parse().unwrap());
+            .connect_reqwest(client, self.rpc_url.parse().unwrap());
         let data = match (&tx.purpose, self.approve_cap) {
             (
                 crate::deposit::wallet::TxPurpose::Approve {
@@ -2468,5 +2475,55 @@ mod tests {
         );
         w.reorg_after_confirmation(tx, 0);
         assert_one_hash_everywhere(&w);
+    }
+
+    /// A node that takes the connection and never answers: the wallet
+    /// gives up within its request timeout instead of waiting forever, and
+    /// the run treats the send as one whose outcome is unknown.
+    #[tokio::test]
+    async fn a_local_key_wallet_gives_up_on_a_node_that_never_answers() {
+        use crate::deposit::wallet::{TxPurpose, TxRequest, Wallet as _, WalletError};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accepts every connection and holds it open without a byte back.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        let from = signer.address();
+        let mut w = LocalKeyWallet {
+            signer,
+            rpc_url: format!("http://{addr}"),
+            legacy: false,
+            approve_cap: None,
+            request_timeout: std::time::Duration::from_millis(300),
+        };
+        let tx = TxRequest {
+            from,
+            to: Address::repeat_byte(0x22),
+            data: Bytes::new(),
+            gas: 50_000,
+            fees: crate::deposit::evm::Fees {
+                max_fee_per_gas: 2_000_000_000,
+                max_priority_fee_per_gas: 1_000_000_000,
+            },
+            purpose: TxPurpose::Approve {
+                token: Address::repeat_byte(0x22),
+                spender: Address::repeat_byte(0x33),
+                amount: U256::from(1u64),
+            },
+        };
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            w.send_transaction(&ui, &tx),
+        )
+        .await
+        .expect("the wallet must give up on a silent node, not wait forever");
+        assert!(matches!(got, Err(WalletError::Other(_))), "{got:?}");
     }
 }

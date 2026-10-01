@@ -101,6 +101,7 @@ async fn one_real_deposit_from_sepolia_is_credited_on_shellnet() {
         rpc_url: p.rpc_url.clone().expect("RPC_URL, from the profile"),
         legacy: false,
         approve_cap: None,
+        request_timeout: crate::deposit::retry::ONE_READ,
     };
     let s = run_with(&p, &d, &mut wallet)
         .await

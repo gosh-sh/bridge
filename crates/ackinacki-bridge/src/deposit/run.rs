@@ -4251,4 +4251,36 @@ mod tests {
             })
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_approve_whose_receipt_cannot_be_read_ends_in_time_and_frees_the_directory() {
+        // The wallet returned the approve's hash; the RPC then stays down.
+        let mut w = World::healthy();
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a)]);
+        w.evm
+            .fail_receipts
+            .store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+        let p = w.params(RunMode::Fresh);
+        let t0 = tokio::time::Instant::now();
+        let e = tokio::time::timeout(
+            Duration::from_secs(3600),
+            run_with(&p, &w.deps(), &mut w.wallet),
+        )
+        .await
+        .expect("--pair-timeout-s must end the approve wait")
+        .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed, "{e}");
+        assert!(t0.elapsed() <= p.pair_timeout, "{:?}", t0.elapsed());
+        assert!(
+            e.to_string().contains("could not be confirmed in time"),
+            "{e}"
+        );
+        assert!(DirLock::try_take(&p.state_dir).unwrap().is_some());
+        let rec = Store::open(&p.state_dir)
+            .unwrap()
+            .load(e.op_id().unwrap())
+            .unwrap();
+        assert_eq!(rec.failure.unwrap().reason, FailReason::ApproveFailed);
+    }
 }

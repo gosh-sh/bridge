@@ -88,6 +88,11 @@ pub struct FakeEvm {
     pub estimate_transport_failures: AtomicU32,
     /// The next N `transaction` calls fail, as a flaky RPC does.
     pub fail_tx_reads: AtomicU32,
+    /// The next N `receipt` calls fail; `u32::MAX` is an RPC that stays
+    /// down.
+    pub fail_receipts: AtomicU32,
+    /// `Some(n)`: n more `call`s answer, then every one fails.
+    pub calls_before_failing: Mutex<Option<u32>>,
     /// The next N `transaction` calls answer `None`, as a lagging backend does.
     pub miss_tx_reads: AtomicU32,
     /// `Some(n)`: after n more `transaction` calls every transaction is gone
@@ -128,6 +133,8 @@ impl Default for FakeEvm {
             estimate_revert: Mutex::default(),
             estimate_transport_failures: AtomicU32::new(0),
             fail_tx_reads: AtomicU32::default(),
+            fail_receipts: AtomicU32::default(),
+            calls_before_failing: Mutex::default(),
             miss_tx_reads: AtomicU32::default(),
             vanish_tx_after: Mutex::default(),
             vanishing_txs: Mutex::default(),
@@ -193,6 +200,12 @@ impl EvmRead for FakeEvm {
     }
 
     async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes> {
+        if let Some(left) = self.calls_before_failing.lock().unwrap().as_mut() {
+            if *left == 0 {
+                anyhow::bail!("503 Service Unavailable");
+            }
+            *left -= 1;
+        }
         let sel: [u8; 4] = data
             .get(..4)
             .ok_or_else(|| anyhow::anyhow!("calldata without a selector"))?
@@ -250,6 +263,13 @@ impl EvmRead for FakeEvm {
     }
 
     async fn receipt(&self, h: B256) -> anyhow::Result<Option<ReceiptLite>> {
+        if self
+            .fail_receipts
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            anyhow::bail!("503 Service Unavailable");
+        }
         Ok(self
             .receipts
             .lock()

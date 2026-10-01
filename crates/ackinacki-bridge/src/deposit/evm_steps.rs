@@ -1,13 +1,14 @@
 //! Steps 3 and 4 on the EVM side: the allowance, and the deposit request.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use alloy_primitives::{Address, B256, U256};
+use tokio::time::Instant;
 
 use crate::{
     deposit::{
         evm::{read_allowance, revert_of, EvmRead},
-        retry::{transient, until},
+        retry::{deadline_after, transient, until, until_with},
         ui::Ui,
         wallet::{TxPurpose, TxRequest, Wallet, WalletError},
     },
@@ -59,8 +60,81 @@ async fn build_or_revert(
     .await
 }
 
+/// The text of the last failed read of an approve wait, when there is one.
+type LastError = Option<String>;
+
+/// One read of an approve wait, retried until `deadline`; `Err` when the
+/// deadline came first, with the last error, or `None` when the node never
+/// answered.
+async fn read_by<T, F, Fut>(
+    ui: &dyn Ui,
+    what: &str,
+    deadline: Instant,
+    f: F,
+) -> Result<T, LastError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    until_with(Some(deadline), f, |attempt, e| {
+        ui.retry(what, attempt, &format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.map(|e| format!("{e:#}")))
+}
+
+/// Reads `f` every `poll` until `done` takes its value, all before
+/// `deadline`: the reads, their retries and the pauses, none of them past
+/// it. `Err(None)` when the deadline came with the reads working,
+/// `Err(Some(error))` when it came while they failed.
+async fn poll_by<T, F, Fut>(
+    ui: &dyn Ui,
+    what: &str,
+    waiting: &str,
+    deadline: Instant,
+    poll: Duration,
+    mut f: F,
+    done: impl Fn(&T) -> bool,
+) -> Result<T, LastError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    loop {
+        let v = read_by(ui, what, deadline, &mut f)
+            .await
+            .map_err(|e| Some(e.unwrap_or_else(|| "the node did not answer".into())))?;
+        if done(&v) {
+            return Ok(v);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(None);
+        }
+        ui.status(waiting);
+        tokio::time::sleep_until((now + poll).min(deadline)).await;
+        if Instant::now() >= deadline {
+            return Err(None);
+        }
+    }
+}
+
+/// The exit-21 error of an approve wait that reached its deadline: `what`
+/// "was not mined in time" (or as `unseen` says) while the reads worked,
+/// "could not be confirmed in time" with the last error while they failed.
+fn out_of_time(op_id: &str, what: &str, unseen: &str, last: LastError) -> CliError {
+    approve_failed(op_id, match last {
+        None => format!("{what} {unseen}"),
+        Some(e) => format!("{what} could not be confirmed in time: {e}"),
+    })
+}
+
 /// Asks the wallet for one `approve(bridge, amount)` and waits until it is
-/// mined (a hash) or its effect is visible in the allowance (no hash).
+/// mined (a hash) or its effect is visible in the allowance (no hash). The
+/// wait has `wait_limit` from the wallet's answer — the hash, or the QR
+/// code shown — not from the request: the time the user takes to confirm
+/// is not in it. Every read, retry and pause is inside it, and so is
+/// whatever the caller reads next with the deadline returned.
 #[allow(clippy::too_many_arguments)]
 async fn send_approve(
     evm: &dyn EvmRead,
@@ -73,7 +147,7 @@ async fn send_approve(
     op_id: &str,
     wait_limit: Duration,
     poll: Duration,
-) -> CliResult<Option<B256>> {
+) -> CliResult<(Option<B256>, Instant)> {
     let purpose = TxPurpose::Approve {
         token: usdc,
         spender: bridge,
@@ -88,55 +162,63 @@ async fn send_approve(
             ))
         },
     };
-    match wallet.send_transaction(ui, &req).await {
+    let sent = wallet.send_transaction(ui, &req).await;
+    let deadline = deadline_after(wait_limit);
+    match sent {
         Ok(h) => {
             // One confirmation: an approve that is reorged out and replayed moves no money.
-            let started = tokio::time::Instant::now();
-            loop {
-                if let Some(r) =
-                    transient(ui, "reading the approve receipt", || evm.receipt(h)).await
-                {
-                    if !r.status {
-                        return Err(approve_failed(op_id, format!("approve {h} reverted")));
-                    }
-                    return Ok(Some(h));
-                }
-                if started.elapsed() > wait_limit {
-                    return Err(approve_failed(
-                        op_id,
-                        format!("approve {h} was not mined in time"),
-                    ));
-                }
-                ui.status("waiting for the approve to be mined");
-                tokio::time::sleep(poll).await;
+            let r = poll_by(
+                ui,
+                "reading the approve receipt",
+                "waiting for the approve to be mined",
+                deadline,
+                poll,
+                || evm.receipt(h),
+                Option::is_some,
+            )
+            .await
+            .map_err(|last| {
+                out_of_time(
+                    op_id,
+                    &format!("approve {h}"),
+                    "was not mined in time",
+                    last,
+                )
+            })?;
+            if r.is_some_and(|r| !r.status) {
+                return Err(approve_failed(op_id, format!("approve {h} reverted")));
             }
+            Ok((Some(h), deadline))
         },
         Err(WalletError::NoHash) => {
-            let started = tokio::time::Instant::now();
-            loop {
-                let a = transient(ui, "reading the allowance", || {
-                    read_allowance(evm, usdc, from, bridge)
-                })
-                .await;
-                // A reset must land on exactly zero; a real approve may be
-                // raised in the wallet, and any limit that covers it will do.
-                let landed = if amount.is_zero() {
+            // A reset must land on exactly zero; a real approve may be
+            // raised in the wallet, and any limit that covers it will do.
+            let landed = |a: &U256| {
+                if amount.is_zero() {
                     a.is_zero()
                 } else {
-                    a >= amount
-                };
-                if landed {
-                    return Ok(None);
+                    *a >= amount
                 }
-                if started.elapsed() > wait_limit {
-                    return Err(approve_failed(
-                        op_id,
-                        "the approve from the QR code was not seen on chain in time".into(),
-                    ));
-                }
-                ui.status("waiting for the approve from the QR code");
-                tokio::time::sleep(poll).await;
-            }
+            };
+            poll_by(
+                ui,
+                "reading the allowance",
+                "waiting for the approve from the QR code",
+                deadline,
+                poll,
+                || read_allowance(evm, usdc, from, bridge),
+                landed,
+            )
+            .await
+            .map_err(|last| {
+                out_of_time(
+                    op_id,
+                    "the approve from the QR code",
+                    "was not seen on chain in time",
+                    last,
+                )
+            })?;
+            Ok((None, deadline))
         },
         Err(WalletError::Rejected) => Err(approve_failed(
             op_id,
@@ -149,7 +231,8 @@ async fn send_approve(
 /// Makes sure the bridge may pull `amount` of USDC from `from`: nothing to
 /// do when it already may, otherwise an approve (after a reset to zero when
 /// a smaller allowance is set), then a re-read, because the wallet lets the
-/// user edit the limit.
+/// user edit the limit. Each approve's wait, the re-read after the last one
+/// included, ends at `wait_limit` with exit 21.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_allowance(
     evm: &dyn EvmRead,
@@ -187,15 +270,24 @@ pub async fn ensure_allowance(
         )
         .await?;
     }
-    let tx = send_approve(
+    let (tx, deadline) = send_approve(
         evm, wallet, ui, usdc, bridge, from, need, op_id, wait_limit, poll,
     )
     .await?;
     // The wallet lets the user edit the spending limit, including down.
-    let after = transient(ui, "reading the allowance", || {
+    let after = read_by(ui, "reading the allowance", deadline, || {
         read_allowance(evm, usdc, from, bridge)
     })
-    .await;
+    .await
+    .map_err(|last| {
+        approve_failed(
+            op_id,
+            format!(
+                "the approve could not be confirmed in time: the allowance could not be read: {}",
+                last.unwrap_or_else(|| "the node did not answer".into())
+            ),
+        )
+    })?;
     if after < need {
         return Err(approve_failed(
             op_id,
@@ -562,6 +654,89 @@ mod tests {
         assert_eq!(
             go(&evm, &mut w).await.unwrap_err().exit_code(),
             ExitCode::ApproveFailed
+        );
+    }
+
+    // ---- the approve wait under an RPC that keeps failing ----
+
+    /// `go` within an hour of the paused clock, and how long it took.
+    async fn timed(evm: &FakeEvm, w: &mut FakeWallet) -> (CliResult<ApproveOutcome>, Duration) {
+        let t0 = tokio::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(3600), go(evm, w))
+            .await
+            .expect("--pair-timeout-s must end the approve wait");
+        (r, t0.elapsed())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_eip681_approve_whose_allowance_cannot_be_read_ends_in_time() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        *evm.calls_before_failing.lock().unwrap() = Some(1); // the read before the request
+        let mut w = FakeWallet::eoa();
+        w.send_results
+            .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
+        let (r, took) = timed(&evm, &mut w).await;
+        let e = r.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed, "{e}");
+        assert!(took <= Duration::from_secs(60), "{took:?}");
+        let m = e.to_string();
+        assert!(m.contains("could not be confirmed in time"), "{m}");
+        assert!(m.contains("503") && m.contains("no USDC moved"), "{m}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_allowance_that_cannot_be_read_after_the_approve_ends_in_time() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        *evm.calls_before_failing.lock().unwrap() = Some(1);
+        let mut w = FakeWallet::eoa();
+        w.send_results.push_back(Ok(B256::repeat_byte(1)));
+        mined_ok(&evm, B256::repeat_byte(1));
+        let (r, took) = timed(&evm, &mut w).await;
+        let e = r.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed, "{e}");
+        assert!(took <= Duration::from_secs(60), "{took:?}");
+        let m = e.to_string();
+        assert!(m.contains("could not be confirmed in time"), "{m}");
+        assert!(m.contains("503"), "{m}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_rpc_and_a_slow_chain_still_settle_the_approve_in_time() {
+        // Three failed receipt reads, then the approve is there.
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0, 12_500_000]);
+        evm.fail_receipts
+            .store(3, std::sync::atomic::Ordering::SeqCst);
+        let mut w = FakeWallet::eoa();
+        w.send_results.push_back(Ok(B256::repeat_byte(1)));
+        mined_ok(&evm, B256::repeat_byte(1));
+        let (r, _) = timed(&evm, &mut w).await;
+        assert_eq!(r.unwrap(), ApproveOutcome::Approved {
+            tx: Some(B256::repeat_byte(1))
+        });
+        // Read fine, never mined: said so, in time.
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        let mut w = FakeWallet::eoa();
+        w.send_results.push_back(Ok(B256::repeat_byte(2)));
+        let (r, took) = timed(&evm, &mut w).await;
+        let e = r.unwrap_err();
+        assert!(took <= Duration::from_secs(60), "{took:?}");
+        assert!(e.to_string().contains("was not mined in time"), "{e}");
+        // An EIP-681 approve that never lands, the reads working.
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        let mut w = FakeWallet::eoa();
+        w.send_results
+            .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
+        let (r, took) = timed(&evm, &mut w).await;
+        let e = r.unwrap_err();
+        assert!(took <= Duration::from_secs(60), "{took:?}");
+        assert!(
+            e.to_string().contains("was not seen on chain in time"),
+            "{e}"
         );
     }
 

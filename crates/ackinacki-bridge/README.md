@@ -1314,7 +1314,8 @@ deposit is not requested while the first one's outcome is unknown.
    or the wallet's hash is not visible and another deposit took its nonce —
    find yours in the wallet and run `--resume <op-id> --tx-hash <hash>`. The
    hash is checked (the sender, success, a `Deposit` of this bridge, not
-   claimed by another operation) before it is bound.
+   claimed by another operation, not sent before this deposit was
+   requested) before it is bound.
 4. If you have made sure the wallet never sent it: `ackinacki-bridge deposit
    --abandon <op-id>`. That lifts the block on new deposits. Should the
    transaction turn up after all, `--resume <op-id>` still continues it; if its

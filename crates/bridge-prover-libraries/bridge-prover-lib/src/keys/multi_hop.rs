@@ -55,6 +55,23 @@ pub(super) const PREFIX: &str = "multi_hop";
 /// change: old PK/VK on disk are invalidated, `N_BUNDLE_MAX` doubles from 10
 /// to 20, the outer verifier YUL must be regenerated and the on-chain
 /// `BridgeMultiHopAggregatorVerifier` redeployed.
+///
+/// Rev 5: `ref_index = 0` (the same-thread `parent_block_id` edge of the L7
+/// Poseidon dense-Merkle tree) is now a valid hop edge. The circuit selects
+/// the Poseidon leaf tag per hop on `is_zero(ref_index)`:
+/// `REFERENCED_PARENT_BLOCK_TAG` (37 B, chunks 31+31+7) vs
+/// `REFERENCED_REF_BLOCK_TAG` (34 B, chunks 31+31+4). This adds a per-hop
+/// `gate.select` over the three Fr chunk inputs plus two constants
+/// (`pow_256_3`, `pow_256_6`) and two tag-chunk constant pairs; the hard
+/// `assert_ref_index_is_cross_thread` ban is dropped. See
+/// `bridge/multithreading/README.md` §2.0 for the chain-side rationale.
+/// Breaking change: old PK/VK on disk are invalidated. `BaseCircuitParams`
+/// are unchanged (K=17, 25 advice, 1 instance column), so the universal
+/// outer SHPLONK aggregator stays byte-identical:
+/// `BridgeMultiHopAggregatorVerifier.{sol,bin}` do not change and no
+/// on-chain redeploy is required. The in-tree
+/// `BridgeMultiHopAggregatorVerifier_calldata.bin` fixture is regenerated
+/// against the rotated inner VK.
 pub(super) const MULTI_HOP_CIRCUIT_REVISION: u32 = 5;
 
 /// Deterministic seed for the synthetic-witness keygen path. Any seed

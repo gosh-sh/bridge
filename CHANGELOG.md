@@ -102,9 +102,15 @@ assigns it when the release is tagged.
       (`MULTI_HOP_CIRCUIT_REVISION` bumped to 5). On-disk
       `multi_hop_pk*.bin` / `multi_hop_vk*.bin` cache files invalidate
       on first daemon start; keygen runs automatically.
-    - `BridgeMultiHopAggregatorVerifier.sol` must be regenerated with
+    - The circuit base `BaseCircuitParams` are unchanged (K=17, 25 advice
+      cols, 1 instance column), so the universal outer SHPLONK aggregator
+      stays byte-identical: `BridgeMultiHopAggregatorVerifier.{sol,bin}`
+      remain unchanged and **no on-chain redeploy is required**. The
+      per-fixture `BridgeMultiHopAggregatorVerifier_calldata.bin` is
+      regenerated against the rotated inner VK and shipped in-tree; run
+      `bridge-snark-utils export-multi-hop-poseidon-snark` followed by
       `bridge-evm-aggregator export-inner-aggregator --name
-      BridgeMultiHopAggregatorVerifier` and redeployed on Ethereum.
+      BridgeMultiHopAggregatorVerifier` to reproduce.
     - Public API break on `bridge-event-prove-circuit`: the public
       `multi_hop_witness::assert_ref_index_is_cross_thread` function is
       deleted. Downstream callers (if any outside this workspace) that

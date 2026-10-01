@@ -104,7 +104,7 @@ require(
 Two facts pin the anchor down:
 
 1. **It's a public input of the proof.** `finalRoot` and `anchorLayer` are exposed as instances of `BridgeEventFinalProof` (see §6.3 for the 13-slot layout), so the circuit binds every private Y-side witness to *this specific* root at *this specific* layer.
-2. **It must live in thread 0's window.** `_isKnownLayerAnchor` reads `layerWindows[anchorLayer]`, populated only from thread-0 layer-N batch roots (`GLOBAL_HISTORY_DATA_SPEC.md`). The check therefore succeeds only when `finalRoot` is a genuine thread-0 layer-N root.
+2. **It must live in thread 0's window.** `_isKnownLayerAnchor` reads `layerWindows[anchorLayer]`, populated only from thread-0 layer-N batch roots ([`GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md)). The check therefore succeeds only when `finalRoot` is a genuine thread-0 layer-N root.
 
 The rolling window has finite depth; anchors that age out of it become unusable and the prover must select a higher-layer anchor (§1.3).
 

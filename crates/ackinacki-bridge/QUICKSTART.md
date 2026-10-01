@@ -236,6 +236,12 @@ prover directory is complete with the right ceremony. It prints both
 transactions and whom the wait for the anchor would wait for — `waiting for
 the bridge owner` on shellnet. Nothing is sent and no wallet is involved.
 
+A dry run still writes to disk: it creates the state and work directories if
+they are missing and holds the state directory's lock while it runs. So it
+answers exit 3 while another deposit run on this machine is between its
+preflight and the confirmation of its deposit, or while an earlier deposit of
+the same amount to the same recipient has an unknown outcome (section 12).
+
 ## 11. The deposit
 
 ```bash
@@ -256,7 +262,8 @@ echo "exit=$?"
 4. **Confirm `approve`**, the bridge's spending limit, set to exactly the
    amount. It is skipped when your allowance already covers the amount. Keep
    the limit as proposed: a lower one stops the run with exit 21 before any
-   USDC moves.
+   USDC moves. So does an `approve` that does not show on chain within five
+   minutes (`--pair-timeout-s`); run the deposit again.
 5. **Confirm `deposit`**, the transaction that moves the USDC. Do not change
    the amount, and do not speed it up with different parameters: a deposit
    that differs from the request is not finalized by the CLI (exit 35).
@@ -292,7 +299,7 @@ recipient's balance before and after.
 | 2 | refused before the deposit was requested; an `approve` may have been sent | not moved |
 | 3 | another deposit is in the way; the message names it | untouched |
 | 20 | the wallet did not pair; you rejected the connection, the check or the deposit; or it is a smart-contract account | untouched |
-| 21 | `approve` failed or was rejected, or the limit was lowered | untouched |
+| 21 | `approve` failed, was rejected or did not show on chain in time, or the limit was lowered | untouched |
 | 22 | the deposit transaction reverted | not taken; gas spent |
 | 30 | the deposit transaction has not been found yet | maybe sent |
 | 31–34 | the deposit is on chain; the Acki Nacki side has not finished | in the bridge; resumable |

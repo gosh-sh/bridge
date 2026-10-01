@@ -1080,7 +1080,13 @@ Preflight, in order:
   again after pairing.
 
 `--dry-run` stops there. It prints the calldata of both transactions, the QR
-payloads and whom the anchor wait would wait for, and sends nothing.
+payloads and whom the anchor wait would wait for, and sends nothing. It is not
+read-only, though: it creates the state and work directories if they are
+missing, writes and removes its probe files in the work directory and in the
+prover's `data/`, takes the state directory's lock for as long as it runs, and
+closes operations an interrupted run left before the deposit was requested.
+So a dry run answers exit 3 too, while another run on this machine holds the
+state directory or an operation for the same deposit has an unknown outcome.
 
 ### Command line
 
@@ -1123,7 +1129,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 
 | Flag | Default | What it limits | When it runs out |
 |------|---------|----------------|------------------|
-| `--pair-timeout-s` | 300 | pairing with the wallet | exit 20 |
+| `--pair-timeout-s` | 300 | pairing with the wallet; and the wait for an `approve` to show on chain — its receipt once the wallet returned a hash, or the allowance once the QR code is shown (`eip681`) | exit 20 for pairing, exit 21 for an `approve` |
 | `--recovery-window-s` | 600 | the search for the deposit transaction when the wallet did not return its hash, the session dropped, or the node does not show the hash the wallet returned | exit 30 |
 | `--anchor-timeout-s` | 0 = no limit | the anchor wait and the whole of step 8, pauses and sends included | exit 31; exit 34 if a `finalizeDeposit` was in doubt |
 | `--relayer-grace-s` | 120 | how long after the anchor the deposit is left to the operator's relayer | the CLI proves it itself |
@@ -1159,12 +1165,12 @@ time limit, which covers the retries too.
   EIP-681 code cannot ask for a type-2 transaction**, and a wallet that sends a
   legacy one makes the deposit unprovable (exit 35). The wallet will not add
   the network either, and some wallets drop the call data. The CLI asks you to
-  accept that risk: `--yes` accepts it, `--non-interactive` without `--yes`
-  declines it (exit 20), and Ctrl-C at the question ends the run at once, as
-  anywhere else. There is no signature check in this mode, only the
-  check of the account's code, so an ERC-4337 account that is not deployed yet
-  is not caught: its deposit goes through the account's contract and ends at
-  exit 35.
+  accept that risk: `--yes` accepts it, `--non-interactive` or `--json`
+  without `--yes` declines it (exit 20), and Ctrl-C at the question ends the
+  run at once, as anywhere else. There is no signature check in this mode,
+  only the check of the account's code, so an ERC-4337 account that is not
+  deployed yet is not caught: its deposit goes through the account's contract
+  and ends at exit 35.
 - **`both`** — WalletConnect first, and the EIP-681 codes only if pairing
   itself fails.
 
@@ -1192,11 +1198,14 @@ keys into the URL, and HTTP clients quote it whole in their errors. The
 operation records hold chain identifiers only.
 
 **From a source checkout**, from `crates/ackinacki-bridge/`, once the
-[prover directory](#the-deposit-prover) is in place:
+[prover directory](#the-deposit-prover) is in place. Until the
+[minimum bridge version](#minimum-bridge-version) is set, a build from source
+refuses every bridge with exit 2 unless it is built with
+`--features dev-unfixed-bridge`, and such a build is for development only:
 
 ```bash
 export BRIDGE_CONFIG=./config/bridge_config
-cargo run --release -p ackinacki-bridge \
+cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
   --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
   deposit --dry-run --network sepolia --amount 1.000000 \
     --to <dapp_id>::<account_id> --wc-project-id <project id>
@@ -1223,7 +1232,7 @@ prints the owner's call to pass on:
 | Phase | On Sepolia |
 |-------|------------|
 | Preflight | seconds |
-| Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing gives up after `--pair-timeout-s` |
+| Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing, and an `approve` that does not show on chain, give up after `--pair-timeout-s` |
 | EVM confirmation, 12 blocks | ~2.5 min |
 | Block anchor, by the owner | **from ~13 min, plus the owner's reaction; no limit by default** |
 | Deposit block finalized on the EVM side | ~13 min, inside the anchor wait |
@@ -1335,7 +1344,7 @@ without them it is refused with exit 2.
 | 2 | Refused before the deposit was requested: preflight, including a paused bridge on either side and a USDC balance below the amount; a filesystem without `flock`; a `--resume` or `--abandon` whose command line contradicts the operation's record. Also the EVM bridge paused, or the deposit's gas estimate reverting, right before the request — by then an `approve` may have been sent | not moved; `approve` gas may be spent | fix what the message names, run again |
 | 3 | Another deposit holds the state directory; an operation with an unknown outcome exists for the same deposit or the same sender; the operation is being run by another process | untouched by this run | wait for the other run, or `--resume` / `--abandon` the operation the message names |
 | 20 | Wallet: not paired, rejected, timed out; a smart-contract account (code, or a signature not made with the account's key); or the wallet replaced the deposit transaction in a finalized block | untouched | pair again, from a plain account |
-| 21 | `approve` reverted, was rejected or would revert; or the wallet set a spending limit below the amount | not moved; `approve` gas may be spent | fix the cause, run again |
+| 21 | `approve` reverted, was rejected, would revert or did not show on chain within `--pair-timeout-s`; or the wallet set a spending limit below the amount | not moved; `approve` gas may be spent | fix the cause, run again |
 | 22 | The deposit transaction reverted on the EVM side, or succeeded without a `Deposit` event of the bridge | not taken; gas spent | read the cause it names, run again |
 | 30 | The wallet was asked; the transaction was not found in the recovery window | possibly in flight | [after exit 30](#operations-resume-and-abandon) |
 | 31 | The deposit is confirmed; the Acki Nacki side (the anchor, or a paused bridge) did not come in time | in the EVM bridge | `--resume <op-id>` later |

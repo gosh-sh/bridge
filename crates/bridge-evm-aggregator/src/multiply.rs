@@ -65,6 +65,34 @@ pub fn build_multiply_circuit(
     (builder, vec![c_val])
 }
 
+/// Same column shape as [`build_multiply_circuit`], but the public instance
+/// is `a * b + 1`. The extra addition changes the selector polynomial, so
+/// the inner VK (and therefore the aggregator digest) differs, while the
+/// advice / fixed / instance column counts stay those of one `GateChip`.
+pub fn build_multiply_plus_one_circuit(
+    witness_gen_only: bool,
+    k: usize,
+    lookup_bits: usize,
+    a: Fr,
+    b: Fr,
+) -> (BaseCircuitBuilder<Fr>, Vec<Fr>) {
+    let mut builder =
+        BaseCircuitBuilder::<Fr>::new(witness_gen_only).use_params(multiply_params(k, lookup_bits));
+
+    let gate = GateChip::<Fr>::default();
+    let ctx = builder.main(0);
+    let a_w = ctx.load_witness(a);
+    let b_w = ctx.load_witness(b);
+    let product = gate.mul(ctx, a_w, b_w);
+    let one = ctx.load_witness(Fr::from(1u64));
+    let out = gate.add(ctx, product, one);
+    let out_val = *out.value();
+
+    builder.assigned_instances[0] = vec![out];
+
+    (builder, vec![out_val])
+}
+
 #[cfg(test)]
 mod tests {
     use halo2_base::halo2_proofs::dev::MockProver;

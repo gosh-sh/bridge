@@ -210,22 +210,19 @@ assigns it when the release is tagged.
       together, not one at a time;
     - a self-deployed verifiers directory (`--verifiers-dir` /
       `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
-      that `export-inner-aggregator` wrote next to its `.bin`.
+      that `export-inner-aggregator` wrote next to its `.bin`, and
+      `BridgeWithdrawalAggregatorVerifier_calldata.bin` (word 23 is the
+      withdrawal adapter's `vkDigest` pin). `scripts/install.sh` treats
+      that `_calldata.bin` as part of a complete verifiers directory.
   `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
   rotated Circuit-4 key and compiles to the committed `.bin`. Because a
   compiled `.bin` ends with `solc`'s CBOR metadata, whose hash commits to the
   source's keccak256, compiling to the identical `.bin` proves a `.sol` is
   exactly the source of that `.bin` — which also holds for
-  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 21`,
+  `LayerHashesAggregatorVerifier.sol`, regenerated here at `k_outer = 22`,
   and for `PrimaryAggregatorVerifier.sol` and
-  `FallbackAggregatorVerifier.sol`, whose keys are unchanged and whose
-  sources were not regenerated for this change. What that leaves unconfirmed
-  is only whether the generator at the current `snark-verifier` pin still
-  reproduces those last two sources from their keys — which the relayer's own
-  former bytecode self-check already established on every aggregation it ran
-  before this change. Watch the first `verifyBlock` cycle of each kind after
-  the upgrade in case a future `snark-verifier` bump changes the generated
-  source.
+  `FallbackAggregatorVerifier.sol`, regenerated in `6360455` with the
+  other two. All four sources match the `.bin` files in this tree.
 - **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
   meaning — a bootstrap escape hatch for a verifier whose source is not
   committed yet — with no alias for the old spelling.
@@ -239,8 +236,8 @@ assigns it when the release is tagged.
   `sender`) now nullify to distinct values and can both pay out on the
   ETH side; pre-rotation they would have collided on the second
   withdraw as a replay.
-  The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
-  instances; the reference `_calldata.bin` is 3 648 B. Redeploy
+  The aggregated Yul is 21 314 B / 24 instances; the reference
+  `_calldata.bin` is 3 680 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
   not decode. The extra tuple field also **changes the `withdrawByProof`
@@ -312,6 +309,21 @@ assigns it when the release is tagged.
   is actually used. All four files have to come from the same
   successful keygen run on some other host.
 
+- **All four SHPLONK aggregator adapters bind on-chain to the inner-circuit
+  VK.** Upgrade `aggregate-proof`, the relayer, `ackinacki-bridge` (a
+  `scripts/install.sh` install) and `contracts/ethereum/verifiers/`
+  together with the contracts. The CLI reads
+  `BridgeWithdrawalAggregatorVerifier_calldata.bin` from `--verifiers-dir`
+  as well as the `.bin` and `.sol`. Calldata from an old `aggregate-proof` has
+  no digest slot, and every new adapter rejects it
+  (`AttestationProofRejected` / `LayerHashesProofRejected` /
+  `WithdrawalProofRejected`). `AckiNackiBridge` has to be redeployed:
+  `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` and
+  `bridgeWithdrawalVerifier` are `immutable`. `DeployReuseVerifiersBridge`
+  and `DeployGenesisCursorBridge` take adapter addresses from
+  `PRIMARY_VERIFIER` / `FALLBACK_VERIFIER` / `LAYER_HASHES_VERIFIER` /
+  `WITHDRAWAL_VERIFIER` — do not pass pre-rotation adapters there.
+
 - `withdrawByProof` reverts `LayerOutOfRange` when `anchorLayer` is 0 or
   greater than 10, the same error `getLayerWindow` already uses.
   `InvalidNumLayers` stays on `verifyBlock` and on the layer-window
@@ -319,20 +331,36 @@ assigns it when the release is tagged.
   `anchorRemainingAppends`). A caller that caught `InvalidNumLayers` on
   a bad withdrawal layer will need to catch `LayerOutOfRange` instead.
 
-- **The layer-hashes verification key is rotated. Redeploy that verifier.**
-  `LayerHashesAggregatorVerifier` was re-keygen'd at `k_outer = 21`, because at
-  20 the outer circuit did not fit the 14 inner public inputs. The runtime
-  artefact grows from 19 100 B to 23 111 B, so its address and `extcodehash`
-  change and the pin in `ShplonkDeployLib` moves with it. Proofs produced
-  against the old key do not verify against the new one; a deployment that
-  updates only the bridge will fail every `verifyBlock`. Margin to EIP-170
-  (24 576 B) is now 1 465 B, the tightest of the four verifiers — see the
-  warning below.
+  Each adapter constructor is `(address _shplonkVerifier, bytes32 _vkDigest)`,
+  rejects a zero digest with `InvalidVkDigest()`, rejects a pin at or above
+  the BN254 scalar-field modulus `r` with `VkDigestExceedsFieldModulus()`
+  (guards an operator who passes a raw 32-byte hash in place of a real Fr
+  digest; a chain id is far below `r` and is not what this guard catches —
+  it rejects about 81% of random 32-byte values), and exposes `vkDigest()`.
+  `verifyPrimaryAttestation` and `verifyFallbackAttestation` compare word
+  16, `verifyLayerHashesMovement` word 26, `verifyWithdrawal` word 23,
+  then delegate to Yul. A pin is word `12 + N` of the matching
+  `<name>_calldata.bin` (big-endian `bytes32`); after deploy check with
+  `cast call <adapter> "vkDigest()(bytes32)"`. The library helper
+  `bridge_evm_aggregator::vk_binding::expected_vk_digest` has no CLI.
 
-  The other two keys are **unchanged**: `PrimaryAggregatorVerifier.bin`
-  and `FallbackAggregatorVerifier.bin` are byte-identical to 0.2.0.
-  Primary's and Fallback's `_calldata.bin` fixtures were re-emitted, which
-  is a test-vector refresh and not a rotation.
+  Against 0.2.0 the artefacts are: Primary 21 494 → 21 655 B / calldata
+  3 840 → 3 872 B; Fallback 21 493 → 21 655 B / 3 840 → 3 872 B;
+  LayerHashes 19 100 → 19 263 B / 3 072 → 3 104 B (`k_outer` stays 22);
+  Withdrawal 20 990 → 21 314 B / 3 616 → 3 680 B. Primary and Fallback are
+  the tightest at 88% of EIP-170. The aggregator cache stem moved
+  `__v2__` → `__v3__`: the first run re-keygens every outer PK; old slots
+  stay on disk until deleted. `numLayers` was already 5 at 0.2.0.
+
+- **The layer-hashes verification key is rotated. Redeploy that verifier.**
+  Against 0.2.0 `LayerHashesAggregatorVerifier` stays at `k_outer = 22`.
+  The runtime artefact grows from 19 100 B to 19 263 B and its
+  `_calldata.bin` from 3 072 B to 3 104 B (the extra digest word).
+  Address and `extcodehash` change with the pin in `ShplonkDeployLib`.
+  Proofs against the old key do not verify; a deployment that updates
+  only the bridge will fail every `verifyBlock`. Margin to EIP-170
+  (24 576 B) is 5 313 B. Primary and Fallback at 21 655 B (88%) are
+  the tightest of the four.
 
 - Deployment: `DeployRealBridge` now requires `WIRE_VERIFY_BLOCK=true` on
   **every** chain (`:132`, unconditional). On mainnet `USE_AXIOM_ORACLE` and
@@ -543,6 +571,38 @@ assigns it when the release is tagged.
   `crates/bridge-circuits/bridge-event-prove-circuit/docs/MULTITHREAD_MIGRATION_PLAN.md`
   §4 for the migration staging and the follow-on hop-chain circuit.
 
+- **`deposit-relayer daemon` exports Prometheus metrics.** `--metrics-addr`
+  (`DEPOSIT_RELAYER_METRICS_ADDR`, e.g. `127.0.0.1:9467`) serves the text
+  format at `GET /metrics`, the same facade and histogram buckets as
+  `relayer daemon-live --metrics-addr` on the AN→ETH side, so one scrape
+  config fits both. Unset means no exporter, and the library's `metrics::*`
+  calls are no-ops without one. Names are operator API, listed with their
+  meaning in `deposit_relayer_daemon::metrics`:
+  `deposit_relayer_ticks_total{outcome}` (finalized, already_finalized,
+  not_yet_available, proof_failed, an_rejected, an_pending, skipped, error),
+  `deposit_relayer_stage_duration_seconds{stage}` (is_finalized, fetch_event,
+  prove, submit, tick), `deposit_relayer_prover_stage_duration_seconds{example}`
+  and `deposit_relayer_prover_stage_failures_total{example}` per
+  `deposit-prover` subprocess, `deposit_relayer_eth_get_logs_total{outcome}`
+  (ok, retry, error) and `deposit_relayer_eth_scanned_blocks_total` for the
+  `eth_getLogs` cost, gauges `deposit_relayer_eth_safe_head_block`,
+  `deposit_relayer_eth_scan_from_block`, `deposit_relayer_scan_done_through_block`,
+  `deposit_relayer_eth_deposit_counter` (`depositCounter()` on Ethereum,
+  polled once a minute; minus `last_finalized + 1` is the backlog),
+  `deposit_relayer_target_deposit_id`, `deposit_relayer_last_finalized_deposit_id`,
+  `deposit_relayer_last_finalized_timestamp_seconds`,
+  `deposit_relayer_last_tick_timestamp_seconds`,
+  `deposit_relayer_attempts_since_progress`, `deposit_relayer_parked_deposits`,
+  `deposit_relayer_backoff_seconds`, `deposit_relayer_build_info{version}` and
+  `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
+  counters and the shutdown snapshot are unchanged.
+
+- **`AckiNackiBridge` has `pause()` / `unpause()` again** (owner-only). While
+  paused, `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof`
+  revert `BridgePaused`. AAVE management stays available so the owner can
+  evacuate funds. Restored after it was dropped in #20; the AN-side
+  `eccUSDCBridge.setPaused` is a separate control.
+
 - **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
   read back with `isPaused()`.** While it is paused, the two cross-chain entry
   points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:
@@ -562,7 +622,8 @@ assigns it when the release is tagged.
   The bridge's code hash moves with this, `48d5c0ed…` → `68b17ae3…`, and the
   contract reports version `1.5.0`. A network takes it as a fresh zerostate or
   as an `updateCode` round on the bridge, not as an in-place patch; the voucher
-  and the light client are unchanged and their artefacts are byte-identical.
+  is unchanged and its artefacts are byte-identical. The light client changes
+  separately, see the entry on light-client anchors under Fixed.
 
 - **The Acki Nacki contracts now live in this repository, under `contracts/an/`.**
   `eccUSDCBridge`, `DepositVoucher` and `EthBeaconLightClient` with the
@@ -617,7 +678,8 @@ assigns it when the release is tagged.
   value that never arrived.
 - `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
   `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
-  size drift, and warns from 90% of EIP-170 (layer hashes warns today at 94%).
+  size drift, and warns from 90% of EIP-170 (none warn today; Primary and
+  Fallback sit at 88%, layer hashes at 78%).
   Growth now shows up in a diff instead of in a reverted deploy.
 - `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
   appends, a seq_no jump not mass-evicting earlier anchors,
@@ -728,6 +790,41 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
+  proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
+  exponential backoff.** With the aggregator now binding the inner-circuit
+  VK on-chain, a proof built against a rotated (or wrong) inner key makes
+  the adapter's runtime digest guard return `false`, and the bridge reverts
+  `WithdrawalProofRejected()` — every retry has the same fate. The scan
+  loop now classifies the 4-byte revert selector: `WithdrawalProofRejected`,
+  `WithdrawIdentityMismatch`, `DstChainIdMismatch`, `UnsupportedTokenId`,
+  `RecipientHalfOutOfRange`, `InvalidRecipient`, `FieldElementOutOfRange`,
+  `InvalidNumLayers` and `NullifierAlreadyUsed` are treated as permanent
+  (the path is recorded in an in-memory set, counted under
+  `parked_permanent`, and the scan continues to the next file). A restart
+  retries the file. A rewrite of the same path is retried in-process when
+  its length or mtime changes. `skipped_already_used` is only an
+  already-used nullifier, and that log carries the nullifier, amount and
+  recipient; a parked proof logs those fields on its own line. `UnknownAnchor` and `WithdrawTreasuryShortfall` stay on
+  the backoff path, as do RPC-side failures and post-send confirmation
+  errors. The `submit-withdraw` and `withdraw-e2e` CLI subcommands now
+  label the revert as `(permanent)` or `(transient)` in the failure
+  message.
+
+- **`ackinacki-bridge withdraw` preflight now reads the withdrawal
+  adapter's `vkDigest()` and compares it with word 23 of the reference
+  `BridgeWithdrawalAggregatorVerifier_calldata.bin`.** A mismatch or an
+  adapter that predates the inner-VK binding (`vkDigest()` reverts) is
+  refused before the AN-side burn, exit `2` (`PreflightRefused`), with
+  the `cast call <adapter> "vkDigest()(bytes32)"` remedy. Without the
+  check the failure surfaces post-burn and post-anchor-wait as
+  `WithdrawalProofRejected`. The check runs only when `--verifiers-dir`
+  is passed (which is when the deployed-bytecode compare already runs);
+  without it the run still passes the earlier stages and warns that both
+  the bytecode check and the digest pin compare were skipped. A
+  `_calldata.bin` that is not exactly 3 680 B is refused. 3 648 B is the
+  pre-binding blob.
 
 - The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
   rotation is covered, even if the layer cursor is still behind this N.
@@ -1017,6 +1114,90 @@ assigns it when the release is tagged.
   the committed `.bin` on future artefact bumps; the Foundry test
   `test_eth6_multiHopYul_extcodehashMatchesPin` locks the invariant
   into CI alongside the four existing pin tests.
+- `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
+  cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
+  head on every poll, whether the target `depositId` was found or not. A
+  second deposit confirmed in the same poll window, and a deposit whose
+  proof or `finalizeDeposit` had failed, were never looked for again: the
+  daemon kept waiting as if they were not made yet, while the bridge's
+  `depositCounter()` was already past them. A fresh start also skipped the
+  `--from-block` block itself. Now each poll first reads `depositCounter()`
+  at the confirmed head (`--confirmations` below the head):
+  - while the next `depositId` is not made yet, the poll makes no
+    `eth_getLogs` call and moves the cursor up to the confirmed head;
+  - once it is made, the scan starts after the cursor and stops at the block
+    that holds the deposit. The cursor moves only after AN accepts the
+    deposit, and only to the block before it, so a retry finds the deposit
+    again and a later deposit in the same block is still found;
+  - if `depositCounter()` says the deposit is made but no scanned block holds
+    its log, the poll fails with an error naming the blocks it scanned: the
+    RPC returned incomplete logs, or `--from-block` is above the deposit.
+    `watch` and `prove-one` look deposits up the same way and fail with the
+    same error where they used to report the deposit as not visible yet.
+
+  The field is now `scan_done_through_block`. The old one is ignored and
+  dropped on the next save, so `state.json` needs no editing. After the
+  upgrade the first scan starts at `--from-block`, which must not be above
+  the oldest deposit the daemon has yet to deliver. The RPC must answer
+  `eth_call` at a block `--confirmations` below the head.
+- `deposit-relayer daemon --skip-after-attempts` counted every poll that
+  found no deposit as a failed attempt, so an idle daemon parked ids nobody
+  had deposited yet, and the deposits that later took those ids needed a
+  manual `finalize-one`. Waiting no longer counts; only a failed proof, an
+  AN rejection or a submit still pending does. The attempt count an older
+  daemon saved in `state.json` included those polls, so the first start
+  after the upgrade resets it. The warning `no confirmed deposit yet; relayer
+  is idle` is gone with it. The flag now also reads
+  `SKIP_AFTER_ATTEMPTS`. The systemd unit does not pass
+  `--skip-after-attempts`, so a `SKIP_AFTER_ATTEMPTS` line in
+  `deposit-relayer.env` did nothing before and takes effect now: check it
+  before restarting the daemon.
+- `deposit-relayer` did not build against tvm-sdk `v3.0.6.an`: its
+  `Cargo.toml` lacked the halo2 `[patch]` tables that pin `tvm_vm` to a
+  single `halo2-axiom` (already present on `eth-light-client-relayer`),
+  and `TvmAckiNacki::supports_dapp_id` called a `ClientContext` method
+  removed in that tag. The probe was only a log line — `v3.0.6.an`
+  `send_message` already rejects an empty `dapp_id`. `--an-graphql-url`
+  / `AN_GRAPHQL_URL` must now name a host that serves GraphQL *and*
+  `/v2/messages`. Rebuild `deposit-relayer` from this tree before
+  `daemon` / `finalize-one`.
+- **No block the light client admitted could finalize a deposit.**
+  `EthBeaconLightClient` sent `USDCBridge` its stored anchor key — the block
+  hash with each 16-byte half byte-reversed, `(LE(h[0..16]) << 128) |
+  LE(h[16..32])` — while `finalizeDeposit` looks the block hash up in
+  Ethereum byte order, the way the deposit proof carries it. Every
+  light-client anchor missed, and once `disableOwnerAnchors` leaves the light
+  client as the only writer, every `finalizeDeposit` fails with
+  `ERR_UNKNOWN_BLOCK` (224). `acceptBlockHashFromLightClient` and
+  `forgetBlockHashFromLightClient` now carry the Ethereum-order hash.
+  Everything else keeps the stored key: `rePushAnchor` takes it, `getHead`,
+  `HeadUpdated`, `CheckpointBackfilled` and `AncestryAccepted` report it, and
+  `isProvenExecutionBlockHash` and the light client's own
+  `isAcceptedBlockHash` take it. So the light client's `isAcceptedBlockHash`
+  is not interchangeable with the bridge's: for the same block the bridge is
+  asked the Ethereum-order hash. The ABI is unchanged.
+
+  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is rebuilt
+  and reports version `1.4.1`; its code hash moves from `78905cf7…9ed532` to
+  `314ac6b8…6092f5`. A network takes it with a fresh zerostate, every
+  contract deployed from scratch, once acki-nacki's pin is moved. The
+  standalone `contracts/an/EthBeaconLightClient.sol` has the same fix and
+  reports version `0.1.1`; a light client deployed from it has to be deployed
+  again from this source.
+
+  A light client already deployed from the 1.4.0 `.tvc` is upgraded in place:
+  its owner calls `updateCode` (present since 1.4.0) with the rebuilt code.
+  The address, head, committee and proven set stay, and the bridge keeps
+  accepting it as the writer. Anchors it pushed before the upgrade do not
+  count; the daemon re-sends the checkpoint it proves next, and an older
+  block still needed by a deposit gets `rePushAnchor` with its stored key
+  (or, while owner anchors are enabled, `setAcceptedBlockHash` with the
+  Ethereum-order hash). The words pushed before the upgrade stay in the
+  bridge's anchor set; they match no block, so they admit nothing.
+  `EthBeaconLightClient_encoding_and_gas_notes.patch` is regenerated against
+  this copy: its `rePushAnchor` note is now in the source, the two remaining
+  hunks still apply, and the code hash stays `314ac6b8…6092f5` with them
+  applied.
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's
@@ -1118,8 +1299,7 @@ assigns it when the release is tagged.
   (compute phase, exit 252) because two byte orders were in play. The step
   circuit splits a hash with `node_hi_lo` — each 16-byte half read
   little-endian — so `submitUpdate` keys an anchor as
-  `(LE(h[0..16]) << 128) | LE(h[16..32])`, and that word is what the bridge
-  holds and what the deposit public inputs carry. Keccak in the VM returns
+  `(LE(h[0..16]) << 128) | LE(h[16..32])`. Keccak in the VM returns
   Ethereum byte order, so `submitAncestry` looked up
   `_provenEthSlot[keccak(rlp)]`, never found the checkpoint and failed
   `ERR_UNKNOWN_CHECKPOINT`; the daemon sent `rePushAnchor` in the same wrong
@@ -1245,7 +1425,8 @@ assigns it when the release is tagged.
   `_piForm`, `provenQueue` and the rotate decider. So the delivery is now two
   narrow patches instead of a file — `EthKeccak_sold_fixes.patch` (behaviour)
   and `EthBeaconLightClient_encoding_and_gas_notes.patch` (comments only, code
-  hash verified unchanged at `78905cf7…9ed532`) — and the gate was rewritten to
+  hash verified unchanged at `78905cf7…9ed532`, then at `314ac6b8…6092f5` after
+  the QC-AN-13 rebuild) — and the gate was rewritten to
   assert scope: patches stay inside `contracts/exchange/`, carry no sink wiring
   in either direction, the keccak patch only moves their library toward
   `contracts/an/EthKeccak.sol`, and the notes patch adds nothing but comments.

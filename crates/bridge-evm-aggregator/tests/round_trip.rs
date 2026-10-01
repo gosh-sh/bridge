@@ -14,8 +14,12 @@
 
 use std::{env, path::PathBuf};
 
-use bridge_evm_aggregator::aggregator::{
-    aggregate, generate_yul_verifier_gated, prove_inner, K_OUTER, NUM_ACCUMULATOR_INSTANCES,
+use bridge_evm_aggregator::{
+    aggregator::{
+        aggregate, generate_yul_verifier_gated, prove_inner, AggregatorConfig, K_OUTER,
+        NUM_ACCUMULATOR_INSTANCES,
+    },
+    vk_binding::{expected_vk_digest, vk_digest_index, NUM_VK_BINDING_INSTANCES},
 };
 use halo2_base::{halo2_proofs::halo2curves::bn256::Fr, utils::fs::gen_srs};
 
@@ -60,10 +64,11 @@ fn aggregator_round_trip() {
     );
     assert_eq!(
         agg_snark.instances[0].len(),
-        NUM_ACCUMULATOR_INSTANCES + INNER_NUM_INSTANCES,
-        "aggregator instance count = {} acc limbs + {} re-exposed inner PI(s)",
+        NUM_ACCUMULATOR_INSTANCES + INNER_NUM_INSTANCES + NUM_VK_BINDING_INSTANCES,
+        "aggregator instance count = {} acc limbs + {} re-exposed inner PI(s) + {} VK digest(s)",
         NUM_ACCUMULATOR_INSTANCES,
         INNER_NUM_INSTANCES,
+        NUM_VK_BINDING_INSTANCES,
     );
     // The re-exposed inner PI sits immediately after the accumulator limbs and
     // must equal the inner circuit's public output a*b == 77.
@@ -71,6 +76,16 @@ fn aggregator_round_trip() {
         agg_snark.instances[0][NUM_ACCUMULATOR_INSTANCES],
         Fr::from(77u64),
         "re-exposed inner public input must be a*b == 77",
+    );
+    // VK-digest binding: the digest sits at the tail of the instance column
+    // and must equal the value the native helper predicts for this inner
+    // snark.
+    let expected_digest =
+        expected_vk_digest(&params_outer, &inner_snark, AggregatorConfig::default());
+    let digest_slot = vk_digest_index(INNER_NUM_INSTANCES);
+    assert_eq!(
+        agg_snark.instances[0][digest_slot], expected_digest,
+        "in-circuit VK digest must match the native `expected_vk_digest` value",
     );
 
     let yul_path = workdir.join("AggregatorVerifierSpike.sol");
@@ -105,4 +120,79 @@ fn aggregator_round_trip() {
         &yul_src[..yul_src.len().min(400)]
     );
     println!("[M2 spike] Yul source: {} bytes", yul_src.len());
+}
+
+/// The digest must change when the inner constraints change, and must not
+/// change when only the witness changes. The outer Yul for two same-shape
+/// inners is byte-identical, so that Yul alone would accept the variant.
+///
+/// Run with `cargo test --release --test round_trip -- --ignored
+/// digest_tracks_inner_vk`.
+#[test]
+#[ignore = "two inner proofs, two aggregations and two Yul builds"]
+fn digest_tracks_inner_vk() {
+    use bridge_evm_aggregator::aggregator::{
+        generate_yul_verifier, prove_inner_plus_one, VerifierUniversality, K_INNER,
+        LOOKUP_BITS_INNER,
+    };
+
+    let workdir = PathBuf::from(env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into()))
+        .join("spike-vk-digest");
+    std::fs::create_dir_all(&workdir).expect("mkdir");
+    let prev_cwd = env::current_dir().expect("cwd");
+    env::set_current_dir(&workdir).expect("chdir");
+    let params_inner = gen_srs(K_INNER);
+    let params_outer = gen_srs(K_OUTER);
+    env::set_current_dir(&prev_cwd).expect("chdir back");
+
+    let mul_a = prove_inner(&params_inner, Fr::from(7u64), Fr::from(11u64)).expect("mul 7*11");
+    let mul_b = prove_inner(&params_inner, Fr::from(3u64), Fr::from(5u64)).expect("mul 3*5");
+    let plus = prove_inner_plus_one(
+        &params_inner,
+        K_INNER,
+        LOOKUP_BITS_INNER,
+        Fr::from(7u64),
+        Fr::from(11u64),
+    )
+    .expect("mul+1");
+
+    let full = AggregatorConfig::default();
+    let mut as_witness = AggregatorConfig::default();
+    as_witness.universality = VerifierUniversality::PreprocessedAsWitness;
+
+    let d_full_a = expected_vk_digest(&params_outer, &mul_a, full);
+    let d_full_b = expected_vk_digest(&params_outer, &mul_b, full);
+    let d_full_plus = expected_vk_digest(&params_outer, &plus, full);
+    assert_eq!(d_full_a, d_full_b, "witness must not change the digest");
+    assert_ne!(
+        d_full_a, d_full_plus,
+        "a different constraint must change the digest"
+    );
+
+    let d_wit_a = expected_vk_digest(&params_outer, &mul_a, as_witness);
+    let d_wit_plus = expected_vk_digest(&params_outer, &plus, as_witness);
+    assert_ne!(
+        d_wit_a, d_wit_plus,
+        "PreprocessedAsWitness still binds the inner VK"
+    );
+
+    let yul_a = workdir.join("a.sol");
+    let yul_b = workdir.join("b.sol");
+    generate_yul_verifier(&params_outer, &mul_a, &yul_a, full, false).expect("yul a");
+    generate_yul_verifier(&params_outer, &plus, &yul_b, full, false).expect("yul b");
+    let src_a = std::fs::read(&yul_a).expect("read a");
+    let src_b = std::fs::read(&yul_b).expect("read b");
+    assert_eq!(
+        src_a, src_b,
+        "same-shape inners must regenerate byte-identical Yul"
+    );
+
+    let agg_a = aggregate(&params_outer, mul_a).expect("aggregate a");
+    let agg_b = aggregate(&params_outer, mul_b).expect("aggregate b");
+    let slot = vk_digest_index(1);
+    assert_eq!(
+        agg_a.instances[0][slot], agg_b.instances[0][slot],
+        "two proofs of the same circuit must expose the same digest"
+    );
+    assert_eq!(agg_a.instances[0][slot], d_full_a);
 }

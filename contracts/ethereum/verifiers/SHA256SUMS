@@ -1,28 +1,35 @@
 # Pin of committed SHPLONK runtime + smoke calldata.
 # Default pairing (ShplonkArtefactPairing.t.sol): all four pairs.
-# 1A/1B bins unchanged vs 2026-08-12; calldata regenerated 2026-09-08 on n14
-# (Hermez PPoT). LayerHashes Yul regenerated at k_outer=21 (23111 B).
-# Circuit 4 Yul regenerated 2026-09-18 (21152 B, 11 inner PIs, 23 instances);
-# calldata rotated 2026-09-22 after re-running the pipeline against the rev-3
-# circuit (events_pos in Poseidon preimage + anchor_layer range-check). The
-# Yul .bin byte-hashes identically to 2026-09-18 — the deterministic export
-# reproduced the same VK-embedded bytecode — so only _calldata.bin drifted.
-# BridgeMultiHopAggregatorVerifier first-time export 2026-09-27 at rev 4 /
-# H_HOPS_PER_PROOF=1 / K=17 / 25 inner cols / k_outer=21 Full (23722 B,
-# 96.5 % EIP-170, above the 90 % soft-warn line — mirrors LayerHashes 94 %).
-# _calldata.bin rotated 2026-09-28 after re-running the pipeline against
-# the Direction (a) walk-fix (see CHANGELOG). The Yul .bin byte-hashes
-# identically to 2026-09-27 — the swap only reshuffles which cells feed
-# the endpoint sub-gates; the constraint system produces byte-identical VK
-# and byte-identical embedded-VK Yul bytecode — so only _calldata.bin drifted.
+#
+# TODO(merge/feature-multithreading): every pair below needs regeneration
+# post-merge to combine main's 2026-09-23 inner-VK-digest binding (one extra
+# public instance = Poseidon digest of inner VK witnesses at the tail of
+# instance column 0, Yul expects 12 + N_inner + 1 scalars, adapter
+# `bytes32 immutable vkDigest` pins it) with multithreading's circuit
+# shapes:
+#   - Primary/Fallback: pure vk-binding on top of unchanged 1A/1B circuit.
+#   - LayerHashes: vk-binding on top of HEAD's k_outer=22→21 regen (23111 B).
+#   - Withdrawal: vk-binding on top of HEAD's rev-3 Circuit 4 (13 inner PIs
+#     with xBlockId/yBlockId at slots 23/24 for the bundle anchor).
+#   - MultiHop: first-time vk-binding (HEAD's 2026-09-27 export at rev 4 /
+#     H_HOPS_PER_PROOF=1 / K=17 / 25 inner cols / k_outer=21 Full,
+#     23722 B, 96.5 % EIP-170, above the 90 % soft-warn line — mirrors
+#     LayerHashes 94 %); 2026-09-28 Direction (a) walk-fix produced
+#     byte-identical Yul and only rotated _calldata.bin.
 # CREATE extcodehash pins live in ShplonkDeployLib *_YUL_CODEHASH.
-22762e5e8e8aa3781a91114037a319fb9e242b65a97cce5f316b7de39b564b0d  BridgeWithdrawalAggregatorVerifier.bin
-36a2088283ba69a1a96c6c2b903a42044190a7325af6386a14746bd6ff4f8ee0  BridgeWithdrawalAggregatorVerifier_calldata.bin
+#
+# Current on-disk pins:
+#   - Primary/Fallback/LayerHashes/Withdrawal: main's 2026-09-23 vk-binding
+#     bytes (will be re-pinned once rebased on multithreading's circuits).
+#   - BridgeMultiHopAggregatorVerifier{,_calldata}.bin: HEAD's 2026-09-27 /
+#     2026-09-28 export (will be re-pinned once vk-binding lands).
+bfa8c4f4f7ebfc300e12d062cc1e0958a06422ebaa2942ff970e6d577a02392f  BridgeWithdrawalAggregatorVerifier.bin
+2270bfa73b6d89f118a74e49b7e1893b08d83321b93e620ac020d781bdad9860  BridgeWithdrawalAggregatorVerifier_calldata.bin
 a5e38f80f8e51ced5655b8e086c38db4a7be205e0e1cea554cc9a763151daa97  BridgeMultiHopAggregatorVerifier.bin
 310ffd5cc9028eab9d789a8495626f682dfde37cc3e0577cdcb5fd74ff544ab4  BridgeMultiHopAggregatorVerifier_calldata.bin
-db36c101ad9edf1e0bcb3456276b78bc9bca177d9016b82cfddcfe34db4131df  FallbackAggregatorVerifier.bin
-32cd3f693cb9e570d0de97c073c75607b6efe063f2f47ae5f33740aa2f57a4c5  FallbackAggregatorVerifier_calldata.bin
-bb34278118a0ce7c193005110dec26d59f85dd46759851114b439d9d127e9dce  LayerHashesAggregatorVerifier.bin
-72252dbd10a7706114e81b5853d1c6d9e955483b20aa92fcbec6a1ac97b556a5  LayerHashesAggregatorVerifier_calldata.bin
-0389a20844ced3093503df7bca989684a1f0d19f931c915826b5f261e6d7f82a  PrimaryAggregatorVerifier.bin
-79f19391e73822ebd3e57ac350739d9fd2d9d5c189f55c6d515fb49558b9b47f  PrimaryAggregatorVerifier_calldata.bin
+092e3d4c508862f95a0391dabbd5daf610d07ac286468a81c9392c12975f5070  FallbackAggregatorVerifier.bin
+a938045a8d66a7212156a783af86d82eaccc802134163fbbe5bcb6a479e5a19c  FallbackAggregatorVerifier_calldata.bin
+f86c9dffbc466a9646dbf6e22dcc521e933769e45de0035b560b4bc0fa99aaa9  LayerHashesAggregatorVerifier.bin
+4dccf6bdd857771b38cc59695ffc1e11cf3278eed88886bc0a407636cfe7c603  LayerHashesAggregatorVerifier_calldata.bin
+449aaeac24d0d2d051829d4b4d8e74f2287581b447107c728e093cdc864b2c07  PrimaryAggregatorVerifier.bin
+75a45d7521e574aae9e25bc204aec5049212b376863151cdb0f8f1896981317b  PrimaryAggregatorVerifier_calldata.bin

@@ -20,6 +20,7 @@
 //! - `status` — print the state file path.
 
 use std::{
+    net::SocketAddr,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -33,8 +34,8 @@ use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -156,7 +157,9 @@ enum Cmd {
         /// Must be non-zero unless `--dry-run` (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
-        /// GraphQL endpoint for tvm_client 3.0 (live submit). Example:
+        /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
+        /// `/v2/messages` (`send_message`). A public gateway that only
+        /// answers `/graphql` is not enough. Example:
         /// `http://127.0.0.1:11000/graphql`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
@@ -186,8 +189,9 @@ enum Cmd {
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in
-        /// `state.json` and advance the cursor (0 = disabled).
-        #[arg(long, default_value_t = 0)]
+        /// `state.json` and advance the cursor (0 = disabled). Waiting for a
+        /// deposit that is not made yet is not a failure.
+        #[arg(long, env = "SKIP_AFTER_ATTEMPTS", default_value_t = 0)]
         skip_after_attempts: u32,
         /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
         #[arg(long)]
@@ -196,6 +200,11 @@ enum Cmd {
         /// the deposit allowlist either way.
         #[arg(long)]
         expect_chain_id: Option<u64>,
+        /// Bind address of the Prometheus text exporter (`GET /metrics`), e.g.
+        /// `127.0.0.1:9467`. Unset = no exporter. Metric names are listed in
+        /// `deposit_relayer_daemon::metrics`.
+        #[arg(long, env = "DEPOSIT_RELAYER_METRICS_ADDR")]
+        metrics_addr: Option<SocketAddr>,
     },
     /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
     /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
@@ -211,8 +220,10 @@ enum Cmd {
         /// `vk_blob.bin`) — e.g. a `prove-one --out-dir`.
         #[arg(long)]
         bundle_dir: PathBuf,
-        /// GraphQL endpoint for tvm_client 3.0 (e.g. shellnet
-        /// `https://shellnet.ackinacki.org/graphql`).
+        /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
+        /// `/v2/messages` (`send_message`). A public gateway that only
+        /// answers `/graphql` is not enough. Example: shellnet
+        /// `https://shellnet.ackinacki.org/graphql`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         /// Path to tvm-cli keys JSON (signer for `finalizeDeposit`).
@@ -345,7 +356,11 @@ async fn main() -> anyhow::Result<()> {
             skip_after_attempts,
             allow_insecure_graphql,
             expect_chain_id,
+            metrics_addr,
         } => {
+            if let Some(addr) = metrics_addr {
+                install_metrics_exporter(addr)?;
+            }
             let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
                 .map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
@@ -656,9 +671,7 @@ async fn run_daemon(
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
 
     let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
-    let scan_cursor = Arc::new(Mutex::new(
-        existing_state.scanned_through_block.unwrap_or(from_block),
-    ));
+    let scan_cursor = Arc::new(Mutex::new(existing_state.scan_done_through_block));
 
     // Same gate as `watch` / `prove-one`: an unsupported chain produces proofs
     // the AN-side bridge has no allowlist entry for, so fail before the first
@@ -676,6 +689,8 @@ async fn run_daemon(
         EthLogSource::new(provider, bridge_address, from_block, confirmations)
             .with_scan_cursor(scan_cursor.clone()),
     );
+    deposit_relayer_daemon::metrics::set_build_info();
+    spawn_deposit_counter_poller(source.clone());
     let prover = Arc::new(SubprocessProofGenerator::new(prover_cfg));
 
     let skip_after = if skip_after_attempts == 0 {
@@ -729,11 +744,6 @@ async fn run_daemon(
             bridge_abi,
         })
         .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
-        if tvm.supports_dapp_id().await? {
-            info!("AN node supports SDK 3.0 dapp_id wire format");
-        } else {
-            warn!("AN node is pre-1.0.0; empty dapp_id is allowed on the wire");
-        }
         let submit_cfg = an_cfg.to_submit_config();
         run_daemon_loop(
             state_path,
@@ -759,7 +769,7 @@ async fn run_daemon_loop<S, P, A>(
     deployment: DeploymentIdentity,
     force_state: bool,
     skip_after_attempts: Option<u32>,
-    scan_cursor: Arc<Mutex<u64>>,
+    scan_cursor: Arc<Mutex<Option<u64>>>,
     source: Arc<S>,
     prover: Arc<P>,
     submitter: Arc<A>,
@@ -773,7 +783,6 @@ where
         state_path,
         start_deposit_id,
         poll_interval: backoff.initial,
-        max_attempts_warn: 16,
         deployment: Some(deployment),
         force_state,
         skip_after_attempts,
@@ -812,6 +821,51 @@ where
         .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "deposit daemon stopped");
     Ok(())
+}
+
+/// Serve the Prometheus text format at `http://<addr>/metrics` for the
+/// lifetime of the process. Every `metrics::*` macro in this binary and in
+/// `deposit_relayer_daemon` records into it. Same buckets as the AN→ETH
+/// relayer: sub-second RPC round-trips up to ten-minute proving stages.
+fn install_metrics_exporter(addr: SocketAddr) -> anyhow::Result<()> {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    const BUCKETS: &[f64] = &[
+        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    ];
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .set_buckets(BUCKETS)
+        .map_err(|e| anyhow::anyhow!("metrics exporter buckets: {e}"))?
+        .install()
+        .map_err(|e| anyhow::anyhow!("metrics exporter on {addr}: {e}"))?;
+    deposit_relayer_daemon::metrics::describe();
+    info!(%addr, "metrics exporter listening (GET /metrics)");
+    Ok(())
+}
+
+/// How often the daemon reads `depositCounter()` for the backlog gauge.
+const DEPOSIT_COUNTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keep `deposit_relayer_eth_deposit_counter` fresh: one `eth_call` a minute,
+/// independent of the tick loop, so the backlog is visible while a proof runs.
+fn spawn_deposit_counter_poller<P>(source: Arc<EthLogSource<P>>)
+where
+    P: alloy::providers::Provider<alloy::network::Ethereum> + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match source.deposit_counter().await {
+                Ok(counter) => {
+                    let value = u64::try_from(counter).unwrap_or(u64::MAX);
+                    metrics::gauge!(deposit_relayer_daemon::metrics::ETH_DEPOSIT_COUNTER)
+                        .set(value as f64);
+                },
+                Err(e) => warn!(error = %e, "depositCounter() poll failed"),
+            }
+            tokio::time::sleep(DEPOSIT_COUNTER_POLL_INTERVAL).await;
+        }
+    });
 }
 
 fn log_err(stage: &'static str) -> impl Fn(anyhow::Error) -> anyhow::Error {

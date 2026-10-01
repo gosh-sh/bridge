@@ -10,9 +10,10 @@
 //! The production on-chain verifier is the R15 SHPLONK aggregator
 //! (`BridgeWithdrawalAggregatorVerifier`, Yul): it consumes aggregator calldata
 //! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
-//! the 13 re-exposed Circuit-4 public inputs (≥
-//! `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the 1A/1B/2 shape
-//! checks in [`crate::proof_validation`].
+//! the 13 re-exposed Circuit-4 public inputs + a Poseidon digest of the inner
+//! VK witnesses (≥ `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes; 26-instance layout
+//! post-merge of multi-thread 13-PI + PR #67 inner-VK binding). This mirrors
+//! the 1A/1B/2 shape checks in [`crate::proof_validation`].
 
 use std::path::{Path, PathBuf};
 
@@ -41,9 +42,22 @@ pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 13;
 
 /// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
 /// prefix is 12 KZG accumulator limbs + the 13 re-exposed Circuit-4 public
-/// inputs, each a 32-byte field element (the outer proof bytes follow). Matches
-/// `BridgeWithdrawalAggregatorVerifier`'s 25-instance layout.
-pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS) * 32;
+/// inputs + 1 inner-VK Poseidon digest slot, each a 32-byte field element
+/// (the outer proof bytes follow). Matches
+/// `BridgeWithdrawalAggregatorVerifier`'s 26-instance layout.
+pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS + 1) * 32;
+
+/// Byte length of a Circuit-4 SHPLONK calldata blob after the inner-VK
+/// binding and multi-thread 13-PI layout: 26 instance words plus the
+/// outer proof. The pre-vk-binding, 11-PI blob was 3 648 B; main's
+/// vk-binding-only, 11-PI blob was 3 680 B.
+///
+/// TODO(merge/feature-multithreading): this value is a provisional forecast
+/// (`3_680 + 2 * 32 = 3_744`, adding two instance words for `xBlockId` and
+/// `yBlockId`). Re-measure against the regenerated
+/// `BridgeWithdrawalAggregatorVerifier_calldata.bin` in the same commit as
+/// the post-merge aggregator export and replace this constant.
+pub const WITHDRAWAL_CALLDATA_LEN: usize = 3_744;
 
 /// One per-hop `BridgeMultiHopProof` blob as persisted in
 /// `proof_event_*.json` under the `hops_hex` array. Mirrors the driver's
@@ -110,7 +124,8 @@ impl PartnerWithdrawalProof {
         if raw.len() < SHPLONK_MIN_WITHDRAWAL_INSTANCES {
             return Err(RelayerError::other(format!(
                 "withdrawal proof is {} bytes; expected SHPLONK aggregator calldata (>= {} bytes: \
-                 12 accumulator limbs + {} Circuit-4 public inputs, then the outer proof)",
+                 12 accumulator limbs + {} Circuit-4 public inputs + 1 inner-VK digest, then the \
+                 outer proof)",
                 raw.len(),
                 SHPLONK_MIN_WITHDRAWAL_INSTANCES,
                 WITHDRAWAL_PUBLIC_INPUTS,

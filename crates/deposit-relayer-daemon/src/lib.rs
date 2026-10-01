@@ -62,6 +62,9 @@
 pub mod an_config;
 pub mod daemon;
 pub mod error;
+#[cfg(test)]
+mod fake_rpc;
+pub mod metrics;
 pub mod prover;
 pub mod relayer;
 pub mod source;

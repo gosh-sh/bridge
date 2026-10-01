@@ -38,21 +38,21 @@ assigns it when the release is tagged.
   `HopChainHeadMismatch` / `HopChainTailMismatch` against the new one,
   and vice versa — redeploy the bridge and rotate any hand-crafted
   cross-thread calldata so `hopPublicInputs[0][HOP_START] == yBlockId`
-  and `hopPublicInputs[last][HOP_END] == xBlockId`. **Verification keys
-  are NOT rotated** — the two production SHPLONK Yul verifiers
-  (`BridgeWithdrawalAggregatorVerifier`, `BridgeMultiHopAggregatorVerifier`)
-  and the underlying halo2 circuits are byte-identical: `MULTI_HOP_PI_LEN`,
-  `TOTAL_PUBLIC_INPUTS`, the two slot constants (`PUB_X_BLOCK_ID = 11`,
-  `PUB_Y_BLOCK_ID = 12`), and every circuit constraint stay the same. The
-  pivot is a bundle-composition contract change; only the caller
-  (the witness walker in `bridge-event-witness::resolve_cross_thread_chain`)
-  has to reorder which endpoint feeds which slot — that walker rewrite
-  is not part of this changeset and is tracked as a follow-up on
-  `feature/multithreading`. Until the walker ships, cross-thread
-  bundles produced by the daemon still carry the old
-  `xBlockId → yBlockId` layout and will be rejected by the new
-  contract; the pipeline needs both halves to land before it can
-  round-trip end-to-end. Same-thread claims remain fully functional.
+  and `hopPublicInputs[last][HOP_END] == xBlockId`. Circuit 4 now commits
+  the Y block's own `tracked_ext_out_messages_root` in its history leaf
+  instead of reusing X's event-tree root. `EVENT_CIRCUIT_REVISION` is 6 and
+  witness JSON schema version is 3, so old Circuit-4 proving/verifying keys,
+  cached proofs, and witness JSON are incompatible. Regenerate the Circuit-4
+  keys and `BridgeWithdrawalAggregatorVerifier.{sol,bin}`, then redeploy the
+  verifier and bridge in the same upgrade; the production deployment codehash
+  pin is rotated with the artefact. `BridgeMultiHopAggregatorVerifier`
+  is unaffected by this particular Circuit-4 change. The witness builder and
+  relayer now resolve the exact `PrivateWitness.block_id_hex`, produce the
+  route in `Y → … → X` order, and pass every edge's `ref_index` through to
+  the per-hop proofs. Y is the resolver's nearest reachable thread-0 block;
+  Circuit 4 opens that block directly through its history hierarchy, without
+  scanning newer thread-0 blocks or prepending a parent chain. Same-thread
+  claims remain fully functional.
   Motivation
   and full-length analysis in
   `multithreading/DRAFT_cross_thread_reachability_issue.md` §3
@@ -94,9 +94,9 @@ assigns it when the release is tagged.
   schema impact: `HopWitnessJson.ref_index` is no longer required to be
   `≥ 1`; `bridge_event_witness::enrich::build_hop_witness` accepts
   slot 0 and succeeds the native L7 Poseidon re-check against the
-  parent-tag leaf. The cross-thread walker
-  (`resolve_cross_thread_chain`) still skips slot 0 as a performance
-  choice (same-thread parent cannot progress a cross-thread walk).
+  parent-tag leaf. The graph resolver indexes and traverses slot 0 together
+  with all cross-thread slots, and the witness builder preserves those parent
+  edges in mixed `Y → … → X` routes.
   Consequences:
     - `BridgeMultiHopProof` verifying and proving keys are rotated
       (`MULTI_HOP_CIRCUIT_REVISION` bumped to 5). On-disk
@@ -239,8 +239,8 @@ assigns it when the release is tagged.
   `sender`) now nullify to distinct values and can both pay out on the
   ETH side; pre-rotation they would have collided on the second
   withdraw as a replay.
-  The aggregated Yul grows from 20 990 B / 22 instances to 21 152 B / 23
-  instances; the reference `_calldata.bin` is 3 648 B. Redeploy
+  The current revision-6 aggregated Yul is 21 476 B / 25 instances; the
+  reference `_calldata.bin` is 3 712 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
   not decode. The extra tuple field also **changes the `withdrawByProof`
@@ -761,6 +761,11 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- `bootstrap_hermez_srs` can derive K≤20 SRS prefixes from an explicitly
+  supplied K=21 Hermez ptau when the retired public K=20 object is absent.
+  The fallback applies the same `s_g2` head guard used for K=21; the original
+  hash-anchored K=20 path remains preferred when that file is available.
 
 - The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
   rotation is covered, even if the layer cursor is still behind this N.

@@ -1926,6 +1926,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bridge-block-graph-resolver",
  "bridge-event-prove-circuit",
  "bridge-gql-fetcher",
  "bridge-prover-lib",
@@ -2034,6 +2035,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "bridge-block-graph-resolver",
  "bridge-event-prover-lib",
  "bridge-event-witness",
  "bridge-gql-fetcher",

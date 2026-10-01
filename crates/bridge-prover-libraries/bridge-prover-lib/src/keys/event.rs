@@ -63,7 +63,7 @@ pub(super) const PREFIX: &str = "event";
 /// Rev 5: `KEYGEN_SRS_K` dropped 20 → 19 to match the circuit's actual K.
 /// Old K=20 PKs on disk are invalidated and force fresh keygen at K=19
 /// (~2× smaller). See `KEYGEN_SRS_K` doc-comment for the rationale.
-pub(super) const EVENT_CIRCUIT_REVISION: u32 = 5;
+pub(super) const EVENT_CIRCUIT_REVISION: u32 = 6;
 
 /// Deterministic seed for the synthetic-witness keygen path. Any seed
 /// produces the same VK/PK shape.

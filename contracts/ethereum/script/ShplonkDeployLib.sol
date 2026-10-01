@@ -40,7 +40,7 @@ library ShplonkDeployLib {
     bytes32 internal constant LAYER_HASHES_YUL_CODEHASH =
         0xd6f78f3b014cf94b0fbc8d60e409955adf86c7f2274c84ce19b745f5bb92525e;
     bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
-        0x23e0d1a694c9b7485f81a59eefafa6c0d1865db721133b030ecd6ff86dfe48bb;
+        0xfff87aff086fd9c2ae31355ae9624a8ab1de0a76d502ab551bc024fbfaea87b5;
     /// @dev Multi-hop verifier codehash, computed from the committed
     ///      `verifiers/BridgeMultiHopAggregatorVerifier.bin` via
     ///      `script/PrintMultiHopCodehash.s.sol`. Regenerate + update this

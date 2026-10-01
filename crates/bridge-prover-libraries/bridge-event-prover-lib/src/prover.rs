@@ -25,9 +25,9 @@
 //! `y_block_id` is derived from the accompanying [`MultiHopBundleWitnessJson`]:
 //! same-thread callers pass `&MultiHopBundleWitnessJson::default()` (an empty
 //! `snarks: []`) and get `y_block_id = x_block_id = block_id_hex` with
-//! `is_same_thread = true`; cross-thread callers pass a bundle whose last
-//! snark's last hop supplies `hop_end_block_id_hex`, which becomes
-//! `y_block_id` and flips `is_same_thread = false`.
+//! `is_same_thread = true`; cross-thread callers pass a `Y → … → X` bundle.
+//! Its first hop supplies `y_block_id`; its last hop must end at the exact
+//! event `block_id_hex` (`x_block_id`).
 
 use std::convert::TryInto;
 
@@ -166,10 +166,8 @@ fn dense_chain_to_native(links: &[DenseChainLinkSer]) -> Result<Vec<DenseChainLi
 /// `anchor` are all `Some(_)` — the per-tx exporter leaves them `None` and
 /// the daemon fills them in from verifier state.
 ///
-/// `hop_bundle` supplies the cross-thread endpoint: same-thread callers pass
-/// `&MultiHopBundleWitnessJson::default()` (empty `snarks`) to get
-/// `y_block_id = x_block_id`; cross-thread callers pass a bundle whose last
-/// snark's last hop provides `hop_end_block_id_hex`.
+/// `hop_bundle` supplies the cross-thread route in `Y -> ... -> X` order.
+/// Same-thread callers pass an empty bundle and get `y_block_id = x_block_id`.
 pub fn build_proof_inputs(
     witness: &PrivateWitness,
     hop_bundle: &MultiHopBundleWitnessJson,
@@ -335,29 +333,50 @@ pub fn build_proof_inputs(
 
     // Multi-thread witness fields. `x_block_id` is always the event block;
     // `y_block_id` is either the same (same-thread claim, `hop_bundle.snarks`
-    // is empty) or the terminal endpoint of the hop chain — the last snark's
-    // last hop's `hop_end_block_id_hex`. `h07_sibling` completes the L8
+    // is empty) or the head of the hop chain. The chain tail must equal the
+    // exact event block X. `h07_sibling` completes the L8
     // opening pair — the circuit reconstructs `x_block_id` from
     // `(ext_out_root, h07_sibling)` via a depth-4 SHA opening and
     // copy-constrains equality with the witness.
     let h07_sibling = parse_hex_array::<32>("h07_sibling_hex", &witness.h07_sibling_hex)?;
+    let y_tracked_ext_out_messages_root = parse_hex_array::<32>(
+        "y_tracked_ext_out_messages_root_hex",
+        &witness.y_tracked_ext_out_messages_root_hex,
+    )?;
     let x_block_id = block_id;
     let x_block_id_fr = block_id_fr;
-    let (y_block_id, is_same_thread) = match hop_bundle.snarks.last() {
+    let (y_block_id, is_same_thread) = match hop_bundle.snarks.first() {
         None => (block_id, true),
-        Some(last_snark) => {
-            // `MultiHopProofWitnessJson.hops` is `[HopWitnessJson;
-            // H_HOPS_PER_PROOF]` with `H_HOPS_PER_PROOF >= 1`, so
-            // `hops.last()` is always `Some(_)` — the array-length invariant
-            // is enforced by the type system, not the JSON decoder.
-            let last_hop = last_snark
-                .hops
-                .last()
-                .expect("MultiHopProofWitnessJson.hops has H_HOPS_PER_PROOF>=1 elements");
+        Some(first_snark) => {
+            let first_hop = &first_snark.hops[0];
             let y = parse_hex_array::<32>(
-                "hop_bundle.snarks.last.hops.last.hop_end_block_id_hex",
-                &last_hop.hop_end_block_id_hex,
+                "hop_bundle.snarks.first.hops.first.hop_start_block_id_hex",
+                &first_hop.hop_start_block_id_hex,
             )?;
+            let mut previous_end: Option<[u8; 32]> = None;
+            for (index, snark) in hop_bundle.snarks.iter().enumerate() {
+                let hop = &snark.hops[0];
+                if !hop.is_active {
+                    bail!("hop_bundle.snarks[{index}] contains an inactive route hop");
+                }
+                let start = parse_hex_array::<32>(
+                    &format!("hop_bundle.snarks[{index}].hops[0].hop_start_block_id_hex"),
+                    &hop.hop_start_block_id_hex,
+                )?;
+                let end = parse_hex_array::<32>(
+                    &format!("hop_bundle.snarks[{index}].hops[0].hop_end_block_id_hex"),
+                    &hop.hop_end_block_id_hex,
+                )?;
+                if let Some(previous) = previous_end {
+                    if previous != start {
+                        bail!("hop bundle is discontinuous before snark {index}");
+                    }
+                }
+                previous_end = Some(end);
+            }
+            if previous_end != Some(block_id) {
+                bail!("hop bundle tail does not equal PrivateWitness.block_id_hex");
+            }
             (y, false)
         },
     };
@@ -388,6 +407,7 @@ pub fn build_proof_inputs(
         y_block_id,
         h07_sibling,
         is_same_thread,
+        y_tracked_ext_out_messages_root,
         envelope_hash,
         block_siblings,
         block_pos,

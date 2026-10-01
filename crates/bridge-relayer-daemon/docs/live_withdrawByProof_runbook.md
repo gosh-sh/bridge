@@ -93,14 +93,15 @@ this doc extends.
 > count is bounded by `N_BUNDLE_MAX = 20`. "Same-thread claim" = empty
 > `hopPublicInputs`/`hopProofs` slices, contract requires
 > `xBlockId == yBlockId`. "Cross-thread claim" = one or more hops, and
-> the contract folds `xBlockId → hop0.start → hop0.end → hop1.start → …
-> → hopLast.end → yBlockId` (`AckiNackiBridge.sol:1480–1514`). All
+> the contract requires `yBlockId == hop0.start`, folds
+> `hop0.start → hop0.end → hop1.start → … → hopLast.end`, and
+> requires `hopLast.end == xBlockId` (`AckiNackiBridge.sol:1480–1514`). All
 > in-tree callers under `crates/bridge-relayer-daemon/src/bin/relayer.rs`
 > and `crates/ackinacki-bridge/src/orchestrator.rs` now plumb the
 > hop chain through: `PartnerWithdrawalProof::hop_pis()` /
 > `hop_proofs()` decode the `hops_hex` array the driver writes into
-> `proof_event_*.json` (populated by `resolve_cross_thread_chain` +
-> `generate_multi_hop_proof`), and pass it to
+> `proof_event_*.json` (populated from the persistent block-graph resolver's
+> `Y → … → X` route and `generate_multi_hop_proof`), and pass it to
 > `submit_withdraw_bundle` alongside the outer Circuit-4 calldata.
 > Same-thread events resolve to empty vecs and take the
 > `xBlockId == yBlockId` fast path; cross-thread events (2- to 4-thread
@@ -419,8 +420,11 @@ own. To exercise the Circuit-4 multi-hop path you additionally need to:
    the giver (`config/USDCBridge.keys.json` is the mint authority).
 4. Call `burn(recipient, amount)` on the caller. The internal
    cross-thread call to the bridge fires `WithdrawalInitiated` in a
-   block on thread 1 whose parent chain traces back into thread 0 —
-   the daemon's `resolve_cross_thread_chain` walks that Leaf-7 path.
+   block on thread 1 whose reference graph is reachable from thread 0. The
+   daemon resolves the exact event block from `PrivateWitness.block_id_hex`,
+   uses the resolver's nearest reachable thread-0 block directly as Y, and
+   materialises the resulting `Y → … → X` Leaf-7 path. Circuit 4 opens Y
+   in its history hierarchy; it does not advance Y along thread-0 parents.
 
 TODO — the exact `tvm-cli` invocations for steps 1-4 are not in this
 runbook yet. Fill in on first successful E2E; the harness spawns the
@@ -1239,8 +1243,6 @@ crates/bridge-prover-libraries/
   warm cache).
 - `python/contracts/USDCBridge.shellnet.keys.json` — **NEVER** commit
   changes upstream; keys are shellnet-operator state, not repo state.
-
-
 
 
 

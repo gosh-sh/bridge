@@ -42,8 +42,8 @@ pub mod schema;
 
 use anyhow::{Context, Result};
 pub use enrich::{
-    enrich_witness, AnchorLayerMode, EnrichSummary, EnrichedWitness, HISTORY_WINDOW_SIZE,
-    THINNING_FACTOR_P,
+    build_hop_bundle, enrich_witness, enrich_witness_for_resolved_proof, AnchorLayerMode,
+    EnrichSummary, EnrichedWitness, HISTORY_WINDOW_SIZE, THINNING_FACTOR_P,
 };
 use tvm_block::{Deserializable, Message, Serializable};
 
@@ -113,6 +113,7 @@ pub fn export_from_event_boc_base64(
         // fills this in. Zero placeholder documented in
         // `schema::PrivateWitness::h07_sibling_hex`.
         h07_sibling_hex: hex::encode([0u8; 32]),
+        y_tracked_ext_out_messages_root_hex: hex::encode([0u8; 32]),
     })
 }
 

@@ -91,10 +91,11 @@ the store lazily during a cold historical search.
 separate anchor (Y) and target (X) proof blocks plus one canonical source block
 per hop. Before returning, the resolver checks every
 `source.proof_block_refs[ref_index] == edge.to`, including parent slot `0`.
-Selecting a thread-0 block covered by the verifier's active history roots and
-building the corresponding Merkle openings require `BridgeState`. Those steps
-belong to the witness/prover integration and are deliberately outside this
-crate.
+Checking whether the returned thread-0 anchor is covered by the verifier's
+active history roots and building the corresponding Merkle openings require
+`BridgeState`. Those steps belong to the witness/prover integration and are
+deliberately outside this crate; the integration uses the returned anchor
+directly rather than advancing to a newer thread-0 block.
 
 The default features are `graphql`, `sqlite`, and `cli`. Disable default
 features for a provider-neutral library build, or enable `test-utils` for the

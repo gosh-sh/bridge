@@ -26,6 +26,7 @@
 //! are now internal helpers with a stable public entrypoint.
 
 use anyhow::{bail, Context, Result};
+use bridge_block_graph_resolver::ResolvedBlockProof;
 use bridge_event_prove_circuit::multi_hop_witness::{
     block_merkle_leaf_proof, proof_block_ref_inner_path_native, ref_leaf_hash_native,
     verify_block_merkle_leaf_proof, verify_proof_block_ref_inner_path, N_BUNDLE_MAX,
@@ -100,6 +101,13 @@ pub struct EnrichedWitness {
     pub summary: EnrichSummary,
 }
 
+#[derive(Clone, Copy)]
+struct AnchorBlockMaterial {
+    height: u64,
+    envelope_hash: [u8; 32],
+    tracked_ext_out_messages_root: [u8; 32],
+}
+
 /// Enrich a partial `PrivateWitness` (from the hermetic exporter) with
 /// daemon-side fields — the core function the standalone binary
 /// `bridge-event-witness-builder` and any in-process orchestrator both
@@ -119,7 +127,107 @@ pub struct EnrichedWitness {
 pub async fn enrich_witness(
     gql: &GqlClient,
     bridge_state: &BridgeState,
+    partial: PrivateWitness,
+    anchor_mode: AnchorLayerMode,
+    i_know_the_wait: bool,
+) -> Result<EnrichedWitness> {
+    let x = fetch_exact_event_block(gql, &partial).await?;
+    if x.thread_id != ThreadIdentifier::default() {
+        bail!("non-zero-thread event requires enrich_witness_for_resolved_proof");
+    }
+    let anchor = AnchorBlockMaterial {
+        height: x.height,
+        envelope_hash: x.envelope_hash,
+        tracked_ext_out_messages_root: x.tracked_ext_out_messages_root,
+    };
+    enrich_witness_inner(
+        gql,
+        bridge_state,
+        partial,
+        x,
+        anchor,
+        anchor_mode,
+        i_know_the_wait,
+    )
+    .await
+}
+
+/// Enrich an event against the Y anchor selected by the graph resolver and
+/// build its `Y -> ... -> X` hop bundle.
+pub async fn enrich_witness_for_resolved_proof(
+    gql: &GqlClient,
+    bridge_state: &BridgeState,
+    partial: PrivateWitness,
+    proof: &ResolvedBlockProof,
+    anchor_mode: AnchorLayerMode,
+    i_know_the_wait: bool,
+) -> Result<(EnrichedWitness, MultiHopBundleWitnessJson)> {
+    let expected_x = parse_hex32("block_id_hex", &partial.block_id_hex)?;
+    if proof.path.target.as_bytes() != &expected_x {
+        bail!(
+            "resolver target {} does not equal PrivateWitness.block_id_hex {}",
+            proof.path.target,
+            partial.block_id_hex
+        );
+    }
+    if proof.target_block.block.block_id != proof.path.target {
+        bail!("resolver target proof block does not match route target");
+    }
+    if proof.anchor_block.block.block_id != proof.path.anchor
+        || !proof.anchor_block.block.thread_id.is_zero()
+    {
+        bail!("resolver anchor proof block is not the route's thread-0 anchor");
+    }
+    let x = fetch_exact_event_block(gql, &partial).await?;
+    let anchor = AnchorBlockMaterial {
+        height: proof.anchor_block.block.height,
+        envelope_hash: proof.anchor_block.envelope_hash,
+        tracked_ext_out_messages_root: proof.anchor_block.tracked_ext_out_messages_root,
+    };
+    let enriched = enrich_witness_inner(
+        gql,
+        bridge_state,
+        partial,
+        x,
+        anchor,
+        anchor_mode,
+        i_know_the_wait,
+    )
+    .await?;
+    let bundle = build_hop_bundle(proof)?;
+    Ok((enriched, bundle))
+}
+
+async fn fetch_exact_event_block(
+    gql: &GqlClient,
+    partial: &PrivateWitness,
+) -> Result<GqlProofBlock> {
+    let expected = parse_hex32("block_id_hex", &partial.block_id_hex)?;
+    let block = gql
+        .query_proof_block_by_id(&hex::encode(expected))
+        .await
+        .context("fetching exact event block from PrivateWitness.block_id_hex")?;
+    if block.block_id != expected {
+        bail!("GraphQL returned a different block for PrivateWitness.block_id_hex");
+    }
+    if block.height != partial.block_seq_no {
+        bail!(
+            "exact event block {} has height {}, but PrivateWitness.block_seq_no is {}",
+            partial.block_id_hex,
+            block.height,
+            partial.block_seq_no
+        );
+    }
+    Ok(block)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enrich_witness_inner(
+    gql: &GqlClient,
+    bridge_state: &BridgeState,
     mut partial: PrivateWitness,
+    event_block: GqlProofBlock,
+    anchor_block: AnchorBlockMaterial,
     anchor_mode: AnchorLayerMode,
     i_know_the_wait: bool,
 ) -> Result<EnrichedWitness> {
@@ -142,6 +250,7 @@ pub async fn enrich_witness(
     );
 
     let event_seq = partial.block_seq_no;
+    let anchor_seq = anchor_block.height;
     let event_repr_hash = parse_hex32("event_message_hash_hex", &partial.event_message_hash_hex)?;
     let dapp = parse_hex32(
         "block_context.account_dapp_id_hex",
@@ -159,7 +268,7 @@ pub async fn enrich_witness(
 
     // Resolve anchor layer (auto probe or explicit passthrough).
     let (anchor_layer, escalated_from_auto) =
-        resolve_anchor_layer(gql, bridge_state, event_seq, anchor_mode)
+        resolve_anchor_layer(gql, bridge_state, anchor_seq, anchor_mode)
             .await
             .context("resolving anchor layer")?;
     info!(
@@ -177,8 +286,7 @@ pub async fn enrich_witness(
     )?;
 
     // events_tree_proof.
-    let events_tree_proof = build_events_tree_proof(gql, event_seq, &dapp, &acc, &event_repr_hash)
-        .await
+    let events_tree_proof = build_events_tree_proof(&event_block, &dapp, &acc, &event_repr_hash)
         .context("building events_tree_proof failed")?;
     info!(
         "events_tree_proof: position={}, depth={}",
@@ -186,14 +294,14 @@ pub async fn enrich_witness(
         events_tree_proof.siblings_hex.len(),
     );
 
-    // H_e (event's L1 key block).
+    // H_y (Y anchor block's L1 key block).
     let w = HISTORY_WINDOW_SIZE;
     let p = THINNING_FACTOR_P;
-    let key_block_seq = ((event_seq / w) * w) + w;
+    let key_block_seq = ((anchor_seq / w) * w) + w;
     let window_start = key_block_seq - w;
-    let block_offset_in_window = event_seq - window_start;
+    let block_offset_in_window = anchor_seq - window_start;
     info!(
-        "H_e={} (event's W-aligned KB, window=[{}..{}), offset={})",
+        "H_y={} (Y block's W-aligned KB, window=[{}..{}), offset={})",
         key_block_seq, window_start, key_block_seq, block_offset_in_window,
     );
 
@@ -212,7 +320,7 @@ pub async fn enrich_witness(
     // Event-anchor chain (L1 horizontal or L(n≥2) vertical).
     let chain_result = real_chain_builder::build_event_anchor_chain(
         gql,
-        event_seq,
+        anchor_seq,
         l1_root_self_computed,
         anchor_layer,
         w,
@@ -229,11 +337,11 @@ pub async fn enrich_witness(
     if num_active > MAX_CHAIN_LEN {
         bail!(
             "internal: {} active chain links exceed MAX_CHAIN_LEN={} (anchor_layer=L{}, \
-             event_seq={}, W={}, P={}, anchor_kb={})",
+             anchor_seq={}, W={}, P={}, anchor_kb={})",
             num_active,
             MAX_CHAIN_LEN,
             anchor_layer,
-            event_seq,
+            anchor_seq,
             w,
             p,
             chain_result.anchor_kb_seqno,
@@ -342,12 +450,6 @@ pub async fn enrich_witness(
     // 2608f686e); the exporter cannot know this because it has only the
     // ExtOut BOC. Older blocks without `block_merkle_tree_leaves` fail
     // fast rather than silently producing a garbage witness.
-    let event_block = gql
-        .query_proof_block_by_seqno(event_seq)
-        .await
-        .with_context(|| {
-            format!("fetching event block seq={event_seq} for h07_sibling derivation")
-        })?;
     let leaves = event_block.block_merkle_tree_leaves.ok_or_else(|| {
         anyhow::anyhow!(
             "event block seq={} does not expose block_merkle_tree_leaves — node predates the \
@@ -358,6 +460,9 @@ pub async fn enrich_witness(
     })?;
     let h07_sibling = BlockIdMerkleTree::from_leaves(leaves).h0_7;
     partial.h07_sibling_hex = hex::encode(h07_sibling);
+    partial.block_context.envelope_hash_hex = hex::encode(anchor_block.envelope_hash);
+    partial.y_tracked_ext_out_messages_root_hex =
+        hex::encode(anchor_block.tracked_ext_out_messages_root);
     info!(
         "h07_sibling derived from block_merkle_tree_leaves: {}",
         partial.h07_sibling_hex,
@@ -561,9 +666,8 @@ pub(crate) fn parse_hex32(label: &str, s: &str) -> Result<[u8; 32]> {
 /// Fetch the event's block envelope, rebuild the same Poseidon dense Merkle
 /// tree the node uses for `tracked_ext_out_messages`, locate the leaf for
 /// this event, and return its proof in schema form.
-pub(crate) async fn build_events_tree_proof(
-    gql: &GqlClient,
-    event_seq: u64,
+pub(crate) fn build_events_tree_proof(
+    block: &GqlProofBlock,
     dapp: &[u8; 32],
     acc: &[u8; 32],
     event_repr_hash: &[u8; 32],
@@ -571,11 +675,6 @@ pub(crate) async fn build_events_tree_proof(
     use bridge_prover_lib::poseidon_dense::{
         compute_ext_message_leaf_hash, dense_merkle_proof, PoseidonHasher,
     };
-
-    let block = gql
-        .query_proof_block_by_seqno(event_seq)
-        .await
-        .with_context(|| format!("fetching proof block for event block seq={event_seq}"))?;
 
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     for (account_routing, messages) in block.tracked_ext_out_messages.iter() {
@@ -586,8 +685,9 @@ pub(crate) async fn build_events_tree_proof(
     }
     if leaves.is_empty() {
         bail!(
-            "block seq={event_seq} has no tracked_ext_out_messages — cannot have emitted a \
-             WithdrawalInitiated event there"
+            "event block {} has no tracked_ext_out_messages — cannot have emitted a \
+             WithdrawalInitiated event there",
+            hex::encode(block.block_id)
         );
     }
 
@@ -597,9 +697,9 @@ pub(crate) async fn build_events_tree_proof(
         .position(|l| *l == target_leaf)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "target event leaf {} not found in block seq={}'s tracked_ext_out_messages",
+                "target event leaf {} not found in block {}'s tracked_ext_out_messages",
                 hex::encode(target_leaf),
-                event_seq,
+                hex::encode(block.block_id),
             )
         })?;
 
@@ -702,199 +802,11 @@ pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Re
     Ok(block.height)
 }
 
-/// Detect whether the event's block is on the same thread as the anchor
-/// (currently `DEFAULT_THREAD_ID` = thread 0 for the bridge cut) and, if
-/// cross-thread, walk `proof_block_refs` back to a same-thread ancestor —
-/// emitting a `MultiHopBundleWitnessJson` the multi-hop verifier consumes.
-///
-/// Returns `MultiHopBundleWitnessJson::default()` (i.e. `snarks = []`) for
-/// same-thread claims — the signal the prover uses to short-circuit
-/// `y_block_id = x_block_id`.
-///
-/// # Cross-thread walk (Direction (a))
-///
-/// Starting from `event_block` (on some non-default thread), the walker
-/// repeatedly picks a `proof_block_refs[i]` with `i >= 1` that leads to a
-/// strictly different thread, preferring the default thread when it appears
-/// among the candidates. Slot 0 (`parent_block_id`) is a valid hop edge
-/// from the circuit's point of view but points at the same thread as the
-/// current block, so it cannot progress a cross-thread walk and is skipped
-/// here. Because `refs` on Acki Nacki only ever point at strictly older
-/// blocks, the walk emits snarks in newest→oldest order — matching
-/// Direction (a) of the cross-thread reachability model (event `X` newer on
-/// thread `t`; anchor `Y` older on thread 0). Each step produces one
-/// `MultiHopProofWitnessJson` snark carrying:
-///
-/// * the SHA-256 depth-4 L7 opening of `block_merkle_tree_leaves[7]`
-///   (`proof_block_refs_root`) against the current block's `block_id`
-///   (`block_merkle_leaf_proof` — mirrors `gql_proof.rs::block_merkle_leaf_proof`);
-/// * the Poseidon dense-merkle inner path of the chosen
-///   `proof_block_refs[ref_index]` against L7
-///   (`proof_block_ref_inner_path_native` — mirrors
-///   `history-proof::dense_merkle_proof` with the byte-flat sponge convention);
-/// * the clear-byte endpoints — Direction (a):
-///   `hop_start_block_id = block_id` (the *current* block being opened,
-///   newer) and `hop_end_block_id = refs[ref_index]` (the *older* ref
-///   extracted from that block).
-///
-/// Both openings are re-verified natively before the witness is shipped —
-/// a mismatched leaf or wrong `refs_tree_depth` fails here instead of
-/// blowing up in-circuit.
-///
-/// The walk terminates when the next referenced block is on the default
-/// thread. The emitted `snarks` are already in newest→oldest order — no
-/// reverse — so `snarks[0].hops[0].hop_start` = event block (`X`) and
-/// `snarks[K-1].hops.last().hop_end` = default-thread ancestor (`Y`). The
-/// circuit's `x_block_id` / `y_block_id` public inputs bind to those two
-/// endpoints.
-///
-/// # Errors
-///
-/// * `event_block` on a non-default thread with `proof_block_refs.len() < 2`
-///   — no cross-thread ref to hop through.
-/// * No ref leads to a different thread (walk is stuck).
-/// * More than `N_BUNDLE_MAX = 20` hops needed — over the prototype cap.
-/// * A referenced block is missing `block_merkle_tree_leaves` (very old
-///   blocks that predate the node exposing the field).
-/// * A native re-check of the L7 SHA-256 or Poseidon opening fails —
-///   chain-side data inconsistency that the prover would surface downstream.
-pub async fn resolve_cross_thread_chain(
-    gql: &GqlClient,
-    event_seq: u64,
-) -> Result<MultiHopBundleWitnessJson> {
-    let event_block = gql
-        .query_proof_block_by_seqno(event_seq)
-        .await
-        .with_context(|| format!("fetching event block seq={event_seq} for thread detection"))?;
-
-    // Compare thread_id via its canonical 34-byte identity. The default
-    // (all-zero) thread is what the bridge anchors to today.
-    let default_thread = ThreadIdentifier::default();
-    if event_block.thread_id == default_thread {
-        info!(
-            "event block seq={} is on the default thread — same-thread claim, empty bundle",
-            event_seq,
-        );
-        return Ok(MultiHopBundleWitnessJson::default());
-    }
-
-    info!(
-        event_seq,
-        thread = %event_block.thread_id,
-        "event block is on a non-default thread — walking proof_block_refs back to thread 0",
-    );
-
-    let mut snarks: Vec<MultiHopProofWitnessJson> = Vec::new();
-    let mut cur_block = event_block;
-
-    loop {
-        let (ref_index, next_block) = pick_next_hop(gql, &cur_block, &default_thread)
-            .await
-            .with_context(|| {
-                format!(
-                    "picking next hop from block {} on thread {}",
-                    hex::encode(cur_block.block_id),
-                    cur_block.thread_id
-                )
-            })?;
-
-        let hop = build_hop_witness(&cur_block, ref_index)?;
-        snarks.push(MultiHopProofWitnessJson {
-            hops: [hop],
-        });
-
-        if next_block.thread_id == default_thread {
-            info!(
-                hops = snarks.len(),
-                terminal_block = %hex::encode(next_block.block_id),
-                "L7 walk reached the default thread",
-            );
-            break;
-        }
-        if snarks.len() >= N_BUNDLE_MAX {
-            bail!(
-                "cross-thread chain from event seq={} exceeds N_BUNDLE_MAX = {} hops \
-                 without reaching the default thread",
-                event_seq,
-                N_BUNDLE_MAX
-            );
-        }
-        cur_block = next_block;
-    }
-
-    // Direction (a): snarks are already newest→oldest. snarks[0].hop_start =
-    // event block (== x_block_id), snarks[K-1].hop_end = default-thread
-    // ancestor (== y_block_id). Cross-hop continuity in the circuit is
-    // `snarks[i].hop_end == snarks[i+1].hop_start` — the older ref extracted
-    // by hop i is the current block opened by hop i+1.
-    Ok(MultiHopBundleWitnessJson {
-        snarks,
-    })
-}
-
-/// Pick the next hop from `cur`. Scans `cur.proof_block_refs[1..]` in order,
-/// fetches each referenced block, and returns:
-///
-/// * the first ref whose block is on `default_thread` (preferred terminus), or
-/// * the first ref whose block is on a strictly different thread from `cur`
-///   (progresses the walk), or
-/// * an error if no such ref exists.
-///
-/// Slot 0 (`parent_block_id`) is a valid hop edge from the circuit's point
-/// of view, but it points at the same thread as `cur` by construction and
-/// therefore cannot provide cross-thread progress — this walker skips it as
-/// a cross-thread-specific performance choice (saves one GQL round-trip per
-/// block). Future walkers that need same-thread hops may call
-/// `build_hop_witness(cur, 0)` directly.
-async fn pick_next_hop(
-    gql: &GqlClient,
-    cur: &GqlProofBlock,
-    default_thread: &ThreadIdentifier,
-) -> Result<(u32, GqlProofBlock)> {
-    if cur.proof_block_refs.len() < 2 {
-        bail!(
-            "block {} on thread {} has no cross-thread refs \
-             (proof_block_refs.len() = {}); cannot hop",
-            hex::encode(cur.block_id),
-            cur.thread_id,
-            cur.proof_block_refs.len()
-        );
-    }
-
-    let mut fallback: Option<(u32, GqlProofBlock)> = None;
-    for (i, ref_id) in cur.proof_block_refs.iter().enumerate().skip(1) {
-        let ref_hex = hex::encode(ref_id);
-        let ref_block = gql
-            .query_proof_block_by_id(&ref_hex)
-            .await
-            .with_context(|| {
-                format!(
-                    "fetch ref block {ref_hex} (slot {i} of block {})",
-                    hex::encode(cur.block_id)
-                )
-            })?;
-        if ref_block.thread_id == *default_thread {
-            return Ok((i as u32, ref_block));
-        }
-        if ref_block.thread_id != cur.thread_id && fallback.is_none() {
-            fallback = Some((i as u32, ref_block));
-        }
-    }
-    fallback.ok_or_else(|| {
-        anyhow::anyhow!(
-            "block {} on thread {} has no ref leading to a different thread — L7 walk stuck \
-             ({} refs scanned)",
-            hex::encode(cur.block_id),
-            cur.thread_id,
-            cur.proof_block_refs.len() - 1,
-        )
-    })
-}
-
 /// Build one `HopWitnessJson` opening `cur.proof_block_refs[ref_index]`
 /// against `cur.block_id` via the L7 SHA-256 leaf proof + Poseidon dense
 /// merkle inner path. Both openings are re-verified natively so a
 /// malformed chain payload fails here rather than in-circuit.
+#[cfg(test)]
 fn build_hop_witness(cur: &GqlProofBlock, ref_index: u32) -> Result<HopWitnessJson> {
     let leaves = cur.block_merkle_tree_leaves.ok_or_else(|| {
         anyhow::anyhow!(
@@ -903,46 +815,54 @@ fn build_hop_witness(cur: &GqlProofBlock, ref_index: u32) -> Result<HopWitnessJs
         )
     })?;
 
+    build_hop_witness_from_parts(cur.block_id, &cur.proof_block_refs, leaves, ref_index)
+}
+
+fn build_hop_witness_from_parts(
+    block_id: [u8; 32],
+    refs: &[[u8; 32]],
+    leaves: [[u8; 32]; 16],
+    ref_index: u32,
+) -> Result<HopWitnessJson> {
     let idx = ref_index as usize;
-    if idx >= cur.proof_block_refs.len() {
+    if idx >= refs.len() {
         bail!(
             "ref_index {} out of range (proof_block_refs.len() = {})",
             idx,
-            cur.proof_block_refs.len()
+            refs.len()
         );
     }
 
     let l7_sibling_path = block_merkle_leaf_proof(&leaves, 7);
-    let (inner_path, refs_tree_depth) =
-        proof_block_ref_inner_path_native(&cur.proof_block_refs, idx);
+    let (inner_path, refs_tree_depth) = proof_block_ref_inner_path_native(refs, idx);
 
     // Defense-in-depth: re-verify both openings before shipping the witness.
     let l7_leaf = leaves[7];
-    if !verify_block_merkle_leaf_proof(&cur.block_id, &l7_leaf, 7, &l7_sibling_path) {
+    if !verify_block_merkle_leaf_proof(&block_id, &l7_leaf, 7, &l7_sibling_path) {
         bail!(
-            "block {}: L7 SHA-256 opening does not verify against block_id — \
-             chain data inconsistent",
-            hex::encode(cur.block_id)
+            "block {}: L7 SHA-256 opening does not verify against block_id — chain data \
+             inconsistent",
+            hex::encode(block_id)
         );
     }
-    let ref_leaf = ref_leaf_hash_native(idx, &cur.proof_block_refs[idx]);
+    let ref_leaf = ref_leaf_hash_native(idx, &refs[idx]);
     if !verify_proof_block_ref_inner_path(&l7_leaf, &ref_leaf, idx, &inner_path, refs_tree_depth) {
         bail!(
-            "block {}: L7 Poseidon opening at ref_index {} does not verify — \
-             chain data inconsistent",
-            hex::encode(cur.block_id),
+            "block {}: L7 Poseidon opening at ref_index {} does not verify — chain data \
+             inconsistent",
+            hex::encode(block_id),
             idx
         );
     }
 
-    // Direction (a): start = current (newer) block; end = older ref.
-    let hop_start_block_id = cur.block_id;
-    let hop_end_block_id = cur.proof_block_refs[idx];
+    // A Y→X route follows refs from the current/newer block to an older block.
+    let hop_start_block_id = block_id;
+    let hop_end_block_id = refs[idx];
 
     let block_json = BlockWitnessJson {
-        block_id_hex: hex::encode(cur.block_id),
+        block_id_hex: hex::encode(block_id),
         block_merkle_tree_leaves_hex: std::array::from_fn(|i| hex::encode(leaves[i])),
-        proof_block_refs_hex: cur.proof_block_refs.iter().map(hex::encode).collect(),
+        proof_block_refs_hex: refs.iter().map(hex::encode).collect(),
     };
 
     Ok(HopWitnessJson {
@@ -957,23 +877,82 @@ fn build_hop_witness(cur: &GqlProofBlock, ref_index: u32) -> Result<HopWitnessJs
     })
 }
 
+/// Convert a resolver proof in canonical `Y -> ... -> X` order into the
+/// one-hop-per-snark JSON consumed by the multi-hop prover.
+pub fn build_hop_bundle(proof: &ResolvedBlockProof) -> Result<MultiHopBundleWitnessJson> {
+    if proof.path.hops.is_empty() {
+        if proof.path.anchor != proof.path.target {
+            bail!("zero-hop route has different anchor and target");
+        }
+        return Ok(MultiHopBundleWitnessJson::default());
+    }
+    if proof.path.hops.len() > N_BUNDLE_MAX {
+        bail!(
+            "resolved route has {} hops, exceeding N_BUNDLE_MAX={N_BUNDLE_MAX}",
+            proof.path.hops.len()
+        );
+    }
+    if proof.path.hops.len() != proof.hop_blocks.len() {
+        bail!(
+            "resolved route has {} edges but {} source blocks",
+            proof.path.hops.len(),
+            proof.hop_blocks.len()
+        );
+    }
+
+    let mut snarks = Vec::with_capacity(proof.path.hops.len());
+    for (index, (edge, source)) in proof.path.hops.iter().zip(&proof.hop_blocks).enumerate() {
+        if source.block.block_id != edge.from {
+            bail!("hop {index} source block does not match edge origin");
+        }
+        if source.block.refs.get(edge.ref_index as usize).copied() != Some(edge.to) {
+            bail!("hop {index} ref_index does not select edge destination");
+        }
+        if index == 0 && edge.from != proof.path.anchor {
+            bail!("first hop does not start at resolver anchor");
+        }
+        if index > 0 && proof.path.hops[index - 1].to != edge.from {
+            bail!("hop {index} is not continuous with previous hop");
+        }
+        let hop = build_hop_witness_from_parts(
+            *source.block.block_id.as_bytes(),
+            &source
+                .block
+                .refs
+                .iter()
+                .map(|id| *id.as_bytes())
+                .collect::<Vec<_>>(),
+            source.block_merkle_tree_leaves,
+            edge.ref_index,
+        )?;
+        snarks.push(MultiHopProofWitnessJson {
+            hops: [hop],
+        });
+    }
+    if proof.path.hops.last().map(|edge| edge.to) != Some(proof.path.target) {
+        bail!("last hop does not end at resolver target");
+    }
+    Ok(MultiHopBundleWitnessJson {
+        snarks,
+    })
+}
+
 #[cfg(test)]
 mod cross_thread_tests {
-    //! Pure-Rust tests for `build_hop_witness`. The GQL-driven
-    //! `resolve_cross_thread_chain` needs a live `GqlClient`, so it is
-    //! covered by the daemon integration tests (see
-    //! `bridge-relayer-daemon/src/withdraw_e2e`) — here we only pin the
-    //! byte-flat witness assembly against the same primitives the circuit
-    //! uses.
+    //! Pure-Rust tests for converting resolver routes into byte-flat circuit
+    //! witnesses. GraphQL transport is covered by `bridge-gql-fetcher`.
+    use std::collections::BTreeMap;
+
+    use bridge_block_graph_resolver::{
+        BlockEdge, BlockId, BlockNode, ProofBlock, ResolvedBlockProof, ResolvedPath, ThreadId,
+    };
     use bridge_event_prove_circuit::multi_hop_witness::{
         block_merkle_root, proof_block_refs_root_native, BLOCK_MERKLE_LEAF_COUNT,
         MAX_PROOF_BLOCK_REFS_DEPTH,
     };
-    use bridge_gql_fetcher::gql_client::GqlProofBlock;
-    use bridge_gql_fetcher::types::ThreadIdentifier;
-    use std::collections::BTreeMap;
+    use bridge_gql_fetcher::{gql_client::GqlProofBlock, types::ThreadIdentifier};
 
-    use super::build_hop_witness;
+    use super::{build_hop_bundle, build_hop_witness};
 
     /// Assemble a synthetic `GqlProofBlock` whose L7 leaf equals the
     /// Poseidon root over `refs` and whose `block_id` equals the SHA-256
@@ -1012,6 +991,85 @@ mod cross_thread_tests {
         }
     }
 
+    fn resolver_proof(block: &GqlProofBlock) -> ProofBlock {
+        ProofBlock {
+            block: BlockNode {
+                block_id: BlockId::from_bytes(block.block_id),
+                thread_id: ThreadId::from_bytes(*block.thread_id.as_bytes()),
+                height: block.height,
+                refs: block
+                    .proof_block_refs
+                    .iter()
+                    .copied()
+                    .map(BlockId::from_bytes)
+                    .collect(),
+            },
+            gen_utime_ms: 0,
+            envelope_hash: block.envelope_hash,
+            tracked_ext_out_messages_root: block.tracked_ext_out_messages_root,
+            history_proofs: block.history_proofs.clone(),
+            block_merkle_tree_leaves: block.block_merkle_tree_leaves.unwrap(),
+        }
+    }
+
+    #[test]
+    fn resolver_route_becomes_y_to_x_bundle_with_parent_slot() {
+        let x = [0x55; 32];
+        let b0 = synth_block(0, vec![[0x44; 32], x]);
+        let b1 = synth_block(0, vec![b0.block_id]);
+        let b0_proof = resolver_proof(&b0);
+        let b1_proof = resolver_proof(&b1);
+        let x_proof = ProofBlock {
+            block: BlockNode {
+                block_id: BlockId::from_bytes(x),
+                thread_id: ThreadId::from_bytes([1; 34]),
+                height: 1,
+                refs: vec![],
+            },
+            gen_utime_ms: 0,
+            envelope_hash: [0; 32],
+            tracked_ext_out_messages_root: [0; 32],
+            history_proofs: BTreeMap::new(),
+            block_merkle_tree_leaves: [[0; 32]; 16],
+        };
+        let proof = ResolvedBlockProof {
+            path: ResolvedPath {
+                anchor: b1_proof.block.block_id,
+                anchor_height: 2,
+                target: x_proof.block.block_id,
+                hops: vec![
+                    BlockEdge {
+                        from: b1_proof.block.block_id,
+                        to: b0_proof.block.block_id,
+                        ref_index: 0,
+                    },
+                    BlockEdge {
+                        from: b0_proof.block.block_id,
+                        to: x_proof.block.block_id,
+                        ref_index: 1,
+                    },
+                ],
+                graph_version: 1,
+            },
+            anchor_block: b1_proof.clone(),
+            target_block: x_proof,
+            hop_blocks: vec![b1_proof, b0_proof],
+        };
+
+        let bundle = build_hop_bundle(&proof).unwrap();
+        assert_eq!(bundle.snarks.len(), 2);
+        assert_eq!(bundle.snarks[0].hops[0].ref_index, 0);
+        assert_eq!(bundle.snarks[1].hops[0].ref_index, 1);
+        assert_eq!(
+            bundle.snarks[0].hops[0].hop_start_block_id_hex,
+            proof.path.anchor.to_string()
+        );
+        assert_eq!(
+            bundle.snarks[1].hops[0].hop_end_block_id_hex,
+            proof.path.target.to_string()
+        );
+    }
+
     #[test]
     fn hop_witness_roundtrips_with_native_openings() {
         // 3 refs: slot 0 = parent (valid hop edge, exercised by
@@ -1023,14 +1081,17 @@ mod cross_thread_tests {
 
         assert!(hop.is_active);
         assert_eq!(hop.ref_index, 2);
-        // Direction (a): start = current (newer) block; end = older ref.
+        // A Y→X route follows refs from the current/newer block to an older block.
         assert_eq!(hop.hop_start_block_id_hex, hex::encode(block.block_id));
         assert_eq!(hop.hop_end_block_id_hex, hex::encode(refs[2]));
         // refs.len() = 3 → next_power_of_two = 4 → depth = 2.
         assert_eq!(hop.refs_tree_depth, 2);
         // Padded siblings beyond refs_tree_depth are zero.
         for i in (hop.refs_tree_depth as usize)..MAX_PROOF_BLOCK_REFS_DEPTH {
-            assert_eq!(hop.proof_block_ref_inner_path_hex[i], hex::encode([0u8; 32]));
+            assert_eq!(
+                hop.proof_block_ref_inner_path_hex[i],
+                hex::encode([0u8; 32])
+            );
         }
     }
 

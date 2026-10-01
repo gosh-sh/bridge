@@ -107,8 +107,8 @@ Five executables, two long-running daemons that own the state files, plus three 
 | Binary | Reads | Writes | Touches daemon state / GQL? |
 |---|---|---|---|
 | `bridge-event-private-witness-export` | Event BOC + block context from CLI flags only. | `partial.json` (decoded `WithdrawalInitiated` + `ext_msg_leaf` ingredients). | **No.** Pure local decode — safe to run before the enclosing bundle is even proved. |
-| `bridge-event-witness-builder` | `partial.json`, **`state/verifier_state.json`** (for the anchor layer hash), GQL (for `tracked_ext_out_messages` and the L1 tree shape). | `witness.json` — the complete Circuit-4 `PrivateWitness` (`events_tree_proof`, `block_tree_proof`, `anchor`). | **Yes — the only one of the three.** Glue step between the live world and the prover. |
-| `bridge-event-halo2-prover` | `witness.json` + `./params/` (SRS + Circuit 4 PK/VK). | `proofs/proof_event_NNN.json` (self-verified before exit). | **No.** Pure cryptographic step — replayable offline against a frozen `witness.json`. |
+| `bridge-event-witness-builder` | `partial.json`, **`state/verifier_state.json`**, GQL, and its persistent `block-graph-resolver.sqlite`. The event target is exactly `PrivateWitness.block_id_hex`. | `witness.json` plus a sibling `witness.hops.json` for cross-thread events. The latter is the ordered `Y → … → X` route, including parent edges (`ref_index = 0`). | **Yes — the only one of the three.** Resolves the graph route and builds the history/event openings. |
+| `bridge-event-halo2-prover` | `witness.json`, optional `--hops-fixture witness.hops.json`, and `./params/` (SRS + Circuit 4 and multi-hop PK/VK). | `proofs/proof_event_NNN.json` (self-verified before exit), including per-hop proofs for a cross-thread event. | **No.** Pure cryptographic step — replayable offline against frozen witness files. |
 
 **Why three event binaries instead of one.** Each step has a different failure mode and a different dependency surface, so isolating them keeps the deterministic pieces deterministic:
 
@@ -444,7 +444,7 @@ Phases (`[T+MM:SS]`):
 2. Send `WithdrawalInitiated` via `TokenBridge`.
 3. Poll GraphQL for the ExtOut message; capture `(block_seq_no, block_height, envelope_hash, account_dapp_id, account_id)`.
 4. Compute `thinned_kb_seq = ((event_seq // (W·P)) + 1) · W·P` and wait for the verifier state to advance to it.
-5. Run `bridge-event-private-witness-export` → `bridge-event-witness-builder` → `bridge-event-halo2-prover --fixture <enriched.json> --out-dir proofs/`.
+5. Run `bridge-event-private-witness-export` → `bridge-event-witness-builder` → `bridge-event-halo2-prover --fixture <enriched.json> [--hops-fixture <hops.json>] --out-dir proofs/`. The Python helper passes `hops_out` automatically for cross-thread events.
 6. Wait for `proofs/proof_event_NNN.result.json` from the verifier daemon.
 7. Assert `verified == true && anchor_matched == true && proof_valid == true`. Exit 0.
 
@@ -714,10 +714,10 @@ Since v6 (2026-07-23), `block_id_hex` carries the **raw 32-byte BE chain hash** 
 
 ```json
 {
-  "schema_version": 1,
   "seq_no": 0,
   "proof_hex": "…",
-  "public_instances_hex": ["…", … (10 entries; slot 9 = final_root)],
+  "public_instances_hex": ["…", … (13 entries; slots 11/12 = xBlockId/yBlockId)],
+  "hops": [{"proof_hex":"…","public_instances_hex":["hopStart","hopEnd"]}],
   "self_verified": true,
   "event_proof_gen_ms": 152166
 }
@@ -823,19 +823,15 @@ Pending items the current production path is missing — none block today's E2E 
 
 Likewise not on the daemon path yet. Circuit 3 proves that applying the on-chain "effective changes" to the old BK-set Poseidon commitment (L2) yields the new one (L3), both sitting under `H_1` of the block-id Merkle tree. K=16, public instances `[block_id, poseidon_old, poseidon_new]`. Must run **on every key block whose BK set differs from the previous one** — otherwise the verifier's `stored_bk_set_commitment` cannot advance and the next Circuit 1A/1B will fail on commitment mismatch. Wiring: detect BK-set delta in the prover daemon, generate the proof alongside the 1A+2 bundle, extend the verifier-daemon to consume it and roll `storedBkSetCommitment` forward.
 
-### 2. Event anchoring beyond nearest L1
+### 2. Event-anchor policy
 
-**Current state — confirmed.** `bridge-event-witness-builder` hard-codes `layer_idx = 0` and rejects anything else (`main.rs` line ~223). The Python orchestrator's `target_seq = thinned_kb_seq` math is the matching client-side consequence: a withdrawal must wait for the **next thinned L1 key block past the event** to be relayed, then is bound directly to that L1 layer hash. `bridge-event-prover-lib` and `bridge-prover-lib` together produce a Circuit 4 witness whose `dense_chain` carries **only inactive padding** to `MAX_CHAIN_LEN = 11` — i.e. zero hops up to a higher layer; the L1 root *is* the anchor.
-
-What this means in practice:
-- **Liveness coupling.** A user withdrawal cannot be proved until the bundle covering its key block has been relayed (one bundle = `W·P` blocks, 1024 at W=128 and the current P=8, ≈ minutes on devnet, longer on shellnet).
-- **No cross-layer compression.** Even when an event sits inside an L2/L3/… aggregation that the prover *is* relaying, the witness still has to anchor against the L1 cell. There is no escalation logic.
-
-Future enhancements (all already sketched in `bridge-event-witness/src/bin/build.rs` as `TODO(L1→L5 escalation)`):
-
-- **L1→Ln escalation.** When the event's bundle has rolled out of the L1 rolling window, walk up: find the parent L2 key block in `state.layer_windows[1]`, append one active `dense_chain` link to bridge L1→L2 (or further). The in-circuit `verify_chain_of_dense_proofs` already supports up to 11 hops; only the witness builder needs work. Production-shape `real_chain_builder::build_layer_n_tree` is the reference layout.
-- **Wait-for-L2 (or higher) by default.** Shellnet and the intended mainnet profile already anchor at L2 (`BRIDGE_ANCHOR_LEVEL=2`). L1 remains the local/CI `AnchorMode` default and this CLI's compile-time default.
-- **Anchor randomization / batching.** When multiple withdrawals fall under the same layer-N root, the submitter could randomize which of the layer's child roots each proof binds to (anonymity-set behaviour the dropped `circuit4-single-final-root` design used to provide in-circuit). Same goes for amortising several proofs under a shared anchor: pick the highest layer that still covers the freshest event.
-- **Anchor recency policy.** Once L1→Ln escalation lands, the bridge contract needs a rule for the maximum staleness it accepts. Probably exposed as a contract parameter so it can be tightened/loosened without redeploying.
+The witness builder supports explicit L1..L(n) anchoring and automatic
+escalation when a lower layer has rolled out. For a cross-thread event, the
+nearest reachable thread-0 block B0 is Y: Circuit 4 opens B0 directly in its
+L1 history window and uses the dense history chain to reach the selected
+layer root. No newer thread-0 block or parent-chain prefix is required. The
+remaining policy work is operational: define and enforce a maximum accepted
+anchor age, and decide whether batching several withdrawals under a shared
+higher-layer root is desirable.
 
 ---

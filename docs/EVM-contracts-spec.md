@@ -517,8 +517,8 @@ contract's fallback entrypoint via `staticcall`.
 | `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 494 | 3 840 |
 | `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 493 | 3 840 |
 | `LayerHashesAggregatorVerifier.bin` | 2 | 14 | 23 111 | 4 160 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 `BridgeEventFinalProof` (inner K=19) | 13 | 21 152 | 3 648 |
-| `BridgeMultiHopAggregatorVerifier.bin` | 4 `BridgeMultiHopProof` (cross-thread) | 2 | *pending regen* | *pending regen* |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 `BridgeEventFinalProof` (inner K=19) | 13 | 21 476 | 3 712 |
+| `BridgeMultiHopAggregatorVerifier.bin` | 4 `BridgeMultiHopProof` (cross-thread) | 2 | 23 722 | 4 448 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`

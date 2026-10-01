@@ -4,11 +4,13 @@
 //!
 //! Two SRS provisioning paths:
 //!
-//! * **K in 1..=20** — uses `gosh-zk-snark-halo2-utils::ptau`, which pins the
-//!   K=20 raw-SRS SHA-256 trust anchor. Reads `powersOfTau28_hez_final_20.ptau`
-//!   (SnarkJs, ~1.2 GB) once, verifies the anchor, then downsizes to each
-//!   requested K. Ptau is downloaded on cache miss to
-//!   `$HOME/.cache/halo2-kzg-srs/`.
+//! * **K in 1..=20** — normally uses `gosh-zk-snark-halo2-utils::ptau`, which
+//!   pins the K=20 raw-SRS SHA-256 trust anchor. Reads
+//!   `powersOfTau28_hez_final_20.ptau` (SnarkJs, ~1.2 GB) once, verifies the
+//!   anchor, then downsizes to each requested K. If that legacy object is
+//!   unavailable but `--ptau21` exists, the requested prefix is read from the
+//!   K=21 ceremony instead and receives the same Hermez `s_g2` head check used
+//!   for K=21.
 //!
 //! * **K = 21** — no shared trust anchor available (utils crate is capped at
 //!   K=20). Reads `powersOfTau28_hez_final_21.ptau` (SnarkJs, ~2.4 GB) directly
@@ -273,8 +275,13 @@ fn main() -> Result<()> {
     // Split requested K into <=20 (utils path) and ==21 (direct path).
     let needs_k20_ptau = args.ks.iter().any(|&k| k <= 20);
 
-    // Step 1a — ensure K=20 ptau on disk (download on cache miss) if needed.
-    if needs_k20_ptau {
+    // A K=21 ceremony contains the exact powers needed by all smaller
+    // degrees. Prefer the hash-anchored K=20 path, but permit an explicitly
+    // available K=21 file when the legacy K=20 object is absent.
+    let use_k21_for_small = needs_k20_ptau && !args.ptau_path.exists() && args.ptau21_path.exists();
+
+    // Step 1a — ensure K=20 ptau unless the K=21 fallback is available.
+    if needs_k20_ptau && !use_k21_for_small {
         ensure_hermez_k20_ptau(&args.ptau_path)
             .map_err(|e| anyhow::anyhow!("ensure_hermez_k20_ptau: {e}"))?;
         println!(
@@ -286,12 +293,18 @@ fn main() -> Result<()> {
     // Step 2 — materialize each requested K.
     for &k in &args.ks {
         let out = args.params_dir.join(format!("kzg_bn254_{k}.srs"));
-        let raw_srs: Vec<u8> = if k <= 20 {
+        let raw_srs: Vec<u8> = if k <= 20 && !use_k21_for_small {
             let mut file = fs::File::open(&args.ptau_path)
                 .with_context(|| format!("opening ptau {}", args.ptau_path.display()))?;
             println!("[K={k}] reading + verifying + downsizing K=20 ptau...");
             let mat = read_hermez_ptau_and_verify(&mut file, k);
             mat.raw_srs
+        } else if k <= 20 {
+            println!(
+                "[K={k}] reading prefix from K=21 ptau (legacy K=20 object unavailable; relying \
+                 on s_g2 head)..."
+            );
+            materialize_raw_srs_from_ptau(&args.ptau21_path, k)?
         } else {
             // K=21 (fallback proving) and K=22 (outer aggregator) — both take
             // the direct-ptau no-anchor path. parse_args caps K at 22.

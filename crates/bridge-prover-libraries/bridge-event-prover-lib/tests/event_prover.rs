@@ -14,9 +14,13 @@ use bridge_event_prover_lib::{
 };
 use bridge_event_witness::{
     export_from_event_boc_base64,
-    schema::{AnchorRef, DenseChainLinkSer, MerkleProofData, PrivateWitness, SCHEMA_VERSION},
+    schema::{
+        AnchorRef, BlockWitnessJson, DenseChainLinkSer, HopWitnessJson, MerkleProofData,
+        MultiHopProofWitnessJson, PrivateWitness, SCHEMA_VERSION,
+    },
     BlockContextInput,
 };
+use gosh_dense_balanced_tree::bytes_to_fr;
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
 // Reused from the test_withdrawal.rs fixture — first record of the
@@ -105,6 +109,7 @@ fn populated_witness() -> PrivateWitness {
     // "non-zero fixture seeding" assertion downstream still catches
     // silent zero-through translation bugs.
     w.h07_sibling_hex = hex::encode([0xB7u8; 32]);
+    w.y_tracked_ext_out_messages_root_hex = hex::encode([0xB8u8; 32]);
     w
 }
 
@@ -139,6 +144,88 @@ fn happy_path_translates_to_circuit_inputs() {
             Fr::zero(),
             "public-instance slot {slot} must be non-zero with our fixture seeding"
         );
+    }
+}
+
+fn dummy_hop(start: [u8; 32], end: [u8; 32]) -> HopWitnessJson {
+    HopWitnessJson {
+        is_active: true,
+        block: BlockWitnessJson {
+            block_id_hex: hex::encode(start),
+            block_merkle_tree_leaves_hex: std::array::from_fn(|_| hex::encode([0; 32])),
+            proof_block_refs_hex: vec![hex::encode(end)],
+        },
+        block_merkle_leaf_proof_l7_hex: std::array::from_fn(|_| hex::encode([0; 32])),
+        ref_index: 0,
+        refs_tree_depth: 0,
+        proof_block_ref_inner_path_hex: std::array::from_fn(|_| hex::encode([0; 32])),
+        hop_start_block_id_hex: hex::encode(start),
+        hop_end_block_id_hex: hex::encode(end),
+    }
+}
+
+#[test]
+fn cross_thread_bundle_binds_y_head_and_exact_x_tail() {
+    let w = populated_witness();
+    let x: [u8; 32] = hex::decode(&w.block_id_hex).unwrap().try_into().unwrap();
+    let y = [0x33; 32];
+    let middle = [0x22; 32];
+    let bundle = MultiHopBundleWitnessJson {
+        snarks: vec![
+            MultiHopProofWitnessJson {
+                hops: [dummy_hop(y, middle)],
+            },
+            MultiHopProofWitnessJson {
+                hops: [dummy_hop(middle, x)],
+            },
+        ],
+    };
+    let inputs = build_proof_inputs(&w, &bundle, default_event_circuit_params()).unwrap();
+    assert_eq!(inputs.public_instances[11], bytes_to_fr(&x));
+    assert_eq!(inputs.public_instances[12], bytes_to_fr(&y));
+    assert_eq!(inputs.circuit.x_block_id, x);
+    assert_eq!(inputs.circuit.y_block_id, y);
+}
+
+#[test]
+fn cross_thread_bundle_rejects_wrong_tail_and_discontinuity() {
+    let w = populated_witness();
+    let y = [0x33; 32];
+    let middle = [0x22; 32];
+    let wrong = [0x44; 32];
+    let wrong_tail = MultiHopBundleWitnessJson {
+        snarks: vec![MultiHopProofWitnessJson {
+            hops: [dummy_hop(y, wrong)],
+        }],
+    };
+    assert!(must_bundle_err(&w, &wrong_tail, "wrong tail")
+        .to_string()
+        .contains("tail"));
+
+    let x: [u8; 32] = hex::decode(&w.block_id_hex).unwrap().try_into().unwrap();
+    let discontinuous = MultiHopBundleWitnessJson {
+        snarks: vec![
+            MultiHopProofWitnessJson {
+                hops: [dummy_hop(y, middle)],
+            },
+            MultiHopProofWitnessJson {
+                hops: [dummy_hop(wrong, x)],
+            },
+        ],
+    };
+    assert!(must_bundle_err(&w, &discontinuous, "discontinuous bundle")
+        .to_string()
+        .contains("discontinuous"));
+}
+
+fn must_bundle_err(
+    w: &PrivateWitness,
+    bundle: &MultiHopBundleWitnessJson,
+    ctx: &str,
+) -> anyhow::Error {
+    match build_proof_inputs(w, bundle, default_event_circuit_params()) {
+        Ok(_) => panic!("{ctx}: expected error, got Ok"),
+        Err(e) => e,
     }
 }
 

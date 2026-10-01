@@ -203,8 +203,13 @@ pub fn aggregate_and_prove_cached(
 
     let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
 
-    let verifier_source =
-        gen_evm_verifier_sol_shplonk::<AggregationCircuit>(&params_outer, pk.get_vk(), num_instance);
+    let verifier_source = normalize_solidity_source(&gen_evm_verifier_sol_shplonk::<
+        AggregationCircuit,
+    >(
+        &params_outer,
+        pk.get_vk(),
+        num_instance,
+    ));
     let verifier_bytecode = match artifacts_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
@@ -236,6 +241,22 @@ pub fn aggregate_and_prove_cached(
     })
 }
 
+/// The upstream Yul emitter leaves indentation on otherwise blank lines.
+/// Normalize it before both compilation and persistence so generated verifier
+/// sources pass the repository whitespace gate and still compile byte-for-byte
+/// to their adjacent `.bin` files.
+fn normalize_solidity_source(source: &str) -> String {
+    let mut normalized = source
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if source.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
+}
+
 /// Deserialize an inner [`Snark`] and aggregate it with the supplied config.
 pub fn aggregate_snark_from_bytes(
     params_outer: &ParamsKZG<Bn256>,
@@ -261,4 +282,17 @@ pub fn prove_multiply_spike(
     );
     let pk = gen_pk(params, &builder, None);
     Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_solidity_source;
+
+    #[test]
+    fn solidity_source_normalization_removes_only_trailing_whitespace() {
+        assert_eq!(
+            normalize_solidity_source("contract C {  \n    \n  x();\t\n}\n"),
+            "contract C {\n\n  x();\n}\n"
+        );
+    }
 }

@@ -604,6 +604,7 @@ pub struct FinalProofTwoLevelWitnesses {
     /// `h07_sibling` via the SHA depth-4 opening. The MockProver's L8-opening
     /// gadget will reconstruct exactly this value in-circuit.
     pub block_id: [u8; 32],
+    pub y_tracked_ext_out_messages_root: [u8; 32],
     pub envelope_hash_bytes: [u8; 32],
     pub events_siblings: Vec<[u8; 32]>,
     pub events_pos: usize,
@@ -672,6 +673,7 @@ pub fn build_final_proof_two_level_tree(
         account_dapp_id: dapp_id,
         account_id: account_id_b,
         block_id,
+        y_tracked_ext_out_messages_root: ext_out_root_bytes,
         envelope_hash_bytes: envelope_hash,
         events_siblings,
         events_pos: 0,
@@ -702,10 +704,12 @@ pub fn build_final_proof_two_level_tree_cross(
     let mut dapp_id = [0u8; 32];
     let mut account_id_b = [0u8; 32];
     let mut envelope_hash = [0u8; 32];
+    let mut y_tracked_ext_out_messages_root = [0u8; 32];
     let mut h07_sibling = [0u8; 32];
     rng.fill(&mut dapp_id);
     rng.fill(&mut account_id_b);
     rng.fill(&mut envelope_hash);
+    rng.fill(&mut y_tracked_ext_out_messages_root);
     rng.fill(&mut h07_sibling);
 
     let ext_msg_leaf = poseidon_hash_96_native(&dapp_id, &account_id_b, repr_hash);
@@ -721,11 +725,12 @@ pub fn build_final_proof_two_level_tree_cross(
     let ext_out_root_bytes = fr_to_bytes(bytes_to_fr(&events_root));
     let x_block_id = compute_block_id_from_l8_native(&ext_out_root_bytes, &h07_sibling);
 
-    // Block leaf is Y-side: uses the caller's y_block_id but the same
-    // ext_out_root / envelope_hash. In production this is what the Y-block
-    // *would* contain — the L7 walker circuit (Commit 4) enforces the
-    // cross-thread binding; here we just wire the witness consistently.
-    let block_leaf = poseidon_hash_96_native(&y_block_id, &envelope_hash, &events_root);
+    y_tracked_ext_out_messages_root = fr_to_bytes(bytes_to_fr(&y_tracked_ext_out_messages_root));
+    let block_leaf = poseidon_hash_96_native(
+        &y_block_id,
+        &envelope_hash,
+        &y_tracked_ext_out_messages_root,
+    );
     let mut block_leaves = vec![[0u8; 32]; num_block_leaves];
     block_leaves[0] = block_leaf;
     for i in 1..num_block_leaves {
@@ -738,6 +743,7 @@ pub fn build_final_proof_two_level_tree_cross(
         account_dapp_id: dapp_id,
         account_id: account_id_b,
         block_id: x_block_id, // .block_id here means x_block_id
+        y_tracked_ext_out_messages_root,
         envelope_hash_bytes: envelope_hash,
         events_siblings,
         events_pos: 0,
@@ -809,6 +815,7 @@ pub fn build_synthetic_final_proof_keygen_inputs(
         tw.block_id, // y_block_id (same-thread)
         tw.h07_sibling,
         true, // is_same_thread
+        tw.y_tracked_ext_out_messages_root,
         tw.envelope_hash_bytes,
         tw.block_siblings,
         tw.block_pos,
@@ -889,16 +896,13 @@ pub fn multi_hop_base_circuit_params() -> BaseCircuitParams {
     }
 }
 
-/// Build one active hop under Direction (a) semantics: given
+/// Build one active newest-to-oldest hop: given
 /// `older_ref_id` (the block the current hop's `proof_block_refs[1]` points
 /// at), derive the current (newer) block whose L7 contains that ref. Returns
 /// the fully-populated `HopWitness` — `hop.hop_start_block_id ==
 /// current_block_id` (newer), `hop.hop_end_block_id == older_ref_id` (older)
 /// — and the derived `current_block_id` so callers can chain multiple hops.
-pub fn make_active_hop_public(
-    older_ref_id: [u8; 32],
-    sentinel_byte: u8,
-) -> (HopWitness, [u8; 32]) {
+pub fn make_active_hop_public(older_ref_id: [u8; 32], sentinel_byte: u8) -> (HopWitness, [u8; 32]) {
     let proof_block_refs: Vec<[u8; 32]> = vec![SLOT0_PARENT_PLACEHOLDER, older_ref_id];
     let l7 = proof_block_refs_root_native(&proof_block_refs);
 
@@ -953,17 +957,14 @@ pub fn make_inactive_hop_public(pad_bid: [u8; 32]) -> HopWitness {
     }
 }
 
-/// Build `H_HOPS_PER_PROOF` hops under Direction (a) semantics: `seed_bytes`
-/// is the *oldest* block-id (the anchor `Y`). We construct the chain
+/// Build `H_HOPS_PER_PROOF` newest-to-oldest hops. `seed_bytes` is the
+/// *oldest* block-id. We construct the chain
 /// oldest→newest — each iteration derives a newer block whose L7 references
-/// the previous older one — then reverse so `hops[0].hop_start = X` (newest
-/// event block) and the last active hop's `hop_end = seed_bytes` (`Y`). Any
-/// tail slot is inactive padding carrying `Y` on both endpoints. `k_active`
+/// the previous older one — then reverse so `hops[0].hop_start` is the newest
+/// block and the last active hop's `hop_end = seed_bytes`. Any tail slot is
+/// inactive padding carrying the oldest id on both endpoints. `k_active`
 /// must be `<= H_HOPS_PER_PROOF`.
-pub fn synth_hops_public(
-    seed_bytes: [u8; 32],
-    k_active: usize,
-) -> [HopWitness; H_HOPS_PER_PROOF] {
+pub fn synth_hops_public(seed_bytes: [u8; 32], k_active: usize) -> [HopWitness; H_HOPS_PER_PROOF] {
     assert!(k_active <= H_HOPS_PER_PROOF);
     let mut chain: Vec<HopWitness> = Vec::with_capacity(k_active);
     let mut older_bid = seed_bytes;
@@ -972,8 +973,8 @@ pub fn synth_hops_public(
         chain.push(hop);
         older_bid = newer_bid;
     }
-    // Reverse so index 0 is the newest hop (start = X) and the last active
-    // hop's end is `seed_bytes` (Y). At k_active=0 this is a no-op.
+    // Reverse so index 0 is the newest hop and the last active hop's end is
+    // `seed_bytes`. At k_active=0 this is a no-op.
     chain.reverse();
     let terminal_older = if chain.is_empty() {
         seed_bytes

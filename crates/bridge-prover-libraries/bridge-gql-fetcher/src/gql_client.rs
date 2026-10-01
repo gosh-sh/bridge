@@ -303,8 +303,8 @@ pub struct GqlProofBlock {
     pub history_proofs: BTreeMap<u8, [u8; 32]>,
     /// Ordered block references committed by `block_merkle_tree_leaves[7]`.
     /// Entry 0 = parent block id; entries 1+ = `CommonSection.refs` in
-    /// canonical order. Consumed by cross-thread hop resolution
-    /// (`bridge-event-witness::enrich::resolve_cross_thread_chain`).
+    /// canonical order. Consumed by `bridge-block-graph-resolver` and by
+    /// `bridge-event-witness` when materialising the resolved route.
     pub proof_block_refs: Vec<[u8; 32]>,
     /// 16-leaf SHA-256 block-id Merkle leaves (canonical depth-4 tree, see
     /// `bridge-prover-lib::block_id_tree`). May be absent on very old blocks
@@ -1137,9 +1137,8 @@ impl GqlClient {
     }
 
     /// Fetch a `GqlProofBlock` by its `block_id` (32-byte hex hash).
-    /// Backs `bridge-event-witness::enrich::resolve_cross_thread_chain`
-    /// which walks `proof_block_refs` across threads and only has the
-    /// referenced block's id — not its (thread_id, height) pair.
+    /// Used when an exact block id is authoritative, notably the event block
+    /// from `PrivateWitness.block_id_hex`.
     pub async fn query_proof_block_by_id(
         &self,
         block_id_hex: &str,

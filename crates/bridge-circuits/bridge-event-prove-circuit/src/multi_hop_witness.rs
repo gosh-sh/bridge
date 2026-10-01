@@ -198,7 +198,7 @@ pub struct HopWitness {
     pub is_active: bool,
 
     /// The hop's **start** block: `block.block_id` is what the hop's clear
-    /// start endpoint publishes (Direction (a): start = current/newer block),
+    /// start endpoint publishes (start = current/newer block),
     /// and the hop's **end** block (the older ref) appears inside
     /// `block.proof_block_refs` (opened at `ref_index` against L7 via
     /// `proof_block_ref_inner_path`).
@@ -232,13 +232,13 @@ pub struct HopWitness {
     /// in-circuit fold ignores via the live-flag gate.
     pub proof_block_ref_inner_path: [[u8; 32]; MAX_PROOF_BLOCK_REFS_DEPTH],
 
-    /// The hop's start endpoint as clear bytes — Direction (a): the *current*
+    /// The hop's start endpoint as clear bytes: the *current*
     /// (newer) block whose L7 walk is closed by this hop, i.e.
     /// `block.block_id`. Published as `BridgeMultiHopProof.PI[0]` for the
     /// first hop in the snark.
     pub hop_start_block_id: [u8; 32],
 
-    /// The hop's end endpoint as clear bytes — Direction (a): the *older*
+    /// The hop's end endpoint as clear bytes: the *older*
     /// block extracted from `block.proof_block_refs[ref_index]`. Cross-hop
     /// continuity is enforced as a direct byte equality against the next
     /// hop's `hop_start_block_id` (which is that next hop's current block —
@@ -748,5 +748,4 @@ mod tests {
             ));
         }
     }
-
 }

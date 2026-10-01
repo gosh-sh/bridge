@@ -428,14 +428,17 @@ def run_event_proving_steps(tracer: Tracer, prover_dir: str, work_dir: str,
     assert os.path.isfile(witness_path), f"witness-builder did not produce {witness_path}"
 
     tracer.log_phase(f"Step 7: bridge-event-halo2-prover (seq_no={seq_no})")
+    prover_args = [
+        "--fixture",  witness_path,
+        "--out-dir",  proofs_dir,
+        "--seq-no",   str(seq_no),
+    ]
+    if wb_summary.get("hops_out"):
+        prover_args.extend(["--hops-fixture", wb_summary["hops_out"]])
     ep_summary = run_rust_bin(
         tracer, prover_dir,
         "bridge-event-halo2-prover",
-        [
-            "--fixture",  witness_path,
-            "--out-dir",  proofs_dir,
-            "--seq-no",   str(seq_no),
-        ],
+        prover_args,
         timeout_s=rust_bin_timeout_s,
     )
     tracer.log(f"  summary: schema={ep_summary.get('schema_version')}, "

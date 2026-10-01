@@ -3,6 +3,10 @@ name = "bridge-gql-fetcher"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+default = ["bk-set"]
+bk-set = ["dep:halo2-base"]
+
 [dependencies]
 anyhow = { workspace = true }
 reqwest = { workspace = true }
@@ -12,8 +16,5 @@ tracing = { workspace = true }
 hex = { workspace = true }
 bincode = { workspace = true }
 tokio = { workspace = true }
-halo2-base = { workspace = true }
-# Sole source of truth for the 16-leaf / depth-4 block-id Merkle constants —
-# `BLOCK_ID_TREE_LEAF_COUNT` lives in `bridge_test_data_gen::layer_hashes`.
-bridge-test-data-gen = { workspace = true }
+halo2-base = { workspace = true, optional = true }
 metrics = "0.24"

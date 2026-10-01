@@ -6,8 +6,9 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    BlockEdge, BlockId, BlockNode, BlockProvider, EdgePolicy, PathCacheKey, ResolutionPolicy,
-    ResolutionRequest, ResolvedPath, ResolverStore, StoreBatch, SyncStats,
+    AnchoredResolutionRequest, BlockEdge, BlockId, BlockNode, BlockProvider, PathCacheKey,
+    ResolutionPolicy, ResolutionRequest, ResolvedAnchoredBlockProof, ResolvedBlockProof,
+    ResolvedPath, ResolverStore, StoreBatch, SyncStats,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +81,10 @@ pub enum ResolutionError {
         candidates: usize,
         max_anchor_candidates: usize,
     },
+    #[error("proof material for block {block} was not found by provider {namespace}")]
+    ProofBlockNotFound { block: BlockId, namespace: String },
+    #[error("invalid proof material for block {block}: {reason}")]
+    InvalidProofBlock { block: BlockId, reason: String },
 }
 
 pub struct GraphResolver<P, S> {
@@ -113,10 +118,6 @@ where
 
     pub async fn store_version(&self) -> anyhow::Result<crate::StoreVersion> {
         self.store.version().await
-    }
-
-    pub fn edge_policy(&self) -> EdgePolicy {
-        self.store.edge_policy()
     }
 
     pub async fn sync_latest(&self, limit: usize) -> anyhow::Result<SyncStats> {
@@ -206,6 +207,182 @@ where
         };
         self.cache(&key, &path).await?;
         Ok(path)
+    }
+
+    /// Resolve a route and hydrate every block that commits one of its edges
+    /// with the canonical node-side payload needed by the proof circuit.
+    ///
+    /// This method does not generate a Halo2 proof. It returns a complete,
+    /// circuit-neutral proof source and fails if the provider's topology and
+    /// proof views disagree at any edge.
+    pub async fn resolve_proof(
+        &self,
+        request: ResolutionRequest,
+    ) -> anyhow::Result<ResolvedBlockProof> {
+        let path = self.resolve(request).await?;
+        self.hydrate_path(path).await
+    }
+
+    async fn hydrate_path(&self, path: ResolvedPath) -> anyhow::Result<ResolvedBlockProof> {
+        let mut loaded = HashMap::<BlockId, crate::ProofBlock>::new();
+        let mut ids = Vec::with_capacity(path.hops.len() + 2);
+        ids.push(path.anchor);
+        ids.extend(path.hops.iter().map(|edge| edge.from));
+        ids.push(path.target);
+        ids.sort_unstable();
+        ids.dedup();
+
+        for id in ids {
+            let proof = self.provider.proof_block_by_id(&id).await?.ok_or_else(|| {
+                ResolutionError::ProofBlockNotFound {
+                    block: id,
+                    namespace: self.provider.namespace().to_owned(),
+                }
+            })?;
+            if proof.block.block_id != id {
+                return Err(ResolutionError::InvalidProofBlock {
+                    block: id,
+                    reason: format!("provider returned block id {}", proof.block.block_id),
+                }
+                .into());
+            }
+            loaded.insert(id, proof);
+        }
+
+        let mut hop_blocks = Vec::with_capacity(path.hops.len());
+        for edge in &path.hops {
+            let block = loaded
+                .get(&edge.from)
+                .ok_or_else(|| anyhow::anyhow!("internal proof hydration gap at {}", edge.from))?;
+            let index = usize::try_from(edge.ref_index)
+                .map_err(|_| anyhow::anyhow!("reference index exceeds usize"))?;
+            if block.block.refs.get(index).copied() != Some(edge.to) {
+                return Err(ResolutionError::InvalidProofBlock {
+                    block: edge.from,
+                    reason: format!(
+                        "refs[{}] does not point to route destination {}",
+                        edge.ref_index, edge.to
+                    ),
+                }
+                .into());
+            }
+            hop_blocks.push(block.clone());
+        }
+
+        let anchor_block = loaded
+            .get(&path.anchor)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("internal anchor proof hydration gap"))?;
+        let target_block = loaded
+            .get(&path.target)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("internal target proof hydration gap"))?;
+        Ok(ResolvedBlockProof {
+            path,
+            anchor_block,
+            target_block,
+            hop_blocks,
+        })
+    }
+
+    /// Find the nearest reachable thread-0 block at or to the right of the
+    /// target for which the provider supplies an opaque witness selecting one
+    /// of the active verifier roots. No cryptographic hashing happens here.
+    pub async fn resolve_anchored_proof(
+        &self,
+        request: AnchoredResolutionRequest,
+    ) -> anyhow::Result<ResolvedAnchoredBlockProof> {
+        let graph_request = request.resolution;
+        let target_timed = self
+            .provider
+            .timed_block_by_id(&graph_request.target)
+            .await?
+            .ok_or_else(|| ResolutionError::TargetNotFound {
+                target: graph_request.target,
+                namespace: self.provider.namespace().to_owned(),
+            })?;
+        let target = target_timed.block.clone();
+        let thread_zero = crate::ThreadId::ZERO;
+        let tip = self
+            .provider
+            .latest_timed_block_in_thread(&thread_zero)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("thread 0 has no blocks"))?;
+        let start = self
+            .thread_zero_lower_bound(target_timed.gen_utime_ms, tip.block.height)
+            .await?;
+        let mut visited = HashSet::from([graph_request.target]);
+        let mut depth = 0;
+        let mut search = HistoricalSearchState::default();
+        search.suffixes.insert(graph_request.target, Vec::new());
+        for (count, height) in (start..=tip.block.height).enumerate() {
+            if count >= self.historical_search.max_anchor_candidates {
+                break;
+            }
+            let anchor = self
+                .provider
+                .timed_block_by_height(&thread_zero, height)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("thread 0 has no block at height {height}"))?
+                .block;
+            let Some(path) = self
+                .incremental_path_from_anchor(
+                    &graph_request,
+                    Some(&target),
+                    target_timed.gen_utime_ms,
+                    anchor,
+                    &mut visited,
+                    &mut depth,
+                    &mut search,
+                )
+                .await?
+            else {
+                continue;
+            };
+            let Some(history) = self
+                .provider
+                .anchor_history_witness(
+                    &path.anchor,
+                    &request.anchor_snapshot,
+                    request.anchor_layer,
+                )
+                .await?
+            else {
+                continue;
+            };
+            if !crate::history_selects_snapshot_slot(&history, &request.anchor_snapshot) {
+                continue;
+            }
+            let route = self.hydrate_path(path).await?;
+            let mut hop_openings = Vec::with_capacity(route.path.hops.len());
+            for (edge, block) in route.path.hops.iter().copied().zip(&route.hop_blocks) {
+                let opening = self
+                    .provider
+                    .hop_opening(block, edge)
+                    .await?
+                    .ok_or_else(|| ResolutionError::InvalidProofBlock {
+                        block: edge.from,
+                        reason: format!(
+                            "provider returned no opening for refs[{}]",
+                            edge.ref_index
+                        ),
+                    })?;
+                if opening.edge != edge {
+                    return Err(ResolutionError::InvalidProofBlock {
+                        block: edge.from,
+                        reason: "provider returned an opening for a different edge".to_owned(),
+                    }
+                    .into());
+                }
+                hop_openings.push(opening);
+            }
+            return Ok(ResolvedAnchoredBlockProof {
+                route,
+                hop_openings,
+                history,
+            });
+        }
+        anyhow::bail!("no reachable thread-0 anchor is covered by the supplied verifier snapshot")
     }
 
     async fn cache(&self, key: &PathCacheKey, path: &ResolvedPath) -> anyhow::Result<()> {
@@ -370,39 +547,37 @@ where
             frontier.sort_by_key(|block| block.block_id);
 
             for block in &frontier {
-                if self.store.edge_policy() == EdgePolicy::AllReferences {
-                    if let Some(target) = target_thread_entry {
-                        if search.terminal_checked.insert(block.block_id)
-                            && block.thread_id == target.thread_id
-                            && block.height >= target.height
+                if let Some(target) = target_thread_entry {
+                    if search.terminal_checked.insert(block.block_id)
+                        && block.thread_id == target.thread_id
+                        && block.height >= target.height
+                    {
+                        if let Some(tail) = self
+                            .parent_path_to_target(
+                                request,
+                                target,
+                                block.clone(),
+                                0,
+                                globally_visited,
+                                depth_reached,
+                            )
+                            .await?
                         {
-                            if let Some(tail) = self
-                                .parent_path_to_target(
-                                    request,
-                                    target,
-                                    block.clone(),
-                                    0,
-                                    globally_visited,
-                                    depth_reached,
-                                )
-                                .await?
-                            {
-                                for index in (0..tail.len()).rev() {
-                                    relax_historical_suffix(
-                                        search,
-                                        tail[index].from,
-                                        tail[index..].to_vec(),
-                                        request.limits.max_hops,
-                                    );
-                                }
-                                if tail.is_empty() {
-                                    relax_historical_suffix(
-                                        search,
-                                        block.block_id,
-                                        tail,
-                                        request.limits.max_hops,
-                                    );
-                                }
+                            for index in (0..tail.len()).rev() {
+                                relax_historical_suffix(
+                                    search,
+                                    tail[index].from,
+                                    tail[index..].to_vec(),
+                                    request.limits.max_hops,
+                                );
+                            }
+                            if tail.is_empty() {
+                                relax_historical_suffix(
+                                    search,
+                                    block.block_id,
+                                    tail,
+                                    request.limits.max_hops,
+                                );
                             }
                         }
                     }
@@ -433,9 +608,6 @@ where
                 for (ref_index, to) in block.refs.iter().copied().enumerate() {
                     let ref_index = u32::try_from(ref_index)
                         .map_err(|_| anyhow::anyhow!("reference index exceeds u32"))?;
-                    if !self.store.edge_policy().allows(ref_index) {
-                        continue;
-                    }
                     let edge = BlockEdge {
                         from: block.block_id,
                         to,
@@ -847,6 +1019,7 @@ mod tests {
     #[derive(Default)]
     struct FakeProvider {
         blocks: Mutex<HashMap<BlockId, BlockNode>>,
+        proofs: Mutex<HashMap<BlockId, crate::ProofBlock>>,
         height_queries: Mutex<Vec<u64>>,
         historical: Mutex<bool>,
     }
@@ -858,6 +1031,13 @@ mod tests {
 
         fn enable_historical(&self) {
             *self.historical.lock().unwrap() = true;
+        }
+
+        fn set_proofs(&self, proofs: Vec<crate::ProofBlock>) {
+            *self.proofs.lock().unwrap() = proofs
+                .into_iter()
+                .map(|proof| (proof.block.block_id, proof))
+                .collect();
         }
     }
 
@@ -929,6 +1109,99 @@ mod tests {
                     gen_utime_ms: block.height * 10,
                     block,
                 }))
+        }
+
+        async fn proof_block_by_id(
+            &self,
+            id: &BlockId,
+        ) -> anyhow::Result<Option<crate::ProofBlock>> {
+            if let Some(proof) = self.proofs.lock().unwrap().get(id).cloned() {
+                return Ok(Some(proof));
+            }
+            Ok(self
+                .blocks
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .map(|block| crate::ProofBlock {
+                    gen_utime_ms: block.height * 10,
+                    envelope_hash: [block.height as u8; 32],
+                    tracked_ext_out_messages_root: [block.refs.len() as u8; 32],
+                    history_proofs: Default::default(),
+                    block_merkle_tree_leaves: [[0u8; 32]; 16],
+                    block,
+                }))
+        }
+
+        async fn proof_block_by_height(
+            &self,
+            thread: &ThreadId,
+            height: u64,
+        ) -> anyhow::Result<Option<crate::ProofBlock>> {
+            let id = self
+                .blocks
+                .lock()
+                .unwrap()
+                .values()
+                .find(|block| block.thread_id == *thread && block.height == height)
+                .map(|block| block.block_id);
+            match id {
+                Some(id) => self.proof_block_by_id(&id).await,
+                None => Ok(None),
+            }
+        }
+
+        async fn anchor_history_witness(
+            &self,
+            _anchor: &BlockId,
+            snapshot: &crate::AnchorSnapshot,
+            mode: crate::AnchorLayerMode,
+        ) -> anyhow::Result<Option<crate::AnchorHistoryWitness>> {
+            let layer = match mode {
+                crate::AnchorLayerMode::Auto => snapshot
+                    .layers
+                    .iter()
+                    .position(|slots| !slots.is_empty())
+                    .map(|index| index as u8 + 1),
+                crate::AnchorLayerMode::Explicit(layer) => Some(layer),
+            };
+            let Some(layer) = layer else {
+                return Ok(None);
+            };
+            let Some(slot) = snapshot
+                .layers
+                .get(layer as usize - 1)
+                .and_then(|slots| slots.first())
+            else {
+                return Ok(None);
+            };
+            Ok(Some(crate::AnchorHistoryWitness {
+                anchor_epoch: snapshot.epoch,
+                layer,
+                final_root: slot.root,
+                anchor_key_block_height: slot.height,
+                block_leaf: [1; 32],
+                block_tree: crate::DenseOpening {
+                    leaf: [1; 32],
+                    position: 0,
+                    siblings: vec![],
+                },
+                dense_chain: vec![],
+            }))
+        }
+
+        async fn hop_opening(
+            &self,
+            _block: &crate::ProofBlock,
+            edge: BlockEdge,
+        ) -> anyhow::Result<Option<crate::HopOpening>> {
+            Ok(Some(crate::HopOpening {
+                edge,
+                block_merkle_leaf_proof_l7: [[0; 32]; 4],
+                refs_tree_depth: 0,
+                proof_block_ref_inner_path: vec![],
+            }))
         }
 
         fn namespace(&self) -> &str {
@@ -1031,43 +1304,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_thread_only_rejects_parent_hops_but_accepts_cross_refs() {
-        let provider = Arc::new(FakeProvider::default());
-        provider.replace(vec![
+    async fn resolve_proof_hydrates_every_hop_and_preserves_parent_slots() {
+        let (_, _, resolver) = setup(vec![
             block(1, 1, 1, &[]),
             block(2, 1, 2, &[1]),
-            block(3, 0, 3, &[8, 2]),
-        ]);
-        let store = Arc::new(MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly));
-        let resolver = GraphResolver::new(provider, store, 0);
-        resolver.sync_latest(100).await.unwrap();
-        assert!(resolver
-            .resolve(request(1, ResolutionPolicy::ShortestCurrent))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("no path"));
-
-        let provider = Arc::new(FakeProvider::default());
-        provider.replace(vec![
-            block(1, 1, 1, &[]),
-            block(2, 2, 2, &[9, 1]),
-            block(3, 0, 3, &[8, 2]),
-        ]);
-        let store = Arc::new(MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly));
-        let resolver = GraphResolver::new(provider, store, 0);
-        resolver.sync_latest(100).await.unwrap();
-        let path = resolver
-            .resolve(request(1, ResolutionPolicy::ShortestCurrent))
+            block(3, 2, 3, &[2]),
+            block(4, 0, 10, &[8, 3]),
+        ])
+        .await;
+        let proof = resolver
+            .resolve_proof(request(1, ResolutionPolicy::ShortestCurrent))
             .await
             .unwrap();
+
+        assert_eq!(proof.anchor_block.block.block_id, id(4));
+        assert_eq!(proof.target_block.block.block_id, id(1));
         assert_eq!(
-            path.hops
+            proof
+                .path
+                .hops
                 .iter()
                 .map(|edge| edge.ref_index)
                 .collect::<Vec<_>>(),
-            vec![1, 1]
+            vec![1, 0, 0]
         );
+        assert_eq!(
+            proof
+                .hop_blocks
+                .iter()
+                .map(|block| block.block.block_id)
+                .collect::<Vec<_>>(),
+            vec![id(4), id(3), id(2)]
+        );
+        for (edge, source) in proof.path.hops.iter().zip(&proof.hop_blocks) {
+            assert_eq!(
+                source.block.refs[edge.ref_index as usize], edge.to,
+                "hydrated proof source must commit the selected edge"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolves_complete_anchored_parent_proof() {
+        let target_id = id(9);
+        let anchor_id = id(2);
+        let target = BlockNode {
+            block_id: target_id,
+            thread_id: thread(1),
+            height: 0,
+            refs: vec![],
+        };
+        let zero0 = block(1, 0, 0, &[]);
+        let anchor = block(2, 0, 1, &[9]);
+        let key = block(3, 0, 2, &[]);
+        let (provider, _, resolver) = setup(vec![
+            target.clone(),
+            zero0.clone(),
+            anchor.clone(),
+            key.clone(),
+        ])
+        .await;
+        provider.enable_historical();
+
+        let proof = |block: BlockNode, leaves| crate::ProofBlock {
+            gen_utime_ms: block.height * 10,
+            envelope_hash: [block.height as u8 + 1; 32],
+            tracked_ext_out_messages_root: [block.height as u8 + 11; 32],
+            history_proofs: Default::default(),
+            block_merkle_tree_leaves: leaves,
+            block,
+        };
+        let target_proof = proof(target, [[0; 32]; 16]);
+        let zero0_proof = proof(zero0, [[0; 32]; 16]);
+        let anchor_proof = proof(anchor, [[0; 32]; 16]);
+        let key_proof = proof(key, [[0; 32]; 16]);
+        provider.set_proofs(vec![target_proof, zero0_proof, anchor_proof, key_proof]);
+
+        let result = resolver
+            .resolve_anchored_proof(crate::AnchoredResolutionRequest {
+                resolution: request(9, ResolutionPolicy::FirstValid),
+                anchor_snapshot: crate::AnchorSnapshot {
+                    epoch: 1,
+                    window_size: 2,
+                    thinning_factor: 1,
+                    layers: vec![vec![crate::AnchorSlot {
+                        root: [42; 32],
+                        height: 2,
+                    }]],
+                },
+                anchor_layer: crate::AnchorLayerMode::Auto,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.route.path.anchor, anchor_id);
+        assert_eq!(result.hop_openings[0].edge.ref_index, 0);
+        assert_eq!(result.history.final_root, [42; 32]);
     }
 
     #[tokio::test]
@@ -1249,25 +1580,5 @@ mod tests {
             },
         ]);
         assert!(provider.height_queries.lock().unwrap().contains(&15));
-    }
-
-    #[tokio::test]
-    async fn historical_fallback_respects_cross_thread_only_policy() {
-        let provider = Arc::new(FakeProvider::default());
-        provider.enable_historical();
-        let mut blocks = vec![block(1, 1, 15, &[]), block(2, 1, 16, &[1])];
-        for height in 0u8..=31 {
-            let refs = if height == 17 { vec![116, 2] } else { vec![] };
-            blocks.push(block(100 + height, 0, u64::from(height), &refs));
-        }
-        provider.replace(blocks);
-        let store = Arc::new(MemoryStore::with_edge_policy(EdgePolicy::CrossThreadOnly));
-        let resolver = GraphResolver::new(provider, store, 0);
-        assert!(resolver
-            .resolve(request(1, ResolutionPolicy::FirstValid))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("no path"));
     }
 }

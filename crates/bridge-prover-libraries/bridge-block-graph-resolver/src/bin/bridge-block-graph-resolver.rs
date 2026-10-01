@@ -2,9 +2,9 @@ use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duratio
 
 use anyhow::Context;
 use bridge_block_graph_resolver::{
-    BlockId, BlockProvider, EdgePolicy, GraphResolver, GraphqlBlockProvider,
-    HistoricalSearchConfig, MemoryStore, ResolutionPolicy, ResolutionRequest, ResolvedPath,
-    ResolverApi, ResolverLimits, ResolverStore, SqliteStore, SyncStats,
+    BlockId, BlockProvider, GraphResolver, GraphqlBlockProvider, HistoricalSearchConfig,
+    MemoryStore, ResolutionPolicy, ResolutionRequest, ResolverApi, ResolverLimits, ResolverStore,
+    SqliteStore, SyncStats,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -40,11 +40,12 @@ enum Command {
         max_anchor_candidates: usize,
         #[arg(long, value_enum, default_value_t = CliPolicy::ShortestCurrent)]
         policy: CliPolicy,
-        /// Allowed hop kinds; changing this clears a persistent store.
-        #[arg(long, value_enum, default_value_t = CliEdgePolicy::AllReferences)]
-        edge_policy: CliEdgePolicy,
         #[arg(long)]
         pretty: bool,
+        /// Include canonical proof material for the anchor, target and every
+        /// hop source block.
+        #[arg(long)]
+        proof_material: bool,
     },
     /// Load and validate a rolling graph window.
     Sync {
@@ -58,9 +59,6 @@ enum Command {
         /// run.
         #[arg(long)]
         database: Option<PathBuf>,
-        /// Allowed hop kinds; changing this clears a persistent store.
-        #[arg(long, value_enum, default_value_t = CliEdgePolicy::AllReferences)]
-        edge_policy: CliEdgePolicy,
         #[arg(long)]
         pretty: bool,
     },
@@ -81,9 +79,6 @@ enum Command {
         /// Maximum thread-0 blocks examined per cold historical resolution.
         #[arg(long, default_value_t = 1000)]
         max_anchor_candidates: usize,
-        /// Allowed hop kinds; changing this clears the persistent store.
-        #[arg(long, value_enum, default_value_t = CliEdgePolicy::AllReferences)]
-        edge_policy: CliEdgePolicy,
     },
 }
 
@@ -102,21 +97,6 @@ impl From<CliPolicy> for ResolutionPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum CliEdgePolicy {
-    AllReferences,
-    CrossThreadOnly,
-}
-
-impl From<CliEdgePolicy> for EdgePolicy {
-    fn from(value: CliEdgePolicy) -> Self {
-        match value {
-            CliEdgePolicy::AllReferences => Self::AllReferences,
-            CliEdgePolicy::CrossThreadOnly => Self::CrossThreadOnly,
-        }
-    }
-}
-
 fn parse_block_id(value: &str) -> Result<BlockId, String> {
     BlockId::from_str(value).map_err(|error| error.to_string())
 }
@@ -131,6 +111,7 @@ fn print_json(value: &impl Serialize, pretty: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_with_store<S: ResolverStore>(
     provider: Arc<GraphqlBlockProvider>,
     store: Arc<S>,
@@ -138,7 +119,8 @@ async fn resolve_with_store<S: ResolverStore>(
     scan_window: usize,
     max_anchor_candidates: usize,
     request: ResolutionRequest,
-) -> anyhow::Result<ResolvedPath> {
+    proof_material: bool,
+) -> anyhow::Result<serde_json::Value> {
     let resolver = GraphResolver::new(provider, store, per_thread_window)
         .with_historical_search_config(HistoricalSearchConfig {
             max_anchor_candidates,
@@ -147,10 +129,23 @@ async fn resolve_with_store<S: ResolverStore>(
         .sync_latest(scan_window)
         .await
         .context("sync graph window")?;
-    resolver
-        .resolve(request)
-        .await
-        .context("resolve block path")
+    if proof_material {
+        serde_json::to_value(
+            resolver
+                .resolve_proof(request)
+                .await
+                .context("resolve block proof material")?,
+        )
+        .context("serialize resolved block proof")
+    } else {
+        serde_json::to_value(
+            resolver
+                .resolve(request)
+                .await
+                .context("resolve block path")?,
+        )
+        .context("serialize resolved block path")
+    }
 }
 
 async fn sync_with_store<S: ResolverStore>(
@@ -183,8 +178,8 @@ async fn main() -> anyhow::Result<()> {
             max_visited_blocks,
             max_anchor_candidates,
             policy,
-            edge_policy,
             pretty,
+            proof_material,
         } => {
             let provider =
                 Arc::new(GraphqlBlockProvider::new(&gql_url).context("create GraphQL provider")?);
@@ -198,13 +193,9 @@ async fn main() -> anyhow::Result<()> {
             };
             let path = if let Some(database) = database {
                 let store = Arc::new(
-                    SqliteStore::open_with_edge_policy(
-                        database,
-                        provider.namespace(),
-                        edge_policy.into(),
-                    )
-                    .await
-                    .context("open resolver database")?,
+                    SqliteStore::open(database, provider.namespace())
+                        .await
+                        .context("open resolver database")?,
                 );
                 resolve_with_store(
                     provider,
@@ -213,16 +204,18 @@ async fn main() -> anyhow::Result<()> {
                     scan_window,
                     max_anchor_candidates,
                     request,
+                    proof_material,
                 )
                 .await?
             } else {
                 resolve_with_store(
                     provider,
-                    Arc::new(MemoryStore::with_edge_policy(edge_policy.into())),
+                    Arc::new(MemoryStore::new()),
                     per_thread_window,
                     scan_window,
                     max_anchor_candidates,
                     request,
+                    proof_material,
                 )
                 .await?
             };
@@ -233,26 +226,21 @@ async fn main() -> anyhow::Result<()> {
             scan_window,
             per_thread_window,
             database,
-            edge_policy,
             pretty,
         } => {
             let provider =
                 Arc::new(GraphqlBlockProvider::new(&gql_url).context("create GraphQL provider")?);
             let stats = if let Some(database) = database {
                 let store = Arc::new(
-                    SqliteStore::open_with_edge_policy(
-                        database,
-                        provider.namespace(),
-                        edge_policy.into(),
-                    )
-                    .await
-                    .context("open resolver database")?,
+                    SqliteStore::open(database, provider.namespace())
+                        .await
+                        .context("open resolver database")?,
                 );
                 sync_with_store(provider, store, per_thread_window, scan_window).await?
             } else {
                 sync_with_store(
                     provider,
-                    Arc::new(MemoryStore::with_edge_policy(edge_policy.into())),
+                    Arc::new(MemoryStore::new()),
                     per_thread_window,
                     scan_window,
                 )
@@ -268,14 +256,13 @@ async fn main() -> anyhow::Result<()> {
             per_thread_window,
             sync_interval_secs,
             max_anchor_candidates,
-            edge_policy,
         } => {
             anyhow::ensure!(sync_interval_secs > 0, "--sync-interval-secs must be > 0");
             let provider =
                 Arc::new(GraphqlBlockProvider::new(&gql_url).context("create GraphQL provider")?);
             let namespace = provider.namespace().to_owned();
             let store = Arc::new(
-                SqliteStore::open_with_edge_policy(database, &namespace, edge_policy.into())
+                SqliteStore::open(database, &namespace)
                     .await
                     .context("open resolver database")?,
             );
@@ -355,8 +342,6 @@ mod tests {
             "node:8600",
             "--database",
             "resolver.sqlite",
-            "--edge-policy",
-            "cross-thread-only",
         ])
         .unwrap();
     }

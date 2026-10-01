@@ -15,7 +15,7 @@ cli = ["server", "dep:clap", "dep:tracing-subscriber"]
 anyhow = { workspace = true }
 async-trait = "0.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"], optional = true }
-bridge-gql-fetcher = { workspace = true, optional = true }
+bridge-gql-fetcher = { path = "../bridge-gql-fetcher", optional = true, default-features = false }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 hex = { workspace = true }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }

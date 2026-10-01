@@ -1948,7 +1948,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
- "bridge-test-data-gen",
  "halo2-base",
  "hex",
  "metrics 0.24.6",

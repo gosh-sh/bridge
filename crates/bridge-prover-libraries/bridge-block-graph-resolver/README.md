@@ -29,22 +29,18 @@ GraphQL provider and persistent SQLite store:
 use std::{str::FromStr, sync::Arc};
 
 use bridge_block_graph_resolver::{
-    BlockId, BlockProvider, EdgePolicy, GraphResolver, GraphqlBlockProvider,
-    HistoricalSearchConfig, ResolutionPolicy, ResolutionRequest,
-    ResolverLimits, SqliteStore,
+    BlockId, BlockProvider, GraphResolver, GraphqlBlockProvider, HistoricalSearchConfig,
+    ResolutionPolicy, ResolutionRequest, ResolverLimits, SqliteStore,
 };
 
 async fn resolve_block() -> anyhow::Result<()> {
 let provider = Arc::new(GraphqlBlockProvider::new(
     "http://127.0.0.1:8600/graphql",
 )?);
-let store = Arc::new(
-    SqliteStore::open_with_edge_policy(
-        "resolver.sqlite",
-        provider.namespace(),
-        EdgePolicy::AllReferences,
-    ).await?,
-);
+let store = Arc::new(SqliteStore::open(
+    "resolver.sqlite",
+    provider.namespace(),
+).await?);
 let resolver = GraphResolver::new(provider, store, 1_000)
     .with_historical_search_config(HistoricalSearchConfig {
         max_anchor_candidates: 1_000,
@@ -64,6 +60,9 @@ let path = resolver
     })
     .await?;
 println!("{} -> {} in {} hops", path.anchor, path.target, path.hops.len());
+
+// Use resolve_proof(request) when the caller also needs canonical proof
+// payloads for the anchor, target, and every block committing a hop.
 Ok(())
 }
 ```
@@ -72,20 +71,37 @@ The library is split around two abstractions:
 
 - `BlockProvider` supplies finalized blocks. It supports block-ID lookup,
   rolling-window synchronization, and optional timestamped lookups by thread
-  and height for historical resolution. `GraphqlBlockProvider` is the built-in
-  implementation; applications can provide their own backend.
+  and height for historical resolution. Its optional `proof_block_by_id`
+  method supplies envelope/history data and the complete 16-leaf block-ID
+  tree without storing that large payload in the reverse index.
+  Providers used with `resolve_anchored_proof()` additionally return ready
+  `AnchorHistoryWitness` and `HopOpening` values. Their cryptographic
+  construction and verification stay in the node/prover/circuit layer; this
+  crate does not implement or depend on Poseidon.
+  `GraphqlBlockProvider` is the built-in implementation; applications can
+  provide their own backend.
 - `ResolverStore` owns blocks, reverse edges, graph versions, and positive path
   cache entries. `MemoryStore` is process-local; `SqliteStore` persists state
   and binds the database to the provider namespace so it cannot be reused
-  accidentally for another network. The store also owns its immutable
-  `EdgePolicy`: `AllReferences` permits parent and cross-thread hops, while
-  `CrossThreadOnly` permits only slots `1+`. Opening a SQLite store with a
-  different policy atomically clears its graph and path cache before reuse.
+  accidentally for another network. Parent slot `0` and all cross-thread
+  reference slots are always indexed and available to the resolver.
 
 `GraphResolver<P, S>` is generic over both traits. Provider I/O is performed
 without holding store locks, and `StoreBatch` is the atomic ingestion boundary.
 Applications control when `sync_latest()` runs; `resolve()` can also populate
 the store lazily during a cold historical search.
+
+`resolve_proof()` additionally returns `ResolvedBlockProof`. It contains
+separate anchor (Y) and target (X) proof blocks plus one canonical source block
+per hop. Before returning, the resolver checks every
+`source.proof_block_refs[ref_index] == edge.to`, including parent slot `0`.
+`resolve_anchored_proof()` is the library-level composition API for providers
+that can supply ready cryptographic witnesses. It accepts an `AnchorSnapshot`,
+examines candidates from the first thread-0 block at or to the right of X's
+timestamp, and returns the selected route plus provider-supplied hop and
+history openings. The resolver checks block IDs, reference slots, edge
+identity, epoch, layer, height, and selection of an active `final_root`; it
+does not calculate hashes or cryptographically verify the openings.
 
 The default features are `graphql`, `sqlite`, and `cli`. Disable default
 features for a provider-neutral library build, or enable `test-utils` for the
@@ -107,15 +123,15 @@ anchor and anchoring delay.
 
 ### CLI
 
-Resolve one block and print a JSON `ResolvedPath`:
+Resolve one block and print JSON proof material:
 
 ```bash
 cargo run -p bridge-block-graph-resolver --bin bridge-block-graph-resolver -- resolve \
   --gql-url http://127.0.0.1:8600/graphql \
   --block-id 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --database resolver.sqlite \
-  --edge-policy all-references \
   --policy shortest-current \
+  --proof-material \
   --pretty
 ```
 
@@ -124,18 +140,12 @@ store for resolution. Omit `--database` for a temporary in-memory store. Use
 `--max-hops`, `--max-visited-blocks`, and `--max-anchor-candidates` to bound a
 request.
 
-Use `--edge-policy cross-thread-only` to enforce paths compatible with a
-cross-reference-only witness. The option belongs to the store and must match
-across `sync`, `resolve`, and `serve`; changing it for an existing SQLite
-database clears the stored graph and positive path cache.
-
 Synchronize and validate the rolling graph without resolving a target:
 
 ```bash
 cargo run -p bridge-block-graph-resolver --bin bridge-block-graph-resolver -- sync \
   --gql-url http://127.0.0.1:8600/graphql \
   --scan-window 1000 \
-  --edge-policy all-references \
   --database resolver.sqlite
 ```
 
@@ -150,7 +160,6 @@ Start a persistent resolver service:
 cargo run -p bridge-block-graph-resolver --bin bridge-block-graph-resolver -- serve \
   --gql-url http://127.0.0.1:8600/graphql \
   --database resolver.sqlite \
-  --edge-policy all-references \
   --listen 127.0.0.1:8787 \
   --scan-window 1000 \
   --sync-interval-secs 10
@@ -172,11 +181,13 @@ curl -sS http://127.0.0.1:8787/v1/resolve \
 Endpoints:
 
 - `GET /healthz` returns health, store version, and last-sync state;
-- `GET /v1/status` returns the same state, including `edge_policy`, without
-  health-status mapping;
+- `GET /v1/status` returns the same state without health-status mapping;
 - `POST /v1/sync` triggers a serialized refresh;
 - `POST /v1/resolve` accepts `ResolutionRequest` and returns `ResolvedPath` or
-  a structured error.
+  a structured error;
+- `POST /v1/resolve-proof` accepts the same request and returns
+  `ResolvedBlockProof`, including canonical proof payloads for both endpoints
+  and every hop source.
 
 ## Algorithm
 
@@ -203,11 +214,9 @@ the batch atomically, and retains the highest configured number of blocks per
 thread. Replacing a block removes its previous reverse edges before inserting
 the new ones. Graph versions change only when stored graph data changes.
 
-The store's edge policy is applied consistently to both search phases.
-`all-references` indexes and traverses every slot. `cross-thread-only` ignores
-slot `0` in the reverse index and in historical forward traversal, and it does
-not use the target-thread parent-chain shortcut. In that mode a candidate must
-reach the exact target using only slots `1+`.
+Both search phases always traverse every reference slot. Slot `0` is the
+parent, and slots `1+` are cross-thread references. Historical search may use
+the target-thread parent-chain shortcut once it enters the target thread.
 
 ### Cached and reverse-index resolution
 

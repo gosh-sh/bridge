@@ -1,7 +1,6 @@
 //! Stateful reverse-graph resolution from an event block to a newer thread-0
 //! anchor.
 
-pub mod memory;
 pub mod model;
 pub mod provider;
 #[cfg(feature = "graphql")]
@@ -9,23 +8,25 @@ pub mod providers;
 pub mod resolver;
 #[cfg(feature = "server")]
 pub mod server;
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
 pub mod store;
+pub mod stores;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_generator;
 
-pub use memory::MemoryStore;
-pub use model::{BlockEdge, BlockId, BlockNode, ThreadId};
-pub use provider::{BlockProvider, TimedBlock};
+pub use model::{
+    history_selects_snapshot_slot, AnchorHistoryWitness, AnchorLayerMode, AnchorSlot,
+    AnchorSnapshot, AnchoredResolutionRequest, ApplyStats, BlockEdge, BlockId, BlockNode,
+    DenseOpening, ErrorBody, HopOpening, PathCacheKey, ProofBlock, PruneStats, ResolutionPolicy,
+    ResolutionRequest, ResolvedAnchoredBlockProof, ResolvedBlockProof, ResolvedPath,
+    ResolverLimits, ServiceStatus, StoreBatch, StoreVersion, SyncStats, ThreadId, TimedBlock,
+};
+pub use provider::BlockProvider;
 #[cfg(feature = "graphql")]
 pub use providers::graphql::GraphqlBlockProvider;
 pub use resolver::{GraphResolver, HistoricalSearchConfig, ResolutionError};
 #[cfg(feature = "server")]
-pub use server::{router as http_router, ResolverApi, ServiceStatus};
+pub use server::{router as http_router, ResolverApi};
+pub use store::ResolverStore;
+pub use stores::MemoryStore;
 #[cfg(feature = "sqlite")]
-pub use sqlite::SqliteStore;
-pub use store::{
-    ApplyStats, EdgePolicy, PathCacheKey, PruneStats, ResolutionPolicy, ResolutionRequest,
-    ResolvedPath, ResolverLimits, ResolverStore, StoreBatch, StoreVersion, SyncStats,
-};
+pub use stores::SqliteStore;

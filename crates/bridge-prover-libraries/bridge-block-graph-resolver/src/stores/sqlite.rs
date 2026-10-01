@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
 
 use crate::{
-    ApplyStats, BlockEdge, BlockId, BlockNode, EdgePolicy, PathCacheKey, PruneStats,
-    ResolutionPolicy, ResolvedPath, ResolverStore, StoreBatch, StoreVersion, ThreadId,
+    ApplyStats, BlockEdge, BlockId, BlockNode, PathCacheKey, PruneStats, ResolutionPolicy,
+    ResolvedPath, ResolverStore, StoreBatch, StoreVersion, ThreadId,
 };
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const QUERY_CHUNK: usize = 500;
 
 /// Persistent resolver storage bound to one provider namespace.
@@ -25,7 +25,6 @@ const QUERY_CHUNK: usize = 500;
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
     namespace: Arc<str>,
-    edge_policy: EdgePolicy,
 }
 
 impl SqliteStore {
@@ -33,20 +32,12 @@ impl SqliteStore {
         path: impl AsRef<Path>,
         namespace: impl Into<String>,
     ) -> anyhow::Result<Self> {
-        Self::open_with_edge_policy(path, namespace, EdgePolicy::default()).await
-    }
-
-    pub async fn open_with_edge_policy(
-        path: impl AsRef<Path>,
-        namespace: impl Into<String>,
-        edge_policy: EdgePolicy,
-    ) -> anyhow::Result<Self> {
         let path = path.as_ref().to_owned();
         let namespace = namespace.into();
         let namespace_for_open = namespace.clone();
         let connection = tokio::task::spawn_blocking(move || -> anyhow::Result<Connection> {
             let mut connection = Connection::open(&path)?;
-            initialize(&mut connection, &namespace_for_open, edge_policy)?;
+            initialize(&mut connection, &namespace_for_open)?;
             Ok(connection)
         })
         .await
@@ -54,25 +45,16 @@ impl SqliteStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             namespace: namespace.into(),
-            edge_policy,
         })
     }
 
     #[cfg(test)]
     async fn open_in_memory(namespace: &str) -> anyhow::Result<Self> {
-        Self::open_in_memory_with_edge_policy(namespace, EdgePolicy::default()).await
-    }
-
-    #[cfg(test)]
-    async fn open_in_memory_with_edge_policy(
-        namespace: &str,
-        edge_policy: EdgePolicy,
-    ) -> anyhow::Result<Self> {
         let namespace = namespace.to_owned();
         let namespace_for_open = namespace.clone();
         let connection = tokio::task::spawn_blocking(move || -> anyhow::Result<Connection> {
             let mut connection = Connection::open_in_memory()?;
-            initialize(&mut connection, &namespace_for_open, edge_policy)?;
+            initialize(&mut connection, &namespace_for_open)?;
             Ok(connection)
         })
         .await
@@ -80,7 +62,6 @@ impl SqliteStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             namespace: namespace.into(),
-            edge_policy,
         })
     }
 
@@ -105,11 +86,7 @@ impl SqliteStore {
     }
 }
 
-fn initialize(
-    connection: &mut Connection,
-    namespace: &str,
-    edge_policy: EdgePolicy,
-) -> anyhow::Result<()> {
+fn initialize(connection: &mut Connection, namespace: &str) -> anyhow::Result<()> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -117,7 +94,6 @@ fn initialize(
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
              schema_version INTEGER NOT NULL,
              namespace TEXT NOT NULL,
-             edge_policy INTEGER NOT NULL,
              graph_version BLOB NOT NULL,
              anchor_epoch BLOB NOT NULL
          );
@@ -166,10 +142,26 @@ fn initialize(
             match version {
                 1 => {
                     tx.execute(
-                        "ALTER TABLE resolver_metadata ADD COLUMN edge_policy INTEGER NOT NULL \
-                         DEFAULT 0",
-                        [],
+                        "UPDATE resolver_metadata SET schema_version = ?1 WHERE singleton = 1",
+                        [SCHEMA_VERSION],
                     )?;
+                },
+                2 => {
+                    let legacy_policy: i64 = tx.query_row(
+                        "SELECT edge_policy FROM resolver_metadata WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if legacy_policy != 0 {
+                        tx.execute("DELETE FROM paths", [])?;
+                        tx.execute("DELETE FROM blocks", [])?;
+                        tx.execute(
+                            "UPDATE resolver_metadata SET graph_version = ?1, anchor_epoch = ?2 \
+                             WHERE singleton = 1",
+                            params![encode_u64(0), encode_u64(0)],
+                        )?;
+                    }
+                    tx.execute("ALTER TABLE resolver_metadata DROP COLUMN edge_policy", [])?;
                     tx.execute(
                         "UPDATE resolver_metadata SET schema_version = ?1 WHERE singleton = 1",
                         [SCHEMA_VERSION],
@@ -185,31 +177,11 @@ fn initialize(
         None => {
             tx.execute(
                 "INSERT INTO resolver_metadata
-                 (singleton, schema_version, namespace, edge_policy, graph_version, anchor_epoch)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-                params![
-                    SCHEMA_VERSION,
-                    namespace,
-                    edge_policy_code(edge_policy),
-                    encode_u64(0),
-                    encode_u64(0)
-                ],
+                 (singleton, schema_version, namespace, graph_version, anchor_epoch)
+                 VALUES (1, ?1, ?2, ?3, ?4)",
+                params![SCHEMA_VERSION, namespace, encode_u64(0), encode_u64(0)],
             )?;
         },
-    }
-    let stored_edge_policy: i64 = tx.query_row(
-        "SELECT edge_policy FROM resolver_metadata WHERE singleton = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    if stored_edge_policy != edge_policy_code(edge_policy) {
-        tx.execute("DELETE FROM paths", [])?;
-        tx.execute("DELETE FROM blocks", [])?;
-        tx.execute(
-            "UPDATE resolver_metadata SET edge_policy = ?1, graph_version = ?2, anchor_epoch = ?3 \
-             WHERE singleton = 1",
-            params![edge_policy_code(edge_policy), encode_u64(0), encode_u64(0)],
-        )?;
     }
     tx.commit()?;
     Ok(())
@@ -333,19 +305,8 @@ fn policy_code(policy: ResolutionPolicy) -> i64 {
     }
 }
 
-fn edge_policy_code(policy: EdgePolicy) -> i64 {
-    match policy {
-        EdgePolicy::AllReferences => 0,
-        EdgePolicy::CrossThreadOnly => 1,
-    }
-}
-
 #[async_trait]
 impl ResolverStore for SqliteStore {
-    fn edge_policy(&self) -> EdgePolicy {
-        self.edge_policy
-    }
-
     async fn version(&self) -> anyhow::Result<StoreVersion> {
         self.call(|connection| {
             let tx = connection.transaction()?;
@@ -373,7 +334,6 @@ impl ResolverStore for SqliteStore {
         ids: &[BlockId],
     ) -> anyhow::Result<HashMap<BlockId, Vec<BlockEdge>>> {
         let ids = ids.to_vec();
-        let edge_policy = self.edge_policy;
         self.call(move |connection| {
             let mut result: HashMap<BlockId, Vec<BlockEdge>> = HashMap::new();
             for chunk in ids.chunks(QUERY_CHUNK) {
@@ -392,9 +352,6 @@ impl ResolverStore for SqliteStore {
                     let to = decode_block_id(row.get(1)?, "to_id")?;
                     let ref_index = u32::try_from(row.get::<_, i64>(2)?)
                         .map_err(|_| anyhow::anyhow!("ref_index is outside u32 range"))?;
-                    if !edge_policy.allows(ref_index) {
-                        continue;
-                    }
                     result.entry(to).or_default().push(BlockEdge {
                         from,
                         to,
@@ -762,47 +719,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changing_edge_policy_clears_persistent_state() {
+    async fn migrates_legacy_cross_thread_policy_to_unconditional_parent_refs() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("resolver.sqlite");
-        {
-            let store = SqliteStore::open(&path, "network-a").await.unwrap();
-            store
-                .apply(StoreBatch {
-                    blocks: vec![block(1, 1, 1, &[2])],
-                    anchor_epoch: Some(9),
-                })
-                .await
-                .unwrap();
-        }
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE resolver_metadata (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version INTEGER NOT NULL,
+                    namespace TEXT NOT NULL,
+                    edge_policy INTEGER NOT NULL,
+                    graph_version BLOB NOT NULL,
+                    anchor_epoch BLOB NOT NULL
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO resolver_metadata VALUES (1, 2, 'network-a', 1, ?1, ?2)",
+                params![encode_u64(7), encode_u64(9)],
+            )
+            .unwrap();
+        drop(connection);
 
-        let store =
-            SqliteStore::open_with_edge_policy(&path, "network-a", EdgePolicy::CrossThreadOnly)
-                .await
-                .unwrap();
-        assert_eq!(store.edge_policy(), EdgePolicy::CrossThreadOnly);
+        let store = SqliteStore::open(&path, "network-a").await.unwrap();
         assert_eq!(store.version().await.unwrap(), StoreVersion::default());
-        assert!(store.block(&id(1)).await.unwrap().is_none());
-        store
-            .apply(StoreBatch {
-                blocks: vec![block(4, 1, 2, &[2, 3])],
-                anchor_epoch: None,
+        let columns = store
+            .call(|connection| {
+                let mut statement = connection.prepare("PRAGMA table_info(resolver_metadata)")?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(columns)
             })
             .await
             .unwrap();
-        assert!(store.incoming_edges(&[id(2)]).await.unwrap().is_empty());
-        assert_eq!(
-            store.incoming_edges(&[id(3)]).await.unwrap()[&id(3)][0].ref_index,
-            1
-        );
-
-        drop(store);
-        let reopened =
-            SqliteStore::open_with_edge_policy(&path, "network-a", EdgePolicy::CrossThreadOnly)
-                .await
-                .unwrap();
-        assert_eq!(reopened.edge_policy(), EdgePolicy::CrossThreadOnly);
-        assert!(reopened.block(&id(4)).await.unwrap().is_some());
+        assert!(!columns.iter().any(|column| column == "edge_policy"));
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 
-use crate::{BlockId, BlockNode, BlockProvider, EdgePolicy, ThreadId, TimedBlock};
+use crate::{BlockId, BlockNode, BlockProvider, ProofBlock, ThreadId, TimedBlock};
 
 const LOAD_MAX: i32 = 10_000;
 /// `65_455 * 330 ms = 21_600.15 s`: just over six logical hours.
@@ -160,6 +160,7 @@ pub struct GeneratedBlock {
 
 #[derive(Clone, Debug)]
 pub struct GeneratedGraph {
+    proof_seed: u64,
     pub blocks: Vec<GeneratedBlock>,
     pub lifecycle: Vec<LifecycleEvent>,
     pub active_thread_counts: Vec<usize>,
@@ -203,13 +204,10 @@ impl GeneratedGraph {
         SyntheticBlockProvider::new(self)
     }
 
-    /// Build reachability from all thread-0 blocks under the selected edge
-    /// policy. Thread-0 anchors are processed oldest first, so the first mark
-    /// also identifies the earliest anchor that can reach a block.
-    pub fn accessibility_map(
-        &self,
-        edge_policy: EdgePolicy,
-    ) -> anyhow::Result<BlockAccessibilityMap> {
+    /// Build reachability from all thread-0 blocks. Thread-0 anchors are
+    /// processed oldest first, so the first mark also identifies the earliest
+    /// anchor that can reach a block.
+    pub fn accessibility_map(&self) -> anyhow::Result<BlockAccessibilityMap> {
         let by_id: HashMap<_, _> = self
             .blocks
             .iter()
@@ -240,19 +238,14 @@ impl GeneratedGraph {
                     earliest_anchor_tick: anchor.tick,
                     delay_ms: anchor.gen_utime_ms.saturating_sub(block.gen_utime_ms),
                 });
-                for (ref_index, reference) in block.node.refs.iter().copied().enumerate() {
-                    let ref_index = u32::try_from(ref_index)
-                        .map_err(|_| anyhow::anyhow!("reference index exceeds u32"))?;
-                    if !edge_policy.allows(ref_index) {
-                        continue;
-                    }
-                    let referenced_index = by_id.get(&reference).copied().ok_or_else(|| {
+                for reference in &block.node.refs {
+                    let referenced_index = by_id.get(reference).copied().ok_or_else(|| {
                         anyhow::anyhow!(
                             "generated block {} references missing block {reference}",
                             block.node.block_id
                         )
                     })?;
-                    if !entries.contains_key(&reference) {
+                    if !entries.contains_key(reference) {
                         stack.push(referenced_index);
                     }
                 }
@@ -527,6 +520,7 @@ impl TestGraphGenerator {
             self.config.ticks * self.config.block_interval_ms,
         );
         GeneratedGraph {
+            proof_seed: self.config.seed,
             blocks,
             lifecycle,
             active_thread_counts,
@@ -911,6 +905,41 @@ fn initial_thread_interval_ms(config: &GeneratorConfig, seed: u64, serial: u64) 
         + splitmix64(seed ^ 0x494e_5445_5256_414c ^ serial.rotate_left(37)) % width
 }
 
+fn synthetic_proof_material(
+    seed: u64,
+    tick: u64,
+    ordinal: u64,
+) -> ([u8; 32], [u8; 32], [[u8; 32]; 16]) {
+    let mut leaves = [[0u8; 32]; 16];
+    for (index, leaf) in leaves.iter_mut().enumerate() {
+        fill_deterministic(leaf, seed ^ 0x4d45_524b_4c45, tick, ordinal, index as u64);
+    }
+    let (envelope_hash, tracked_ext_out_messages_root) =
+        synthetic_block_leaf_metadata(seed, tick, ordinal);
+    leaves[8] = tracked_ext_out_messages_root;
+    (envelope_hash, tracked_ext_out_messages_root, leaves)
+}
+
+fn synthetic_block_leaf_metadata(seed: u64, tick: u64, ordinal: u64) -> ([u8; 32], [u8; 32]) {
+    let mut envelope_hash = [0u8; 32];
+    fill_deterministic(
+        &mut envelope_hash,
+        seed ^ 0x454e_5645_4c4f_5045,
+        tick,
+        ordinal,
+        0,
+    );
+    let mut tracked_ext_out_messages_root = [0u8; 32];
+    fill_deterministic(
+        &mut tracked_ext_out_messages_root,
+        seed ^ 0x4d45_524b_4c45,
+        tick,
+        ordinal,
+        8,
+    );
+    (envelope_hash, tracked_ext_out_messages_root)
+}
+
 fn deterministic_block_id(seed: u64, tick: u64, thread: u64, height: u64) -> BlockId {
     let mut bytes = [0u8; 32];
     fill_deterministic(&mut bytes, seed ^ 0x0042_4c4f_434b, tick, thread, height);
@@ -965,6 +994,7 @@ impl DeterministicRng {
 }
 
 pub struct SyntheticBlockProvider {
+    proof_seed: u64,
     blocks: Vec<GeneratedBlock>,
     by_id: HashMap<BlockId, usize>,
     by_thread_height: HashMap<(ThreadId, u64), usize>,
@@ -979,6 +1009,8 @@ pub struct ProviderCallCounts {
     pub timed_block_by_id: u64,
     pub timed_block_by_height: u64,
     pub latest_timed_block_in_thread: u64,
+    pub proof_block_by_id: u64,
+    pub proof_block_by_height: u64,
 }
 
 impl ProviderCallCounts {
@@ -988,6 +1020,8 @@ impl ProviderCallCounts {
             + self.timed_block_by_id
             + self.timed_block_by_height
             + self.latest_timed_block_in_thread
+            + self.proof_block_by_id
+            + self.proof_block_by_height
     }
 
     pub fn since(self, earlier: Self) -> Self {
@@ -998,6 +1032,8 @@ impl ProviderCallCounts {
             timed_block_by_height: self.timed_block_by_height - earlier.timed_block_by_height,
             latest_timed_block_in_thread: self.latest_timed_block_in_thread
                 - earlier.latest_timed_block_in_thread,
+            proof_block_by_id: self.proof_block_by_id - earlier.proof_block_by_id,
+            proof_block_by_height: self.proof_block_by_height - earlier.proof_block_by_height,
         }
     }
 
@@ -1007,6 +1043,8 @@ impl ProviderCallCounts {
         self.timed_block_by_id += other.timed_block_by_id;
         self.timed_block_by_height += other.timed_block_by_height;
         self.latest_timed_block_in_thread += other.latest_timed_block_in_thread;
+        self.proof_block_by_id += other.proof_block_by_id;
+        self.proof_block_by_height += other.proof_block_by_height;
     }
 }
 
@@ -1017,6 +1055,8 @@ struct ProviderCallCounters {
     timed_block_by_id: AtomicU64,
     timed_block_by_height: AtomicU64,
     latest_timed_block_in_thread: AtomicU64,
+    proof_block_by_id: AtomicU64,
+    proof_block_by_height: AtomicU64,
 }
 
 impl SyntheticBlockProvider {
@@ -1037,6 +1077,7 @@ impl SyntheticBlockProvider {
                 .or_insert(index);
         }
         Self {
+            proof_seed: graph.proof_seed,
             blocks: graph.blocks,
             by_id,
             by_thread_height,
@@ -1059,6 +1100,8 @@ impl SyntheticBlockProvider {
                 .calls
                 .latest_timed_block_in_thread
                 .load(Ordering::Relaxed),
+            proof_block_by_id: self.calls.proof_block_by_id.load(Ordering::Relaxed),
+            proof_block_by_height: self.calls.proof_block_by_height.load(Ordering::Relaxed),
         }
     }
 
@@ -1066,6 +1109,20 @@ impl SyntheticBlockProvider {
         TimedBlock {
             block: self.blocks[index].node.clone(),
             gen_utime_ms: self.blocks[index].gen_utime_ms,
+        }
+    }
+
+    fn proof(&self, index: usize) -> ProofBlock {
+        let generated = &self.blocks[index];
+        let (envelope_hash, tracked_ext_out_messages_root, leaves) =
+            synthetic_proof_material(self.proof_seed, generated.tick, generated.ordinal);
+        ProofBlock {
+            block: generated.node.clone(),
+            gen_utime_ms: generated.gen_utime_ms,
+            envelope_hash,
+            tracked_ext_out_messages_root,
+            history_proofs: BTreeMap::new(),
+            block_merkle_tree_leaves: leaves,
         }
     }
 }
@@ -1118,6 +1175,25 @@ impl BlockProvider for SyntheticBlockProvider {
             .latest_timed_block_in_thread
             .fetch_add(1, Ordering::Relaxed);
         Ok(self.thread_tips.get(thread).map(|index| self.timed(*index)))
+    }
+
+    async fn proof_block_by_id(&self, id: &BlockId) -> anyhow::Result<Option<ProofBlock>> {
+        self.calls.proof_block_by_id.fetch_add(1, Ordering::Relaxed);
+        Ok(self.by_id.get(id).map(|index| self.proof(*index)))
+    }
+
+    async fn proof_block_by_height(
+        &self,
+        thread: &ThreadId,
+        height: u64,
+    ) -> anyhow::Result<Option<ProofBlock>> {
+        self.calls
+            .proof_block_by_height
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(self
+            .by_thread_height
+            .get(&(*thread, height))
+            .map(|index| self.proof(*index)))
     }
 
     fn namespace(&self) -> &str {
@@ -1608,7 +1684,7 @@ mod tests {
             .generate();
         let mut candidates_by_tick = BTreeMap::<u64, Vec<BlockId>>::new();
         for block in graph.blocks.iter().filter(|block| {
-            !block.node.thread_id.is_zero() && block.tick + 100 < evolving_config().ticks
+            !block.node.thread_id.is_zero() && block.tick + 5_000 < evolving_config().ticks
         }) {
             candidates_by_tick
                 .entry(block.tick)
@@ -1636,7 +1712,7 @@ mod tests {
             "time-stratified targets must be distinct"
         );
 
-        let accessibility = graph.accessibility_map(EdgePolicy::AllReferences).unwrap();
+        let accessibility = graph.accessibility_map().unwrap();
         let reachable_targets = targets
             .iter()
             .filter(|(target, _)| accessibility.is_reachable(target))
@@ -1652,8 +1728,8 @@ mod tests {
         target_anchor_delays_ms.sort_unstable();
         let target_delay_p95 = (target_anchor_delays_ms.len() - 1) * 95 / 100;
         println!(
-            "accessibility policy=all-references reachable={}/{} unreachable={} \
-             sampled_targets_reachable={}/{} target_anchor_delay_ms_min={} median={} p95={} max={}",
+            "accessibility reachable={}/{} unreachable={} sampled_targets_reachable={}/{} \
+             target_anchor_delay_ms_min={} median={} p95={} max={}",
             accessibility.reachable_blocks(),
             accessibility.total_blocks(),
             accessibility.unreachable_blocks(),
@@ -1677,6 +1753,7 @@ mod tests {
             let mut elapsed_micros = Vec::with_capacity(1_000);
             let mut successful_elapsed_micros = Vec::with_capacity(1_000);
             let mut aggregate_calls = ProviderCallCounts::default();
+            let mut resolved_paths = Vec::with_capacity(1_000);
             let mut failures = 0_usize;
             for (sample, (target, tick)) in targets.iter().copied().enumerate() {
                 let calls_before = provider.call_counts();
@@ -1707,6 +1784,7 @@ mod tests {
                         assert_eq!(path.hops.last().unwrap().to, target);
                         *histogram.entry(path.hops.len()).or_default() += 1;
                         hops.push(path.hops.len());
+                        resolved_paths.push(path.clone());
                         successful_elapsed_micros.push(resolve_elapsed_micros);
                         println!(
                             "resolve sample={} tick={} status=ok hops={} provider_calls={} \
@@ -1776,6 +1854,71 @@ mod tests {
             );
             assert_eq!(hops.len() + failures, 1_000);
             assert!(!hops.is_empty());
+
+            let proof_started = std::time::Instant::now();
+            let mut proof_hops = Vec::with_capacity(resolved_paths.len());
+            let mut proof_calls = Vec::with_capacity(resolved_paths.len());
+            let mut parent_edges = 0usize;
+            let mut cross_edges = 0usize;
+            let mut proof_failures = 0usize;
+            for (sample, path) in resolved_paths.iter().enumerate() {
+                let target = path.target;
+                let before = provider.call_counts();
+                let result = resolver
+                    .resolve_proof(ResolutionRequest {
+                        target,
+                        policy: ResolutionPolicy::FirstValid,
+                        limits: ResolverLimits {
+                            max_hops: 500,
+                            max_visited_blocks: 10_000,
+                        },
+                    })
+                    .await;
+                let calls = provider.call_counts().since(before).total();
+                match result {
+                    Ok(proof) => {
+                        assert_eq!(proof.path.target, target);
+                        for edge in &proof.path.hops {
+                            if edge.ref_index == 0 {
+                                parent_edges += 1;
+                            } else {
+                                cross_edges += 1;
+                            }
+                        }
+                        proof_hops.push(proof.path.hops.len());
+                        proof_calls.push(calls);
+                    },
+                    Err(error) => {
+                        proof_failures += 1;
+                        println!(
+                            "proof sample={} status=error provider_calls={} error={error:#}",
+                            sample + 1,
+                            calls,
+                        );
+                    },
+                }
+            }
+            proof_hops.sort_unstable();
+            proof_calls.sort_unstable();
+            println!(
+                "proof_1000 successes={} failures={} parent_edges={} cross_edges={} hops_min={} \
+                 median={} p95={} max={} calls_min={} median={} p95={} max={} time_wall_ms={}",
+                proof_hops.len(),
+                proof_failures,
+                parent_edges,
+                cross_edges,
+                proof_hops[0],
+                proof_hops[proof_hops.len() / 2],
+                proof_hops[949],
+                proof_hops[999],
+                proof_calls[0],
+                proof_calls[proof_calls.len() / 2],
+                proof_calls[949],
+                proof_calls[999],
+                proof_started.elapsed().as_millis(),
+            );
+            assert_eq!(proof_failures, 0);
+            assert_eq!(proof_hops.len(), 1_000);
         }
     }
 }

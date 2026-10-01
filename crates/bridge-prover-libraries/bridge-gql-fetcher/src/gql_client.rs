@@ -5,10 +5,8 @@ use std::{
 };
 
 use anyhow::{bail, Context};
-/// Canonical block-id Merkle leaf count (protocol-fixed = 16). Sourced from
-/// the circuits repo so the GraphQL projection stays in lock-step with the
-/// circuit witness layout — no local `= 16` literal to drift out of sync.
-pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
+/// The Acki Nacki block-id Merkle tree has a fixed depth of four.
+pub const BLOCK_ID_TREE_LEAF_COUNT: usize = 16;
 use metrics::{counter, describe_counter, describe_histogram, histogram};
 use serde_json::{json, Value};
 use tracing::{error, warn};

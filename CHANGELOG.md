@@ -327,6 +327,19 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `bridge-block-graph-resolver` can now return canonical proof material in
+  addition to a block path. Rust callers use `GraphResolver::resolve_proof`,
+  the CLI uses `resolve --proof-material`, and servers expose
+  `POST /v1/resolve-proof`. The response keeps the anchor/Y and target/X block
+  payloads separate, includes the source block for every hop, and validates
+  each returned `ref_index`, including parent slot `0`, against the node's
+  `proof_block_refs` before returning it. Library callers with a provider that
+  supplies ready hop/history openings can use `resolve_anchored_proof` to
+  select the nearest reachable thread-0 block covered by active verifier
+  roots. The resolver treats those openings as opaque and has no Poseidon or
+  circuit dependency; cryptographic construction and validation remain in
+  the provider/prover pipeline.
+
 - Added the `bridge-block-graph-resolver` CLI for operators to scan a finalized
   Acki Nacki GraphQL block window and resolve a deterministic minimum-hop path
   from a thread-0 anchor to an event block. `resolve` emits lowercase block IDs
@@ -347,11 +360,8 @@ assigns it when the release is tagged.
   references, and follows parent references to the exact target. The fallback
   reuses expanded branches and known path suffixes across anchor candidates;
   its visited-block limit applies across the complete resolution.
-  `--edge-policy all-references|cross-thread-only` selects whether paths may
-  use slot-0 parent transitions or only slots `1+`. This policy belongs to the
-  memory/SQLite store and is reported by the HTTP status endpoints. Reopening
-  an existing SQLite database with a different edge policy atomically clears
-  its graph and positive path cache before synchronization.
+  Parent slot `0` and all cross-thread reference slots are always available to
+  both the reverse-index and historical search.
 
 - **Offline keygen bins for the multi-thread Circuit-4 pair —
   `keygen_bridge_final` and `keygen_bridge_multi_hop` under

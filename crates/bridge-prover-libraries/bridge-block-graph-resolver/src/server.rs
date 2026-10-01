@@ -10,12 +10,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    EdgePolicy, GraphResolver, GraphqlBlockProvider, ResolutionError, ResolutionRequest,
-    ResolvedPath, SqliteStore, StoreVersion, SyncStats,
+    ErrorBody, GraphResolver, GraphqlBlockProvider, ResolutionError, ResolutionRequest,
+    ResolvedBlockProof, ResolvedPath, ServiceStatus, SqliteStore, StoreVersion, SyncStats,
 };
 
 type PersistentResolver = GraphResolver<GraphqlBlockProvider, SqliteStore>;
@@ -34,17 +33,6 @@ struct MutableStatus {
     last_sync: Option<SyncStats>,
     last_sync_unix_seconds: Option<u64>,
     last_error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ServiceStatus {
-    pub healthy: bool,
-    pub namespace: String,
-    pub edge_policy: EdgePolicy,
-    pub store_version: StoreVersion,
-    pub last_sync: Option<SyncStats>,
-    pub last_sync_unix_seconds: Option<u64>,
-    pub last_error: Option<String>,
 }
 
 impl ResolverApi {
@@ -83,13 +71,19 @@ impl ResolverApi {
         self.resolver.resolve(request).await
     }
 
+    pub async fn resolve_proof(
+        &self,
+        request: ResolutionRequest,
+    ) -> anyhow::Result<ResolvedBlockProof> {
+        self.resolver.resolve_proof(request).await
+    }
+
     pub async fn status(&self) -> anyhow::Result<ServiceStatus> {
         let version = self.resolver_store_version().await?;
         let status = self.status.read().await.clone();
         Ok(ServiceStatus {
             healthy: status.last_error.is_none(),
             namespace: self.namespace.to_string(),
-            edge_policy: self.resolver.edge_policy(),
             store_version: version,
             last_sync: status.last_sync,
             last_sync_unix_seconds: status.last_sync_unix_seconds,
@@ -111,6 +105,7 @@ pub fn router(state: ResolverApi) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/sync", post(sync))
         .route("/v1/resolve", post(resolve))
+        .route("/v1/resolve-proof", post(resolve_proof))
         .with_state(state)
 }
 
@@ -145,17 +140,22 @@ async fn resolve(
     ))
 }
 
+async fn resolve_proof(
+    State(api): State<ResolverApi>,
+    Json(request): Json<ResolutionRequest>,
+) -> Result<Json<ResolvedBlockProof>, ApiError> {
+    Ok(Json(
+        api.resolve_proof(request)
+            .await
+            .map_err(ApiError::resolution)?,
+    ))
+}
+
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    kind: &'static str,
-    error: String,
 }
 
 struct ApiError {
@@ -187,6 +187,12 @@ impl ApiError {
             Some(ResolutionError::HistoricalSearchLimit {
                 ..
             }) => (StatusCode::UNPROCESSABLE_ENTITY, "historical-search-limit"),
+            Some(ResolutionError::ProofBlockNotFound {
+                ..
+            }) => (StatusCode::NOT_FOUND, "proof-block-not-found"),
+            Some(ResolutionError::InvalidProofBlock {
+                ..
+            }) => (StatusCode::BAD_GATEWAY, "invalid-proof-block"),
             None => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         Self {
@@ -298,7 +304,6 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status["healthy"], true);
         assert_eq!(status["namespace"], "test-network");
-        assert_eq!(status["edge_policy"], "all-references");
         assert_eq!(status["store_version"]["graph_version"], 1);
     }
 

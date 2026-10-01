@@ -118,8 +118,14 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
 # Currently pinned to the shellnet team's L2-anchored reference deploy
-# on Sepolia. The server-side bundle relayer that advances this contract
+# on Sepolia, deployed 2026-09-29 at block 11807209 (genesis seq_no
+# 20054016). The server-side bundle relayer that advances this contract
 # runs L2 only. See README.md Quick start for the default-user flow.
+#
+# The deploy before it, `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, is
+# no longer advanced: its BlockVerified events stop at seq_no 20054016,
+# where this one starts. It still answers every getter and keeps its own
+# treasury.
 #
 # NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
 # over a new AN-side eccUSDCBridge and rolled back the same day. That
@@ -154,4 +160,4 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7
+BRIDGE_ADDRESS=0x32b9E87aCAA1AD7d61A81f93DD9D525F64Ff4F38

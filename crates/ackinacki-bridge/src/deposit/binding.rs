@@ -82,6 +82,17 @@ fn is_candidate(op: &OpRecord, c: &Candidate, others: &Claims) -> bool {
         && !others.tx_hashes.contains(&c.tx_hash)
 }
 
+/// Whether `c` was sent no earlier than the operation's request: its nonce
+/// is at least the account's next nonce read before the request. The
+/// search starts at the finalized block, below the head at the request,
+/// and the sender's earlier deposits — the same calldata among them —
+/// fall into it; none of them is this operation's.
+fn not_before_request(op: &OpRecord, c: &Candidate) -> bool {
+    op.request
+        .as_ref()
+        .is_none_or(|q| c.nonce >= q.nonce_before)
+}
+
 /// Only for naming deposits outside the slot that look like this request.
 fn matches_request(op: &OpRecord, c: &Candidate) -> bool {
     op.request.as_ref().is_some_and(|q| q.calldata == c.input)
@@ -101,7 +112,7 @@ fn slot_of(op: &OpRecord) -> Option<u64> {
 pub fn decide(op: &OpRecord, candidates: &[Candidate], others: &Claims) -> Binding {
     let cands: Vec<&Candidate> = candidates
         .iter()
-        .filter(|c| is_candidate(op, c, others))
+        .filter(|c| is_candidate(op, c, others) && not_before_request(op, c))
         .collect();
     let slot = slot_of(op);
     if let Some(n) = slot {
@@ -144,8 +155,9 @@ pub fn decide(op: &OpRecord, candidates: &[Candidate], others: &Claims) -> Bindi
     }
 }
 
-/// Checks a transaction the user named with `--tx-hash`: the nonce and
-/// uniqueness rules are skipped, the rest is not.
+/// Checks a transaction the user named with `--tx-hash`: the nonce slot and
+/// uniqueness rules are skipped, the rest is not — a transaction sent
+/// before the request is refused too.
 pub fn check_explicit(
     op: &OpRecord,
     cand: &Candidate,
@@ -157,6 +169,13 @@ pub fn check_explicit(
             "{} is not a successful bridge deposit from {:?}, or another operation has already \
              claimed it",
             cand.tx_hash, op.from
+        ));
+    }
+    if !not_before_request(op, cand) {
+        return Err(format!(
+            "{} uses nonce {}, below the account's next nonce when this operation's deposit was \
+             requested: it was sent before this operation's deposit was requested",
+            cand.tx_hash, cand.nonce
         ));
     }
     for o in unresolved_others {
@@ -397,6 +416,39 @@ mod tests {
         let mut claimed = Claims::default();
         claimed.tx_hashes.insert(B256::repeat_byte(1));
         assert!(check_explicit(&a, &cand(1, 42), &claimed, &[]).is_err());
+    }
+
+    #[test]
+    fn an_earlier_deposit_of_the_sender_is_never_this_operations() {
+        // The search starts at the finalized block, below the head the
+        // request was made at: the sender's deposits from before the
+        // request, the same calldata among them, fall into it.
+        let a = op("A", 7);
+        let earlier = cand(1, 5);
+        assert_eq!(
+            decide(&a, std::slice::from_ref(&earlier), &Claims::default()),
+            Binding::NotYet,
+            "no ambiguity with a deposit sent before the request"
+        );
+        assert_eq!(
+            decide(&a, &[earlier.clone(), cand(2, 7)], &Claims::default()),
+            Binding::Bind(B256::repeat_byte(2))
+        );
+        let mut signed = op("A", 7);
+        signed.stage = OpStage::Signed;
+        signed.tx = Some(TxClaim {
+            tx_hash: B256::repeat_byte(3),
+            tx_nonce: 7,
+        });
+        assert_eq!(
+            decide(&signed, std::slice::from_ref(&earlier), &Claims::default()),
+            Binding::NotYet
+        );
+        let e = check_explicit(&a, &earlier, &Claims::default(), &[]).unwrap_err();
+        assert!(
+            e.contains("before this operation's deposit was requested"),
+            "{e}"
+        );
     }
 
     #[test]

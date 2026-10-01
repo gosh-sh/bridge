@@ -40,7 +40,8 @@ pub enum SearchOutcome {
 }
 
 /// Every transaction with a bridge `Deposit` of the operation's sender
-/// from the block the request was made at through `to_block`, once each,
+/// from the block the request recorded (the finalized block before it, in
+/// a record written now) through `to_block`, once each,
 /// with its transaction and receipt. A log whose transaction or receipt the
 /// node does not return right now is an error: the search is incomplete,
 /// and the caller reads again. So is a record without a sender or a

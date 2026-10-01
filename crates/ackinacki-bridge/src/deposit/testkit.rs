@@ -93,6 +93,9 @@ pub struct FakeEvm {
     /// `Some(n)`: after n more `transaction` calls every transaction is gone
     /// (it left the mempool, or the backend stopped showing it).
     pub vanish_tx_after: Mutex<Option<u32>>,
+    /// Transaction → how many more reads show it before it is gone, as a
+    /// transaction the wallet replaced.
+    pub vanishing_txs: Mutex<HashMap<B256, u32>>,
     /// `header(Finalized)` never answers.
     pub hang_finalized: AtomicBool,
     /// `header_by_hash` never answers.
@@ -127,6 +130,7 @@ impl Default for FakeEvm {
             fail_tx_reads: AtomicU32::default(),
             miss_tx_reads: AtomicU32::default(),
             vanish_tx_after: Mutex::default(),
+            vanishing_txs: Mutex::default(),
             hang_finalized: AtomicBool::default(),
             hang_headers_by_hash: AtomicBool::default(),
             fail_finalized: AtomicBool::default(),
@@ -271,6 +275,12 @@ impl EvmRead for FakeEvm {
             return Ok(None);
         }
         if let Some(left) = self.vanish_tx_after.lock().unwrap().as_mut() {
+            if *left == 0 {
+                return Ok(None);
+            }
+            *left -= 1;
+        }
+        if let Some(left) = self.vanishing_txs.lock().unwrap().get_mut(&h) {
             if *left == 0 {
                 return Ok(None);
             }
@@ -1818,6 +1828,14 @@ impl World {
         self.write_expected_pi(&m);
         self.mined = Some(m);
         tx
+    }
+
+    /// A successful deposit at `nonce` with the next deposit id, in block
+    /// `number` (block hash tag `tag`).
+    pub fn mined_deposit_in_block(&mut self, nonce: u64, number: u64, tag: u8) -> B256 {
+        self.next_id += 1;
+        let id = U256::from(self.next_id);
+        self.mine(nonce, 2, true, world_header(number, tag), id, W_AMOUNT)
     }
 
     /// A successful deposit at `nonce` with the next deposit id.

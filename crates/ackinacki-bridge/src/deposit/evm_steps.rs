@@ -308,11 +308,14 @@ pub async fn request_deposit(
         evm.tx_count(from, BlockTag::Pending)
     })
     .await;
-    let from_block = transient(ui, "reading the chain head", || async {
-        evm.header(BlockTag::Latest)
+    // Where a search for the transaction starts. A reorg onto a shorter
+    // branch can put it below the head seen now, never below the finalized
+    // block: a transaction sent after this read cannot land there.
+    let from_block = transient(ui, "reading the finalized block", || async {
+        evm.header(BlockTag::Finalized)
             .await?
             .map(|h| h.number)
-            .ok_or_else(|| anyhow::anyhow!("no latest block"))
+            .ok_or_else(|| anyhow::anyhow!("the node has no finalized block"))
     })
     .await;
     rec.stage = OpStage::Requested;
@@ -581,6 +584,7 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(100, 1)]);
+        evm.finalized.set([Some(header(90, 2))]);
         let w = FakeWallet::eoa();
         let from = w.account;
         evm.counts.lock().unwrap().insert((from, "pending"), 7);
@@ -655,6 +659,31 @@ mod tests {
         let back = s.store.load(&s.rec.op_id).unwrap();
         assert_eq!(back.stage, OpStage::Signed);
         assert_eq!(back.request.unwrap().nonce_before, 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_search_starts_at_the_finalized_block_read_before_the_request() {
+        // A reorg onto a shorter branch can put the deposit below the head
+        // seen at the request, never below the finalized block. The node
+        // has no finalized block at first: that is read again, not
+        // replaced by the head.
+        let mut s = setup();
+        s.evm.finalized.set([None, Some(header(90, 2))]);
+        s.w.send_results
+            .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
+        let ui = RecordingUi::new(true);
+        request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+            .await
+            .unwrap();
+        let back = s.store.load(&s.rec.op_id).unwrap();
+        assert_eq!(back.request.unwrap().from_block, 90, "not the head, 100");
+        assert!(
+            ui.events()
+                .iter()
+                .any(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..))),
+            "{:?}",
+            ui.events()
+        );
     }
 
     #[tokio::test(start_paused = true)]

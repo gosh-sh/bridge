@@ -1862,7 +1862,7 @@ fn done_earlier(board: &Board<'_>, stage: OpStage) {
 }
 
 /// The bridge deposits of the operation's sender from the block its
-/// deposit was requested at, read until `deadline` (`None`: until they are
+/// request recorded, read until `deadline` (`None`: until they are
 /// read); `None` when the time ran out first. A log whose transaction the
 /// node does not return right now leaves the list incomplete: it is read
 /// again, never judged on.
@@ -1950,9 +1950,10 @@ async fn released_without_identity(
 
 /// Binds the transaction the user named with `--tx-hash`. It must be a
 /// successful bridge deposit from the operation's sender, made from the
-/// block the deposit was requested at, that no other operation has claimed
-/// and that no other operation whose outcome is unknown could take by its
-/// own rules; the nonce and uniqueness rules of the search are skipped. The
+/// block its request recorded with a nonce no lower than the one observed
+/// before the request, that no other operation has claimed and that no
+/// other operation whose outcome is unknown could take by its own rules;
+/// the nonce slot and uniqueness rules of the search are skipped. The
 /// chain is read first; the claims are checked and the binding written
 /// under the directory lock. A refusal leaves the record as it was, with
 /// the exit of an outcome still unknown.
@@ -4151,5 +4152,103 @@ mod tests {
             assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
             assert_eq!(store.load(&op).unwrap().stage, at, "unchanged");
         }
+    }
+
+    // ---- a deposit a reorg put below the head the request was made at ----
+
+    /// Where the world's deposit lands: below its head at the request,
+    /// 1000, above its finalized block, 990, as after a reorg onto a
+    /// shorter branch.
+    const BELOW_THE_HEAD: u64 = 995;
+
+    /// A new deposit in `w` that confirms at one block and then waits one
+    /// second for the anchor.
+    fn confirmed_at_one_block(w: &World) -> DepositParams {
+        let mut p = w.params(RunMode::Fresh);
+        p.confirmations = 1;
+        p.anchor_timeout = Some(Duration::from_secs(1));
+        p
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deposit_below_the_head_seen_at_the_request_is_found_without_its_hash() {
+        // The wallet never returns a hash (EIP-681), or its answer is lost.
+        for lost in [WalletError::NoHash, WalletError::Timeout] {
+            let mut w = World::healthy();
+            let h = w.mined_deposit_in_block(7, BELOW_THE_HEAD, 0x95);
+            let a = w.approve_hash();
+            w.wallet.send_results.extend([Ok(a), Err(lost.clone())]);
+            let p = confirmed_at_one_block(&w);
+            let e = run_with(&p, &w.deps(), &mut w.wallet).await.unwrap_err();
+            assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{lost:?}: {e}");
+            let rec = Store::open(&p.state_dir)
+                .unwrap()
+                .load(e.op_id().unwrap())
+                .unwrap();
+            assert_eq!(rec.stage, OpStage::Confirmed);
+            assert_eq!(rec.tx.map(|t| t.tx_hash), Some(h));
+            assert_eq!(rec.request.unwrap().from_block, 990, "the finalized block");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tx_hash_accepts_a_deposit_below_the_head_seen_at_the_request() {
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        w.evm.counts.lock().unwrap().insert((from, "pending"), 7);
+        let a = w.approve_hash();
+        w.wallet
+            .send_results
+            .extend([Ok(a), Err(WalletError::NoHash)]);
+        let p = confirmed_at_one_block(&w);
+        // Nothing on chain within --recovery-window-s.
+        let e = run_with(&p, &w.deps(), &mut w.wallet).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositOutcomeUnknown, "{e}");
+        let op = e.op_id().unwrap().to_string();
+        let h = w.mined_deposit_in_block(7, BELOW_THE_HEAD, 0x95);
+        let target = OpRef::Op(op.clone());
+        let e = resume(&p, &w.deps(), &target, Some(h)).await.unwrap_err();
+        assert_eq!(
+            e.exit_code(),
+            ExitCode::AnWaitTimeout,
+            "bound and confirmed, then the anchor: {e}"
+        );
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.tx.map(|t| t.tx_hash), Some(h));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_below_the_head_seen_at_the_request_is_bound_not_nonce_consumed() {
+        // The wallet returned a hash and then replaced that transaction; the
+        // replacement landed below the head seen at the request, and the
+        // slot is used in finalized state.
+        let mut w = World::healthy();
+        let from = w.wallet.account;
+        let replacement = w.mined_deposit_in_block(7, BELOW_THE_HEAD, 0x95);
+        let original = B256::repeat_byte(0x55);
+        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC));
+        w.evm.txs.lock().unwrap().insert(
+            original,
+            deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),
+        );
+        // Shown to the read that records its nonce, then gone.
+        w.evm.vanishing_txs.lock().unwrap().insert(original, 1);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(original)]);
+        let p = confirmed_at_one_block(&w);
+        let e = run_with(&p, &w.deps(), &mut w.wallet).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
+        let rec = Store::open(&p.state_dir)
+            .unwrap()
+            .load(e.op_id().unwrap())
+            .unwrap();
+        assert_eq!(rec.stage, OpStage::Confirmed);
+        assert_eq!(
+            rec.tx,
+            Some(TxClaim {
+                tx_hash: replacement,
+                tx_nonce: 7
+            })
+        );
     }
 }

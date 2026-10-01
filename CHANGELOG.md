@@ -554,6 +554,18 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **The shellnet profile points at the current Sepolia bridge.**
+  `crates/ackinacki-bridge/config/bridge_config.shellnet` now sets
+  `BRIDGE_ADDRESS=0x32b9E87aCAA1AD7d61A81f93DD9D525F64Ff4F38`, the deploy of
+  2026-09-29 that the bundle relayer advances. The previous address,
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, is no longer advanced: a
+  withdrawal against it burns and then times out at stage 4b, and a deposit
+  into it reaches Acki Nacki only while that bridge stays trusted there.
+  `USDC_BRIDGE_ACCOUNT_ID` stays the same. A profile installed by
+  `install.sh` from an earlier release, or copied by hand, keeps the old
+  address: change `BRIDGE_ADDRESS` in it. Each deploy keeps its own treasury,
+  and nothing moves from the old one to the new one.
+
 - **`.woodpecker/release.yaml` builds, checks and publishes the deposit
   prover, and refuses a tag in more cases.**
   - The `build` step fails at once while `MIN_BRIDGE_VERSION` is unset (see

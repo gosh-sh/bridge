@@ -493,6 +493,39 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_replacement_in_a_slot_below_the_observed_nonce_is_bound_not_nonce_consumed() {
+        // The wallet sent the deposit with nonce 5, below the 7 the CLI's
+        // node showed, then replaced it; the slot is used in finalized
+        // state.
+        let evm = FakeEvm::sepolia();
+        evm.latest.set([header(200, 1)]);
+        evm.finalized.set([Some(header(190, 3))]);
+        evm.counts.lock().unwrap().insert((FROM, "latest"), 6);
+        evm.counts.lock().unwrap().insert((FROM, "finalized"), 6);
+        put_deposit(&evm, B256::repeat_byte(4), 5, 150);
+        let tx = Some(TxClaim {
+            tx_hash: B256::repeat_byte(1),
+            tx_nonce: 5,
+        });
+        let ui = RecordingUi::new(true);
+        let got = search(
+            &evm,
+            &op(7, tx),
+            &Claims::default(),
+            BRIDGE,
+            None,
+            &ui,
+            Duration::from_secs(12),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, SearchOutcome::Bound {
+            tx_hash: B256::repeat_byte(4),
+            nonce: 5
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_cancel_in_a_finalized_block_consumes_the_slot() {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);

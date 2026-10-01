@@ -93,6 +93,8 @@ pub struct FakeEvm {
     pub fail_receipts: AtomicU32,
     /// `Some(n)`: n more `call`s answer, then every one fails.
     pub calls_before_failing: Mutex<Option<u32>>,
+    /// How long every `call` takes before it answers.
+    pub call_delay: Mutex<std::time::Duration>,
     /// The next N `transaction` calls answer `None`, as a lagging backend does.
     pub miss_tx_reads: AtomicU32,
     /// `Some(n)`: after n more `transaction` calls every transaction is gone
@@ -135,6 +137,7 @@ impl Default for FakeEvm {
             fail_tx_reads: AtomicU32::default(),
             fail_receipts: AtomicU32::default(),
             calls_before_failing: Mutex::default(),
+            call_delay: Mutex::default(),
             miss_tx_reads: AtomicU32::default(),
             vanish_tx_after: Mutex::default(),
             vanishing_txs: Mutex::default(),
@@ -200,6 +203,8 @@ impl EvmRead for FakeEvm {
     }
 
     async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes> {
+        let delay = *self.call_delay.lock().unwrap();
+        tokio::time::sleep(delay).await;
         if let Some(left) = self.calls_before_failing.lock().unwrap().as_mut() {
             if *left == 0 {
                 anyhow::bail!("503 Service Unavailable");
@@ -1850,12 +1855,18 @@ impl World {
         tx
     }
 
-    /// A successful deposit at `nonce` with the next deposit id, in block
-    /// `number` (block hash tag `tag`).
-    pub fn mined_deposit_in_block(&mut self, nonce: u64, number: u64, tag: u8) -> B256 {
+    /// A successful deposit of `amount` at `nonce` with the next deposit
+    /// id, in block `number` (block hash tag `tag`).
+    pub fn mined_deposit_in_block(
+        &mut self,
+        nonce: u64,
+        amount: u64,
+        number: u64,
+        tag: u8,
+    ) -> B256 {
         self.next_id += 1;
         let id = U256::from(self.next_id);
-        self.mine(nonce, 2, true, world_header(number, tag), id, W_AMOUNT)
+        self.mine(nonce, 2, true, world_header(number, tag), id, amount)
     }
 
     /// A successful deposit at `nonce` with the next deposit id.

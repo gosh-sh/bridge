@@ -82,11 +82,14 @@ fn is_candidate(op: &OpRecord, c: &Candidate, others: &Claims) -> bool {
         && !others.tx_hashes.contains(&c.tx_hash)
 }
 
-/// Whether `c` was sent no earlier than the operation's request: its nonce
-/// is at least the account's next nonce read before the request. The
-/// search starts at the finalized block, below the head at the request,
-/// and the sender's earlier deposits — the same calldata among them —
-/// fall into it; none of them is this operation's.
+/// Whether `c`'s nonce is at least the one the CLI's node showed as next
+/// before the request. The search starts at the finalized block, below the
+/// head at the request, and the sender's earlier deposits — the same
+/// calldata among them — fall into it: below that nonce a deposit like the
+/// request is not named. It decides nothing else. That nonce is only what
+/// one node showed: a transaction the wallet never saw can keep it from
+/// the operation's own, which then goes out with a lower nonce, so neither
+/// the slot nor `--tx-hash` is held to it.
 fn not_before_request(op: &OpRecord, c: &Candidate) -> bool {
     op.request
         .as_ref()
@@ -112,7 +115,7 @@ fn slot_of(op: &OpRecord) -> Option<u64> {
 pub fn decide(op: &OpRecord, candidates: &[Candidate], others: &Claims) -> Binding {
     let cands: Vec<&Candidate> = candidates
         .iter()
-        .filter(|c| is_candidate(op, c, others) && not_before_request(op, c))
+        .filter(|c| is_candidate(op, c, others))
         .collect();
     let slot = slot_of(op);
     if let Some(n) = slot {
@@ -134,7 +137,7 @@ pub fn decide(op: &OpRecord, candidates: &[Candidate], others: &Claims) -> Bindi
     }
     let alike: Vec<B256> = cands
         .iter()
-        .filter(|c| matches_request(op, c))
+        .filter(|c| matches_request(op, c) && not_before_request(op, c))
         .map(|c| c.tx_hash)
         .collect();
     match (slot, alike.is_empty()) {
@@ -155,9 +158,8 @@ pub fn decide(op: &OpRecord, candidates: &[Candidate], others: &Claims) -> Bindi
     }
 }
 
-/// Checks a transaction the user named with `--tx-hash`: the nonce slot and
-/// uniqueness rules are skipped, the rest is not — a transaction sent
-/// before the request is refused too.
+/// Checks a transaction the user named with `--tx-hash`: the nonce rules
+/// and the uniqueness rule are skipped, the rest is not.
 pub fn check_explicit(
     op: &OpRecord,
     cand: &Candidate,
@@ -169,13 +171,6 @@ pub fn check_explicit(
             "{} is not a successful bridge deposit from {:?}, or another operation has already \
              claimed it",
             cand.tx_hash, op.from
-        ));
-    }
-    if !not_before_request(op, cand) {
-        return Err(format!(
-            "{} uses nonce {}, below the account's next nonce when this operation's deposit was \
-             requested: it was sent before this operation's deposit was requested",
-            cand.tx_hash, cand.nonce
         ));
     }
     for o in unresolved_others {
@@ -419,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn an_earlier_deposit_of_the_sender_is_never_this_operations() {
+    fn an_earlier_deposit_of_the_sender_is_not_named_but_a_hash_may_bind_it() {
         // The search starts at the finalized block, below the head the
         // request was made at: the sender's deposits from before the
         // request, the same calldata among them, fall into it.
@@ -428,26 +423,42 @@ mod tests {
         assert_eq!(
             decide(&a, std::slice::from_ref(&earlier), &Claims::default()),
             Binding::NotYet,
-            "no ambiguity with a deposit sent before the request"
+            "no ambiguity with a deposit below the nonce observed before the request"
         );
         assert_eq!(
             decide(&a, &[earlier.clone(), cand(2, 7)], &Claims::default()),
             Binding::Bind(B256::repeat_byte(2))
         );
+        // That nonce is only what the CLI's node showed: --tx-hash may
+        // still name such a deposit, unless another operation claims it.
+        check_explicit(&a, &earlier, &Claims::default(), &[]).unwrap();
+        let mut claimed = Claims::default();
+        claimed.tx_hashes.insert(earlier.tx_hash);
+        assert!(check_explicit(&a, &earlier, &claimed, &[]).is_err());
+        let mut b = op("B", 5);
+        b.stage = OpStage::Signed;
+        b.tx = Some(TxClaim {
+            tx_hash: B256::repeat_byte(9),
+            tx_nonce: 5,
+        });
+        let e = check_explicit(&a, &earlier, &Claims::default(), &[&b]).unwrap_err();
+        assert!(e.contains("B"), "{e}");
+    }
+
+    #[test]
+    fn a_known_slot_below_the_observed_nonce_still_binds() {
+        // A stuck transaction the CLI's node showed and the wallet did not:
+        // the deposit went out with nonce 5, below the 7 observed. With its
+        // hash known, the slot is 5, and a replacement in it is bound.
         let mut signed = op("A", 7);
         signed.stage = OpStage::Signed;
         signed.tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(3),
-            tx_nonce: 7,
+            tx_nonce: 5,
         });
         assert_eq!(
-            decide(&signed, std::slice::from_ref(&earlier), &Claims::default()),
-            Binding::NotYet
-        );
-        let e = check_explicit(&a, &earlier, &Claims::default(), &[]).unwrap_err();
-        assert!(
-            e.contains("before this operation's deposit was requested"),
-            "{e}"
+            decide(&signed, &[cand(2, 5)], &Claims::default()),
+            Binding::Bind(B256::repeat_byte(2))
         );
     }
 

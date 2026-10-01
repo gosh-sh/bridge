@@ -266,7 +266,6 @@ mod tests {
                         refs: vec![],
                     },
                 ],
-                anchor_epoch: None,
             })
             .await
             .unwrap();

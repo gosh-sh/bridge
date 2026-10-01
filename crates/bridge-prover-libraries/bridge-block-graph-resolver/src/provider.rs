@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{
-    AnchorHistoryWitness, AnchorLayerMode, AnchorSnapshot, BlockEdge, BlockId, BlockNode,
-    HopOpening, ProofBlock, ThreadId, TimedBlock,
-};
+use crate::{BlockId, BlockNode, ProofBlock, ThreadId, TimedBlock};
 
 #[async_trait]
 pub trait BlockProvider: Send + Sync + 'static {
@@ -48,30 +45,6 @@ pub trait BlockProvider: Send + Sync + 'static {
         _thread: &ThreadId,
         _height: u64,
     ) -> anyhow::Result<Option<ProofBlock>> {
-        Ok(None)
-    }
-
-    /// Return a ready history witness connecting `anchor` to an active root
-    /// from `snapshot`. Building and cryptographically validating this witness
-    /// belongs to the provider/prover boundary; the graph resolver never runs
-    /// Poseidon itself.
-    async fn anchor_history_witness(
-        &self,
-        _anchor: &BlockId,
-        _snapshot: &AnchorSnapshot,
-        _mode: AnchorLayerMode,
-    ) -> anyhow::Result<Option<AnchorHistoryWitness>> {
-        Ok(None)
-    }
-
-    /// Return a ready circuit opening for an edge selected by the resolver.
-    /// The provider must use the parent domain for slot zero and the
-    /// cross-reference domain for every other slot.
-    async fn hop_opening(
-        &self,
-        _block: &ProofBlock,
-        _edge: BlockEdge,
-    ) -> anyhow::Result<Option<HopOpening>> {
         Ok(None)
     }
 

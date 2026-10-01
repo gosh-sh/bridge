@@ -74,10 +74,6 @@ The library is split around two abstractions:
   and height for historical resolution. Its optional `proof_block_by_id`
   method supplies envelope/history data and the complete 16-leaf block-ID
   tree without storing that large payload in the reverse index.
-  Providers used with `resolve_anchored_proof()` additionally return ready
-  `AnchorHistoryWitness` and `HopOpening` values. Their cryptographic
-  construction and verification stay in the node/prover/circuit layer; this
-  crate does not implement or depend on Poseidon.
   `GraphqlBlockProvider` is the built-in implementation; applications can
   provide their own backend.
 - `ResolverStore` owns blocks, reverse edges, graph versions, and positive path
@@ -95,13 +91,10 @@ the store lazily during a cold historical search.
 separate anchor (Y) and target (X) proof blocks plus one canonical source block
 per hop. Before returning, the resolver checks every
 `source.proof_block_refs[ref_index] == edge.to`, including parent slot `0`.
-`resolve_anchored_proof()` is the library-level composition API for providers
-that can supply ready cryptographic witnesses. It accepts an `AnchorSnapshot`,
-examines candidates from the first thread-0 block at or to the right of X's
-timestamp, and returns the selected route plus provider-supplied hop and
-history openings. The resolver checks block IDs, reference slots, edge
-identity, epoch, layer, height, and selection of an active `final_root`; it
-does not calculate hashes or cryptographically verify the openings.
+Selecting a thread-0 block covered by the verifier's active history roots and
+building the corresponding Merkle openings require `BridgeState`. Those steps
+belong to the witness/prover integration and are deliberately outside this
+crate.
 
 The default features are `graphql`, `sqlite`, and `cli`. Disable default
 features for a provider-neutral library build, or enable `test-utils` for the

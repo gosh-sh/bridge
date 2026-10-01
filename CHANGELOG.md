@@ -366,12 +366,9 @@ assigns it when the release is tagged.
   `POST /v1/resolve-proof`. The response keeps the anchor/Y and target/X block
   payloads separate, includes the source block for every hop, and validates
   each returned `ref_index`, including parent slot `0`, against the node's
-  `proof_block_refs` before returning it. Library callers with a provider that
-  supplies ready hop/history openings can use `resolve_anchored_proof` to
-  select the nearest reachable thread-0 block covered by active verifier
-  roots. The resolver treats those openings as opaque and has no Poseidon or
-  circuit dependency; cryptographic construction and validation remain in
-  the provider/prover pipeline.
+  `proof_block_refs` before returning it. Selection against active verifier
+  history and construction of circuit-specific Merkle openings remain in the
+  witness/prover pipeline; the resolver has no Poseidon or circuit dependency.
 
 - Added the `bridge-block-graph-resolver` CLI for operators to scan a finalized
   Acki Nacki GraphQL block window and resolve a deterministic minimum-hop path

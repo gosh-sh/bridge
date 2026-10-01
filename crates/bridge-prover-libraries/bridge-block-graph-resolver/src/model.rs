@@ -152,96 +152,17 @@ pub struct ProofBlock {
     pub block_merkle_tree_leaves: [[u8; 32]; 16],
 }
 
-/// Selects which history layer may anchor the resolved graph path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AnchorLayerMode {
-    /// Let the provider choose a valid active layer.
-    Auto,
-    /// Require this one-based history layer.
-    Explicit(u8),
-}
-
-/// Active history root and its key-block height.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AnchorSlot {
-    pub root: [u8; 32],
-    pub height: u64,
-}
-
-/// Current set of history roots against which an anchor may be proven.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AnchorSnapshot {
-    /// Changes whenever the eligible history-root set changes.
-    pub epoch: u64,
-    /// Number of key blocks represented by the densest history layer.
-    pub window_size: u64,
-    /// Ratio between adjacent history layers.
-    pub thinning_factor: u64,
-    /// Index 0 contains L1 slots, index 1 L2 slots, and so on.
-    pub layers: Vec<Vec<AnchorSlot>>,
-}
-
-/// One Merkle opening in a dense history layer.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DenseOpening {
-    pub leaf: [u8; 32],
-    /// Zero-based leaf position in this tree.
-    pub position: usize,
-    /// Sibling hashes ordered from leaf level toward the root.
-    pub siblings: Vec<[u8; 32]>,
-}
-
-/// Opaque history witness supplied by the data provider.
-///
-/// The resolver checks that it selects an active snapshot slot, but does not
-/// hash or cryptographically verify it. Circuit/witness integration owns that
-/// validation and the Poseidon implementation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AnchorHistoryWitness {
-    /// Snapshot epoch for which this witness was built.
-    pub anchor_epoch: u64,
-    /// One-based selected history layer.
-    pub layer: u8,
-    /// Active history root selected from the snapshot.
-    pub final_root: [u8; 32],
-    /// Height of the key block containing the anchor leaf.
-    pub anchor_key_block_height: u64,
-    pub block_leaf: [u8; 32],
-    /// Opening of `block_leaf` inside its key block.
-    pub block_tree: DenseOpening,
-    /// Openings connecting the key block to `final_root`.
-    pub dense_chain: Vec<DenseOpening>,
-}
-
-/// Opaque circuit-ready opening for one selected graph edge.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HopOpening {
-    /// Graph edge whose reference commitment is opened.
-    pub edge: BlockEdge,
-    /// Opening of the reference-tree root in the source block's L7 tree.
-    pub block_merkle_leaf_proof_l7: [[u8; 32]; 4],
-    pub refs_tree_depth: u8,
-    /// Opening of `edge.to` at `edge.ref_index` in the source block's
-    /// reference tree.
-    pub proof_block_ref_inner_path: Vec<[u8; 32]>,
-}
-
-/// Monotonic versions used to invalidate cached paths and anchor witnesses.
+/// Monotonic version used to invalidate cached paths.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StoreVersion {
     /// Increments whenever stored topology changes.
     pub graph_version: u64,
-    /// Identifies the currently eligible anchor snapshot.
-    pub anchor_epoch: u64,
 }
 
 /// Atomic update applied to a [`crate::ResolverStore`].
 #[derive(Clone, Debug, Default)]
 pub struct StoreBatch {
     pub blocks: Vec<BlockNode>,
-    /// When set, atomically replaces the anchor eligibility epoch.
-    pub anchor_epoch: Option<u64>,
 }
 
 /// Result of applying a [`StoreBatch`].
@@ -251,7 +172,6 @@ pub struct ApplyStats {
     pub updated: usize,
     pub unchanged: usize,
     pub graph_version: u64,
-    pub anchor_epoch: u64,
 }
 
 /// Result of pruning old per-thread topology from a store.
@@ -297,9 +217,8 @@ pub struct ResolvedPath {
     /// Ordered edges where the first starts at `anchor`, the last ends at
     /// `target`, and adjacent edges join.
     pub hops: Vec<BlockEdge>,
-    /// Store versions against which this path was resolved.
+    /// Store version against which this path was resolved.
     pub graph_version: u64,
-    pub anchor_epoch: u64,
 }
 
 /// A resolved route together with all canonical block payloads required to
@@ -316,23 +235,6 @@ pub struct ResolvedBlockProof {
     pub hop_blocks: Vec<ProofBlock>,
 }
 
-/// Request for a graph path plus its complete active-history witness.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AnchoredResolutionRequest {
-    pub resolution: ResolutionRequest,
-    pub anchor_snapshot: AnchorSnapshot,
-    pub anchor_layer: AnchorLayerMode,
-}
-
-/// Circuit-ready result combining topology, edge openings and history proof.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ResolvedAnchoredBlockProof {
-    pub route: ResolvedBlockProof,
-    /// One opening per `route.path.hops` entry, in identical order.
-    pub hop_openings: Vec<HopOpening>,
-    pub history: AnchorHistoryWitness,
-}
-
 /// Complete identity of a reusable cached resolution.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PathCacheKey {
@@ -341,7 +243,6 @@ pub struct PathCacheKey {
     pub target: BlockId,
     pub policy: ResolutionPolicy,
     pub limits: ResolverLimits,
-    pub anchor_epoch: u64,
 }
 
 /// Combined provider fetch, store update and pruning statistics.
@@ -353,7 +254,6 @@ pub struct SyncStats {
     pub unchanged: usize,
     pub pruned: usize,
     pub graph_version: u64,
-    pub anchor_epoch: u64,
 }
 
 /// JSON status returned by the HTTP service.
@@ -374,26 +274,6 @@ pub struct ErrorBody {
     pub kind: &'static str,
     /// Human-readable diagnostic detail.
     pub error: String,
-}
-
-/// Checks whether a provider-supplied history witness selects a root that is
-/// present in the given snapshot at the declared layer and height.
-///
-/// This is structural validation only; it does not verify Merkle hashes.
-pub fn history_selects_snapshot_slot(
-    witness: &AnchorHistoryWitness,
-    snapshot: &AnchorSnapshot,
-) -> bool {
-    witness.anchor_epoch == snapshot.epoch
-        && witness.layer > 0
-        && snapshot
-            .layers
-            .get(witness.layer as usize - 1)
-            .into_iter()
-            .flatten()
-            .any(|slot| {
-                slot.height == witness.anchor_key_block_height && slot.root == witness.final_root
-            })
 }
 
 #[cfg(test)]

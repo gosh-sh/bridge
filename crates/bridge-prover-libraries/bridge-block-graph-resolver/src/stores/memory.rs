@@ -14,7 +14,6 @@ struct MemoryState {
     incoming: HashMap<BlockId, Vec<BlockEdge>>,
     paths: HashMap<PathCacheKey, ResolvedPath>,
     graph_version: u64,
-    anchor_epoch: u64,
 }
 
 pub struct MemoryStore {
@@ -68,7 +67,6 @@ impl ResolverStore for MemoryStore {
         let state = self.state.read().await;
         Ok(StoreVersion {
             graph_version: state.graph_version,
-            anchor_epoch: state.anchor_epoch,
         })
     }
 
@@ -118,9 +116,6 @@ impl ResolverStore for MemoryStore {
                 },
             }
         }
-        if let Some(epoch) = batch.anchor_epoch {
-            state.anchor_epoch = epoch;
-        }
         if changed {
             state.graph_version = state
                 .graph_version
@@ -128,7 +123,6 @@ impl ResolverStore for MemoryStore {
                 .ok_or_else(|| anyhow::anyhow!("memory store graph version overflow"))?;
         }
         stats.graph_version = state.graph_version;
-        stats.anchor_epoch = state.anchor_epoch;
         Ok(stats)
     }
 
@@ -209,7 +203,6 @@ mod tests {
         let stats = store
             .apply(StoreBatch {
                 blocks: vec![one.clone()],
-                anchor_epoch: None,
             })
             .await
             .unwrap();
@@ -223,26 +216,15 @@ mod tests {
         let repeated = store
             .apply(StoreBatch {
                 blocks: vec![one],
-                anchor_epoch: None,
             })
             .await
             .unwrap();
         assert_eq!((repeated.unchanged, repeated.graph_version), (1, 1));
 
-        let epoch = store
-            .apply(StoreBatch {
-                blocks: vec![],
-                anchor_epoch: Some(7),
-            })
-            .await
-            .unwrap();
-        assert_eq!((epoch.graph_version, epoch.anchor_epoch), (1, 7));
-
         let replacement = block(1, 1, 1, &[4]);
         let replaced = store
             .apply(StoreBatch {
                 blocks: vec![replacement],
-                anchor_epoch: None,
             })
             .await
             .unwrap();
@@ -264,7 +246,6 @@ mod tests {
                     block(2, 1, 2, &[1]),
                     block(3, 2, 1, &[]),
                 ],
-                anchor_epoch: None,
             })
             .await
             .unwrap();
@@ -281,7 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_contract_cache_key_includes_policy_limits_and_epoch() {
+    async fn store_contract_cache_key_includes_policy_and_limits() {
         let store = MemoryStore::new();
         let base = PathCacheKey {
             namespace: "test".into(),
@@ -291,7 +272,6 @@ mod tests {
                 max_hops: 2,
                 max_visited_blocks: 3,
             },
-            anchor_epoch: 4,
         };
         let path = ResolvedPath {
             anchor: id(2),
@@ -299,17 +279,12 @@ mod tests {
             target: id(1),
             hops: vec![],
             graph_version: 1,
-            anchor_epoch: 4,
         };
         store.cache_path(base.clone(), path.clone()).await.unwrap();
         assert_eq!(store.cached_path(&base).await.unwrap(), Some(path));
-        let mut other = base;
-        other.anchor_epoch += 1;
-        assert!(store.cached_path(&other).await.unwrap().is_none());
-        other = PathCacheKey {
-            anchor_epoch: 4,
+        let mut other = PathCacheKey {
             policy: ResolutionPolicy::ShortestCurrent,
-            ..other
+            ..base
         };
         assert!(store.cached_path(&other).await.unwrap().is_none());
         other = PathCacheKey {

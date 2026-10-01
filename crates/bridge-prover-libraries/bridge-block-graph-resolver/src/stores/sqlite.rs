@@ -13,7 +13,7 @@ use crate::{
     ResolvedPath, ResolverStore, StoreBatch, StoreVersion, ThreadId,
 };
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const QUERY_CHUNK: usize = 500;
 
 /// Persistent resolver storage bound to one provider namespace.
@@ -94,8 +94,7 @@ fn initialize(connection: &mut Connection, namespace: &str) -> anyhow::Result<()
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
              schema_version INTEGER NOT NULL,
              namespace TEXT NOT NULL,
-             graph_version BLOB NOT NULL,
-             anchor_epoch BLOB NOT NULL
+             graph_version BLOB NOT NULL
          );
          CREATE TABLE IF NOT EXISTS blocks (
              block_id BLOB PRIMARY KEY,
@@ -116,11 +115,10 @@ fn initialize(connection: &mut Connection, namespace: &str) -> anyhow::Result<()
              policy INTEGER NOT NULL,
              max_hops INTEGER NOT NULL,
              max_visited_be BLOB NOT NULL,
-             anchor_epoch BLOB NOT NULL,
              path_json TEXT NOT NULL,
              PRIMARY KEY (
                  namespace, target, policy, max_hops,
-                 max_visited_be, anchor_epoch
+                 max_visited_be
              )
          ) WITHOUT ROWID;",
     )?;
@@ -140,12 +138,7 @@ fn initialize(connection: &mut Connection, namespace: &str) -> anyhow::Result<()
                 "resolver database belongs to namespace {stored_namespace:?}, not {namespace:?}"
             );
             match version {
-                1 => {
-                    tx.execute(
-                        "UPDATE resolver_metadata SET schema_version = ?1 WHERE singleton = 1",
-                        [SCHEMA_VERSION],
-                    )?;
-                },
+                1 => migrate_to_v4(&tx)?,
                 2 => {
                     let legacy_policy: i64 = tx.query_row(
                         "SELECT edge_policy FROM resolver_metadata WHERE singleton = 1",
@@ -156,17 +149,14 @@ fn initialize(connection: &mut Connection, namespace: &str) -> anyhow::Result<()
                         tx.execute("DELETE FROM paths", [])?;
                         tx.execute("DELETE FROM blocks", [])?;
                         tx.execute(
-                            "UPDATE resolver_metadata SET graph_version = ?1, anchor_epoch = ?2 \
-                             WHERE singleton = 1",
-                            params![encode_u64(0), encode_u64(0)],
+                            "UPDATE resolver_metadata SET graph_version = ?1 WHERE singleton = 1",
+                            [encode_u64(0)],
                         )?;
                     }
                     tx.execute("ALTER TABLE resolver_metadata DROP COLUMN edge_policy", [])?;
-                    tx.execute(
-                        "UPDATE resolver_metadata SET schema_version = ?1 WHERE singleton = 1",
-                        [SCHEMA_VERSION],
-                    )?;
+                    migrate_to_v4(&tx)?;
                 },
+                3 => migrate_to_v4(&tx)?,
                 SCHEMA_VERSION => {},
                 _ => anyhow::bail!(
                     "unsupported resolver SQLite schema version {version}; expected \
@@ -177,14 +167,55 @@ fn initialize(connection: &mut Connection, namespace: &str) -> anyhow::Result<()
         None => {
             tx.execute(
                 "INSERT INTO resolver_metadata
-                 (singleton, schema_version, namespace, graph_version, anchor_epoch)
-                 VALUES (1, ?1, ?2, ?3, ?4)",
-                params![SCHEMA_VERSION, namespace, encode_u64(0), encode_u64(0)],
+                 (singleton, schema_version, namespace, graph_version)
+                 VALUES (1, ?1, ?2, ?3)",
+                params![SCHEMA_VERSION, namespace, encode_u64(0)],
             )?;
         },
     }
     tx.commit()?;
     Ok(())
+}
+
+fn migrate_to_v4(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    if table_has_column(transaction, "paths", "anchor_epoch")? {
+        transaction.execute_batch(
+            "CREATE TABLE paths_v4 (
+                 namespace TEXT NOT NULL,
+                 target BLOB NOT NULL,
+                 policy INTEGER NOT NULL,
+                 max_hops INTEGER NOT NULL,
+                 max_visited_be BLOB NOT NULL,
+                 path_json TEXT NOT NULL,
+                 PRIMARY KEY (namespace, target, policy, max_hops, max_visited_be)
+             ) WITHOUT ROWID;
+             INSERT OR REPLACE INTO paths_v4
+                 (namespace, target, policy, max_hops, max_visited_be, path_json)
+             SELECT namespace, target, policy, max_hops, max_visited_be, path_json FROM paths;
+             DROP TABLE paths;
+             ALTER TABLE paths_v4 RENAME TO paths;",
+        )?;
+    }
+    if table_has_column(transaction, "resolver_metadata", "anchor_epoch")? {
+        transaction.execute("ALTER TABLE resolver_metadata DROP COLUMN anchor_epoch", [])?;
+    }
+    transaction.execute(
+        "UPDATE resolver_metadata SET schema_version = ?1 WHERE singleton = 1",
+        [SCHEMA_VERSION],
+    )?;
+    Ok(())
+}
+
+fn table_has_column(
+    transaction: &Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> anyhow::Result<bool> {
+    let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|candidate| candidate == column))
 }
 
 fn encode_u64(value: u64) -> [u8; 8] {
@@ -213,14 +244,13 @@ fn decode_thread_id(value: Vec<u8>) -> anyhow::Result<ThreadId> {
 }
 
 fn version_in(transaction: &Transaction<'_>) -> anyhow::Result<StoreVersion> {
-    let (graph, anchor): (Vec<u8>, Vec<u8>) = transaction.query_row(
-        "SELECT graph_version, anchor_epoch FROM resolver_metadata WHERE singleton = 1",
+    let graph: Vec<u8> = transaction.query_row(
+        "SELECT graph_version FROM resolver_metadata WHERE singleton = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )?;
     Ok(StoreVersion {
         graph_version: decode_u64(graph, "graph_version")?,
-        anchor_epoch: decode_u64(anchor, "anchor_epoch")?,
     })
 }
 
@@ -412,20 +442,12 @@ impl ResolverStore for SqliteStore {
                     .checked_add(1)
                     .ok_or_else(|| anyhow::anyhow!("SQLite graph version overflow"))?;
             }
-            if let Some(epoch) = batch.anchor_epoch {
-                version.anchor_epoch = epoch;
-            }
             tx.execute(
-                "UPDATE resolver_metadata SET graph_version = ?1, anchor_epoch = ?2 WHERE \
-                 singleton = 1",
-                params![
-                    encode_u64(version.graph_version),
-                    encode_u64(version.anchor_epoch)
-                ],
+                "UPDATE resolver_metadata SET graph_version = ?1 WHERE singleton = 1",
+                [encode_u64(version.graph_version)],
             )?;
             tx.commit()?;
             stats.graph_version = version.graph_version;
-            stats.anchor_epoch = version.anchor_epoch;
             Ok(stats)
         })
         .await
@@ -490,15 +512,13 @@ impl ResolverStore for SqliteStore {
             let json: Option<String> = connection
                 .query_row(
                     "SELECT path_json FROM paths WHERE namespace = ?1 AND target = ?2 AND policy \
-                     = ?3
-                 AND max_hops = ?4 AND max_visited_be = ?5 AND anchor_epoch = ?6",
+                     = ?3 AND max_hops = ?4 AND max_visited_be = ?5",
                     params![
                         key.namespace,
                         key.target.as_bytes().as_slice(),
                         policy_code(key.policy),
                         i64::from(key.limits.max_hops),
-                        encode_u64(key.limits.max_visited_blocks as u64),
-                        encode_u64(key.anchor_epoch)
+                        encode_u64(key.limits.max_visited_blocks as u64)
                     ],
                     |row| row.get(0),
                 )
@@ -513,10 +533,9 @@ impl ResolverStore for SqliteStore {
         self.call(move |connection| {
             let json = serde_json::to_string(&path)?;
             connection.execute(
-                "INSERT INTO paths(namespace, target, policy, max_hops, max_visited_be, \
-                 anchor_epoch, path_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(namespace, target, policy, max_hops, max_visited_be, anchor_epoch)
+                "INSERT INTO paths(namespace, target, policy, max_hops, max_visited_be, path_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(namespace, target, policy, max_hops, max_visited_be)
                  DO UPDATE SET path_json = excluded.path_json",
                 params![
                     key.namespace,
@@ -524,7 +543,6 @@ impl ResolverStore for SqliteStore {
                     policy_code(key.policy),
                     i64::from(key.limits.max_hops),
                     encode_u64(key.limits.max_visited_blocks as u64),
-                    encode_u64(key.anchor_epoch),
                     json
                 ],
             )?;
@@ -585,18 +603,10 @@ mod tests {
         let applied = store
             .apply(StoreBatch {
                 blocks: vec![original.clone(), block(4, 1, 2, &[1])],
-                anchor_epoch: Some(8),
             })
             .await
             .unwrap();
-        assert_eq!(
-            (
-                applied.inserted,
-                applied.graph_version,
-                applied.anchor_epoch
-            ),
-            (2, 1, 8)
-        );
+        assert_eq!((applied.inserted, applied.graph_version), (2, 1));
         assert_eq!(store.block(&id(1)).await.unwrap(), Some(original.clone()));
         assert_eq!(store.blocks(&[id(1), id(9)]).await.unwrap().len(), 1);
         let incoming = store.incoming_edges(&[id(2), id(3)]).await.unwrap();
@@ -606,7 +616,6 @@ mod tests {
         let unchanged = store
             .apply(StoreBatch {
                 blocks: vec![original],
-                anchor_epoch: None,
             })
             .await
             .unwrap();
@@ -616,7 +625,6 @@ mod tests {
         let updated = store
             .apply(StoreBatch {
                 blocks: vec![replacement],
-                anchor_epoch: None,
             })
             .await
             .unwrap();
@@ -635,7 +643,6 @@ mod tests {
                 max_hops: 10,
                 max_visited_blocks: 100,
             },
-            anchor_epoch: 8,
         };
         let path = ResolvedPath {
             anchor: id(1),
@@ -647,7 +654,6 @@ mod tests {
                 ref_index: 0,
             }],
             graph_version: 2,
-            anchor_epoch: 8,
         };
         store.cache_path(key.clone(), path.clone()).await.unwrap();
         assert_eq!(store.cached_path(&key).await.unwrap(), Some(path));
@@ -674,7 +680,6 @@ mod tests {
                 max_hops: 2,
                 max_visited_blocks: 3,
             },
-            anchor_epoch: u64::MAX,
         };
         let cached_path = ResolvedPath {
             anchor: id(1),
@@ -682,14 +687,12 @@ mod tests {
             target: id(1),
             hops: vec![],
             graph_version: 1,
-            anchor_epoch: u64::MAX,
         };
         {
             let store = SqliteStore::open(&path, "network-a").await.unwrap();
             store
                 .apply(StoreBatch {
                     blocks: vec![block(1, 2, u64::MAX, &[])],
-                    anchor_epoch: Some(u64::MAX),
                 })
                 .await
                 .unwrap();
@@ -703,7 +706,6 @@ mod tests {
             reopened.block(&id(1)).await.unwrap().unwrap().height,
             u64::MAX
         );
-        assert_eq!(reopened.version().await.unwrap().anchor_epoch, u64::MAX);
         assert_eq!(
             reopened.cached_path(&cache_key).await.unwrap(),
             Some(cached_path)
@@ -756,6 +758,91 @@ mod tests {
             .await
             .unwrap();
         assert!(!columns.iter().any(|column| column == "edge_policy"));
+        assert!(!columns.iter().any(|column| column == "anchor_epoch"));
+    }
+
+    #[tokio::test]
+    async fn migrates_v3_cache_without_anchor_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("resolver.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE resolver_metadata (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version INTEGER NOT NULL,
+                    namespace TEXT NOT NULL,
+                    graph_version BLOB NOT NULL,
+                    anchor_epoch BLOB NOT NULL
+                 );
+                 CREATE TABLE paths (
+                    namespace TEXT NOT NULL,
+                    target BLOB NOT NULL,
+                    policy INTEGER NOT NULL,
+                    max_hops INTEGER NOT NULL,
+                    max_visited_be BLOB NOT NULL,
+                    anchor_epoch BLOB NOT NULL,
+                    path_json TEXT NOT NULL,
+                    PRIMARY KEY (
+                        namespace, target, policy, max_hops,
+                        max_visited_be, anchor_epoch
+                    )
+                 ) WITHOUT ROWID;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO resolver_metadata VALUES (1, 3, 'network-a', ?1, ?2)",
+                params![encode_u64(1), encode_u64(9)],
+            )
+            .unwrap();
+        let key = PathCacheKey {
+            namespace: "network-a".into(),
+            target: id(1),
+            policy: ResolutionPolicy::FirstValid,
+            limits: ResolverLimits {
+                max_hops: 2,
+                max_visited_blocks: 3,
+            },
+        };
+        let path = ResolvedPath {
+            anchor: id(2),
+            anchor_height: 1,
+            target: id(1),
+            hops: vec![],
+            graph_version: 1,
+        };
+        let mut legacy_json = serde_json::to_value(&path).unwrap();
+        legacy_json["anchor_epoch"] = serde_json::json!(9);
+        connection
+            .execute(
+                "INSERT INTO paths VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &key.namespace,
+                    key.target.as_bytes().as_slice(),
+                    policy_code(key.policy),
+                    i64::from(key.limits.max_hops),
+                    encode_u64(key.limits.max_visited_blocks as u64),
+                    encode_u64(9),
+                    legacy_json.to_string(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SqliteStore::open(&database, "network-a").await.unwrap();
+        assert_eq!(store.cached_path(&key).await.unwrap(), Some(path));
+        let columns = store
+            .call(|connection| {
+                let mut statement = connection.prepare("PRAGMA table_info(paths)")?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(columns)
+            })
+            .await
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "anchor_epoch"));
     }
 
     #[tokio::test]
@@ -764,7 +851,6 @@ mod tests {
         let error = store
             .apply(StoreBatch {
                 blocks: vec![block(1, 1, 1, &[]), block(2, 1, 2, &[3, 3])],
-                anchor_epoch: Some(9),
             })
             .await
             .unwrap_err();

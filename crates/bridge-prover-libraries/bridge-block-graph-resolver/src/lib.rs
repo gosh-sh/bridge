@@ -14,11 +14,9 @@ pub mod stores;
 pub mod test_generator;
 
 pub use model::{
-    history_selects_snapshot_slot, AnchorHistoryWitness, AnchorLayerMode, AnchorSlot,
-    AnchorSnapshot, AnchoredResolutionRequest, ApplyStats, BlockEdge, BlockId, BlockNode,
-    DenseOpening, ErrorBody, HopOpening, PathCacheKey, ProofBlock, PruneStats, ResolutionPolicy,
-    ResolutionRequest, ResolvedAnchoredBlockProof, ResolvedBlockProof, ResolvedPath,
-    ResolverLimits, ServiceStatus, StoreBatch, StoreVersion, SyncStats, ThreadId, TimedBlock,
+    ApplyStats, BlockEdge, BlockId, BlockNode, ErrorBody, PathCacheKey, ProofBlock, PruneStats,
+    ResolutionPolicy, ResolutionRequest, ResolvedBlockProof, ResolvedPath, ResolverLimits,
+    ServiceStatus, StoreBatch, StoreVersion, SyncStats, ThreadId, TimedBlock,
 };
 pub use provider::BlockProvider;
 #[cfg(feature = "graphql")]

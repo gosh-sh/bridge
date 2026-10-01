@@ -6,9 +6,8 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    AnchoredResolutionRequest, BlockEdge, BlockId, BlockNode, BlockProvider, PathCacheKey,
-    ResolutionPolicy, ResolutionRequest, ResolvedAnchoredBlockProof, ResolvedBlockProof,
-    ResolvedPath, ResolverStore, StoreBatch, SyncStats,
+    BlockEdge, BlockId, BlockNode, BlockProvider, PathCacheKey, ResolutionPolicy,
+    ResolutionRequest, ResolvedBlockProof, ResolvedPath, ResolverStore, StoreBatch, SyncStats,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,7 +127,6 @@ where
             .store
             .apply(StoreBatch {
                 blocks,
-                anchor_epoch: None,
             })
             .await?;
         let pruned = self.store.prune_recent(self.per_thread_window).await?;
@@ -140,7 +138,6 @@ where
             unchanged: applied.unchanged,
             pruned: pruned.pruned,
             graph_version: version.graph_version,
-            anchor_epoch: version.anchor_epoch,
         })
     }
 
@@ -151,12 +148,10 @@ where
             target: request.target,
             policy: request.policy,
             limits: request.limits,
-            anchor_epoch: version.anchor_epoch,
         };
         if let Some(path) = self.store.cached_path(&key).await? {
             let usable = request.policy == ResolutionPolicy::FirstValid
-                || (path.graph_version == version.graph_version
-                    && path.anchor_epoch == version.anchor_epoch);
+                || path.graph_version == version.graph_version;
             if usable {
                 return Ok(path);
             }
@@ -177,7 +172,6 @@ where
                 self.store
                     .apply(StoreBatch {
                         blocks: vec![block.clone()],
-                        anchor_epoch: None,
                     })
                     .await?;
                 version = self.store.version().await?;
@@ -186,12 +180,7 @@ where
         };
 
         let initial = self
-            .bfs(
-                &request,
-                target.clone(),
-                version.graph_version,
-                version.anchor_epoch,
-            )
+            .bfs(&request, target.clone(), version.graph_version)
             .await;
         let path = match initial {
             Ok(path) => path,
@@ -285,112 +274,8 @@ where
         })
     }
 
-    /// Find the nearest reachable thread-0 block at or to the right of the
-    /// target for which the provider supplies an opaque witness selecting one
-    /// of the active verifier roots. No cryptographic hashing happens here.
-    pub async fn resolve_anchored_proof(
-        &self,
-        request: AnchoredResolutionRequest,
-    ) -> anyhow::Result<ResolvedAnchoredBlockProof> {
-        let graph_request = request.resolution;
-        let target_timed = self
-            .provider
-            .timed_block_by_id(&graph_request.target)
-            .await?
-            .ok_or_else(|| ResolutionError::TargetNotFound {
-                target: graph_request.target,
-                namespace: self.provider.namespace().to_owned(),
-            })?;
-        let target = target_timed.block.clone();
-        let thread_zero = crate::ThreadId::ZERO;
-        let tip = self
-            .provider
-            .latest_timed_block_in_thread(&thread_zero)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("thread 0 has no blocks"))?;
-        let start = self
-            .thread_zero_lower_bound(target_timed.gen_utime_ms, tip.block.height)
-            .await?;
-        let mut visited = HashSet::from([graph_request.target]);
-        let mut depth = 0;
-        let mut search = HistoricalSearchState::default();
-        search.suffixes.insert(graph_request.target, Vec::new());
-        for (count, height) in (start..=tip.block.height).enumerate() {
-            if count >= self.historical_search.max_anchor_candidates {
-                break;
-            }
-            let anchor = self
-                .provider
-                .timed_block_by_height(&thread_zero, height)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("thread 0 has no block at height {height}"))?
-                .block;
-            let Some(path) = self
-                .incremental_path_from_anchor(
-                    &graph_request,
-                    Some(&target),
-                    target_timed.gen_utime_ms,
-                    anchor,
-                    &mut visited,
-                    &mut depth,
-                    &mut search,
-                )
-                .await?
-            else {
-                continue;
-            };
-            let Some(history) = self
-                .provider
-                .anchor_history_witness(
-                    &path.anchor,
-                    &request.anchor_snapshot,
-                    request.anchor_layer,
-                )
-                .await?
-            else {
-                continue;
-            };
-            if !crate::history_selects_snapshot_slot(&history, &request.anchor_snapshot) {
-                continue;
-            }
-            let route = self.hydrate_path(path).await?;
-            let mut hop_openings = Vec::with_capacity(route.path.hops.len());
-            for (edge, block) in route.path.hops.iter().copied().zip(&route.hop_blocks) {
-                let opening = self
-                    .provider
-                    .hop_opening(block, edge)
-                    .await?
-                    .ok_or_else(|| ResolutionError::InvalidProofBlock {
-                        block: edge.from,
-                        reason: format!(
-                            "provider returned no opening for refs[{}]",
-                            edge.ref_index
-                        ),
-                    })?;
-                if opening.edge != edge {
-                    return Err(ResolutionError::InvalidProofBlock {
-                        block: edge.from,
-                        reason: "provider returned an opening for a different edge".to_owned(),
-                    }
-                    .into());
-                }
-                hop_openings.push(opening);
-            }
-            return Ok(ResolvedAnchoredBlockProof {
-                route,
-                hop_openings,
-                history,
-            });
-        }
-        anyhow::bail!("no reachable thread-0 anchor is covered by the supplied verifier snapshot")
-    }
-
     async fn cache(&self, key: &PathCacheKey, path: &ResolvedPath) -> anyhow::Result<()> {
-        let final_key = PathCacheKey {
-            anchor_epoch: path.anchor_epoch,
-            ..key.clone()
-        };
-        self.store.cache_path(final_key, path.clone()).await?;
+        self.store.cache_path(key.clone(), path.clone()).await?;
         Ok(())
     }
 
@@ -463,7 +348,6 @@ where
             self.store
                 .apply(StoreBatch {
                     blocks: vec![anchor.clone()],
-                    anchor_epoch: None,
                 })
                 .await?;
             examined_anchors.push(anchor.clone());
@@ -678,7 +562,6 @@ where
                 self.store
                     .apply(StoreBatch {
                         blocks: fetched,
-                        anchor_epoch: None,
                     })
                     .await?;
             }
@@ -745,7 +628,6 @@ where
                     self.store
                         .apply(StoreBatch {
                             blocks: vec![block.clone()],
-                            anchor_epoch: None,
                         })
                         .await?;
                     block
@@ -797,7 +679,6 @@ where
             target: request.target,
             hops,
             graph_version: version.graph_version,
-            anchor_epoch: version.anchor_epoch,
         }))
     }
 
@@ -806,7 +687,6 @@ where
         request: &ResolutionRequest,
         target: BlockNode,
         graph_version: u64,
-        anchor_epoch: u64,
     ) -> anyhow::Result<ResolvedPath> {
         if target.thread_id.is_zero() {
             return Ok(ResolvedPath {
@@ -815,7 +695,6 @@ where
                 target: target.block_id,
                 hops: vec![],
                 graph_version,
-                anchor_epoch,
             });
         }
 
@@ -918,7 +797,6 @@ where
                     target: request.target,
                     hops,
                     graph_version,
-                    anchor_epoch,
                 });
             }
             frontier = next;
@@ -1019,7 +897,6 @@ mod tests {
     #[derive(Default)]
     struct FakeProvider {
         blocks: Mutex<HashMap<BlockId, BlockNode>>,
-        proofs: Mutex<HashMap<BlockId, crate::ProofBlock>>,
         height_queries: Mutex<Vec<u64>>,
         historical: Mutex<bool>,
     }
@@ -1031,13 +908,6 @@ mod tests {
 
         fn enable_historical(&self) {
             *self.historical.lock().unwrap() = true;
-        }
-
-        fn set_proofs(&self, proofs: Vec<crate::ProofBlock>) {
-            *self.proofs.lock().unwrap() = proofs
-                .into_iter()
-                .map(|proof| (proof.block.block_id, proof))
-                .collect();
         }
     }
 
@@ -1115,9 +985,6 @@ mod tests {
             &self,
             id: &BlockId,
         ) -> anyhow::Result<Option<crate::ProofBlock>> {
-            if let Some(proof) = self.proofs.lock().unwrap().get(id).cloned() {
-                return Ok(Some(proof));
-            }
             Ok(self
                 .blocks
                 .lock()
@@ -1150,58 +1017,6 @@ mod tests {
                 Some(id) => self.proof_block_by_id(&id).await,
                 None => Ok(None),
             }
-        }
-
-        async fn anchor_history_witness(
-            &self,
-            _anchor: &BlockId,
-            snapshot: &crate::AnchorSnapshot,
-            mode: crate::AnchorLayerMode,
-        ) -> anyhow::Result<Option<crate::AnchorHistoryWitness>> {
-            let layer = match mode {
-                crate::AnchorLayerMode::Auto => snapshot
-                    .layers
-                    .iter()
-                    .position(|slots| !slots.is_empty())
-                    .map(|index| index as u8 + 1),
-                crate::AnchorLayerMode::Explicit(layer) => Some(layer),
-            };
-            let Some(layer) = layer else {
-                return Ok(None);
-            };
-            let Some(slot) = snapshot
-                .layers
-                .get(layer as usize - 1)
-                .and_then(|slots| slots.first())
-            else {
-                return Ok(None);
-            };
-            Ok(Some(crate::AnchorHistoryWitness {
-                anchor_epoch: snapshot.epoch,
-                layer,
-                final_root: slot.root,
-                anchor_key_block_height: slot.height,
-                block_leaf: [1; 32],
-                block_tree: crate::DenseOpening {
-                    leaf: [1; 32],
-                    position: 0,
-                    siblings: vec![],
-                },
-                dense_chain: vec![],
-            }))
-        }
-
-        async fn hop_opening(
-            &self,
-            _block: &crate::ProofBlock,
-            edge: BlockEdge,
-        ) -> anyhow::Result<Option<crate::HopOpening>> {
-            Ok(Some(crate::HopOpening {
-                edge,
-                block_merkle_leaf_proof_l7: [[0; 32]; 4],
-                refs_tree_depth: 0,
-                proof_block_ref_inner_path: vec![],
-            }))
         }
 
         fn namespace(&self) -> &str {
@@ -1342,63 +1157,6 @@ mod tests {
                 "hydrated proof source must commit the selected edge"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn resolves_complete_anchored_parent_proof() {
-        let target_id = id(9);
-        let anchor_id = id(2);
-        let target = BlockNode {
-            block_id: target_id,
-            thread_id: thread(1),
-            height: 0,
-            refs: vec![],
-        };
-        let zero0 = block(1, 0, 0, &[]);
-        let anchor = block(2, 0, 1, &[9]);
-        let key = block(3, 0, 2, &[]);
-        let (provider, _, resolver) = setup(vec![
-            target.clone(),
-            zero0.clone(),
-            anchor.clone(),
-            key.clone(),
-        ])
-        .await;
-        provider.enable_historical();
-
-        let proof = |block: BlockNode, leaves| crate::ProofBlock {
-            gen_utime_ms: block.height * 10,
-            envelope_hash: [block.height as u8 + 1; 32],
-            tracked_ext_out_messages_root: [block.height as u8 + 11; 32],
-            history_proofs: Default::default(),
-            block_merkle_tree_leaves: leaves,
-            block,
-        };
-        let target_proof = proof(target, [[0; 32]; 16]);
-        let zero0_proof = proof(zero0, [[0; 32]; 16]);
-        let anchor_proof = proof(anchor, [[0; 32]; 16]);
-        let key_proof = proof(key, [[0; 32]; 16]);
-        provider.set_proofs(vec![target_proof, zero0_proof, anchor_proof, key_proof]);
-
-        let result = resolver
-            .resolve_anchored_proof(crate::AnchoredResolutionRequest {
-                resolution: request(9, ResolutionPolicy::FirstValid),
-                anchor_snapshot: crate::AnchorSnapshot {
-                    epoch: 1,
-                    window_size: 2,
-                    thinning_factor: 1,
-                    layers: vec![vec![crate::AnchorSlot {
-                        root: [42; 32],
-                        height: 2,
-                    }]],
-                },
-                anchor_layer: crate::AnchorLayerMode::Auto,
-            })
-            .await
-            .unwrap();
-        assert_eq!(result.route.path.anchor, anchor_id);
-        assert_eq!(result.hop_openings[0].edge.ref_index, 0);
-        assert_eq!(result.history.final_root, [42; 32]);
     }
 
     #[tokio::test]

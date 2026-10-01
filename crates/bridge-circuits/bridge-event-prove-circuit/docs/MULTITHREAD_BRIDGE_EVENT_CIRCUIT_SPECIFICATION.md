@@ -932,32 +932,19 @@ A future anonymity-preserving variant would restore these primitives, pad bundle
 
 ---
 
-## 11. Circuit implementation status
+## 11. Circuit maintenance notes
 
-**Not started.** This document is the design step for the multi-thread landing on the `feature/multithreading` branch. The single-thread `BridgeEventProveCircuit` is fully implemented in `bridge_event_prove_circuit.rs`; extending it to multi-thread requires the work broken out below.
+The multi-thread circuit code described above has landed on `feature/multithreading` — the extended `bridge_event_prove_circuit.rs` plus the sibling files `multi_hop_proof.rs`, `multi_hop_witness.rs`, `bundle_verifier.rs` and `test_helpers.rs` under `bridge-event-prove-circuit/src/`.
 
-### 11.1 Circuit code — **TODO**
+### 11.1 Refresh the on-chain verifier whenever the circuits change
 
-- **New file** `bridge-event-prove-circuit/src/multi_hop_proof.rs` — the `BridgeMultiHopProof` circuit of §6.6 (H = 1 hop, clear-endpoint publication, `Sha256Chip` + `dense_merkle_root_padded_bound`).
-- **New file** `bridge-event-prove-circuit/src/multi_hop_witness.rs` — witness builder for `BridgeMultiHopProof` (per-hop L7-walk fixture assembly, sibling collection, tree-depth derivation).
-- **Extend** `bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs`:
-  - Split `block_id` → `x_block_id` + `y_block_id` (line 346 area).
-  - Add L8 depth-4 SHA opening after `ext_out_root` computation (after line 810).
-  - Add `PUB_X_BLOCK_ID`, `PUB_Y_BLOCK_ID` to the instance vector; bump `TOTAL_PUBLIC_INPUTS` from 11 to 13.
-  - Rewire nullifier (line 972 area) to consume `x_block_id_fr`.
-  - K sweep to lock K + advice column count.
-- **New file** `bridge-event-prove-circuit/src/bundle_verifier.rs` — pure-Rust mock of the Ethereum `withdrawByProofBundle` acceptance gate, driving synthetic + real-prover bundle E2E tests. Same phase ordering as §6.4 (cheap PI consistency → per-snark SHPLONK verify → settle).
-- **Extend** `bridge-event-prove-circuit/src/test_helpers.rs` — L7 walk fixture builder, L8 opening fixture builder, bundle-level assembly.
+Any change to a circuit's constraints, public-input layout, `K`, or advice column count rotates its verification key and therefore its on-chain Yul verifier. When that happens:
 
-### 11.2 Off-tree work — **TODO**
+- **Re-export the SHPLONK verifier(s).** Run `bridge-evm-aggregator export-inner-aggregator` for every affected circuit; the fresh Yul source + bytecode lands under `contracts/ethereum/verifiers/`. Confirm the bytecode stays within EIP-170 via `scripts/check_verifier_sources.sh` (and the `verifier_sources.yaml` CI job that compiles each `*AggregatorVerifier.sol` with `solc` 0.8.19 to its `.bin` byte for byte).
+- **Register the new VK** on the Ethereum side (`contracts/ethereum/`) and record the rotation in [`CHANGELOG.md`](../../../../CHANGELOG.md) under *Breaking Changes* — per [`AGENTS.md`](../../../../AGENTS.md), a rotated VK is always a breaking change because proofs produced for the previous circuit stop verifying.
+- **Refresh any pinned proof fixtures** that embed the old VK (e.g. `bridge-snark-utils/proofs/bound/` via `export-bound-block-proofs`, and any `#[ignore]`d real-prover fixtures in this crate).
 
-- **Ethereum contract updates.** `AckiNackiBridge.sol` gains `withdrawByProofBundle` (or extension of `withdrawByProof`); two new verifier Yul contracts under `contracts/ethereum/verifiers/`; register new VKs. Update [`EVM-contracts-spec.md`](../../../../docs/EVM-contracts-spec.md).
-- **SHPLONK aggregator export.** Run `bridge-evm-aggregator export-inner-aggregator` for both new circuits; check verifier bytecode against EIP-170 (`scripts/check_verifier_sources.sh`).
-- **Prover-side integration** (`bridge-event-prover-lib`, `bridge-event-witness`, `bridge-relayer-daemon`): witness builder for multi-thread claim bundles, per-claim dispatch of the correct number of hop snarks (dynamic per §6.5), on-demand PK loading, retry / idempotency for partial bundle failures.
-- **Changelog + docs**: [`CHANGELOG.md`](../../../../CHANGELOG.md) breaking-change entry (new VKs, ABI additions); update [`contracts/ethereum/verifiers/README.md`](../../../../contracts/ethereum/verifiers/README.md); add a `bridge-event-prove-circuit/README.md` overview mirroring the [`deposit-prover/README.md`](../../../../deposit-prover/README.md) style.
-- **CI**: `.woodpecker/bridge-circuits.yaml` gains a heavy-step `#[ignore]` bundle stress test at `L = 300` to mirror per-crate real-prover practice.
-
-### 11.3 Known deferrable items
+### 11.2 Known deferrable items
 
 - **Upstream 4-bit hardcode** in `gosh-dense-balanced-tree::dense_merkle_root_circuit_padded`. The `is_less_than(j_const, num_active_levels, 4)` call inside the padded walker hard-codes a 4-bit range for the depth witness. Values in `[8, 16)` collapse to "all levels active" via that comparison, so there is no cheating window at the current `MAX_PROOF_BLOCK_REFS_DEPTH = 8`, but the hardcode couples the upstream helper to an assumption of the consumer. A cross-repo fix in `gosh-halo2-crypto-lib` should either parameterise the bit-width or accept it as an argument. Track when the upstream is next touched.
 - **Outer-SHPLONK bundle aggregator** (§6.4 alternative). Deferred until per-snark verification is landed and stable.

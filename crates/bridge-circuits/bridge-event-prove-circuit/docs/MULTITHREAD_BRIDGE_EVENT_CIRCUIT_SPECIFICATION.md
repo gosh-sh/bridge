@@ -169,7 +169,7 @@ Combine rule at every level: `SHA-256(left_32B ‖ right_32B)`. Fifteen SHA-256 
   - `h12..15 = SHA-256(h12-13 ‖ h14-15) = SHA-256(h10-11 ‖ h10-11)` — constant
   - `L9 = 0×32` — constant
   These four constants are hard-coded into the circuit as fixed cells; the prover does not witness them. Only the L8 leaf itself and its left-half cousin `h0..7` are live witnesses when opening L8.
-- **Opening any leaf costs 4 SHA-256 compressions** — one per tree level. Opening L8 walks `L8 → h89 → h8..11 → h8..15 → block_id`; three of the four siblings (`L9`, `h10-11`, `h12..15`) are the constants above, one (`h0..7`) is a witness. Opening L7 for a hop (§4) walks `L7 → h67 → h4..7 → h0..7 → block_id`; all four siblings (`L6`, `h45`, `h0..3`, `h8..15`) are live witnesses, since a hop does not bind L8 and therefore leaves `h8..15` opaque.
+- **Opening any leaf costs 4 SHA-256 *calls* = 8 SHA-256 compressions** — one call per tree level. Each call hashes a 64-byte `(child ‖ sibling)` input; SHA-256 padding pushes any input ≥ 56 B into a **second compression block**, so one 64-byte call = 2 compressions, and a depth-4 path takes 4 calls × 2 = **8 compressions**. Opening L8 walks `L8 → h89 → h8..11 → h8..15 → block_id`; three of the four siblings (`L9`, `h10-11`, `h12..15`) are the constants above, one (`h0..7`) is a witness. Opening L7 for a hop (§4) walks `L7 → h67 → h4..7 → h0..7 → block_id`; all four siblings (`L6`, `h45`, `h0..3`, `h8..15`) are live witnesses, since a hop does not bind L8 and therefore leaves `h8..15` opaque.
 
 ### 2.2 CommonSection — fields feeding L0, L1, L7, L8
 
@@ -315,7 +315,7 @@ An `is_active` flag also lives at the hop level, but only makes sense inside `Br
 
 Constraints (single hop; the enclosing `BridgeMultiHopProof` gates them by its own `is_active[h]`):
 
-1. **SHA-256 depth-4 Merkle path.** Open `B.L7_root` against `B.block_id` via the 4-step path `L7 → h67 → h4..7 → h0..7 → block_id` using witness siblings `[L6, h45, h0..3, h8..15]`. Total **4 SHA-256 compressions**. `h8..15` is an opaque witness — a hop does not bind L8, so no derivation from L8 or from the L9..L15 zero-constants is needed here (that only happens in `BridgeEventFinalProof`, §6.7).
+1. **SHA-256 depth-4 Merkle path.** Open `B.L7_root` against `B.block_id` via the 4-step path `L7 → h67 → h4..7 → h0..7 → block_id` using witness siblings `[L6, h45, h0..3, h8..15]`. **4 SHA-256 calls** = **8 compressions** (each 64-byte call pads into a second block). `h8..15` is an opaque witness — a hop does not bind L8, so no derivation from L8 or from the L9..L15 zero-constants is needed here (that only happens in `BridgeEventFinalProof`, §6.7).
 2. **Tagged leaf hash for A.** All L7 leaves share the same tag:
    ```
    tag_bytes = REFERENCED_REF_BLOCK_TAG

@@ -12,8 +12,8 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
 - Hermez SRS at `STEP_SRS_PATH` (opcode is Hermez-keyed).
 - `eth-light-client-prover` + `crates/eth-light-client-relayer` synced to this
   branch.
-- `EthBeaconLightClient` deployed. Set `AN_USDC_BRIDGE` (do **not** pass
-  `--no-flip-owner` until you want the owner path left on).
+- `EthBeaconLightClient` deployed from the bridge (`deployLightClient`). Set
+  `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH` only if you mean to flip (step 8).
 - Binary: `cargo build --release --features live-submit` in the relayer crate.
 
 ## Steps
@@ -29,12 +29,15 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    → `deposit-relayer prove-one` → `finalizeDeposit` ACCEPTED.
 6. For a deposit in a non-checkpoint block of the same epoch:
    `eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`
-   then `finalizeDeposit`. `ancestry-one` is the read-only check.
+   then `finalizeDeposit`. `ancestry-one` is the read-only check. Today the call
+   does not fit the gas limit (`docs/eth-light-client.md` §3.4).
 7. Period boundary: `eth-lc-relayer daemon` (rotate **on** by default) **or**
    `submit-rotate` from `rotate_tree_n8` `EMIT_VKBLOB=1` (~40 GB n14).
-8. Owner flip is issued by the daemon after step 3 (or `eth-lc-relayer flip-owner`).
-   Confirm `getLightClient() != 0` and owner flags are off. See
-   `scripts/ursus/flip_deposit_to_light_client.md`.
+8. Owner flip, only on purpose: `eth-lc-relayer daemon --flip-owner` issues it
+   after step 3, or run `eth-lc-relayer flip-owner`. After it, deposits outside
+   checkpoint blocks and from L2s have no anchor writer; read
+   `scripts/ursus/flip_deposit_to_light_client.md` first. Confirm
+   `getLightClient() != 0` and owner flags are off.
 
 Negative: a privately mined `Deposit` whose `blockHash` is not on the parent
 chain of a proven checkpoint must still revert `finalizeDeposit`.

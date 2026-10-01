@@ -207,7 +207,7 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 |---|---|---|
 | `hygiene.yaml` | PRs, pushes to `main` | `gitleaks` over the whole history (`.gitleaks.toml`, `.gitleaksignore`); `lychee` over the Markdown (`lychee.toml`); English-only text (`scripts/check_english_only.py`, `make english-check`; a `non-english-ok` marker exempts a line) |
 | `solidity.yaml` | PRs, pushes to `main` | `forge build`, `forge fmt --check`, `forge test --no-match-contract Fork` |
-| `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json` |
+| `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json`, the slim ABIs `eth-lc-relayer` ships (`scripts/check_lc_relayer_abis.py`) |
 | `verifier_sources.yaml` | PRs, pushes touching `contracts/ethereum/verifiers/` | Every `*AggregatorVerifier.sol` compiles with `solc` 0.8.19 to its `.bin` byte for byte; EIP-170 |
 | `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
 | `release.yaml` | tags `v*` | Builds `ackinacki-bridge` and `aggregate-proof` and publishes the three assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Builds only |

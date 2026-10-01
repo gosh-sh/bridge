@@ -637,7 +637,7 @@ witnesses:
     hop_next_block_id[h]                                    (32 bytes)
     B_h.L0..L7_root, B_h.L8                                 (9 × 32 bytes; needed to reconstruct B_h.block_id via 4 SHA compressions)
     refs_tree_depth[h] ∈ [0, MAX_PROOF_BLOCK_REFS_DEPTH]    (u8; range-checked)
-    ref_index[h] ∈ [1, 2^refs_tree_depth[h])                (u32; range-checked)
+    ref_index[h] ∈ [0, 2^refs_tree_depth[h])                (u32; range-checked)
     L7_inner_path[h]                                        (8 × 32 bytes; unused steps ignored)
 
 constraints:
@@ -645,8 +645,11 @@ constraints:
        when is_active[h]:
          - Reconstruct B_h.block_id from B_h.L0..L7, L8 via depth-4 SHA-256 tree (4 SHA compressions).
          - Constrain hop_current_block_id[h] == B_h.block_id (byte equality).
-         - Tagged Poseidon leaf: ref_leaf = Poseidon(bytes_to_fr(REFERENCED_REF_BLOCK_TAG || A.block_id))
-           where A.block_id = hop_next_block_id[h].
+         - Tagged Poseidon leaf: ref_leaf = Poseidon(bytes_to_fr(leaf_tag[h] || A.block_id))
+           where leaf_tag[h] = REFERENCED_PARENT_BLOCK_TAG when is_zero(ref_index[h]),
+           otherwise REFERENCED_REF_BLOCK_TAG, and A.block_id = hop_next_block_id[h].
+           (Tag selection matches `multi_hop_witness.rs` constants
+           REFERENCED_PARENT_BLOCK_TAG / REFERENCED_REF_BLOCK_TAG; see §2.3.)
          - Variable-depth L7 fold: verify B_h.L7_root == open(ref_leaf, ref_index[h], L7_inner_path[h], refs_tree_depth[h]).
          - Direction bits inside the walker are bound to bit-decomposition of ref_index[h]
            via `dense_merkle_root_padded_bound` (§6.2).

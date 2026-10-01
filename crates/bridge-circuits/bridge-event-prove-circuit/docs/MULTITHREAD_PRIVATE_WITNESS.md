@@ -105,14 +105,11 @@ graph"). Port the idea to Rust:
    doesn't matter — pick any one. We only need **one** path.
 4. Caveats:
    - **Emit the shortest path even when it uses slot-0 edges.** Per §1,
-     slot 0 and slots ≥ 1 are equally legitimate chain-side. The
-     current `bridge-event-prove-circuit` still carries
-     `assert_ref_index_is_cross_thread(ref_index ≥ 1)`
-     (`multi_hop_witness.rs:150`); that constraint is being dropped in
-     parallel. We will tag the resulting witness and only hand it to
-     the prover when the circuit side has caught up — collecting the
-     data now is strictly more useful than throwing paths away at BFS
-     time.
+     slot 0 and slots ≥ 1 are equally legitimate chain-side.
+     `bridge-event-prove-circuit` and `bridge-event-witness` accept any
+     `ref_index ∈ [0, 2^refs_tree_depth)` and select the Poseidon leaf
+     tag (`REFERENCED_PARENT_BLOCK_TAG` vs `REFERENCED_REF_BLOCK_TAG`)
+     on `is_zero(ref_index)`.
    - If no Y is reachable within a hop budget `L_MAX = 300`
      (production — spec §0.2 and §4.4), return a hard error. For
      prototyping, `L_MAX = 20` is enough.

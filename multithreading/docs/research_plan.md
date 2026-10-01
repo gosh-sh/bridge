@@ -119,6 +119,7 @@ walk?"; not in this pass.
   chain within the proving budget is a separate benchmark; not needed for
   the topology characterization pass.
 - **Circuit-side slot-0 opening.** The BFS already counts slot-0 (parent
-  chain) edges as first-class hops. The circuit spec still excludes slot 0
-  from L7 openings — landing that change is a separate work item, tracked
-  outside this document.
+  chain) edges as first-class hops. The circuit and witness builder now
+  accept `ref_index ∈ [0, 2^refs_tree_depth)` and select the Poseidon leaf
+  tag on `is_zero(ref_index)` — slot-0 and cross-thread edges are first-class
+  everywhere in the stack.

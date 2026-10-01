@@ -90,4 +90,32 @@ impl AnConfig {
             "AN GraphQL must be HTTPS (or loopback / --allow-insecure-graphql)",
         ))
     }
+
+    /// The flip disables `USDCBridge` owner anchors and `EthBeaconLightClient`
+    /// owner rotation together; without the bridge client only the second
+    /// half could run.
+    pub fn validate_flip_owner(&self, flip_owner: bool) -> Result<(), RelayerError> {
+        if flip_owner && !self.is_usdc_ready() {
+            return Err(RelayerError::other(
+                "--flip-owner needs AN_USDC_BRIDGE and AN_USDC_ABI_PATH",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flip_owner_requires_usdc_bridge() {
+        let mut an = AnConfig::default();
+        assert!(an.validate_flip_owner(false).is_ok());
+        assert!(an.validate_flip_owner(true).is_err());
+        an.usdc_bridge = format!("{0}::{0}", "1a".repeat(32));
+        assert!(an.validate_flip_owner(true).is_err());
+        an.usdc_abi_path = "abi/USDCBridge.abi.json".into();
+        assert!(an.validate_flip_owner(true).is_ok());
+    }
 }

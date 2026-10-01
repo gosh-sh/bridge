@@ -37,6 +37,15 @@ pub trait IAckiNacki: Send + Sync {
 
     /// Get account balance
     async fn get_balance(&self, address: &str) -> Result<u64>;
+
+    /// Local `run_tvm` of a getter (no on-chain message). Used to read
+    /// `getAnchorConfig` before `disableOwnerAnchors`.
+    async fn run_getter(
+        &self,
+        to: &str,
+        function: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value>;
 }
 
 /// Trait for sending transactions with retry logic

@@ -12,11 +12,12 @@
 			"outputs": []
 		},
 		{
-			"name": "setLightClient",
-			"inputs": [
-				{"name":"lightClient","type":"address"}
-			],
-			"outputs": []
+			"name": "getAnchorConfig",
+			"inputs": [],
+			"outputs": [
+				{"name":"lightClient","type":"address"},
+				{"name":"ownerAnchorsEnabled","type":"bool"}
+			]
 		},
 		{
 			"name": "disableOwnerAnchors",

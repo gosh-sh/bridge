@@ -103,9 +103,11 @@ update, proves it (keygen + prove, ~7 min at k=19 on 48 threads) and calls
 
 `status.sh` prints `getHead` (finalized slot, execution block hash) next to
 the live `finality_update`. The getter returns roots in the contract's
-encoding, `(hi << 128) | lo` over little-endian 16-byte halves (the same
-convention `USDCBridge._parseBlockHash` uses); `status.sh` also prints the
-Ethereum form (each half byte-reversed). Independently, for any recorded hash:
+encoding, `(hi << 128) | lo` over little-endian 16-byte halves; for the
+execution block hash that is the light client's stored key, not the
+Ethereum-order hash it sends `USDCBridge`;
+`status.sh` also prints the Ethereum form (each half byte-reversed).
+Independently, for any recorded hash:
 
 ```bash
 curl -s https://ethereum-sepolia-rpc.publicnode.com -H 'content-type: application/json' \
@@ -147,8 +149,8 @@ emitted, `getCommitteeState` shows the new period).
 
 ## What is not covered by shadow
 
-- `USDCBridge` wiring (`setLightClient`, `acceptBlockHashFromLightClient`,
-  `disableOwnerAnchors`): the shellnet `eccUSDCBridge` has no such surface yet.
+- `USDCBridge` wiring (`getAnchorConfig`, `acceptBlockHashFromLightClient`,
+  `disableOwnerAnchors`): shadow does not call them; production flip-owner does.
 - `submitRotate` and `disableOwnerRotation`.
 - `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...`)
   and will OOG on Acki Nacki until a keccak builtin; the daemon does not send it

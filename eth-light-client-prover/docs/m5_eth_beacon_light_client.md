@@ -10,6 +10,12 @@ This closes the ETH→AN canonicality trust seam that `USDCBridge` left open in 
 own comments ("or eventually an Ethereum light client — means adding a writer for
 this mapping").
 
+The `USDCBridge` wiring below — a `_lightClient` slot set with `setLightClient` —
+is how M5 patched the bridge in `acki-nacki`. `eccUSDCBridge` 1.5.0
+(`contracts/an/exchange/`) has no `setLightClient`: the zerostate installs the
+light-client code with `setLightClientCode`, the bridge derives the light-client
+address from it, and the owner deploys the light client with `deployLightClient`.
+
 ## Files
 
 | File | Repo | Change |
@@ -32,8 +38,10 @@ this mapping").
 3. `tvm.accept()` then the opcode: `require(gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof))`.
 4. Advance head (`_finalizedSlot/Root/ExecutionBlockHash`, `_updatesApplied++`),
    register `_provenExecutionBlockHash[execHash] = true`.
-5. If a sink is configured, push `acceptBlockHashFromLightClient(_l1ChainId, execHash)`
+5. If a sink is configured, push `acceptBlockHashFromLightClient(_l1ChainId, _piForm(execHash))`
    into the `USDCBridge` so `finalizeDeposit` reads it synchronously from its own storage.
+   `execHash` is the stored key; `_piForm` turns it into the Ethereum-order hash the bridge
+   keys by (see `docs/eth-light-client.md` §3.4).
 
 The **committee gate is the crux of trustlessness**: the step proof only shows
 *some* committee (whose Poseidon commitment = PI #5) signed with a supermajority —
@@ -48,7 +56,9 @@ which point the committee chain becomes fully trustless from the checkpoint.
 
 `setPubkey`, `setUsdcBridge`, `setCommitteeCommitment` (all owner-pubkey);
 `getHead`, `isProvenExecutionBlockHash`, `isAcceptedBlockHash(chainId, hash)`
-(drop-in shape matching `USDCBridge`), `getConfig`, `getVersion`.
+(the signature of `USDCBridge`'s, but it takes the stored anchor key, not the
+Ethereum-order hash the bridge takes; see `docs/eth-light-client.md` §3.4),
+`getConfig`, `getVersion`.
 
 ## Why the anchor is *pushed*, not *pulled*
 
@@ -58,7 +68,8 @@ into `USDCBridge._acceptedBlockHash` (the exact set `finalizeDeposit` already
 gates on) via the new authorized writer. The write is authorized solely by being
 the configured `_lightClient` — no human asserts canonicality, the proof does.
 This is independent of `_ownerAnchorsEnabled` (which governs the owner path); the
-owner's one remaining action is granting trust once via `setLightClient`.
+owner's one remaining action is granting trust once, which on `eccUSDCBridge` is
+installing the light-client code (`setLightClientCode`).
 
 `_lightClient` follows the `_expectedBridgeFr` convention: it is **not** threaded
 through the `onCodeUpgrade` migration cell, so it must be re-set by the owner
@@ -138,7 +149,10 @@ same VkBlob bytes, same opcode handler.
 - VK_BLOB header `VKBLOB\0\0` + version 1 + Base shape + embedded `BaseCircuitParams`
   `{k:19, num_advice_per_phase:[132], …}`; sha256 matches the fixture sidecar.
 - Builtin arity/signature matched against `origin/halo2_verify`.
-- Public-input decode mirrors `USDCBridge._parseBlockHash` byte-for-byte (LE, hi<<128|lo).
+- Public-input decode reads each field element little-endian and recombines
+  `hi << 128 | lo`, as `USDCBridge._parseBlockHash` does. The step circuit fills
+  the halves little-endian (`node_hi_lo`), so the word is the stored anchor key,
+  not the Ethereum-order hash the bridge is sent.
 - Brace/paren/bracket balance on both files.
 
 ## Operational constraints (go / no-go)

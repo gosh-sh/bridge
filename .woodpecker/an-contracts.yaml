@@ -1,4 +1,4 @@
-# The Acki Nacki contracts under contracts/an/ carry three invariants the
+# The Acki Nacki contracts under contracts/an/ carry four invariants the
 # compiler does not check:
 #
 #   * eccUSDCBridge embeds DepositVoucher's code, and the voucher calls back
@@ -8,6 +8,9 @@
 #     match deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin.
 #   * BridgeZerostateData.getBridgeData must encode the same tuple that
 #     eccUSDCBridge.onCodeUpgrade decodes.
+#   * The trimmed ABIs eth-lc-relayer ships (crates/eth-light-client-relayer/
+#     abi/) must match the compiled contracts and hold every function the
+#     relayer calls.
 #
 # The zerostate module's own unit tests (contracts/an/zerostate_init.py) also
 # run here.
@@ -43,3 +46,8 @@ steps:
     commands:
       - apk add --no-cache git
       - python3 scripts/check_place_manifest.py
+  relayer-abis:
+    image: python:3-alpine
+    depends_on: [ ]
+    commands:
+      - python3 scripts/check_lc_relayer_abis.py

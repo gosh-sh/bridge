@@ -17,10 +17,12 @@ use std::{
     time::Duration,
 };
 
+use metrics::gauge;
 use tracing::{debug, info, warn};
 
 use crate::{
     error::RelayerError,
+    metrics as prom,
     prover::ProofGenerator,
     relayer::{Relayer, TickOutcome},
     source::DepositSource,
@@ -182,14 +184,19 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             m.current_backoff_secs
                 .store(current_delay.as_secs(), Ordering::Relaxed);
         }
+        gauge!(prom::BACKOFF_SECONDS).set(current_delay.as_secs_f64());
         tokio::pin!(shutdown);
 
         loop {
+            let tick_started = std::time::Instant::now();
             let outcome_or_err = self.tick().await;
+            prom::record_stage("tick", tick_started.elapsed());
+            gauge!(prom::LAST_TICK_TIMESTAMP_SECONDS).set(prom::unix_now());
             summary.ticks += 1;
             if let Some(m) = &metrics {
                 m.ticks_total.fetch_add(1, Ordering::Relaxed);
             }
+            prom::record_tick_outcome(outcome_label(&outcome_or_err));
 
             let (success, last_tag) = match outcome_or_err {
                 Ok(TickOutcome::Finalized {
@@ -200,6 +207,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         m.last_finalized_deposit_id
                             .store(deposit_id, Ordering::Relaxed);
                     }
+                    mark_finalized(deposit_id);
                     summary.finalized += 1;
                     info!(deposit_id, "daemon: finalized");
                     (true, LastOutcome::Finalized {
@@ -214,6 +222,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         m.last_finalized_deposit_id
                             .store(deposit_id, Ordering::Relaxed);
                     }
+                    mark_finalized(deposit_id);
                     summary.already_finalized += 1;
                     // A nullifier skip is "progress" — reset backoff.
                     (true, LastOutcome::AlreadyFinalized {
@@ -304,6 +313,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 m.current_backoff_secs
                     .store(current_delay.as_secs(), Ordering::Relaxed);
             }
+            gauge!(prom::BACKOFF_SECONDS).set(current_delay.as_secs_f64());
 
             tokio::select! {
                 biased;
@@ -315,6 +325,40 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
         }
     }
+}
+
+/// The `outcome` label of `deposit_relayer_ticks_total` for one tick result.
+fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
+    match outcome {
+        Ok(TickOutcome::Finalized {
+            ..
+        }) => "finalized",
+        Ok(TickOutcome::AlreadyFinalized {
+            ..
+        }) => "already_finalized",
+        Ok(TickOutcome::NotYetAvailable {
+            ..
+        }) => "not_yet_available",
+        Ok(TickOutcome::ProofFailed {
+            ..
+        }) => "proof_failed",
+        Ok(TickOutcome::AnRejected {
+            ..
+        }) => "an_rejected",
+        Ok(TickOutcome::AnPending {
+            ..
+        }) => "an_pending",
+        Ok(TickOutcome::Skipped {
+            ..
+        }) => "skipped",
+        Err(_) => "error",
+    }
+}
+
+/// Gauges that move when a deposit is (found) finalized on AN.
+fn mark_finalized(deposit_id: u64) {
+    gauge!(prom::LAST_FINALIZED_DEPOSIT_ID).set(deposit_id as f64);
+    gauge!(prom::LAST_FINALIZED_TIMESTAMP_SECONDS).set(prom::unix_now());
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -366,7 +410,6 @@ mod tests {
             state_path,
             start_deposit_id: 0,
             poll_interval: Duration::from_millis(0),
-            max_attempts_warn: 16,
             deployment: None,
             force_state: false,
             skip_after_attempts: None,

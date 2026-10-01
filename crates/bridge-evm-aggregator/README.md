@@ -51,9 +51,9 @@ test-only.
 **That future has since arrived.** Circuit 4 landed: the inner event snark is produced by
 `export-c4-poseidon-snark` in `bridge-snark-utils`, aggregated by this crate's
 `export-inner-aggregator`, and the result is committed as
-`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 314 B on disk; pending
-post-merge regen for the 13-PI + inner-VK-digest-binding combination — the circuit itself fits at
-`K=19`, but halo2-axiom bakes `params.k()=20` from the shared ceremony SRS into `vk.domain`), which
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 638 B on disk, 13 inner
+PIs + inner-VK-digest binding — the circuit itself fits at `K=19`, but halo2-axiom bakes
+`params.k()=20` from the shared ceremony SRS into `vk.domain`), which
 `AckiNackiBridge.withdrawByProofBundle` calls through its `BridgeWithdrawalFinalVerifier` and
 `BridgeMultiHopVerifier` adapters. The same pipeline produces the 1A, 1B and Circuit-2 verifiers.
 So the milestone text below (M4 → M7) is a historical record of a plan that

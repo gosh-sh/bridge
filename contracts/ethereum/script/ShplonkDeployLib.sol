@@ -37,27 +37,19 @@ library ShplonkDeployLib {
     /// @dev keccak256 of runtime after CREATE of the committed `.bin`.
     ///      Re-measure (`extcodehash`) when n14 regenerates artefacts.
     bytes32 internal constant PRIMARY_YUL_CODEHASH =
-        0x87667b88a829e82cd3a840d7840e531cc479b46c383081c906ed6ab77c8f7d7c;
+        0x26a629eca2d1272c0b776663b01c9151ddffbb5b29b9164d20a582648dd59ef2;
     bytes32 internal constant FALLBACK_YUL_CODEHASH =
-        0xea25ba9c1cab6df9616122cb951875a47f41c962ebc699dfb53819215efaf963;
+        0xa5173ba41e794f5b3a9ed1b4da1b93af58764b1f44329bb5ebf9794c97d1e923;
     bytes32 internal constant LAYER_HASHES_YUL_CODEHASH =
-        0xe1f47d047e03d59dcacb747fd168efe120da942a84a4e7003d74e8208d99f07b;
-        // TODO(merge/feature-multithreading): re-measure extcodehash after
-        // regenerating `BridgeWithdrawalAggregatorVerifier.bin` against the
-        // 13-PI event-final circuit under vk-binding. Pre-merge HEAD value
-        // was 0x23e0d1a6... (13-PI, no vk-binding); pre-merge main value was
-        // 0xf3a462e3... (11-PI, with vk-binding). Zero skips the on-chain
-        // runtime pin check in `deployYulFromBin` until this is derived.
-        bytes32(0);
+        0x22b194cfa002ac041e6e680d992e76f8ef9d2f383954d055e8988ddb34134437;
+    bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
+        0x3a8372c70b067cbf6c988308841d98ac225f30417086636e80fe11751cb84a7c;
     /// @dev Multi-hop verifier codehash, computed from the committed
     ///      `verifiers/BridgeMultiHopAggregatorVerifier.bin` via
     ///      `script/PrintMultiHopCodehash.s.sol`. Regenerate + update this
     ///      constant in the same commit as any artefact bump.
-    // TODO(merge/feature-multithreading): re-measure after regenerating
-    // `BridgeMultiHopAggregatorVerifier.bin` under vk-binding. Pre-merge HEAD
-    // value was 0xd1cfbbd8... (no vk-binding). Zero skips the runtime pin
-    // check in `deployYulFromBin` until this is derived.
-    bytes32 internal constant MULTI_HOP_YUL_CODEHASH = bytes32(0);
+    bytes32 internal constant MULTI_HOP_YUL_CODEHASH =
+        0xdf0198b19eada3ad81ca27a4e7a902076f48fd85811dfed076f0d8f2ef70946f;
 
     /// @dev Poseidon digest of the inner-circuit VK witnesses, in the exact
     ///      32-byte layout the aggregator emits at instance slot `12 + NUM_INNER`.
@@ -68,16 +60,11 @@ library ShplonkDeployLib {
     bytes32 internal constant FALLBACK_VK_DIGEST =
         0x02eabb18cdc35deba417d2a3a9326bb41a722c333d11eccb45f4ae52ccba1484;
     bytes32 internal constant LAYER_HASHES_VK_DIGEST =
-        0x022fe6c98b76a4733105a03be905bf3cfcf4cb4373fb856c53ec894a27bb4e17;
-    // TODO(merge/feature-multithreading): re-derive via
-    // `bridge_evm_aggregator::vk_binding::expected_vk_digest` against the
-    // rotated 13-PI event-final inner VK. Pre-merge main value was
-    // 0x1e91c1fe... (against the superseded 11-PI event-prove circuit).
-    bytes32 internal constant WITHDRAWAL_VK_DIGEST = bytes32(0);
-    // TODO(merge/feature-multithreading): derive via
-    // `bridge_evm_aggregator::vk_binding::expected_vk_digest` against the
-    // multi-hop inner VK (first-time wiring; no prior value to supersede).
-    bytes32 internal constant MULTI_HOP_VK_DIGEST = bytes32(0);
+        0x013503ca3e2be627a4f0a0492a9d4c97986eb686874c9691218ed5e8de250f0f;
+    bytes32 internal constant WITHDRAWAL_VK_DIGEST =
+        0x18b4ba34b1d094f0f3328864a9db3d0771c4987679ed4848479c8eb92faab7b3;
+    bytes32 internal constant MULTI_HOP_VK_DIGEST =
+        0x25cc953588b169004317bb42f90a6c9fe0166cb7ec69b0a9cb27d56117fba1ea;
 
     struct VerifyBlockVerifiers {
         IPrimaryVerifier primary;

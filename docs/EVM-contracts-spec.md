@@ -520,12 +520,14 @@ contract's fallback entrypoint via `staticcall`.
 |---|---|---:|---:|---:|
 | `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 655 | 3 872 |
 | `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 655 | 3 872 |
-| `LayerHashesAggregatorVerifier.bin` | 2 (k_outer=21 post-merge) | 14 | *pending regen* (19 263 on disk at k_outer=22) | *pending regen* (3 104 on disk) |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 `BridgeEventFinalProof` (inner K=20 per `vk.domain`) | 13 | *pending regen* (21 314 on disk at 11-PI pre-multithread) | *pending regen* (3 680 on disk) |
-| `BridgeMultiHopAggregatorVerifier.bin` | 4 `BridgeMultiHopProof` (cross-thread) | 2 | *pending vk-binding regen* (23 722 on disk pre-binding) | *pending vk-binding regen* (4 448 on disk) |
+| `LayerHashesAggregatorVerifier.bin` | 2 (k_outer=22) | 14 | 19 263 | 3 104 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 `BridgeEventFinalProof` (inner K=20 per `vk.domain`) | 13 | 21 638 | 3 744 |
+| `BridgeMultiHopAggregatorVerifier.bin` | 4 `BridgeMultiHopProof` (cross-thread) | 2 | 23 883 | 4 480 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
-`scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
+`scripts/check_eip170_verifier_bins.sh` enforces in CI. `BridgeMultiHopAggregatorVerifier.bin`
+at 23 883 B is the tightest, with 693 B of EIP-170 headroom (97 %, above the 90 % soft-warn
+line in `scripts/check_shplonk_artefacts.sh`). Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
 output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`). 
 

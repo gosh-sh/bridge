@@ -2,23 +2,24 @@
 
 Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefacts. 
 
-Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-09-23**, the same
+Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-10-01**, the same
 metric `scripts/check_eip170_verifier_bins.sh` uses. Re-measure rather than trusting the row.
 
 | File | Circuit | Inner PIs | Size | EIP-170 (24 576 B) |
 |------|---------|-----------|------|--------------------|
 | `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | 21 655 B | OK (88%) |
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 655 B | OK (K=21 inner, 88%) |
-| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | *pending regen* | *pending regen* (k_outer=21, post-merge vk-binding) |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal (`BridgeEventFinalProof`) | 13 | *pending regen* | *pending regen* (K=19 inner, 13-PI + vk-digest) |
-| `BridgeMultiHopAggregatorVerifier.bin` | multi-hop (cross-thread) | 2 | *pending regen* | *pending regen* (K=17 inner, vk-binding) |
+| `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 19 263 B | OK (k_outer=22, 78%) |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal (`BridgeEventFinalProof`) | 13 | 21 638 B | OK (K=19 inner, 88%) |
+| `BridgeMultiHopAggregatorVerifier.bin` | multi-hop (cross-thread) | 2 | 23 883 B | WARN (K=17 inner, 97%, 693 B margin) |
 
-Against 0.2.0 Layer hashes stays at `k_outer=22` (19 100 → 19 263 B). Primary and Fallback
-at 21 655 B are the tightest — regenerate with the size gate in the loop, not after it.
+MultiHop is now the tightest — above the 90 % soft-warn line with 693 B of EIP-170 headroom.
+Primary and Fallback at 21 655 B and Withdrawal at 21 638 B all sit around 88 % — regenerate
+with the size gate in the loop, not after it.
 
 Every size is also pinned in `SIZES`, next to `SHA256SUMS`, and
-`scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (none warn
-today; Primary/Fallback sit at 88%). That is deliberate: past the limit `CREATE` returns the zero address and
+`scripts/check_shplonk_artefacts.sh` fails on drift and warns from 90% of EIP-170 (MultiHop
+sits at 97% / 693 B margin; Primary/Fallback/Withdrawal at 88%; LayerHashes at 78%). That is deliberate: past the limit `CREATE` returns the zero address and
 `deployYulFromBin` reverts `YulDeployFailed`, so growth has to be visible in a diff rather than in
 a failed deploy. Regenerating an artefact means updating `SIZES` in the same commit.
 
@@ -54,10 +55,8 @@ Circuit-4 public inputs (adding `xBlockId` at slot 23 and `yBlockId` at slot 24 
 11-slot layout so cross-thread hop chains anchor to a bundle endpoint) + 1 Poseidon digest of
 the inner VK witnesses that the on-chain adapter pins against its immutable `vkDigest`. Rotation
 history: 2026-09-18 for the `events_pos` nullifier preimage and the per-layer anchor scan →
-2026-09-23 for the inner-VK-digest binding → *pending post-merge regen* for the combined
-13-PI (`BridgeEventFinalProof`) + vk-digest layout. Yul size will be re-measured and the
-`BridgeWithdrawalAggregatorVerifier.bin` row above updated in the same commit that lands the
-regenerated artefacts.
+2026-09-23 for the inner-VK-digest binding → 2026-10-01 for the combined 13-PI
+(`BridgeEventFinalProof`) + vk-digest layout (21 638 B).
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation
@@ -128,10 +127,10 @@ cargo run --release --bin export-inner-aggregator -- \
   --name BridgeMultiHopAggregatorVerifier
 ```
 
-After the run: populate `MULTI_HOP_YUL_CODEHASH` in
-`script/ShplonkDeployLib.sol`, add the `.bin` and `_calldata.bin` rows to
-`SHA256SUMS` and `SIZES`, and replace the `*pending regen*` cells in the
-size table above with the measured values — all in the same commit.
+After the run: refresh `MULTI_HOP_YUL_CODEHASH` and `MULTI_HOP_VK_DIGEST`
+in `script/ShplonkDeployLib.sol`, update the `.bin` and `_calldata.bin`
+rows in `SHA256SUMS` and `SIZES`, and re-measure the size cell above —
+all in the same commit.
 
 Or run the whole pipeline on n14: `./scripts/n14_r15_proving_run.sh continue-c && ./scripts/n14_r15_proving_run.sh pull-artifacts`.
 

@@ -2,27 +2,18 @@
 # 24576 B for the runtime .bin; scripts/check_shplonk_artefacts.sh fails when
 # these figures drift, so a regeneration shows its growth in the diff.
 #
-# TODO(merge/feature-multithreading): every pair below will shift after the
-# post-merge regen that combines main's inner-VK-digest binding (+1 instance
-# word in calldata, Yul grows a few hundred bytes) with multithreading's
-# circuit shapes (Withdrawal 13-PI incl. xBlockId/yBlockId; LayerHashes
-# k_outer=21; MultiHop first-time vk-binding on top of the K=17 / k_outer=21
-# Full export).
-#
-# Current on-disk figures:
-#   - Primary/Fallback/LayerHashes/Withdrawal: main's 2026-09-23 vk-binding
-#     sizes (will be re-measured once rebased on multithreading's circuits).
-#   - BridgeMultiHopAggregatorVerifier{,_calldata}.bin: HEAD's 2026-09-27 /
-#     2026-09-28 export (23722 B, 96.5 % EIP-170; above the 90 % soft-warn
-#     line — mirrors LayerHashes 94 %). Will be re-measured once vk-binding
-#     lands.
-21314  BridgeWithdrawalAggregatorVerifier.bin
-3680  BridgeWithdrawalAggregatorVerifier_calldata.bin
-23722  BridgeMultiHopAggregatorVerifier.bin
-4448  BridgeMultiHopAggregatorVerifier_calldata.bin
+# All five verifiers combine inner-VK-digest binding (+1 instance word in
+# calldata, Yul grows a few hundred bytes) with multithreading's circuit
+# shapes (Withdrawal 13-PI incl. xBlockId/yBlockId; LayerHashes
+# k_outer=22; MultiHop 2-PI). MultiHop sits at 23883 B / 97.2 % EIP-170 —
+# above the 90 % soft-warn line, 693 B of margin remain.
+21655  PrimaryAggregatorVerifier.bin
+3872  PrimaryAggregatorVerifier_calldata.bin
 21655  FallbackAggregatorVerifier.bin
 3872  FallbackAggregatorVerifier_calldata.bin
 19263  LayerHashesAggregatorVerifier.bin
 3104  LayerHashesAggregatorVerifier_calldata.bin
-21655  PrimaryAggregatorVerifier.bin
-3872  PrimaryAggregatorVerifier_calldata.bin
+21638  BridgeWithdrawalAggregatorVerifier.bin
+3744  BridgeWithdrawalAggregatorVerifier_calldata.bin
+23883  BridgeMultiHopAggregatorVerifier.bin
+4480  BridgeMultiHopAggregatorVerifier_calldata.bin

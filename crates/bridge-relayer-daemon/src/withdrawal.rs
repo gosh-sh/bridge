@@ -49,14 +49,10 @@ pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPU
 
 /// Byte length of a Circuit-4 SHPLONK calldata blob after the inner-VK
 /// binding and multi-thread 13-PI layout: 26 instance words plus the
-/// outer proof. The pre-vk-binding, 11-PI blob was 3 648 B; main's
-/// vk-binding-only, 11-PI blob was 3 680 B.
-///
-/// TODO(merge/feature-multithreading): this value is a provisional forecast
-/// (`3_680 + 2 * 32 = 3_744`, adding two instance words for `xBlockId` and
-/// `yBlockId`). Re-measure against the regenerated
-/// `BridgeWithdrawalAggregatorVerifier_calldata.bin` in the same commit as
-/// the post-merge aggregator export and replace this constant.
+/// outer proof. Measured against the committed
+/// `BridgeWithdrawalAggregatorVerifier_calldata.bin` (2026-10-01).
+/// The pre-vk-binding, 11-PI blob was 3 648 B; main's vk-binding-only,
+/// 11-PI blob was 3 680 B.
 pub const WITHDRAWAL_CALLDATA_LEN: usize = 3_744;
 
 /// One per-hop `BridgeMultiHopProof` blob as persisted in

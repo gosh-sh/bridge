@@ -855,8 +855,9 @@ pub fn build_synthetic_final_proof_keygen_inputs(
 /// keygen. Matches `multi_hop_proof::tests::test_params(K=17)`.
 pub const MULTI_HOP_K: u32 = 17;
 
-/// Deterministic placeholder for the slot-0 same-thread parent — never opened
-/// by the circuit (spec §5.1) but must be a well-defined value so native
+/// Deterministic placeholder for the slot-0 same-thread `parent_block_id`.
+/// Slot 0 is a valid hop edge the circuit may open; test fixtures that do
+/// not exercise it still need a well-defined byte string so native
 /// `proof_block_refs_root_native` is reproducible.
 pub const SLOT0_PARENT_PLACEHOLDER: [u8; 32] = [0xF0; 32];
 

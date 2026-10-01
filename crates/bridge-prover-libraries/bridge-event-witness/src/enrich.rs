@@ -714,11 +714,13 @@ pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Re
 /// # Cross-thread walk (Direction (a))
 ///
 /// Starting from `event_block` (on some non-default thread), the walker
-/// repeatedly picks a `proof_block_refs[i]` with `i >= 1` (slot 0 is the
-/// same-thread parent, excluded per spec §4) that leads to a strictly
-/// different thread, preferring the default thread when it appears among
-/// the candidates. Because `refs` on Acki Nacki only ever point at strictly
-/// older blocks, the walk emits snarks in newest→oldest order — matching
+/// repeatedly picks a `proof_block_refs[i]` with `i >= 1` that leads to a
+/// strictly different thread, preferring the default thread when it appears
+/// among the candidates. Slot 0 (`parent_block_id`) is a valid hop edge
+/// from the circuit's point of view but points at the same thread as the
+/// current block, so it cannot progress a cross-thread walk and is skipped
+/// here. Because `refs` on Acki Nacki only ever point at strictly older
+/// blocks, the walk emits snarks in newest→oldest order — matching
 /// Direction (a) of the cross-thread reachability model (event `X` newer on
 /// thread `t`; anchor `Y` older on thread 0). Each step produces one
 /// `MultiHopProofWitnessJson` snark carrying:
@@ -838,7 +840,12 @@ pub async fn resolve_cross_thread_chain(
 ///   (progresses the walk), or
 /// * an error if no such ref exists.
 ///
-/// Slot 0 is the same-thread parent — excluded per spec §4.
+/// Slot 0 (`parent_block_id`) is a valid hop edge from the circuit's point
+/// of view, but it points at the same thread as `cur` by construction and
+/// therefore cannot provide cross-thread progress — this walker skips it as
+/// a cross-thread-specific performance choice (saves one GQL round-trip per
+/// block). Future walkers that need same-thread hops may call
+/// `build_hop_witness(cur, 0)` directly.
 async fn pick_next_hop(
     gql: &GqlClient,
     cur: &GqlProofBlock,
@@ -897,11 +904,6 @@ fn build_hop_witness(cur: &GqlProofBlock, ref_index: u32) -> Result<HopWitnessJs
     })?;
 
     let idx = ref_index as usize;
-    if idx == 0 {
-        bail!(
-            "ref_index 0 is the same-thread parent slot; the bridge L7 walk requires idx >= 1"
-        );
-    }
     if idx >= cur.proof_block_refs.len() {
         bail!(
             "ref_index {} out of range (proof_block_refs.len() = {})",
@@ -1012,7 +1014,9 @@ mod cross_thread_tests {
 
     #[test]
     fn hop_witness_roundtrips_with_native_openings() {
-        // 3 refs: slot 0 = parent (unused for hop), slots 1, 2 = cross-thread candidates.
+        // 3 refs: slot 0 = parent (valid hop edge, exercised by
+        // `hop_witness_accepts_ref_index_zero` below); slots 1, 2 =
+        // cross-thread candidates.
         let refs = vec![[0xAAu8; 32], [0xBBu8; 32], [0xCCu8; 32]];
         let block = synth_block(1, refs.clone());
         let hop = build_hop_witness(&block, 2).expect("hop witness");
@@ -1031,11 +1035,18 @@ mod cross_thread_tests {
     }
 
     #[test]
-    fn hop_witness_rejects_ref_index_zero() {
+    fn hop_witness_accepts_ref_index_zero() {
+        // Slot 0 is `parent_block_id` and is a valid hop edge — the native
+        // re-check inside `build_hop_witness` must succeed and the resulting
+        // witness must bind to the parent block at `hop_end_block_id`.
         let refs = vec![[0xAAu8; 32], [0xBBu8; 32]];
-        let block = synth_block(1, refs);
-        let err = build_hop_witness(&block, 0).expect_err("must reject ref_index 0");
-        assert!(err.to_string().contains("same-thread parent slot"));
+        let block = synth_block(1, refs.clone());
+        let hop = build_hop_witness(&block, 0).expect("slot-0 hop witness");
+
+        assert!(hop.is_active);
+        assert_eq!(hop.ref_index, 0);
+        assert_eq!(hop.hop_start_block_id_hex, hex::encode(block.block_id));
+        assert_eq!(hop.hop_end_block_id_hex, hex::encode(refs[0]));
     }
 
     #[test]

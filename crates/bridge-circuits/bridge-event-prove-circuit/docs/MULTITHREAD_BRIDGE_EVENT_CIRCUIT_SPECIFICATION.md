@@ -10,41 +10,47 @@ The document is self-contained. A bridge developer should be able to implement t
 
 ### 0.1 Notation convention — the `→` arrow
 
-Throughout this document, when a hop chain is written
+Throughout this document, an arrow
 
 ```
 A  →  B
 ```
 
-it means **"A references B via its `refs` list — i.e. A is the current
-block whose L7 we open, and B is the next (older, cross-thread) block
-extracted from one slot of A.refs."**
+means **"A is a leaf in B's L7 Poseidon dense-Merkle tree, i.e.
+`A.block_id` appears in `B.proof_block_refs` at some slot `k ≥ 0`"**.
+The tail of the arrow is the *older* block (the leaf of the per-block
+L7 tree); the head is the *newer* block (the root direction, which
+Merkle-commits to the leaf through its L7 opening).
 
-The arrow direction is the **walk-step direction**, and because acki-nacki
-`refs` always point at strictly older blocks in other threads (§2.3,
-`node/src/multithreading/thread_synchrinization_service.rs:67-77`), the
-arrow always points from a **newer** block to an **older** block. Reading
-the walk left-to-right therefore reads **newest → oldest**.
+This matches the standard Merkle-tree convention: `leaf → root` folds
+upward. The convention is uniform across both scales in this document:
 
-This is the opposite of the usual Merkle-tree drawing convention where
-`leaf → root` means "leaf feeds up into root". Here `→` is a hop, not a
-Merkle level. A single hop internally opens a Merkle path (L7 Poseidon
-dense-Merkle plus the depth-4 SHA outer path up to `block_id`) — those
-openings run leaf-to-root inside the hop, but the `→` arrow between hops
-in the walk chain runs newest-to-oldest.
+- **Within a block** — folding L7 (or L8) up to `block_id` goes
+  `leaf → root`, e.g. `L8 → h89 → h8..11 → h8..15 → block_id`.
+- **Between blocks** — a hop step `A → B` points from the leaf side
+  (older block, referenced inside B.L7) to the root side (newer block,
+  containing A as a ref).
 
-**A note on this convention's history.** An earlier revision of this doc
-drew the walk as `X → … → Y` where X (thread t, event) was on the left and
-Y (thread 0, anchor) was on the right. That reading matched the "walk
-starts at X" (Direction (a)) framing rejected in
-[`multithreading/DRAFT_cross_thread_reachability_issue.md`](../../../../../multithreading/DRAFT_cross_thread_reachability_issue.md)
-§3.1.1 on cryptographic-soundness grounds. Under the sound direction
-(Direction (b), the one this doc now specifies), the walk **starts at the
-on-chain-anchored thread-0 block Y** and terminates at the event block X.
-Because refs still point at older blocks, and the walk still runs
-newest → oldest as written left-to-right, the endpoints are reordered:
-`Y → … → X`, Y on the left, X on the right. If in any earlier text an
-arrow reads the other way, treat this section as the source of truth.
+Reading a walk chain left-to-right therefore reads **oldest → newest**.
+Because acki-nacki `proof_block_refs` always point at strictly older
+blocks (slot 0 = same-thread parent, slots ≥ 1 = cross-thread older
+blocks — see §2.3,
+`node/src/multithreading/thread_synchrinization_service.rs:67-77` and
+`helpers/proof_helper/src/gql_proof.rs:76,109`), the oldest-to-newest
+direction is well-defined.
+
+**Walk chain.** The walk starts at the event block **X** (thread t,
+oldest / leaf side) and terminates at the anchored thread-0 block
+**Y** (newest / root side) — Y is where the chain of leaf-to-root
+openings finally hits a block whose own `block_leaf` lands inside
+`layerWindows[]` on Ethereum. Written left-to-right:
+
+```
+X  →  B_{L-1}  →  …  →  B_1  →  Y
+```
+
+i.e. "X is a ref inside `B_{L-1}.L7`, which is a ref inside
+`B_{L-2}.L7`, …, which is a ref inside `Y.L7`".
 
 ### 0.2 Terminology table
 
@@ -53,7 +59,7 @@ arrow reads the other way, treat this section as the source of truth.
 | **BWS** | Batch Window Size = **128**. Canonical value from `HISTORY_PROOF_WINDOW_SIZE` in the AN node's `history-proof` library. |
 | **Batch M** (thread 0) | The contiguous range of thread-0 blocks at heights `[M·BWS, (M+1)·BWS − 1]`. |
 | **`#L<N>(M)`** | Layer-N batch root for batch M of thread 0. Layer-1 is built over the blocks of batch M; layer-(N+1) is built over `BWS` consecutive layer-N roots. |
-| **X** | The **event block** — the AN block, in some thread t (t may be 0 or ≠ 0), that emitted the `WithdrawalInitiated` event. Its `block_id` is a public input (§6.3); no anonymity is claimed. **X is the walk's terminus (older endpoint) under Direction (b).** |
+| **X** | The **event block** — the AN block, in some thread t (t may be 0 or ≠ 0), that emitted the `WithdrawalInitiated` event. Its `block_id` is a public input (§6.3); no anonymity is claimed. X is the walk's leaf-side endpoint (older). |
 | **Y** | The **anchor block** — a block in **thread 0**, *newer* than X, whose transitive `refs` closure reaches X within ≤ L cross-thread hops. Y's `block_leaf` folds into a `finalRoot ∈ layerWindows[]` on Ethereum, so Y is the on-chain trust root the walk begins at. When t = 0, Y = X and L = 0. |
 | **X-side / Y-side** | The portions of the proof concerned with X (event binding, in thread t) and Y (thread-0 anchor). When t ≠ 0 they are separate; when t = 0 they collapse onto the same block. |
 | **`event_hash`** | 32-byte SHA-256 root hash of the `WithdrawalInitiated` ext-out message wrapper cell (`repr_hash(C0)` of the 4-cell BOC — wrapper, body, recipient, sender). |
@@ -61,10 +67,10 @@ arrow reads the other way, treat this section as the source of truth.
 | **`layerWindows[N]`** | On-chain (Ethereum) rolling window of thread-0 layer-N batch roots maintained by `AckiNackiBridge.sol`. Mirrors the node-side `GlobalHistoricalData[thread 0][N]`. |
 | **`finalRoot`** | The layer-N batch root the prover anchors against. Exposed as `PUB_FINAL_ROOT`. Must lie inside `layerWindows[anchorLayer]` (`_isKnownLayerAnchor` in `AckiNackiBridge.sol`). |
 | **`anchorLayer`** | 1-indexed layer number the prover claims for `finalRoot`. Range `1..=MAX_ANCHOR_LAYER = 10` (must equal Solidity `MAX_LAYER_HASHES`). |
-| **L** | True chain length in hops between Y and X (under Direction (b): Y → … → X, walked newest → oldest). `L = 0 ⇔ t = 0`. |
-| **`L_MAX`** | Circuit-side upper bound on L. **Production target = 300** (node-team ceiling on cross-thread walk length under the current threading design). Prototyping target = **20**. |
+| **L** | True chain length in hops between X and Y (`X → … → Y`, oldest → newest, leaf → root). `L = 0 ⇔ t = 0`. |
+| **`L_MAX`** | Circuit-side upper bound on L — a **worst-case ceiling**, not a target. The node team has announced **300** as the hard worst-case for cross-thread walks under the current threading design; with slot-0 (same-thread parent) edges a walk can also run up to **~128** same-thread hops. Both numbers are already punishing for the prover (see §4.3 cell costs). The **desired average** we design for is **10–20** cross-thread hops, ideally **1–5**; longer walks are tolerated but should be the exception, not the plan. Prototyping cap = **20**. |
 | **`H`** | Hops packed per `BridgeMultiHopProof` snark. Set to **1** for the bridge (see §5.H for the sizing derivation). |
-| **`N_BUNDLE_MAX`** | Upper bound on the number of `BridgeMultiHopProof` snarks per claim. `N_BUNDLE_MAX = ⌈L_MAX / H⌉`. Dynamic per claim (§6.5); prototype cap = 20, production cap = 300. |
+| **`N_BUNDLE_MAX`** | Upper bound on the number of `BridgeMultiHopProof` snarks per claim. `N_BUNDLE_MAX = ⌈L_MAX / H⌉`. Dynamic per claim (§6.5); prototype cap = 20, worst-case production cap = 300. Typical claims land in the 1–20 range. |
 | **Bundle** | One `BridgeEventFinalProof` + `n ∈ [0, N_BUNDLE_MAX]` `BridgeMultiHopProof` snarks. `n = 0` when `t = 0`. |
 | **Circuit 4** | Current on-chain name for the bridge event-prove circuit registered in `AckiNackiBridge.sol`. This spec keeps the name and extends the public-input surface. |
 
@@ -82,9 +88,7 @@ The **anchor**, in contrast, must land in **thread 0**. Under the current thread
 
 When `t = 0`, event and anchor coincide (`X = Y`) and no cross-thread bridging is needed. This is the "single-thread" case.
 
-When `t ≠ 0`, the proof must chain Y (thread 0, anchored on Ethereum) via cross-thread L7 reference edges (§4) *down to* X (thread t). The walk begins at Y — the block whose `block_leaf` folds into a `finalRoot ∈ layerWindows[]` — and follows Y.refs, then the next block's refs, etc., across threads until it reaches X. This is Direction (b) of
-[`multithreading/DRAFT_cross_thread_reachability_issue.md`](../../../../../multithreading/DRAFT_cross_thread_reachability_issue.md);
-Direction (a) (walk starts at X) is cryptographically unsound (see that doc's §3.1.1). Only Y — a thread-0 block — can be anchored to the Ethereum-side per-layer window, so the walk must start at an anchored Y and end at X; the reverse direction leaves X unbound.
+When `t ≠ 0`, the proof chains X (thread t, event) to Y (thread 0, anchored on Ethereum) via cross-thread L7 reference edges (§4). The walk is drawn `X → … → Y` (leaf → root): each step opens the newer block's L7 and exposes the older block as one of its refs. Y is the trust root — its `block_leaf` folds into a `finalRoot ∈ layerWindows[]` on Ethereum — and X inherits that trust transitively through the chain of L7 openings.
 
 ### 1.2 The contract-side check — Ethereum
 
@@ -100,7 +104,7 @@ require(
 Two facts pin the anchor down:
 
 1. **It's a public input of the proof.** `finalRoot` and `anchorLayer` are exposed as instances of `BridgeEventFinalProof` (see §6.3 for the 13-slot layout), so the circuit binds every private Y-side witness to *this specific* root at *this specific* layer.
-2. **It must live in thread 0's window.** `_isKnownLayerAnchor` reads `layerWindows[anchorLayer]`, populated only from thread-0 layer-N batch roots (`GLOBAL_HISTORY_DATA_SPEC.md`). The check therefore succeeds only when `finalRoot` is a genuine thread-0 layer-N root.
+2. **It must live in thread 0's window.** `_isKnownLayerAnchor` reads `layerWindows[anchorLayer]`, populated only from thread-0 layer-N batch roots ([`GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md)). The check therefore succeeds only when `finalRoot` is a genuine thread-0 layer-N root.
 
 The rolling window has finite depth; anchors that age out of it become unusable and the prover must select a higher-layer anchor (§1.3).
 
@@ -165,7 +169,7 @@ Combine rule at every level: `SHA-256(left_32B ‖ right_32B)`. Fifteen SHA-256 
   - `h12..15 = SHA-256(h12-13 ‖ h14-15) = SHA-256(h10-11 ‖ h10-11)` — constant
   - `L9 = 0×32` — constant
   These four constants are hard-coded into the circuit as fixed cells; the prover does not witness them. Only the L8 leaf itself and its left-half cousin `h0..7` are live witnesses when opening L8.
-- **Opening any leaf costs 4 SHA-256 compressions** — one per tree level. Opening L8 walks `L8 → h89 → h8..11 → h8..15 → block_id`; three of the four siblings (`L9`, `h10-11`, `h12..15`) are the constants above, one (`h0..7`) is a witness. Opening L7 for a hop (§4) walks `L7 → h67 → h4..7 → h0..7 → block_id`; all four siblings (`L6`, `h45`, `h0..3`, `h8..15`) are live witnesses, since a hop does not bind L8 and therefore leaves `h8..15` opaque.
+- **Opening any leaf costs 4 SHA-256 *calls* = 8 SHA-256 compressions** — one call per tree level. Each call hashes a 64-byte `(child ‖ sibling)` input; SHA-256 padding pushes any input ≥ 56 B into a **second compression block**, so one 64-byte call = 2 compressions, and a depth-4 path takes 4 calls × 2 = **8 compressions**. Opening L8 walks `L8 → h89 → h8..11 → h8..15 → block_id`; three of the four siblings (`L9`, `h10-11`, `h12..15`) are the constants above, one (`h0..7`) is a witness. Opening L7 for a hop (§4) walks `L7 → h67 → h4..7 → h0..7 → block_id`; all four siblings (`L6`, `h45`, `h0..3`, `h8..15`) are live witnesses, since a hop does not bind L8 and therefore leaves `h8..15` opaque.
 
 ### 2.2 CommonSection — fields feeding L0, L1, L7, L8
 
@@ -201,7 +205,7 @@ leaf[i] = Poseidon( tag_i ‖ proof_block_refs[i] )    (32 bytes out)
 
 The chain imposes **no hard ref-count ceiling** — `refs` is a plain `Vec<BlockIdentifier>`, so real blocks have variable-depth L7 (observed depths 0..8). The bridge circuit therefore witnesses the actual per-hop tree depth (`refs_tree_depth`) and walks a gated 8-step fold sized to `MAX_PROOF_BLOCK_REFS = 256` (depth 8); see §4.2 for the depth-witness handling.
 
-**Slot-0 (`parent_block_id`) is same-thread by construction.** The producer for thread `t` selects its parent via `select_thread_last_finalized_block(&thread_id)` and sets the child's block height as `parent_height.next(&thread_id)` (`node/src/block/producer/producer_service/block_producer.rs:534,576,992`). The parent is therefore always in thread `t` itself. The only exception is the *spawn edge* — the first block of a newly-spawned thread T′ has as its parent the split block on the parent thread. Spawn edges are irrelevant to withdrawal proofs: a producer that wants to witness such an edge for cross-thread anchoring can always add it to `refs`. **Consequence for §4:** the bridge circuit's L7 walk only opens `refs[0..n]` (slots `1..n`), never slot 0. `ref_index` is range-checked to `1..=MAX_PROOF_BLOCK_REFS`.
+**Chain-side: slot 0 vs slots ≥ 1.** The producer for thread `t` selects its parent via `select_thread_last_finalized_block(&thread_id)` and sets the child's block height as `parent_height.next(&thread_id)` (`node/src/block/producer/producer_service/block_producer.rs:534,576,992`), so under normal operation `parent_block_id` is same-thread and `refs[0..n]` are cross-thread. The *spawn edge* is the one exception — the first block of a newly-spawned thread T′ has as its parent the split block on the parent thread; a producer that wants to anchor across such an edge can also add it to `refs`. **The circuit treats both leaf kinds uniformly** (see §4 and the slot-agnostic hop gadget below): both leaves live inside the same L7 Poseidon tree, the leaf tag is picked by `is_zero(ref_index)` between `REFERENCED_PARENT_BLOCK_TAG` and `REFERENCED_REF_BLOCK_TAG` (`multi_hop_witness.rs` constants `REFERENCED_PARENT_BLOCK_TAG`/`REFERENCED_REF_BLOCK_TAG`), and `ref_index` is range-checked to `[0, 2^refs_tree_depth)`. Opening a slot-0 edge amounts to a same-thread parent walk-back, which the shortest-path witness builder uses freely (see [`MULTITHREAD_PRIVATE_WITNESS.md`](./MULTITHREAD_PRIVATE_WITNESS.md) §1).
 
 L7 is populated for **every** block and provides the outgoing edges the L7 walk (§4) follows.
 
@@ -224,7 +228,7 @@ L7 is populated for **every** block and provides the outgoing edges the L7 walk 
 
 ## 3. Per-thread layer-N batch tree (thread 0 only)
 
-The per-layer batch tree is a **Poseidon dense-Merkle** of width `BWS = 128`. It is built independently per batch per layer for thread 0 only; thread 0's layer-N tree roots are the values mirrored into the Ethereum-side `layerWindows[N]`. **No other thread produces layer trees under this protocol.** See [`GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md) for the on-chain window semantics and [`BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md) for the anchoring cadence.
+The per-layer batch tree is a **Poseidon dense-Merkle** of width `BWS = 128`. It is built independently per batch per layer for thread 0 only; thread 0's layer-N tree roots are the values mirrored into the Ethereum-side `layerWindows[N]`. **No other thread produces layer trees under this protocol.** See [`GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md) for both the on-chain window semantics and the production anchoring cadence — a layer-N root is appended on each thread-0 key block of order N, i.e. at heights where `height % W^N == 0`, so layer 2 anchors roughly every `W² = 128² = 16384` source blocks and higher layers correspondingly less often. [`BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md) documents an earlier fixed-stride (`W·P`) thinning model that is still partially reflected in `crates/bridge-relayer-daemon`; it is retained for background on the relayer code paths and should not be read as the current production cadence.
 
 ### 3.1 Layer-1 leaf: `block_leaf`
 
@@ -281,13 +285,13 @@ Y's `envelope_hash` and `tracked_ext_out_messages_root` are **unconstrained witn
 
 A **hop** is the atomic cross-thread step. One hop proves:
 
-> *Block A's block_id appears in block B's L7 as one of `refs[0..n]` (slots `1..n`).*
+> *Block A's block_id appears in block B's L7 as one of `proof_block_refs[k]` (slot `k ∈ [0, refs.len())`).*
 
-That is, **block B references block A cross-thread** via its `refs` list, which — per the arrow convention of §0.1 — is written **`B → A`** (B on the left, newer, opens its L7 to expose A on the right, older, in another thread). The hop's "current" block is B (the one whose L7 we open, `hop_start`), the "next" block is A (the one we hop to, `hop_end`). Because `refs` point to **older** blocks in other threads, repeated hops walk **into the past across threads**.
+Per the §0.1 arrow convention this is written **`A → B`** (A on the left, older, is a leaf in B.L7; B on the right, newer, opens its L7 to expose A). The hop's `hop_start` is B (the block whose L7 we open — root side); `hop_end` is A (the ref exposed inside B's L7 — leaf side). The arrow is drawn leaf → root (oldest → newest), consistent with every other Merkle fold in this doc.
 
-Under Direction (b), the walk starts at **Y in thread 0** (an anchored, on-chain-known block) and, by following forward `refs` edges hop-by-hop, terminates at **X in thread t** (the event block, older). At the walk-chain level this reads `Y → … → X`, newest → oldest, left to right.
+At the walk-chain level, the walk starts at the event block **X** (thread t, oldest, leaf-most) and terminates at **Y** (thread 0, newest, anchored): `X → … → Y`, oldest → newest, left to right.
 
-Slot 0 of L7 (`parent_block_id`) is **not** used as a hop edge: per §2.3 it is same-thread by producer construction and therefore never crosses a thread boundary. The circuit consequently only handles the `refs` case, and `ref_index` is range-checked to `1..=MAX_PROOF_BLOCK_REFS`.
+**Both slot kinds are valid hop edges** (see [`multithreading/README.md`](../../../../multithreading/README.md) §2.0): slot 0 (`parent_block_id`, same-thread parent chain) and slots ≥ 1 (cross-thread refs) live inside the same L7 Poseidon tree and open identically. The hop gadget is slot-agnostic.
 
 ### 4.2 What one hop constrains
 
@@ -295,7 +299,7 @@ The hop is a **building block, not a standalone snark** — the atomic hop has n
 
 **Shape-witnessing preamble.** The L7 tree on the chain side is variable-depth (§2.3). Since Halo2 constraints are a fixed circuit, we size the inner path array to the worst case (`MAX_PROOF_BLOCK_REFS_DEPTH = 8`) and carry a per-hop witness `refs_tree_depth ∈ [0, 8]` that tells the circuit how many combine steps of the pre-allocated 8-step fold are *live* for this hop. The remaining steps are gated off. This mirrors the pattern the current single-thread `BridgeEventProveCircuit` uses for the variable-depth ext-out-messages tree opening (`num_events_levels`).
 
-Inputs for a hop B → A (all private witnesses at the hop level):
+Inputs for a hop `A → B` (A leaf/older, B root/newer — all private witnesses at the hop level):
 
 ```
 current_block_id   = B.block_id                          (32 bytes)
@@ -303,7 +307,7 @@ next_block_id      = A.block_id                          (32 bytes)
 B.L7_root                                                (32 bytes; the L7 root being opened against B.block_id)
 outer_siblings     = [L6, h45, h0..3, h8..15]            (4 × 32 bytes; depth-4 SHA path from L7 up to block_id — all opaque, incl. h8..15)
 refs_tree_depth    (u8; range-checked to [0, MAX_PROOF_BLOCK_REFS_DEPTH = 8])
-ref_index          (u32; range-checked to [1, 2^refs_tree_depth); slot 0 excluded per §4.1)
+ref_index          (u32; range-checked to [0, 2^refs_tree_depth))
 L7_inner_path      ([[u8; 32]; 8]; fixed-length array — entries beyond refs_tree_depth are padding, ignored)
 ```
 
@@ -311,15 +315,15 @@ An `is_active` flag also lives at the hop level, but only makes sense inside `Br
 
 Constraints (single hop; the enclosing `BridgeMultiHopProof` gates them by its own `is_active[h]`):
 
-1. **SHA-256 depth-4 Merkle path.** Open `B.L7_root` against `B.block_id` via the 4-step path `L7 → h67 → h4..7 → h0..7 → block_id` using witness siblings `[L6, h45, h0..3, h8..15]`. Total **4 SHA-256 compressions**. `h8..15` is an opaque witness — a hop does not bind L8, so no derivation from L8 or from the L9..L15 zero-constants is needed here (that only happens in `BridgeEventFinalProof`, §6.7).
-2. **Tagged leaf hash for A.** Since only `refs` slots (index ≥ 1) are opened, the tag is fixed:
+1. **SHA-256 depth-4 Merkle path.** Open `B.L7_root` against `B.block_id` via the 4-step path `L7 → h67 → h4..7 → h0..7 → block_id` using witness siblings `[L6, h45, h0..3, h8..15]`. **4 SHA-256 calls** = **8 compressions** (each 64-byte call pads into a second block). `h8..15` is an opaque witness — a hop does not bind L8, so no derivation from L8 or from the L9..L15 zero-constants is needed here (that only happens in `BridgeEventFinalProof`, §6.7).
+2. **Tagged leaf hash for A.** All L7 leaves share the same tag:
    ```
    tag_bytes = REFERENCED_REF_BLOCK_TAG
    tag_hash  = Poseidon(tag_bytes ‖ A.block_id)
    ```
 3. **Depth-witness sanity.**
    - Range-check `refs_tree_depth ∈ [0, 8]` (a lookup or 4-bit decomposition).
-   - Range-check `ref_index ∈ [1, 2^refs_tree_depth)` — i.e. the high `(8 - refs_tree_depth)` bits of `ref_index` are zero. This prevents the prover from opening a padding slot at any depth. Realisation: decompose `ref_index` into 8 bits `b0..b7`; unary-decompose `refs_tree_depth` into `d0..d7` where `dk = 1{k < refs_tree_depth}` (monotone-decreasing); assert `bk · (1 − dk) == 0` for `k = 0..7`.
+   - Range-check `ref_index ∈ [0, 2^refs_tree_depth)` — i.e. the high `(8 - refs_tree_depth)` bits of `ref_index` are zero. This prevents the prover from opening a padding slot at any depth. Realisation: decompose `ref_index` into 8 bits `b0..b7`; unary-decompose `refs_tree_depth` into `d0..d7` where `dk = 1{k < refs_tree_depth}` (monotone-decreasing); assert `bk · (1 − dk) == 0` for `k = 0..7`.
 4. **Variable-depth Poseidon dense-Merkle opening.** Verify `B.L7_root == open(tag_hash, ref_index, L7_inner_path, refs_tree_depth)`. Implemented as an unconditional 8-step fold with per-step live-flag:
    ```
    acc_0     = tag_hash
@@ -349,48 +353,34 @@ At `gosh-sha256-chip`'s measured ≈ 354 K advice cells per SHA compression: **�
 
 ### 4.4 The full L7 walk
 
-**Direction convention: Direction (b).** The walk starts at **Y** (the
-anchor block, thread 0, newer, on-chain-anchored via
-`layerWindows[anchorLayer]`) and terminates at **X** (the event block,
-thread t, older). Because `refs` only ever point at strictly older blocks,
-the walk crawls **newest → oldest**, matching the arrow convention of §0.1.
-A chain of L hops `[hop_0, hop_1, …, hop_{L-1}]` collectively proves:
+The walk starts at **X** (the event block, thread t, older) and
+terminates at **Y** (the anchor block, thread 0, newer, on-chain-anchored
+via `layerWindows[anchorLayer]`). A chain of L hops
+`[hop_0, hop_1, …, hop_{L-1}]` collectively proves:
 
 ```
-Y  =  B_0  →  B_1  →  B_2  →  ...  →  B_L  =  X   (newest → oldest)
-       ^                                          ^
-       thread 0 (anchor, on-chain-known)          thread t (event block)
+X  =  B_L  →  B_{L-1}  →  ...  →  B_1  →  B_0  =  Y   (oldest → newest, leaf → root)
+       ^                                              ^
+       thread t (event block)                         thread 0 (anchor, on-chain-known)
 ```
 
-with the per-hop endpoint convention `hop_i.hop_start = B_i` (current,
-newer — the block whose L7 we open) and `hop_i.hop_end = B_{i+1}` (older
-ref extracted from `B_i.proof_block_refs`) and the gluing constraint
+with the per-hop endpoint convention `hop_i.hop_start = B_i` (the newer
+block whose L7 is opened — the **root** side of the arrow) and
+`hop_i.hop_end = B_{i+1}` (the older ref extracted from
+`B_i.proof_block_refs` — the **leaf** side) and the gluing constraint
 `hop_i.hop_end == hop_{i+1}.hop_start` for all i.
 
-Reading the diagram: `hop_0.hop_start = Y`, `hop_{L-1}.hop_end = X`, so at
-the bundle level `hopProofs[0].publicInputs[PUB_HOP_START] = y_block_id_fr`
-and `hopProofs[last].publicInputs[PUB_HOP_END] = x_block_id_fr` (§6.4).
+Reading the diagram: `hop_0.hop_start = B_0 = Y`, `hop_{L-1}.hop_end =
+B_L = X`, so at the bundle level
+`hopProofs[0].publicInputs[PUB_HOP_START] = y_block_id_fr` and
+`hopProofs[last].publicInputs[PUB_HOP_END] = x_block_id_fr` (§6.4).
+Bundle ordering is thus **right-to-left** in the diagram: `snarks[0]`
+handles the rightmost arrow `B_1 → Y`, `snarks[L-1]` handles the
+leftmost arrow `X → B_{L-1}`.
 
 At `H = 1`, each hop lives in its own snark; the gluing constraint becomes cross-snark and is enforced by the Solidity orchestrator on the clear block-ids exposed at the snarks' publics (§6.4).
 
-**Why Direction (b) and not (a).** A walk that started at X and terminated
-at Y (Direction (a) of the earlier draft) would be syntactically symmetric
-— the hop gadget itself is direction-agnostic; it just opens a Merkle
-leaf against a root — but is cryptographically **unsound** in this
-design. X is not independently anchored on Ethereum; only Y is
-(`layerWindows[]` holds thread-0 layer roots). A walk that starts at an
-un-anchored X and ends at an anchored Y proves at most "if X existed, it
-referenced Y", which is trivially satisfiable by an attacker who
-fabricates a synthetic X whose L7 tree they controlled — the circuit's
-constraints check hash consistency of X's block-id tree but never that
-any real producer signed X.block_id. See
-[`multithreading/DRAFT_cross_thread_reachability_issue.md`](../../../../../multithreading/DRAFT_cross_thread_reachability_issue.md)
-§3.1.1 for the concrete forgery. Under Direction (b), the walk begins on
-`layerWindows[]` and every subsequent block's `block_id` is transitively
-committed to the on-chain anchor via the preceding hop's `refs` opening,
-so X inherits Y's on-chain trust.
-
-**Production bound: `L_MAX = 300`** (specified by the node team as the cross-thread walk-length ceiling under the current threading design). Prototyping target `L_MAX = 20`. `N_BUNDLE_MAX = ⌈L_MAX / H⌉` scales linearly — at `H = 1` this yields 20 hop snarks (prototype) or 300 hop snarks (production) in the worst case. Per-snark K is unchanged by `L_MAX`.
+**Worst-case ceiling: `L_MAX = 300`** — the hard upper bound the node team announced for cross-thread walks under the current threading design, not a design target. Slot-0 (same-thread parent) edges add a separate ceiling of ~128 same-thread hops. Both are expensive: at ≈ 2.83 M advice cells per hop (§4.3), 300 hops ≈ 850 M cells of SHA work alone. The **desired average** is **10–20** hops, ideally **1–5**; the circuit tolerates longer walks but each extra hop costs real prover wall time. Prototyping cap `L_MAX = 20`. `N_BUNDLE_MAX = ⌈L_MAX / H⌉` scales linearly — at `H = 1` this yields 20 hop snarks (prototype) or 300 hop snarks (worst-case production). Per-snark K is unchanged by `L_MAX`.
 
 Reference off-chain implementation of the equivalent chain walk: acki-nacki's `helpers/proof_helper/src/gql_proof.rs`. The circuit-side hop logic mirrors `verify_proof_block_ref_proof` (Poseidon inner) + `verify_block_merkle_leaf_proof` (SHA outer, at depth 4).
 
@@ -403,9 +393,13 @@ that follows denote **cryptographic reduction** (each step is a hash
 opening: `child_bytes → hash(child_bytes) = parent_root`), read top-to-bottom
 as "event data reduces to `finalRoot`". This is orthogonal to the
 walk-chain arrow convention of §0.1 / §4.4 — the L7-walk row inside the
-diagram compresses L hops in the newest → oldest order (`Y → … → X`) into
-a single "walk" step for readability. The vertical `↓` there is the
-composition of L Merkle openings, not a hop.
+diagram compresses L hops in the oldest → newest / leaf → root order
+(`X → … → Y`) into a single "walk" step for readability. Because the
+surrounding diagram flows top-to-bottom from `X.block_id` down to
+`Y.block_id`, the embedded walk row is drawn pointing **downward** (X at
+the top, Y at the bottom); each `↓` is one hop's L7 opening (`refs[k]`
+leaf → opening block's `block_id` root), and the composition of L such
+openings reduces X to Y.
 
 Reading the chain from the withdrawal event down to the on-chain-known anchor root:
 
@@ -419,9 +413,9 @@ ext_msg_leaf  =  Poseidon96( account_dapp_id ‖ account_id ‖ event_hash )
 X.tracked_ext_out_messages_root                        (= X.L8)
    ↓ (block-id tree, depth 4, opens L8; 3 constant siblings + h0..7 witness)
 X.block_id                                             (PUBLIC on FinalProof)
-   ↑ (L7 walk: L hops opened in order Y → B_1 → … → B_{L-1} → X, i.e. newest → oldest;
-       each hop's L7 opening commits its `hop_start.block_id` to its `hop_end.block_id`;
-       here shown bottom-up to match the "reduction" direction of the surrounding diagram)
+   ↓ (L7 walk: L hops opened in diagram order X → B_{L-1} → … → B_1 → Y, i.e. oldest → newest, leaf → root;
+       each hop's L7 opening commits its `hop_end.block_id` (leaf, older) to its `hop_start.block_id` (root, newer);
+       bundle order is right-to-left in the §4.4 diagram, so snarks[0].hop_start = Y and snarks[L-1].hop_end = X)
 Y.block_id                                             (Y in thread 0; when t=0, Y = X and L = 0)
                                                        (PUBLIC on FinalProof)
    ↓ (Poseidon96)
@@ -435,7 +429,7 @@ block_leaf(Y)  =  Poseidon96( Y.block_id ‖ Y.envelope_hash ‖ Y.tracked_ext_o
 Key properties:
 
 - **Event binding on the X-side is fully algebraic and self-contained.** The prover supplies (a) the raw 4-cell BOC preimages, (b) the SHA child-hash chain that links `wrapper ↔ body ↔ recipient / sender` (each parent cell embeds each child's 32-byte `repr_hash` at a known offset), (c) the ext-out-messages Merkle path from `ext_msg_leaf` to X's L8, and (d) the depth-4 L8 opening (three constant siblings + `h0..7` witness).
-- **The L7 walk is a pure L7 traversal.** Each hop opens the outer depth-4 SHA-256 tree of some block B, extracts B.L7, and opens one slot of L7's inner Poseidon dense-Merkle to reveal an edge to some older block A. `h8..15` on hops is an opaque witness because hops don't bind L8. Slot 0 (`parent_block_id`) is excluded.
+- **The L7 walk is a pure L7 traversal.** Each hop opens the outer depth-4 SHA-256 tree of some block B, extracts B.L7, and opens one slot of L7's inner Poseidon dense-Merkle to reveal an edge to some older block A. `h8..15` on hops is an opaque witness because hops don't bind L8. Both slot kinds are valid hop edges (§4.1): slot 0 (`parent_block_id`, same-thread parent chain) and slots ≥ 1 (cross-thread refs); the hop gadget selects the Poseidon leaf tag on `is_zero(ref_index)`.
 - **Y is a thread-0 block.** Y need not be a key block — only that the batch tree containing `block_leaf(Y)` is currently anchored in the on-chain window. Y's `envelope_hash` and `tracked_ext_out_messages_root` are unconstrained witnesses; Y is the anchor, not the event source.
 - **`t = 0` case.** When X is in thread 0, X = Y. The FinalProof publishes `x_block_id_fr == y_block_id_fr`. The bundle contains **zero** hop snarks; the on-chain orchestrator sees `hopProofs.length == 0`, checks `x_block_id_fr == y_block_id_fr`, and proceeds to per-snark verification.
 - **Nullifier binds the event block.** `nullifier = Poseidon(x_block_id_fr, tokenId, amount, recipientHi, recipientLo, senderAccFr, eventsPos)` — the withdrawal is uniquely identified by the event's location in the chain (X), plus the settled withdrawal fields, plus the in-block position of the event (§9.3).
@@ -457,7 +451,7 @@ The outer SHPLONK Yul bytecode scales at ~450–500 B per inner advice column (m
 
 Tradeoff: `N_BUNDLE_MAX = ⌈L_MAX / H⌉ = L_MAX` multi-hop snarks per claim at `H = 1`.
 - Prototype `L_MAX = 20` → up to 20 hop snarks.
-- Production `L_MAX = 300` → up to 300 hop snarks.
+- Worst-case production `L_MAX = 300` → up to 300 hop snarks. The desired operating range is 1–20 hops per claim; 300 is a hard ceiling, not an expected shape.
 
 Verification cost per bundle scales linearly. The multi-hop chaining logic that a larger `H` would have kept inside the circuit is instead moved to the smart contract (`withdrawByProofBundle`, §6.4): bundle adjacency `hopEnd[i] == hopStart[i+1]` is enforced by Solidity equality checks on the clear block-ids.
 
@@ -560,9 +554,10 @@ function withdrawByProofBundle(
     );
 
     // 1c. Chain continuity — CLEAR block-id equality.
-    //     Direction (b): walk begins at Y (thread 0, on-chain-anchored) and
-    //     terminates at X (thread t, event). hopProofs[0].hop_start = Y;
-    //     hopProofs[last].hop_end = X.
+    //     Walk is leaf → root (X → … → Y). Bundle is ordered root-side
+    //     first, so hopProofs[0] handles the hop with root Y (hop_start
+    //     = Y, the anchored end) and hopProofs[last] handles the hop
+    //     with leaf X (hop_end = X, the event end).
     bytes32 xBlockId = finalProof.publicInputs[PUB_X_BLOCK_ID];
     bytes32 yBlockId = finalProof.publicInputs[PUB_Y_BLOCK_ID];
     if (hopProofs.length == 0) {
@@ -607,7 +602,7 @@ function withdrawByProofBundle(
 
 Phase 1 is cheap (field comparisons + one storage read for the window); phase 2 is the only heavy work (`1 + hopProofs.length` Halo2 KZG verifications).
 
-**Verifier keys.** Two new Yul verifier contracts are generated by the existing `bridge-evm-aggregator` pipeline (`export-inner-aggregator` / `aggregate-proof`): one for `BridgeEventFinalProof` (replacing the current Circuit-4 verifier, since PIs grew from 11 to 13), one for `BridgeMultiHopProof` (new artifact). Both slot into `contracts/ethereum/verifiers/`. A verification-key rotation is a breaking change per repo policy — call it out in `CHANGELOG.md` under `## [Unreleased]` when the multi-thread PR lands.
+**Verifier keys.** Two new Yul verifier contracts are generated by the existing `bridge-evm-aggregator` pipeline (`export-inner-aggregator` / `aggregate-proof`): one for `BridgeEventFinalProof` (replacing the current Circuit-4 verifier, since PIs grew from 11 to 13), one for `BridgeMultiHopProof` (new artifact). Both slot into [`contracts/ethereum/verifiers/`](../../../../contracts/ethereum/verifiers/). A verification-key rotation is a breaking change per repo policy — call it out in [`CHANGELOG.md`](../../../../CHANGELOG.md) under `## [Unreleased]` when the multi-thread PR lands.
 
 **Alternative — single outer aggregation.** The bundle could be reduced to one on-chain verification by an additional outer SHPLONK aggregator that takes the FinalProof + up to `N_BUNDLE_MAX` hop snarks as inputs. This trades one more prover-side proof (server, minutes) for a large gas saving per withdrawal — worst case at `L = 300` today runs to `61 × ~750 K = ~46 M gas` per bundle, which becomes untenable long before the production cap. Recommended follow-up once the base design is in production; not on the critical path for the initial multi-thread landing.
 
@@ -642,7 +637,7 @@ witnesses:
     hop_next_block_id[h]                                    (32 bytes)
     B_h.L0..L7_root, B_h.L8                                 (9 × 32 bytes; needed to reconstruct B_h.block_id via 4 SHA compressions)
     refs_tree_depth[h] ∈ [0, MAX_PROOF_BLOCK_REFS_DEPTH]    (u8; range-checked)
-    ref_index[h] ∈ [1, 2^refs_tree_depth[h])                (u32; range-checked)
+    ref_index[h] ∈ [0, 2^refs_tree_depth[h])                (u32; range-checked)
     L7_inner_path[h]                                        (8 × 32 bytes; unused steps ignored)
 
 constraints:
@@ -650,8 +645,11 @@ constraints:
        when is_active[h]:
          - Reconstruct B_h.block_id from B_h.L0..L7, L8 via depth-4 SHA-256 tree (4 SHA compressions).
          - Constrain hop_current_block_id[h] == B_h.block_id (byte equality).
-         - Tagged Poseidon leaf: ref_leaf = Poseidon(bytes_to_fr(REFERENCED_REF_BLOCK_TAG || A.block_id))
-           where A.block_id = hop_next_block_id[h].
+         - Tagged Poseidon leaf: ref_leaf = Poseidon(bytes_to_fr(leaf_tag[h] || A.block_id))
+           where leaf_tag[h] = REFERENCED_PARENT_BLOCK_TAG when is_zero(ref_index[h]),
+           otherwise REFERENCED_REF_BLOCK_TAG, and A.block_id = hop_next_block_id[h].
+           (Tag selection matches `multi_hop_witness.rs` constants
+           REFERENCED_PARENT_BLOCK_TAG / REFERENCED_REF_BLOCK_TAG; see §2.3.)
          - Variable-depth L7 fold: verify B_h.L7_root == open(ref_leaf, ref_index[h], L7_inner_path[h], refs_tree_depth[h]).
          - Direction bits inside the walker are bound to bit-decomposition of ref_index[h]
            via `dense_merkle_root_padded_bound` (§6.2).
@@ -799,8 +797,8 @@ Prover runs on server hardware, so this is a throughput question, not a UX quest
 | 0                    | 0 | 1  | ≈ 1–2 min                           |
 | 1                    | 1 | 2  | ≈ 2–3 min                            |
 | 5                    | 5 | 6  | ≈ 3–4 min (embarrassingly parallel)  |
-| 20 (proto cap)       | 20 | 21 | ≈ 5–10 min                          |
-| 300 (prod cap)       | 300 | 301 | ≈ 15–45 min (heavy parallelism)   |
+| 20 (proto cap, desired upper end) | 20 | 21 | ≈ 5–10 min                   |
+| 300 (worst-case ceiling, rare)    | 300 | 301 | ≈ 15–45 min (heavy parallelism) |
 
 Numbers are order-of-magnitude, calibrated from stress runs of hop-shaped circuits of the same K = 17 shape. Hop snarks are embarrassingly parallel; the FinalProof is on the critical path.
 
@@ -808,7 +806,7 @@ Numbers are order-of-magnitude, calibrated from stress runs of hop-shaped circui
 
 Two VKs: `VK_BridgeEventFinal`, `VK_BridgeMultiHop`. No aggregation, no universal VK, no recursion. Both are consumed by the existing `bridge-evm-aggregator` SHPLONK pipeline to produce Yul verifier contracts under `contracts/ethereum/verifiers/`.
 
-**Key rotation is a breaking change** per bridge repo policy (`AGENTS.md` §Changelog policy). The multi-thread landing PR must document:
+**Key rotation is a breaking change** per bridge repo policy ([`AGENTS.md`](../../../../AGENTS.md) §Changelog policy). The multi-thread landing PR must document:
 
 - Retirement of the current single-thread Circuit-4 VK.
 - Introduction of `VK_BridgeEventFinal` and `VK_BridgeMultiHop`.
@@ -825,8 +823,8 @@ A binary in `bridge-event-prove-circuit/examples/` produces multi-thread fixture
 | S0   | 0     | 0             | 0          | Same-thread; X = Y; hop-less bundle |
 | S1   | ≠ 0   | 1             | 1          | Shortest cross-thread |
 | S5   | ≠ 0   | 5             | 5          | Mid-range |
-| S20  | ≠ 0   | 20            | 20         | Worst case at prototyping `L_MAX = 20` |
-| Sprod | ≠ 0  | 300           | 300        | Production stress (mark `#[ignore]`) |
+| S20  | ≠ 0   | 20            | 20         | Prototyping cap; also the desired upper end of normal operation |
+| Sprod | ≠ 0  | 300           | 300        | Worst-case ceiling, not an expected shape — stress only (mark `#[ignore]`) |
 
 Each fixture emits:
 
@@ -915,8 +913,8 @@ A future anonymity-preserving variant would restore these primitives, pad bundle
 | L7 outer opening depth per hop | **4** SHA-256 sibling combines (8 compressions) | §4 |
 | `MAX_PROOF_BLOCK_REFS` | **256** leaves padded, depth 8 | Protocol cap |
 | `H` (hops per `BridgeMultiHopProof`) | **1** | Forced by EIP-170 24 576 B cap on Yul verifier size (§5.H) |
-| `L_MAX` (max real chain length) | **20** (prototyping) → **300** (production) | Node-team ceiling |
-| `N_BUNDLE_MAX` (max hop snarks per claim) | **20** (prototyping) → **300** (production) | Dynamic per-claim, upper bound only; = `⌈L_MAX / H⌉` |
+| `L_MAX` (max real chain length) | prototype **20**; worst-case ceiling **300** (node-team hard upper bound, not a target); ~128 same-thread parent hops also possible via slot 0; **desired average 10–20, ideally 1–5** | Prover wall time scales linearly in L |
+| `N_BUNDLE_MAX` (max hop snarks per claim) | prototype **20**; worst-case **300** | Dynamic per-claim, upper bound only; = `⌈L_MAX / H⌉`; typical claims land in the 1–20 range |
 | `MAX_CHAIN_LEN` (thread-0 dense chain) | **11** | `gosh-dense-balanced-tree` |
 | `MAX_ANCHOR_LAYER` | **10** | Must equal `MAX_LAYER_HASHES` in `AckiNackiBridge.sol` |
 | `MAX_EVENTS_TREE_DEPTH` | **8** | `bridge_event_prove_circuit.rs:124` |
@@ -932,37 +930,24 @@ A future anonymity-preserving variant would restore these primitives, pad bundle
 1. **K sweep on `BridgeEventFinalProof`.** Decide K=17 with wider advice columns vs. K=18. Blocker: run a `test_k_sweep_benchmark` before locking the SHPLONK aggregator wiring.
 2. **Outer-SHPLONK bundle aggregation.** Whether to ship the multi-thread landing with per-snark on-chain verification (simple; ~15 M gas at L=20; ~230 M gas at L=300 — the latter is untenable) or with outer aggregation (one on-chain verify; extra prover round). See §6.4 alternative. Recommendation: ship per-snark first, add outer aggregation as a follow-up before L exceeds the ~30-hop-per-bundle gas ceiling in practice.
 3. **Naming convention for the new final circuit.** Keep `BridgeEventProveCircuit` (existing name evolved) vs. rename to `BridgeEventFinalProofCircuit` (matches the "Final + Hop" taxonomy used throughout this doc). Downstream consumers (`bridge-event-prover-lib`, `bridge-event-witness`) will need mechanical updates either way.
-4. **Ethereum-side entrypoint.** Whether to add a new function `withdrawByProofBundle` (backwards-compatible during rollout) or repurpose `withdrawByProof` (cleaner, but rotates the ABI). Coordinate with `contracts/ethereum/` and [`EVM-contracts-spec.md`](../../../../../docs/EVM-contracts-spec.md).
+4. **Ethereum-side entrypoint.** Whether to add a new function `withdrawByProofBundle` (backwards-compatible during rollout) or repurpose `withdrawByProof` (cleaner, but rotates the ABI). Coordinate with `contracts/ethereum/` and [`EVM-contracts-spec.md`](../../../../docs/EVM-contracts-spec.md).
 5. **Handling `t = 0` on Ethereum without a special-case branch.** The layout in §6.4 requires `xBlockId == yBlockId` when `hopProofs.length == 0`. Confirm this Solidity branch is well-formed under gas / calldata reasoning — an alternative is to always require at least one hop snark, using an "identity hop" for `t = 0`, at the cost of one extra 2-instance snark per claim.
 
 ---
 
-## 11. Circuit implementation status
+## 11. Circuit maintenance notes
 
-**Not started.** This document is the design step for the multi-thread landing on the `feature/multithreading` branch. The single-thread `BridgeEventProveCircuit` is fully implemented in `bridge_event_prove_circuit.rs`; extending it to multi-thread requires the work broken out below.
+The multi-thread circuit code described above has landed on `feature/multithreading` — the extended `bridge_event_prove_circuit.rs` plus the sibling files `multi_hop_proof.rs`, `multi_hop_witness.rs`, `bundle_verifier.rs` and `test_helpers.rs` under `bridge-event-prove-circuit/src/`.
 
-### 11.1 Circuit code — **TODO**
+### 11.1 Refresh the on-chain verifier whenever the circuits change
 
-- **New file** `bridge-event-prove-circuit/src/multi_hop_proof.rs` — the `BridgeMultiHopProof` circuit of §6.6 (H = 1 hop, clear-endpoint publication, `Sha256Chip` + `dense_merkle_root_padded_bound`).
-- **New file** `bridge-event-prove-circuit/src/multi_hop_witness.rs` — witness builder for `BridgeMultiHopProof` (per-hop L7-walk fixture assembly, sibling collection, tree-depth derivation).
-- **Extend** `bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs`:
-  - Split `block_id` → `x_block_id` + `y_block_id` (line 346 area).
-  - Add L8 depth-4 SHA opening after `ext_out_root` computation (after line 810).
-  - Add `PUB_X_BLOCK_ID`, `PUB_Y_BLOCK_ID` to the instance vector; bump `TOTAL_PUBLIC_INPUTS` from 11 to 13.
-  - Rewire nullifier (line 972 area) to consume `x_block_id_fr`.
-  - K sweep to lock K + advice column count.
-- **New file** `bridge-event-prove-circuit/src/bundle_verifier.rs` — pure-Rust mock of the Ethereum `withdrawByProofBundle` acceptance gate, driving synthetic + real-prover bundle E2E tests. Same phase ordering as §6.4 (cheap PI consistency → per-snark SHPLONK verify → settle).
-- **Extend** `bridge-event-prove-circuit/src/test_helpers.rs` — L7 walk fixture builder, L8 opening fixture builder, bundle-level assembly.
+Any change to a circuit's constraints, public-input layout, `K`, or advice column count rotates its verification key and therefore its on-chain Yul verifier. When that happens:
 
-### 11.2 Off-tree work — **TODO**
+- **Re-export the SHPLONK verifier(s).** Run `bridge-evm-aggregator export-inner-aggregator` for every affected circuit; the fresh Yul source + bytecode lands under `contracts/ethereum/verifiers/`. Confirm the bytecode stays within EIP-170 via `scripts/check_verifier_sources.sh` (and the `verifier_sources.yaml` CI job that compiles each `*AggregatorVerifier.sol` with `solc` 0.8.19 to its `.bin` byte for byte).
+- **Register the new VK** on the Ethereum side (`contracts/ethereum/`) and record the rotation in [`CHANGELOG.md`](../../../../CHANGELOG.md) under *Breaking Changes* — per [`AGENTS.md`](../../../../AGENTS.md), a rotated VK is always a breaking change because proofs produced for the previous circuit stop verifying.
+- **Refresh any pinned proof fixtures** that embed the old VK (e.g. `bridge-snark-utils/proofs/bound/` via `export-bound-block-proofs`, and any `#[ignore]`d real-prover fixtures in this crate).
 
-- **Ethereum contract updates.** `AckiNackiBridge.sol` gains `withdrawByProofBundle` (or extension of `withdrawByProof`); two new verifier Yul contracts under `contracts/ethereum/verifiers/`; register new VKs. Update [`EVM-contracts-spec.md`](../../../../../docs/EVM-contracts-spec.md).
-- **SHPLONK aggregator export.** Run `bridge-evm-aggregator export-inner-aggregator` for both new circuits; check verifier bytecode against EIP-170 (`scripts/check_verifier_sources.sh`).
-- **Prover-side integration** (`bridge-event-prover-lib`, `bridge-event-witness`, `bridge-relayer-daemon`): witness builder for multi-thread claim bundles, per-claim dispatch of the correct number of hop snarks (dynamic per §6.5), on-demand PK loading, retry / idempotency for partial bundle failures.
-- **Changelog + docs**: `CHANGELOG.md` breaking-change entry (new VKs, ABI additions); update `contracts/ethereum/verifiers/README.md`; add a `bridge-event-prove-circuit/README.md` overview mirroring the `deposit-prover/README.md` style.
-- **CI**: `.woodpecker/bridge-circuits.yaml` gains a heavy-step `#[ignore]` bundle stress test at `L = 300` to mirror per-crate real-prover practice.
-
-### 11.3 Known deferrable items
+### 11.2 Known deferrable items
 
 - **Upstream 4-bit hardcode** in `gosh-dense-balanced-tree::dense_merkle_root_circuit_padded`. The `is_less_than(j_const, num_active_levels, 4)` call inside the padded walker hard-codes a 4-bit range for the depth witness. Values in `[8, 16)` collapse to "all levels active" via that comparison, so there is no cheating window at the current `MAX_PROOF_BLOCK_REFS_DEPTH = 8`, but the hardcode couples the upstream helper to an assumption of the consumer. A cross-repo fix in `gosh-halo2-crypto-lib` should either parameterise the bit-width or accept it as an argument. Track when the upstream is next touched.
 - **Outer-SHPLONK bundle aggregator** (§6.4 alternative). Deferred until per-snark verification is landed and stable.
@@ -993,7 +978,7 @@ Every existing public-input slot 0..10 keeps its current byte-for-byte semantics
 - **Bridge single-thread circuit being extended:** `crates/bridge-circuits/bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs`.
 - **Bridge block-id doc:** [`crates/bridge-circuits/docs/BLOCK_ID_ALG_NEW.md`](../../docs/BLOCK_ID_ALG_NEW.md).
 - **Bridge global-history-data doc (Y-side anchor infrastructure):** [`crates/bridge-circuits/docs/GLOBAL_HISTORY_DATA_SPEC.md`](../../docs/GLOBAL_HISTORY_DATA_SPEC.md).
-- **Bridge thinning spec (window / anchor cadence context):** [`crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md).
+- **Bridge thinning spec (earlier fixed-stride model; superseded for the circuit by the layer-N key-block cadence in `GLOBAL_HISTORY_DATA_SPEC.md`, still partially reflected in `crates/bridge-relayer-daemon`):** [`crates/bridge-circuits/docs/BRIDGE_PROVER_THINNING_SPEC.md`](../../docs/BRIDGE_PROVER_THINNING_SPEC.md).
 - **Bridge SHA-256 accounting:** [`crates/bridge-circuits/docs/SHA256_INVOCATIONS.md`](../../docs/SHA256_INVOCATIONS.md).
 - **Bridge circuit complexity analysis:** [`crates/bridge-circuits/docs/CIRCUIT_COMPLEXITY_COMPARISON.md`](../../docs/CIRCUIT_COMPLEXITY_COMPARISON.md).
 - **AN node source of truth for block Merkle leaves:** `node/src/types/ackinacki_block/{mod.rs, merkle.rs}`.

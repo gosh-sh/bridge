@@ -233,8 +233,10 @@ pub struct HopWitnessJson {
     /// SHA-256 merkle opening for L7 against `block.block_id_hex`,
     /// `BLOCK_MERKLE_DEPTH = 4` siblings.
     pub block_merkle_leaf_proof_l7_hex: [String; BLOCK_MERKLE_DEPTH],
-    /// Index of the referenced parent within `block.proof_block_refs_hex`.
-    /// Must be ≥ 1 for the bridge L7 walk (slot 0 is same-thread).
+    /// Index of the referenced block within `block.proof_block_refs_hex`.
+    /// Slot 0 (same-thread `parent_block_id`) and slots ≥ 1 (cross-thread
+    /// `refs[k]`) are both valid hop edges; the circuit selects the matching
+    /// Poseidon-leaf tag layout per hop.
     pub ref_index: u32,
     /// Real depth of the L7 dense-merkle tree for this hop, in
     /// `[0, MAX_PROOF_BLOCK_REFS_DEPTH]`.

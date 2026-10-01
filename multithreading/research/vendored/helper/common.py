@@ -1,3 +1,5 @@
+import base64
+import http.client
 import json
 import os
 import platform
@@ -6,6 +8,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 from dataclasses import asdict, is_dataclass
@@ -450,6 +453,214 @@ def call_contract(address: str, abi: str, keys: str|None, method: str, params=No
         f"callx --abi {abi} --addr {address} {arg_keys} -m {method} {params}",
         print_output
     )
+
+
+# --- Raw ingress path -------------------------------------------------------
+# Ported from acki-nacki/tests/mt/cli.py (encode_external_message +
+# _submit_external_message). Purpose: bypass tvm-cli's `callx` (which was
+# emitting GiverV3-reject 103 on local devnet with the 3.0.6.an CLI) and use
+# the two-step `message` subcommand + direct POST to :11000/v2/messages that
+# the cross-thread test harness has been driving successfully for weeks.
+
+# HTTP read timeout on /v2/messages MUST exceed the signed message's lifetime
+# so a slow producer round-trip cannot turn a still-running request into a
+# false-success duplicate retry (Misha's rationale in
+# tests/mt/cli.py::_submit_external_message). Set to lifetime + 60 per call.
+_RAW_INGRESS_HTTP_TIMEOUT_MARGIN = 60.0
+_last_raw_ingress_stamp_ms = 0
+
+
+def _encode_external_message_raw(address: str, abi: str, keys: str,
+                                 method: str, params, lifetime: int) -> dict:
+    """`tvm-cli message ... --raw --output <boc>` → {id, body(b64), ...}."""
+    if isinstance(params, dict) or params is None:
+        params_json = json.dumps(params or {}, separators=(",", ":"))
+    else:
+        params_json = params
+    if "::" in address:
+        dapp_id, account_id = address.split("::", maxsplit=1)
+    else:
+        dapp_id, account_id = address.split(":", maxsplit=1)
+    cli_address = f"{dapp_id}::{account_id}"
+    with tempfile.NamedTemporaryFile(suffix=".boc") as boc:
+        cmd = [
+            tvm_cli(), "-j", "message",
+            cli_address, method, params_json,
+            "--abi", abi,
+            "--sign", keys,
+            "--lifetime", str(int(lifetime)),
+            "--raw",
+            "--output", boc.name,
+        ]
+        tvm_cli_cwd = os.getenv("TVM_CLI_CWD") or None
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True,
+                                cwd=tvm_cli_cwd)
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout).strip()
+            raise RuntimeError(
+                f"tvm-cli message failed for {method}@{cli_address}: {details}"
+            )
+        message_id = json.loads(result.stdout)["MessageId"]
+        message_body = base64.b64encode(Path(boc.name).read_bytes()).decode("ascii")
+    return {
+        "id": message_id,
+        "body": message_body,
+        "expire_at": None,
+        "thread_id": "00000000000000000000000000000000000000000000000000000000000000000000",
+        "ext_message_token": None,
+        "dapp_id": dapp_id,
+        "account_id": account_id,
+    }
+
+
+def _post_external_message_raw(message_request: dict,
+                               accepted_tvm_exit_codes: frozenset,
+                               ingress_url: str,
+                               http_timeout: float) -> None:
+    """POST one signed message to /v2/messages with retry+follow semantics."""
+    global _last_raw_ingress_stamp_ms
+    auth_token = os.getenv("MESSAGE_ARCHIVE_AUTH_TOKEN", "my-secret-token")
+    follow_producer_url = os.getenv(
+        "MESSAGE_ARCHIVE_FOLLOW_PRODUCER_URL", "1"
+    ).lower() not in {"0", "false", "no"}
+    node_url = ingress_url
+    request_data = message_request.copy()
+    sent_ms = max(int(time.time() * 1000), _last_raw_ingress_stamp_ms + 1)
+    _last_raw_ingress_stamp_ms = sent_ms
+    last_err = None
+    _debug = os.getenv("RAW_INGRESS_DEBUG") == "1"
+    for _iter in range(60):
+        payload = json.dumps([request_data]).encode("ascii")
+        if _debug:
+            print(f"[raw_ingress] iter={_iter} POST {node_url} sent_ms={sent_ms} "
+                  f"body_len={len(payload)} req_body_id={request_data.get('id')} "
+                  f"token={request_data.get('ext_message_token')}", file=sys.stderr)
+        req = urllib.request.Request(
+            node_url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {auth_token}",
+                "Content-Type": "application/json",
+                "X-EXT-MSG-SENT": str(sent_ms),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=http_timeout) as resp:
+                body = resp.read().decode("utf-8")
+                status = resp.status
+            if _debug:
+                print(f"[raw_ingress] iter={_iter} <- HTTP {status} {body[:300]}",
+                      file=sys.stderr)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            status = e.code
+        except (TimeoutError, urllib.error.URLError, ConnectionError,
+                http.client.RemoteDisconnected) as e:
+            last_err = str(e)
+            time.sleep(1)
+            continue
+
+        result = json.loads(body) if body else {}
+        resp_err = result.get("error")
+        if resp_err is None and status < 400:
+            execution = result.get("result")
+            if not isinstance(execution, dict):
+                raise RuntimeError(
+                    f"external message returned no execution feedback: {body}"
+                )
+            exit_code = execution.get("exit_code")
+            if exit_code in accepted_tvm_exit_codes:
+                return
+            if execution.get("aborted") or exit_code != 0:
+                raise RuntimeError(f"external message execution failed: {body}")
+            return
+
+        # response has an error
+        error_code = resp_err.get("code")
+        error_data = resp_err.get("data") or {}
+        producers = error_data.get("producers") or []
+        if (error_code == "TVM_ERROR"
+                and error_data.get("exit_code") in accepted_tvm_exit_codes):
+            return
+        if error_code == "TVM_ERROR" and error_data.get("exit_code") == 52:
+            return
+        if error_code in {"WRONG_PRODUCER", "NOT_BLOCK_PRODUCER", "THREAD_MISMATCH"}:
+            if error_code == "THREAD_MISMATCH" and error_data.get("thread_id"):
+                request_data["thread_id"] = error_data["thread_id"]
+            node_url = (
+                f"http://{producers[0]}/v2/messages"
+                if producers and follow_producer_url
+                else ingress_url
+            )
+            request_data["ext_message_token"] = result.get("ext_message_token")
+            last_err = resp_err
+            if node_url == ingress_url:
+                time.sleep(1)
+            continue
+        if error_code == "DUPLICATE_MESSAGE" or error_code == "ISSUER_RESOLUTION_FAILED":
+            last_err = resp_err
+            time.sleep(1)
+            continue
+        raise RuntimeError(f"external messages failed with HTTP {status}: {body}")
+    raise RuntimeError(
+        f"external messages failed: retries exhausted; last error: {last_err}"
+    )
+
+
+def send_external_message_raw(address: str, abi: str, keys: str, method: str,
+                              params=None, *, lifetime: int = 60,
+                              accepted_tvm_exit_codes: frozenset = frozenset()) -> None:
+    """Sibling of `call_contract`: signs via `tvm-cli message`, submits directly
+    to the local node's /v2/messages ingress. Uses the exact code path that
+    the acki-nacki cross-thread MT test harness runs successfully.
+    """
+    ingress_url = os.getenv(
+        "MESSAGE_ARCHIVE_NODE_URL",
+        f"http://{get_lan_ipv4()}:11000/v2/messages",
+    )
+    request = _encode_external_message_raw(address, abi, keys, method, params, lifetime)
+    http_timeout = float(lifetime) + _RAW_INGRESS_HTTP_TIMEOUT_MARGIN
+    _post_external_message_raw(request, accepted_tvm_exit_codes, ingress_url, http_timeout)
+
+
+def send_external_message_raw_with_resign(address: str, abi: str, keys: str,
+                                          method: str, params=None, *,
+                                          lifetime: int = 60,
+                                          accepted_tvm_exit_codes: frozenset = frozenset(),
+                                          resign_on_tvm_exit_codes: frozenset = frozenset({103}),
+                                          max_resign_attempts: int = 6,
+                                          resign_delay_seconds: float = 5.0) -> None:
+    """Sibling of `send_external_message_raw` that re-encodes (re-signs) the
+    message when the chain returns one of `resign_on_tvm_exit_codes`
+    (default: 103 = GiverV3 `afterSignatureCheck` `expireAt < block.timestamp
+    + 5 min` guard).
+
+    Motivation: on Misha's local MT cluster the base giver's thread 0
+    intermittently reports `block.timestamp` far behind wall clock (observed
+    ≥60s, occasionally more). A single fresh BOC's `expireAt` then falls
+    outside the 5-minute window at execution time and fires 103. Re-signing
+    starts a new lifetime window from *now* and typically succeeds within a
+    few attempts as the thread produces new blocks.
+    """
+    for attempt in range(1, max_resign_attempts + 1):
+        try:
+            send_external_message_raw(
+                address, abi, keys, method, params,
+                lifetime=lifetime,
+                accepted_tvm_exit_codes=accepted_tvm_exit_codes,
+            )
+            return
+        except RuntimeError as e:
+            msg = str(e)
+            hit = None
+            for code in resign_on_tvm_exit_codes:
+                if f'"exit_code":{code}' in msg:
+                    hit = code
+                    break
+            if hit is None or attempt == max_resign_attempts:
+                raise
+            time.sleep(resign_delay_seconds)
 
 
 def run_getter(address: str, abi: str, method: str, params: dict = None) -> dict:

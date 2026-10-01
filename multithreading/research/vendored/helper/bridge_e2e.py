@@ -27,6 +27,18 @@ GIVER_ADDRESS       = common.to_dapp_address(GIVER_ADDRESS_LEGACY)
 
 USDC_BRIDGE_DAPP_ID, USDC_BRIDGE_ACCOUNT_ID = USDC_BRIDGE_ADDRESS.split("::", 1)
 
+_GIVER_BASE_ACCOUNT_ID = GIVER_ADDRESS_LEGACY.removeprefix("0:")
+
+
+def giver_for_dapp(dapp_id: str) -> str:
+    """Per-dapp giver replica address (base account_id XOR dapp_id, routed to
+    dapp_id). Mirrors acki-nacki tests/mt/cli.py::giver_address so funding a
+    target on an arbitrary dapp lands on the same thread as the target
+    (cross-dapp routing via ZERO_DAPP giver otherwise expires the message)."""
+    dapp = dapp_id.removeprefix("0x")
+    replica_account_id = int(_GIVER_BASE_ACCOUNT_ID, 16) ^ int(dapp, 16)
+    return f"{dapp}::{replica_account_id:064x}"
+
 # ── ABIs / TVCs (bundled under python/contracts/) ─────────────────────────────
 CONTRACTS_DIR    = os.path.join(_PY_DIR, "contracts")
 USDC_BRIDGE_ABI  = os.path.join(CONTRACTS_DIR, "USDCBridge.abi.json")
@@ -203,9 +215,12 @@ def call_initiate_withdrawal(msig_address: str, msig_abi: str, msig_key_path: st
         "flags":   1,
         "payload": payload,
     }
-    return common.call_contract(
+    # Ingress path (see helper/common.py::send_external_message_raw): callx
+    # via 3.0.6.an CLI trips replay-protection exit_code 103 on local devnet.
+    return common.send_external_message_raw(
         msig_address, msig_abi, msig_key_path,
-        "sendTransaction", params, True,
+        "sendTransaction", params,
+        accepted_tvm_exit_codes=frozenset({104}),
     )
 
 

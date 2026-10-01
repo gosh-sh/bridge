@@ -60,6 +60,51 @@ To override (binaries elsewhere on the box):
 TOOLS_DIR=/opt/an-tools ./runbooks/run_multipath.sh
 ```
 
+## macOS: also fix `acki-nacki/contracts/compiler/`
+
+The `tvm-cli` / `sold` / `tvm-debugger` files that ship in
+`acki-nacki/contracts/compiler/` are **Linux ELF x86_64** — they cannot
+execute on a macOS host. The docker image build inside the compose
+project doesn't care (it's a Linux container), but `make run` first
+invokes `make compile_contracts` on the *host*, which shells out to
+`./contracts/compiler/sold`. On macOS that fails with:
+
+```
+/…/contracts/compiler/sold: cannot execute binary file
+Compilation failed for GiverV3.sol
+make[1]: *** [GiverV3.tvc] Error 1
+make: *** [compile_contracts] Error 2
+```
+
+Replace the three offenders in place with native arm64 builds from
+your `tvm-sdk` and `TVM-Solidity-Compiler` checkouts (siblings of
+`bridge/`):
+
+```bash
+AN=/path/to/acki-nacki
+TVM=/path/to/tvm-sdk
+SOL=/path/to/TVM-Solidity-Compiler
+
+# Build once if not built yet:
+( cd "$TVM" && cargo build --release --bin tvm-cli --bin tvm-debugger )
+( cd "$SOL" && cargo build --release --bin sold )
+
+cp "$TVM/target/release/tvm-cli"     "$AN/contracts/compiler/tvm-cli"
+cp "$TVM/target/release/tvm-debugger" "$AN/contracts/compiler/tvm-debugger"
+cp "$SOL/target/release/sold"         "$AN/contracts/compiler/sold"
+
+file "$AN/contracts/compiler/sold"   # expect: Mach-O 64-bit … arm64
+```
+
+Same three arm64 builds are what `bins_macOS/{tvm-cli,tvm-debugger,sold}`
+should hold too. `zerostate-helper` / `node-helper` are already built
+from `acki-nacki/target/release/` (see the recipe above), which is
+naturally native on macOS.
+
+On Linux this step doesn't apply — the shipped ELF binaries are the
+right ones, and `bins_linux/` is populated from them directly (see
+`../bins_linux/README.md`).
+
 ## State-v2 note
 
 The `tests/mt/cli.py test-multithread-cross-thread` harness against a

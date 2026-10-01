@@ -63,12 +63,11 @@ is opened from an already-bound predecessor.
 - **slot 0** = `parent_block_id` (same-thread, previous seq_no)
 - **slots 1..** = cross-thread refs (any thread ≠ own, strictly older)
 
-Both live inside the same L7 tree, so opening slot 0 is as cheap and as sound
-as opening any cross-thread slot — the "slot 0 is excluded" constraint in
-`bridge-event-witness` today is a **circuit-code choice**, not a chain-side
-requirement. The measurement work in §4 characterises paths under the DAG's
-actual shape; the circuit-spec update that allows the walker to *use* those
-paths is tracked separately.
+Both live inside the same L7 tree and open identically; `bridge-event-witness`
+and `bridge-event-prove-circuit` accept any `ref_index ∈ [0, 2^refs_tree_depth)`
+and select the Poseidon leaf tag (`REFERENCED_PARENT_BLOCK_TAG` vs
+`REFERENCED_REF_BLOCK_TAG`) on `is_zero(ref_index)`. The measurement work in §4
+characterises paths under the DAG's actual shape.
 
 Some representative topologies:
 

@@ -299,7 +299,7 @@ recipient's balance before and after.
 | 2 | refused before the deposit was requested; an `approve` may have been sent | not moved |
 | 3 | another deposit is in the way; the message names it | untouched |
 | 20 | the wallet did not pair; you rejected the connection, the check or the deposit; or it is a smart-contract account | untouched |
-| 21 | `approve` failed, was rejected or did not show on chain in time, or the limit was lowered | untouched |
+| 21 | `approve` failed, was rejected, or did not show on chain (or could not be confirmed) in time, or the limit was lowered | untouched |
 | 22 | the deposit transaction reverted | not taken; gas spent |
 | 30 | the deposit transaction has not been found yet | maybe sent |
 | 31–34 | the deposit is on chain; the Acki Nacki side has not finished | in the bridge; resumable |

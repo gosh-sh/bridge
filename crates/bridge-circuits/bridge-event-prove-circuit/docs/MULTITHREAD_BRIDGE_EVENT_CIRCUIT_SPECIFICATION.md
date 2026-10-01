@@ -68,9 +68,9 @@ i.e. "X is a ref inside `B_{L-1}.L7`, which is a ref inside
 | **`finalRoot`** | The layer-N batch root the prover anchors against. Exposed as `PUB_FINAL_ROOT`. Must lie inside `layerWindows[anchorLayer]` (`_isKnownLayerAnchor` in `AckiNackiBridge.sol`). |
 | **`anchorLayer`** | 1-indexed layer number the prover claims for `finalRoot`. Range `1..=MAX_ANCHOR_LAYER = 10` (must equal Solidity `MAX_LAYER_HASHES`). |
 | **L** | True chain length in hops between X and Y (`X → … → Y`, oldest → newest, leaf → root). `L = 0 ⇔ t = 0`. |
-| **`L_MAX`** | Circuit-side upper bound on L. **Production target = 300** (node-team ceiling on cross-thread walk length under the current threading design). Prototyping target = **20**. |
+| **`L_MAX`** | Circuit-side upper bound on L — a **worst-case ceiling**, not a target. The node team has announced **300** as the hard worst-case for cross-thread walks under the current threading design; with slot-0 (same-thread parent) edges a walk can also run up to **~128** same-thread hops. Both numbers are already punishing for the prover (see §4.3 cell costs). The **desired average** we design for is **10–20** cross-thread hops, ideally **1–5**; longer walks are tolerated but should be the exception, not the plan. Prototyping cap = **20**. |
 | **`H`** | Hops packed per `BridgeMultiHopProof` snark. Set to **1** for the bridge (see §5.H for the sizing derivation). |
-| **`N_BUNDLE_MAX`** | Upper bound on the number of `BridgeMultiHopProof` snarks per claim. `N_BUNDLE_MAX = ⌈L_MAX / H⌉`. Dynamic per claim (§6.5); prototype cap = 20, production cap = 300. |
+| **`N_BUNDLE_MAX`** | Upper bound on the number of `BridgeMultiHopProof` snarks per claim. `N_BUNDLE_MAX = ⌈L_MAX / H⌉`. Dynamic per claim (§6.5); prototype cap = 20, worst-case production cap = 300. Typical claims land in the 1–20 range. |
 | **Bundle** | One `BridgeEventFinalProof` + `n ∈ [0, N_BUNDLE_MAX]` `BridgeMultiHopProof` snarks. `n = 0` when `t = 0`. |
 | **Circuit 4** | Current on-chain name for the bridge event-prove circuit registered in `AckiNackiBridge.sol`. This spec keeps the name and extends the public-input surface. |
 
@@ -380,7 +380,7 @@ leftmost arrow `X → B_{L-1}`.
 
 At `H = 1`, each hop lives in its own snark; the gluing constraint becomes cross-snark and is enforced by the Solidity orchestrator on the clear block-ids exposed at the snarks' publics (§6.4).
 
-**Production bound: `L_MAX = 300`** (specified by the node team as the cross-thread walk-length ceiling under the current threading design). Prototyping target `L_MAX = 20`. `N_BUNDLE_MAX = ⌈L_MAX / H⌉` scales linearly — at `H = 1` this yields 20 hop snarks (prototype) or 300 hop snarks (production) in the worst case. Per-snark K is unchanged by `L_MAX`.
+**Worst-case ceiling: `L_MAX = 300`** — the hard upper bound the node team announced for cross-thread walks under the current threading design, not a design target. Slot-0 (same-thread parent) edges add a separate ceiling of ~128 same-thread hops. Both are expensive: at ≈ 2.83 M advice cells per hop (§4.3), 300 hops ≈ 850 M cells of SHA work alone. The **desired average** is **10–20** hops, ideally **1–5**; the circuit tolerates longer walks but each extra hop costs real prover wall time. Prototyping cap `L_MAX = 20`. `N_BUNDLE_MAX = ⌈L_MAX / H⌉` scales linearly — at `H = 1` this yields 20 hop snarks (prototype) or 300 hop snarks (worst-case production). Per-snark K is unchanged by `L_MAX`.
 
 Reference off-chain implementation of the equivalent chain walk: acki-nacki's `helpers/proof_helper/src/gql_proof.rs`. The circuit-side hop logic mirrors `verify_proof_block_ref_proof` (Poseidon inner) + `verify_block_merkle_leaf_proof` (SHA outer, at depth 4).
 
@@ -451,7 +451,7 @@ The outer SHPLONK Yul bytecode scales at ~450–500 B per inner advice column (m
 
 Tradeoff: `N_BUNDLE_MAX = ⌈L_MAX / H⌉ = L_MAX` multi-hop snarks per claim at `H = 1`.
 - Prototype `L_MAX = 20` → up to 20 hop snarks.
-- Production `L_MAX = 300` → up to 300 hop snarks.
+- Worst-case production `L_MAX = 300` → up to 300 hop snarks. The desired operating range is 1–20 hops per claim; 300 is a hard ceiling, not an expected shape.
 
 Verification cost per bundle scales linearly. The multi-hop chaining logic that a larger `H` would have kept inside the circuit is instead moved to the smart contract (`withdrawByProofBundle`, §6.4): bundle adjacency `hopEnd[i] == hopStart[i+1]` is enforced by Solidity equality checks on the clear block-ids.
 
@@ -794,8 +794,8 @@ Prover runs on server hardware, so this is a throughput question, not a UX quest
 | 0                    | 0 | 1  | ≈ 1–2 min                           |
 | 1                    | 1 | 2  | ≈ 2–3 min                            |
 | 5                    | 5 | 6  | ≈ 3–4 min (embarrassingly parallel)  |
-| 20 (proto cap)       | 20 | 21 | ≈ 5–10 min                          |
-| 300 (prod cap)       | 300 | 301 | ≈ 15–45 min (heavy parallelism)   |
+| 20 (proto cap, desired upper end) | 20 | 21 | ≈ 5–10 min                   |
+| 300 (worst-case ceiling, rare)    | 300 | 301 | ≈ 15–45 min (heavy parallelism) |
 
 Numbers are order-of-magnitude, calibrated from stress runs of hop-shaped circuits of the same K = 17 shape. Hop snarks are embarrassingly parallel; the FinalProof is on the critical path.
 
@@ -820,8 +820,8 @@ A binary in `bridge-event-prove-circuit/examples/` produces multi-thread fixture
 | S0   | 0     | 0             | 0          | Same-thread; X = Y; hop-less bundle |
 | S1   | ≠ 0   | 1             | 1          | Shortest cross-thread |
 | S5   | ≠ 0   | 5             | 5          | Mid-range |
-| S20  | ≠ 0   | 20            | 20         | Worst case at prototyping `L_MAX = 20` |
-| Sprod | ≠ 0  | 300           | 300        | Production stress (mark `#[ignore]`) |
+| S20  | ≠ 0   | 20            | 20         | Prototyping cap; also the desired upper end of normal operation |
+| Sprod | ≠ 0  | 300           | 300        | Worst-case ceiling, not an expected shape — stress only (mark `#[ignore]`) |
 
 Each fixture emits:
 
@@ -910,8 +910,8 @@ A future anonymity-preserving variant would restore these primitives, pad bundle
 | L7 outer opening depth per hop | **4** SHA-256 sibling combines (8 compressions) | §4 |
 | `MAX_PROOF_BLOCK_REFS` | **256** leaves padded, depth 8 | Protocol cap |
 | `H` (hops per `BridgeMultiHopProof`) | **1** | Forced by EIP-170 24 576 B cap on Yul verifier size (§5.H) |
-| `L_MAX` (max real chain length) | **20** (prototyping) → **300** (production) | Node-team ceiling |
-| `N_BUNDLE_MAX` (max hop snarks per claim) | **20** (prototyping) → **300** (production) | Dynamic per-claim, upper bound only; = `⌈L_MAX / H⌉` |
+| `L_MAX` (max real chain length) | prototype **20**; worst-case ceiling **300** (node-team hard upper bound, not a target); ~128 same-thread parent hops also possible via slot 0; **desired average 10–20, ideally 1–5** | Prover wall time scales linearly in L |
+| `N_BUNDLE_MAX` (max hop snarks per claim) | prototype **20**; worst-case **300** | Dynamic per-claim, upper bound only; = `⌈L_MAX / H⌉`; typical claims land in the 1–20 range |
 | `MAX_CHAIN_LEN` (thread-0 dense chain) | **11** | `gosh-dense-balanced-tree` |
 | `MAX_ANCHOR_LAYER` | **10** | Must equal `MAX_LAYER_HASHES` in `AckiNackiBridge.sol` |
 | `MAX_EVENTS_TREE_DEPTH` | **8** | `bridge_event_prove_circuit.rs:124` |

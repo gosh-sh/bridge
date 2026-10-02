@@ -509,9 +509,10 @@ assigns it when the release is tagged.
   a span over its cap) is not. The snapshot is pinned to one block and every kept log
   is checked against its window slot (hash and height) and the window's
   `lastHeight`: a mismatch (an append landing mid-read, a partial log set)
-  or a rejected newest span re-read the snapshot a few times, fewer logs
-  than entries (a backend one block behind omitting the newest append) at
-  most once,
+  or a rejected newest span re-read the snapshot a few times (six seconds
+  apart, so the re-reads span a Sepolia slot), fewer logs than entries (a
+  backend one block behind omitting the newest append) once, counted on
+  its own,
   after which a short log set fails naming `BRIDGE_DEPLOY_BLOCK` and the
   others surface as they are; on a span the RPC always rejects that is two
   extra short reads before the same refusal, and a `BRIDGE_DEPLOY_BLOCK`
@@ -520,9 +521,22 @@ assigns it when the release is tagged.
   unset deploy block is a warning. The CLI's coverage poll reads one scalar
   per round, reads the full snapshot once coverage is observed, and polls on
   if that snapshot still predates the target; an RPC error in a round is
-  retried on the next one within the wait budget instead of ending the run
-  after the burn, and once `latest` has shown the target the wait allows a
-  few rounds past the deadline for the snapshot to catch up.
+  retried on the next one (up to ten rounds in a row, within the wait
+  budget) instead of ending the run after the burn, the last error is part
+  of the message when the wait gives up, and once `latest` has shown the
+  target the wait allows a few rounds past the deadline for the snapshot to
+  catch up.
+- **The shellnet profile's `RPC_URL` is `https://sepolia.gateway.tenderly.co`**
+  (was `https://ethereum-sepolia-rpc.publicnode.com`), and so is the
+  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common`. The
+  window-heights read needs `eth_getLogs` back to the bridge's oldest held
+  anchor; publicnode keeps only the newest ~10 000 blocks of logs and answers
+  an empty set for older ones, so on it the read comes up short about a day
+  and a half after the first anchor and every default-profile withdrawal is
+  refused in preflight. Tenderly's public gateway serves full log history
+  and takes a 10 000-block span. When a short log set is met and the deploy
+  block itself answers with no logs, the error also says the RPC may not
+  serve history that far back, and no re-read is spent on it.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
   rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
   deploy from `main` with the owner pause; its deploy block 11828971 is
@@ -540,9 +554,10 @@ assigns it when the release is tagged.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn
-  and the coverage wait; on a bridge without anchors yet, where the read
-  sends no `eth_getLogs`, preflight sends the scan's first call once, with
-  the scan's retries.
+  and the coverage wait; preflight also sends the scan's first full-span
+  `eth_getLogs` once, with the scan's retries, since the read itself sends
+  none on a bridge without anchors and a clamped one on a bridge younger
+  than the span.
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
   exponential backoff.** With the aggregator now binding the inner-circuit

@@ -95,16 +95,26 @@ pub fn covering_bundle_seq_no(burn_seq_no: u64, stride: u64) -> u64 {
 /// included.
 pub const GRACE_ROUNDS_BEHIND_LATEST: u32 = 5;
 
+/// Rounds in a row that may fail (poll or snapshot read) before the wait
+/// gives up with the last error: long enough for an RPC blip, short enough
+/// that a failure that never clears is reported in minutes, not at the end
+/// of the budget.
+pub const MAX_CONSECUTIVE_FAILED_ROUNDS: u32 = 10;
+
 /// Poll `AckiNackiBridge` until it has advanced past `target_seq_no`
 /// (the covering bundle for the burn), then return the resurrected
-/// `BridgeState` snapshot at that moment. Errors on deadline expiry, or
-/// when the contract's windows cannot be mirrored.
+/// `BridgeState` snapshot at that moment. Errors on deadline expiry, after
+/// [`MAX_CONSECUTIVE_FAILED_ROUNDS`] failed rounds in a row, or when the
+/// contract's windows cannot be mirrored.
 ///
 /// RPC errors inside the budget cost a round, not the run: the burn is
 /// already recorded, so a failed poll or a failed snapshot read is retried
-/// on the next round until the deadline. Once `latest` has shown the
+/// on the next round, up to [`MAX_CONSECUTIVE_FAILED_ROUNDS`] in a row,
+/// within the deadline plus the grace rounds below; the last error is part
+/// of the message when the wait gives up. Once `latest` has shown the
 /// target, a pinned snapshot still behind it is given a few rounds past the
-/// deadline to catch up ([`GRACE_ROUNDS_BEHIND_LATEST`]).
+/// deadline to catch up ([`GRACE_ROUNDS_BEHIND_LATEST`]), failed reads
+/// included.
 ///
 /// The returned state is byte-for-byte the contract mirror — safe to
 /// hand straight to
@@ -130,6 +140,9 @@ where
     let mut rounds_behind_latest: u32 = 0;
     let mut seen_at_latest = false;
     let mut rounds_past_deadline: u32 = 0;
+    // Failed rounds in a row and the last failure, for the give-up message.
+    let mut failed_in_a_row: u32 = 0;
+    let mut last_error: Option<String> = None;
     // What the last successful poll saw, for the messages below.
     let mut last_seen: Option<u64> = None;
     loop {
@@ -141,11 +154,14 @@ where
         // the wire, and the deadline bounds the retries.
         match client.stored_last_seen_block_seq_no().await {
             Err(e) => {
+                failed_in_a_row += 1;
                 warn!(
                     attempt,
+                    failed_in_a_row,
                     error = %e,
                     "storedLastSeenBlockSeqNo poll failed; retrying after the poll interval",
                 );
+                last_error = Some(format!("storedLastSeenBlockSeqNo: {e}"));
             },
             Ok(observed) => {
                 last_seen = Some(observed);
@@ -160,12 +176,15 @@ where
                     seen_at_latest = true;
                     match client.read_full_state().await {
                         Err(e) => {
+                            failed_in_a_row += 1;
                             warn!(
                                 attempt,
+                                failed_in_a_row,
                                 error = %e,
                                 "read_full_state failed after coverage was seen at latest; \
                                  retrying after the poll interval",
                             );
+                            last_error = Some(format!("read_full_state: {e}"));
                         },
                         // The poll read `latest`; the snapshot is pinned to
                         // its own head. Behind a load-balanced RPC that head
@@ -173,6 +192,7 @@ where
                         // without the anchor fails the enricher after the
                         // burn. Poll on instead.
                         Ok(cfs) if cfs.last_seen_block_seq_no < target_seq_no => {
+                            failed_in_a_row = 0;
                             rounds_behind_latest += 1;
                             info!(
                                 observed_last_seen = observed,
@@ -198,8 +218,19 @@ where
                             return Ok(state);
                         },
                     }
+                } else {
+                    failed_in_a_row = 0;
                 }
             },
+        }
+        let last_seen_text = last_seen.map_or_else(|| "unknown".to_string(), |s| s.to_string());
+        let last_error_text = last_error.clone().unwrap_or_else(|| "none".to_string());
+        if failed_in_a_row > MAX_CONSECUTIVE_FAILED_ROUNDS {
+            anyhow::bail!(
+                "wait_for_coverage: {failed_in_a_row} rounds in a row failed after {attempt} \
+                 polls — contract at last_seen={last_seen_text} (last successful poll), need >= \
+                 {target_seq_no}; last error: {last_error_text}",
+            );
         }
         let now = Instant::now();
         let past_deadline = now >= deadline;
@@ -211,11 +242,11 @@ where
             // giving up.
             if !seen_at_latest || rounds_past_deadline > GRACE_ROUNDS_BEHIND_LATEST {
                 anyhow::bail!(
-                    "wait_for_coverage: gave up after {attempt} polls — contract at last_seen={} \
-                     (last successful poll), need >= {target_seq_no}, snapshot behind latest for \
-                     {rounds_behind_latest} rounds, {rounds_past_deadline} rounds past the \
-                     deadline (stride={}, wait_budget={:?})",
-                    last_seen.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+                    "wait_for_coverage: gave up after {attempt} polls — contract at \
+                     last_seen={last_seen_text} (last successful poll), need >= {target_seq_no}, \
+                     snapshot behind latest for {rounds_behind_latest} rounds, \
+                     {rounds_past_deadline} rounds past the deadline (stride={}, \
+                     wait_budget={:?}); last error: {last_error_text}",
                     stride_for(anchor),
                     total_wait,
                 );
@@ -229,7 +260,7 @@ where
         };
         info!(
             attempt,
-            last_seen = last_seen.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+            last_seen = last_seen_text,
             target_covering_seq_no = target_seq_no,
             sleep_s = sleep.as_secs(),
             remaining_s = remaining.as_secs(),

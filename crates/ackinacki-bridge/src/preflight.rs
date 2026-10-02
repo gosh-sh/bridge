@@ -2159,34 +2159,33 @@ pub async fn check_window_scan(
                 "--bridge-address {bridge}: the window-heights read that stage 4b runs after the \
                  burn failed now: {e}.\n\x20 Check BRIDGE_DEPLOY_BLOCK (the block this bridge was \
                  deployed in; now {}), BRIDGE_GET_LOGS_CHUNK_BLOCKS (your RPC's eth_getLogs span \
-                 cap; now {}) and that --rpc-url serves logs back to the deploy block.",
+                 cap; now {}) and that --rpc-url serves logs back to the deploy block (public \
+                 endpoints such as publicnode keep only the newest ~10 000 blocks).",
                 scan.deploy_block, scan.chunk_blocks,
             ),
             source: Some(anyhow::Error::new(e)),
         })?;
-    if state.layer_windows.iter().all(|w| w.data_len == 0) {
-        // No anchors yet, so the read above sent no `eth_getLogs` and a
-        // span the RPC rejects would surface only in stage 4b, after the
-        // first bundle lands. Send the scan's first call once.
-        let logs = client
-            .probe_log_span()
-            .await
-            .map_err(|e| CliError::Preflight {
-                reason: format!(
-                    "--bridge-address {bridge}: the bridge has no anchors yet, and the \
-                     eth_getLogs call stage 4b will send failed: {e}.\n\x20 Check \
-                     BRIDGE_GET_LOGS_CHUNK_BLOCKS (your RPC's eth_getLogs span cap; now {}) and \
-                     that --rpc-url serves logs.",
-                    scan.chunk_blocks,
-                ),
-                source: Some(anyhow::Error::new(e)),
-            })?;
-        tracing::info!(
-            chunk_blocks = scan.chunk_blocks,
-            logs,
-            "no anchors yet; one eth_getLogs over the newest span answered"
-        );
-    }
+    // The read above sends no `eth_getLogs` on a bridge without anchors, and
+    // on one younger than the span its only call is clamped to the deploy
+    // block; a span the RPC rejects would then surface only in stage 4b,
+    // after the burn. Send the scan's first full-span call once.
+    let logs = client
+        .probe_log_span()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: the eth_getLogs call stage 4b will send over the \
+                 configured span failed: {e}.\n\x20 Check BRIDGE_GET_LOGS_CHUNK_BLOCKS (your \
+                 RPC's eth_getLogs span cap; now {}) and that --rpc-url serves logs.",
+                scan.chunk_blocks,
+            ),
+            source: Some(anyhow::Error::new(e)),
+        })?;
+    tracing::info!(
+        chunk_blocks = scan.chunk_blocks,
+        logs,
+        "one eth_getLogs over the newest span answered"
+    );
     tracing::info!(
         last_seen = state.last_seen_block_seq_no,
         deploy_block = scan.deploy_block,
@@ -2799,10 +2798,10 @@ pub(crate) mod tests {
         format!("0x{}", "00".repeat(32 * (128 + 128 + 3)))
     }
 
-    /// The pre-burn window-heights read passes on empty windows (where it
-    /// sends the scan's first `eth_getLogs` as a probe), refuses a deploy
-    /// block above the head, and a node that cannot serve it refuses naming
-    /// the two knobs to check.
+    /// The pre-burn window-heights read passes on empty windows (and sends
+    /// the scan's first full-span `eth_getLogs` as a probe), refuses a
+    /// deploy block above the head, and a node that cannot serve it refuses
+    /// naming the two knobs to check.
     #[tokio::test]
     async fn window_scan_passes_on_empty_windows_and_names_the_knobs_on_failure() {
         let url = mock_rpc(SOME_CODE, full_walk(&[])).await;

@@ -100,15 +100,19 @@ const GET_LOGS_PROGRESS_EVERY: usize = 200;
 /// [`EthBridgeClient::read_full_state`] pins every read to one block; a
 /// lagging backend behind a load-balanced RPC may answer "header not found"
 /// for it, omit the newest log, or reject the newest span, so the whole
-/// snapshot is read up to this many times.
+/// snapshot is read up to this many times for such failures (a short log
+/// set adds its own single re-read, [`SHORT_LOG_SET_RE_READS`]), spaced
+/// [`READ_FULL_STATE_RETRY_DELAY_MS`] apart: two delays span a Sepolia
+/// slot, so a backend one block behind has caught up by the last read.
 const READ_FULL_STATE_ATTEMPTS: u32 = 3;
-/// Reads of the snapshot when the failure was a short log set: each
-/// re-read walks the whole range again, so it gets at most one. A backend
-/// still behind on that re-read is left to the callers, which all retry at
-/// a higher level: the CLI's coverage rounds after the burn, an exit-2
-/// re-run in preflight, a container restart for `daemon-live`.
-const SHORT_LOG_SET_ATTEMPTS: u32 = 2;
-const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 2_000;
+const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 6_000;
+/// Re-reads of the snapshot after a short log set, counted on their own:
+/// each one walks the whole range again, so there is one, whatever else
+/// failed before it. A backend still behind on that re-read is left to the
+/// callers, which all retry at a higher level: the CLI's coverage rounds
+/// after the burn, an exit-2 re-run in preflight, a container restart for
+/// `daemon-live`.
+const SHORT_LOG_SET_RE_READS: u32 = 1;
 
 /// How the `LayerAnchorAppended` scan of [`EthBridgeClient::read_full_state`]
 /// walks the chain. Both entry points build it from their clap arguments
@@ -985,8 +989,9 @@ where
 
     /// One `eth_getLogs` for `LayerAnchorAppended` over the newest
     /// `chunk_blocks` blocks: the call the scan would send first. Lets a
-    /// preflight exercise the RPC's span cap and log serving on a bridge
-    /// whose windows are still empty, where the scan itself sends nothing.
+    /// preflight exercise the RPC's span cap, which the scan itself does not
+    /// on a bridge without anchors (it sends nothing) nor on one younger
+    /// than the span (its only chunk is clamped to the deploy block).
     /// Same tolerance as the scan's newest chunk: retryable RPC errors are
     /// retried with backoff, and a rejected span (the head may be one a
     /// lagging backend does not have yet) is re-pinned a few times before
@@ -1050,6 +1055,25 @@ where
                 },
             }
         }
+    }
+
+    /// Whether the RPC serves any log of the bridge in `block`. Asked for
+    /// the deploy block after a short log set: the bridge emits
+    /// `OwnershipTransferred` there, so an empty answer from the block the
+    /// bridge was deployed in means the RPC does not keep logs that far
+    /// back (public endpoints often keep only the newest ~10 000 blocks),
+    /// and re-walking cannot help.
+    async fn bridge_has_logs_in_block(&self, block: u64) -> Result<bool, RelayerError> {
+        let filter = Filter::new()
+            .address(self.address)
+            .from_block(block)
+            .to_block(block);
+        self.contract
+            .provider()
+            .get_logs(&filter)
+            .await
+            .map(|logs| !logs.is_empty())
+            .map_err(|e| RelayerError::other(format!("eth_getLogs for block {block}: {e}")))
     }
 
     pub fn address(&self) -> Address {
@@ -1354,7 +1378,10 @@ where
     /// snapshot is re-read a few times whenever a fresh one can succeed: a
     /// pinned read the backend cannot serve yet, a slot or `lastHeight`
     /// mismatch, fewer logs than entries (a backend one block behind; this
-    /// one is re-read at most once, since each re-read is a full walk), and a
+    /// one is re-read once, counted on its own, since each re-read is a
+    /// full walk; when the RPC serves no log for the lower bound at all it
+    /// is final: pruned history, or a bound that is not the deploy block),
+    /// and a
     /// rejected newest span, which on a deterministic span cap costs two
     /// extra short reads before the same refusal. A deploy block above the
     /// chain head is refused before any scan (re-read a couple of times,
@@ -1367,6 +1394,7 @@ where
     /// that observed the target.
     pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
         let mut attempt = 0u32;
+        let mut full_walks = 0u32;
         loop {
             attempt += 1;
             match self.read_full_state_once().await {
@@ -1374,13 +1402,12 @@ where
                 Err(SnapshotError::Transient {
                     err,
                     full_walk,
-                }) if attempt
-                    < if full_walk {
-                        SHORT_LOG_SET_ATTEMPTS
-                    } else {
-                        READ_FULL_STATE_ATTEMPTS
-                    } =>
+                }) if (!full_walk && attempt < READ_FULL_STATE_ATTEMPTS)
+                    || (full_walk && full_walks < SHORT_LOG_SET_RE_READS) =>
                 {
+                    if full_walk {
+                        full_walks += 1;
+                    }
                     tracing::warn!(
                         attempt,
                         full_walk,
@@ -1624,21 +1651,56 @@ where
             elapsed_s = started.elapsed().as_secs(),
             "LayerAnchorAppended scan done"
         );
-        paint_heights_from_events(windows, &events).map_err(|e| {
-            let transient = e.is_transient();
-            let full_walk = matches!(e, PaintError::Short { .. });
-            let err = RelayerError::other(format!(
-                "{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)"
-            ));
-            if transient {
-                SnapshotError::Transient {
-                    err,
-                    full_walk,
+        match paint_heights_from_events(windows, &events) {
+            Ok(()) => Ok(()),
+            Err(
+                e @ PaintError::Short {
+                    ..
+                },
+            ) => {
+                let msg =
+                    format!("{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)");
+                // A short set from an RPC that prunes old logs looks exactly
+                // like a wrong deploy block. The deploy block holds the
+                // bridge's own `OwnershipTransferred`, so one more call tells
+                // the two apart when the bound is the deploy block.
+                let served = if from == 0 {
+                    None
+                } else {
+                    Some(self.bridge_has_logs_in_block(from).await)
+                };
+                match served {
+                    Some(Ok(false)) => Err(SnapshotError::Final(RelayerError::other(format!(
+                        "{msg}; the RPC returned no logs for block {from} either. If that is the \
+                         block the bridge was deployed in (it emits OwnershipTransferred there), \
+                         the RPC does not serve log history that far back (public endpoints often \
+                         keep only the newest ~10 000 blocks): use an RPC with full log history. \
+                         Otherwise set {BRIDGE_DEPLOY_BLOCK_ENV} to the deploy block."
+                    )))),
+                    Some(Err(probe)) => Err(SnapshotError::Transient {
+                        err: RelayerError::other(format!(
+                            "{msg}; probing block {from} for the bridge's deploy log failed too: \
+                             {probe}"
+                        )),
+                        full_walk: true,
+                    }),
+                    Some(Ok(true)) | None => Err(SnapshotError::Transient {
+                        err: RelayerError::other(msg),
+                        full_walk: true,
+                    }),
                 }
-            } else {
-                SnapshotError::Final(err)
-            }
-        })
+            },
+            Err(e) => {
+                let err = RelayerError::other(format!(
+                    "{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)"
+                ));
+                if e.is_transient() {
+                    Err(SnapshotError::transient(err))
+                } else {
+                    Err(SnapshotError::Final(err))
+                }
+            },
+        }
     }
 }
 

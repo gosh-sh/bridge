@@ -155,7 +155,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
 | `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
-| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProof` |
+| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile uses Tenderly's public gateway) |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
 | `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Block the bridge was deployed in: where the `LayerAnchorAppended` scan (preflight, then stage 4b) stops when a window is not covered yet; changes together with `BRIDGE_ADDRESS` (unset = genesis). `--get-logs-chunk-blocks` / `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and `--get-logs-pause-ms` / `BRIDGE_GET_LOGS_PAUSE_MS` fit the scan to a capped, rate-limited RPC |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
@@ -642,9 +642,10 @@ specific reason. Common causes:
 - USDCBridge account_id does not resolve via GQL
 - the window-heights read fails: a wrong `BRIDGE_DEPLOY_BLOCK` (above the
   chain head, or after the oldest anchor the bridge's windows still hold),
-  an `eth_getLogs` span
-  your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or an RPC without log
-  history
+  an `eth_getLogs` span your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or
+  an RPC without log history back to the deploy block (publicnode keeps only
+  the newest ~10 000 blocks; the refusal says so when the deploy block
+  itself answers with no logs)
 
 **Remediation:** fix the specific issue, re-run. Preflight is
 side-effect-free.

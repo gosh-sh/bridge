@@ -24,6 +24,23 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`EthBeaconLightClient` hashes execution headers with the TVM `KECCAK256`
+  instruction instead of the `EthKeccak` software implementation, and
+  `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
+  64.68M gas before and costs 4,722 now; a 32-header epoch walk measures
+  469,816 gas against the 10M per-transaction limit, where it used to
+  extrapolate to ~2.07G. On-chain epoch ancestry therefore works, and a
+  deposit in a non-checkpoint block no longer needs `setAcceptedBlockHash`
+  from the owner key.
+
+  This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
+  tvmlabs/tvm-sdk `05ff0848`) and a `sold` built against that SDK; against an
+  older node the light client throws on an unknown opcode. The light client's
+  code hash moves `314ac6b8…` → `67dd98a5…`, so the bridge has to be given the
+  new code with `setLightClientCode` and the client redeployed; its ABI is
+  unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP reader, which
+  is now what the walk spends most of its gas on.
+
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
   `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,

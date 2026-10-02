@@ -391,7 +391,7 @@ contract EthBeaconLightClient {
         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
         tvm.accept();
-        uint256 checkpoint = _piForm(EthKeccak.hash(headerRlps[0]));
+        uint256 checkpoint = _piForm(gosh.keccak256(headerRlps[0]));
         require(_isLive(checkpoint), ERR_UNKNOWN_CHECKPOINT);
         uint64 ckptSlot = _provenEthSlot[checkpoint];
         _evictExpired();
@@ -399,7 +399,7 @@ contract EthBeaconLightClient {
         uint64 added = 0;
         uint i;
         for (i = 1; i < headerRlps.length; i++) {
-            uint256 h = EthKeccak.hash(headerRlps[i]);
+            uint256 h = gosh.keccak256(headerRlps[i]);
             require(h == want, ERR_BAD_ANCESTRY);
             uint256 key = _piForm(h);
             if (!_isLive(key)) {

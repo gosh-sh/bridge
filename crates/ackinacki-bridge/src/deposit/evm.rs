@@ -145,12 +145,15 @@ pub trait EvmRead: Send + Sync {
     async fn chain_id(&self) -> anyhow::Result<u64>;
     /// The code at `a`; empty for an account without code.
     async fn code(&self, a: Address) -> anyhow::Result<Bytes>;
-    /// `eth_call` at the latest block; returns the call's output.
+    /// `eth_call` at the node's head; returns the call's output. Over
+    /// JSON-RPC the request names the `pending` block, the RPC client's
+    /// default.
     async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes> {
         self.call_at(to, data, BlockTag::Latest).await
     }
     /// `eth_call` at `at`; returns the call's output. A node that does not
-    /// have that block yet answers with an error.
+    /// have that block yet answers with an error. `Latest` is the head as
+    /// [`EvmRead::call`] reads it.
     async fn call_at(&self, to: Address, data: Bytes, at: BlockTag) -> anyhow::Result<Bytes>;
     /// Re-executes a call at `block`; `Some(reason)` if it reverts.
     async fn revert_reason(
@@ -186,7 +189,8 @@ pub trait EvmRead: Send + Sync {
     /// Fetches every receipt and raw transaction of one block, the way
     /// the prover's fetcher will. Returns the transaction count.
     async fn probe_block(&self, tag: BlockTag) -> anyhow::Result<usize>;
-    /// `eth_estimateGas` for a call from `from`, at `at`.
+    /// `eth_estimateGas` for a call from `from`, at `at`; `Latest` is the
+    /// head as [`EvmRead::call`] reads it.
     async fn estimate_gas_at(
         &self,
         from: Address,
@@ -421,8 +425,8 @@ impl EvmRead for AlloyEvm {
             .p
             .call(TransactionRequest::default().to(to).input(data.into()));
         Ok(match at {
-            // No block parameter, as before there was a choice: the node
-            // takes its head.
+            // The RPC client's default, which names the `pending` block:
+            // the same request as before a read could be pinned.
             BlockTag::Latest => call.await?,
             at => call.block(BlockId::Number(tag(at))).await?,
         })
@@ -608,8 +612,8 @@ impl EvmRead for AlloyEvm {
             .to(to)
             .input(data.into());
         let estimate = self.p.estimate_gas(req);
-        // At the head, no block parameter: a node that does not take one
-        // for eth_estimateGas is asked exactly as before.
+        // At the head, the RPC client's default, which names the `pending`
+        // block: the same request as before an estimate could be pinned.
         let estimated = match at {
             BlockTag::Latest => estimate.await,
             at => estimate.block(BlockId::Number(tag(at))).await,

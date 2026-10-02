@@ -2,7 +2,7 @@
 name = "ackinacki-bridge"
 version = "0.2.0"
 edition = "2021"
-description = "End-user CLI for the Acki Nacki ↔ EVM bridge. Currently ships the `withdraw` subcommand: burn USDC on Acki Nacki via a single-custodian multisig, then produce + submit the Circuit-4 SHPLONK proof to withdraw on the EVM side. Additional subcommands (e.g. deposit) will land here."
+description = "End-user CLI for the Acki Nacki ↔ EVM bridge: `withdraw` (Acki Nacki → EVM) and `deposit` (EVM → Acki Nacki)."
 
 # Build via the bridge-prover-libraries workspace (member symlink
 # crates/bridge-prover-libraries/ackinacki-bridge → ../ackinacki-bridge):
@@ -18,6 +18,7 @@ tokio = { version = "1.42", features = ["full"] }
 async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
+rand = "0.8"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -41,6 +42,9 @@ alloy = { version = "2.0", features = [
     "signers",
     "network",
     "sol-types",
+    # `Filter`, `TransactionRequest` and the RPC log type the deposit's
+    # EVM reads are written against.
+    "rpc-types",
 ] }
 alloy-primitives = "1"
 
@@ -63,6 +67,7 @@ bridge-event-witness  = { path = "../bridge-event-witness" }
 bridge-prover-lib     = { path = "../bridge-prover-lib" }
 bridge-gql-fetcher    = { path = "../bridge-gql-fetcher" }
 acki-nacki-interface  = { path = "../../acki-nacki-interface" }
+deposit-chain-ids     = { path = "../../deposit-chain-ids" }
 
 # `bytes_to_fr` — the exact conversion the prover uses for public inputs
 # [6] and [7]. Reused rather than reimplemented so the preflight cannot
@@ -77,12 +82,55 @@ tempfile = "3"
 # transitive deps, so this costs nothing.
 libc = "0.2"
 
+# Operation ids, and the endpoint parsing behind the recorded network id.
+ulid = "1"
+url = "2"
+
+# Base64 for the BOCs and TVC images `tvm_client` takes, and `futures`
+# for its async API. Both are already in this workspace's lock file.
+base64 = "0.22"
+futures = "0.3"
+
+# WalletConnect envelope cryptography.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+
+# WalletConnect relay authorization: did:key and the EdDSA JWT.
+ed25519-dalek = "2"
+bs58 = "0.5"
+
+# WalletConnect relay transport: the websocket, and TLS for `wss://`. This
+# build links both rustls crypto providers (ring and aws-lc-rs, through
+# different dependencies), so rustls cannot pick a process default and the
+# relay client names `ring` itself, with the Mozilla roots from
+# `webpki-roots` — the pairing the GraphQL client's reqwest already uses.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+# The pairing URI as a QR code: in the terminal, and as `--qr-out` SVG or PNG.
+qrcode = { version = "0.14", default-features = false, features = ["svg", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 tempfile = "3"
+# Test-only: reads a rendered QR code back.
+rqrr = "0.10"
 # Test-only: building a real deployed-multisig account BOC offline, so a
 # fake node has something `tvm_block::Account` will actually parse.
 tvm_types = { workspace = true }
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[features]
+# A release is built with no features at all; `.woodpecker/release.yaml` passes none.
+default = []
+# Development and e2e only, never in `default`: accept a bridge although this build
+# does not know the minimum version that is safe to resend to.
+dev-unfixed-bridge = []
+# Compiles the live end-to-end deposit test, which spends testnet funds. Never in
+# `default`.
+e2e = []
 
 [[bin]]
 name = "ackinacki-bridge"

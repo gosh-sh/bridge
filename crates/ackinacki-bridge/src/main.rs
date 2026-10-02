@@ -28,6 +28,7 @@
 
 mod args;
 mod burn;
+mod deposit;
 mod errors;
 mod idempotency;
 mod orchestrator;
@@ -39,12 +40,14 @@ mod source_guard;
 #[cfg(test)]
 mod test_chain;
 #[cfg(test)]
+mod test_forks;
+#[cfg(test)]
 mod test_keys;
 
-use std::{io::IsTerminal, process::ExitCode as ProcExitCode};
+use std::{borrow::Cow, io::IsTerminal, process::ExitCode as ProcExitCode};
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
 
 use crate::args::{Cli, Command};
 
@@ -213,7 +216,7 @@ fn main() -> ProcExitCode {
 /// Route the top-level subcommand. Kept as a thin async fn so
 /// exit-code mapping stays in `main` and the orchestrator stays free of
 /// process concerns.
-async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> {
+async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
     // --non-interactive alone means "refuse rather than block on a prompt".
     // Together with --yes there is no prompt to block on, so the run
     // proceeds. That pairing is the normal shape for a CI wrapper.
@@ -234,9 +237,46 @@ async fn dispatch(cli: Cli) -> errors::CliResult<orchestrator::WithdrawSuccess> 
                 });
             }
             let dry_run = args.dry_run;
-            orchestrator::run(args, dry_run, skip_prompt).await
+            orchestrator::run(args, dry_run, skip_prompt)
+                .await
+                .map(output::RunSuccess::Withdraw)
+        },
+        Command::Deposit(args) => {
+            // From here on nothing this process prints carries the path,
+            // query or userinfo of a configured URL, or the WalletConnect
+            // project id: RPC providers put their API keys in the URL, and
+            // HTTP clients quote the whole URL in their errors.
+            hide_deposit_secrets(&args);
+            let g = crate::deposit::args::GlobalFlags {
+                json: cli.json,
+                yes: cli.yes,
+                non_interactive: cli.non_interactive,
+            };
+            let params = args.validate(&g)?;
+            crate::deposit::run(params)
+                .await
+                .map(|s| output::RunSuccess::Deposit(Box::new(s)))
         },
     }
+}
+
+/// Registers what a deposit run's output must never print: the secret
+/// parts of its endpoint URLs and its WalletConnect project id.
+fn hide_deposit_secrets(args: &deposit::args::DepositArgs) {
+    deposit::ui::hide_url_secrets(
+        [
+            args.rpc_url.as_deref(),
+            args.gql_endpoint.as_deref(),
+            Some(args.wc_relay_url.as_str()),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    deposit::ui::hide_secret_values(
+        args.wc_project_id
+            .as_deref()
+            .or(deposit::args::DEFAULT_WC_PROJECT_ID),
+    );
 }
 
 /// Tracing → stderr. Respects `RUST_LOG`; defaults to `info` for our crate
@@ -255,8 +295,228 @@ fn init_tracing() {
     )]
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(Redacting {
+            make: std::io::stderr,
+            above_board: deposit::ui::log_above_board,
+        })
         .with_ansi(is_tty)
         .with_target(false)
         .try_init();
+}
+
+/// Log output that hides what a deposit run registered as secret (see
+/// [`deposit::ui::hide_url_secrets`]): an HTTP client's error quotes the
+/// whole RPC or relay URL, API key and project id included. The secrets are
+/// looked up as each line is written, so the ones registered after tracing
+/// started are hidden too. With none registered — any run but a deposit —
+/// every line goes out byte for byte.
+struct Redacting<M> {
+    /// The stream a line goes to.
+    make: M,
+    /// Prints a complete line above a board on the screen; `false` when no
+    /// board is (see [`deposit::ui::log_above_board`]).
+    above_board: fn(&[u8]) -> bool,
+}
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Redacting<M> {
+    /// One line, held until it is complete.
+    type Writer = RedactedLine<M::Writer>;
+
+    /// A holder for the next line, in front of the stream `M` makes.
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactedLine {
+            out: self.make.make_writer(),
+            buf: Vec::new(),
+            above_board: self.above_board,
+        }
+    }
+}
+
+/// One log line on its way to `out`, held whole so that it is redacted
+/// whole, and written when it is dropped.
+struct RedactedLine<W: std::io::Write> {
+    /// Where the line goes.
+    out: W,
+    /// The line so far.
+    buf: Vec<u8>,
+    /// See [`Redacting::above_board`].
+    above_board: fn(&[u8]) -> bool,
+}
+
+impl<W: std::io::Write> std::io::Write for RedactedLine<W> {
+    /// Adds `b` to the line.
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    /// Nothing to do: the line is written when it is complete.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<W: std::io::Write> Drop for RedactedLine<W> {
+    /// Writes the line, redacted: above the deposit board while one is on
+    /// the screen, to `out` otherwise.
+    fn drop(&mut self) {
+        let line = line_out(&self.buf, deposit::ui::redact_in_deposit_run);
+        if (self.above_board)(&line) {
+            return;
+        }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a log line that cannot be written has nowhere else to go"
+        )]
+        let _ = self.out.write_all(&line).and_then(|()| self.out.flush());
+    }
+}
+
+/// `buf` as it goes out after `hide`: the hidden text when `hide` changed
+/// anything, else `buf` itself, byte for byte.
+fn line_out(buf: &[u8], hide: fn(&str) -> Cow<'_, str>) -> Cow<'_, [u8]> {
+    let text = String::from_utf8_lossy(buf);
+    match hide(&text) {
+        Cow::Borrowed(_) => Cow::Borrowed(buf),
+        Cow::Owned(s) => Cow::Owned(s.into_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// A stream that keeps what is written to it.
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_log_line_hides_the_secrets_of_the_configured_urls() {
+        const URL: &str =
+            "https://Relay.Example.COM/v1/LogPathKey-3b2a1c0d?projectId=LogProject-9f8e7d6c";
+        crate::deposit::ui::hide_url_secrets([URL]);
+        let written = Capture(Arc::new(Mutex::new(Vec::new())));
+        let sink = written.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Redacting {
+                make: move || sink.clone(),
+                above_board: |_| false,
+            })
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("relay publish failed: {URL}");
+            tracing::error!(
+                error = "error sending request for url (https://relay.example.com/v1/\
+                         LogPathKey-3b2a1c0d/?projectId=LogProject-9f8e7d6c)",
+                "retrying"
+            );
+            tracing::error!("{:?}", url::Url::parse(URL).unwrap());
+        });
+        let out = String::from_utf8(written.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(out.lines().count(), 3, "{out}");
+        for key in ["LogPathKey-3b2a1c0d", "LogProject-9f8e7d6c"] {
+            assert!(!out.contains(key), "{out}");
+        }
+        assert!(
+            out.contains("relay publish failed: https://Relay.Example.COM"),
+            "{out}"
+        );
+        assert!(
+            out.contains("error sending request for url (https://relay.example.com)"),
+            "{out}"
+        );
+    }
+
+    /// Logs one line through a [`Redacting`] writer whose board check is
+    /// `above_board`; what reached the stream.
+    fn one_line_with(above_board: fn(&[u8]) -> bool) -> String {
+        let written = Capture(Arc::new(Mutex::new(Vec::new())));
+        let sink = written.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Redacting {
+                make: move || sink.clone(),
+                above_board,
+            })
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("a relay call failed · attempt 2");
+        });
+        let out = written.0.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn with_no_board_a_log_line_reaches_the_stream_unchanged() {
+        let out = one_line_with(|_| false);
+        assert_eq!(out.lines().count(), 1, "{out:?}");
+        assert!(
+            out.ends_with("a relay call failed · attempt 2\n"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_line_the_board_printed_is_not_written_again() {
+        assert_eq!(one_line_with(|_| true), "");
+    }
+
+    #[test]
+    fn a_deposit_run_hides_its_endpoints_and_its_walletconnect_project_id() {
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "deposit",
+            "--rpc-url",
+            "https://rpc.example/v2/MainRpcKey-5e6f7a",
+            "--gql-endpoint",
+            "https://gql.example/graphql?token=MainGqlToken-8b9c0d",
+            "--wc-relay-url",
+            "wss://relay.example/?auth=MainRelayAuth-1c2d3e",
+            "--wc-project-id",
+            "MainProject-4f5a6b",
+        ])
+        .unwrap();
+        let Command::Deposit(args) = cli.cmd else {
+            panic!("parsed as another subcommand");
+        };
+        hide_deposit_secrets(&args);
+        let secrets = [
+            "MainRpcKey-5e6f7a",
+            "MainGqlToken-8b9c0d",
+            "MainRelayAuth-1c2d3e",
+            "MainProject-4f5a6b",
+        ];
+        let out = deposit::ui::redact(&secrets.join(" "));
+        for s in secrets {
+            assert!(!out.contains(s), "{out}");
+        }
+    }
+
+    #[test]
+    fn with_nothing_to_hide_a_log_line_goes_out_byte_for_byte() {
+        let line = b"\x1b[2m2026-09-30\x1b[0m WARN at https://h.example/k?x=1 \xff\n";
+        assert_eq!(
+            line_out(line, |s| Cow::Borrowed(s)),
+            Cow::Borrowed(&line[..])
+        );
+        let hidden = line_out(line, |s| Cow::Owned(crate::deposit::ui::redact(s)));
+        assert!(
+            String::from_utf8_lossy(&hidden).contains("at https://h.example "),
+            "{hidden:?}"
+        );
+    }
 }

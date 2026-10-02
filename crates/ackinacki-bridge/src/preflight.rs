@@ -4004,6 +4004,7 @@ pub(crate) mod tests {
         // cargo fallback, so a stale or wrong-arch build is *preferred* and
         // then dies after the burn.
         use std::os::unix::fs::PermissionsExt;
+        let _spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new().unwrap();
         make_artifact_tree(dir.path());
         let bin = dir.path().join("agg/target/release/aggregate-proof");
@@ -4034,6 +4035,7 @@ pub(crate) mod tests {
         // expected path — or a stub someone dropped there to get past a
         // check — would pass a bare exit-status test and then fail on the
         // real invocation, after the burn.
+        let _spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new().unwrap();
         make_artifact_tree(dir.path());
         write_exec(
@@ -4065,6 +4067,7 @@ pub(crate) mod tests {
         // So: have the child publish its pid and then `exec`, and check the
         // pid is gone afterwards. `exec` matters — without it `sh` forks
         // `sleep` and only the shell is killed.
+        let spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new().unwrap();
         let bin_dir = dir.path().join("target/release");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -4108,6 +4111,9 @@ pub(crate) mod tests {
              not start a shell in that time, which is a problem with the runner rather than with \
              kill_on_drop"
         );
+        // The shell that wrote it is past `exec`, and the probe starts
+        // nothing else: the ten seconds below need not keep other tests out.
+        drop(spawning);
 
         let started = std::time::Instant::now();
         let err = probe
@@ -4158,6 +4164,7 @@ pub(crate) mod tests {
         // Create the fixture INSIDE the process cwd so a relative path is a
         // plain file name — no path-arithmetic crate, and no assumption
         // about where the temp dir lives relative to the test binary.
+        let _spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
         let bin_dir = dir.path().join("target/release");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -4180,6 +4187,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn aggregator_check_accepts_a_binary_whose_help_names_our_flags() {
+        let _spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new().unwrap();
         make_artifact_tree(dir.path());
         write_exec(
@@ -4202,6 +4210,7 @@ pub(crate) mod tests {
         // its absence in an otherwise-recognised --help is what must trip
         // this refusal, with a message distinct from "not aggregate-proof at
         // all".
+        let _spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new().unwrap();
         make_artifact_tree(dir.path());
         write_exec(
@@ -4230,6 +4239,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn aggregator_check_accepts_a_binary_whose_help_names_the_source_self_check() {
+        let _spawning = crate::test_forks::spawning();
         let dir = tempfile::TempDir::new().unwrap();
         make_artifact_tree(dir.path());
         write_exec(

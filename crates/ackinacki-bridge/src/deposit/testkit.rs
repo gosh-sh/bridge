@@ -813,11 +813,7 @@ impl MockRelay {
 
     /// Answers the next `irn_subscribe` calls as `answers` says, one each.
     pub fn answer_next_subscribes(&self, answers: impl IntoIterator<Item = SubscribeAnswer>) {
-        self.state
-            .lock()
-            .unwrap()
-            .subscribe_answers
-            .extend(answers);
+        self.state.lock().unwrap().subscribe_answers.extend(answers);
     }
 
     /// From now on, answers every publication tagged `tag` with an error

@@ -813,6 +813,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_node_without_the_approves_block_yet_is_asked_again_in_time() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0, 12_500_000]);
+        // Three reads at block 10 fail, as on a node that has not got it.
+        evm.pinned_misses
+            .store(3, std::sync::atomic::Ordering::SeqCst);
+        let mut w = FakeWallet::eoa();
+        let h = B256::repeat_byte(1);
+        w.send_results.push_back(Ok(h));
+        mined_ok(&evm, h);
+        let (r, took) = timed(&evm, &mut w).await;
+        assert_eq!(r.unwrap(), ApproveOutcome::Approved {
+            tx: Some(h),
+            block: 10
+        });
+        assert!(took < Duration::from_secs(60), "{took:?}");
+        assert_eq!(*evm.pinned_reads.lock().unwrap(), vec![10; 4]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_limit_lowered_in_the_wallet_is_still_exit_21_at_the_approves_block() {
         let evm = FakeEvm::sepolia();
         allowance_seq(&evm, &[1_000_000]);

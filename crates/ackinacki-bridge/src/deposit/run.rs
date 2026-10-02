@@ -2510,9 +2510,10 @@ mod tests {
         // counts 6 transactions, pending ones included.
         let (r, rec) = after_an_approve_on_a_lagging_node(|w| {
             let from = w.wallet.account;
-            let mut counts = w.evm.counts.lock().unwrap();
-            counts.insert((from, "pending"), 6);
-            counts.insert((from, "block"), 7);
+            w.evm.counts.lock().unwrap().insert((from, "pending"), 6);
+            // Counted at the approve's block itself; any other block here
+            // counts as the lagging node does.
+            w.evm.counts_at.lock().unwrap().insert((from, 899), 7);
         })
         .await;
         r.unwrap();
@@ -3489,6 +3490,37 @@ mod tests {
         // Without its lock the operation is not closed: a later resume with
         // the lock fixed does that.
         assert_eq!(store.load(&op).unwrap().stage, OpStage::Reserved);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_operation_whose_lock_cannot_be_taken_answers_from_its_record() {
+        let mut w = World::healthy();
+        let op = w.credited_operation();
+        break_the_lock(w.state.path(), &op);
+        let (p, target) = resuming(&w, &op);
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(s.op_id.as_deref(), Some(op.as_str()));
+        assert_eq!(s.confirmation.unwrap()["confirm_tx"], "btx");
+
+        let w = World::healthy();
+        let op = w.left_signed_operation_from(w.wallet.account, 7);
+        let store = Store::open(w.state.path()).unwrap();
+        let mut rec = store.load(&op).unwrap();
+        rec.fail(
+            OpStage::Signed,
+            FailReason::Reverted,
+            ExitCode::DepositReverted,
+            "the deposit reverted in block 900",
+        );
+        store.write(&mut rec).unwrap();
+        break_the_lock(w.state.path(), &op);
+        let (p, target) = resuming(&w, &op);
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositReverted, "{e}");
+        assert!(
+            e.to_string().contains("the deposit reverted in block 900"),
+            "{e}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -83,9 +83,11 @@ pub struct FakeEvm {
     /// Transactions by hash.
     pub txs: Mutex<HashMap<B256, TxLite>>,
     /// `(address, tag)` → count; `Finalized` absent means the RPC does not know
-    /// the tag. A block number reads `"block"`, or `"pending"` when the test
-    /// set no `"block"`.
+    /// the tag.
     pub counts: Mutex<HashMap<(Address, &'static str), u64>>,
+    /// `(address, block number)` → count at that block; a block the test did
+    /// not set counts as `"pending"` does.
+    pub counts_at: Mutex<HashMap<(Address, u64), u64>>,
     /// Every `Deposit` log on the chain.
     pub logs: Mutex<Vec<DepositLogRef>>,
     /// `probe_block` fails with this text.
@@ -150,6 +152,7 @@ impl Default for FakeEvm {
             receipts: Mutex::default(),
             txs: Mutex::default(),
             counts: Mutex::default(),
+            counts_at: Mutex::default(),
             logs: Mutex::default(),
             probe_error: Mutex::default(),
             revert: Mutex::default(),
@@ -365,16 +368,15 @@ impl EvmRead for FakeEvm {
             BlockTag::Latest => "latest",
             BlockTag::Pending => "pending",
             BlockTag::Finalized => "finalized",
-            BlockTag::Number(_) => "block",
+            BlockTag::Number(n) => match self.counts_at.lock().unwrap().get(&(a, n)) {
+                Some(c) => return Ok(*c),
+                None => "pending",
+            },
         };
-        let counts = self.counts.lock().unwrap();
-        counts
+        self.counts
+            .lock()
+            .unwrap()
             .get(&(a, key))
-            .or_else(|| {
-                (key == "block")
-                    .then(|| counts.get(&(a, "pending")))
-                    .flatten()
-            })
             .copied()
             .ok_or_else(|| anyhow::anyhow!("unknown tag {key}"))
     }

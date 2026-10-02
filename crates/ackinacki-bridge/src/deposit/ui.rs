@@ -1836,8 +1836,15 @@ mod tests {
         assert!(shown[10].starts_with("scan the QR code"), "{shown:#?}");
     }
 
+    /// Held by the tests that put a board into [`LOG_BOARD`], which is one
+    /// for the whole process.
+    static LOG_BOARD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn log_lines_go_above_the_board_only_while_it_is_on_the_screen() {
+        let _one_at_a_time = LOG_BOARD_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (log, _codes, ui) = board(Settings::default(), true);
         ui.take_log_lines();
         assert!(
@@ -1851,6 +1858,33 @@ mod tests {
         let s = text(&log);
         assert_eq!(s.matches("while the board is up").count(), 1, "{s}");
         assert!(!s.contains("before the first frame") && !s.contains("after the board"));
+    }
+
+    #[test]
+    fn a_log_line_from_a_thread_drawing_the_board_goes_out_without_it() {
+        let _one_at_a_time = LOG_BOARD_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (log, _codes, ui) = board(Settings::default(), true);
+        ui.take_log_lines();
+        ui.step(StepId::Anchor, StepState::Running, "");
+        let ui = Arc::new(ui);
+        let (done, answered) = std::sync::mpsc::channel();
+        let drawing = ui.clone();
+        std::thread::spawn(move || {
+            // As if the board's own code logged while it holds its lock.
+            let _held = drawing.lock();
+            done.send(log_above_board(b"WARN logged while drawing\n"))
+                .unwrap();
+        });
+        let taken = answered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a log line from a thread holding the board's lock must not wait for it");
+        assert!(!taken, "it goes out as if there were no board");
+        assert!(!text(&log).contains("logged while drawing"));
+        // Another thread waits for the lock and prints above the board.
+        assert!(log_above_board(b"WARN from elsewhere\n"));
+        assert_eq!(text(&log).matches("from elsewhere").count(), 1);
     }
 
     #[test]

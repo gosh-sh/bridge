@@ -75,6 +75,68 @@ impl WalletConnectWallet {
         let (r, s) = self.parts()?;
         session::request(r, s, &chain, method, params, t).await
     }
+
+    /// The account the settled session `s` shares on the deposit network:
+    /// asks the wallet to switch to the network, or to add it, when the
+    /// session has no account there, and holds the account to
+    /// `--from-address` when one is given.
+    async fn account_on_network(
+        &self,
+        r: &mut relay::Relay,
+        s: &mut session::Session,
+    ) -> Result<Address, WalletError> {
+        let net = self.cfg.network;
+        if s.accounts_on(&net.caip2()).is_empty() {
+            let any_chain = s
+                .accounts
+                .first()
+                .and_then(|a| a.rsplit_once(':'))
+                .map(|(c, _)| c.to_string())
+                .ok_or_else(|| WalletError::Other("the wallet shared no accounts".into()))?;
+            let hex_id = format!("{:#x}", net.chain_id());
+            let t = self.cfg.request_timeout;
+            match session::request(
+                r,
+                s,
+                &any_chain,
+                "wallet_switchEthereumChain",
+                json!([{ "chainId": hex_id }]),
+                t,
+            )
+            .await
+            {
+                Ok(_) => {},
+                Err(WalletError::Other(e)) if e.starts_with("4902") => {
+                    session::request(
+                        r,
+                        s,
+                        &any_chain,
+                        "wallet_addEthereumChain",
+                        json!([net.eip3085()]),
+                        t,
+                    )
+                    .await?;
+                },
+                Err(e) => return Err(e),
+            }
+            session::wait_for_accounts_on(r, s, &net.caip2(), t)
+                .await
+                .map_err(|e| match e {
+                    WalletError::Timeout => {
+                        WalletError::Other(format!("the wallet did not add {}", net.name()))
+                    },
+                    other => other,
+                })?;
+        }
+        let accounts = s.accounts_on(&net.caip2());
+        match self.cfg.expect_from {
+            Some(f) if accounts.contains(&f) => Ok(f),
+            Some(f) => Err(WalletError::Other(format!(
+                "the wallet connected {accounts:?}, not --from-address {f}"
+            ))),
+            None => Ok(accounts[0]),
+        }
+    }
 }
 
 /// Unix time in seconds.
@@ -123,61 +185,22 @@ impl Wallet for WalletConnectWallet {
             ),
         ]);
         let mut s = session::propose_and_settle(&mut r, &uri, net, self.cfg.pair_timeout).await?;
-        if s.accounts_on(&net.caip2()).is_empty() {
-            let any_chain = s
-                .accounts
-                .first()
-                .and_then(|a| a.rsplit_once(':'))
-                .map(|(c, _)| c.to_string())
-                .ok_or_else(|| WalletError::Other("the wallet shared no accounts".into()))?;
-            let hex_id = format!("{:#x}", net.chain_id());
-            let t = self.cfg.request_timeout;
-            match session::request(
-                &mut r,
-                &mut s,
-                &any_chain,
-                "wallet_switchEthereumChain",
-                json!([{ "chainId": hex_id }]),
-                t,
-            )
-            .await
-            {
-                Ok(_) => {},
-                Err(WalletError::Other(e)) if e.starts_with("4902") => {
-                    session::request(
-                        &mut r,
-                        &mut s,
-                        &any_chain,
-                        "wallet_addEthereumChain",
-                        json!([net.eip3085()]),
-                        t,
-                    )
-                    .await?;
-                },
-                Err(e) => return Err(e),
-            }
-            session::wait_for_accounts_on(&mut r, &mut s, &net.caip2(), t)
-                .await
-                .map_err(|e| match e {
-                    WalletError::Timeout => {
-                        WalletError::Other(format!("the wallet did not add {}", net.name()))
-                    },
-                    other => other,
-                })?;
-        }
-        let accounts = s.accounts_on(&net.caip2());
-        let account = match self.cfg.expect_from {
-            Some(f) if accounts.contains(&f) => f,
-            Some(f) => {
-                return Err(WalletError::Other(format!(
-                    "the wallet connected {accounts:?}, not --from-address {f}"
-                )))
+        // The wallet now holds a session. One that does not become this
+        // run's is ended for the wallet too, or it lingers there until it
+        // expires; the error that ended it is the answer.
+        match self.account_on_network(&mut r, &mut s).await {
+            Ok(account) => {
+                self.relay = Some(r);
+                self.session = Some(s);
+                Ok(account)
             },
-            None => accounts[0],
-        };
-        self.relay = Some(r);
-        self.session = Some(s);
-        Ok(account)
+            Err(e) => {
+                session::disconnect(&r, &s).await;
+                // Stops the socket task.
+                drop(r);
+                Err(e)
+            },
+        }
     }
 
     async fn personal_sign(
@@ -348,6 +371,117 @@ mod tests {
         let e = w.connect(ui.as_ref()).await.unwrap_err();
         watcher.abort();
         assert!(matches!(e, WalletError::Other(m) if m.contains("--from-address")));
+    }
+
+    /// Plays a wallet the test scripts by hand: once the URI is shown, it
+    /// pairs sharing `accounts`, then hands the relay, the session topic and
+    /// its key to `script`.
+    fn scripted_when_shown<F, Fut, T>(
+        ui: Arc<RecordingUi>,
+        url: String,
+        accounts: Vec<String>,
+        script: F,
+    ) -> tokio::task::JoinHandle<T>
+    where
+        F: FnOnce(relay::Relay, String, [u8; 32]) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + Send,
+        T: Send + 'static,
+    {
+        tokio::spawn(async move {
+            let uri = loop {
+                let shown = ui.events().into_iter().find_map(|e| match e {
+                    UiEvent::Qr(u) => Some(u),
+                    _ => None,
+                });
+                if let Some(u) = shown {
+                    break session::PairingUri::parse(&u).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            let mut r = relay::Relay::connect(url).await.unwrap();
+            let (topic, sym) = MockWalletPeer::pair(&mut r, &uri, &accounts).await;
+            script(r, topic, sym).await
+        })
+    }
+
+    /// What the scripted wallet saw after pairing: answers each request with
+    /// `answer` and returns the tag of `wc_sessionDelete`, or `None` if the
+    /// session went quiet without one.
+    async fn until_deleted(
+        mut r: relay::Relay,
+        topic: String,
+        sym: [u8; 32],
+        answer: fn(&serde_json::Value) -> serde_json::Value,
+    ) -> Option<u32> {
+        let mut answered = std::collections::HashSet::new();
+        while let Some((v, tag)) =
+            MockWalletPeer::next(&mut r, &topic, &sym, Duration::from_secs(10)).await
+        {
+            if v["method"] == "wc_sessionDelete" {
+                return Some(tag);
+            }
+            if v["method"] == "wc_sessionRequest" && answered.insert(v["id"].as_u64().unwrap()) {
+                let reply = answer(&v);
+                MockWalletPeer::send(&r, &topic, &sym, reply, session::TAG_REQUEST_RESP).await;
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn a_from_address_the_wallet_did_not_share_ends_the_session_for_the_wallet() {
+        let relay = MockRelay::start().await;
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        let ui = Arc::new(RecordingUi::new(true));
+        let mut c = cfg(&relay, Duration::from_secs(10));
+        let other = Address::repeat_byte(0x99);
+        c.expect_from = Some(other);
+        let mut w = WalletConnectWallet::new(c);
+        let accounts = vec![format!("eip155:11155111:{:#x}", signer.address())];
+        let wallet = scripted_when_shown(ui.clone(), relay.url(), accounts, |r, t, k| {
+            until_deleted(r, t, k, |_| serde_json::Value::Null)
+        });
+        let e = w.connect(ui.as_ref()).await.unwrap_err();
+        assert_eq!(
+            e,
+            WalletError::Other(format!(
+                "the wallet connected {:?}, not --from-address {other}",
+                vec![signer.address()]
+            )),
+            "the error is the one that ended the connection"
+        );
+        let seen = tokio::time::timeout(Duration::from_secs(20), wallet)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen, Some(session::TAG_DELETE), "the wallet was told");
+    }
+
+    #[tokio::test]
+    async fn a_chain_switch_the_wallet_refuses_ends_the_session_for_the_wallet() {
+        let relay = MockRelay::start().await;
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        let ui = Arc::new(RecordingUi::new(true));
+        let mut w = WalletConnectWallet::new(cfg(&relay, Duration::from_secs(10)));
+        // Shared on mainnet only: the CLI asks the wallet to switch.
+        let accounts = vec![format!("eip155:1:{:#x}", signer.address())];
+        let wallet = scripted_when_shown(ui.clone(), relay.url(), accounts, |r, t, k| {
+            until_deleted(r, t, k, |v| {
+                assert_eq!(
+                    v["params"]["request"]["method"],
+                    "wallet_switchEthereumChain"
+                );
+                serde_json::json!({"id": v["id"], "jsonrpc": "2.0",
+                    "error": {"code": 4001, "message": "User rejected"}})
+            })
+        });
+        let e = w.connect(ui.as_ref()).await.unwrap_err();
+        assert_eq!(e, WalletError::Rejected);
+        let seen = tokio::time::timeout(Duration::from_secs(20), wallet)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen, Some(session::TAG_DELETE), "the wallet was told");
     }
 
     #[tokio::test]

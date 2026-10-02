@@ -10,9 +10,10 @@
 
 use std::{
     borrow::Cow,
+    cell::Cell,
     collections::HashMap,
     io::{IsTerminal as _, Write},
-    sync::{Arc, Mutex, RwLock, Weak},
+    sync::{Arc, Mutex, MutexGuard, RwLock, Weak},
     time::{Duration, Instant},
 };
 
@@ -923,7 +924,59 @@ impl Board {
             self.drawn = 0;
         }
     }
+
+    /// Prints the log line `line` above the board, as a warning is, when
+    /// the board is on the screen; `false` when it is not — before its
+    /// first frame, while a question stands where it was, once it is gone.
+    fn log(&mut self, line: &[u8]) -> bool {
+        if self.closed || self.drawn == 0 {
+            return false;
+        }
+        self.draw(&String::from_utf8_lossy(line));
+        true
+    }
 }
+
+thread_local! {
+    /// This thread holds a board's lock.
+    static IN_BOARD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A board's lock, held by this thread. A log line this thread writes
+/// meanwhile does not wait for it: it goes out as if there were no board.
+struct Held<'a>(MutexGuard<'a, Board>);
+
+/// Takes the board's lock, even after a panic elsewhere.
+fn hold(board: &Mutex<Board>) -> Held<'_> {
+    let guard = board.lock().unwrap_or_else(|p| p.into_inner());
+    IN_BOARD.set(true);
+    Held(guard)
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = Board;
+
+    fn deref(&self) -> &Board {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Board {
+        &mut self.0
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        IN_BOARD.set(false);
+    }
+}
+
+/// The board on this process's terminal, once a run has one: log lines go
+/// above it while it is on the screen. Written under the cursor, a line
+/// would be painted over by the next frame and leave a stale row above it.
+static LOG_BOARD: Mutex<Option<Weak<Mutex<Board>>>> = Mutex::new(None);
 
 /// Redraws the board every `every` while its timers move; returns once the
 /// board is gone.
@@ -933,7 +986,7 @@ fn keep_ticking(board: &Weak<Mutex<Board>>, every: Duration) {
         let Some(board) = board.upgrade() else {
             return;
         };
-        let mut b = board.lock().unwrap_or_else(|p| p.into_inner());
+        let mut b = hold(&board);
         if b.closed {
             return;
         }
@@ -983,8 +1036,39 @@ impl TtyBoard {
     }
 
     /// The board, even after a panic elsewhere.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Board> {
-        self.board.lock().unwrap_or_else(|p| p.into_inner())
+    fn lock(&self) -> Held<'_> {
+        hold(&self.board)
+    }
+}
+
+/// Prints `line`, one complete log line as the log writes it, above the
+/// board of this process's terminal while it is on the screen. `false`
+/// when no board is, or when this thread is drawing it, and the caller
+/// writes the line as it would without a board.
+pub fn log_above_board(line: &[u8]) -> bool {
+    if IN_BOARD.get() {
+        return false;
+    }
+    let board = LOG_BOARD
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(Weak::upgrade);
+    board.is_some_and(|b| hold(&b).log(line))
+}
+
+impl TtyBoard {
+    /// Log lines of this process go above this board while it is on the
+    /// screen.
+    fn take_log_lines(&self) {
+        *LOG_BOARD.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::downgrade(&self.board));
+    }
+
+    /// Prints the log line `line` above the board when it is on the
+    /// screen; `false` when it is not.
+    #[cfg(test)]
+    fn log_line(&self, line: &[u8]) -> bool {
+        self.lock().log(line)
     }
 }
 
@@ -1129,6 +1213,9 @@ struct Terminal {
     width: fn() -> Option<usize>,
     /// How often the board redraws itself while a step runs.
     tick: Option<Duration>,
+    /// The process's log lines are written to `stderr` too, and a board
+    /// takes them.
+    logs: bool,
 }
 
 impl Terminal {
@@ -1141,6 +1228,7 @@ impl Terminal {
             stderr_tty: std::io::stderr().is_terminal(),
             width: stderr_width,
             tick: Some(TICK),
+            logs: true,
         }
     }
 }
@@ -1173,7 +1261,11 @@ fn pick_from(
         non_interactive: g.non_interactive,
     };
     if t.stderr_tty {
-        return Arc::new(TtyBoard::build(t.stderr, codes, settings, t.width, t.tick));
+        let board = TtyBoard::build(t.stderr, codes, settings, t.width, t.tick);
+        if t.logs {
+            board.take_log_lines();
+        }
+        return Arc::new(board);
     }
     Arc::new(PlainLines::build(t.stderr, codes, settings))
 }
@@ -1599,6 +1691,96 @@ mod tests {
         assert!(warn_at < pair_at, "warnings print above the board");
     }
 
+    /// What a terminal shows once `s` is written to it, top to bottom:
+    /// text, newlines, and the cursor-up, erase-line and erase-below
+    /// sequences the board uses. The empty line the cursor ends on is left
+    /// out.
+    fn screen(s: &str) -> Vec<String> {
+        let mut lines = vec![String::new()];
+        let mut row = 0;
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => {
+                    assert_eq!(chars.next(), Some('['));
+                    let mut arg = String::new();
+                    let command = loop {
+                        let c = chars.next().unwrap();
+                        if c.is_ascii_alphabetic() {
+                            break c;
+                        }
+                        arg.push(c);
+                    };
+                    match command {
+                        'A' => row -= arg.parse::<usize>().unwrap_or(1),
+                        'K' => lines[row].clear(),
+                        'J' => {
+                            lines[row].clear();
+                            lines.truncate(row + 1);
+                        },
+                        _ => {},
+                    }
+                },
+                '\n' => {
+                    row += 1;
+                    if row == lines.len() {
+                        lines.push(String::new());
+                    }
+                },
+                c => lines[row].push(c),
+            }
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    }
+
+    #[test]
+    fn a_log_line_lands_above_the_board_and_the_next_frame_is_whole() {
+        let (log, _codes, ui) = board(Settings::default(), true);
+        ui.step(StepId::Preflight, StepState::Running, "");
+        const LINE: &str = "2026-10-02T12:00:00Z  WARN a WalletConnect relay call failed\n";
+        if !ui.log_line(LINE.as_bytes()) {
+            // What the log writer does without a board: the same terminal.
+            log.lock().unwrap().extend_from_slice(LINE.as_bytes());
+        }
+        ui.step(StepId::Preflight, StepState::Done, "ok");
+        ui.status("scan the QR code");
+        let shown = screen(&text(&log));
+        assert_eq!(shown[0], LINE.trim_end(), "{shown:#?}");
+        assert_eq!(
+            shown.iter().filter(|l| l.contains("relay call failed")).count(),
+            1,
+            "{shown:#?}"
+        );
+        assert_eq!(
+            shown.iter().filter(|l| l.contains("preflight")).count(),
+            1,
+            "no stale row: {shown:#?}"
+        );
+        assert_eq!(shown.len(), 1 + StepId::ALL.len() + 1, "{shown:#?}");
+        assert!(shown[1].starts_with('✔') && shown[1].contains("ok"), "{shown:#?}");
+        assert!(shown[10].starts_with("scan the QR code"), "{shown:#?}");
+    }
+
+    #[test]
+    fn log_lines_go_above_the_board_only_while_it_is_on_the_screen() {
+        let (log, _codes, ui) = board(Settings::default(), true);
+        ui.take_log_lines();
+        assert!(
+            !log_above_board(b"before the first frame\n"),
+            "nothing to keep clear of yet"
+        );
+        ui.step(StepId::Anchor, StepState::Running, "");
+        assert!(log_above_board(b"WARN while the board is up\n"));
+        drop(ui);
+        assert!(!log_above_board(b"after the board\n"));
+        let s = text(&log);
+        assert_eq!(s.matches("while the board is up").count(), 1, "{s}");
+        assert!(!s.contains("before the first frame") && !s.contains("after the board"));
+    }
+
     #[test]
     fn the_five_glyphs_of_the_checklist() {
         let all: String = [
@@ -1807,6 +1989,7 @@ mod tests {
                 stderr_tty,
                 width: || None,
                 tick: None,
+                logs: false,
             });
             ui.status("hello");
             drop(ui);

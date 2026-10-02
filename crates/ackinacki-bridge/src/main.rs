@@ -295,7 +295,10 @@ fn init_tracing() {
     )]
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(Redacting(std::io::stderr))
+        .with_writer(Redacting {
+            make: std::io::stderr,
+            above_board: deposit::ui::log_above_board,
+        })
         .with_ansi(is_tty)
         .with_target(false)
         .try_init();
@@ -307,7 +310,13 @@ fn init_tracing() {
 /// looked up as each line is written, so the ones registered after tracing
 /// started are hidden too. With none registered — any run but a deposit —
 /// every line goes out byte for byte.
-struct Redacting<M>(M);
+struct Redacting<M> {
+    /// The stream a line goes to.
+    make: M,
+    /// Prints a complete line above a board on the screen; `false` when no
+    /// board is (see [`deposit::ui::log_above_board`]).
+    above_board: fn(&[u8]) -> bool,
+}
 
 impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Redacting<M> {
     /// One line, held until it is complete.
@@ -316,8 +325,9 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Redacting<M> {
     /// A holder for the next line, in front of the stream `M` makes.
     fn make_writer(&'a self) -> Self::Writer {
         RedactedLine {
-            out: self.0.make_writer(),
+            out: self.make.make_writer(),
             buf: Vec::new(),
+            above_board: self.above_board,
         }
     }
 }
@@ -329,6 +339,8 @@ struct RedactedLine<W: std::io::Write> {
     out: W,
     /// The line so far.
     buf: Vec<u8>,
+    /// See [`Redacting::above_board`].
+    above_board: fn(&[u8]) -> bool,
 }
 
 impl<W: std::io::Write> std::io::Write for RedactedLine<W> {
@@ -345,9 +357,13 @@ impl<W: std::io::Write> std::io::Write for RedactedLine<W> {
 }
 
 impl<W: std::io::Write> Drop for RedactedLine<W> {
-    /// Writes the line, redacted.
+    /// Writes the line, redacted: above the deposit board while one is on
+    /// the screen, to `out` otherwise.
     fn drop(&mut self) {
         let line = line_out(&self.buf, deposit::ui::redact_in_deposit_run);
+        if (self.above_board)(&line) {
+            return;
+        }
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a log line that cannot be written has nowhere else to go"
@@ -395,7 +411,10 @@ mod tests {
         let written = Capture(Arc::new(Mutex::new(Vec::new())));
         let sink = written.clone();
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(Redacting(move || sink.clone()))
+            .with_writer(Redacting {
+                make: move || sink.clone(),
+                above_board: |_| false,
+            })
             .with_ansi(false)
             .finish();
         tracing::subscriber::with_default(subscriber, || {
@@ -420,6 +439,40 @@ mod tests {
             out.contains("error sending request for url (https://relay.example.com)"),
             "{out}"
         );
+    }
+
+    /// Logs one line through a [`Redacting`] writer whose board check is
+    /// `above_board`; what reached the stream.
+    fn one_line_with(above_board: fn(&[u8]) -> bool) -> String {
+        let written = Capture(Arc::new(Mutex::new(Vec::new())));
+        let sink = written.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Redacting {
+                make: move || sink.clone(),
+                above_board,
+            })
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("a relay call failed · attempt 2");
+        });
+        let out = written.0.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn with_no_board_a_log_line_reaches_the_stream_unchanged() {
+        let out = one_line_with(|_| false);
+        assert_eq!(out.lines().count(), 1, "{out:?}");
+        assert!(
+            out.ends_with("a relay call failed · attempt 2\n"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_line_the_board_printed_is_not_written_again() {
+        assert_eq!(one_line_with(|_| true), "");
     }
 
     #[test]

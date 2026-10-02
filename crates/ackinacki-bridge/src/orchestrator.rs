@@ -1029,6 +1029,59 @@ pub async fn run(
         // N-long for cross-thread walks — the on-chain bundle path enforces
         // `SameThreadEndpointsMismatch()` and the `HopChain*Mismatch()` /
         // `AdjacentHopBlockIdMismatch()` invariants on both shapes.
+        //
+        // Preflight the inner-VK binding (main's PR #67): fetch the deployed
+        // withdrawal adapter, read its immutable `vkDigest`, and compare it
+        // against word 25 of the produced calldata (`12 accumulator + 13 inner
+        // PIs = word 25`, two slots past main's 11-PI layout because the
+        // multi-thread Circuit 4 adds `xBlockId` / `yBlockId` at slots 23/24).
+        let adapter =
+            ro_bridge
+                .withdrawal_verifier()
+                .await
+                .map_err(|e| CliError::EthSubmitFailed {
+                    reason: format!(
+                        "bridgeWithdrawalVerifier() failed before the dry-run: {e}. The burn is \
+                         already on the wire; this call is a read."
+                    ),
+                    source: Some(anyhow::Error::new(e)),
+                })?;
+        let on_chain_digest =
+            ro_bridge
+                .adapter_vk_digest(adapter)
+                .await
+                .map_err(|e| CliError::EthSubmitFailed {
+                    reason: format!(
+                        "withdrawal adapter {adapter}: vkDigest() failed: {e}. If this is an RPC \
+                         error, retry the read. If the adapter has no vkDigest(), it predates the \
+                         inner-VK binding. The bridge stores the adapter as an immutable, so the \
+                         fix is a new adapter and a new bridge. The burn is already on the wire."
+                    ),
+                    source: Some(anyhow::Error::new(e)),
+                })?;
+        let digest_off = (12 + 13) * 32;
+        let produced = proof_bytes
+            .get(digest_off..digest_off + 32)
+            .ok_or_else(|| CliError::EthSubmitFailed {
+                reason: format!(
+                    "produced withdraw calldata is {} bytes, shorter than word 25. The burn is \
+                     already on the wire; regenerate the proof with this build's aggregator.",
+                    proof_bytes.len()
+                ),
+                source: None,
+            })?;
+        if produced != on_chain_digest.as_slice() {
+            return Err(CliError::EthSubmitFailed {
+                reason: format!(
+                    "produced calldata word 25 does not match the withdrawal adapter's vkDigest \
+                     ({on_chain_digest}). A dry-run would revert WithdrawalProofRejected and a \
+                     re-run would produce the same proof. The burn is already on the wire. The \
+                     local Circuit-4 keys do not match the deployed pin; redeploying the adapter \
+                     alone does not help, because the bridge holds it as an immutable."
+                ),
+                source: None,
+            });
+        }
         match ro_bridge
             .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
             .await
@@ -1137,6 +1190,7 @@ pub async fn run(
         },
         WithdrawSubmitOutcome::Reverted {
             reason,
+            permanent: _,
         } => {
             // Keep the record so a follow-up run resumes here instead of
             // burning again. The proof itself is NOT kept: it is

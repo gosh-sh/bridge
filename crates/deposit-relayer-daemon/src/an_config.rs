@@ -26,8 +26,10 @@ fn default_confirm_timeout_secs() -> u64 {
 /// the CLI also exposes the fields as flags / env vars.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnConfig {
-    /// GraphQL endpoint for tvm_client 3.0 (e.g. `http://127.0.0.1:11000/graphql`).
-    /// Required for live submission.
+    /// tvm_client 3.0 endpoint (e.g. `http://127.0.0.1:11000/graphql`).
+    /// The host must serve GraphQL *and* `/v2/messages`; a gateway that
+    /// only answers `/graphql` cannot `send_message`. Required for live
+    /// submission.
     #[serde(default)]
     pub graphql_url: String,
     /// Path to the relayer's tvm-cli keys JSON (signer for `finalizeDeposit`).

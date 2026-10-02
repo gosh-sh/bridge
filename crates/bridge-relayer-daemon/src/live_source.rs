@@ -190,7 +190,8 @@ fn map_driver_err(e: DriverError) -> RelayerError {
             cursor,
             rotation_seqno,
         } => RelayerError::AckiNacki(format!(
-            "ack too early: cursor={cursor} rotation_seqno={rotation_seqno}"
+            "ack_bk_update deferred: cursor {cursor} + stride ≤ rotation {rotation_seqno}; \
+             retry after the next bundle ack"
         )),
         DriverError::Other(inner) => RelayerError::Other(inner.to_string()),
     }

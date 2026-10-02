@@ -153,6 +153,12 @@ contract AckiNackiBridge {
     /// @notice Address that receives harvested yield (defaults to owner)
     address public yieldRecipient;
 
+    /// @notice Global pause flag. When `true`, user-facing entrypoints
+    ///         (`deposit`, `verifyBlock`, `applyBkSetUpdate`,
+    ///         `withdrawByProofBundle`) revert `BridgePaused`. Owner-only
+    ///         AAVE management remains available so funds can be evacuated.
+    bool public paused;
+
     // Reentrancy guard (avoid pulling in OZ for a single uint256)
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -330,6 +336,11 @@ contract AckiNackiBridge {
     /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
     ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
     event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
+
+    /// @notice Bridge paused — emitted when the owner sets `paused = true`.
+    event Paused(address indexed by);
+    /// @notice Bridge unpaused — emitted when the owner sets `paused = false`.
+    event Unpaused(address indexed by);
 
     /// @notice Emitted on every successful `verifyBlock` call.
     /// @param blockId AN block identifier (Merkle root committed by both proofs).
@@ -516,6 +527,10 @@ contract AckiNackiBridge {
     ///         on demand. Surfaced as a distinct error to make debugging
     ///         easier than `WithdrawTransferFailed`.
     error WithdrawTreasuryShortfall(uint256 requested, uint256 available);
+    /// @notice User-facing entrypoints are paused. Owner-only AAVE
+    ///         management remains available.
+    error BridgePaused();
+    error AlreadyInThatPauseState();
 
     // ---------------------------------------------------------------------
     // Modifiers
@@ -523,6 +538,12 @@ contract AckiNackiBridge {
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    /// @dev User-facing entrypoints revert when the bridge is paused.
+    modifier whenNotPaused() {
+        if (paused) revert BridgePaused();
         _;
     }
 
@@ -742,7 +763,11 @@ contract AckiNackiBridge {
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
     ///                    A wrong non-zero destination is one-way (no refund).
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant {
+    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
@@ -821,7 +846,7 @@ contract AckiNackiBridge {
         uint8 numLayers,
         uint256[MAX_LAYER_HASHES] calldata layerHashes,
         uint256 prevMaxLevelLayerHash
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         // Feature gate: all three verifier slots must be wired.
         if (
             address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)
@@ -988,7 +1013,7 @@ contract AckiNackiBridge {
         bytes32 siblingH01,
         bytes32 siblingH4_7,
         bytes32 siblingH8_15
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         if (address(primaryVerifier) == address(0) || address(fallbackVerifier) == address(0)) {
             revert BkUpdateDisabled();
         }
@@ -1377,6 +1402,13 @@ contract AckiNackiBridge {
     ///      recipient-shape / canonical-Fr / anchor-window checks in the
     ///      same order as the circuit binds them.
     ///
+    /// @dev Permissionless. The caller pays gas but the payout goes to the
+    ///      event's `recipient`. Typical caller is a relayer running
+    ///      `bridge-relayer-daemon`. Gated by the owner-controlled pause
+    ///      switch — reverts `BridgePaused` while paused, matching the
+    ///      pause-coverage invariant that `deposit`, `verifyBlock` and
+    ///      `applyBkSetUpdate` already uphold.
+    ///
     /// @param finalPublicInputs 13 slots matching
     ///        `IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs`
     ///        field order.
@@ -1392,7 +1424,7 @@ contract AckiNackiBridge {
         bytes calldata finalProof,
         uint256[][] calldata hopPublicInputs,
         bytes[] calldata hopProofs
-    ) external nonReentrant returns (bool success) {
+    ) external nonReentrant whenNotPaused returns (bool success) {
         if (address(bridgeWithdrawalFinalVerifier) == address(0)
             || address(bridgeMultiHopVerifier) == address(0)) {
             revert WithdrawByProofBundleDisabled();
@@ -1715,6 +1747,23 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(yieldRecipient, toSkim);
         }
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
+    }
+
+    /// @notice Pause user-facing entrypoints (`deposit`, `verifyBlock`,
+    ///         `applyBkSetUpdate`, `withdrawByProofBundle`). Reverts if
+    ///         already paused. Owner-only AAVE management stays available
+    ///         so the owner can evacuate funds while paused.
+    function pause() external onlyOwner {
+        if (paused) revert AlreadyInThatPauseState();
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @notice Re-enable user-facing entrypoints. Reverts if not paused.
+    function unpause() external onlyOwner {
+        if (!paused) revert AlreadyInThatPauseState();
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     /// @notice Enable or disable further supplies to AAVE.

@@ -44,7 +44,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.0";
+    string constant version = "1.4.1";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -483,6 +483,10 @@ contract EthBeaconLightClient {
     /// @notice Re-send an already-proven hash to `USDCBridge`. Recovers a
     ///         dropped `acceptBlockHashFromLightClient` (bounce, mis-set sink,
     ///         push that landed before `setLightClient`). Does not re-prove.
+    ///         `blockHash` is the stored anchor key (`_piForm` packing), not
+    ///         the Ethereum byte order a block explorer shows. The bridge is
+    ///         sent `_piForm(blockHash)`, the Ethereum-order hash
+    ///         `finalizeDeposit` looks up.
     function rePushAnchor(uint256 blockHash) public {
         require(_isLive(blockHash), ERR_NOT_PROVEN);
         tvm.accept();
@@ -490,6 +494,11 @@ contract EthBeaconLightClient {
         ensureBalance();
     }
 
+    // `h` is the stored key. The bridge keys `_acceptedBlockHash` by the hash
+    // in Ethereum byte order, which is what `_parseBlockHash` rebuilds from
+    // the deposit public inputs, so both sink calls send `_piForm(h)`:
+    // `_piForm` is its own inverse. Sending `h` itself admits a word no
+    // deposit ever looks up.
     function _notifySink(uint256 h) private {
         // bounce: true so a rejected sink returns the 1 vmshell and
         // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
@@ -498,7 +507,7 @@ contract EthBeaconLightClient {
             value: 1 vmshell,
             bounce: true,
             flag: 1
-        }(_l1ChainId, h);
+        }(_l1ChainId, _piForm(h));
     }
 
     function _forgetSink(uint256 h) private {
@@ -506,7 +515,7 @@ contract EthBeaconLightClient {
             value: 1 vmshell,
             bounce: true,
             flag: 1
-        }(_l1ChainId, h);
+        }(_l1ChainId, _piForm(h));
     }
 
     onBounce(TvmSlice /*body*/) external {
@@ -681,12 +690,17 @@ contract EthBeaconLightClient {
     }
 
     /// @notice Whether a finalized execution block hash has been proven canonical.
+    ///         Takes the stored anchor key (`_piForm` packing), as `getHead`
+    ///         returns it, not the Ethereum byte order.
     function isProvenExecutionBlockHash(uint256 blockHash) external view returns (bool) {
         return _isLive(blockHash);
     }
 
-    /// @notice Drop-in canonicality query matching `USDCBridge.isAcceptedBlockHash`:
-    ///         true only for the followed L1 and a live (in-window) proven hash.
+    /// @notice True only for the followed L1 and a live (in-window) proven hash.
+    ///         Takes the stored anchor key, like `isProvenExecutionBlockHash`.
+    ///         Not interchangeable with `USDCBridge.isAcceptedBlockHash`: for
+    ///         the same block, the bridge's getter takes `_piForm` of the key
+    ///         passed here, the hash in Ethereum byte order.
     function isAcceptedBlockHash(uint256 chainId, uint256 blockHash) external view returns (bool) {
         return chainId == _l1ChainId && _isLive(blockHash);
     }
@@ -730,7 +744,10 @@ contract EthBeaconLightClient {
     /// @dev Reads the 10 step public inputs out of the PROVEN blob (the proof was
     ///      verified over this exact byte string, so every value is proof-bound).
     ///      Layout = 10 × 32-byte LE Fr; 32-byte roots are split hi/lo (hi first)
-    ///      exactly as `USDCBridge._parseBlockHash` reassembles the deposit hash.
+    ///      and recombined `hi << 128 | lo`, as `USDCBridge._parseBlockHash`
+    ///      does. The step circuit fills each half little-endian (`node_hi_lo`),
+    ///      so `executionBlockHash` comes out as the stored key (`_piForm`), not
+    ///      the Ethereum-order hash the bridge reads out of a deposit.
     function _parsePublicInputs(bytes publicInputs) private pure returns (StepPI pi) {
         TvmSlice s = publicInputs.toSlice();
         uint256[] fr;

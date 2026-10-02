@@ -1,13 +1,19 @@
 # Byte size of every committed SHPLONK artefact. EIP-170 limit is
 # 24576 B for the runtime .bin; scripts/check_shplonk_artefacts.sh fails when
 # these figures drift, so a regeneration shows its growth in the diff.
-21476  BridgeWithdrawalAggregatorVerifier.bin
-3712  BridgeWithdrawalAggregatorVerifier_calldata.bin
-23722  BridgeMultiHopAggregatorVerifier.bin
-4448  BridgeMultiHopAggregatorVerifier_calldata.bin
-21493  FallbackAggregatorVerifier.bin
-3840  FallbackAggregatorVerifier_calldata.bin
-23111  LayerHashesAggregatorVerifier.bin
-4160  LayerHashesAggregatorVerifier_calldata.bin
-21494  PrimaryAggregatorVerifier.bin
-3840  PrimaryAggregatorVerifier_calldata.bin
+#
+# All five verifiers combine inner-VK-digest binding (+1 instance word in
+# calldata, Yul grows a few hundred bytes) with multithreading's circuit
+# shapes (Withdrawal 13-PI incl. xBlockId/yBlockId; LayerHashes
+# k_outer=22; MultiHop 2-PI). MultiHop sits at 23883 B / 97.2 % EIP-170 —
+# above the 90 % soft-warn line, 693 B of margin remain.
+21655  PrimaryAggregatorVerifier.bin
+3872  PrimaryAggregatorVerifier_calldata.bin
+21655  FallbackAggregatorVerifier.bin
+3872  FallbackAggregatorVerifier_calldata.bin
+19263  LayerHashesAggregatorVerifier.bin
+3104  LayerHashesAggregatorVerifier_calldata.bin
+21638  BridgeWithdrawalAggregatorVerifier.bin
+3744  BridgeWithdrawalAggregatorVerifier_calldata.bin
+23883  BridgeMultiHopAggregatorVerifier.bin
+4480  BridgeMultiHopAggregatorVerifier_calldata.bin

@@ -98,15 +98,6 @@ impl TvmAckiNacki {
         Ok(Abi::Json(json))
     }
 
-    /// Whether the connected node speaks the v3 `dapp_id` wire format
-    /// (GraphQL `info.version >= 1.0.0`).
-    pub async fn supports_dapp_id(&self) -> Result<bool> {
-        self.context
-            .supports_dapp_id()
-            .await
-            .map_err(|e| AckiNackiError::NetworkError(e.to_string()))
-    }
-
     /// Probe account state via SDK 3.0 `ParamsOfGetAccount { account_id,
     /// dapp_id }`.
     pub async fn fetch_account_boc(&self, addr: &ExtendedAddress) -> Result<String> {

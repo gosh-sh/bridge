@@ -6,18 +6,26 @@
 //! (which is the one-time verifier-generation step). The aggregator VK is
 //! deterministic in `(SRS, AggregatorConfig, inner-snark shape)` and, under
 //! `VerifierUniversality::Full`, independent of the inner snark's *values* — so
-//! a fresh inner snark yields fresh calldata that the same on-chain verifier
-//! accepts.
+//! a fresh proof of the same inner circuit yields fresh calldata that the
+//! same on-chain verifier accepts. To also bind the aggregator to the
+//! specific inner VK, the aggregator exposes the Poseidon digest of the
+//! inner-circuit VK witnesses as the final public instance (slot
+//! `12 + NUM_INNER`); the on-chain adapter compares that slot against its
+//! immutable `vkDigest` pin, so a same-shape but differently-constrained
+//! inner circuit is rejected on chain.
 //!
-//! To make that guarantee *self-checking* rather than assumed, this bin
-//! regenerates the verifier's Solidity source for the supplied inner snark and
-//! asserts it is **byte-identical** to the committed
-//! `contracts/ethereum/verifiers/<name>.sol`. The source is fully determined by
-//! the aggregator VK, so a drifted VK (wrong inner shape / config / SRS) — whose
-//! calldata the deployed verifier would reject — fails the comparison and we
-//! refuse to emit it. Nothing is compiled here, so no `solc` is needed; that the
-//! committed `.sol` compiles to the deployed `.bin` is checked where verifiers
-//! are regenerated (`scripts/check_verifier_sources.sh`).
+//! To make the *shape* half of the guarantee self-checking rather than
+//! assumed, this bin regenerates the verifier's Solidity source for the
+//! supplied inner snark and asserts it is **byte-identical** to the
+//! committed `contracts/ethereum/verifiers/<name>.sol`. The source is fully
+//! determined by the aggregator VK, so a drifted shape (wrong inner shape
+//! / config / SRS) fails that byte-equality check and we refuse to emit
+//! calldata. What the byte-equality check does **not** catch is a
+//! same-shape rotation of the inner circuit — that is exactly what the
+//! `vkDigest` on-chain pin covers. Nothing is compiled here, so no `solc`
+//! is needed; that the committed `.sol` compiles to the deployed `.bin`
+//! is checked where verifiers are regenerated
+//! (`scripts/check_verifier_sources.sh`).
 //!
 //! ```bash
 //! cd crates/bridge-evm-aggregator
@@ -111,12 +119,16 @@ fn main() -> anyhow::Result<()> {
     )
     .context("aggregate + evm-proof (aggregate_and_prove_cached)")?;
 
-    // Self-check: the regenerated verifier source must match the committed one.
+    // Self-check: the regenerated verifier source must match the committed
+    // one *byte-for-byte*. This pins the aggregator's shape (columns,
+    // gates, lookup arity, `k_outer`, universality), not the inner-circuit
+    // VK — a same-shape inner rotation would pass this check and be caught
+    // only by the on-chain `vkDigest` pin.
     match check_committed_source(&verifiers_dir, &name, &export.verifier_source)
         .with_context(|| format!("read committed {name}.sol in {}", verifiers_dir.display()))?
     {
         SourceCheck::Match(len) => {
-            println!("VK match: regenerated {name}.sol == committed ({len} B) [OK]")
+            println!("Aggregator shape match: regenerated {name}.sol == committed ({len} B) [OK]")
         }
         SourceCheck::Drift(msg) if allow_source_drift => {
             eprintln!("WARNING (--allow-source-drift): {msg}")

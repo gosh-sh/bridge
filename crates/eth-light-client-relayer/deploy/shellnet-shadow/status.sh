@@ -13,8 +13,8 @@ echo "== EthBeaconLightClient $AN_LIGHT_CLIENT"
 HEAD_JSON="$(tvm_json runx --abi "$ABI" --addr "$AN_LIGHT_CLIENT" -m getHead)"
 printf '%s\n' "$HEAD_JSON"
 # The contract stores 32-byte roots as `(hi << 128) | lo` over little-endian
-# 16-byte halves (same encoding as USDCBridge._parseBlockHash), so the getter
-# hex is not the Ethereum hash literal: reverse each half to compare with
+# 16-byte halves, so the getter hex is not the Ethereum hash literal (nor the
+# word USDCBridge holds for that block): reverse each half to compare with
 # eth_getBlockByHash / the beacon finality_update.
 printf '%s' "$HEAD_JSON" | python3 -c '
 import json, sys

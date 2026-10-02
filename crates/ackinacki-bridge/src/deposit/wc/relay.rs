@@ -113,6 +113,7 @@ type UrlSource = Box<dyn Fn() -> String + Send + Sync>;
 
 impl Relay {
     /// Connects to `url`, the same URL for every reconnect.
+    #[cfg(test)]
     pub async fn connect(url: String) -> anyhow::Result<Relay> {
         Self::connect_with(move || url.clone()).await
     }

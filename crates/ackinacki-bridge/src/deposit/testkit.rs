@@ -811,6 +811,10 @@ impl MockRelay {
             Message,
         };
 
+        #[expect(
+            clippy::result_large_err,
+            reason = "the handshake callback's signature is tungstenite's"
+        )]
         let note_uri = move |req: &Request, resp: Response| {
             uris.lock().unwrap().push(req.uri().to_string());
             Ok(resp)

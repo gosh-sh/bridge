@@ -1881,28 +1881,25 @@ async fn open_for_resume(
         _ => {},
     }
     let lock = lock.map_err(|why| lock_unusable(&op, &rec, &why))?;
-    match rec.stage {
-        OpStage::Reserved => {
-            // Its lock was free: the run that reserved it is gone, and it
-            // never requested the deposit. Closed as a new deposit's
-            // preflight closes such an operation, under the directory lock.
-            let _dir = DirLock::wait(store.dir()).await?;
-            rec.fail(
-                OpStage::Reserved,
-                FailReason::Interrupted,
-                ExitCode::PreflightRefused,
-                crate::deposit::store::INTERRUPTED_BEFORE_REQUEST,
-            );
-            store.write(&mut rec).map_err(nothing_sent)?;
-            return Err(CliError::Preflight {
-                reason: format!(
-                    "operation {op} ended before its deposit was requested (an approve may have \
-                     been sent; no USDC moved), so there is nothing to continue; it is closed now"
-                ),
-                source: None,
-            });
-        },
-        _ => {},
+    if rec.stage == OpStage::Reserved {
+        // Its lock was free: the run that reserved it is gone, and it
+        // never requested the deposit. Closed as a new deposit's preflight
+        // closes such an operation, under the directory lock.
+        let _dir = DirLock::wait(store.dir()).await?;
+        rec.fail(
+            OpStage::Reserved,
+            FailReason::Interrupted,
+            ExitCode::PreflightRefused,
+            crate::deposit::store::INTERRUPTED_BEFORE_REQUEST,
+        );
+        store.write(&mut rec).map_err(nothing_sent)?;
+        return Err(CliError::Preflight {
+            reason: format!(
+                "operation {op} ended before its deposit was requested (an approve may have been \
+                 sent; no USDC moved), so there is nothing to continue; it is closed now"
+            ),
+            source: None,
+        });
     }
     Ok(Resumable::Open(Box::new(Opened {
         store,

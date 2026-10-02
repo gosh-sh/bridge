@@ -115,10 +115,6 @@ where
         self
     }
 
-    pub async fn store_version(&self) -> anyhow::Result<crate::StoreVersion> {
-        self.store.version().await
-    }
-
     pub async fn sync_latest(&self, limit: usize) -> anyhow::Result<SyncStats> {
         let blocks = self.provider.latest_blocks(limit).await?;
         validate_blocks(&blocks)?;

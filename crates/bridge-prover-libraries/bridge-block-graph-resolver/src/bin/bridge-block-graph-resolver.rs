@@ -1,10 +1,10 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use anyhow::Context;
 use bridge_block_graph_resolver::{
     BlockId, BlockProvider, GraphResolver, GraphqlBlockProvider, HistoricalSearchConfig,
-    MemoryStore, ResolutionPolicy, ResolutionRequest, ResolverApi, ResolverLimits, ResolverStore,
-    SqliteStore, SyncStats,
+    MemoryStore, ResolutionPolicy, ResolutionRequest, ResolverLimits, ResolverStore, SqliteStore,
+    SyncStats,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -61,24 +61,6 @@ enum Command {
         database: Option<PathBuf>,
         #[arg(long)]
         pretty: bool,
-    },
-    /// Run a persistent HTTP resolver with periodic graph synchronization.
-    Serve {
-        #[arg(long)]
-        gql_url: String,
-        #[arg(long)]
-        database: PathBuf,
-        #[arg(long, default_value = "127.0.0.1:8787")]
-        listen: SocketAddr,
-        #[arg(long, default_value_t = 1000)]
-        scan_window: usize,
-        #[arg(long, default_value_t = 1000)]
-        per_thread_window: usize,
-        #[arg(long, default_value_t = 10)]
-        sync_interval_secs: u64,
-        /// Maximum thread-0 blocks examined per cold historical resolution.
-        #[arg(long, default_value_t = 1000)]
-        max_anchor_candidates: usize,
     },
 }
 
@@ -248,62 +230,6 @@ async fn main() -> anyhow::Result<()> {
             };
             print_json(&stats, pretty)?;
         },
-        Command::Serve {
-            gql_url,
-            database,
-            listen,
-            scan_window,
-            per_thread_window,
-            sync_interval_secs,
-            max_anchor_candidates,
-        } => {
-            anyhow::ensure!(sync_interval_secs > 0, "--sync-interval-secs must be > 0");
-            let provider =
-                Arc::new(GraphqlBlockProvider::new(&gql_url).context("create GraphQL provider")?);
-            let namespace = provider.namespace().to_owned();
-            let store = Arc::new(
-                SqliteStore::open(database, &namespace)
-                    .await
-                    .context("open resolver database")?,
-            );
-            let resolver = Arc::new(
-                GraphResolver::new(provider, store, per_thread_window)
-                    .with_historical_search_config(HistoricalSearchConfig {
-                        max_anchor_candidates,
-                    }),
-            );
-            let api = ResolverApi::new(resolver, scan_window, namespace);
-            api.sync_once().await.context("initial graph sync")?;
-
-            let listener = tokio::net::TcpListener::bind(listen)
-                .await
-                .with_context(|| format!("bind resolver HTTP server to {listen}"))?;
-            tracing::info!(%listen, "resolver HTTP server listening");
-
-            let poll_api = api.clone();
-            let poller = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(sync_interval_secs));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                interval.tick().await;
-                loop {
-                    interval.tick().await;
-                    if let Err(error) = poll_api.sync_once().await {
-                        tracing::error!(%error, "periodic graph sync failed");
-                    }
-                }
-            });
-
-            let result = axum::serve(listener, bridge_block_graph_resolver::http_router(api))
-                .with_graceful_shutdown(async {
-                    if let Err(error) = tokio::signal::ctrl_c().await {
-                        tracing::error!(%error, "failed to listen for shutdown signal");
-                    }
-                })
-                .await;
-            poller.abort();
-            let _ = poller.await;
-            result.context("resolver HTTP server")?;
-        },
     }
     Ok(())
 }
@@ -342,21 +268,6 @@ mod tests {
             "node:8600",
             "--database",
             "resolver.sqlite",
-        ])
-        .unwrap();
-    }
-
-    #[test]
-    fn serve_options_are_accepted() {
-        Cli::try_parse_from([
-            "resolver",
-            "serve",
-            "--gql-url",
-            "node:8600",
-            "--database",
-            "resolver.sqlite",
-            "--listen",
-            "127.0.0.1:9999",
         ])
         .unwrap();
     }

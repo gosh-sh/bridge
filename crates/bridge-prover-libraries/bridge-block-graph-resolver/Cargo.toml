@@ -8,13 +8,11 @@ default = ["graphql", "sqlite", "cli"]
 test-utils = []
 graphql = ["dep:bridge-gql-fetcher"]
 sqlite = ["dep:rusqlite"]
-server = ["graphql", "sqlite", "dep:axum"]
-cli = ["server", "dep:clap", "dep:tracing-subscriber"]
+cli = ["graphql", "sqlite", "dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
 anyhow = { workspace = true }
 async-trait = "0.1"
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"], optional = true }
 bridge-gql-fetcher = { path = "../bridge-gql-fetcher", optional = true, default-features = false }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 hex = { workspace = true }
@@ -28,7 +26,6 @@ tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
 name = "bridge-block-graph-resolver"

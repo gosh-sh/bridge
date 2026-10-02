@@ -9,11 +9,10 @@ and slots `1+` are cross-thread references.
 
 The resolver maintains a bounded local graph, tries its reverse index first,
 and falls back to an incremental historical search when the target is older
-than the local window. It can be used in three ways:
+than the local window. It can be used in two ways:
 
 - as a Rust library with pluggable block providers and stores;
-- as a CLI for one-shot resolution and explicit synchronization;
-- as an HTTP server backed by SQLite and periodic synchronization.
+- as a CLI for one-shot resolution and explicit synchronization.
 
 ## Getting started
 
@@ -145,43 +144,6 @@ cargo run -p bridge-block-graph-resolver --bin bridge-block-graph-resolver -- sy
 
 Without `--database`, `sync` is diagnostic and its state disappears when the
 process exits.
-
-### HTTP server
-
-Start a persistent resolver service:
-
-```bash
-cargo run -p bridge-block-graph-resolver --bin bridge-block-graph-resolver -- serve \
-  --gql-url http://127.0.0.1:8600/graphql \
-  --database resolver.sqlite \
-  --listen 127.0.0.1:8787 \
-  --scan-window 1000 \
-  --sync-interval-secs 10
-```
-
-The server performs an initial sync before listening and refreshes the graph
-periodically. Resolve a block with:
-
-```bash
-curl -sS http://127.0.0.1:8787/v1/resolve \
-  -H 'content-type: application/json' \
-  -d '{
-    "target":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "policy":"shortest-current",
-    "limits":{"max_hops":300,"max_visited_blocks":100000}
-  }'
-```
-
-Endpoints:
-
-- `GET /healthz` returns health, store version, and last-sync state;
-- `GET /v1/status` returns the same state without health-status mapping;
-- `POST /v1/sync` triggers a serialized refresh;
-- `POST /v1/resolve` accepts `ResolutionRequest` and returns `ResolvedPath` or
-  a structured error;
-- `POST /v1/resolve-proof` accepts the same request and returns
-  `ResolvedBlockProof`, including canonical proof payloads for both endpoints
-  and every hop source.
 
 ## Algorithm
 

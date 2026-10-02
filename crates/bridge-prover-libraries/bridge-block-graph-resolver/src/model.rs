@@ -1,7 +1,7 @@
 //! Data types exchanged between resolver components and exposed by its API.
 //!
 //! Provider and store modules define behavior only; their inputs, outputs and
-//! persistent/cache keys live here so library, CLI and server users share one
+//! persistent/cache keys live here so library and CLI users share one
 //! representation.
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
@@ -254,26 +254,6 @@ pub struct SyncStats {
     pub unchanged: usize,
     pub pruned: usize,
     pub graph_version: u64,
-}
-
-/// JSON status returned by the HTTP service.
-#[derive(Clone, Debug, Serialize)]
-pub struct ServiceStatus {
-    pub healthy: bool,
-    pub namespace: String,
-    pub store_version: StoreVersion,
-    pub last_sync: Option<SyncStats>,
-    pub last_sync_unix_seconds: Option<u64>,
-    pub last_error: Option<String>,
-}
-
-/// Stable JSON body returned for HTTP API failures.
-#[derive(Debug, Serialize)]
-pub struct ErrorBody {
-    /// Machine-readable error category.
-    pub kind: &'static str,
-    /// Human-readable diagnostic detail.
-    pub error: String,
 }
 
 #[cfg(test)]

@@ -362,13 +362,13 @@ assigns it when the release is tagged.
 
 - `bridge-block-graph-resolver` can now return canonical proof material in
   addition to a block path. Rust callers use `GraphResolver::resolve_proof`,
-  the CLI uses `resolve --proof-material`, and servers expose
-  `POST /v1/resolve-proof`. The response keeps the anchor/Y and target/X block
-  payloads separate, includes the source block for every hop, and validates
-  each returned `ref_index`, including parent slot `0`, against the node's
-  `proof_block_refs` before returning it. Selection against active verifier
-  history and construction of circuit-specific Merkle openings remain in the
-  witness/prover pipeline; the resolver has no Poseidon or circuit dependency.
+  and the CLI uses `resolve --proof-material`. The response keeps the anchor/Y
+  and target/X block payloads separate, includes the source block for every
+  hop, and validates each returned `ref_index`, including parent slot `0`,
+  against the node's `proof_block_refs` before returning it. Selection against
+  active verifier history and construction of circuit-specific Merkle openings
+  remain in the witness/prover pipeline; the resolver has no Poseidon or
+  circuit dependency.
 
 - Added the `bridge-block-graph-resolver` CLI for operators to scan a finalized
   Acki Nacki GraphQL block window and resolve a deterministic minimum-hop path
@@ -378,9 +378,7 @@ assigns it when the release is tagged.
   `--per-thread-window`, `--max-hops`, and `--max-visited-blocks` to bind the
   endpoint and resource limits. Pass `--database <PATH>` to persist graph and
   positive-cache state across invocations in SQLite; the database is bound to
-  its normalized GraphQL endpoint and refuses reuse with another endpoint. The
-  `serve` command keeps that graph hot with periodic polling and exposes
-  `/healthz`, `/v1/status`, `/v1/sync`, and `/v1/resolve` over HTTP.
+  its normalized GraphQL endpoint and refuses reuse with another endpoint.
   Targets outside the rolling window are located without a full-history scan:
   the resolver uses the target timestamp to binary-search thread 0 by height,
   then walks newer thread-0 candidates and lazily fetches referenced blocks by

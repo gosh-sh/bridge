@@ -836,6 +836,15 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `scripts/install.sh` created `<prefix>/withdraw-state` and
+  `<prefix>/deposit-state` with the umask's mode, 0755 under the usual 022,
+  so every `withdraw` and `deposit` run warned that the state directory can
+  be reached by more than its owner. When it writes the profile it now makes
+  both owner-only (0700), also over directories an earlier install left
+  behind, and when it appends the deposit settings to an existing profile it
+  does the same for `<prefix>/deposit-state`. It leaves `withdraw-state`
+  alone in that case: an installation from before deposits keeps the 0755
+  directory and its warning until you run `chmod 700` on it.
 - `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
   cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
   head on every poll, whether the target `depositId` was found or not. A

@@ -329,6 +329,10 @@ if have_profile; then
   ok "$PROFILE"
 elif [ -s "$PROFILE.release" ]; then
   mkdir -p "$PREFIX/work_dir" "$PREFIX/withdraw-state" "$PREFIX/deposit-state" "$PARAMS/pk_cache"
+  # Records carry amounts and addresses, and the CLI warns on every run about
+  # a state directory others can reach. chmod rather than `mkdir -m`, so the
+  # directories an earlier install left at the umask's mode are restricted too.
+  chmod 700 "$PREFIX/withdraw-state" "$PREFIX/deposit-state"
   sed -E \
     -e "s#^BRIDGE_PARAMS_DIR=.*#BRIDGE_PARAMS_DIR=$PARAMS#" \
     -e "s#^BRIDGE_PK_CACHE_DIR=.*#BRIDGE_PK_CACHE_DIR=$PARAMS/pk_cache#" \
@@ -354,6 +358,7 @@ if have_profile && ! have_deposit_settings; then
     gap "$PROFILE: no deposit settings; a run without --check appends them"
   else
     mkdir -p "$PREFIX/deposit-state"
+    chmod 700 "$PREFIX/deposit-state"
     {
       printf '\n# --- Deposit (EVM → Acki Nacki), added by install.sh ---\n'
       printf 'BRIDGE_DEPOSIT_PROVER_DIR=%s\n' "$DEPOSIT_PROVER"

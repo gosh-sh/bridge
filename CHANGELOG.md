@@ -237,6 +237,15 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `relayer daemon-live` and `ackinacki-bridge withdraw` take the
+  `LayerAnchorAppended` scan settings as arguments: `--bridge-deploy-block`
+  (`BRIDGE_DEPLOY_BLOCK`), `--get-logs-chunk-blocks`
+  (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`; 0 = the default) and `--get-logs-pause-ms`
+  (`BRIDGE_GET_LOGS_PAUSE_MS`), so they are in `--help` and a malformed value
+  fails at argument parsing. The other `relayer` subcommands read the same
+  variables leniently (unparseable → default with a warning) and never scan.
+  `scripts/deploy_bridge_bundle.sh` writes `BRIDGE_DEPLOY_BLOCK` next to the
+  `BRIDGE_ADDRESS` it deploys.
 - **`deposit-relayer daemon` exports Prometheus metrics.** `--metrics-addr`
   (`DEPOSIT_RELAYER_METRICS_ADDR`, e.g. `127.0.0.1:9467`) serves the text
   format at `GET /metrics`, the same facade and histogram buckets as
@@ -473,29 +482,41 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- `read_full_state` (the AN→ETH relayer's `daemon-live` startup, and the
-  `ackinacki-bridge` CLI after coverage) reconstructs per-slot window heights
-  from `LayerAnchorAppended` between `BRIDGE_DEPLOY_BLOCK` and the head, in
-  2 000-block `eth_getLogs` chunks (`BRIDGE_GET_LOGS_CHUNK_BLOCKS` overrides
-  the span; Alchemy's free tier caps it at 10; `BRIDGE_GET_LOGS_PAUSE_MS`
-  spaces the calls on a rate-limited RPC; a call failing with 429 / 5xx / a
-  transport error is retried with backoff, a span-cap rejection is not). A
-  scan with no from/to block used to default both ends to `latest` and fail
-  resurrect on any contract that already had history (ETH-31). `daemon-live`
-  also takes the three as `--bridge-deploy-block`, `--get-logs-chunk-blocks`
-  and `--get-logs-pause-ms`; the CLI reads them from its profile, and
-  `config/bridge_config.shellnet` now pins the 2026-09-29 deploy
-  `0x32b9e87a…` together with its deploy block (the previous `0x0F4F8b7E…`
-  is no longer advanced). Unset means a scan from genesis, logged as a
-  warning; an unparseable value is ignored with a warning instead of
-  silently becoming the default; the scan logs its range, progress and
-  total. The whole snapshot is pinned to one block (`eth_blockNumber`
-  first, every view call and the log scan at it) and the newest kept event
-  per layer is checked against the window's `lastHeight`, so a
-  `verifyBlock` landing mid-read or a short log tail is re-read instead of
-  painting every height one slot off. The CLI's coverage poll reads one
-  scalar per round and the full snapshot once. The compose kit's
-  `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK`.
+- The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
+  `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
+  per-slot window heights from `LayerAnchorAppended` logs. The scan walks
+  backwards from a pinned head in `BRIDGE_GET_LOGS_CHUNK_BLOCKS`-block
+  `eth_getLogs` calls (default 2 000; Alchemy's free tier caps it at 10),
+  `BRIDGE_GET_LOGS_PAUSE_MS` apart, and stops as soon as every window's
+  entries are covered or at `BRIDGE_DEPLOY_BLOCK`, so once the windows are
+  full the cost is bounded by the window span, not by the bridge's age; a
+  call failing with 429 / 5xx / a transport error is retried with backoff, a
+  span-cap rejection is not. A scan with no from/to block used to default
+  both ends to `latest` and fail resurrect on any contract that already had
+  history (ETH-31). The snapshot is pinned to one block and every kept log
+  is checked against its window slot (hash and height) and the window's
+  `lastHeight`: a mismatch (an append landing mid-read, a partial log set)
+  re-reads the snapshot, fewer logs than entries fails naming
+  `BRIDGE_DEPLOY_BLOCK`. The scan logs its range, progress and total; an
+  unset deploy block is a warning. The CLI's coverage poll reads one scalar
+  per round, reads the full snapshot once coverage is observed, and polls on
+  if that snapshot still predates the target.
+- **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
+  rotated to `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38`** (the 2026-09-29
+  deploy from `main`; its deploy block 11807209 is pinned beside it as
+  `BRIDGE_DEPLOY_BLOCK`). The previous
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` still answers every getter but
+  is no longer advanced (it stopped at seq 20054016), so a withdraw against
+  it burned and then timed out at stage 4b. Both deploys bind the same AN
+  bridge account; nothing else in the profile changes.
+- **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK`** (a block
+  number above 0 and not above the head) and, when the RPC serves historical
+  code, checks that it is the first block with bridge code.
+  `runtime.env.example` and the kit README document the scan variables.
+- `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
+  wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
+  without log history refuses with exit 2 instead of failing after the burn
+  and the coverage wait.
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
   exponential backoff.** With the aggregator now binding the inner-circuit

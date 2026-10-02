@@ -32,12 +32,13 @@ pub use aggregator::{
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
-    classify_withdraw_revert, get_logs_chunks, get_logs_error_is_retryable,
+    chronological, classify_withdraw_revert, get_logs_chunks, get_logs_error_is_retryable,
     paint_heights_from_events, resolve_bridge_deploy_block, resolve_get_logs_chunk_blocks,
-    resolve_get_logs_pause, BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState,
-    DryRunOutcome, EthBridgeClient, LogScanConfig, MockBridgeClient, SubmitOutcome, WithdrawBridge,
-    WithdrawRevertKind, WithdrawSubmitOutcome, BRIDGE_DEPLOY_BLOCK_ENV, GET_LOGS_CHUNK_BLOCKS,
-    GET_LOGS_CHUNK_BLOCKS_ENV, GET_LOGS_PAUSE_MS_ENV,
+    resolve_get_logs_pause, windows_covered, AnchorEvent, BkSetUpdateSubmitOutcome, BridgeClient,
+    BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig, MockBridgeClient,
+    PaintError, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
+    BRIDGE_DEPLOY_BLOCK_ENV, GET_LOGS_CHUNK_BLOCKS, GET_LOGS_CHUNK_BLOCKS_ENV,
+    GET_LOGS_PAUSE_MS_ENV,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,

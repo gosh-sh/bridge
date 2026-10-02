@@ -219,13 +219,18 @@ receipt.
 ## Startup scan
 
 On every start `daemon-live` reads the contract's ten layer windows and
-rebuilds their per-slot heights from `LayerAnchorAppended` logs, scanning from
-`BRIDGE_DEPLOY_BLOCK` (the block the bridge was deployed in; `preflight.sh`
-requires it) to the head in `BRIDGE_GET_LOGS_CHUNK_BLOCKS`-block `eth_getLogs`
-calls, `BRIDGE_GET_LOGS_PAUSE_MS` apart. On a capped, rate-limited RPC
-(Alchemy's free tier: 10 blocks, ~4 calls/s) a deploy a few weeks old takes
-minutes; the log shows `scanning LayerAnchorAppended` with the chunk count, a
-progress line every 200 chunks and `LayerAnchorAppended scan done`.
+rebuilds their per-slot heights from `LayerAnchorAppended` logs. The scan
+walks backwards from the head in `BRIDGE_GET_LOGS_CHUNK_BLOCKS`-block
+`eth_getLogs` calls, `BRIDGE_GET_LOGS_PAUSE_MS` apart, and stops as soon as
+every window's entries are covered, or at `BRIDGE_DEPLOY_BLOCK` (the block the
+bridge was deployed in; `preflight.sh` requires it and, when the RPC serves
+historical code, checks it against the chain). Once the windows are full that
+is at most 128 bundles per layer, about 56 000 Sepolia blocks: on a capped,
+rate-limited RPC (Alchemy's free tier: 10 blocks, ~4 calls/s) about 5 600
+calls and 25 minutes, less on a younger bridge; on a 2 000-block span a few
+dozen calls. The log shows `scanning LayerAnchorAppended backwards from the
+head` with the chunk count, a progress line every 200 chunks and
+`LayerAnchorAppended scan done` with `covered=true` when it stopped early.
 
 ## GraphQL failover and metrics
 

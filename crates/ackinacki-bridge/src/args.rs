@@ -15,9 +15,10 @@
 //! - `--to-chain` — bridge has two sides, `--chain-id` would be ambiguous once
 //!   the source side is selectable too.
 
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use alloy_primitives::Address;
+use bridge_relayer_daemon::{LogScanConfig, GET_LOGS_CHUNK_BLOCKS};
 use clap::{Parser, Subcommand};
 use rust_decimal::Decimal;
 
@@ -203,6 +204,24 @@ pub struct WithdrawArgs {
     /// Deployed AckiNackiBridge address on the destination chain.
     #[arg(long, env = "BRIDGE_ADDRESS")]
     pub bridge_address: Address,
+
+    /// Block the bridge in `--bridge-address` was deployed in: where the
+    /// `LayerAnchorAppended` scan that rebuilds the window heights
+    /// (preflight, then stage 4b) stops when a window is not covered yet.
+    /// Changes together with the address. Unset = genesis, slow on an old
+    /// bridge.
+    #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
+    pub bridge_deploy_block: Option<u64>,
+
+    /// Block span of one `eth_getLogs` call in that scan: the RPC's cap
+    /// (Alchemy free tier: 10). Unset or 0 = 2000.
+    #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS")]
+    pub get_logs_chunk_blocks: Option<u64>,
+
+    /// Milliseconds between two `eth_getLogs` calls of that scan, for a
+    /// rate-limited RPC (Alchemy free tier: ~250). Unset = 0.
+    #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS")]
+    pub get_logs_pause_ms: Option<u64>,
 
     /// Signer key for the EVM `withdrawByProof` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
@@ -612,6 +631,20 @@ pub struct SubmitPlumbing {
 }
 
 impl WithdrawArgs {
+    /// The `LayerAnchorAppended` scan settings for
+    /// `EthBridgeClient::with_scan_config`: the three flags (or their
+    /// environment) over the library defaults.
+    pub fn log_scan_config(&self) -> LogScanConfig {
+        LogScanConfig {
+            deploy_block: self.bridge_deploy_block.unwrap_or(0),
+            chunk_blocks: match self.get_logs_chunk_blocks {
+                Some(n) if n > 0 => n,
+                _ => GET_LOGS_CHUNK_BLOCKS,
+            },
+            pause: Duration::from_millis(self.get_logs_pause_ms.unwrap_or(0)),
+        }
+    }
+
     /// Resolve the submit-only plumbing, or refuse listing everything that
     /// is missing. `--dry-run` never calls this — that is the whole point:
     /// a preflight must not require an EVM signing key it will never use.

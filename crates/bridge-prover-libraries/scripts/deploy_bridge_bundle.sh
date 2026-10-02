@@ -88,6 +88,16 @@ BRIDGE_ADDRESS="$(jq -r '
 ' "$BROADCAST" | tail -n 1)"
 : "${BRIDGE_ADDRESS:?failed to extract AckiNackiBridge address from $BROADCAST}"
 echo ">>> Deployed BRIDGE_ADDRESS = $BRIDGE_ADDRESS"
+# The block that CREATE landed in: where the relayer's and the CLI's
+# `LayerAnchorAppended` scan stops (BRIDGE_DEPLOY_BLOCK).
+BRIDGE_DEPLOY_BLOCK="$(jq -r --arg addr "$(printf '%s' "$BRIDGE_ADDRESS" | tr '[:upper:]' '[:lower:]')" '
+  .receipts[]
+  | select(((.contractAddress // "") | ascii_downcase) == $addr)
+  | .blockNumber
+' "$BROADCAST" | tail -n 1)"
+: "${BRIDGE_DEPLOY_BLOCK:?failed to extract the AckiNackiBridge deploy block from $BROADCAST}"
+BRIDGE_DEPLOY_BLOCK=$((BRIDGE_DEPLOY_BLOCK)) # hex receipt field -> decimal
+echo ">>> Deployed in block $BRIDGE_DEPLOY_BLOCK"
 
 # ─── 4. Rewrite non-secret L${LEVEL}_config/env ───────────────────────────────
 CFG_DIR="$PROVER_DIR/L${LEVEL}_config"
@@ -99,6 +109,7 @@ cat > "$CFG_DIR/env" <<EOF
 source "\$(dirname "\${BASH_SOURCE[0]}")/../shellnet.common"
 
 BRIDGE_ADDRESS=$BRIDGE_ADDRESS
+BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK
 BRIDGE_BOOTSTRAP_SEQNO=$GENESIS_SEED_SEQNO
 BRIDGE_ANCHOR_LEVEL=$LEVEL
 EOF

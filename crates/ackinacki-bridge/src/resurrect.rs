@@ -132,17 +132,30 @@ where
                 .read_full_state()
                 .await
                 .context("EthBridgeClient::read_full_state")?;
-            let state = BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level).context(
-                "BridgeState::from_contract failed — on-chain layer window shape does not match \
-                 HISTORY_PROOF_WINDOW (128)",
-            )?;
-            info!(
-                observed_last_seen = observed,
-                stored_last_seen_block_seq_no = state.stored_last_seen_block_seq_no,
-                num_active_layers = state.num_active_layers(),
-                "coverage reached — resurrected BridgeState from contract",
-            );
-            return Ok(state);
+            // The poll read `latest`; the snapshot is pinned to its own
+            // head. Behind a load-balanced RPC that head can still predate
+            // the covering bundle, and a state without the anchor fails
+            // the enricher after the burn. Poll on instead.
+            if cfs.last_seen_block_seq_no < target_seq_no {
+                info!(
+                    observed_last_seen = observed,
+                    snapshot_last_seen = cfs.last_seen_block_seq_no,
+                    target_covering_seq_no = target_seq_no,
+                    "snapshot predates coverage seen at latest; polling on",
+                );
+            } else {
+                let state = BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level).context(
+                    "BridgeState::from_contract failed — on-chain layer window shape does not \
+                     match HISTORY_PROOF_WINDOW (128)",
+                )?;
+                info!(
+                    observed_last_seen = observed,
+                    stored_last_seen_block_seq_no = state.stored_last_seen_block_seq_no,
+                    num_active_layers = state.num_active_layers(),
+                    "coverage reached — resurrected BridgeState from contract",
+                );
+                return Ok(state);
+            }
         }
         let now = Instant::now();
         if now >= deadline {

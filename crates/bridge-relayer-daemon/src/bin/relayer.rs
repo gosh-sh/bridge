@@ -406,20 +406,14 @@ enum Cmd {
         /// drift check.
         #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
         anchor_level: u8,
-        /// Block `AckiNackiBridge` was deployed in: inclusive lower bound of
-        /// the startup `LayerAnchorAppended` scan that rebuilds the per-slot
-        /// window heights. Unset = genesis, which is thousands of
-        /// `eth_getLogs` calls and is warned about.
+        /// Block `AckiNackiBridge` was deployed in: where the startup
+        /// `LayerAnchorAppended` scan (backwards from the head) stops when a
+        /// window is not covered yet. Unset = genesis, warned about.
         #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
         bridge_deploy_block: Option<u64>,
         /// Inclusive block span of one `eth_getLogs` call in that scan. Set
-        /// it to the RPC's cap (Alchemy free tier: 10).
-        #[arg(
-            long,
-            env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS",
-            default_value_t = GET_LOGS_CHUNK_BLOCKS,
-            value_parser = clap::value_parser!(u64).range(1..)
-        )]
+        /// it to the RPC's cap (Alchemy free tier: 10); 0 means the default.
+        #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS", default_value_t = GET_LOGS_CHUNK_BLOCKS)]
         get_logs_chunk_blocks: u64,
         /// Milliseconds between two `eth_getLogs` calls of that scan, for a
         /// rate-limited RPC (Alchemy free tier: ~250).
@@ -814,7 +808,11 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let scan = LogScanConfig {
                 deploy_block: bridge_deploy_block.unwrap_or(0),
-                chunk_blocks: get_logs_chunk_blocks,
+                chunk_blocks: if get_logs_chunk_blocks == 0 {
+                    GET_LOGS_CHUNK_BLOCKS
+                } else {
+                    get_logs_chunk_blocks
+                },
                 pause: Duration::from_millis(get_logs_pause_ms),
             };
             let backoff = BackoffConfig {

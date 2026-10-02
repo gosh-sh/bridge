@@ -11,6 +11,10 @@ ok() {
   printf 'OK: %s\n' "$*"
 }
 
+warn() {
+  printf 'WARN: %s\n' "$*" >&2
+}
+
 lower() {
   tr '[:upper:]' '[:lower:]'
 }
@@ -109,6 +113,7 @@ done
 [[ "$EXPECTED_EVM_CHAIN_ID" == 11155111 ]] || die "expected Sepolia chain id"
 [[ "$BRIDGE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad bridge address"
 [[ "$BRIDGE_DEPLOY_BLOCK" =~ ^[0-9]+$ ]] || die "BRIDGE_DEPLOY_BLOCK must be a block number"
+(( BRIDGE_DEPLOY_BLOCK > 0 )) || die "BRIDGE_DEPLOY_BLOCK=0 scans from genesis; set the bridge's deploy block"
 [[ "$RELAYER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad relayer address"
 [[ "$RELAYER_PRIVATE_KEY" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "bad private key shape"
 [[ "$BRIDGE_BOOTSTRAP_SEQNO" =~ ^[0-9]+$ ]] || die "bad bootstrap seqno"
@@ -121,6 +126,22 @@ for value in "$EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID" \
   "$EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID" "$EXPECTED_WITHDRAW_ALT_TOKEN_ID"; do
   [[ "$value" =~ ^[0-9]+$ ]] || die "bad withdraw destination/token ID"
 done
+
+# The deploy block is the first block with runtime code at the address. The
+# compare needs an RPC that serves historical state; one that does not is
+# skipped with a warning, so an archive-less RPC still starts the relayer.
+head_block=$(cast block-number --rpc-url "$RPC_URL")
+(( BRIDGE_DEPLOY_BLOCK <= head_block )) || die "BRIDGE_DEPLOY_BLOCK is above the chain head ($head_block)"
+if code_at=$(cast code "$BRIDGE_ADDRESS" --block "$BRIDGE_DEPLOY_BLOCK" --rpc-url "$RPC_URL" 2>/dev/null) &&
+  code_before=$(cast code "$BRIDGE_ADDRESS" --block "$((BRIDGE_DEPLOY_BLOCK - 1))" --rpc-url "$RPC_URL" 2>/dev/null); then
+  [[ "$code_at" != 0x && ${#code_at} -gt 100 ]] ||
+    die "no bridge code at block $BRIDGE_DEPLOY_BLOCK: BRIDGE_DEPLOY_BLOCK is not the deploy block"
+  [[ "$code_before" == 0x ]] ||
+    die "bridge code already present at block $((BRIDGE_DEPLOY_BLOCK - 1)): BRIDGE_DEPLOY_BLOCK is after the deploy block"
+  ok "BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK is the bridge's deploy block"
+else
+  warn "RPC does not serve historical code; BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK not verified against the chain"
+fi
 
 if [[ "$runtime_layout" == compose ]]; then
   [[ -s "$BRIDGE_REPO_DIR/SOURCE_COMMIT" ]] || die "container source marker is missing"

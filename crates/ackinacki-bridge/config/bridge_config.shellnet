@@ -150,10 +150,10 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # bridge.
 BRIDGE_ADDRESS=0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38
 
-# Block the deploy above was created in: lower bound of the one
-# `LayerAnchorAppended` scan the CLI runs after coverage to rebuild the
-# per-slot window heights. Unset means a scan from genesis, thousands of
-# `eth_getLogs` calls. Changes together with BRIDGE_ADDRESS.
+# Block the deploy above was created in: where the `LayerAnchorAppended`
+# scan the CLI runs (in preflight, then after coverage) stops when a window
+# is not covered yet. Unset means it may walk back to genesis. Changes
+# together with BRIDGE_ADDRESS; `--bridge-deploy-block` overrides it.
 BRIDGE_DEPLOY_BLOCK=11807209
 # For a capped / rate-limited RPC (Alchemy's free tier: 10-block spans,
 # ~4 calls per second). The public default above needs neither.

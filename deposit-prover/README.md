@@ -62,6 +62,9 @@ MAX_DATA_BYTE_LEN: 128     // src/circuit_v2.rs:29 — max event data length
 MAX_LOG_NUM: 3             // :30 — max logs per receipt
 TOPIC_NUM_BOUNDS: (0, 4)   // :31 — min/max topics per log
 RECEIPT_PF_MAX_DEPTH: 10   // :32 — max MPT proof depth
+MAX_TX_CALLDATA_BYTE_LEN: 2048  // enclosing tx calldata (Safe / 4337)
+MAX_TX_ACCESS_LIST_LEN: 512     // RLP-encoded access list
+ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2; type 0 stays off
 ```
 
 ## On-chain consumption

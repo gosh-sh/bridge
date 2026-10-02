@@ -61,10 +61,20 @@ pub const DEPOSIT_NUM_PUBLIC_INPUTS: usize = DEPOSIT_PUBLIC_INPUT_LAYOUT.len();
 pub const PI_CHAIN_ID: usize = 4;
 /// Max depth of the transactions-trie MPT proof (mirrors receipt path).
 pub const TX_PF_MAX_DEPTH: usize = 10;
-/// Max calldata bytes for the enclosing EIP-1559 tx (deposit ABI is small).
-pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 256;
-/// Max RLP-encoded access-list length (deposit txs typically have none).
-pub const MAX_TX_ACCESS_LIST_LEN: usize = 64;
+/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is ~100 B;
+/// Safe `execTransaction` is ≥ 324 B before nested data and signatures
+/// (typically 600–700 B with one signer). 2048 covers that and a modest
+/// ERC-4337 `handleOps`. Larger batches still cannot be proven.
+pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
+/// Max RLP-encoded access-list bytes (type 1 field 7 / type 2 field 8).
+/// 64 B was smaller than one address + storage key; 512 B covers a short list.
+pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
+/// axiom-eth `enable_types`: legacy / EIP-2930 / EIP-1559.
+/// Type 0 stays off — its RLP field 0 is the nonce, so extracting "chain_id"
+/// from it would publish nonce as the public `chainId`.
+pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
+/// EIP-2930 type byte / circuit `transaction_type` value.
+pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
 pub const EIP1559_TX_TYPE: u64 = 2;
 
@@ -380,7 +390,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Extracted transactionsRoot from block header (32 bytes)");
 
         // ====================================================================
-        // Track 2: bind enclosing EIP-1559 tx (chain_id + to + same tx_index)
+        // Track 2: bind enclosing typed tx (chain_id + same tx_index)
         // ====================================================================
         // `from` is NOT in the typed-tx RLP (ECDSA-only); binding the Deposit
         // `sender` topic to the same `tx_index` as this MPT proof closes that
@@ -394,7 +404,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let tx_chip_params = EthTransactionChipParams {
             max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
             max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
-            enable_types: [false, false, true], // EIP-1559 only
+            enable_types: ENABLE_TX_TYPES,
             network: self.params.network,
         };
         let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
@@ -422,12 +432,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Constrained tx MPT root == transactionsRoot");
 
-        // transaction_type == 2 (EIP-1559)
-        let eip1559 = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
-        ctx.constrain_equal(&tx_witness.transaction_type, &eip1559);
-        println!("   ✓ Constrained tx type == EIP-1559 (0x02)");
+        // Type ∈ {1, 2}. Field 0 is chain_id for both EIP-2930 and EIP-1559.
+        // (type − 1)(type − 2) == 0 also refuses type 0, whose field 0 is nonce.
+        let gate = tx_chip.gate();
+        let one = ctx.load_constant(Fr::from(EIP2930_TX_TYPE));
+        let two = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
+        let d1 = gate.sub(ctx, tx_witness.transaction_type, one);
+        let d2 = gate.sub(ctx, tx_witness.transaction_type, two);
+        let prod = gate.mul(ctx, d1, d2);
+        let zero = ctx.load_constant(Fr::from(0u64));
+        ctx.constrain_equal(&prod, &zero);
+        println!("   ✓ Constrained tx type ∈ {{EIP-2930, EIP-1559}}");
 
-        // Extract EIP-1559 chain_id (RLP field 0) and expose as a public input.
+        // Extract typed-tx chain_id (RLP field 0) and expose as a public input.
         // Not constrained to a VK-baked constant — AN allowlists (chainId →
         // expected bridge Fr); the relayer sanity-checks against eth_chainId.
         let chain_id_idx = ctx.load_constant(Fr::from(0u64));
@@ -661,7 +678,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let tx_chip_params = EthTransactionChipParams {
             max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
             max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
-            enable_types: [false, false, true],
+            enable_types: ENABLE_TX_TYPES,
             network: self.params.network,
         };
         let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
@@ -1035,7 +1052,7 @@ impl TransactionProof {
         let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
         let value_max_byte_len =
-            calc_max_val_len(max_data_byte_len, max_access_list_len, [false, false, true]);
+            calc_max_val_len(max_data_byte_len, max_access_list_len, ENABLE_TX_TYPES);
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
@@ -1182,6 +1199,20 @@ mod tests {
             vec![DEPOSIT_NUM_PUBLIC_INPUTS],
             "num_instance() drifted from DEPOSIT_PUBLIC_INPUT_LAYOUT"
         );
+    }
+
+    /// DEP-04: Safe/4337 need more than 256 B of calldata; type 1 shares
+    /// field-0 chain_id with type 2; type 0 must stay off.
+    #[test]
+    fn enclosing_tx_limits_admit_safe_and_type1() {
+        assert_eq!(ENABLE_TX_TYPES, [false, true, true]);
+        assert!(
+            MAX_TX_CALLDATA_BYTE_LEN >= 324 + 100 + 65,
+            "Safe execTransaction header + deposit + one signature"
+        );
+        assert!(MAX_TX_ACCESS_LIST_LEN > 64);
+        assert_eq!(EIP2930_TX_TYPE, 1);
+        assert_eq!(EIP1559_TX_TYPE, 2);
     }
 
     /// Shape-only `DepositProofInput` — enough to construct the circuit struct

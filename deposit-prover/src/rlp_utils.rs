@@ -279,11 +279,13 @@ pub fn encode_block_header<T>(block: &Block<T>) -> Result<Vec<u8>> {
     Ok(rlp.out().into())
 }
 
-/// EIP-1559 (`0x02`) is the only transaction type the circuit can bind, since
-/// `chain_id` must be a top-level RLP field (legacy txs hide it inside `v`).
+/// EIP-2930 (`0x01`) and EIP-1559 (`0x02`) are the transaction types whose
+/// RLP field 0 is `chain_id`. Legacy (type 0) hides it inside `v`; enabling
+/// that type without an EIP-155 extract would publish nonce as `chainId`.
+pub const EIP2930_TX_TYPE: u8 = 0x01;
 pub const EIP1559_TX_TYPE: u8 = 0x02;
 
-/// Read `chain_id` out of an EIP-1559 transaction's wire encoding.
+/// Read `chain_id` out of a typed transaction's wire encoding (type 1 or 2).
 ///
 /// This is the same field the circuit extracts (typed-tx RLP field 0); decoding
 /// it out-of-circuit lets callers reject a witness/flag mismatch before paying
@@ -292,10 +294,10 @@ pub fn typed_tx_chain_id(tx_bytes: &[u8]) -> Result<u64> {
     let (&tx_type, rest) = tx_bytes
         .split_first()
         .ok_or_else(|| anyhow!("transaction bytes are empty"))?;
-    if tx_type != EIP1559_TX_TYPE {
+    if tx_type != EIP2930_TX_TYPE && tx_type != EIP1559_TX_TYPE {
         return Err(anyhow!(
-            "transaction type {tx_type:#04x} is not EIP-1559 (0x02); the deposit circuit \
-             cannot bind chain_id for this type"
+            "transaction type {tx_type:#04x} is not EIP-2930 (0x01) or EIP-1559 (0x02); \
+             the deposit circuit cannot bind chain_id for this type"
         ));
     }
     let prefix = *rest
@@ -712,10 +714,36 @@ mod tests {
     }
 
     #[test]
-    fn typed_tx_chain_id_rejects_non_1559() {
+    fn typed_tx_chain_id_rejects_legacy_and_blob() {
         let err = typed_tx_chain_id(&[0x00, 0xc0]).unwrap_err().to_string();
-        assert!(err.contains("not EIP-1559"), "unexpected error: {err}");
+        assert!(
+            err.contains("not EIP-2930") || err.contains("not EIP-1559"),
+            "unexpected error: {err}"
+        );
+        let err3 = typed_tx_chain_id(&[0x03, 0xc0]).unwrap_err().to_string();
+        assert!(err3.contains("0x03"), "unexpected error: {err3}");
         assert!(typed_tx_chain_id(&[]).is_err());
+    }
+
+    #[test]
+    fn typed_tx_chain_id_accepts_eip2930_chain_id() {
+        // 0x01 || RLP([11155111]) — field 0 only; the rest of the tx is unused.
+        let sepolia: u64 = crate::supported_chains::CHAIN_ID_SEPOLIA;
+        let body = {
+            let mut n = sepolia.to_be_bytes().to_vec();
+            while n.first() == Some(&0) && n.len() > 1 {
+                n.remove(0);
+            }
+            let mut payload = Vec::new();
+            payload.push(0x80 + n.len() as u8);
+            payload.extend_from_slice(&n);
+            let mut out = vec![0xc0 + payload.len() as u8];
+            out.extend_from_slice(&payload);
+            out
+        };
+        let mut bytes = vec![0x01];
+        bytes.extend_from_slice(&body);
+        assert_eq!(typed_tx_chain_id(&bytes).unwrap(), sepolia);
     }
 
     /// BC-D09: a truncated typed-tx must error, never panic. Both inputs are the

@@ -190,12 +190,13 @@ pub async fn generate_transaction_proof(
     let tx_bytes = target_tx_bytes.ok_or_else(|| anyhow!("target tx bytes missing"))?;
     // Reject non-EIP-1559 early so MockProver / prove fail with a clear error
     // rather than an opaque RLP constraint failure.
-    if tx_bytes.first() != Some(&crate::rlp_utils::EIP1559_TX_TYPE) {
+    if tx_bytes.first() != Some(&crate::rlp_utils::EIP1559_TX_TYPE)
+        && tx_bytes.first() != Some(&crate::rlp_utils::EIP2930_TX_TYPE)
+    {
         return Err(anyhow!(
-            "deposit enclosing tx must be EIP-1559 (type 0x02); got first byte {:#x}. \
-             The circuit binds chain_id from the typed-tx RLP, which only type 0x02 \
-             exposes, so this deposit cannot be proven as-is — the depositor must \
-             re-send with an EIP-1559 transaction.",
+            "deposit enclosing tx must be EIP-2930 (type 0x01) or EIP-1559 (type 0x02); \
+             got first byte {:#x}. Legacy type 0 hides chain_id inside v, so this \
+             deposit cannot be proven as-is — resend as type 1 or 2.",
             tx_bytes.first().copied().unwrap_or(0)
         ));
     }

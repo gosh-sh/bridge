@@ -24,6 +24,19 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The deposit-prover verification key is rotated.** The enclosing
+  transaction may now be EIP-2930 (type 1) or EIP-1559 (type 2), with
+  calldata up to 2048 bytes and an access-list RLP up to 512 bytes, so
+  a Safe `execTransaction` or a modest ERC-4337 `handleOps` that calls
+  `deposit()` can be proven. Type 0 (legacy) is still refused: its
+  field 0 is the nonce, and publishing that as `chainId` would let a
+  mainnet deposit with nonce 1 finalize as chain 1. Proofs made with
+  the previous VkBlob stop verifying. Regenerate `deposit_vk_blob.bin`
+  (`export_vk_blob`), embed it with `scripts/embed_deposit_vk_blob.py`,
+  recompile `eccUSDCBridge` and redeploy. Do not add
+  `msg.sender == tx.origin` on `deposit()` — that would reject Safe
+  and 4337, which this rotation is meant to admit.
+
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
   `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,

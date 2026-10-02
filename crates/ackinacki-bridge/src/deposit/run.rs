@@ -1812,7 +1812,10 @@ fn state_dir_unreadable(target: &OpRef, e: CliError) -> CliError {
 fn lock_unusable(op: &str, rec: &OpRecord, why: &str) -> CliError {
     match signals::exit_for(Some(rec.stage)) {
         ExitCode::PreflightRefused => CliError::Preflight {
-            reason: format!("{why}; operation {op} never requested its deposit (nothing was sent)"),
+            reason: format!(
+                "{why}; operation {op} ended before its deposit was requested (an approve may \
+                 have been sent; no USDC moved)"
+            ),
             source: None,
         },
         exit => err(
@@ -3476,7 +3479,16 @@ mod tests {
         let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
         assert!(e.to_string().contains("cannot open the lock"), "{e}");
-        assert!(e.to_string().contains("nothing was sent"), "{e}");
+        // Its run may have sent an approve before it died.
+        assert!(
+            e.to_string()
+                .contains("(an approve may have been sent; no USDC moved)"),
+            "{e}"
+        );
+        assert!(!e.to_string().contains("nothing was sent"), "{e}");
+        // Without its lock the operation is not closed: a later resume with
+        // the lock fixed does that.
+        assert_eq!(store.load(&op).unwrap().stage, OpStage::Reserved);
     }
 
     #[tokio::test(start_paused = true)]

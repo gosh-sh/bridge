@@ -53,6 +53,10 @@ impl<T: Clone> Script<T> {
 /// Scripted `eth_call` answers, keyed by `(to, first 4 bytes of calldata)`.
 pub type CallScripts = HashMap<(Address, [u8; 4]), Script<Bytes>>;
 
+/// `eth_call` answers at one block, keyed by `(to, first 4 bytes of
+/// calldata, block number)`.
+pub type CallsAtBlock = HashMap<(Address, [u8; 4], u64), Bytes>;
+
 /// An EVM node that answers from what the test put in it.
 pub struct FakeEvm {
     /// What `chain_id` answers.
@@ -68,7 +72,7 @@ pub struct FakeEvm {
     pub stale_calls: Mutex<CallScripts>,
     /// `(to, first 4 bytes of calldata, block)` → what a call pinned to that
     /// block number answers, before `calls` is asked.
-    pub at_block: Mutex<HashMap<(Address, [u8; 4], u64), Bytes>>,
+    pub at_block: Mutex<CallsAtBlock>,
     /// The next N calls pinned to a block number fail, as on a node that
     /// does not have the block yet.
     pub pinned_misses: AtomicU32,

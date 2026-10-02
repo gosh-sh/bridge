@@ -355,7 +355,11 @@ impl EvmRead for FakeEvm {
         let counts = self.counts.lock().unwrap();
         counts
             .get(&(a, key))
-            .or_else(|| (key == "block").then(|| counts.get(&(a, "pending"))).flatten())
+            .or_else(|| {
+                (key == "block")
+                    .then(|| counts.get(&(a, "pending")))
+                    .flatten()
+            })
             .copied()
             .ok_or_else(|| anyhow::anyhow!("unknown tag {key}"))
     }

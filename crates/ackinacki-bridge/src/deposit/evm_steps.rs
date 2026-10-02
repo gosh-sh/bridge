@@ -33,7 +33,6 @@ pub enum ApproveOutcome {
     },
 }
 
-
 /// The exit-21 error of this step.
 fn approve_failed(op_id: &str, why: String) -> CliError {
     CliError::deposit(
@@ -773,7 +772,10 @@ mod tests {
             .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
         let out = go(&evm, &mut w).await.unwrap();
         assert!(
-            matches!(out, ApproveOutcome::Approved { tx: None, block: 21 }),
+            matches!(out, ApproveOutcome::Approved {
+                tx: None,
+                block: 21
+            }),
             "{out:?}"
         );
         // Two polls, then the read-back at the block where it landed.
@@ -969,9 +971,11 @@ mod tests {
             .unwrap()
             .insert(h, deposit_tx(h, s.w.account, BRIDGE, 7, 2, Bytes::new()));
         let ui = RecordingUi::new(true);
-        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
-            .await
-            .unwrap();
+        let out = request_deposit(
+            &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+        )
+        .await
+        .unwrap();
         assert_eq!(*seen.lock().unwrap(), Some(OpStage::Requested));
         assert_eq!(
             out,
@@ -996,9 +1000,11 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
         let ui = RecordingUi::new(true);
-        request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
-            .await
-            .unwrap();
+        request_deposit(
+            &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+        )
+        .await
+        .unwrap();
         let back = s.store.load(&s.rec.op_id).unwrap();
         assert_eq!(back.request.unwrap().from_block, 90, "not the head, 100");
         assert!(
@@ -1021,7 +1027,9 @@ mod tests {
         let t0 = tokio::time::Instant::now();
         let out = tokio::time::timeout(
             Duration::from_secs(3600),
-            request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None),
+            request_deposit(
+                &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+            ),
         )
         .await
         .expect("--recovery-window-s must end the read")
@@ -1052,9 +1060,11 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::Rejected));
         let ui = RecordingUi::new(true);
-        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
-            .await
-            .unwrap_err();
+        let e = request_deposit(
+            &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::WalletFailed);
         let back = s.store.load(&s.rec.op_id).unwrap();
         assert_eq!(back.stage, OpStage::Failed);
@@ -1067,9 +1077,11 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
         let ui = RecordingUi::new(true);
-        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
-            .await
-            .unwrap();
+        let out = request_deposit(
+            &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out, RequestOutcome::Search {
             window: WINDOW
         });
@@ -1087,9 +1099,11 @@ mod tests {
         let mut s = setup();
         *s.evm.paused.lock().unwrap() = Some(true);
         let ui = RecordingUi::new(true);
-        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
-            .await
-            .unwrap_err();
+        let e = request_deposit(
+            &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
         assert!(e.to_string().contains("paused by its owner"), "{e}");
         assert!(s.w.sent.is_empty(), "the wallet was never asked");
@@ -1102,9 +1116,11 @@ mod tests {
             *s.evm.paused.lock().unwrap() = absent;
             s.w.send_results
                 .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
-            let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
-                .await
-                .unwrap();
+            let out = request_deposit(
+                &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 out,
                 RequestOutcome::Search {

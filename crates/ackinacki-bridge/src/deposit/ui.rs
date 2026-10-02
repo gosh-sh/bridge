@@ -1750,7 +1750,10 @@ mod tests {
         let shown = screen(&text(&log));
         assert_eq!(shown[0], LINE.trim_end(), "{shown:#?}");
         assert_eq!(
-            shown.iter().filter(|l| l.contains("relay call failed")).count(),
+            shown
+                .iter()
+                .filter(|l| l.contains("relay call failed"))
+                .count(),
             1,
             "{shown:#?}"
         );
@@ -1760,7 +1763,10 @@ mod tests {
             "no stale row: {shown:#?}"
         );
         assert_eq!(shown.len(), 1 + StepId::ALL.len() + 1, "{shown:#?}");
-        assert!(shown[1].starts_with('✔') && shown[1].contains("ok"), "{shown:#?}");
+        assert!(
+            shown[1].starts_with('✔') && shown[1].contains("ok"),
+            "{shown:#?}"
+        );
         assert!(shown[10].starts_with("scan the QR code"), "{shown:#?}");
     }
 

@@ -1788,7 +1788,11 @@ fn state_dir_unreadable(target: &OpRef, e: CliError) -> CliError {
     let why = e.into_reason();
     let (op, named, which) = match target {
         OpRef::Op(op) => (Some(op.as_str()), op.clone(), format!("operation {op}")),
-        OpRef::DepositId(n) => (None, n.to_string(), format!("the operation of depositId {n}")),
+        OpRef::DepositId(n) => (
+            None,
+            n.to_string(),
+            format!("the operation of depositId {n}"),
+        ),
     };
     CliError::deposit(
         ExitCode::CreditUnconfirmed,
@@ -1849,8 +1853,7 @@ async fn open_for_resume(
                 Stage::Preflight,
                 Some(&op),
                 format!(
-                    "operation {op} is being run by another process (nothing was sent by this \
-                     run)"
+                    "operation {op} is being run by another process (nothing was sent by this run)"
                 ),
             ))
         },
@@ -3457,7 +3460,10 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("cannot open the lock"), "{msg}");
         assert!(msg.contains("is damaged"), "{msg}");
-        assert!(msg.contains("how far the operation got is unknown"), "{msg}");
+        assert!(
+            msg.contains("how far the operation got is unknown"),
+            "{msg}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3481,7 +3487,10 @@ mod tests {
         let op = Store::new_op_id();
         for (target, named) in [
             (OpRef::Op(op.clone()), op.clone()),
-            (OpRef::DepositId(alloy_primitives::U256::from(6)), "6".to_string()),
+            (
+                OpRef::DepositId(alloy_primitives::U256::from(6)),
+                "6".to_string(),
+            ),
         ] {
             let mut p = w.params(RunMode::Resume {
                 target: target.clone(),
@@ -3489,10 +3498,17 @@ mod tests {
             });
             p.state_dir = file.clone();
             let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
-            assert_eq!(e.exit_code(), ExitCode::CreditUnconfirmed, "{target:?}: {e}");
+            assert_eq!(
+                e.exit_code(),
+                ExitCode::CreditUnconfirmed,
+                "{target:?}: {e}"
+            );
             let msg = e.to_string();
             assert!(msg.contains(&format!("--resume {named}")), "{msg}");
-            assert!(msg.contains("how far the operation got is unknown"), "{msg}");
+            assert!(
+                msg.contains("how far the operation got is unknown"),
+                "{msg}"
+            );
             assert!(!msg.contains("nothing was sent"), "{msg}");
         }
     }

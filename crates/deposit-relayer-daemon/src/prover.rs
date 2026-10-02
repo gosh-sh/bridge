@@ -15,13 +15,19 @@
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
 //!   Blake2b SHPLONK proof operands) and assembles the three opcode operands.
 
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    path::PathBuf,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use alloy::primitives::U256;
 use async_trait::async_trait;
+use metrics::{counter, histogram};
 
 use crate::{
     error::RelayerError,
+    metrics as prom,
     types::{DepositEvent, DepositProofBundle, DepositPublicInputs},
 };
 
@@ -206,11 +212,23 @@ impl SubprocessProofGenerator {
     }
 
     async fn run_example(&self, args: &[String]) -> Result<(), RelayerError> {
-        use tokio::process::Command;
-
         let example = args
             .first()
-            .ok_or_else(|| RelayerError::ProofGeneration("empty example args".into()))?;
+            .ok_or_else(|| RelayerError::ProofGeneration("empty example args".into()))?
+            .clone();
+        let started = Instant::now();
+        let result = self.run_example_inner(&example, args).await;
+        histogram!(prom::PROVER_STAGE_DURATION_SECONDS, "example" => example.clone())
+            .record(started.elapsed().as_secs_f64());
+        if result.is_err() {
+            counter!(prom::PROVER_STAGE_FAILURES_TOTAL, "example" => example).increment(1);
+        }
+        result
+    }
+
+    async fn run_example_inner(&self, example: &str, args: &[String]) -> Result<(), RelayerError> {
+        use tokio::process::Command;
+
         let passthrough: &[String] = match args.get(1).map(String::as_str) {
             Some("--") => &args[2..],
             _ => &args[1..],

@@ -8,8 +8,8 @@
 			"inputs": [
 				{"name":"pubkey","type":"uint256"},
 				{"name":"l1ChainId","type":"uint256"},
-				{"name":"committeeCommitment","type":"uint256"},
-				{"name":"committeePeriod","type":"uint64"}
+				{"name":"bootstrapCommittee","type":"uint256"},
+				{"name":"bootstrapPeriod","type":"uint64"}
 			],
 			"outputs": []
 		},
@@ -46,6 +46,14 @@
 		{
 			"name": "disableOwnerRotation",
 			"inputs": [],
+			"outputs": []
+		},
+		{
+			"name": "setCommitteeCommitment",
+			"inputs": [
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"period","type":"uint64"}
+			],
 			"outputs": []
 		},
 		{

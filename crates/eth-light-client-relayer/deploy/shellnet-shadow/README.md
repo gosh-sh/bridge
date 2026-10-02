@@ -149,8 +149,8 @@ emitted, `getCommitteeState` shows the new period).
 
 ## What is not covered by shadow
 
-- `USDCBridge` wiring (`setLightClient`, `acceptBlockHashFromLightClient`,
-  `disableOwnerAnchors`): the shellnet `eccUSDCBridge` has no such surface yet.
+- `USDCBridge` wiring (`getAnchorConfig`, `acceptBlockHashFromLightClient`,
+  `disableOwnerAnchors`): shadow does not call them; production flip-owner does.
 - `submitRotate` and `disableOwnerRotation`.
 - `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...`)
   and will OOG on Acki Nacki until a keccak builtin; the daemon does not send it

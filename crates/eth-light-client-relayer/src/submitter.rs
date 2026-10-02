@@ -37,8 +37,11 @@ pub trait AnSubmitter: Send + Sync {
     /// [`anchor_key_hex`] re-packs it into the stored key at the ABI boundary.
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
-    /// Owner one-way flip: `setLightClient` + `disableOwnerAnchors`
-    /// (USDCBridge) and `disableOwnerRotation` (EthBeaconLightClient).
+    /// Owner flip: check `getAnchorConfig().lightClient` against
+    /// `AN_LIGHT_CLIENT`, then `disableOwnerAnchors` (USDCBridge) unless
+    /// `ownerAnchorsEnabled` is already false, then `disableOwnerRotation`
+    /// (EthBeaconLightClient). The bridge derives the light-client address
+    /// from `setLightClientCode`. Rejected without a USDCBridge client.
     /// Idempotent.
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError>;
 
@@ -85,7 +88,7 @@ struct MockInner {
     proven: HashSet<[u8; 32]>,
     period: Option<u64>,
     reject: bool,
-    light_client_set: bool,
+    reject_flip: bool,
     owner_anchors_enabled: bool,
     owner_rotation_enabled: bool,
     re_push_count: u32,
@@ -100,7 +103,7 @@ impl MockAnSubmitter {
                 proven: HashSet::new(),
                 period: None,
                 reject: false,
-                light_client_set: false,
+                reject_flip: false,
                 owner_anchors_enabled: true,
                 owner_rotation_enabled: true,
                 re_push_count: 0,
@@ -113,6 +116,18 @@ impl MockAnSubmitter {
         let s = Self::accepting();
         s.inner.lock().unwrap().reject = true;
         s
+    }
+
+    /// Accepts everything except `flip_owner`, which it rejects until
+    /// [`Self::accept_flip`].
+    pub fn rejecting_flip() -> Self {
+        let s = Self::accepting();
+        s.inner.lock().unwrap().reject_flip = true;
+        s
+    }
+
+    pub fn accept_flip(&self) {
+        self.inner.lock().unwrap().reject_flip = false;
     }
 
     pub fn head_slot(&self) -> Option<u64> {
@@ -137,10 +152,6 @@ impl MockAnSubmitter {
 
     pub fn owner_anchors_enabled(&self) -> bool {
         self.inner.lock().unwrap().owner_anchors_enabled
-    }
-
-    pub fn light_client_set(&self) -> bool {
-        self.inner.lock().unwrap().light_client_set
     }
 
     pub fn re_push_count(&self) -> u32 {
@@ -249,12 +260,11 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
-        if inner.reject {
+        if inner.reject || inner.reject_flip {
             return Ok(SubmitOutcome::Rejected {
                 reason: "flip-owner rejected".into(),
             });
         }
-        inner.light_client_set = true;
         inner.owner_anchors_enabled = false;
         inner.owner_rotation_enabled = false;
         Ok(SubmitOutcome::Accepted {
@@ -288,6 +298,21 @@ impl AnSubmitter for MockAnSubmitter {
 #[cfg(test)]
 mod set_committee_tests {
     use super::*;
+
+    #[test]
+    fn same_tvm_account_accepts_workchain_and_extended_forms() {
+        let acc = "aa".repeat(32);
+        assert!(same_tvm_account(&format!("0:{acc}"), &acc));
+        assert!(same_tvm_account(&format!("0x{acc}"), &acc));
+        assert!(same_tvm_account(&format!("{acc}::{acc}"), &acc));
+        assert!(!same_tvm_account(&format!("0:{}", "bb".repeat(32)), &acc));
+        // The account half of `dapp::account` is compared, not the dapp.
+        let dapp = "cc".repeat(32);
+        assert!(same_tvm_account(&format!("{dapp}::{acc}"), &acc));
+        assert!(!same_tvm_account(&format!("{acc}::{dapp}"), &acc));
+        assert!(!same_tvm_account(&format!("-1:{acc}"), &acc));
+        assert!(!same_tvm_account("", &acc));
+    }
 
     #[test]
     fn le_word_becomes_big_endian_uint256() {
@@ -406,7 +431,6 @@ mod ancestry_submit_tests {
             } => {},
             other => panic!("{other:?}"),
         }
-        assert!(mock.light_client_set());
         assert!(!mock.owner_anchors_enabled());
         assert!(!mock.owner_rotation_enabled());
         mock.flip_owner().await.unwrap();
@@ -612,24 +636,45 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     }
 
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError> {
-        if let Some((usdc_addr, usdc_client)) = &self.usdc {
-            let lc = ExtendedAddress::parse(&self.config.light_client)
-                .map_err(RelayerError::from)?
-                .workchain_address();
-            match self
-                .call_on(
-                    usdc_client.as_ref(),
-                    usdc_addr,
-                    "setLightClient",
-                    json!({ "lightClient": lc }),
-                )
-                .await?
-            {
-                SubmitOutcome::Accepted {
-                    ..
-                } => {},
-                other => return Ok(other),
-            }
+        // `disableOwnerRotation` alone would report a flip while the owner
+        // still admits anchors, so both contracts are required.
+        let Some((usdc_addr, usdc_client)) = &self.usdc else {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "flip-owner needs USDCBridge (AN_USDC_BRIDGE + AN_USDC_ABI_PATH)".into(),
+            });
+        };
+        let expected =
+            ExtendedAddress::parse(&self.config.light_client).map_err(RelayerError::from)?;
+        // A failed read is retried on the next accepted update like any other
+        // refusal; it must not abort the tick before `rePushAnchor`.
+        let cfg = match usdc_client
+            .run_getter(usdc_addr, "getAnchorConfig", json!({}))
+            .await
+        {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return Ok(SubmitOutcome::Rejected {
+                    reason: format!("getAnchorConfig failed: {e}"),
+                })
+            },
+        };
+        let on_chain = cfg
+            .get("lightClient")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if is_zero_tvm_account(on_chain) || !same_tvm_account(on_chain, expected.account_id()) {
+            return Ok(SubmitOutcome::Rejected {
+                reason: format!(
+                    "getAnchorConfig.lightClient={on_chain} != AN_LIGHT_CLIENT {}",
+                    expected.workchain_address()
+                ),
+            });
+        }
+        // `disableOwnerAnchors` does not revert a second call, so the getter is
+        // the only "already flipped" signal; anything but an explicit `false`
+        // sends the call.
+        let already_off = cfg.get("ownerAnchorsEnabled").and_then(|v| v.as_bool()) == Some(false);
+        if !already_off {
             match self
                 .call_on(
                     usdc_client.as_ref(),
@@ -642,10 +687,6 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 SubmitOutcome::Accepted {
                     ..
                 } => {},
-                // Second call after a wiped `state.json`: already one-way.
-                SubmitOutcome::Rejected {
-                    reason,
-                } if reason.contains("228") || reason.contains("OWNER_ANCHORS_DISABLED") => {},
                 other => return Ok(other),
             }
         }
@@ -668,11 +709,390 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     }
 }
 
+/// Compare a TVM `address` getter (`0:<hex>` / `0x<hex>` / `dapp::account`)
+/// with the 64-hex account id from `AN_LIGHT_CLIENT`.
+fn same_tvm_account(on_chain: &str, expected_account_id: &str) -> bool {
+    let got = tvm_account_hex(on_chain);
+    let exp = tvm_account_hex(expected_account_id);
+    match (got, exp) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+        _ => false,
+    }
+}
+
+/// `getAnchorConfig` returns the zero address until `setLightClientCode` runs.
+fn is_zero_tvm_account(on_chain: &str) -> bool {
+    tvm_account_hex(on_chain).is_some_and(|h| h.bytes().all(|b| b == b'0'))
+}
+
+fn tvm_account_hex(s: &str) -> Option<String> {
+    if let Ok(ext) = ExtendedAddress::parse(s) {
+        return Some(ext.account_id().to_ascii_lowercase());
+    }
+    let bare = s
+        .trim()
+        .strip_prefix("0:")
+        .or_else(|| s.trim().strip_prefix("0x"))
+        .unwrap_or(s.trim());
+    if bare.len() == 64 && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(bare.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
     if msg.contains("244") || msg.contains("STALE_UPDATE") {
         return SubmitOutcome::AlreadyOnHead;
     }
     SubmitOutcome::Rejected {
         reason: format!("{function} failed: {msg}"),
+    }
+}
+
+#[cfg(test)]
+mod flip_owner_tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
+    use acki_nacki_interface::{
+        AckiNackiError, AckiNackiTransaction, TransactionReceipt, TransactionStatus,
+    };
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    fn lc() -> String {
+        "22".repeat(32)
+    }
+
+    fn bridge() -> String {
+        "1a".repeat(32)
+    }
+
+    fn extended(account: &str) -> String {
+        format!("{account}::{account}")
+    }
+
+    #[derive(Clone)]
+    enum Reply {
+        Err(String),
+        Reverted(i32),
+        Pending,
+    }
+
+    /// Records `(account_id, function)` for every getter and call, in order,
+    /// in one log shared by the light-client and the bridge client. Each
+    /// client stands for one contract's ABI; a call it is asked to send to
+    /// the other contract is logged as `"<function> via <account> client"`.
+    struct RecordingClient {
+        serves: String,
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+        getter: std::result::Result<Value, String>,
+        replies: HashMap<&'static str, Reply>,
+        sent: Mutex<HashMap<[u8; 32], String>>,
+    }
+
+    impl RecordingClient {
+        fn new(getter: std::result::Result<Value, String>) -> Self {
+            Self {
+                serves: String::new(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                getter,
+                replies: HashMap::new(),
+                sent: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn reply(mut self, function: &'static str, reply: Reply) -> Self {
+            self.replies.insert(function, reply);
+            self
+        }
+
+        /// A client for `account`'s contract sharing this one's log and script.
+        fn serving(&self, account: String) -> Self {
+            Self {
+                serves: account,
+                calls: self.calls.clone(),
+                getter: self.getter.clone(),
+                replies: self.replies.clone(),
+                sent: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn record(&self, account: &str, function: &str) -> usize {
+            let entry = if account == self.serves {
+                function.to_string()
+            } else {
+                format!("{function} via {} client", self.serves)
+            };
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((account.to_string(), entry));
+            calls.len()
+        }
+
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl IAckiNacki for RecordingClient {
+        async fn send_transaction(
+            &self,
+            _tx: AckiNackiTransaction,
+        ) -> acki_nacki_interface::Result<[u8; 32]> {
+            unimplemented!("flip_owner does not send raw transactions")
+        }
+
+        async fn call_contract(
+            &self,
+            call: ContractCallRequest,
+        ) -> acki_nacki_interface::Result<[u8; 32]> {
+            let function = call.function.clone();
+            let n = self.record(call.to.account_id(), &function);
+            if let Some(Reply::Err(msg)) = self.replies.get(function.as_str()) {
+                return Err(AckiNackiError::ContractError(msg.clone()));
+            }
+            let hash = [n as u8; 32];
+            self.sent.lock().unwrap().insert(hash, function);
+            Ok(hash)
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _tx_hash: &[u8; 32],
+        ) -> acki_nacki_interface::Result<TransactionStatus> {
+            unimplemented!()
+        }
+
+        async fn get_transaction_receipt(
+            &self,
+            _tx_hash: &[u8; 32],
+        ) -> acki_nacki_interface::Result<TransactionReceipt> {
+            unimplemented!()
+        }
+
+        async fn wait_for_confirmation(
+            &self,
+            tx_hash: &[u8; 32],
+            _timeout_secs: u64,
+        ) -> acki_nacki_interface::Result<TransactionReceipt> {
+            let function = self.sent.lock().unwrap()[tx_hash].clone();
+            let (status, exit_code) = match self.replies.get(function.as_str()) {
+                Some(Reply::Reverted(code)) => (TransactionStatus::Reverted, Some(*code)),
+                Some(Reply::Pending) => (TransactionStatus::Pending, None),
+                _ => (TransactionStatus::Confirmed, Some(0)),
+            };
+            let mut receipt = TransactionReceipt::new(*tx_hash, status, None, 0, Vec::new());
+            receipt.exit_code = exit_code;
+            Ok(receipt)
+        }
+
+        async fn get_block_number(&self) -> acki_nacki_interface::Result<u64> {
+            unimplemented!()
+        }
+
+        async fn get_balance(&self, _address: &str) -> acki_nacki_interface::Result<u64> {
+            unimplemented!()
+        }
+
+        async fn run_getter(
+            &self,
+            to: &str,
+            function: &str,
+            _params: Value,
+        ) -> acki_nacki_interface::Result<Value> {
+            self.record(ExtendedAddress::parse(to).unwrap().account_id(), function);
+            self.getter.clone().map_err(AckiNackiError::NetworkError)
+        }
+    }
+
+    fn submitter(
+        script: RecordingClient,
+        with_usdc: bool,
+    ) -> (AnInterfaceSubmitter<RecordingClient>, Arc<RecordingClient>) {
+        submitter_for(script, with_usdc, lc())
+    }
+
+    /// `light_client` is `AN_LIGHT_CLIENT`'s account. The returned client is
+    /// the light-client one; its log also holds the bridge client's calls.
+    fn submitter_for(
+        script: RecordingClient,
+        with_usdc: bool,
+        light_client: String,
+    ) -> (AnInterfaceSubmitter<RecordingClient>, Arc<RecordingClient>) {
+        let lc_client = Arc::new(script.serving(light_client.clone()));
+        let s = AnInterfaceSubmitter::new(lc_client.clone(), AnSubmitConfig {
+            from: extended(&"33".repeat(32)),
+            light_client: extended(&light_client),
+            confirm_timeout_secs: 1,
+            usdc_bridge: with_usdc.then(|| extended(&bridge())),
+        });
+        let s = if with_usdc {
+            s.with_usdc(extended(&bridge()), Arc::new(script.serving(bridge())))
+        } else {
+            s
+        };
+        (s, lc_client)
+    }
+
+    fn anchor_config(light_client: &str, owner_anchors_enabled: bool) -> Value {
+        json!({
+            "lightClient": format!("0:{light_client}"),
+            "ownerAnchorsEnabled": owner_anchors_enabled,
+        })
+    }
+
+    fn call(account: String, function: &str) -> (String, String) {
+        (account, function.to_string())
+    }
+
+    #[tokio::test]
+    async fn flips_bridge_anchors_then_light_client_rotation() {
+        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&lc(), true))), true);
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Accepted { .. }
+        ));
+        assert_eq!(client.calls(), vec![
+            call(bridge(), "getAnchorConfig"),
+            call(bridge(), "disableOwnerAnchors"),
+            call(lc(), "disableOwnerRotation"),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn another_light_client_on_the_bridge_sends_nothing() {
+        let other = "44".repeat(32);
+        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&other, true))), true);
+        match s.flip_owner().await.unwrap() {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                assert!(reason.contains(&other), "{reason}");
+                assert!(reason.contains(&lc()), "{reason}");
+            },
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+    }
+
+    #[tokio::test]
+    async fn light_client_code_not_installed_sends_nothing() {
+        // `AN_LIGHT_CLIENT` is zero too, so only the zero check can refuse.
+        let zero = "00".repeat(32);
+        let (s, client) = submitter_for(
+            RecordingClient::new(Ok(anchor_config(&zero, true))),
+            true,
+            zero.clone(),
+        );
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
+        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+    }
+
+    #[tokio::test]
+    async fn malformed_getter_output_sends_nothing() {
+        let (s, client) = submitter(
+            RecordingClient::new(Ok(json!({ "value0": format!("0:{}", lc()) }))),
+            true,
+        );
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
+        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+    }
+
+    #[tokio::test]
+    async fn owner_anchors_already_off_goes_straight_to_rotation() {
+        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&lc(), false))), true);
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Accepted { .. }
+        ));
+        assert_eq!(client.calls(), vec![
+            call(bridge(), "getAnchorConfig"),
+            call(lc(), "disableOwnerRotation"),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn missing_owner_anchors_flag_still_disables_them() {
+        let (s, client) = submitter(
+            RecordingClient::new(Ok(json!({ "lightClient": format!("0:{}", lc()) }))),
+            true,
+        );
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Accepted { .. }
+        ));
+        assert_eq!(client.calls()[1], call(bridge(), "disableOwnerAnchors"));
+    }
+
+    /// The error text carries addresses and message ids, so a code that
+    /// appears in it by chance must not read as "already disabled".
+    #[tokio::test]
+    async fn failed_disable_stops_before_rotation_whatever_its_text() {
+        let text = format!(
+            "contract call aborted (exit_code=209) account=0:{}225 OWNER_ANCHORS_DISABLED",
+            "ab".repeat(30)
+        );
+        let client = RecordingClient::new(Ok(anchor_config(&lc(), true)))
+            .reply("disableOwnerAnchors", Reply::Err(text));
+        let (s, client) = submitter(client, true);
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
+        assert_eq!(client.calls(), vec![
+            call(bridge(), "getAnchorConfig"),
+            call(bridge(), "disableOwnerAnchors"),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn reverted_or_pending_disable_stops_before_rotation() {
+        for reply in [Reply::Reverted(225), Reply::Pending] {
+            let client = RecordingClient::new(Ok(anchor_config(&lc(), true)))
+                .reply("disableOwnerAnchors", reply);
+            let (s, client) = submitter(client, true);
+            let out = s.flip_owner().await.unwrap();
+            assert!(
+                matches!(
+                    out,
+                    SubmitOutcome::Rejected { .. } | SubmitOutcome::Pending { .. }
+                ),
+                "{out:?}"
+            );
+            assert_eq!(client.calls().len(), 2, "{:?}", client.calls());
+        }
+    }
+
+    #[tokio::test]
+    async fn getter_failure_is_a_rejection_not_an_error() {
+        let (s, client) = submitter(RecordingClient::new(Err("empty boc".into())), true);
+        match s.flip_owner().await.unwrap() {
+            SubmitOutcome::Rejected {
+                reason,
+            } => assert!(reason.contains("getAnchorConfig"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+    }
+
+    #[tokio::test]
+    async fn without_the_bridge_client_nothing_is_sent() {
+        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&lc(), true))), false);
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
+        assert!(client.calls().is_empty());
     }
 }

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::deposit::{
-    evm::{approve_calldata, deposit_calldata, EvmRead, Fees},
+    evm::{approve_calldata, deposit_calldata, BlockTag, EvmRead, Fees},
     ui::Ui,
 };
 
@@ -64,12 +64,13 @@ pub struct TxRequest {
 }
 
 impl TxRequest {
-    /// Builds the request for `purpose` from `from`, estimating gas and
-    /// fees on the node.
+    /// Builds the request for `purpose` from `from`, estimating gas at
+    /// `at` and fees on the node.
     pub async fn build(
         evm: &dyn EvmRead,
         from: Address,
         purpose: TxPurpose,
+        at: BlockTag,
     ) -> anyhow::Result<TxRequest> {
         let (to, data) = match &purpose {
             TxPurpose::Approve {
@@ -83,7 +84,7 @@ impl TxRequest {
                 account,
             } => (*bridge, deposit_calldata(*amount, *account)),
         };
-        let estimate = evm.estimate_gas(from, to, data.clone()).await?;
+        let estimate = evm.estimate_gas_at(from, to, data.clone(), at).await?;
         Ok(TxRequest {
             from,
             to,
@@ -187,6 +188,7 @@ mod tests {
                 amount: 12_500_000,
                 account: B256::repeat_byte(0xa3),
             },
+            BlockTag::Latest,
         )
         .await
         .unwrap();

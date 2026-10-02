@@ -146,7 +146,12 @@ pub trait EvmRead: Send + Sync {
     /// The code at `a`; empty for an account without code.
     async fn code(&self, a: Address) -> anyhow::Result<Bytes>;
     /// `eth_call` at the latest block; returns the call's output.
-    async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes>;
+    async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes> {
+        self.call_at(to, data, BlockTag::Latest).await
+    }
+    /// `eth_call` at `at`; returns the call's output. A node that does not
+    /// have that block yet answers with an error.
+    async fn call_at(&self, to: Address, data: Bytes, at: BlockTag) -> anyhow::Result<Bytes>;
     /// Re-executes a call at `block`; `Some(reason)` if it reverts.
     async fn revert_reason(
         &self,
@@ -181,8 +186,14 @@ pub trait EvmRead: Send + Sync {
     /// Fetches every receipt and raw transaction of one block, the way
     /// the prover's fetcher will. Returns the transaction count.
     async fn probe_block(&self, tag: BlockTag) -> anyhow::Result<usize>;
-    /// `eth_estimateGas` for a call from `from`.
-    async fn estimate_gas(&self, from: Address, to: Address, data: Bytes) -> anyhow::Result<u64>;
+    /// `eth_estimateGas` for a call from `from`, at `at`.
+    async fn estimate_gas_at(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        at: BlockTag,
+    ) -> anyhow::Result<u64>;
     /// The node's EIP-1559 fee estimate.
     async fn fees(&self) -> anyhow::Result<Fees>;
 }
@@ -269,15 +280,16 @@ pub async fn read_balance(evm: &dyn EvmRead, token: Address, who: Address) -> an
     Ok(IErc20::balanceOfCall::abi_decode_returns(&out)?)
 }
 
-/// The token's `allowance(owner, spender)`.
+/// The token's `allowance(owner, spender)` at `at`.
 pub async fn read_allowance(
     evm: &dyn EvmRead,
     token: Address,
     owner: Address,
     spender: Address,
+    at: BlockTag,
 ) -> anyhow::Result<U256> {
     let out = evm
-        .call(
+        .call_at(
             token,
             IErc20::allowanceCall {
                 owner,
@@ -285,6 +297,7 @@ pub async fn read_allowance(
             }
             .abi_encode()
             .into(),
+            at,
         )
         .await?;
     Ok(IErc20::allowanceCall::abi_decode_returns(&out)?)
@@ -403,11 +416,16 @@ impl EvmRead for AlloyEvm {
         Ok(self.p.get_code_at(a).await?)
     }
 
-    async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes> {
-        Ok(self
+    async fn call_at(&self, to: Address, data: Bytes, at: BlockTag) -> anyhow::Result<Bytes> {
+        let call = self
             .p
-            .call(TransactionRequest::default().to(to).input(data.into()))
-            .await?)
+            .call(TransactionRequest::default().to(to).input(data.into()));
+        Ok(match at {
+            // No block parameter, as before there was a choice: the node
+            // takes its head.
+            BlockTag::Latest => call.await?,
+            at => call.block(BlockId::Number(tag(at))).await?,
+        })
     }
 
     async fn revert_reason(
@@ -578,12 +596,25 @@ impl EvmRead for AlloyEvm {
         Ok(n)
     }
 
-    async fn estimate_gas(&self, from: Address, to: Address, data: Bytes) -> anyhow::Result<u64> {
+    async fn estimate_gas_at(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        at: BlockTag,
+    ) -> anyhow::Result<u64> {
         let req = TransactionRequest::default()
             .from(from)
             .to(to)
             .input(data.into());
-        match self.p.estimate_gas(req).await {
+        let estimate = self.p.estimate_gas(req);
+        // At the head, no block parameter: a node that does not take one
+        // for eth_estimateGas is asked exactly as before.
+        let estimated = match at {
+            BlockTag::Latest => estimate.await,
+            at => estimate.block(BlockId::Number(tag(at))).await,
+        };
+        match estimated {
             Ok(g) => Ok(g),
             Err(e) => match revert_data(&e) {
                 Some(d) => Err(EstimateReverted(revert_text(&e, &d)).into()),
@@ -885,7 +916,7 @@ mod tests {
             ),
         );
         let e = evm
-            .estimate_gas(from, BRIDGE, data.clone())
+            .estimate_gas_at(from, BRIDGE, data.clone(), BlockTag::Latest)
             .await
             .unwrap_err();
         assert_eq!(revert_of(&e).as_deref(), Some("BridgePaused"));
@@ -894,7 +925,7 @@ mod tests {
             r#"{"code":3,"message":"execution reverted: ERC20: transfer amount exceeds balance","data":"0x08c379a0"}"#,
         );
         let e = evm
-            .estimate_gas(from, BRIDGE, data.clone())
+            .estimate_gas_at(from, BRIDGE, data.clone(), BlockTag::Latest)
             .await
             .unwrap_err();
         assert_eq!(
@@ -903,12 +934,17 @@ mod tests {
         );
         rpc_error(&rpc, r#"{"code":-32005,"message":"rate limit exceeded"}"#);
         let e = evm
-            .estimate_gas(from, BRIDGE, data.clone())
+            .estimate_gas_at(from, BRIDGE, data.clone(), BlockTag::Latest)
             .await
             .unwrap_err();
         assert_eq!(revert_of(&e), None, "a rate limit is retried");
         assert_eq!(revert_of(&anyhow::anyhow!("connection reset")), None);
         rpc.push_success(&U256::from(21_000u64));
-        assert_eq!(evm.estimate_gas(from, BRIDGE, data).await.unwrap(), 21_000);
+        assert_eq!(
+            evm.estimate_gas_at(from, BRIDGE, data, BlockTag::Latest)
+                .await
+                .unwrap(),
+            21_000
+        );
     }
 }

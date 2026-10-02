@@ -61,6 +61,11 @@ pub struct FakeEvm {
     pub codes: Mutex<HashMap<Address, Bytes>>,
     /// `(to, first 4 bytes of calldata)` → return data, scripted per call.
     pub calls: Mutex<CallScripts>,
+    /// What calls at the head (`Latest`, `Pending`) answer first, as a node
+    /// behind the one that served the last receipt does; a call pinned to
+    /// a block number, and a key without a script here, answer from
+    /// `calls`.
+    pub stale_calls: Mutex<CallScripts>,
     /// `header(Latest)` and `header(Pending)`, scripted per call.
     pub latest: Script<Header>,
     /// `header(Finalized)`, scripted per call.
@@ -72,7 +77,8 @@ pub struct FakeEvm {
     /// Transactions by hash.
     pub txs: Mutex<HashMap<B256, TxLite>>,
     /// `(address, tag)` → count; `Finalized` absent means the RPC does not know
-    /// the tag.
+    /// the tag. A block number reads `"block"`, or `"pending"` when the test
+    /// set no `"block"`.
     pub counts: Mutex<HashMap<(Address, &'static str), u64>>,
     /// Every `Deposit` log on the chain.
     pub logs: Mutex<Vec<DepositLogRef>>,
@@ -84,6 +90,13 @@ pub struct FakeEvm {
     pub paused: Mutex<Option<bool>>,
     /// `estimate_gas` reverts with this reason when set.
     pub estimate_revert: Mutex<Option<String>>,
+    /// Contract → the reason `estimate_gas` of a call to it reverts with
+    /// at the head, as on a node behind the one that served the last
+    /// receipt; pinned to a block number it does not.
+    pub stale_estimate_reverts: Mutex<HashMap<Address, String>>,
+    /// The block of every call and estimate pinned to a block number, in
+    /// order.
+    pub pinned_reads: Mutex<Vec<u64>>,
     /// The next this-many `estimate_gas` calls fail with a transport error.
     pub estimate_transport_failures: AtomicU32,
     /// The next N `transaction` calls fail, as a flaky RPC does.
@@ -122,6 +135,7 @@ impl Default for FakeEvm {
             chain_id: 0,
             codes: Mutex::default(),
             calls: Mutex::default(),
+            stale_calls: Mutex::default(),
             latest: Script::default(),
             finalized: Script::default(),
             by_hash: Mutex::default(),
@@ -133,6 +147,8 @@ impl Default for FakeEvm {
             revert: Mutex::default(),
             paused: Mutex::new(Some(false)),
             estimate_revert: Mutex::default(),
+            stale_estimate_reverts: Mutex::default(),
+            pinned_reads: Mutex::default(),
             estimate_transport_failures: AtomicU32::new(0),
             fail_tx_reads: AtomicU32::default(),
             fail_receipts: AtomicU32::default(),
@@ -202,7 +218,7 @@ impl EvmRead for FakeEvm {
             .unwrap_or_default())
     }
 
-    async fn call(&self, to: Address, data: Bytes) -> anyhow::Result<Bytes> {
+    async fn call_at(&self, to: Address, data: Bytes, at: BlockTag) -> anyhow::Result<Bytes> {
         let delay = *self.call_delay.lock().unwrap();
         tokio::time::sleep(delay).await;
         if let Some(left) = self.calls_before_failing.lock().unwrap().as_mut() {
@@ -215,11 +231,26 @@ impl EvmRead for FakeEvm {
             .get(..4)
             .ok_or_else(|| anyhow::anyhow!("calldata without a selector"))?
             .try_into()?;
-        self.calls
-            .lock()
-            .unwrap()
-            .get(&(to, sel))
-            .and_then(|s| s.next())
+        let stale = match at {
+            BlockTag::Number(n) => {
+                self.pinned_reads.lock().unwrap().push(n);
+                None
+            },
+            _ => self
+                .stale_calls
+                .lock()
+                .unwrap()
+                .get(&(to, sel))
+                .and_then(|s| s.next()),
+        };
+        stale
+            .or_else(|| {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .get(&(to, sel))
+                    .and_then(|s| s.next())
+            })
             .ok_or_else(|| anyhow::anyhow!("execution reverted"))
     }
 
@@ -319,12 +350,12 @@ impl EvmRead for FakeEvm {
             BlockTag::Latest => "latest",
             BlockTag::Pending => "pending",
             BlockTag::Finalized => "finalized",
-            BlockTag::Number(_) => "latest",
+            BlockTag::Number(_) => "block",
         };
-        self.counts
-            .lock()
-            .unwrap()
+        let counts = self.counts.lock().unwrap();
+        counts
             .get(&(a, key))
+            .or_else(|| (key == "block").then(|| counts.get(&(a, "pending"))).flatten())
             .copied()
             .ok_or_else(|| anyhow::anyhow!("unknown tag {key}"))
     }
@@ -354,7 +385,13 @@ impl EvmRead for FakeEvm {
         }
     }
 
-    async fn estimate_gas(&self, _: Address, _: Address, _: Bytes) -> anyhow::Result<u64> {
+    async fn estimate_gas_at(
+        &self,
+        _: Address,
+        to: Address,
+        _: Bytes,
+        at: BlockTag,
+    ) -> anyhow::Result<u64> {
         let left = self.estimate_transport_failures.load(Ordering::SeqCst);
         if left > 0 {
             self.estimate_transport_failures
@@ -363,6 +400,14 @@ impl EvmRead for FakeEvm {
         }
         if let Some(r) = self.estimate_revert.lock().unwrap().clone() {
             return Err(EstimateReverted(r).into());
+        }
+        match at {
+            BlockTag::Number(n) => self.pinned_reads.lock().unwrap().push(n),
+            _ => {
+                if let Some(r) = self.stale_estimate_reverts.lock().unwrap().get(&to) {
+                    return Err(EstimateReverted(r.clone()).into());
+                }
+            },
         }
         Ok(80_000)
     }

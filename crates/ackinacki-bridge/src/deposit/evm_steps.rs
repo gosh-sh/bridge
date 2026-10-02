@@ -7,7 +7,7 @@ use tokio::time::Instant;
 
 use crate::{
     deposit::{
-        evm::{read_allowance, revert_of, EvmRead},
+        evm::{read_allowance, revert_of, BlockTag, EvmRead},
         retry::{deadline_after, transient, until, until_with},
         ui::Ui,
         wallet::{TxPurpose, TxRequest, Wallet, WalletError},
@@ -25,8 +25,14 @@ pub enum ApproveOutcome {
     Approved {
         /// The approve transaction, when the wallet returned its hash.
         tx: Option<B256>,
+        /// The block the last approve is in, as this run saw it land: its
+        /// receipt's block, or the head at which the allowance read showed
+        /// it. A node behind that block answers as if the approve had not
+        /// been made, so what depends on it is read there.
+        block: u64,
     },
 }
+
 
 /// The exit-21 error of this step.
 fn approve_failed(op_id: &str, why: String) -> CliError {
@@ -38,18 +44,20 @@ fn approve_failed(op_id: &str, why: String) -> CliError {
     )
 }
 
-/// Builds the request for `purpose`, retrying what a retry can fix. A node
-/// that says the call would revert is an answer, not a failure: the reason
-/// comes back as `Err`, and nothing is retried.
+/// Builds the request for `purpose`, its gas estimated at `at`, retrying
+/// what a retry can fix. A node that says the call would revert is an
+/// answer, not a failure: the reason comes back as `Err`, and nothing is
+/// retried.
 async fn build_or_revert(
     evm: &dyn EvmRead,
     ui: &dyn Ui,
     what: &str,
     from: Address,
     purpose: TxPurpose,
+    at: BlockTag,
 ) -> Result<TxRequest, String> {
     transient(ui, what, || async {
-        match TxRequest::build(evm, from, purpose.clone()).await {
+        match TxRequest::build(evm, from, purpose.clone(), at).await {
             Ok(r) => Ok(Ok(r)),
             Err(e) => match revert_of(&e) {
                 Some(reason) => Ok(Err(reason)),
@@ -134,7 +142,9 @@ fn out_of_time(op_id: &str, what: &str, unseen: &str, last: LastError) -> CliErr
 /// wait has `wait_limit` from the wallet's answer — the hash, or the QR
 /// code shown — not from the request: the time the user takes to confirm
 /// is not in it. Every read, retry and pause is inside it, and so is
-/// whatever the caller reads next with the deadline returned.
+/// whatever the caller reads next with the deadline returned. Returns the
+/// hash, that deadline and the block the approve is in: its receipt's, or
+/// the head at which the allowance read showed it.
 #[allow(clippy::too_many_arguments)]
 async fn send_approve(
     evm: &dyn EvmRead,
@@ -147,13 +157,22 @@ async fn send_approve(
     op_id: &str,
     wait_limit: Duration,
     poll: Duration,
-) -> CliResult<(Option<B256>, Instant)> {
+) -> CliResult<(Option<B256>, Instant, u64)> {
     let purpose = TxPurpose::Approve {
         token: usdc,
         spender: bridge,
         amount,
     };
-    let req = match build_or_revert(evm, ui, "estimating approve", from, purpose).await {
+    let req = match build_or_revert(
+        evm,
+        ui,
+        "estimating approve",
+        from,
+        purpose,
+        BlockTag::Latest,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(reason) => {
             return Err(approve_failed(
@@ -185,10 +204,11 @@ async fn send_approve(
                     last,
                 )
             })?;
-            if r.is_some_and(|r| !r.status) {
+            let r = r.expect("the wait ends once the receipt is there");
+            if !r.status {
                 return Err(approve_failed(op_id, format!("approve {h} reverted")));
             }
-            Ok((Some(h), deadline))
+            Ok((Some(h), deadline, r.block_number))
         },
         Err(WalletError::NoHash) => {
             // A reset must land on exactly zero; a real approve may be
@@ -200,14 +220,25 @@ async fn send_approve(
                     *a >= amount
                 }
             };
-            poll_by(
+            // Each poll reads at the head the node reports, so the block
+            // in which the allowance is first seen is known: the reads
+            // that follow are made there.
+            let (block, _) = poll_by(
                 ui,
                 "reading the allowance",
                 "waiting for the approve from the QR code",
                 deadline,
                 poll,
-                || read_allowance(evm, usdc, from, bridge),
-                landed,
+                || async {
+                    let head = evm
+                        .header(BlockTag::Latest)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("the node has no latest block"))?
+                        .number;
+                    let a = read_allowance(evm, usdc, from, bridge, BlockTag::Number(head)).await?;
+                    Ok((head, a))
+                },
+                |(_, a)| landed(a),
             )
             .await
             .map_err(|last| {
@@ -218,7 +249,7 @@ async fn send_approve(
                     last,
                 )
             })?;
-            Ok((None, deadline))
+            Ok((None, deadline, block))
         },
         Err(WalletError::Rejected) => Err(approve_failed(
             op_id,
@@ -232,7 +263,10 @@ async fn send_approve(
 /// do when it already may, otherwise an approve (after a reset to zero when
 /// a smaller allowance is set), then a re-read, because the wallet lets the
 /// user edit the limit. Each approve's wait, the re-read after the last one
-/// included, ends at `wait_limit` with exit 21.
+/// included, ends at `wait_limit` with exit 21. The re-read is made at the
+/// block the last approve is in: a node that does not have that block yet
+/// answers with an error, which is read again, rather than with the
+/// allowance before the approve.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_allowance(
     evm: &dyn EvmRead,
@@ -248,7 +282,7 @@ pub async fn ensure_allowance(
 ) -> CliResult<ApproveOutcome> {
     let need = U256::from(amount);
     let have = transient(ui, "reading the allowance", || {
-        read_allowance(evm, usdc, from, bridge)
+        read_allowance(evm, usdc, from, bridge, BlockTag::Latest)
     })
     .await;
     if have >= need {
@@ -270,13 +304,13 @@ pub async fn ensure_allowance(
         )
         .await?;
     }
-    let (tx, deadline) = send_approve(
+    let (tx, deadline, block) = send_approve(
         evm, wallet, ui, usdc, bridge, from, need, op_id, wait_limit, poll,
     )
     .await?;
     // The wallet lets the user edit the spending limit, including down.
     let after = read_by(ui, "reading the allowance", deadline, || {
-        read_allowance(evm, usdc, from, bridge)
+        read_allowance(evm, usdc, from, bridge, BlockTag::Number(block))
     })
     .await
     .map_err(|last| {
@@ -299,6 +333,7 @@ pub async fn ensure_allowance(
     }
     Ok(ApproveOutcome::Approved {
         tx,
+        block,
     })
 }
 
@@ -341,9 +376,11 @@ fn refuse_before_request(
     }
 }
 
-/// Builds the deposit request, estimating gas and fees. A deposit the node
-/// says would revert is refused before the wallet is asked (exit 2, the
-/// operation closed as refused); any other estimate failure is retried.
+/// Builds the deposit request, estimating gas at `at` — the block of the
+/// approve this run sent, the head otherwise — and fees. A deposit the node
+/// says would revert there is refused before the wallet is asked (exit 2,
+/// the operation closed as refused); any other estimate failure is
+/// retried.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_deposit_request(
     evm: &dyn EvmRead,
@@ -354,13 +391,14 @@ pub async fn build_deposit_request(
     bridge: Address,
     amount: u64,
     account: B256,
+    at: BlockTag,
 ) -> CliResult<TxRequest> {
     let purpose = TxPurpose::Deposit {
         bridge,
         amount,
         account,
     };
-    build_or_revert(evm, ui, "estimating the deposit", from, purpose)
+    build_or_revert(evm, ui, "estimating the deposit", from, purpose, at)
         .await
         .map_err(|reason| {
             refuse_before_request(store, rec, format!("deposit() would revert: {reason}"))
@@ -371,7 +409,11 @@ pub async fn build_deposit_request(
 /// before the wallet is asked, so a crash in between is found by the
 /// search, and never repeated blindly. `window` is `--recovery-window-s`:
 /// a transaction the node does not show before it ends is left to the
-/// search, which starts from the hash the wallet returned.
+/// search, which starts from the hash the wallet returned. `approved_at`
+/// is the block of the approve this run sent, if it sent one: the nonce
+/// the deposit is expected at counts that approve even on a node that
+/// has not seen it.
+#[allow(clippy::too_many_arguments)]
 pub async fn request_deposit(
     evm: &dyn EvmRead,
     wallet: &mut dyn Wallet,
@@ -380,11 +422,9 @@ pub async fn request_deposit(
     rec: &mut crate::deposit::store::OpRecord,
     tx: &TxRequest,
     window: Duration,
+    approved_at: Option<u64>,
 ) -> CliResult<RequestOutcome> {
-    use crate::deposit::{
-        evm::BlockTag,
-        store::{FailReason, OpStage, RequestInfo, TxClaim},
-    };
+    use crate::deposit::store::{FailReason, OpStage, RequestInfo, TxClaim};
     // The owner may have paused the bridge since the preflight; deposit()
     // would revert and the user would pay gas for it.
     let paused = transient(ui, "reading the bridge pause flag", || {
@@ -399,10 +439,19 @@ pub async fn request_deposit(
         ));
     }
     let from = tx.from;
-    let nonce_before = transient(ui, "reading the account nonce", || {
+    let pending = transient(ui, "reading the account nonce", || {
         evm.tx_count(from, BlockTag::Pending)
     })
     .await;
+    let nonce_before = match approved_at {
+        None => pending,
+        Some(b) => pending.max(
+            transient(ui, "reading the account nonce at the approve", || {
+                evm.tx_count(from, BlockTag::Number(b))
+            })
+            .await,
+        ),
+    };
     // Where a search for the transaction starts. A reorg onto a shorter
     // branch can put it below the head seen now, never below the finalized
     // block: a transaction sent after this read cannot land there.
@@ -541,6 +590,19 @@ mod tests {
         );
     }
 
+    /// What a node behind the approve answers for the allowance at its
+    /// head; reads pinned to a block answer from [`allowance_seq`].
+    fn stale_allowance_seq(evm: &FakeEvm, seq: &[u64]) {
+        evm.stale_calls.lock().unwrap().insert(
+            (USDC, IErc20::allowanceCall::SELECTOR),
+            Script::new(
+                seq.iter()
+                    .map(|v| Bytes::from(U256::from(*v).abi_encode()))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
     fn mined_ok(evm: &FakeEvm, h: B256) {
         evm.script_receipt(h, vec![Some(deposit_receipt(
             h,
@@ -623,6 +685,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_eip681_approve_raised_in_the_wallet_is_accepted() {
         let evm = FakeEvm::sepolia();
+        evm.latest.set([header(10, 1)]);
         allowance_seq(&evm, &[0, 0, 12_500_005]);
         let mut w = FakeWallet::eoa();
         w.send_results
@@ -630,7 +693,8 @@ mod tests {
         assert!(matches!(
             go(&evm, &mut w).await.unwrap(),
             ApproveOutcome::Approved {
-                tx: None
+                tx: None,
+                block: 10
             }
         ));
     }
@@ -660,6 +724,62 @@ mod tests {
         );
     }
 
+    // ---- reads after the approve, on a node behind the one that saw it ----
+
+    #[tokio::test(start_paused = true)]
+    async fn the_allowance_is_read_back_at_the_block_the_approve_landed_in() {
+        let evm = FakeEvm::sepolia();
+        // The chain: approved. A node behind the receipt's: not yet.
+        allowance_seq(&evm, &[12_500_000]);
+        stale_allowance_seq(&evm, &[0]);
+        let mut w = FakeWallet::eoa();
+        let h = B256::repeat_byte(1);
+        w.send_results.push_back(Ok(h));
+        mined_ok(&evm, h); // block 10
+        let out = go(&evm, &mut w).await.unwrap();
+        assert!(
+            matches!(out, ApproveOutcome::Approved { tx: Some(t), block: 10 } if t == h),
+            "{out:?}"
+        );
+        assert_eq!(*evm.pinned_reads.lock().unwrap(), vec![10]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_limit_lowered_in_the_wallet_is_still_exit_21_at_the_approves_block() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[1_000_000]);
+        stale_allowance_seq(&evm, &[0]);
+        let mut w = FakeWallet::eoa();
+        w.send_results.push_back(Ok(B256::repeat_byte(1)));
+        mined_ok(&evm, B256::repeat_byte(1));
+        let e = go(&evm, &mut w).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed);
+        assert!(
+            e.to_string()
+                .contains("the wallet set the spending limit to 1000000 units"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_eip681_approve_is_read_at_the_head_each_poll_saw() {
+        let evm = FakeEvm::sepolia();
+        evm.latest.set([header(20, 1), header(21, 2)]);
+        // Not there at block 20, there at 21; the node's head reads lag.
+        allowance_seq(&evm, &[0, 12_500_005]);
+        stale_allowance_seq(&evm, &[0]);
+        let mut w = FakeWallet::eoa();
+        w.send_results
+            .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
+        let out = go(&evm, &mut w).await.unwrap();
+        assert!(
+            matches!(out, ApproveOutcome::Approved { tx: None, block: 21 }),
+            "{out:?}"
+        );
+        // Two polls, then the read-back at the block where it landed.
+        assert_eq!(*evm.pinned_reads.lock().unwrap(), vec![20, 21, 21]);
+    }
+
     // ---- the approve wait under an RPC that keeps failing ----
 
     /// `go` within an hour of the paused clock, and how long it took.
@@ -674,6 +794,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_eip681_approve_whose_allowance_cannot_be_read_ends_in_time() {
         let evm = FakeEvm::sepolia();
+        evm.latest.set([header(10, 1)]);
         allowance_seq(&evm, &[0]);
         *evm.calls_before_failing.lock().unwrap() = Some(1); // the read before the request
         let mut w = FakeWallet::eoa();
@@ -740,7 +861,8 @@ mod tests {
         mined_ok(&evm, B256::repeat_byte(1));
         let (r, _) = timed(&evm, &mut w).await;
         assert_eq!(r.unwrap(), ApproveOutcome::Approved {
-            tx: Some(B256::repeat_byte(1))
+            tx: Some(B256::repeat_byte(1)),
+            block: 10
         });
         // Read fine, never mined: said so, in time.
         let evm = FakeEvm::sepolia();
@@ -753,6 +875,7 @@ mod tests {
         assert!(e.to_string().contains("was not mined in time"), "{e}");
         // An EIP-681 approve that never lands, the reads working.
         let evm = FakeEvm::sepolia();
+        evm.latest.set([header(10, 1)]);
         allowance_seq(&evm, &[0]);
         let mut w = FakeWallet::eoa();
         w.send_results
@@ -846,7 +969,7 @@ mod tests {
             .unwrap()
             .insert(h, deposit_tx(h, s.w.account, BRIDGE, 7, 2, Bytes::new()));
         let ui = RecordingUi::new(true);
-        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
             .await
             .unwrap();
         assert_eq!(*seen.lock().unwrap(), Some(OpStage::Requested));
@@ -873,7 +996,7 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
         let ui = RecordingUi::new(true);
-        request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+        request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
             .await
             .unwrap();
         let back = s.store.load(&s.rec.op_id).unwrap();
@@ -898,7 +1021,7 @@ mod tests {
         let t0 = tokio::time::Instant::now();
         let out = tokio::time::timeout(
             Duration::from_secs(3600),
-            request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW),
+            request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None),
         )
         .await
         .expect("--recovery-window-s must end the read")
@@ -929,7 +1052,7 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::Rejected));
         let ui = RecordingUi::new(true);
-        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::WalletFailed);
@@ -944,7 +1067,7 @@ mod tests {
         s.w.send_results
             .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
         let ui = RecordingUi::new(true);
-        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+        let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
             .await
             .unwrap();
         assert_eq!(out, RequestOutcome::Search {
@@ -964,7 +1087,7 @@ mod tests {
         let mut s = setup();
         *s.evm.paused.lock().unwrap() = Some(true);
         let ui = RecordingUi::new(true);
-        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+        let e = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::PreflightRefused);
@@ -979,7 +1102,7 @@ mod tests {
             *s.evm.paused.lock().unwrap() = absent;
             s.w.send_results
                 .push_back(Err(crate::deposit::wallet::WalletError::NoHash));
-            let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW)
+            let out = request_deposit(&s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1007,6 +1130,7 @@ mod tests {
             BRIDGE,
             1,
             B256::ZERO,
+            BlockTag::Latest,
         )
         .await
         .unwrap_err();
@@ -1027,6 +1151,7 @@ mod tests {
             BRIDGE,
             1,
             B256::ZERO,
+            BlockTag::Latest,
         )
         .await
         .unwrap();
@@ -1050,6 +1175,7 @@ mod tests {
             BRIDGE,
             1,
             B256::ZERO,
+            BlockTag::Latest,
         )
         .await
         .unwrap();

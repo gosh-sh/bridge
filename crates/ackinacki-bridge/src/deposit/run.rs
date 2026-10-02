@@ -601,7 +601,7 @@ async fn request(
 
     // Step 3.
     board.start(StepId::Approve, "");
-    match ensure_allowance(
+    let approved_at = match ensure_allowance(
         evm,
         wallet,
         ui,
@@ -616,14 +616,19 @@ async fn request(
     .await
     {
         Ok(ApproveOutcome::Skipped) => {
-            board.skip(StepId::Approve, "the allowance already covers the amount")
+            board.skip(StepId::Approve, "the allowance already covers the amount");
+            None
         },
         Ok(ApproveOutcome::Approved {
             tx,
-        }) => board.done(
-            StepId::Approve,
-            &tx.map(|h| format!("{h:#x}")).unwrap_or_default(),
-        ),
+            block,
+        }) => {
+            board.done(
+                StepId::Approve,
+                &tx.map(|h| format!("{h:#x}")).unwrap_or_default(),
+            );
+            Some(block)
+        },
         Err(e) => {
             return Err(closed_before_request(
                 d,
@@ -633,11 +638,13 @@ async fn request(
                 e,
             ))
         },
-    }
+    };
 
     // Step 4. A deposit the node says would revert, or a bridge paused
     // since the preflight, is refused before the request and closes the
-    // operation (evm_steps).
+    // operation (evm_steps). After an approve of this run, the estimate and
+    // the nonce are read at the approve's block: a node behind it would
+    // answer as if there were no approve.
     board.start(StepId::Deposit, "confirm the deposit in your wallet");
     let tx = build_deposit_request(
         evm,
@@ -648,9 +655,20 @@ async fn request(
         bridge,
         units,
         ask.to.account_b256(),
+        approved_at.map_or(BlockTag::Latest, BlockTag::Number),
     )
     .await?;
-    let claim = match request_deposit(evm, wallet, ui, store, rec, &tx, p.recovery_window).await? {
+    let requested = request_deposit(
+        evm,
+        wallet,
+        ui,
+        store,
+        rec,
+        &tx,
+        p.recovery_window,
+        approved_at,
+    );
+    let claim = match requested.await? {
         RequestOutcome::Signed(c) => c,
         RequestOutcome::Search {
             window,
@@ -2444,6 +2462,58 @@ mod tests {
         assert_eq!(j["confirmation"]["delivery_tx"], "rtx");
         assert_eq!(j["confirmation"]["via_events"], false);
         assert!(DirLock::try_take(&p.state_dir).unwrap().is_some());
+    }
+
+    /// The happy path's world, its approve in block 899, on a node that
+    /// lags behind the one that served the approve's receipt as `lag` sets
+    /// up; the run's result and the record it left.
+    async fn after_an_approve_on_a_lagging_node(
+        lag: impl FnOnce(&World),
+    ) -> (CliResult<DepositSuccess>, Option<OpRecord>) {
+        let mut w = World::healthy();
+        let h = w.mined_deposit(7);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        w.anchor_after(2);
+        w.credit_chain_for_mined_deposit();
+        lag(&w);
+        let (p, d) = on_the_real_clock(&w);
+        let r = run_with(&p, &d, &mut w.wallet).await;
+        let op = d.current_op.lock().unwrap().clone();
+        let rec = op.and_then(|op| Store::open(&p.state_dir).unwrap().load(&op).ok());
+        (r, rec)
+    }
+
+    #[tokio::test]
+    async fn the_deposit_is_estimated_at_the_block_of_the_approve() {
+        // Behind the approve, the node estimates deposit() as a call that
+        // would revert for want of an allowance.
+        let (r, rec) = after_an_approve_on_a_lagging_node(|w| {
+            w.evm
+                .stale_estimate_reverts
+                .lock()
+                .unwrap()
+                .insert(W_BRIDGE, "ERC20: insufficient allowance".into());
+        })
+        .await;
+        let s = r.unwrap();
+        assert!(s.confirmation.is_some());
+        assert_eq!(rec.unwrap().stage, OpStage::Credited);
+    }
+
+    #[tokio::test]
+    async fn the_deposit_nonce_counts_the_approve_a_lagging_node_misses() {
+        // The approve took nonce 6 in block 899; a node behind it still
+        // counts 6 transactions, pending ones included.
+        let (r, rec) = after_an_approve_on_a_lagging_node(|w| {
+            let from = w.wallet.account;
+            let mut counts = w.evm.counts.lock().unwrap();
+            counts.insert((from, "pending"), 6);
+            counts.insert((from, "block"), 7);
+        })
+        .await;
+        r.unwrap();
+        assert_eq!(rec.unwrap().request.unwrap().nonce_before, 7);
     }
 
     #[tokio::test(start_paused = true)]

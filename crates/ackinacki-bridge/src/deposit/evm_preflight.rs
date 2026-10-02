@@ -101,7 +101,7 @@ pub async fn run(
         }
         // The approve step reads it: a token that cannot answer is refused
         // here, before the wallet is asked for anything.
-        read_allowance(evm, usdc, f, bridge)
+        read_allowance(evm, usdc, f, bridge, BlockTag::Latest)
             .await
             .map_err(|e| refuse(format!("{usdc}.allowance failed"), Some(e)))?;
     }

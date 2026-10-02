@@ -211,11 +211,16 @@ async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
             approve_cap: None,
             request_timeout: crate::deposit::retry::ONE_READ,
         };
-        let tx = TxRequest::build(&evm, signer.address(), TxPurpose::Deposit {
-            bridge,
-            amount: 1_000_000,
-            account: acc,
-        })
+        let tx = TxRequest::build(
+            &evm,
+            signer.address(),
+            TxPurpose::Deposit {
+                bridge,
+                amount: 1_000_000,
+                account: acc,
+            },
+            crate::deposit::evm::BlockTag::Latest,
+        )
         .await
         .unwrap();
         let h = w.send_transaction(&ui, &tx).await.unwrap();

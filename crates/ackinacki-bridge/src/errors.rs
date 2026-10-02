@@ -533,6 +533,17 @@ impl CliError {
         }
     }
 
+    /// What went wrong, for a message that goes on to say more: a refusal's
+    /// reason without its `preflight:` prefix, any other error as it prints.
+    pub fn into_reason(self) -> String {
+        match self {
+            CliError::Preflight {
+                reason, ..
+            } => reason,
+            other => other.to_string(),
+        }
+    }
+
     /// The deposit operation this error is about, if any.
     pub fn op_id(&self) -> Option<&str> {
         match self {

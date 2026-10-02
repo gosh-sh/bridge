@@ -164,10 +164,7 @@ fn after_request(store: &Store, op: &str, e: CliError) -> CliError {
         CliError::Deposit {
             ..
         } => e,
-        CliError::Preflight {
-            reason, ..
-        } => by_stage_on_disk(store, op, &reason),
-        other => by_stage_on_disk(store, op, &other.to_string()),
+        other => by_stage_on_disk(store, op, &other.into_reason()),
     }
 }
 
@@ -265,12 +262,7 @@ pub(crate) fn terminal(rec: &OpRecord) -> CliError {
 /// the operation got is unknown, which is exit 34, never "nothing was
 /// sent".
 fn unreadable(op: &str, e: CliError) -> CliError {
-    let why = match e {
-        CliError::Preflight {
-            reason, ..
-        } => reason,
-        other => other.to_string(),
-    };
+    let why = e.into_reason();
     err(
         ExitCode::CreditUnconfirmed,
         Stage::Deposit,
@@ -1771,6 +1763,45 @@ enum Resumable {
     Open(Box<Opened>),
 }
 
+/// A state directory a resume cannot open: the record of the operation
+/// `target` names cannot be read, so how far it got is unknown — exit 34,
+/// as for a record that cannot be read, never "nothing was sent".
+fn state_dir_unreadable(target: &OpRef, e: CliError) -> CliError {
+    let why = e.into_reason();
+    let (op, named, which) = match target {
+        OpRef::Op(op) => (Some(op.as_str()), op.clone(), format!("operation {op}")),
+        OpRef::DepositId(n) => (None, n.to_string(), format!("the operation of depositId {n}")),
+    };
+    CliError::deposit(
+        ExitCode::CreditUnconfirmed,
+        Stage::Deposit,
+        op,
+        format!(
+            "{why}; the record of {which} cannot be read, so how far the operation got is \
+             unknown. Fix the state directory, then run --resume {named} again"
+        ),
+    )
+}
+
+/// What a resume answers when the lock of operation `op` cannot be taken
+/// although nobody holds it, with the record read without the lock: exit
+/// 2 only for an operation that never asked the wallet, the exit of its
+/// stage otherwise. The lock is not taken, so nothing is changed.
+fn lock_unusable(op: &str, rec: &OpRecord, why: &str) -> CliError {
+    match signals::exit_for(Some(rec.stage)) {
+        ExitCode::PreflightRefused => CliError::Preflight {
+            reason: format!("{why}; operation {op} never requested its deposit (nothing was sent)"),
+            source: None,
+        },
+        exit => err(
+            exit,
+            stage_of(rec.stage),
+            op,
+            format!("{why}; fix it and continue with --resume {op}"),
+        ),
+    }
+}
+
 /// The part of a resume that asks neither chain: finds and locks the
 /// operation, reads its record, checks the command line against it, and
 /// answers what the record answers alone. A credited operation answers
@@ -1779,27 +1810,45 @@ enum Resumable {
 /// deposit was never requested). `current_op` names the operation from the
 /// lock on, before its record is read, so that an interrupt reports on the
 /// record as it stands.
+///
+/// A state directory that cannot be opened is a record that cannot be
+/// read: exit 34. A lock held by another process is exit 3; a lock that
+/// cannot be taken for another reason leaves the record to answer, read
+/// without the lock, and the operation is not driven.
 async fn open_for_resume(
     p: &DepositParams,
     target: &OpRef,
     ui: &dyn Ui,
     current_op: &Mutex<Option<String>>,
 ) -> CliResult<Resumable> {
-    let store = Store::open(&p.state_dir)?;
+    let store = Store::open(&p.state_dir).map_err(|e| state_dir_unreadable(target, e))?;
     let op = find_op(p, &store, target)?;
-    let Some(lock) = OpLock::try_take(&p.state_dir, &op)? else {
-        return Err(CliError::deposit(
-            ExitCode::DuplicateRefused,
-            Stage::Preflight,
-            Some(&op),
-            format!(
-                "operation {op} is being run by another process (nothing was sent by this run)"
-            ),
-        ));
+    let lock = match OpLock::try_take(&p.state_dir, &op) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => {
+            return Err(CliError::deposit(
+                ExitCode::DuplicateRefused,
+                Stage::Preflight,
+                Some(&op),
+                format!(
+                    "operation {op} is being run by another process (nothing was sent by this \
+                     run)"
+                ),
+            ))
+        },
+        Err(e) => Err(e.into_reason()),
     };
-    *current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
+    if lock.is_ok() {
+        *current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
+    }
     ui.op_id(&op);
-    let mut rec = store.load(&op).map_err(|e| unreadable(&op, e))?;
+    let mut rec = store.load(&op).map_err(|e| match &lock {
+        Ok(_) => unreadable(&op, e),
+        Err(why) => unreadable(&op, CliError::Preflight {
+            reason: format!("{why}; {}", e.into_reason()),
+            source: None,
+        }),
+    })?;
     check_flags_against(p, &rec)?;
     match rec.stage {
         // Neither chain is asked for a finished operation.
@@ -1811,6 +1860,10 @@ async fn open_for_resume(
             ))))
         },
         OpStage::Failed => return Err(terminal(&rec)),
+        _ => {},
+    }
+    let lock = lock.map_err(|why| lock_unusable(&op, &rec, &why))?;
+    match rec.stage {
         OpStage::Reserved => {
             // Its lock was free: the run that reserved it is gone, and it
             // never requested the deposit. Closed as a new deposit's
@@ -3288,6 +3341,93 @@ mod tests {
         assert_eq!(e.exit_code(), ExitCode::DuplicateRefused);
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Signed);
+    }
+
+    /// Puts a directory where operation `op`'s lock file would be: the lock
+    /// cannot be opened, though nobody holds it.
+    fn break_the_lock(state_dir: &std::path::Path, op: &str) {
+        std::fs::create_dir(state_dir.join(format!("{op}.lock"))).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_whose_lock_cannot_be_taken_exits_by_the_stage_on_disk() {
+        for (stage, exit) in [
+            (OpStage::Confirmed, ExitCode::AnWaitTimeout),
+            (OpStage::Anchored, ExitCode::DepositProofFailed),
+            (OpStage::Finalizing, ExitCode::CreditUnconfirmed),
+        ] {
+            let mut w = World::healthy();
+            let op = match stage {
+                OpStage::Confirmed => w.confirmed_operation(),
+                OpStage::Anchored => w.anchored_operation(),
+                _ => w.finalizing_operation(),
+            };
+            break_the_lock(w.state.path(), &op);
+            let (p, target) = resuming(&w, &op);
+            let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+            assert_eq!(e.exit_code(), exit, "{stage:?}: {e}");
+            assert_eq!(e.op_id(), Some(op.as_str()));
+            let msg = e.to_string();
+            assert!(msg.contains("cannot open the lock"), "{msg}");
+            assert!(
+                msg.contains(&format!("fix it and continue with --resume {op}")),
+                "{msg}"
+            );
+            let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+            assert_eq!(rec.stage, stage, "the record is left as it was");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_whose_lock_and_record_cannot_be_read_is_exit_34() {
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        break_the_lock(w.state.path(), &op);
+        std::fs::write(w.state.path().join(format!("{op}.json")), b"{ torn").unwrap();
+        let (p, target) = resuming(&w, &op);
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::CreditUnconfirmed, "{e}");
+        let msg = e.to_string();
+        assert!(msg.contains("cannot open the lock"), "{msg}");
+        assert!(msg.contains("is damaged"), "{msg}");
+        assert!(msg.contains("how far the operation got is unknown"), "{msg}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reservation_whose_lock_cannot_be_taken_is_still_exit_2() {
+        let w = World::healthy();
+        let store = Store::open(w.state.path()).unwrap();
+        let op = record(&store, OpStage::Reserved).op_id;
+        break_the_lock(w.state.path(), &op);
+        let (p, target) = resuming(&w, &op);
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::PreflightRefused, "{e}");
+        assert!(e.to_string().contains("cannot open the lock"), "{e}");
+        assert!(e.to_string().contains("nothing was sent"), "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_state_directory_that_cannot_be_opened_on_resume_is_exit_34_naming_the_target() {
+        let w = World::healthy();
+        let file = w.state.path().join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let op = Store::new_op_id();
+        for (target, named) in [
+            (OpRef::Op(op.clone()), op.clone()),
+            (OpRef::DepositId(alloy_primitives::U256::from(6)), "6".to_string()),
+        ] {
+            let mut p = w.params(RunMode::Resume {
+                target: target.clone(),
+                tx_hash: None,
+            });
+            p.state_dir = file.clone();
+            let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+            assert_eq!(e.exit_code(), ExitCode::CreditUnconfirmed, "{target:?}: {e}");
+            let msg = e.to_string();
+            assert!(msg.contains(&format!("--resume {named}")), "{msg}");
+            assert!(msg.contains("how far the operation got is unknown"), "{msg}");
+            assert!(!msg.contains("nothing was sent"), "{msg}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

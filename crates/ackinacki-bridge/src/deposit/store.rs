@@ -321,6 +321,15 @@ impl Store {
         create_missing_levels(dir)?;
         sync_entry_of(dir)?;
         report_permissive_mode(dir);
+        // A path that is not a directory, or one this user cannot list,
+        // holds no records anybody can find: saying so here keeps a later
+        // lookup from taking it for a directory without the operation.
+        std::fs::read_dir(dir).map_err(|e| {
+            preflight(format!(
+                "cannot read the deposit state directory {}: {e}",
+                dir.display()
+            ))
+        })?;
         Ok(Store {
             dir: dir.to_path_buf(),
         })

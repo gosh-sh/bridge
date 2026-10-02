@@ -1270,7 +1270,14 @@ account, and the Acki Nacki network (scheme, host and port of
 `--gql-endpoint`) — and refuses a mismatch with exit 2 before doing anything:
 under another profile, a resume could finalize the same deposit through
 another bridge. A finished operation answers from its record: a credited one
-with its summary, a failed one with its exit code and message.
+with its summary, a failed one with its exit code and message. A state
+directory that cannot be opened, or a record that cannot be read, is exit 34:
+how far the operation got is unknown. The operation's lock,
+`<state-dir>/<op-id>.lock`, held by another run is exit 3. A lock that cannot
+be taken for any other reason leaves the record to answer, read without the
+lock: a finished operation as above, any other with the exit code an
+interrupt at its stage gives (2 only if the deposit was never requested), and
+the operation is left as it is until the lock is fixed.
 
 The EVM chain and bridge, the Acki Nacki bridge, the recipient and the work
 directory come from the record, so a finished or failed operation is answered
@@ -1350,7 +1357,7 @@ without them it is refused with exit 2.
 | 31 | The deposit is confirmed; the Acki Nacki side (the anchor, or a paused bridge) did not come in time | in the EVM bridge | `--resume <op-id>` later |
 | 32 | The proof failed or does not match the deposit; or `finalizeDeposit` could not be built, with no earlier send in doubt | in the EVM bridge | fix the [prover](#the-deposit-prover), `--resume <op-id>` |
 | 33 | The Acki Nacki bridge refused `finalizeDeposit` | in the EVM bridge | 222: `--resume <op-id>` once the owner restores the allowlist; 220: keep the work directory and report it (the prover does not match the bridge's verification key); other codes: report them |
-| 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt | unknown | `--resume <op-id>`; never make a new deposit instead |
+| 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt; or a `--resume` could not open the state directory or read the operation's record | unknown | `--resume <op-id>`; never make a new deposit instead |
 | **35** | **The deposit is on chain but cannot be proven, or it is not the deposit that was requested** | **in the EVM bridge; only the operator can finalize or return it** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 | **37** | **The voucher exists and the bridge transaction that should have minted the credit aborted** | **in the EVM bridge, beyond a retry; only the operator can pay it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 

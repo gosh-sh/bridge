@@ -1410,7 +1410,7 @@ fn ensure_writable_dir(flag: &'static str, dir: &Path) -> CliResult<()> {
 /// **One check, not two, because free space is a property of the filesystem
 /// and not of the directory.** The shipped profile puts the pk cache
 /// *inside* params (`BRIDGE_PK_CACHE_DIR=…/params/pk_cache`,
-/// `bridge_config.shellnet:68`), so two independent comparisons against the
+/// `bridge_config.shellnet:95`), so two independent comparisons against the
 /// same `statvfs` both pass at 3.5 GB free while the run needs ~3.65 GB —
 /// and the shortfall lands during aggregation, after the burn. Two checks
 /// that each ask "is there room for my piece?" never notice they are sharing
@@ -2087,7 +2087,7 @@ pub async fn check_bridge_deploy(
                 // last line sends the operator to `USDC_BRIDGE_ACCOUNT_ID`,
                 // which is written in the profile as 64 lowercase hex
                 // characters with the leading zeros kept
-                // (`config/bridge_config.shellnet:65`). Decimal is the one
+                // (`config/bridge_config.shellnet:73`). Decimal is the one
                 // rendering that cannot be compared against it by eye, so
                 // the refusal asked for a check it made impossible — and it
                 // did so next to `preflight ok usdc_bridge=…`, which prints
@@ -2645,6 +2645,11 @@ pub(crate) mod tests {
                                 Some("eth_chainId") => serde_json::json!("0xaa36a7"), // 11155111
                                 // The head `check_window_scan` pins its reads to.
                                 Some("eth_blockNumber") => serde_json::json!("0x10"),
+                                // Its hash, compared before and after the read.
+                                Some("eth_getBlockByNumber") => serde_json::json!({
+                                    "number": "0x10",
+                                    "hash": format!("0x{}", "11".repeat(32)),
+                                }),
                                 // An empty log set: the window-scan probe on a
                                 // bridge without anchors.
                                 Some("eth_getLogs") => serde_json::json!([]),

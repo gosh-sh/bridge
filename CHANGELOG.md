@@ -29,8 +29,10 @@ assigns it when the release is tagged.
   and not above the head) to the kit's runtime env file before upgrading the
   image: without it every start dies with "BRIDGE_DEPLOY_BLOCK is missing"
   and the container restarts in a loop, sending nothing. When the RPC serves
-  historical code, preflight also checks that it is the first block with
-  bridge code. `runtime.env.example` and the kit README document it together
+  historical code, preflight also checks it against the chain: a bound after
+  the deploy block is refused, the deploy block or an earlier bound passes;
+  an RPC without historical state skips the check with its error in a
+  warning. `runtime.env.example` and the kit README document it together
   with the two optional scan knobs.
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
@@ -506,13 +508,17 @@ assigns it when the release is tagged.
   2 000-block span and about 720 per day (three minutes a day at 4 calls/s)
   on a 10-block cap; a call failing with 429 / 5xx / a transport error is
   retried with backoff, a `-32600` / `-32602` response (how Alchemy rejects
-  a span over its cap) is not. The snapshot is pinned to one block and every kept log
-  is checked against its window slot (hash and height) and the window's
-  `lastHeight`: a mismatch (an append landing mid-read, a partial log set)
-  or a rejected newest span re-read the snapshot a few times (six seconds
-  apart, so the re-reads span a Sepolia slot), fewer logs than entries (a
-  backend one block behind omitting the newest append) once, counted on
-  its own,
+  a span over its cap) is not. The snapshot is pinned to one block (the
+  block's hash is compared before and after the read, so a head block
+  replaced mid-read is re-read instead of mixing two forks, when the RPC
+  observes the replacement) and every kept
+  log is checked against its window slot (hash and height) and the
+  window's `lastHeight`: a rejected newest span re-reads the snapshot a few
+  times (six seconds apart, so the re-reads span a Sepolia slot); a
+  mismatch (an append landing mid-read, a partial log set), fewer logs
+  than entries (a backend one block behind omitting the newest append) or
+  a replaced head block, found only once the walk is complete, once,
+  counted on its own;
   after which a short log set fails naming `BRIDGE_DEPLOY_BLOCK` and the
   others surface as they are; on a span the RPC always rejects that is two
   extra short reads before the same refusal, and a `BRIDGE_DEPLOY_BLOCK`
@@ -536,7 +542,9 @@ assigns it when the release is tagged.
   refused in preflight. Tenderly's public gateway serves full log history
   and takes a 10 000-block span. When a short log set is met and the deploy
   block itself answers with no logs, the error also says the RPC may not
-  serve history that far back, and no re-read is spent on it.
+  serve history that far back, and no re-read is spent on it; with no
+  `BRIDGE_DEPLOY_BLOCK` at all a short log set is final too, since the
+  re-read would walk to genesis again.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
   rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
   deploy from `main` with the owner pause; its deploy block 11828971 is

@@ -100,19 +100,22 @@ const GET_LOGS_PROGRESS_EVERY: usize = 200;
 /// [`EthBridgeClient::read_full_state`] pins every read to one block; a
 /// lagging backend behind a load-balanced RPC may answer "header not found"
 /// for it, omit the newest log, or reject the newest span, so the whole
-/// snapshot is read up to this many times for such failures (a short log
-/// set adds its own single re-read, [`SHORT_LOG_SET_RE_READS`]), spaced
+/// snapshot is read up to this many times for such failures (a failure
+/// found only after the walk adds its own single re-read,
+/// [`FULL_WALK_RE_READS`]), spaced
 /// [`READ_FULL_STATE_RETRY_DELAY_MS`] apart: two delays span a Sepolia
 /// slot, so a backend one block behind has caught up by the last read.
 const READ_FULL_STATE_ATTEMPTS: u32 = 3;
 const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 6_000;
-/// Re-reads of the snapshot after a short log set, counted on their own:
-/// each one walks the whole range again, so there is one, whatever else
-/// failed before it. A backend still behind on that re-read is left to the
-/// callers, which all retry at a higher level: the CLI's coverage rounds
-/// after the burn, an exit-2 re-run in preflight, a container restart for
-/// `daemon-live`.
-const SHORT_LOG_SET_RE_READS: u32 = 1;
+/// Re-reads of the snapshot after a failure found only once the walk is
+/// complete (a short log set, a slot or `lastHeight` mismatch, a replaced
+/// head block), counted on
+/// their own: each one walks the whole range again, so there is one,
+/// whatever else failed before it. A backend still behind on that re-read
+/// is left to the callers, which all retry at a higher level: the CLI's
+/// coverage rounds after the burn, an exit-2 re-run in preflight, a
+/// container restart for `daemon-live`.
+const FULL_WALK_RE_READS: u32 = 1;
 
 /// How the `LayerAnchorAppended` scan of [`EthBridgeClient::read_full_state`]
 /// walks the chain. Both entry points build it from their clap arguments
@@ -1076,6 +1079,34 @@ where
             .map_err(|e| RelayerError::other(format!("eth_getLogs for block {block}: {e}")))
     }
 
+    /// The hash of block `number`, from `eth_getBlockByNumber` as a raw
+    /// request so that only the `hash` field matters. A missing block is a
+    /// lagging backend: transient.
+    async fn block_hash_at(&self, number: u64) -> Result<B256, SnapshotError> {
+        let block: serde_json::Value = self
+            .contract
+            .provider()
+            .raw_request(
+                "eth_getBlockByNumber".into(),
+                (format!("0x{number:x}"), false),
+            )
+            .await
+            .map_err(|e| {
+                SnapshotError::transient(RelayerError::other(format!(
+                    "eth_getBlockByNumber({number}): {e}"
+                )))
+            })?;
+        block
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .and_then(|h| h.parse::<B256>().ok())
+            .ok_or_else(|| {
+                SnapshotError::transient(RelayerError::other(format!(
+                    "eth_getBlockByNumber({number}): no such block yet (a lagging backend?)"
+                )))
+            })
+    }
+
     pub fn address(&self) -> Address {
         self.address
     }
@@ -1369,21 +1400,27 @@ where
     /// the view calls cost ~50 KB of RPC response — well under any
     /// provider's per-call cap.
     ///
-    /// Consistency: `eth_blockNumber` is taken first and every read is
-    /// pinned to it, so a `verifyBlock` landing mid-read cannot leave the
-    /// windows one append ahead of the logs. [`paint_heights_from_events`]
+    /// Consistency: `eth_blockNumber` is taken first, every read is pinned
+    /// to that number, and the block's hash is compared before and after,
+    /// so a `verifyBlock` landing mid-read cannot leave the windows one
+    /// append ahead of the logs, and a head block replaced mid-read is
+    /// re-read instead of mixing two forks, when the RPC observes the
+    /// replacement (backends on different forks behind one balancer can
+    /// still answer the two hash calls alike). [`paint_heights_from_events`]
     /// then checks every kept log against its window slot (hash and
     /// height) and the window's `lastHeight`, so a partial log set from a
     /// lagging backend is reported instead of mis-painted. A failed
-    /// snapshot is re-read a few times whenever a fresh one can succeed: a
-    /// pinned read the backend cannot serve yet, a slot or `lastHeight`
-    /// mismatch, fewer logs than entries (a backend one block behind; this
-    /// one is re-read once, counted on its own, since each re-read is a
-    /// full walk; when the RPC serves no log for the lower bound at all it
-    /// is final: pruned history, or a bound that is not the deploy block),
-    /// and a
-    /// rejected newest span, which on a deterministic span cap costs two
-    /// extra short reads before the same refusal. A deploy block above the
+    /// snapshot is re-read whenever a fresh one can succeed: a pinned read
+    /// the backend cannot serve yet and a rejected newest span are cheap and
+    /// get [`READ_FULL_STATE_ATTEMPTS`] reads, six seconds apart (two delays
+    /// span a Sepolia slot; on a deterministic span cap that is two extra
+    /// short reads before the same refusal); a slot or `lastHeight`
+    /// mismatch, fewer logs than entries and a head block replaced during
+    /// the read are found only once the walk is complete, so each gets one
+    /// re-read, counted on its own. Fewer logs than entries is final when the
+    /// lower bound block holds no log of the bridge at all (pruned history,
+    /// or a bound that is not the deploy block) and when no bound is set
+    /// (the re-read would walk to genesis again). A deploy block above the
     /// chain head is refused before any scan (re-read a couple of times,
     /// since right after a deploy a lagging backend can answer a head below
     /// it). A chunk below the newest that the RPC rejected or that ran out
@@ -1403,7 +1440,7 @@ where
                     err,
                     full_walk,
                 }) if (!full_walk && attempt < READ_FULL_STATE_ATTEMPTS)
-                    || (full_walk && full_walks < SHORT_LOG_SET_RE_READS) =>
+                    || (full_walk && full_walks < FULL_WALK_RE_READS) =>
                 {
                     if full_walk {
                         full_walks += 1;
@@ -1447,6 +1484,11 @@ where
                 self.scan.deploy_block
             ))));
         }
+        // Every read below addresses the head by number, so a head block
+        // replaced mid-read would mix two forks (scalars from one, windows
+        // or logs from the other) without any call failing. Its hash is
+        // taken now and compared after the scan.
+        let head_hash = self.block_hash_at(head).await?;
         let at = BlockId::from(head);
         let scalars = self
             .read_state_at(at)
@@ -1497,6 +1539,28 @@ where
         }
         self.paint_heights_from_appended_logs(&mut windows, head)
             .await?;
+        // Found only once the walk is complete, so the re-read is a full
+        // walk: one, like a short set.
+        let head_hash_after = match self.block_hash_at(head).await {
+            Ok(hash) => hash,
+            Err(SnapshotError::Transient {
+                err, ..
+            }) => {
+                return Err(SnapshotError::Transient {
+                    err,
+                    full_walk: true,
+                })
+            },
+            Err(e) => return Err(e),
+        };
+        if head_hash_after != head_hash {
+            return Err(SnapshotError::Transient {
+                err: RelayerError::other(format!(
+                    "block {head} was replaced during the read ({head_hash} -> {head_hash_after})"
+                )),
+                full_walk: true,
+            });
+        }
         let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] =
             windows.try_into().map_err(|_| {
                 SnapshotError::Final(RelayerError::Other(
@@ -1660,31 +1724,36 @@ where
             ) => {
                 let msg =
                     format!("{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)");
+                if from == 0 {
+                    // Nothing to probe, and a re-read would walk back to
+                    // genesis again: name both causes and stop.
+                    return Err(SnapshotError::Final(RelayerError::other(format!(
+                        "{msg}; {BRIDGE_DEPLOY_BLOCK_ENV} is unset, so the walk went back to \
+                         genesis: set it to the block the bridge was deployed in, and use an RPC \
+                         that serves log history back to it (public endpoints often keep only the \
+                         newest ~10 000 blocks)"
+                    ))));
+                }
                 // A short set from an RPC that prunes old logs looks exactly
-                // like a wrong deploy block. The deploy block holds the
-                // bridge's own `OwnershipTransferred`, so one more call tells
-                // the two apart when the bound is the deploy block.
-                let served = if from == 0 {
-                    None
-                } else {
-                    Some(self.bridge_has_logs_in_block(from).await)
-                };
-                match served {
-                    Some(Ok(false)) => Err(SnapshotError::Final(RelayerError::other(format!(
+                // like a wrong bound. The deploy block holds the bridge's own
+                // `OwnershipTransferred`, so one more call tells the two
+                // apart when the bound is the deploy block.
+                match self.bridge_has_logs_in_block(from).await {
+                    Ok(false) => Err(SnapshotError::Final(RelayerError::other(format!(
                         "{msg}; the RPC returned no logs for block {from} either. If that is the \
                          block the bridge was deployed in (it emits OwnershipTransferred there), \
                          the RPC does not serve log history that far back (public endpoints often \
                          keep only the newest ~10 000 blocks): use an RPC with full log history. \
                          Otherwise set {BRIDGE_DEPLOY_BLOCK_ENV} to the deploy block."
                     )))),
-                    Some(Err(probe)) => Err(SnapshotError::Transient {
+                    Err(probe) => Err(SnapshotError::Transient {
                         err: RelayerError::other(format!(
                             "{msg}; probing block {from} for the bridge's deploy log failed too: \
                              {probe}"
                         )),
                         full_walk: true,
                     }),
-                    Some(Ok(true)) | None => Err(SnapshotError::Transient {
+                    Ok(true) => Err(SnapshotError::Transient {
                         err: RelayerError::other(msg),
                         full_walk: true,
                     }),
@@ -1695,7 +1764,12 @@ where
                     "{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)"
                 ));
                 if e.is_transient() {
-                    Err(SnapshotError::transient(err))
+                    // Found only once the walk is complete, so the re-read
+                    // is a full walk too: one, like a short set.
+                    Err(SnapshotError::Transient {
+                        err,
+                        full_walk: true,
+                    })
                 } else {
                     Err(SnapshotError::Final(err))
                 }
@@ -1708,10 +1782,11 @@ where
 /// a fresh snapshot can succeed where this one failed.
 #[derive(Debug)]
 enum SnapshotError {
-    /// A pinned read the backend could not serve yet, logs and window
-    /// snapshot that disagree, fewer logs than entries, or a rejected
-    /// newest span: re-read. `full_walk` marks the short-log case, whose
-    /// re-read walks the whole range again and is therefore done once.
+    /// Logs and window snapshot that disagree, fewer logs than entries, a
+    /// replaced head block (these three are found only once the walk is
+    /// complete, so `full_walk` is set and the re-read, a whole walk
+    /// again, is done once), a pinned read the backend could not serve
+    /// yet, or a rejected newest span: re-read.
     Transient { err: RelayerError, full_walk: bool },
     /// A chunk below the newest that the RPC rejected or that ran out of
     /// its attempts, or a window shape the ring cannot take: re-reading

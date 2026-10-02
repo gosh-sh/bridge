@@ -44,8 +44,8 @@ pipeline:
    pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
    `treasuryBalance` must already cover the amount, and the window-heights
    read stage 4b will need must succeed now (one `LayerAnchorAppended` scan
-   back from the head; on a bridge without anchors, one probe
-   `eth_getLogs`). **So a dry run can
+   back from the head, plus one probe `eth_getLogs` over the configured
+   span). **So a dry run can
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy, a drained treasury — not only AN-side ones.**
 

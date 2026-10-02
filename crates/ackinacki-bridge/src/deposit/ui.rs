@@ -894,6 +894,12 @@ impl Board {
         let mut s = String::new();
         if self.drawn > 0 {
             s.push_str(&format!("\x1b[{}A", self.drawn));
+            // A line wider than the terminal takes more than one row, and
+            // erasing the row it starts in leaves the rest of the old frame
+            // under the rows it goes on in: the whole old frame goes first.
+            if !above.is_empty() {
+                s.push_str("\x1b[J");
+            }
         }
         for l in above.lines() {
             s.push_str("\x1b[2K");
@@ -1696,8 +1702,14 @@ mod tests {
     /// sequences the board uses. The empty line the cursor ends on is left
     /// out.
     fn screen(s: &str) -> Vec<String> {
-        let mut lines = vec![String::new()];
-        let mut row = 0;
+        screen_of_width(s, usize::MAX)
+    }
+
+    /// [`screen`] on a terminal `width` columns wide, where a longer line
+    /// goes on in the next row.
+    fn screen_of_width(s: &str, width: usize) -> Vec<String> {
+        let mut lines: Vec<Vec<char>> = vec![Vec::new()];
+        let (mut row, mut col) = (0, 0);
         let mut chars = s.chars();
         while let Some(c) = chars.next() {
             match c {
@@ -1715,7 +1727,7 @@ mod tests {
                         'A' => row -= arg.parse::<usize>().unwrap_or(1),
                         'K' => lines[row].clear(),
                         'J' => {
-                            lines[row].clear();
+                            lines[row].truncate(col);
                             lines.truncate(row + 1);
                         },
                         _ => {},
@@ -1723,17 +1735,71 @@ mod tests {
                 },
                 '\n' => {
                     row += 1;
+                    col = 0;
                     if row == lines.len() {
-                        lines.push(String::new());
+                        lines.push(Vec::new());
                     }
                 },
-                c => lines[row].push(c),
+                c => {
+                    if col == width {
+                        row += 1;
+                        col = 0;
+                        if row == lines.len() {
+                            lines.push(Vec::new());
+                        }
+                    }
+                    let line = &mut lines[row];
+                    if col < line.len() {
+                        line[col] = c;
+                    } else {
+                        line.resize(col, ' ');
+                        line.push(c);
+                    }
+                    col += 1;
+                },
             }
         }
-        while lines.last().is_some_and(String::is_empty) {
-            lines.pop();
+        let mut shown: Vec<String> = lines.into_iter().map(|l| l.into_iter().collect()).collect();
+        while shown.last().is_some_and(String::is_empty) {
+            shown.pop();
         }
-        lines
+        shown
+    }
+
+    #[test]
+    fn a_log_line_wider_than_the_terminal_leaves_nothing_of_the_old_frame() {
+        let (log, out) = capture();
+        let (_codes, sink) = capture();
+        let ui = TtyBoard::build(
+            out,
+            Codes {
+                out: sink,
+                terminal: true,
+            },
+            Settings::default(),
+            || Some(40),
+            None,
+        );
+        ui.step(StepId::Preflight, StepState::Running, "");
+        // Two full rows and one character of a third, over the old frame's
+        // third row.
+        let line = "w".repeat(81);
+        assert!(ui.log_line(format!("{line}\n").as_bytes()));
+        ui.step(StepId::Preflight, StepState::Done, "ok");
+        ui.status("scan the QR code");
+        let shown = screen_of_width(&text(&log), 40);
+        assert_eq!(shown[..3].concat(), line, "{shown:#?}");
+        assert_eq!(shown[2], "w", "nothing of the old frame: {shown:#?}");
+        assert_eq!(shown.len(), 3 + StepId::ALL.len() + 1, "{shown:#?}");
+        assert!(
+            shown[3].starts_with('✔') && shown[3].contains("preflight"),
+            "{shown:#?}"
+        );
+        assert_eq!(
+            shown.iter().filter(|l| l.contains("approve")).count(),
+            1,
+            "{shown:#?}"
+        );
     }
 
     #[test]

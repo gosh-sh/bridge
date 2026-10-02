@@ -139,6 +139,9 @@ impl WalletConnectWallet {
     }
 }
 
+/// How long a relay token is valid: a day.
+const RELAY_TOKEN_TTL_S: u64 = 86_400;
+
 /// Unix time in seconds.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -153,20 +156,21 @@ impl Wallet for WalletConnectWallet {
     }
 
     async fn connect(&mut self, ui: &dyn Ui) -> Result<Address, WalletError> {
+        // One client key, and a token signed by it for every opening of the
+        // socket: a token lives a day, and the wait for the wallet may be
+        // longer. The token travels only in the URL, which every printout
+        // of a deposit run cuts to its origin.
         let sk = ed25519_dalek::SigningKey::from_bytes(&crypto::random_bytes());
-        let now = unix_now();
-        let auth = jwt::relay_jwt(
-            &sk,
-            &hex::encode(crypto::random_bytes::<32>()),
-            &self.cfg.relay_url,
-            now,
-            86_400,
-        );
-        let url = jwt::relay_url(&self.cfg.relay_url, &self.cfg.project_id, &auth);
-        let mut r = relay::Relay::connect(url).await.map_err(|e| {
+        let (base, project) = (self.cfg.relay_url.clone(), self.cfg.project_id.clone());
+        let url = move || {
+            let sub = hex::encode(crypto::random_bytes::<32>());
+            let auth = jwt::relay_jwt(&sk, &sub, &base, unix_now(), RELAY_TOKEN_TTL_S);
+            jwt::relay_url(&base, &project, &auth)
+        };
+        let mut r = relay::Relay::connect_with(url).await.map_err(|e| {
             WalletError::Disconnected(format!("cannot reach the WalletConnect relay: {e:#}"))
         })?;
-        let uri = session::PairingUri::new(now, self.cfg.pair_timeout);
+        let uri = session::PairingUri::new(unix_now(), self.cfg.pair_timeout);
         let net = self.cfg.network;
         if let Some(p) = &self.cfg.qr_out {
             crate::deposit::qr::write_file(p, &uri.to_uri())
@@ -514,6 +518,62 @@ mod tests {
             .map(|(_, _, ttl)| ttl)
             .collect();
         assert_eq!(ttls, vec![600]);
+    }
+
+    /// The claims of the relay token a connection's request URI carries.
+    fn token_claims(uri: &str) -> serde_json::Value {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64U, Engine as _};
+        let auth = uri
+            .split(['?', '&'])
+            .find_map(|p| p.strip_prefix("auth="))
+            .unwrap();
+        let claims = auth.split('.').nth(1).unwrap();
+        serde_json::from_slice(&B64U.decode(claims).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_carries_a_fresh_token_from_the_same_client_key() {
+        let relay = MockRelay::start().await;
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        let ui = Arc::new(RecordingUi::new(true));
+        let mut w = WalletConnectWallet::new(cfg(&relay, Duration::from_secs(10)));
+        let watcher = scan_when_shown(ui.clone(), relay.url(), behaviour(&signer, false));
+        w.connect(ui.as_ref()).await.unwrap();
+        // A token is dated in seconds: more than one has passed by the time
+        // the socket is reopened.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        relay.drop_all();
+        // The wallet peer's own connections carry no token.
+        let ours = || -> Vec<String> {
+            relay
+                .request_uris()
+                .into_iter()
+                .filter(|u| u.contains("auth="))
+                .collect()
+        };
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while ours().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the client reconnects");
+        watcher.abort();
+        let uris = ours();
+        assert_ne!(uris[0], uris[1], "a new token for the new socket");
+        let (first, second) = (token_claims(&uris[0]), token_claims(&uris[1]));
+        assert_eq!(first["iss"], second["iss"], "signed by the same client key");
+        assert!(
+            second["iat"].as_u64().unwrap() > first["iat"].as_u64().unwrap(),
+            "{first} {second}"
+        );
+        assert_eq!(
+            second["exp"].as_u64().unwrap() - second["iat"].as_u64().unwrap(),
+            86_400
+        );
+        for u in &uris {
+            assert!(u.contains("projectId=test"), "{u}");
+        }
     }
 
     /// A wallet that adds Sepolia but announces it as `add_update` says.

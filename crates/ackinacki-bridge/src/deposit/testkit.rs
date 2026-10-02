@@ -652,6 +652,8 @@ pub struct MockRelay {
     stall: tokio::sync::broadcast::Sender<()>,
     /// Connections accepted so far.
     accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The request URI of every connection, in the order of the handshakes.
+    uris: std::sync::Arc<Mutex<Vec<String>>>,
 }
 
 /// What [`MockRelay`] knows across connections.
@@ -675,7 +677,14 @@ impl MockRelay {
         let (kill, _) = tokio::sync::broadcast::channel(4);
         let (stall, _) = tokio::sync::broadcast::channel(4);
         let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (st, k, sl, n) = (state.clone(), kill.clone(), stall.clone(), accepted.clone());
+        let uris = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (st, k, sl, n, u) = (
+            state.clone(),
+            kill.clone(),
+            stall.clone(),
+            accepted.clone(),
+            uris.clone(),
+        );
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
                 n.fetch_add(1, Ordering::SeqCst);
@@ -684,6 +693,7 @@ impl MockRelay {
                     st.clone(),
                     k.subscribe(),
                     sl.subscribe(),
+                    u.clone(),
                 ));
             }
         });
@@ -693,6 +703,7 @@ impl MockRelay {
             kill,
             stall,
             accepted,
+            uris,
         }
     }
 
@@ -704,6 +715,12 @@ impl MockRelay {
     /// Connections accepted so far, reconnects included.
     pub fn connections(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
+    }
+
+    /// The request URI (path and query) of every connection so far,
+    /// reconnects included, in the order of their handshakes.
+    pub fn request_uris(&self) -> Vec<String> {
+        self.uris.lock().unwrap().clone()
     }
 
     /// Every publication so far, in order: topic, tag and TTL in seconds.
@@ -741,11 +758,19 @@ impl MockRelay {
         state: std::sync::Arc<Mutex<MockRelayState>>,
         mut killed: tokio::sync::broadcast::Receiver<()>,
         mut stalled: tokio::sync::broadcast::Receiver<()>,
+        uris: std::sync::Arc<Mutex<Vec<String>>>,
     ) {
         use futures::{SinkExt as _, StreamExt as _};
-        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::{
+            handshake::server::{Request, Response},
+            Message,
+        };
 
-        let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else {
+        let note_uri = move |req: &Request, resp: Response| {
+            uris.lock().unwrap().push(req.uri().to_string());
+            Ok(resp)
+        };
+        let Ok(ws) = tokio_tungstenite::accept_hdr_async(tcp, note_uri).await else {
             return;
         };
         let (mut sink, mut stream) = ws.split();

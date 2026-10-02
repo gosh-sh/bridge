@@ -107,16 +107,28 @@ async fn open(url: &str, tls: &Connector) -> anyhow::Result<Ws> {
     Ok(ws)
 }
 
+/// Where the socket task opens the websocket: asked for every opening, so
+/// that a URL whose token runs out is given a fresh one.
+type UrlSource = Box<dyn Fn() -> String + Send + Sync>;
+
 impl Relay {
-    /// Connects to `url`, which carries the JWT and the project id. A bad
-    /// URL or a refused authorization fails here; a connection that drops
-    /// later is reopened by the socket task.
+    /// Connects to `url`, the same URL for every reconnect.
     pub async fn connect(url: String) -> anyhow::Result<Relay> {
+        Self::connect_with(move || url.clone()).await
+    }
+
+    /// Connects to the URL `url` returns, which carries the JWT and the
+    /// project id, and asks it again for each reconnect. A bad URL or a
+    /// refused authorization fails here; a connection that drops later is
+    /// reopened by the socket task.
+    pub async fn connect_with(
+        url: impl Fn() -> String + Send + Sync + 'static,
+    ) -> anyhow::Result<Relay> {
         let tls = tls_connector()?;
-        let ws = open(&url, &tls).await?;
+        let ws = open(&url(), &tls).await?;
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run(url, tls, ws, cmd_rx, in_tx));
+        let task = tokio::spawn(run(Box::new(url), tls, ws, cmd_rx, in_tx));
         Ok(Relay {
             cmd: cmd_tx,
             inbox: in_rx,
@@ -219,8 +231,9 @@ async fn send_unanswered(ws: &mut Ws, frame: Message) {
 }
 
 /// Opens the websocket again, pausing before each attempt: 1 s doubling to
-/// 60 s, ±20 %. It never gives up; callers bound their own waits.
-async fn reconnect(url: &str, tls: &Connector) -> Ws {
+/// 60 s, ±20 %, each attempt on the URL `url` returns then. It never gives
+/// up; callers bound their own waits.
+async fn reconnect(url: &UrlSource, tls: &Connector) -> Ws {
     let mut attempt = 0u32;
     loop {
         let pause = jittered(
@@ -229,7 +242,7 @@ async fn reconnect(url: &str, tls: &Connector) -> Ws {
         );
         tokio::time::sleep(pause).await;
         attempt = attempt.saturating_add(1);
-        if let Ok(ws) = open(url, tls).await {
+        if let Ok(ws) = open(&url(), tls).await {
             return ws;
         }
     }
@@ -240,7 +253,7 @@ async fn reconnect(url: &str, tls: &Connector) -> Ws {
 /// confirmed topic is subscribed again, which makes the relay hand over
 /// what it kept for them.
 async fn recover(
-    url: &str,
+    url: &UrlSource,
     tls: &Connector,
     topics: &HashSet<String>,
     pending: &mut HashMap<u64, (Option<String>, oneshot::Sender<anyhow::Result<Value>>)>,
@@ -263,7 +276,7 @@ async fn recover(
 /// forwards `irn_subscription` pushes, pings, and replaces the socket when
 /// it breaks or goes silent. Ends when the [`Relay`] is gone.
 async fn run(
-    url: String,
+    url: UrlSource,
     tls: Connector,
     mut ws: Ws,
     mut cmds: mpsc::UnboundedReceiver<Cmd>,

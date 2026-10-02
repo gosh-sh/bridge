@@ -208,8 +208,8 @@ pub struct WithdrawArgs {
     /// Block the bridge in `--bridge-address` was deployed in: where the
     /// `LayerAnchorAppended` scan that rebuilds the window heights
     /// (preflight, then stage 4b) stops when a window is not covered yet.
-    /// Changes together with the address. Unset = genesis, slow on an old
-    /// bridge.
+    /// Changes together with the address. Unset = genesis, which only a
+    /// failed scan walks back to.
     #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
     pub bridge_deploy_block: Option<u64>,
 

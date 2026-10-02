@@ -249,10 +249,9 @@ assigns it when the release is tagged.
   `LayerAnchorAppended` scan settings as arguments: `--bridge-deploy-block`
   (`BRIDGE_DEPLOY_BLOCK`), `--get-logs-chunk-blocks`
   (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`; 0 = the default) and `--get-logs-pause-ms`
-  (`BRIDGE_GET_LOGS_PAUSE_MS`), so they are in `--help` and a malformed value
-  fails at argument parsing. The library no longer reads the environment: a
-  client built with `EthBridgeClient::new` carries the defaults and is not
-  meant to scan. `scripts/deploy_bridge_bundle.sh` writes
+  (`BRIDGE_GET_LOGS_PAUSE_MS`), each also read from the environment
+  variable of that name.
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh` writes
   `BRIDGE_DEPLOY_BLOCK` next to the `BRIDGE_ADDRESS` it deploys (a commented
   placeholder when the receipt cannot be read; never fatal after the
   broadcast).
@@ -498,18 +497,23 @@ assigns it when the release is tagged.
   backwards from a pinned head in `BRIDGE_GET_LOGS_CHUNK_BLOCKS`-block
   `eth_getLogs` calls (default 2 000; Alchemy's free tier caps it at 10),
   `BRIDGE_GET_LOGS_PAUSE_MS` apart, and stops as soon as every window's
-  entries are covered or at `BRIDGE_DEPLOY_BLOCK`, so once the windows are
-  full the cost is bounded by the window span, not by the bridge's age; a
-  call failing with 429 / 5xx / a transport error is retried with backoff, a
-  `-32600` / `-32602` response (how Alchemy rejects a span over its cap) is
-  not. A scan with no from/to block used to default
-  both ends to `latest` and fail resurrect on any contract that already had
-  history (ETH-31). The snapshot is pinned to one block and every kept log
+  entries are covered or at `BRIDGE_DEPLOY_BLOCK`; the stop point is the
+  oldest entry still held by any window. Layer N of the windows is appended
+  only at `128^N` boundaries, so a layer that is not full keeps its first
+  entry and the walk reaches back to it (layer 3 fills only after about
+  2.8 years), in practice nearly to the deploy block: about
+  `(head - deploy_block) / span` calls, a few per day of bridge age on a
+  2 000-block span and about 720 per day (three minutes a day at 4 calls/s)
+  on a 10-block cap; a call failing with 429 / 5xx / a transport error is
+  retried with backoff, a `-32600` / `-32602` response (how Alchemy rejects
+  a span over its cap) is not. The snapshot is pinned to one block and every kept log
   is checked against its window slot (hash and height) and the window's
   `lastHeight`: a mismatch (an append landing mid-read, a partial log set),
   fewer logs than entries (a backend one block behind omitting the newest
   append) or a rejected newest span re-read the snapshot a few times, after
-  which the error names `BRIDGE_DEPLOY_BLOCK`. The scan logs its range,
+  which a short log set fails naming `BRIDGE_DEPLOY_BLOCK` and the others
+  surface as they are; on a span the RPC always rejects that is two extra
+  short reads before the same refusal. The scan logs its range,
   progress and total; an
   unset deploy block is a warning. The CLI's coverage poll reads one scalar
   per round, reads the full snapshot once coverage is observed, and polls on
@@ -520,13 +524,17 @@ assigns it when the release is tagged.
   pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The previous deploys,
   `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped at seq
   20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq
-  20054016), still answer every getter but are no longer advanced, so a
-  withdraw against either burns and then times out at stage 4b. All three
-  bind the same AN bridge account; nothing else in the profile changes.
+  20054016), still answer every getter but are no longer advanced:
+  `0x32b9…` has this build's verifier stack, so a withdraw against it burns
+  and then times out at stage 4b; `0x0F4F…` has an older one, so preflight
+  refuses it with exit 2. All three bind the same AN bridge account; nothing
+  else in the profile changes.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn
-  and the coverage wait.
+  and the coverage wait; on a bridge without anchors yet, where the read
+  sends no `eth_getLogs`, preflight sends the scan's first call once, with
+  the scan's retries.
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
   exponential backoff.** With the aggregator now binding the inner-circuit
@@ -728,6 +736,14 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- The read of the bridge that rebuilds window heights scanned
+  `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
+  both ends to `latest` and the read failed on any contract that already had
+  history (`layer 1 has data_len=N but only 0 LayerAnchorAppended logs`;
+  ETH-31): `daemon-live` could not start against such a contract, and
+  `ackinacki-bridge withdraw`, which ran that read on every coverage poll,
+  failed at stage 4b after the burn. The scan now walks the range; see
+  Changed.
 - `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
   cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
   head on every poll, whether the target `depositId` was found or not. A

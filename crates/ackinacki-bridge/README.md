@@ -42,7 +42,10 @@ pipeline:
    must hold code, the withdrawal verifier stack must walk (adapter →
    `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
    pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
-   and `treasuryBalance` must already cover the amount. **So a dry run can
+   `treasuryBalance` must already cover the amount, and the window-heights
+   read stage 4b will need must succeed now (one `LayerAnchorAppended` scan
+   back from the head; on a bridge without anchors, one probe
+   `eth_getLogs`). **So a dry run can
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy, a drained treasury — not only AN-side ones.**
 
@@ -65,13 +68,14 @@ pipeline:
    `USDCBridge.dst_transaction` to the `WithdrawalInitiated` ExtOut
    event, filtering by the specific broadcast tx hash so concurrent
    burns from other operators cannot be mis-selected as ours.
-5. **Resurrect + wait for coverage** — read the deployed
-   `AckiNackiBridge` at `--bridge-address` via
-   `EthBridgeClient::read_full_state` and poll until
-   `storedLastSeenBlockSeqNo` has advanced past the covering L2 bundle
-   boundary (`W² = 16 384` seq_nos) for the burn's block. Once the
-   covering bundle has landed on-chain (fed by the server-side bundle
-   relayer), `BridgeState::from_contract` builds a byte-for-byte mirror.
+5. **Resurrect + wait for coverage** — poll `storedLastSeenBlockSeqNo`
+   on the deployed `AckiNackiBridge` at `--bridge-address` (one call per
+   round) until it has advanced past the covering L2 bundle boundary
+   (`W² = 16 384` seq_nos) for the burn's block, then read the full state
+   via `EthBridgeClient::read_full_state` (ten windows plus the
+   `LayerAnchorAppended` scan). Once the covering bundle has landed
+   on-chain (fed by the server-side bundle relayer),
+   `BridgeState::from_contract` builds a byte-for-byte mirror.
 6. **Prove + submit** — enrich the resurrected `BridgeState`
    (single-shot, no retry), produce a Circuit-4 SHPLONK proof via the
    in-process Circuit-4 prover + `aggregate-proof` subprocess, always
@@ -636,6 +640,9 @@ specific reason. Common causes:
   more via Step 2 (bump the amount inside `deploy_msig_and_mint.py`
   if you need more than the 1 USDC default)
 - USDCBridge account_id does not resolve via GQL
+- the window-heights read fails: a wrong `BRIDGE_DEPLOY_BLOCK`, an
+  `eth_getLogs` span your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or
+  an RPC without log history
 
 **Remediation:** fix the specific issue, re-run. Preflight is
 side-effect-free.

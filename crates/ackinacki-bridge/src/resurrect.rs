@@ -116,7 +116,7 @@ where
         // One `storedLastSeenBlockSeqNo` call per poll. The full snapshot
         // (10 windows plus the `LayerAnchorAppended` scan from the deploy
         // block) is read once, below, after coverage is reached.
-        let observed = client
+        let mut observed = client
             .stored_last_seen_block_seq_no()
             .await
             .context("EthBridgeClient::stored_last_seen_block_seq_no")?;
@@ -143,6 +143,9 @@ where
                     target_covering_seq_no = target_seq_no,
                     "snapshot predates coverage seen at latest; polling on",
                 );
+                // The snapshot is the authoritative read; the sleep and
+                // deadline messages below report it, not the `latest` poll.
+                observed = cfs.last_seen_block_seq_no;
             } else {
                 let state = BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level).context(
                     "BridgeState::from_contract failed — on-chain layer window shape does not \

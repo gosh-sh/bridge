@@ -72,19 +72,26 @@ pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
 
 /// Inclusive `eth_getLogs` span per request. Alchemy free-tier is 10;
 /// paid RPC is typically 2_000. The scan walks backwards from the head and
-/// stops as soon as every window's entries are covered, so on a capped RPC
-/// the cost is bounded by the window span (at most 128 bundles per layer),
-/// not by the bridge's age; [`BRIDGE_DEPLOY_BLOCK_ENV`] is where it stops
-/// when a window is not covered yet. It runs once per process: at
-/// `daemon-live` startup, and in the CLI before the burn and after coverage.
+/// stops once every non-empty window's entries are covered, or at
+/// [`BRIDGE_DEPLOY_BLOCK_ENV`]; the stop point is the oldest entry still
+/// held by any window. Layer N is appended at `128^N` boundaries, so at
+/// anchor level 2 layers 1 and 2 fill in about 8 days, while layer 3 gets
+/// its first entry at the first `128^3` boundary after the seed (hours to
+/// days) and is full only after about 2.8 years: for most of a bridge's
+/// life the walk ends at its first layer-3 anchor, in practice near the
+/// deploy block. The cost is about `(head - deploy_block) / span` calls, a
+/// few per day of bridge age on a 2_000 span and about 720 per day (three
+/// minutes a day at 4 calls/s) on a 10-block cap. It runs at `daemon-live`
+/// startup, and in the CLI in preflight and after each coverage poll that
+/// observed the target.
 pub const GET_LOGS_CHUNK_BLOCKS: u64 = 2_000;
 
-/// Retries of one `eth_getLogs` call of that scan on a retryable RPC error
-/// (429, 5xx, transport), with a doubling delay starting at half a second.
-/// A span-cap rejection (`-32600` / `-32602`) is not retried here: on any
-/// chunk but the newest it fails the same way again; on the newest chunk,
-/// whose end is the pinned head a lagging backend may not have yet, it
-/// re-pins and re-reads the snapshot instead.
+/// Attempts for one `eth_getLogs` call of that scan on a retryable RPC
+/// error (429, 5xx, transport), with a doubling delay starting at half a
+/// second between them. A span-cap rejection (`-32600` / `-32602`) is not
+/// retried here: on any chunk but the newest it fails the same way again; on
+/// the newest chunk, whose end is the pinned head a lagging backend may not
+/// have yet, it re-pins and re-reads the snapshot instead.
 const GET_LOGS_MAX_ATTEMPTS: u32 = 8;
 const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 500;
 const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
@@ -93,7 +100,8 @@ const GET_LOGS_PROGRESS_EVERY: usize = 200;
 /// [`EthBridgeClient::read_full_state`] pins every read to one block; a
 /// lagging backend behind a load-balanced RPC may answer "header not found"
 /// for it, omit the newest log, or reject the newest span, so the whole
-/// snapshot is retried this many times.
+/// snapshot is read up to this many times (a short log set re-walks the
+/// whole range each time).
 const READ_FULL_STATE_ATTEMPTS: u32 = 3;
 const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 2_000;
 
@@ -106,14 +114,31 @@ const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 2_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogScanConfig {
     /// Where the backward scan stops when a window is not covered yet: the
-    /// block the bridge was deployed in. `0` means genesis, which is slow
-    /// on an old bridge and warned about when it runs.
+    /// block the bridge was deployed in. `0` means genesis: a successful
+    /// scan still stops at the bridge's oldest held anchor, but a short
+    /// log set then walks back to genesis before failing; warned about
+    /// when it runs.
     pub deploy_block: u64,
     /// Inclusive block span of one `eth_getLogs` call. `0` means
     /// [`GET_LOGS_CHUNK_BLOCKS`].
     pub chunk_blocks: u64,
     /// Pause between two `eth_getLogs` calls.
     pub pause: Duration,
+}
+
+impl LogScanConfig {
+    /// The settings as the scan uses them: a span of 0 means
+    /// [`GET_LOGS_CHUNK_BLOCKS`].
+    pub fn normalized(self) -> Self {
+        Self {
+            chunk_blocks: if self.chunk_blocks == 0 {
+                GET_LOGS_CHUNK_BLOCKS
+            } else {
+                self.chunk_blocks
+            },
+            ..self
+        }
+    }
 }
 
 impl Default for LogScanConfig {
@@ -137,24 +162,6 @@ pub fn get_logs_error_is_retryable(e: &TransportError) -> bool {
         TransportError::ErrorResp(payload) => !matches!(payload.code, -32600 | -32602),
         _ => true,
     }
-}
-
-/// Inclusive `(from, to)` spans covering `from_block..=to_block`.
-pub fn get_logs_chunks(from_block: u64, to_block: u64, chunk: u64) -> Vec<(u64, u64)> {
-    if chunk == 0 || from_block > to_block {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut start = from_block;
-    while start <= to_block {
-        let end = start.saturating_add(chunk - 1).min(to_block);
-        out.push((start, end));
-        if end == u64::MAX {
-            break;
-        }
-        start = end.saturating_add(1);
-    }
-    out
 }
 
 /// Inclusive `(from, to)` spans covering `from_block..=to_block`, newest
@@ -930,10 +937,10 @@ use sol_bindings::AckiNackiBridge;
 pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     contract: AckiNackiBridge::AckiNackiBridgeInstance<P, N>,
     address: Address,
-    /// How the startup `LayerAnchorAppended` scan walks the chain: from the
-    /// environment in [`Self::new`], explicit in [`Self::with_scan_config`].
-    /// `deploy_block` must be set in production — a scan from block 0 is
-    /// thousands of `eth_getLogs` calls against the RPC.
+    /// How the startup `LayerAnchorAppended` scan walks the chain:
+    /// [`LogScanConfig::default`] from [`Self::new`], explicit in
+    /// [`Self::with_scan_config`]. Set `deploy_block` in production so a
+    /// failed scan does not walk back to genesis.
     scan: LogScanConfig,
 }
 
@@ -942,7 +949,6 @@ where
     P: Provider<N> + Clone,
     N: Network,
 {
-    /// Scan settings from the environment; see [`LogScanConfig::from_env`].
     /// A client for calls that never rebuild window heights. It carries
     /// [`LogScanConfig::default`], so a `read_full_state` on it would walk
     /// back to genesis (warned about); clients that scan come from
@@ -951,20 +957,14 @@ where
         Self::with_scan_config(address, provider, LogScanConfig::default())
     }
 
-    /// `scan.chunk_blocks == 0` means [`GET_LOGS_CHUNK_BLOCKS`].
+    /// `scan.chunk_blocks == 0` means [`GET_LOGS_CHUNK_BLOCKS`]
+    /// ([`LogScanConfig::normalized`]).
     pub fn with_scan_config(address: Address, provider: P, scan: LogScanConfig) -> Self {
         let contract = AckiNackiBridge::new(address, provider);
         Self {
             contract,
             address,
-            scan: LogScanConfig {
-                chunk_blocks: if scan.chunk_blocks == 0 {
-                    GET_LOGS_CHUNK_BLOCKS
-                } else {
-                    scan.chunk_blocks
-                },
-                ..scan
-            },
+            scan: scan.normalized(),
         }
     }
 
@@ -976,6 +976,75 @@ where
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    /// One `eth_getLogs` for `LayerAnchorAppended` over the newest
+    /// `chunk_blocks` blocks: the call the scan would send first. Lets a
+    /// preflight exercise the RPC's span cap and log serving on a bridge
+    /// whose windows are still empty, where the scan itself sends nothing.
+    /// Same tolerance as the scan's newest chunk: retryable RPC errors are
+    /// retried with backoff, and a rejected span (the head may be one a
+    /// lagging backend does not have yet) is re-pinned a few times before
+    /// the error surfaces. Returns the number of logs in that span.
+    pub async fn probe_log_span(&self) -> Result<usize, RelayerError> {
+        let mut pin = 0u32;
+        loop {
+            pin += 1;
+            let outcome = self.probe_log_span_once().await;
+            match outcome {
+                Ok(n) => return Ok(n),
+                Err(e) if pin < READ_FULL_STATE_ATTEMPTS => {
+                    tracing::warn!(
+                        pin,
+                        error = %e,
+                        "LayerAnchorAppended probe failed; re-pinning the head"
+                    );
+                    tokio::time::sleep(Duration::from_millis(READ_FULL_STATE_RETRY_DELAY_MS)).await;
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn probe_log_span_once(&self) -> Result<usize, RelayerError> {
+        let head = self
+            .contract
+            .provider()
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
+        let from = head.saturating_sub(self.scan.chunk_blocks.saturating_sub(1));
+        let filter = Filter::new()
+            .address(self.address)
+            .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
+            .from_block(from)
+            .to_block(head);
+        let mut attempt = 0u32;
+        let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+        loop {
+            attempt += 1;
+            match self.contract.provider().get_logs(&filter).await {
+                Ok(logs) => return Ok(logs.len()),
+                Err(e) if attempt < GET_LOGS_MAX_ATTEMPTS && get_logs_error_is_retryable(&e) => {
+                    tracing::warn!(
+                        from,
+                        head,
+                        attempt,
+                        backoff_ms,
+                        error = %e,
+                        "LayerAnchorAppended probe failed; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+                },
+                Err(e) => {
+                    return Err(RelayerError::other(format!(
+                        "LayerAnchorAppended get_logs [{from},{head}] after {attempt} attempt(s): \
+                         {e}"
+                    )));
+                },
+            }
+        }
     }
 
     pub fn address(&self) -> Address {
@@ -1266,23 +1335,29 @@ where
     /// Issues 5 scalar view calls + 10 `getLayerWindow` calls, all pinned
     /// to one block, then scans `LayerAnchorAppended` backwards from that
     /// block to paint the per-slot heights (the contract no longer stores
-    /// them): see [`Self::paint_heights_from_appended_logs`] for the walk
-    /// and its bound. Each window returns ~5 KB, so the view calls cost
-    /// ~50 KB of RPC response — well under any provider's per-call cap.
+    /// them): see `paint_heights_from_appended_logs` for the walk and
+    /// [`GET_LOGS_CHUNK_BLOCKS`] for its cost. Each window returns ~5 KB, so
+    /// the view calls cost ~50 KB of RPC response — well under any
+    /// provider's per-call cap.
     ///
     /// Consistency: `eth_blockNumber` is taken first and every read is
     /// pinned to it, so a `verifyBlock` landing mid-read cannot leave the
     /// windows one append ahead of the logs. [`paint_heights_from_events`]
     /// then checks every kept log against its window slot (hash and
     /// height) and the window's `lastHeight`, so a partial log set from a
-    /// lagging backend is reported instead of mis-painted. Transient
-    /// failures (a pinned read the backend cannot serve yet, a slot
-    /// mismatch) re-read the snapshot a few times; final ones (a span the
-    /// RPC rejects, fewer logs than entries) return at once.
+    /// lagging backend is reported instead of mis-painted. A failed
+    /// snapshot is re-read a few times whenever a fresh one can succeed: a
+    /// pinned read the backend cannot serve yet, a slot or `lastHeight`
+    /// mismatch, fewer logs than entries (a backend one block behind; each
+    /// re-read is a full walk), and a rejected newest span, which on a
+    /// deterministic span cap costs two extra short reads before the same
+    /// refusal. A chunk below the newest that the RPC rejected or that ran
+    /// out of its attempts returns at once: re-reading would repeat the
+    /// whole walk.
     ///
-    /// Callers: `daemon-live` once at startup; the withdrawal CLI once in
-    /// preflight and once after its coverage poll (one scalar call per
-    /// round) is satisfied.
+    /// Callers: `daemon-live` once at startup; the withdrawal CLI in
+    /// preflight and after each coverage poll (one scalar call per round)
+    /// that observed the target.
     pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
         let mut attempt = 0u32;
         loop {
@@ -1386,9 +1461,12 @@ where
     /// contract no longer SSTOREs them). The walk goes backwards from `to`
     /// in [`LogScanConfig::chunk_blocks`]-block `eth_getLogs` calls and
     /// stops as soon as every non-empty window has at least `data_len`
-    /// logs, or at the deploy block; so once the windows are full the cost
-    /// is bounded by the window span (128 bundles per layer), not by the
-    /// bridge's age. The logs are then put back in chronological order and
+    /// logs, or at the deploy block. The stop point is the oldest entry
+    /// still held by any non-empty window: layer N is appended at `128^N`
+    /// boundaries, so a layer that is not full (layer 3 for about 2.8
+    /// years) keeps its very first entry and the walk reaches back to it,
+    /// in practice near the deploy block; see [`GET_LOGS_CHUNK_BLOCKS`] for
+    /// the cost. The logs are then put back in chronological order and
     /// [`paint_heights_from_events`] keeps the last `data_len` per layer.
     async fn paint_heights_from_appended_logs(
         &self,
@@ -1487,7 +1565,9 @@ where
                     hash_le,
                 });
             }
-            newest_chunk_first.push(chunk_events);
+            if !chunk_events.is_empty() {
+                newest_chunk_first.push(chunk_events);
+            }
             if windows_covered(&found, &needed) {
                 covered = true;
                 break;
@@ -1530,11 +1610,13 @@ where
 /// a fresh snapshot can succeed where this one failed.
 #[derive(Debug)]
 enum SnapshotError {
-    /// A pinned read the backend could not serve yet, or logs and window
-    /// snapshot that disagree: re-read.
+    /// A pinned read the backend could not serve yet, logs and window
+    /// snapshot that disagree, fewer logs than entries (re-walked in full),
+    /// or a rejected newest span: re-read.
     Transient(RelayerError),
-    /// A span the RPC rejects, a chunk that ran out of retries, fewer logs
-    /// than entries: the same scan fails the same way.
+    /// A chunk below the newest that the RPC rejected or that ran out of
+    /// its attempts, or a window shape the ring cannot take: re-reading
+    /// would repeat the whole walk.
     Final(RelayerError),
 }
 
@@ -2163,18 +2245,6 @@ mod tests {
             },
             other => panic!("second rotation must apply after cover, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn get_logs_chunks_covers_range_inclusively() {
-        assert_eq!(get_logs_chunks(100, 350, 100), vec![
-            (100, 199),
-            (200, 299),
-            (300, 350)
-        ]);
-        assert_eq!(get_logs_chunks(5, 5, 10), vec![(5, 5)]);
-        assert_eq!(get_logs_chunks(10, 9, 10), Vec::<(u64, u64)>::new());
-        assert_eq!(get_logs_chunks(0, 0, 2_000), vec![(0, 0)]);
     }
 
     #[test]

@@ -481,7 +481,6 @@ pub async fn run(
     crate::preflight::check_window_scan(&args.rpc_url, args.bridge_address, args.log_scan_config())
         .await
         .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
-    info!(bridge = %args.bridge_address, "window-heights scan ok");
 
     // Signer + prover artifacts — real runs only (a dry-run has no
     // plumbing, never submits and never proves).
@@ -1017,11 +1016,8 @@ pub async fn run(
                     source: None,
                 }
             })?);
-        let ro_bridge = EthBridgeClient::with_scan_config(
-            args.bridge_address,
-            ro_provider,
-            args.log_scan_config(),
-        );
+        // Getters only; no window scan on this client.
+        let ro_bridge = EthBridgeClient::new(args.bridge_address, ro_provider);
         let adapter =
             ro_bridge
                 .withdrawal_verifier()
@@ -1130,8 +1126,8 @@ pub async fn run(
                         source: None,
                     })?,
             );
-    let bridge =
-        EthBridgeClient::with_scan_config(args.bridge_address, provider, args.log_scan_config());
+    // Dry run and submit only; no window scan on this client.
+    let bridge = EthBridgeClient::new(args.bridge_address, provider);
 
     // NB: `Status::Submitted` is written only AFTER `submit_withdraw`
     // returns with an actual `tx_hash`. Writing it beforehand (as v1

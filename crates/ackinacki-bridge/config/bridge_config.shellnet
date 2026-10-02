@@ -113,8 +113,10 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # Redeployed from `main` on 2026-10-02 (owner pause, #73). The previous
 # deploys, `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped
 # at seq 20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped
-# at seq 20054016), still answer every getter but nobody advances them, so
-# a withdraw against either burns and then times out at stage 4b.
+# at seq 20054016), still answer every getter but nobody advances them.
+# `0x32b9…` has this build's verifier stack, so a withdraw against it burns
+# and then times out at stage 4b; `0x0F4F…` has an older one, so preflight
+# refuses it with exit 2.
 #
 # NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
 # over a new AN-side eccUSDCBridge and rolled back the same day. That

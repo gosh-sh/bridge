@@ -113,6 +113,7 @@ done
 [[ "$EXPECTED_EVM_CHAIN_ID" == 11155111 ]] || die "expected Sepolia chain id"
 [[ "$BRIDGE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad bridge address"
 [[ "$BRIDGE_DEPLOY_BLOCK" =~ ^[0-9]+$ ]] || die "BRIDGE_DEPLOY_BLOCK must be a block number"
+BRIDGE_DEPLOY_BLOCK=$((10#$BRIDGE_DEPLOY_BLOCK)) # decimal even with leading zeros
 (( BRIDGE_DEPLOY_BLOCK > 0 )) || die "BRIDGE_DEPLOY_BLOCK=0 scans from genesis; set the bridge's deploy block"
 [[ "$RELAYER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad relayer address"
 [[ "$RELAYER_PRIVATE_KEY" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "bad private key shape"

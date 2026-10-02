@@ -2148,6 +2148,8 @@ pub async fn check_window_scan(
         got: crate::errors::Redacted::rendered(format!("{} ({e})", crate::args::redact(rpc_url))),
     })?;
     let provider = ProviderBuilder::new().connect_http(url);
+    // What the scan will actually use: a span of 0 is the library default.
+    let scan = scan.normalized();
     let client = EthBridgeClient::with_scan_config(bridge, provider, scan);
     let state = client
         .read_full_state()
@@ -2162,6 +2164,29 @@ pub async fn check_window_scan(
             ),
             source: Some(anyhow::Error::new(e)),
         })?;
+    if state.layer_windows.iter().all(|w| w.data_len == 0) {
+        // No anchors yet, so the read above sent no `eth_getLogs` and a
+        // span the RPC rejects would surface only in stage 4b, after the
+        // first bundle lands. Send the scan's first call once.
+        let logs = client
+            .probe_log_span()
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: the bridge has no anchors yet, and the \
+                     eth_getLogs call stage 4b will send failed: {e}.\n\x20 Check \
+                     BRIDGE_GET_LOGS_CHUNK_BLOCKS (your RPC's eth_getLogs span cap; now {}) and \
+                     that --rpc-url serves logs.",
+                    scan.chunk_blocks,
+                ),
+                source: Some(anyhow::Error::new(e)),
+            })?;
+        tracing::info!(
+            chunk_blocks = scan.chunk_blocks,
+            logs,
+            "no anchors yet; one eth_getLogs over the newest span answered"
+        );
+    }
     tracing::info!(
         last_seen = state.last_seen_block_seq_no,
         deploy_block = scan.deploy_block,
@@ -2616,42 +2641,46 @@ pub(crate) mod tests {
                         let v: serde_json::Value =
                             serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
                         let id = v.get("id").cloned().unwrap_or(serde_json::json!(1));
-                        let result = match v.get("method").and_then(|m| m.as_str()) {
-                            Some("eth_chainId") => "0xaa36a7".to_string(), // 11155111
-                            // The head `check_window_scan` pins its reads to.
-                            Some("eth_blockNumber") => "0x10".to_string(),
-                            Some("eth_getCode") => {
-                                let at = v["params"][0].as_str().unwrap_or("");
-                                code.for_address(at)
-                            },
-                            Some("eth_call") => {
-                                // `input` first. Alloy 2 builds contract calls with
-                                // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
-                                // which sets `TransactionInput::input`
-                                // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
-                                // and leaves `data` unset — so the request carries
-                                // `"input": "0x…"` and no `"data"` at all. Reading
-                                // `data` yields "", the selector is empty, every
-                                // lookup misses, the mock answers `0x`, and every
-                                // test here passes or fails for reasons unrelated
-                                // to what it claims to check.
-                                //
-                                // `data` stays as a fallback: it is still valid
-                                // JSON-RPC, other clients send it, and the cost is
-                                // one `or_else`.
-                                let call = &v["params"][0];
-                                let data = call["input"]
-                                    .as_str()
-                                    .or_else(|| call["data"].as_str())
-                                    .unwrap_or("");
-                                let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
-                                answers
-                                    .get(sel)
-                                    .cloned()
-                                    .unwrap_or_else(|| "0x".to_string())
-                            },
-                            _ => "0x".to_string(),
-                        };
+                        let result: serde_json::Value =
+                            match v.get("method").and_then(|m| m.as_str()) {
+                                Some("eth_chainId") => serde_json::json!("0xaa36a7"), // 11155111
+                                // The head `check_window_scan` pins its reads to.
+                                Some("eth_blockNumber") => serde_json::json!("0x10"),
+                                // An empty log set: the window-scan probe on a
+                                // bridge without anchors.
+                                Some("eth_getLogs") => serde_json::json!([]),
+                                Some("eth_getCode") => {
+                                    let at = v["params"][0].as_str().unwrap_or("");
+                                    serde_json::json!(code.for_address(at))
+                                },
+                                Some("eth_call") => {
+                                    // `input` first. Alloy 2 builds contract calls with
+                                    // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
+                                    // which sets `TransactionInput::input`
+                                    // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
+                                    // and leaves `data` unset — so the request carries
+                                    // `"input": "0x…"` and no `"data"` at all. Reading
+                                    // `data` yields "", the selector is empty, every
+                                    // lookup misses, the mock answers `0x`, and every
+                                    // test here passes or fails for reasons unrelated
+                                    // to what it claims to check.
+                                    //
+                                    // `data` stays as a fallback: it is still valid
+                                    // JSON-RPC, other clients send it, and the cost is
+                                    // one `or_else`.
+                                    let call = &v["params"][0];
+                                    let data = call["input"]
+                                        .as_str()
+                                        .or_else(|| call["data"].as_str())
+                                        .unwrap_or("");
+                                    let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
+                                    serde_json::json!(answers
+                                        .get(sel)
+                                        .cloned()
+                                        .unwrap_or_else(|| "0x".to_string()))
+                                },
+                                _ => serde_json::json!("0x"),
+                            };
                         let payload = serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})
                             .to_string();
                         let resp = format!(
@@ -2770,8 +2799,9 @@ pub(crate) mod tests {
         format!("0x{}", "00".repeat(32 * (128 + 128 + 3)))
     }
 
-    /// The pre-burn window-heights read passes on empty windows, and a
-    /// node that cannot serve it refuses naming the two knobs to check.
+    /// The pre-burn window-heights read passes on empty windows (where it
+    /// sends the scan's first `eth_getLogs` as a probe), and a node that
+    /// cannot serve it refuses naming the two knobs to check.
     #[tokio::test]
     async fn window_scan_passes_on_empty_windows_and_names_the_knobs_on_failure() {
         let url = mock_rpc(SOME_CODE, full_walk(&[])).await;

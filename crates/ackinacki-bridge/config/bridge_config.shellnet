@@ -110,10 +110,11 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # on Sepolia. The server-side bundle relayer that advances this contract
 # runs L2 only. See README.md Quick start for the default-user flow.
 #
-# Redeployed from `main` on 2026-09-29. The previous deploy,
-# `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, still answers every
-# getter but stopped at seq 20054016: nobody advances it, so a withdraw
-# against it burns and then times out at stage 4b.
+# Redeployed from `main` on 2026-10-02 (owner pause, #73). The previous
+# deploys, `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped
+# at seq 20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped
+# at seq 20054016), still answer every getter but nobody advances them, so
+# a withdraw against either burns and then times out at stage 4b.
 #
 # NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
 # over a new AN-side eccUSDCBridge and rolled back the same day. That
@@ -148,13 +149,13 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-BRIDGE_ADDRESS=0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38
+BRIDGE_ADDRESS=0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36
 
 # Block the deploy above was created in: where the `LayerAnchorAppended`
 # scan the CLI runs (in preflight, then after coverage) stops when a window
 # is not covered yet. Unset means it may walk back to genesis. Changes
 # together with BRIDGE_ADDRESS; `--bridge-deploy-block` overrides it.
-BRIDGE_DEPLOY_BLOCK=11807209
+BRIDGE_DEPLOY_BLOCK=11828971
 # For a capped / rate-limited RPC (Alchemy's free tier: 10-block spans,
 # ~4 calls per second). The public default above needs neither.
 # BRIDGE_GET_LOGS_CHUNK_BLOCKS=10

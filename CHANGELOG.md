@@ -515,13 +515,14 @@ assigns it when the release is tagged.
   per round, reads the full snapshot once coverage is observed, and polls on
   if that snapshot still predates the target.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
-  rotated to `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38`** (the 2026-09-29
-  deploy from `main`; its deploy block 11807209 is pinned beside it as
-  `BRIDGE_DEPLOY_BLOCK`). The previous
-  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` still answers every getter but
-  is no longer advanced (it stopped at seq 20054016), so a withdraw against
-  it burned and then timed out at stage 4b. Both deploys bind the same AN
-  bridge account; nothing else in the profile changes.
+  rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
+  deploy from `main` with the owner pause; its deploy block 11828971 is
+  pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The previous deploys,
+  `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped at seq
+  20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq
+  20054016), still answer every getter but are no longer advanced, so a
+  withdraw against either burns and then times out at stage 4b. All three
+  bind the same AN bridge account; nothing else in the profile changes.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn

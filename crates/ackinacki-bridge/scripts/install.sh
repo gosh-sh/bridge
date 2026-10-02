@@ -359,6 +359,10 @@ if have_profile && ! have_deposit_settings; then
   else
     mkdir -p "$PREFIX/deposit-state"
     chmod 700 "$PREFIX/deposit-state"
+    # The installer before deposits left this one at the umask's mode.
+    if [ -d "$PREFIX/withdraw-state" ]; then
+      chmod 700 "$PREFIX/withdraw-state"
+    fi
     {
       printf '\n# --- Deposit (EVM → Acki Nacki), added by install.sh ---\n'
       printf 'BRIDGE_DEPOSIT_PROVER_DIR=%s\n' "$DEPOSIT_PROVER"

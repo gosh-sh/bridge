@@ -1596,7 +1596,7 @@ pub fn summary(
     DepositSuccess {
         op_id: Some(rec.op_id.clone()),
         dry_run: false,
-        network: net.map(|n| n.name().to_string()).unwrap_or_default(),
+        network: net.map(Network::arg).unwrap_or_default(),
         chain_id: rec.params.chain_id,
         amount: UsdcAmount(u128::from(rec.params.amount_units)).display(),
         to: rec.params.to.clone(),
@@ -2152,7 +2152,7 @@ pub async fn abandon(p: &DepositParams, op: &str, ui: &dyn Ui) -> CliResult<Depo
         op_id: Some(op.clone()),
         dry_run: false,
         network: Network::from_chain_id(rec.params.chain_id)
-            .map(|n| n.name().to_string())
+            .map(Network::arg)
             .unwrap_or_default(),
         chain_id: rec.params.chain_id,
         amount: UsdcAmount(u128::from(rec.params.amount_units)).display(),
@@ -2381,6 +2381,8 @@ mod tests {
         assert_eq!(now.op_id, s.op_id);
         assert!(now.confirmation.is_some());
         let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["network"], "sepolia", "the value --network takes");
+        assert_eq!(j["chain_id"], 11_155_111);
         assert_eq!(j["deposit"]["tx_hash"], format!("{h:#x}"));
         assert_eq!(j["anchor"]["writer"], "owner");
         assert_eq!(j["tx"]["type"], 2);
@@ -3159,7 +3161,9 @@ mod tests {
         let op = w.left_signed_operation_from(from, 7);
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let p = w.params(RunMode::Abandon(op.clone()));
-        assert!(abandon(&p, &op, &ui).await.unwrap().abandoned);
+        let s = abandon(&p, &op, &ui).await.unwrap();
+        assert!(s.abandoned);
+        assert_eq!(serde_json::to_value(&s).unwrap()["network"], "sepolia");
         assert!(
             ui.warnings().iter().any(|w| w.contains("--resume")),
             "{:?}",

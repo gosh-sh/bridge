@@ -544,7 +544,7 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
     DepositSuccess {
         op_id: None,
         dry_run: true,
-        network: net.name().into(),
+        network: net.arg(),
         chain_id: net.chain_id(),
         amount: p.amount.expect("validated for a fresh run").display(),
         to: to.extended(),

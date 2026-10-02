@@ -190,10 +190,14 @@ fn deposit_summary(s: &crate::deposit::DepositSuccess) -> String {
     } else {
         "deposit complete"
     };
+    // The summary carries the value `--network` takes; people read the
+    // network's name.
+    let network = crate::deposit::args::Network::from_chain_id(s.chain_id)
+        .map_or_else(|| s.network.clone(), |n| n.name().to_string());
     let mut out = format!(
-        "\n{head}:\n\x20 network:      {} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
+        "\n{head}:\n\x20 network:      {network} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
          {}\n",
-        s.network, s.chain_id, s.amount, s.to,
+        s.chain_id, s.amount, s.to,
     );
     if s.dry_run {
         out.push_str(&dry_run_lines(s));
@@ -472,6 +476,7 @@ mod tests {
     fn the_deposit_summary_names_who_anchored() {
         let mut d = sample();
         let text = deposit_summary(&d);
+        assert!(text.contains("  network:      Sepolia (11155111)\n"), "{text}");
         assert!(text.contains("  anchored by:  bridge owner\n"), "{text}");
         assert!(text.contains("deposit complete:"), "{text}");
         assert!(text.contains("tx 0xt depositId 7"), "{text}");
@@ -517,6 +522,8 @@ mod tests {
             let c = check(&p, &world.deps(), &store, None).await.unwrap();
             let s = dry_run_summary(&p, &c);
             let text = deposit_summary(&s);
+            assert_eq!(serde_json::to_value(&s).unwrap()["network"], "sepolia");
+            assert!(text.contains("  network:      Sepolia (11155111)\n"), "{text}");
             let tx = s.tx.as_ref().unwrap();
             for k in ["approve_calldata", "deposit_calldata"] {
                 let calldata = tx[k].as_str().unwrap();

@@ -42,7 +42,7 @@ pub async fn run(
         return Err(refuse(
             format!(
                 "--rpc-url serves chain id {id}, but --network {} is chain id {}",
-                net.name().to_lowercase(),
+                net.arg(),
                 net.chain_id()
             ),
             None,

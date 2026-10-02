@@ -182,7 +182,7 @@ pub struct DepositSuccess {
     pub op_id: Option<String>,
     /// Nothing was sent.
     pub dry_run: bool,
-    /// Network name, e.g. `sepolia`.
+    /// The network as `--network` takes it, e.g. `sepolia`.
     pub network: String,
     /// EVM chain id of `network`.
     pub chain_id: u64,

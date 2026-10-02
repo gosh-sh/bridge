@@ -29,10 +29,20 @@ impl Network {
         }
     }
 
+    /// The name people read, e.g. `Sepolia`.
     pub fn name(self) -> &'static str {
         match self {
             Network::Sepolia => "Sepolia",
         }
+    }
+
+    /// The value `--network` takes for this network, e.g. `sepolia`: what
+    /// the summary's `network` carries and what messages tell you to type.
+    pub fn arg(self) -> String {
+        clap::ValueEnum::to_possible_value(&self)
+            .expect("every network is a --network value")
+            .get_name()
+            .to_owned()
     }
 
     /// The CAIP-2 id WalletConnect namespaces use.
@@ -558,8 +568,21 @@ mod tests {
             );
         }
         assert_eq!(Network::Sepolia.chain_id(), 11_155_111);
+        assert_eq!(Network::Sepolia.arg(), "sepolia");
+        assert_eq!(Network::Sepolia.name(), "Sepolia");
         assert_eq!(Network::Sepolia.caip2(), "eip155:11155111");
         assert_eq!(Network::Sepolia.eip3085()["chainId"], "0xaa36a7");
+    }
+
+    #[test]
+    fn the_network_value_is_the_same_on_the_command_line_and_in_json() {
+        for n in Network::ALL {
+            assert_eq!(serde_json::to_value(n).unwrap(), n.arg());
+            assert_eq!(
+                <Network as clap::ValueEnum>::from_str(&n.arg(), false),
+                Ok(*n)
+            );
+        }
     }
 
     #[test]

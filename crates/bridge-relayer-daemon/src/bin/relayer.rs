@@ -808,11 +808,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let scan = LogScanConfig {
                 deploy_block: bridge_deploy_block.unwrap_or(0),
-                chunk_blocks: if get_logs_chunk_blocks == 0 {
-                    GET_LOGS_CHUNK_BLOCKS
-                } else {
-                    get_logs_chunk_blocks
-                },
+                chunk_blocks: get_logs_chunk_blocks,
                 pause: Duration::from_millis(get_logs_pause_ms),
             };
             let backoff = BackoffConfig {

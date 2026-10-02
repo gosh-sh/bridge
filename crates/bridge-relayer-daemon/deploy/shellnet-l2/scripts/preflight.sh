@@ -127,22 +127,6 @@ for value in "$EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID" \
   [[ "$value" =~ ^[0-9]+$ ]] || die "bad withdraw destination/token ID"
 done
 
-# The deploy block is the first block with runtime code at the address. The
-# compare needs an RPC that serves historical state; one that does not is
-# skipped with a warning, so an archive-less RPC still starts the relayer.
-head_block=$(cast block-number --rpc-url "$RPC_URL")
-(( BRIDGE_DEPLOY_BLOCK <= head_block )) || die "BRIDGE_DEPLOY_BLOCK is above the chain head ($head_block)"
-if code_at=$(cast code "$BRIDGE_ADDRESS" --block "$BRIDGE_DEPLOY_BLOCK" --rpc-url "$RPC_URL" 2>/dev/null) &&
-  code_before=$(cast code "$BRIDGE_ADDRESS" --block "$((BRIDGE_DEPLOY_BLOCK - 1))" --rpc-url "$RPC_URL" 2>/dev/null); then
-  [[ "$code_at" != 0x && ${#code_at} -gt 100 ]] ||
-    die "no bridge code at block $BRIDGE_DEPLOY_BLOCK: BRIDGE_DEPLOY_BLOCK is not the deploy block"
-  [[ "$code_before" == 0x ]] ||
-    die "bridge code already present at block $((BRIDGE_DEPLOY_BLOCK - 1)): BRIDGE_DEPLOY_BLOCK is after the deploy block"
-  ok "BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK is the bridge's deploy block"
-else
-  warn "RPC does not serve historical code; BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK not verified against the chain"
-fi
-
 if [[ "$runtime_layout" == compose ]]; then
   [[ -s "$BRIDGE_REPO_DIR/SOURCE_COMMIT" ]] || die "container source marker is missing"
   [[ -s "$BRIDGE_REPO_DIR/IMAGE-SHA256SUMS" ]] || die "container image manifest is missing"
@@ -216,6 +200,22 @@ chain_id=$(cast chain-id --rpc-url "$RPC_URL")
 [[ "$chain_id" == "$EXPECTED_EVM_CHAIN_ID" ]] ||
   die "RPC chain id $chain_id != $EXPECTED_EVM_CHAIN_ID"
 require_code "$BRIDGE_ADDRESS" "bridge"
+
+# The deploy block is the first block with runtime code at the address. The
+# compare needs an RPC that serves historical state; one that does not is
+# skipped with a warning, so an archive-less RPC still starts the relayer.
+head_block=$(cast block-number --rpc-url "$RPC_URL")
+(( BRIDGE_DEPLOY_BLOCK <= head_block )) || die "BRIDGE_DEPLOY_BLOCK is above the chain head ($head_block)"
+if code_at=$(cast code "$BRIDGE_ADDRESS" --block "$BRIDGE_DEPLOY_BLOCK" --rpc-url "$RPC_URL" 2>/dev/null) &&
+  code_before=$(cast code "$BRIDGE_ADDRESS" --block "$((BRIDGE_DEPLOY_BLOCK - 1))" --rpc-url "$RPC_URL" 2>/dev/null); then
+  [[ "$code_at" != 0x && ${#code_at} -gt 100 ]] ||
+    die "no bridge code at block $BRIDGE_DEPLOY_BLOCK: BRIDGE_DEPLOY_BLOCK is not the deploy block"
+  [[ "$code_before" == 0x ]] ||
+    die "bridge code already present at block $((BRIDGE_DEPLOY_BLOCK - 1)): BRIDGE_DEPLOY_BLOCK is after the deploy block"
+  ok "BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK is the bridge's deploy block"
+else
+  warn "RPC does not serve historical code; BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK not verified against the chain"
+fi
 
 owner=$(call_word "$BRIDGE_ADDRESS" 'owner()(address)')
 [[ "${owner,,}" == "${RELAYER_ADDRESS,,}" ]] || die "bridge owner $owner != expected EOA $RELAYER_ADDRESS"

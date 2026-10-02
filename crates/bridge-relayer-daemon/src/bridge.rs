@@ -64,8 +64,10 @@ use crate::{
     withdrawal::WithdrawalPublicInputs,
 };
 
-/// Environment variable read by [`resolve_bridge_deploy_block`]. Same
-/// name as the deposit relayer so one operator env covers both daemons.
+/// Environment variable behind `--bridge-deploy-block` on both entry points
+/// (`relayer daemon-live`, `ackinacki-bridge withdraw`); same name as the
+/// deposit relayer so one operator env covers both daemons. Named in the
+/// messages that ask the operator to check it.
 pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
 
 /// Inclusive `eth_getLogs` span per request. Alchemy free-tier is 10;
@@ -77,21 +79,12 @@ pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
 /// `daemon-live` startup, and in the CLI before the burn and after coverage.
 pub const GET_LOGS_CHUNK_BLOCKS: u64 = 2_000;
 
-/// Environment variable that overrides [`GET_LOGS_CHUNK_BLOCKS`]: the
-/// inclusive block span of one `eth_getLogs` call. Set it to the RPC's cap
-/// (Alchemy free tier: 10). Unset / 0 → the default; unparseable → the
-/// default, with a warning.
-pub const GET_LOGS_CHUNK_BLOCKS_ENV: &str = "BRIDGE_GET_LOGS_CHUNK_BLOCKS";
-
-/// Environment variable: milliseconds to wait between two `eth_getLogs`
-/// calls of that scan (default 0). Rate-limited RPCs (Alchemy free tier:
-/// ~4 `eth_getLogs` per second) need a few hundred.
-pub const GET_LOGS_PAUSE_MS_ENV: &str = "BRIDGE_GET_LOGS_PAUSE_MS";
-
 /// Retries of one `eth_getLogs` call of that scan on a retryable RPC error
 /// (429, 5xx, transport), with a doubling delay starting at half a second.
-/// A span-cap rejection (`-32600` / `-32602`) is not retried: the same call
-/// fails the same way, so the process stops with the RPC's message at once.
+/// A span-cap rejection (`-32600` / `-32602`) is not retried here: on any
+/// chunk but the newest it fails the same way again; on the newest chunk,
+/// whose end is the pinned head a lagging backend may not have yet, it
+/// re-pins and re-reads the snapshot instead.
 const GET_LOGS_MAX_ATTEMPTS: u32 = 8;
 const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 500;
 const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
@@ -99,28 +92,32 @@ const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
 const GET_LOGS_PROGRESS_EVERY: usize = 200;
 /// [`EthBridgeClient::read_full_state`] pins every read to one block; a
 /// lagging backend behind a load-balanced RPC may answer "header not found"
-/// for it, so the whole snapshot is retried this many times.
+/// for it, omit the newest log, or reject the newest span, so the whole
+/// snapshot is retried this many times.
 const READ_FULL_STATE_ATTEMPTS: u32 = 3;
 const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 2_000;
 
 /// How the `LayerAnchorAppended` scan of [`EthBridgeClient::read_full_state`]
-/// walks the chain. [`EthBridgeClient::new`] takes it from the environment
-/// ([`LogScanConfig::from_env`]); `daemon-live` builds it from its clap
-/// arguments.
+/// walks the chain. Both entry points build it from their clap arguments
+/// (`--bridge-deploy-block`, `--get-logs-chunk-blocks`,
+/// `--get-logs-pause-ms`, each with an `env =` of the same name); a client
+/// from [`EthBridgeClient::new`] carries [`LogScanConfig::default`] and is
+/// not meant to scan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogScanConfig {
     /// Where the backward scan stops when a window is not covered yet: the
     /// block the bridge was deployed in. `0` means genesis, which is slow
     /// on an old bridge and warned about when it runs.
     pub deploy_block: u64,
-    /// Inclusive block span of one `eth_getLogs` call (at least 1).
+    /// Inclusive block span of one `eth_getLogs` call. `0` means
+    /// [`GET_LOGS_CHUNK_BLOCKS`].
     pub chunk_blocks: u64,
     /// Pause between two `eth_getLogs` calls.
     pub pause: Duration,
 }
 
 impl Default for LogScanConfig {
-    /// Genesis, the library span, no pause: what an unset environment gives.
+    /// Genesis, the library span, no pause.
     fn default() -> Self {
         Self {
             deploy_block: 0,
@@ -128,60 +125,6 @@ impl Default for LogScanConfig {
             pause: Duration::ZERO,
         }
     }
-}
-
-impl LogScanConfig {
-    /// [`BRIDGE_DEPLOY_BLOCK_ENV`], [`GET_LOGS_CHUNK_BLOCKS_ENV`] and
-    /// [`GET_LOGS_PAUSE_MS_ENV`], each falling back to its default.
-    pub fn from_env() -> Self {
-        Self {
-            deploy_block: resolve_bridge_deploy_block(),
-            chunk_blocks: resolve_get_logs_chunk_blocks(),
-            pause: resolve_get_logs_pause(),
-        }
-    }
-}
-
-/// A `u64` from an environment variable. Unset or empty → `None`;
-/// unparseable → `None` with a warning naming the variable, so a typo such
-/// as `0xA83B5C` or a trailing comment does not silently become the default.
-fn env_u64(name: &str) -> Option<u64> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<u64>() {
-        Ok(n) => Some(n),
-        Err(e) => {
-            tracing::warn!(
-                var = name,
-                value = trimmed,
-                error = %e,
-                "ignoring unparseable environment value; using the default"
-            );
-            None
-        },
-    }
-}
-
-/// The pause between two `eth_getLogs` calls, from [`GET_LOGS_PAUSE_MS_ENV`].
-pub fn resolve_get_logs_pause() -> Duration {
-    Duration::from_millis(env_u64(GET_LOGS_PAUSE_MS_ENV).unwrap_or(0))
-}
-
-/// The `eth_getLogs` span to use, from [`GET_LOGS_CHUNK_BLOCKS_ENV`] or the
-/// default.
-pub fn resolve_get_logs_chunk_blocks() -> u64 {
-    env_u64(GET_LOGS_CHUNK_BLOCKS_ENV)
-        .filter(|&n| n > 0)
-        .unwrap_or(GET_LOGS_CHUNK_BLOCKS)
-}
-
-/// Lower bound for `LayerAnchorAppended` scans. Unset → 0 (genesis);
-/// unparseable → 0 with a warning. Avoid genesis on a long-lived chain.
-pub fn resolve_bridge_deploy_block() -> u64 {
-    env_u64(BRIDGE_DEPLOY_BLOCK_ENV).unwrap_or(0)
 }
 
 /// Whether a failed `eth_getLogs` of the scan is worth retrying. A JSON-RPC
@@ -214,6 +157,40 @@ pub fn get_logs_chunks(from_block: u64, to_block: u64, chunk: u64) -> Vec<(u64, 
     out
 }
 
+/// Inclusive `(from, to)` spans covering `from_block..=to_block`, newest
+/// first, produced on demand: the backward scan normally stops after a few
+/// of them, and a span list from genesis on a 10-block cap would be over a
+/// million tuples.
+pub fn chunks_newest_first(
+    from_block: u64,
+    to_block: u64,
+    chunk: u64,
+) -> impl Iterator<Item = (u64, u64)> {
+    let mut end = if chunk == 0 || from_block > to_block {
+        None
+    } else {
+        Some(to_block)
+    };
+    std::iter::from_fn(move || {
+        let e = end?;
+        let start = e.saturating_sub(chunk - 1).max(from_block);
+        end = if start > from_block {
+            Some(start - 1)
+        } else {
+            None
+        };
+        Some((start, e))
+    })
+}
+
+/// How many spans [`chunks_newest_first`] yields.
+pub fn chunk_count(from_block: u64, to_block: u64, chunk: u64) -> usize {
+    if chunk == 0 || from_block > to_block {
+        return 0;
+    }
+    ((to_block - from_block) / chunk + 1) as usize
+}
+
 /// Whether every window with entries has at least as many logs as entries:
 /// the backward scan's stop condition.
 pub fn windows_covered(found: &[usize], needed: &[usize]) -> bool {
@@ -240,7 +217,10 @@ pub struct AnchorEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum PaintError {
     /// Fewer logs than window entries: the scan did not reach far enough
-    /// back (the deploy block is wrong) or a backend dropped logs. Final.
+    /// back (the deploy block is wrong), or a backend one block behind
+    /// omitted the newest append on a window that is not full yet. A
+    /// re-read settles which; after the attempts the message names the
+    /// deploy block.
     #[error(
         "layer {layer} has data_len={data_len} but only {found} LayerAnchorAppended logs in the \
          scanned range: is {env} the block the bridge was deployed in?",
@@ -285,10 +265,7 @@ pub enum PaintError {
 impl PaintError {
     /// `true` when a fresh snapshot can succeed where this one failed.
     pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            PaintError::SlotMismatch { .. } | PaintError::LastHeight { .. }
-        )
+        !matches!(self, PaintError::Shape { .. })
     }
 }
 
@@ -966,17 +943,26 @@ where
     N: Network,
 {
     /// Scan settings from the environment; see [`LogScanConfig::from_env`].
+    /// A client for calls that never rebuild window heights. It carries
+    /// [`LogScanConfig::default`], so a `read_full_state` on it would walk
+    /// back to genesis (warned about); clients that scan come from
+    /// [`Self::with_scan_config`].
     pub fn new(address: Address, provider: P) -> Self {
-        Self::with_scan_config(address, provider, LogScanConfig::from_env())
+        Self::with_scan_config(address, provider, LogScanConfig::default())
     }
 
+    /// `scan.chunk_blocks == 0` means [`GET_LOGS_CHUNK_BLOCKS`].
     pub fn with_scan_config(address: Address, provider: P, scan: LogScanConfig) -> Self {
         let contract = AckiNackiBridge::new(address, provider);
         Self {
             contract,
             address,
             scan: LogScanConfig {
-                chunk_blocks: scan.chunk_blocks.max(1),
+                chunk_blocks: if scan.chunk_blocks == 0 {
+                    GET_LOGS_CHUNK_BLOCKS
+                } else {
+                    scan.chunk_blocks
+                },
                 ..scan
             },
         }
@@ -1423,21 +1409,21 @@ where
             );
         }
         let from = self.scan.deploy_block.min(to);
-        let chunks = get_logs_chunks(from, to, self.scan.chunk_blocks);
+        let total = chunk_count(from, to, self.scan.chunk_blocks);
         let started = std::time::Instant::now();
         tracing::info!(
             from,
             to,
             chunk_blocks = self.scan.chunk_blocks,
             pause_ms = self.scan.pause.as_millis() as u64,
-            chunks = chunks.len(),
+            chunks = total,
             "scanning LayerAnchorAppended backwards from the head"
         );
         let mut newest_chunk_first: Vec<Vec<AnchorEvent>> = Vec::new();
         let mut found = vec![0usize; MAX_LAYER_HASHES];
         let mut read = 0usize;
         let mut covered = false;
-        for &(start, end) in chunks.iter().rev() {
+        for (start, end) in chunks_newest_first(from, to, self.scan.chunk_blocks) {
             let filter = Filter::new()
                 .address(self.address)
                 .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
@@ -1464,10 +1450,18 @@ where
                         backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
                     },
                     Err(e) => {
-                        return Err(SnapshotError::Final(RelayerError::other(format!(
+                        let err = RelayerError::other(format!(
                             "LayerAnchorAppended get_logs [{start},{end}] after {attempt} \
                              attempt(s): {e}"
-                        ))));
+                        ));
+                        // The newest chunk ends at the pinned head, which a
+                        // lagging backend may not have yet: re-pin and
+                        // re-read. Any other chunk fails the same way again.
+                        return Err(if end == to {
+                            SnapshotError::Transient(err)
+                        } else {
+                            SnapshotError::Final(err)
+                        });
                     },
                 }
             };
@@ -1501,7 +1495,7 @@ where
             if read.is_multiple_of(GET_LOGS_PROGRESS_EVERY) {
                 tracing::info!(
                     read,
-                    chunks = chunks.len(),
+                    chunks = total,
                     down_to_block = start,
                     events = found.iter().sum::<usize>(),
                     elapsed_s = started.elapsed().as_secs(),
@@ -1512,20 +1506,21 @@ where
         let events = chronological(newest_chunk_first);
         tracing::info!(
             read,
-            chunks = chunks.len(),
+            chunks = total,
             covered,
             events = events.len(),
             elapsed_s = started.elapsed().as_secs(),
             "LayerAnchorAppended scan done"
         );
         paint_heights_from_events(windows, &events).map_err(|e| {
-            if e.is_transient() {
-                SnapshotError::Transient(e.into())
+            let transient = e.is_transient();
+            let err = RelayerError::other(format!(
+                "{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)"
+            ));
+            if transient {
+                SnapshotError::Transient(err)
             } else {
-                SnapshotError::Final(RelayerError::other(format!(
-                    "{e} (scanned blocks {from}..={to}; {read} of {} chunks read)",
-                    chunks.len()
-                )))
+                SnapshotError::Final(err)
             }
         })
     }
@@ -2182,6 +2177,27 @@ mod tests {
         assert_eq!(get_logs_chunks(0, 0, 2_000), vec![(0, 0)]);
     }
 
+    #[test]
+    fn chunks_newest_first_cover_the_range_backwards() {
+        let spans: Vec<(u64, u64)> = chunks_newest_first(100, 350, 100).collect();
+        assert_eq!(spans, vec![(251, 350), (151, 250), (100, 150)]);
+        assert_eq!(chunk_count(100, 350, 100), 3);
+        assert_eq!(chunks_newest_first(5, 5, 10).collect::<Vec<_>>(), vec![(
+            5, 5
+        )]);
+        assert_eq!(chunks_newest_first(10, 9, 10).count(), 0);
+        assert_eq!(chunk_count(10, 9, 10), 0);
+        assert_eq!(chunks_newest_first(0, 0, 2_000).collect::<Vec<_>>(), vec![
+            (0, 0)
+        ]);
+        assert_eq!(chunks_newest_first(0, 25, 10).collect::<Vec<_>>(), vec![
+            (16, 25),
+            (6, 15),
+            (0, 5)
+        ]);
+        assert_eq!(chunk_count(0, 25, 10), 3);
+    }
+
     fn ev(layer: u8, height: u64, tag: u8) -> AnchorEvent {
         AnchorEvent {
             layer,
@@ -2222,7 +2238,7 @@ mod tests {
             }),
             "{err}"
         );
-        assert!(!err.is_transient());
+        assert!(err.is_transient());
         assert!(err.to_string().contains(BRIDGE_DEPLOY_BLOCK_ENV), "{err}");
     }
 
@@ -2317,18 +2333,5 @@ mod tests {
         assert!(get_logs_error_is_retryable(&rate));
         let transport = alloy::transports::TransportErrorKind::custom_str("connection reset");
         assert!(get_logs_error_is_retryable(&transport));
-    }
-
-    #[test]
-    fn env_u64_ignores_garbage_and_empty() {
-        const VAR: &str = "BRIDGE_RELAYER_TEST_ENV_U64";
-        std::env::set_var(VAR, "0xA83B5C");
-        assert_eq!(env_u64(VAR), None);
-        std::env::set_var(VAR, " 11807209 ");
-        assert_eq!(env_u64(VAR), Some(11_807_209));
-        std::env::set_var(VAR, "");
-        assert_eq!(env_u64(VAR), None);
-        std::env::remove_var(VAR);
-        assert_eq!(env_u64(VAR), None);
     }
 }

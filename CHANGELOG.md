@@ -24,6 +24,14 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
+  runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
+  and not above the head) to the kit's runtime env file before upgrading the
+  image: without it every start dies with "BRIDGE_DEPLOY_BLOCK is missing"
+  and the container restarts in a loop, sending nothing. When the RPC serves
+  historical code, preflight also checks that it is the first block with
+  bridge code. `runtime.env.example` and the kit README document it together
+  with the two optional scan knobs.
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
   `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,
@@ -242,10 +250,12 @@ assigns it when the release is tagged.
   (`BRIDGE_DEPLOY_BLOCK`), `--get-logs-chunk-blocks`
   (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`; 0 = the default) and `--get-logs-pause-ms`
   (`BRIDGE_GET_LOGS_PAUSE_MS`), so they are in `--help` and a malformed value
-  fails at argument parsing. The other `relayer` subcommands read the same
-  variables leniently (unparseable → default with a warning) and never scan.
-  `scripts/deploy_bridge_bundle.sh` writes `BRIDGE_DEPLOY_BLOCK` next to the
-  `BRIDGE_ADDRESS` it deploys.
+  fails at argument parsing. The library no longer reads the environment: a
+  client built with `EthBridgeClient::new` carries the defaults and is not
+  meant to scan. `scripts/deploy_bridge_bundle.sh` writes
+  `BRIDGE_DEPLOY_BLOCK` next to the `BRIDGE_ADDRESS` it deploys (a commented
+  placeholder when the receipt cannot be read; never fatal after the
+  broadcast).
 - **`deposit-relayer daemon` exports Prometheus metrics.** `--metrics-addr`
   (`DEPOSIT_RELAYER_METRICS_ADDR`, e.g. `127.0.0.1:9467`) serves the text
   format at `GET /metrics`, the same facade and histogram buckets as
@@ -491,13 +501,16 @@ assigns it when the release is tagged.
   entries are covered or at `BRIDGE_DEPLOY_BLOCK`, so once the windows are
   full the cost is bounded by the window span, not by the bridge's age; a
   call failing with 429 / 5xx / a transport error is retried with backoff, a
-  span-cap rejection is not. A scan with no from/to block used to default
+  `-32600` / `-32602` response (how Alchemy rejects a span over its cap) is
+  not. A scan with no from/to block used to default
   both ends to `latest` and fail resurrect on any contract that already had
   history (ETH-31). The snapshot is pinned to one block and every kept log
   is checked against its window slot (hash and height) and the window's
-  `lastHeight`: a mismatch (an append landing mid-read, a partial log set)
-  re-reads the snapshot, fewer logs than entries fails naming
-  `BRIDGE_DEPLOY_BLOCK`. The scan logs its range, progress and total; an
+  `lastHeight`: a mismatch (an append landing mid-read, a partial log set),
+  fewer logs than entries (a backend one block behind omitting the newest
+  append) or a rejected newest span re-read the snapshot a few times, after
+  which the error names `BRIDGE_DEPLOY_BLOCK`. The scan logs its range,
+  progress and total; an
   unset deploy block is a warning. The CLI's coverage poll reads one scalar
   per round, reads the full snapshot once coverage is observed, and polls on
   if that snapshot still predates the target.
@@ -509,10 +522,6 @@ assigns it when the release is tagged.
   is no longer advanced (it stopped at seq 20054016), so a withdraw against
   it burned and then timed out at stage 4b. Both deploys bind the same AN
   bridge account; nothing else in the profile changes.
-- **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK`** (a block
-  number above 0 and not above the head) and, when the RPC serves historical
-  code, checks that it is the first block with bridge code.
-  `runtime.env.example` and the kit README document the scan variables.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn

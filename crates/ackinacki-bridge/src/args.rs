@@ -18,7 +18,7 @@
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use alloy_primitives::Address;
-use bridge_relayer_daemon::{LogScanConfig, GET_LOGS_CHUNK_BLOCKS};
+use bridge_relayer_daemon::LogScanConfig;
 use clap::{Parser, Subcommand};
 use rust_decimal::Decimal;
 
@@ -633,14 +633,12 @@ pub struct SubmitPlumbing {
 impl WithdrawArgs {
     /// The `LayerAnchorAppended` scan settings for
     /// `EthBridgeClient::with_scan_config`: the three flags (or their
-    /// environment) over the library defaults.
+    /// environment); unset means the library default, and so does a span
+    /// of 0.
     pub fn log_scan_config(&self) -> LogScanConfig {
         LogScanConfig {
             deploy_block: self.bridge_deploy_block.unwrap_or(0),
-            chunk_blocks: match self.get_logs_chunk_blocks {
-                Some(n) if n > 0 => n,
-                _ => GET_LOGS_CHUNK_BLOCKS,
-            },
+            chunk_blocks: self.get_logs_chunk_blocks.unwrap_or(0),
             pause: Duration::from_millis(self.get_logs_pause_ms.unwrap_or(0)),
         }
     }

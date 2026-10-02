@@ -388,6 +388,31 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **Phase 1 deploy-and-fund driver for a self-rooted multisig on an MT
+  Acki Nacki devnet —
+  `crates/bridge-prover-libraries/python/test_phase1_deploy_msig_only.py`.**
+  Short standalone script that drives: `setup → precheck USDCBridge liveness
+  → tvm-cli genaddr msig → cross-DApp giver.sendCurrencyWithFlag fund →
+  deployx msig → verify active + ECC[2] balance`. Honours
+  `MODE=local|shellnet`. Depends on the matching acki-nacki changes
+  (GiverV3 cross-dapp send methods + node-side cross-dapp funded-Uninit
+  fix) — on an unpatched node every cross-DApp fund is dropped and the
+  driver fails after the fund step with "multisig account never
+  materialized". With the paired node fix it completes end-to-end in
+  ~11s on a fresh local MT devnet.
+- **GiverV3 ABI/helpers kept in lockstep with the acki-nacki tree.**
+  `crates/bridge-prover-libraries/python/contracts/GiverV3.abi.json`
+  overlaid with the regenerated ABI (six classic send methods now
+  carry a trailing `uint256 dapp_id`), and
+  `crates/bridge-prover-libraries/python/helper/common.py` grew the same
+  `GIVER_SEND_METHODS` auto-inject that the acki-nacki tree uses so
+  existing bridge python callers that go through the shared
+  `call_contract()` helper keep working without a per-site rewrite.
+  `crates/bridge-prover-libraries/python/helper/msig.py::deploy_multisig()`
+  threads the recipient's DApp into every giver call so a self-rooted
+  multisig can be funded cross-DApp; a sibling
+  `deploy_and_fund_multisig_only()` sticks to Phase 1 scope (no
+  `mint_usdc` call afterwards, no USDC overlay step).
 - **Offline keygen bins for the multi-thread Circuit-4 pair —
   `keygen_bridge_final` and `keygen_bridge_multi_hop` under
   `bridge-prover-lib/src/bin/`.** Both accept `--params-dir <PATH>` (required)

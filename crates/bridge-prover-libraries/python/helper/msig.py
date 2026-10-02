@@ -51,6 +51,7 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
     raw_msig_address = common.generate_address(msig_tvc_copy, msig_key_path)
     msig_account_id = raw_msig_address.split(":", 1)[1] if ":" in raw_msig_address else raw_msig_address
     msig_dapp_id = msig_account_id
+    msig_dapp_id_int = int(msig_dapp_id, 16)                         # for GiverV3 `dapp_id` ABI arg
     msig_address        = f"{msig_dapp_id}::{msig_account_id}"      # CLI / query form
     msig_address_legacy = f"0:{msig_account_id}"                     # ABI payload form
     pubkey = common.read_public_key(msig_key_path)
@@ -70,7 +71,8 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
                 "sendCurrencyWithFlag",
                 {"dest": msig_address_legacy, "value": str(value),
                  "ecc": {str(ECC_ID_FOR_BURN): str(ecc2)},
-                 "flag": flag, "bounce": False},
+                 "flag": flag, "bounce": False,
+                 "dapp_id": msig_dapp_id_int},
                 verbose_faucet,
             )
             time.sleep(3)
@@ -84,7 +86,8 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
             "sendCurrencyWithFlag",
             {"dest": msig_address_legacy, "value": str(fund_native),
              "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
-             "flag": "17", "bounce": False},
+             "flag": "17", "bounce": False,
+             "dapp_id": msig_dapp_id_int},
             verbose_faucet,
         )
     time.sleep(8)
@@ -124,13 +127,123 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
             GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
             "sendCurrencyWithFlag",
             {"dest": msig_address_legacy, "value": "2000000000",
-             "ecc": {str(ECC_ID_FOR_BURN): str(total_ecc)}, "flag": "1"},
+             "ecc": {str(ECC_ID_FOR_BURN): str(total_ecc)}, "flag": "1",
+             "dapp_id": msig_dapp_id_int},
             verbose_faucet,
         )
         time.sleep(5)
 
     mint_usdc(tracer, gql, msig_address_legacy, WITHDRAWAL_AMOUNT,
               usdc_bridge_key_path=usdc_bridge_key_path)
+    return msig_address, msig_abi_copy
+
+
+def deploy_and_fund_multisig_only(tracer, *, work_dir: str, msig_key_path: str,
+                                  is_shellnet: bool, verbose_faucet: bool = False):
+    """Phase 1 isolation: genaddr → fund (cross-DApp giver) → deployx → verify.
+
+    No USDCBridge mint. Returns `(msig_address, msig_abi_copy)`.
+    Mirrors `deploy_multisig` up to and including the ECC[2] top-up, then stops.
+    The caller is responsible for anything else.
+    """
+    mode = "shellnet" if is_shellnet else "local"
+    tracer.log_phase(f"Deploying multisig — Phase 1 (fund-only, no mint) [{mode}]")
+
+    deploy_dir = os.path.join(work_dir, "msig_deploy_phase1")
+    os.makedirs(deploy_dir, exist_ok=True)
+    msig_tvc_copy = os.path.join(deploy_dir, "UpdateCustodianMultisigWallet")
+    shutil.copy(f"{MSIG_TVC_STEM}.tvc", f"{msig_tvc_copy}.tvc")
+    shutil.copy(MSIG_ABI, f"{msig_tvc_copy}.abi.json")
+    msig_abi_copy = f"{msig_tvc_copy}.abi.json"
+
+    if os.path.exists(msig_key_path):
+        os.remove(msig_key_path)
+    raw_msig_address = common.generate_address(msig_tvc_copy, msig_key_path)
+    msig_account_id = raw_msig_address.split(":", 1)[1] if ":" in raw_msig_address else raw_msig_address
+    msig_dapp_id = msig_account_id
+    msig_dapp_id_int = int(msig_dapp_id, 16)
+    msig_address        = f"{msig_dapp_id}::{msig_account_id}"
+    msig_address_legacy = f"0:{msig_account_id}"
+    pubkey = common.read_public_key(msig_key_path)
+    tracer.log(f"  multisig address: {msig_address}")
+    tracer.log(f"  giver cross-DApp target: dapp_id=0x{msig_dapp_id}")
+
+    total_ecc = WITHDRAWAL_AMOUNT * 4
+    if is_shellnet:
+        value = 10_000_000_000_000
+        ecc2  = 100_000_000_000_000
+        for shot, flag in enumerate(("17", "1"), start=1):
+            tracer.log(f"  faucet shot {shot}/2 (flag={flag}): value={value}, ecc[2]={ecc2}")
+            common.call_contract(
+                GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
+                "sendCurrencyWithFlag",
+                {"dest": msig_address_legacy, "value": str(value),
+                 "ecc": {str(ECC_ID_FOR_BURN): str(ecc2)},
+                 "flag": flag, "bounce": False,
+                 "dapp_id": msig_dapp_id_int},
+                verbose_faucet,
+            )
+            time.sleep(3)
+    else:
+        fund_ecc    = max(total_ecc, 100_000_000_000_000)
+        fund_native = 200_000_000_000_000
+        tracer.log(f"  funding via giver single-shot (flag=17), "
+                   f"native={fund_native}, ecc[{ECC_ID_FOR_BURN}]={fund_ecc}")
+        common.call_contract(
+            GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
+            "sendCurrencyWithFlag",
+            {"dest": msig_address_legacy, "value": str(fund_native),
+             "ecc": {str(ECC_ID_FOR_BURN): str(fund_ecc)},
+             "flag": "17", "bounce": False,
+             "dapp_id": msig_dapp_id_int},
+            verbose_faucet,
+        )
+    time.sleep(8)
+    for _ in range(60):
+        account = common.get_account(msig_address)
+        if 'acc_type' in account:
+            tracer.log(f"  account appeared: {account['acc_type']} "
+                       f"ecc={account.get('ecc_balance')}")
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("multisig account never materialized after cross-DApp giver funding")
+
+    constructor_params = {
+        "owners_pubkey":   [f"0x{pubkey}"],
+        "owners_address":  [],
+        "reqConfirms":     1,
+        "reqConfirmsData": 1,
+        "value":           100_000_000,
+    }
+    common.execute_cli_cmd(
+        f"deployx --abi {msig_abi_copy} --keys {msig_key_path} "
+        f"--dst-dapp-id {msig_dapp_id} {msig_tvc_copy}.tvc "
+        f"{common.format_params(constructor_params)}",
+        True,
+    )
+    common.wait_account_active(msig_address)
+    tracer.log("  multisig deployed and active")
+
+    account = common.get_account(msig_address)
+    ecc = account.get("ecc_balance", {}) or {}
+    have = int(ecc.get(str(ECC_ID_FOR_BURN), 0))
+    if have < total_ecc:
+        tracer.log(f"  topping up ECC[{ECC_ID_FOR_BURN}] (have={have}, need={total_ecc})")
+        common.call_contract(
+            GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH,
+            "sendCurrencyWithFlag",
+            {"dest": msig_address_legacy, "value": "2000000000",
+             "ecc": {str(ECC_ID_FOR_BURN): str(total_ecc)}, "flag": "1",
+             "dapp_id": msig_dapp_id_int},
+            verbose_faucet,
+        )
+        time.sleep(5)
+        account = common.get_account(msig_address)
+        ecc = account.get("ecc_balance", {}) or {}
+        have = int(ecc.get(str(ECC_ID_FOR_BURN), 0))
+
+    tracer.log(f"  final ECC[{ECC_ID_FOR_BURN}]={have}")
     return msig_address, msig_abi_copy
 
 

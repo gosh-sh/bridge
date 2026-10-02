@@ -22,7 +22,12 @@
 # 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307. For the deploy path
 # (`scripts/deploy_bridge_bundle.sh`) re-export the same value as `PRIVATE_KEY`
 # — e.g. `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh`.
-RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+# Must serve `eth_getLogs` back to the bridge's oldest held anchor
+# (`daemon-live` rebuilds the window heights from `LayerAnchorAppended` at
+# every start): Tenderly's public gateway serves full log history, while
+# publicnode keeps only the newest ~10 000 blocks and the read comes up
+# short on it after about a day and a half.
+RPC_URL=https://sepolia.gateway.tenderly.co
 RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------

@@ -287,9 +287,10 @@ cargo test -p attestation-bls-checker-circuit -- --ignored \
 the `an-contracts.yaml` checks, `scripts/check_verifier_sources.sh`, gitleaks or lychee.
 
 **It does not go green today.** `make aggregator-fmt` fails because
-`crates/bridge-evm-aggregator` is not formatted yet, and `make relayer-clippy` fails on a stray
-`clippy::useless_conversion` (`useless u8::from(ev.layer)`) that the `-D warnings` gate turns into
-an error. The prior wording of this paragraph blamed a pinned circuit revision that the workspace
+`crates/bridge-evm-aggregator` is not formatted yet, and `make relayer-clippy` fails on
+`dead_code` for the unused test helper `FakeProver::insert_block` in
+`crates/bridge-relayer-daemon/src/relayer.rs` (#56) that the `-D warnings` gate turns into an
+error. The prior wording of this paragraph blamed a pinned circuit revision that the workspace
 could not build against; that claim was accurate when the circuits lived in a private git repo,
 but it is no longer — since the circuits were vendored, `crates/bridge-prover-libraries` reaches
 its circuit deps by path (see [Cargo workspaces](#cargo-workspaces) above), and the build failures

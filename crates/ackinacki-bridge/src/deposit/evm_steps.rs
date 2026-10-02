@@ -263,9 +263,11 @@ async fn send_approve(
 /// a smaller allowance is set), then a re-read, because the wallet lets the
 /// user edit the limit. Each approve's wait, the re-read after the last one
 /// included, ends at `wait_limit` with exit 21. The re-read is made at the
-/// block the last approve is in: a node that does not have that block yet
-/// answers with an error, which is read again, rather than with the
-/// allowance before the approve.
+/// block the last approve is in when it is made: an approve with a hash is
+/// looked up by its receipt again, since a reorg may have moved it, and one
+/// from the QR code is read where its allowance was seen. A receipt the
+/// node does not show, or a block it does not have yet, is an error that
+/// is read again, never the allowance before the approve.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_allowance(
     evm: &dyn EvmRead,
@@ -303,13 +305,27 @@ pub async fn ensure_allowance(
         )
         .await?;
     }
-    let (tx, deadline, block) = send_approve(
+    let (tx, deadline, seen_in) = send_approve(
         evm, wallet, ui, usdc, bridge, from, need, op_id, wait_limit, poll,
     )
     .await?;
     // The wallet lets the user edit the spending limit, including down.
-    let after = read_by(ui, "reading the allowance", deadline, || {
-        read_allowance(evm, usdc, from, bridge, BlockTag::Number(block))
+    // `None` for the allowance: the approve's receipt says it reverted now.
+    let (block, after) = read_by(ui, "reading the allowance", deadline, || async {
+        let block = match tx {
+            Some(h) => {
+                let r = evm.receipt(h).await?.ok_or_else(|| {
+                    anyhow::anyhow!("the node shows no block holding approve {h} now")
+                })?;
+                if !r.status {
+                    return Ok((r.block_number, None));
+                }
+                r.block_number
+            },
+            None => seen_in,
+        };
+        let a = read_allowance(evm, usdc, from, bridge, BlockTag::Number(block)).await?;
+        Ok((block, Some(a)))
     })
     .await
     .map_err(|last| {
@@ -324,6 +340,10 @@ pub async fn ensure_allowance(
             ),
         )
     })?;
+    let Some(after) = after else {
+        let h = tx.map(|h| format!(" {h}")).unwrap_or_default();
+        return Err(approve_failed(op_id, format!("approve{h} reverted")));
+    };
     if after < need {
         return Err(approve_failed(
             op_id,
@@ -602,6 +622,14 @@ mod tests {
         );
     }
 
+    /// The allowance a call pinned to `block` reads.
+    fn allowance_at(evm: &FakeEvm, block: u64, v: u64) {
+        evm.at_block.lock().unwrap().insert(
+            (USDC, IErc20::allowanceCall::SELECTOR, block),
+            Bytes::from(U256::from(v).abi_encode()),
+        );
+    }
+
     fn mined_ok(evm: &FakeEvm, h: B256) {
         evm.script_receipt(h, vec![Some(deposit_receipt(
             h,
@@ -741,6 +769,47 @@ mod tests {
             "{out:?}"
         );
         assert_eq!(*evm.pinned_reads.lock().unwrap(), vec![10]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_approve_a_reorg_moves_to_the_next_block_is_read_back_where_it_is_now() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        // Block 10 as the receipt first named it no longer holds the
+        // approve; block 11 does.
+        allowance_at(&evm, 10, 0);
+        allowance_at(&evm, 11, 12_500_000);
+        let mut w = FakeWallet::eoa();
+        let h = B256::repeat_byte(1);
+        w.send_results.push_back(Ok(h));
+        let receipt_in = |b: crate::deposit::evm::Header| Some(deposit_receipt(h, &b, true, vec![]));
+        // Mined in 10; reorged out for a moment; back in 11.
+        evm.script_receipt(h, vec![
+            receipt_in(header(10, 1)),
+            None,
+            receipt_in(header(11, 2)),
+        ]);
+        let out = go(&evm, &mut w).await.unwrap();
+        assert_eq!(out, ApproveOutcome::Approved {
+            tx: Some(h),
+            block: 11
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_approve_that_reverts_where_a_reorg_put_it_is_exit_21() {
+        let evm = FakeEvm::sepolia();
+        allowance_seq(&evm, &[0]);
+        let mut w = FakeWallet::eoa();
+        let h = B256::repeat_byte(1);
+        w.send_results.push_back(Ok(h));
+        evm.script_receipt(h, vec![
+            Some(deposit_receipt(h, &header(10, 1), true, vec![])),
+            Some(deposit_receipt(h, &header(11, 2), false, vec![])),
+        ]);
+        let e = go(&evm, &mut w).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::ApproveFailed);
+        assert!(e.to_string().contains(&format!("approve {h} reverted")), "{e}");
     }
 
     #[tokio::test(start_paused = true)]

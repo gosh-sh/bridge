@@ -66,6 +66,12 @@ pub struct FakeEvm {
     /// a block number, and a key without a script here, answer from
     /// `calls`.
     pub stale_calls: Mutex<CallScripts>,
+    /// `(to, first 4 bytes of calldata, block)` → what a call pinned to that
+    /// block number answers, before `calls` is asked.
+    pub at_block: Mutex<HashMap<(Address, [u8; 4], u64), Bytes>>,
+    /// The next N calls pinned to a block number fail, as on a node that
+    /// does not have the block yet.
+    pub pinned_misses: AtomicU32,
     /// `header(Latest)` and `header(Pending)`, scripted per call.
     pub latest: Script<Header>,
     /// `header(Finalized)`, scripted per call.
@@ -136,6 +142,8 @@ impl Default for FakeEvm {
             codes: Mutex::default(),
             calls: Mutex::default(),
             stale_calls: Mutex::default(),
+            at_block: Mutex::default(),
+            pinned_misses: AtomicU32::default(),
             latest: Script::default(),
             finalized: Script::default(),
             by_hash: Mutex::default(),
@@ -231,10 +239,17 @@ impl EvmRead for FakeEvm {
             .get(..4)
             .ok_or_else(|| anyhow::anyhow!("calldata without a selector"))?
             .try_into()?;
-        let stale = match at {
+        let first = match at {
             BlockTag::Number(n) => {
                 self.pinned_reads.lock().unwrap().push(n);
-                None
+                if self
+                    .pinned_misses
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |k| k.checked_sub(1))
+                    .is_ok()
+                {
+                    anyhow::bail!("header not found");
+                }
+                self.at_block.lock().unwrap().get(&(to, sel, n)).cloned()
             },
             _ => self
                 .stale_calls
@@ -243,7 +258,7 @@ impl EvmRead for FakeEvm {
                 .get(&(to, sel))
                 .and_then(|s| s.next()),
         };
-        stale
+        first
             .or_else(|| {
                 self.calls
                     .lock()

@@ -1,7 +1,10 @@
 //! A WalletConnect relay client: one websocket, JSON-RPC 2.0, the three
 //! `irn_*` calls this CLI needs. The socket lives in a background task
 //! that reconnects with backoff and resubscribes every topic; the relay
-//! keeps messages for their TTL, so a reconnect loses nothing. A socket
+//! keeps messages for their TTL, so a reconnect loses nothing. A reconnect
+//! is over only when the relay has answered every resubscription: one it
+//! refuses, or leaves unanswered for [`ACK_WAIT`], is a reconnect that
+//! failed, and the next one waits longer. A socket
 //! that goes silent without closing — a network switch, a sleep, a
 //! middlebox that dropped the flow — is caught by pinging it and giving up
 //! on it when nothing at all comes back. A message is handed out at most
@@ -63,6 +66,11 @@ const PING_INTERVAL: Duration = Duration::from_secs(25);
 /// How long the socket may stay silent — not even a pong — before it is
 /// taken for dead and replaced: two missed pings.
 const READ_DEADLINE: Duration = Duration::from_secs(2 * PING_INTERVAL.as_secs());
+
+/// How long an acknowledgement may take: the relay's answer to a
+/// resubscription after a reconnect, and the publication of our answer to
+/// something the wallet sent.
+pub(crate) const ACK_WAIT: Duration = Duration::from_secs(5);
 
 /// A fresh JSON-RPC id: milliseconds since the epoch times 1000 plus a
 /// counter, the shape WalletConnect peers use.
@@ -231,18 +239,44 @@ async fn send_unanswered(ws: &mut Ws, frame: Message) {
     let _ = ws.send(frame).await;
 }
 
+/// Where the socket task stands with replacing its socket.
+#[derive(Default)]
+struct Recovery {
+    /// Sockets opened since the last one that took its resubscriptions;
+    /// the pause before the next one grows with it.
+    attempt: u32,
+    /// The resubscriptions on the socket now open the relay has not
+    /// answered yet, by request id.
+    unconfirmed: HashSet<u64>,
+    /// When the unanswered ones count as refused; `None` while none is.
+    confirm_by: Option<tokio::time::Instant>,
+}
+
+impl Recovery {
+    /// The relay answered resubscription `id` without an error. Once every
+    /// one is answered, the reconnect is over and the backoff starts again
+    /// from its first pause.
+    fn confirmed(&mut self, id: u64) {
+        self.unconfirmed.remove(&id);
+        if self.unconfirmed.is_empty() {
+            self.confirm_by = None;
+            self.attempt = 0;
+        }
+    }
+}
+
 /// Opens the websocket again, pausing before each attempt: 1 s doubling to
-/// 60 s, ±20 %, each attempt on the URL `url` returns then. It never gives
-/// up; callers bound their own waits.
-async fn reconnect(url: &UrlSource, tls: &Connector) -> Ws {
-    let mut attempt = 0u32;
+/// 60 s, ±20 %, with `attempt` counting on from earlier reconnects that
+/// failed; each attempt on the URL `url` returns then. It never gives up;
+/// callers bound their own waits.
+async fn reconnect(url: &UrlSource, tls: &Connector, attempt: &mut u32) -> Ws {
     loop {
         let pause = jittered(
-            base_delay(attempt),
+            base_delay(*attempt),
             rand::thread_rng().gen_range(-1.0..=1.0),
         );
         tokio::time::sleep(pause).await;
-        attempt = attempt.saturating_add(1);
+        *attempt = attempt.saturating_add(1);
         if let Ok(ws) = open(&url(), tls).await {
             return ws;
         }
@@ -252,30 +286,42 @@ async fn reconnect(url: &UrlSource, tls: &Connector) -> Ws {
 /// Replaces a dead socket: every call waiting on it fails (it may or may
 /// not have reached the relay), a new socket is opened, and every
 /// confirmed topic is subscribed again, which makes the relay hand over
-/// what it kept for them.
+/// what it kept for them. The answers to those subscriptions are awaited
+/// in `r`, for no longer than [`ACK_WAIT`].
 async fn recover(
     url: &UrlSource,
     tls: &Connector,
     topics: &HashSet<String>,
     pending: &mut HashMap<u64, (Option<String>, oneshot::Sender<anyhow::Result<Value>>)>,
+    r: &mut Recovery,
 ) -> Ws {
     for (_, (_, reply)) in pending.drain() {
         answer(reply, Err(dropped()));
     }
-    let mut ws = reconnect(url, tls).await;
+    let mut ws = reconnect(url, tls, &mut r.attempt).await;
+    r.unconfirmed.clear();
     for t in topics {
+        let id = next_id();
         let frame = json!({
-            "id": next_id(), "jsonrpc": "2.0", "method": "irn_subscribe",
+            "id": id, "jsonrpc": "2.0", "method": "irn_subscribe",
             "params": { "topic": t }
         });
         send_unanswered(&mut ws, text(frame)).await;
+        r.unconfirmed.insert(id);
+    }
+    r.confirm_by = None;
+    if r.unconfirmed.is_empty() {
+        r.attempt = 0;
+    } else {
+        r.confirm_by = Some(tokio::time::Instant::now() + ACK_WAIT);
     }
     ws
 }
 
 /// The socket task: sends calls, matches results to them by id, acks and
 /// forwards `irn_subscription` pushes, pings, and replaces the socket when
-/// it breaks or goes silent. Ends when the [`Relay`] is gone.
+/// it breaks, goes silent, or does not take its resubscriptions. Ends when
+/// the [`Relay`] is gone.
 async fn run(
     url: UrlSource,
     tls: Connector,
@@ -296,6 +342,7 @@ async fn run(
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // When the socket last delivered any frame, pongs included.
     let mut heard = Instant::now();
+    let mut recovery = Recovery::default();
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
@@ -323,8 +370,15 @@ async fn run(
                 pending.insert(id, (topic, reply));
             }
             _ = ping.tick() => send_unanswered(&mut ws, Message::Ping(Default::default())).await,
+            // A resubscription the relay did not answer in time: nothing
+            // would be delivered on this socket for that topic.
+            () = sleep_until(recovery.confirm_by.unwrap_or(heard)), if recovery.confirm_by.is_some() => {
+                ws = recover(&url, &tls, &topics, &mut pending, &mut recovery).await;
+                heard = Instant::now();
+                ping.reset();
+            }
             () = sleep_until(heard + READ_DEADLINE) => {
-                ws = recover(&url, &tls, &topics, &mut pending).await;
+                ws = recover(&url, &tls, &topics, &mut pending, &mut recovery).await;
                 heard = Instant::now();
                 ping.reset();
             }
@@ -340,7 +394,7 @@ async fn run(
                         }
                     }
                     Some(Err(_)) | None => {
-                        ws = recover(&url, &tls, &topics, &mut pending).await;
+                        ws = recover(&url, &tls, &topics, &mut pending, &mut recovery).await;
                         heard = Instant::now();
                         ping.reset();
                         continue;
@@ -366,6 +420,16 @@ async fn run(
                     continue;
                 }
                 if let Some(id) = v["id"].as_u64() {
+                    if recovery.unconfirmed.contains(&id) {
+                        if v.get("error").is_some() {
+                            ws = recover(&url, &tls, &topics, &mut pending, &mut recovery).await;
+                            heard = Instant::now();
+                            ping.reset();
+                        } else {
+                            recovery.confirmed(id);
+                        }
+                        continue;
+                    }
                     if let Some((topic, reply)) = pending.remove(&id) {
                         let r = match v.get("error") {
                             Some(e) => Err(anyhow::anyhow!("relay error: {e}")),
@@ -389,7 +453,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::deposit::testkit::MockRelay;
+    use crate::deposit::testkit::{MockRelay, SubscribeAnswer};
 
     #[tokio::test]
     async fn a_message_reaches_the_other_subscriber() {
@@ -496,6 +560,62 @@ mod tests {
         a.publish("t1", "fresh", 300, 1108).await.unwrap();
         let got = b.recv(Duration::from_secs(5)).await.unwrap();
         assert_eq!(got.message, "fresh");
+    }
+
+    /// Publishes `message` on `topic` from a client of its own, trying
+    /// again while a reconnect of the relay fails the call.
+    async fn publish_from_another_client(relay: &MockRelay, topic: &str, message: &str) {
+        let b = Relay::connect(relay.url()).await.unwrap();
+        while b.publish(topic, message, 300, 1108).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_resubscription_is_a_reconnect_that_failed() {
+        let relay = MockRelay::start().await;
+        let mut a = Relay::connect(relay.url()).await.unwrap();
+        a.subscribe("t1").await.unwrap();
+        relay.answer_next_subscribes([SubscribeAnswer::Refuse]);
+        relay.drop_all();
+        publish_from_another_client(&relay, "t1", "after").await;
+        let got = a.recv(Duration::from_secs(15)).await;
+        assert_eq!(got.map(|m| m.message).as_deref(), Some("after"));
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_resubscription_is_a_reconnect_that_failed() {
+        let relay = MockRelay::start().await;
+        let mut a = Relay::connect(relay.url()).await.unwrap();
+        a.subscribe("t1").await.unwrap();
+        relay.answer_next_subscribes([SubscribeAnswer::Drop]);
+        relay.drop_all();
+        publish_from_another_client(&relay, "t1", "after").await;
+        // The socket answers pings all along; only the missing answer to
+        // the resubscription shows that nothing will be delivered on it.
+        let got = a.recv(Duration::from_secs(20)).await;
+        assert_eq!(got.map(|m| m.message).as_deref(), Some("after"));
+        assert!(
+            relay.connections() >= 4,
+            "`a` twice, then once more, and the publisher: {}",
+            relay.connections()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_delivered_before_the_resubscription_is_answered_comes_once() {
+        let relay = MockRelay::start().await;
+        let mut a = Relay::connect(relay.url()).await.unwrap();
+        a.subscribe("t1").await.unwrap();
+        relay.answer_next_subscribes([SubscribeAnswer::AfterBacklog]);
+        relay.drop_all();
+        publish_from_another_client(&relay, "t1", "between").await;
+        let got = a.recv(Duration::from_secs(15)).await;
+        assert_eq!(got.map(|m| m.message).as_deref(), Some("between"));
+        assert!(
+            a.recv(Duration::from_secs(3)).await.is_none(),
+            "delivered once"
+        );
     }
 
     #[test]

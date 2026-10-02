@@ -21,7 +21,7 @@ use crate::deposit::{
     wallet::WalletError,
     wc::{
         crypto::{derive_sym_key, open, parse, random_bytes, seal_type0, topic_of, KeyPair},
-        relay::Relay,
+        relay::{Relay, ACK_WAIT},
     },
 };
 
@@ -75,10 +75,6 @@ const DELETE_TTL: u64 = 86_400;
 
 /// The longest closing a session waits for the relay.
 const DELETE_WAIT: Duration = Duration::from_secs(5);
-
-/// The longest the answer to something the wallet sent us may take to
-/// publish; it only keeps the wallet's side of the exchange tidy.
-const ACK_WAIT: Duration = Duration::from_secs(5);
 
 /// The life of a pairing URI and of its proposal on the relay, in seconds:
 /// the time the CLI waits for the wallet, rounded up, and never less than

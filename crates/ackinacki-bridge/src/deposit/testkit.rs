@@ -738,6 +738,22 @@ struct MockRelayState {
     published: Vec<(String, u64, u64)>,
     /// Publications with these tags are answered with an error and dropped.
     refused_tags: HashSet<u64>,
+    /// How the next `irn_subscribe` calls are answered, one each; an empty
+    /// queue answers as a relay does.
+    subscribe_answers: VecDeque<SubscribeAnswer>,
+}
+
+/// How [`MockRelay`] answers one `irn_subscribe` it was told to treat
+/// differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeAnswer {
+    /// With an error; nothing is subscribed.
+    Refuse,
+    /// Not at all, and nothing is subscribed, as when the request is lost.
+    Drop,
+    /// Subscribes and hands over the topic's backlog first, the answer
+    /// after it.
+    AfterBacklog,
 }
 
 impl MockRelay {
@@ -793,6 +809,15 @@ impl MockRelay {
     /// reconnects included, in the order of their handshakes.
     pub fn request_uris(&self) -> Vec<String> {
         self.uris.lock().unwrap().clone()
+    }
+
+    /// Answers the next `irn_subscribe` calls as `answers` says, one each.
+    pub fn answer_next_subscribes(&self, answers: impl IntoIterator<Item = SubscribeAnswer>) {
+        self.state
+            .lock()
+            .unwrap()
+            .subscribe_answers
+            .extend(answers);
     }
 
     /// From now on, answers every publication tagged `tag` with an error
@@ -890,11 +915,26 @@ impl MockRelay {
                     let mut s = state.lock().unwrap();
                     match v["method"].as_str() {
                         Some("irn_subscribe") => {
+                            let answer = s.subscribe_answers.pop_front();
+                            if answer == Some(SubscribeAnswer::Refuse) {
+                                let no = serde_json::json!({"id": v["id"], "jsonrpc": "2.0",
+                                    "error": {"code": -32000, "message": "subscribe refused"}});
+                                MockRelay::push(&out_tx, no);
+                                continue;
+                            }
+                            if answer == Some(SubscribeAnswer::Drop) {
+                                continue;
+                            }
                             s.subs.entry(topic.clone()).or_default().push(out_tx.clone());
                             let ok = serde_json::json!({"id": v["id"], "jsonrpc": "2.0", "result": "sub"});
-                            MockRelay::push(&out_tx, ok);
+                            if answer.is_none() {
+                                MockRelay::push(&out_tx, ok.clone());
+                            }
                             for (msg, tag) in s.backlog.get(&topic).cloned().unwrap_or_default() {
                                 MockRelay::push(&out_tx, MockRelay::delivery(1, &topic, &msg, tag));
+                            }
+                            if answer == Some(SubscribeAnswer::AfterBacklog) {
+                                MockRelay::push(&out_tx, ok);
                             }
                         }
                         Some("irn_publish") => {

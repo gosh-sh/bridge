@@ -1514,6 +1514,17 @@ pub fn fake_prover_dir(extra: &str) -> (FakeProverHome, crate::deposit::prover_f
     (home, dir)
 }
 
+/// Makes the prover of `dir` write both its files, as the exporter does
+/// before it checks the proof itself, and then exit 1 as when that check
+/// fails. Each run still appends a line to `data/runs.log`.
+pub fn prover_fails_after_writing(dir: &crate::deposit::prover_files::ProverDir) {
+    let body = "#!/bin/sh\n[ \"$1\" = --help ] && { echo usage; exit 0; }\nwhile [ $# -gt 0 ]; do \
+                case $1 in --proof-out) p=$2; shift;; --pubin-out) i=$2; shift;; esac; shift; \
+                done\nprintf proof > \"$p\"\ncp expected_pi.bin \"$i\"\necho run >> \
+                data/runs.log\necho 'the proof does not verify' >&2\nexit 1\n";
+    std::fs::write(dir.bin(crate::deposit::prover_files::PROVE_BIN), body).unwrap();
+}
+
 // ---- the world of the end-to-end driver tests ----
 
 /// The EVM bridge of [`World`].

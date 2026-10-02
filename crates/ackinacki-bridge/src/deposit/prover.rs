@@ -39,6 +39,11 @@ const INPUT_FILE: &str = "input.json";
 const PROOF_FILE: &str = "proof.bin";
 /// The proof's public inputs, in the work directory.
 const PUBIN_FILE: &str = "public_inputs.bin";
+/// What the prover writes to, next to the final names: they get those
+/// names only once it has exited successfully. The exporter writes its
+/// files before it checks the proof itself, and leaves them when that
+/// check fails.
+const PARTIAL: &str = ".partial";
 /// How many lines of a failed tool's stderr the error carries.
 const STDERR_TAIL_LINES: usize = 20;
 /// How many times a start refused with ETXTBSY is tried in all.
@@ -97,12 +102,27 @@ fn failed_with_output(op_id: &str, why: impl std::fmt::Display, output: &str) ->
     )
 }
 
-/// The proof an earlier run left in `work`, if both files are there.
+/// The proof an earlier run left in `work`, if both files are there. They
+/// are there only if the prover finished.
 pub fn load(work: &Path) -> Option<ProofFiles> {
     Some(ProofFiles {
         proof: std::fs::read(work.join(PROOF_FILE)).ok()?,
         public_inputs: std::fs::read(work.join(PUBIN_FILE)).ok()?,
     })
+}
+
+/// `work/<name>` with the suffix the prover's output carries until it is
+/// done.
+fn partial(work: &Path, name: &str) -> PathBuf {
+    work.join(format!("{name}{PARTIAL}"))
+}
+
+/// Removes `path`; one that is not there is fine.
+fn remove(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 /// The last `n` lines of a tool's output, decoded lossily.
@@ -329,6 +349,12 @@ async fn run(
 /// Step 7: builds the proof of the deposit in `req` in the prover
 /// directory and checks its public inputs against `want`.
 ///
+/// The files an earlier proof left go first, and the prover writes under
+/// other names, renamed to `proof.bin` and `public_inputs.bin` only after
+/// it exits successfully: a pair under the final names is always one the
+/// prover finished, and nothing a crash or a failed check left behind is
+/// taken for a proof later.
+///
 /// The prover lock is taken before the fetcher starts and held until the
 /// prover exits; a held lock is waited for, and the status says why.
 /// `timeout` bounds both tools together, from the moment the lock is
@@ -358,6 +384,16 @@ pub async fn prove(
         .map_err(|e| failed(op_id, format!("{}: {e}", req.work.display())))?;
     std::fs::create_dir_all(&work)
         .map_err(|e| failed(op_id, format!("cannot create {}: {e}", work.display())))?;
+    for name in [PROOF_FILE, PUBIN_FILE] {
+        for path in [work.join(name), partial(&work, name)] {
+            remove(&path).map_err(|e| {
+                failed(
+                    op_id,
+                    format!("cannot remove the earlier {}: {e}", path.display()),
+                )
+            })?;
+        }
+    }
     let dir = ProverDir {
         root,
     };
@@ -400,9 +436,9 @@ pub async fn prove(
             .arg("--input")
             .arg(&input)
             .arg("--proof-out")
-            .arg(work.join(PROOF_FILE))
+            .arg(partial(&work, PROOF_FILE))
             .arg("--pubin-out")
-            .arg(work.join(PUBIN_FILE))
+            .arg(partial(&work, PUBIN_FILE))
             .args(["--degree", &PROVER_DEGREE.to_string()])
             .args(["--max-data-byte-len", &MAX_LOG_DATA_BYTE_LEN.to_string()])
             .args(["--max-log-num", &MAX_RECEIPT_LOGS.to_string()]),
@@ -414,6 +450,18 @@ pub async fn prove(
     )
     .await?;
     drop(lock);
+    // The proof first: a crash between the two leaves no pair to load.
+    for name in [PROOF_FILE, PUBIN_FILE] {
+        let from = partial(&work, name);
+        if from.exists() {
+            std::fs::rename(&from, work.join(name)).map_err(|e| {
+                failed(
+                    op_id,
+                    format!("cannot rename {} into place: {e}", from.display()),
+                )
+            })?;
+        }
+    }
     let files = load(&work).ok_or_else(|| {
         failed(
             op_id,
@@ -506,6 +554,52 @@ mod tests {
         assert_eq!(p.public_inputs, PI);
         assert_eq!(load(w.path()).unwrap(), p);
         assert_eq!(load(w.path()).unwrap().proof, b"proof");
+        let left: Vec<_> = std::fs::read_dir(w.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".partial"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[tokio::test]
+    async fn a_proof_the_prover_did_not_finish_is_not_left_to_reuse() {
+        let (_d, dir) = fake_prover_dir("");
+        crate::deposit::testkit::prover_fails_after_writing(&dir);
+        let w = tempfile::tempdir().unwrap();
+        let e = prove(
+            &dir,
+            &req(w.path()),
+            &want(),
+            Duration::from_secs(10),
+            &RecordingUi::new(true),
+            "OP",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositProofFailed);
+        assert!(e.to_string().contains("does not verify"), "{e}");
+        assert_eq!(load(w.path()), None, "a proof the prover rejected");
+    }
+
+    #[tokio::test]
+    async fn a_new_proof_starts_without_the_files_an_earlier_one_left() {
+        // Dies before it writes anything, as a killed prover may.
+        let (_d, dir) = fake_prover_dir("exit 3");
+        let w = tempfile::tempdir().unwrap();
+        std::fs::write(w.path().join(PROOF_FILE), b"old proof").unwrap();
+        std::fs::write(w.path().join(PUBIN_FILE), PI).unwrap();
+        prove(
+            &dir,
+            &req(w.path()),
+            &want(),
+            Duration::from_secs(10),
+            &RecordingUi::new(true),
+            "OP",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(load(w.path()), None, "the old pair is gone");
     }
 
     #[tokio::test]
@@ -591,9 +685,9 @@ mod tests {
             "--input",
             &at("input.json"),
             "--proof-out",
-            &at("proof.bin"),
+            &at("proof.bin.partial"),
             "--pubin-out",
-            &at("public_inputs.bin"),
+            &at("public_inputs.bin.partial"),
             "--degree",
             "18",
             "--max-data-byte-len",

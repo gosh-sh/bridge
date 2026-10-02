@@ -2913,6 +2913,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_proof_the_prover_rejected_is_built_again_on_resume() {
+        let mut w = World::healthy();
+        let tool = w.prover.1.bin(crate::deposit::prover_files::PROVE_BIN);
+        let working = std::fs::read(&tool).unwrap();
+        prover_fails_after_writing(&w.prover.1);
+        let h = w.mined_deposit(7);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        w.anchor_after(0);
+        let (p, d) = on_the_real_clock(&w);
+        let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
+        assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was finalized");
+        assert_eq!(w.prover_runs(), 1);
+        // The prover is fixed; the resume proves again before it sends, and
+        // the bridge's answer to that send ends it.
+        std::fs::write(&tool, working).unwrap();
+        w.an.sends
+            .lock()
+            .unwrap()
+            .push_back(crate::deposit::refusals::FinalizeSend::Rejected {
+                exit_code: Some(220),
+                message: "proof rejected".into(),
+            });
+        let target = OpRef::Op(e.op_id().unwrap().to_string());
+        let (p, d) = resuming_on_the_real_clock(&w, &target);
+        let e = resume(&p, &d, &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::FinalizeRefused, "{e}");
+        assert_eq!(*w.an.sent.lock().unwrap(), 1);
+        assert_eq!(w.prover_runs(), 2, "the proof sent is a new one");
+    }
+
+    #[tokio::test]
     async fn an_anchor_lost_after_a_send_that_does_not_come_back_is_exit_34() {
         let mut w = World::healthy();
         let h = w.mined_deposit(7);

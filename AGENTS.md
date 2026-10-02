@@ -180,7 +180,7 @@ FOUNDRY_PROFILE=fork FORK_URL=<RPC URL> forge test --match-contract AaveFork
 cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- --help
 # daemon-bridge runs both ETH legs in one process on one EOA: verifyBlock, falling forward through
-# proof_<N>.json, and withdrawByProof on proof_event_*.json. daemon-withdraw is the payout leg alone;
+# proof_<N>.json, and withdrawByProofBundle on proof_event_*.json. daemon-withdraw is the payout leg alone;
 # daemon-live proves in-process.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...

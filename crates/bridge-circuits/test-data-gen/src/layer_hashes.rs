@@ -22,8 +22,8 @@
 //!   vector).
 //! - [`generate_layer_hash_chain_with_depth`] — lower-level chain-only builder;
 //!   the only depth value supported in practice is [`TREE_DEPTH`].
-//! - [`block_merkle_root`] / [`l0_opening_siblings`] — 16-leaf block-id
-//!   tree helpers (usable outside the synthetic builder).
+//! - [`block_merkle_root`] / [`l0_opening_siblings`] — 16-leaf block-id tree
+//!   helpers (usable outside the synthetic builder).
 
 use bridge_poseidon::{poseidon_hash_bytes, LAYER_PREIMAGE_SIZE, MAX_LAYERS};
 use gosh_dense_balanced_tree::{
@@ -58,8 +58,8 @@ pub const MAX_CHAIN_LEN: usize = DENSE_MAX_CHAIN_LEN;
 ///   `[L1, sha_pair(L2,L3), subtree(L4..L7), subtree(L8..L15)]`.
 pub const NUM_MERKLE_SIBLINGS: usize = 4;
 
-/// Total number of leaves in the block-id SHA-256 Merkle tree (poseidon_profile_new
-/// canonical shape: 16 leaves, depth 4).
+/// Total number of leaves in the block-id SHA-256 Merkle tree
+/// (poseidon_profile_new canonical shape: 16 leaves, depth 4).
 pub const BLOCK_ID_TREE_LEAF_COUNT: usize = 16;
 
 /// Depth of the block-id SHA-256 Merkle tree.
@@ -69,7 +69,8 @@ pub const BLOCK_ID_TREE_DEPTH: usize = 4;
 pub const L0_LEAF_INDEX: usize = 0;
 
 /// Number of public instances Circuit 2 emits:
-/// `block_id + bk_set_poseidon + num_layers + 10 layer hashes + prev_max_level_layer_hash = 14`.
+/// `block_id + bk_set_poseidon + num_layers + 10 layer hashes +
+/// prev_max_level_layer_hash = 14`.
 pub const LAYER_HASHES_NUM_PUBLIC_INPUTS: usize = 1 + 1 + 1 + MAX_LAYERS + 1;
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ fn block_merkle_subtree_root(
             let left = block_merkle_subtree_root(leaves, start, half);
             let right = block_merkle_subtree_root(leaves, start + half, half);
             sha256_pair(&left, &right)
-        }
+        },
         _ => unreachable!("width must be a power of 2 in [1,16]"),
     }
 }
@@ -182,11 +183,13 @@ pub fn l0_opening_siblings(
 // Poseidon Merkle tree (off-circuit, native) — production depth only
 // ---------------------------------------------------------------------------
 
-/// Build a Poseidon Merkle tree with a specific chain leaf value using the given tree depth.
+/// Build a Poseidon Merkle tree with a specific chain leaf value using the
+/// given tree depth.
 ///
-/// Builds the full tree using the same Poseidon hashing as `gosh-dense-balanced-tree`
-/// (via `preprocess_dense_proof` / `compute_root_native`), ensuring byte-identical
-/// results with the in-circuit verification.
+/// Builds the full tree using the same Poseidon hashing as
+/// `gosh-dense-balanced-tree` (via `preprocess_dense_proof` /
+/// `compute_root_native`), ensuring byte-identical results with the in-circuit
+/// verification.
 fn build_tree_with_chain_leaf_depth(
     chain_value: [u8; 32],
     tree_depth: usize,
@@ -235,7 +238,10 @@ fn build_tree_with_chain_leaf_depth(
     // Verify: preprocess_dense_proof with these siblings should give the same root
     let proof = preprocess_dense_proof(chain_value, &siblings, chain_pos);
     let verify_root = fr_to_bytes(compute_root_native(&proof));
-    assert_eq!(root, verify_root, "Tree root mismatch with preprocess_dense_proof");
+    assert_eq!(
+        root, verify_root,
+        "Tree root mismatch with preprocess_dense_proof"
+    );
 
     (root, siblings)
 }
@@ -339,7 +345,8 @@ pub struct LayerHashChainData {
     pub prev_max_level_layer_hash: [u8; 32],
     /// Number of active chain steps (previous chain steps before current).
     pub num_prev_chain_steps: usize,
-    /// Chain proof steps (exactly MAX_CHAIN_LEN entries; inactive ones are padded).
+    /// Chain proof steps (exactly MAX_CHAIN_LEN entries; inactive ones are
+    /// padded).
     pub chain_proofs: Vec<ChainProofStep>,
 }
 
@@ -554,7 +561,10 @@ mod tests {
     fn test_chain_proof_step_leaf_linkage() {
         let data = generate_layer_hash_chain_with_depth(2, 3, TREE_DEPTH);
         // First step's leaf should be the initial prev_root
-        assert_eq!(data.chain_proofs[0].leaf_value, data.prev_max_level_layer_hash);
+        assert_eq!(
+            data.chain_proofs[0].leaf_value,
+            data.prev_max_level_layer_hash
+        );
     }
 
     #[test]
@@ -566,7 +576,10 @@ mod tests {
             assert_eq!(link.siblings.len(), TREE_DEPTH);
         }
         // 14-element public-instance vector.
-        assert_eq!(input.expected_instances.len(), LAYER_HASHES_NUM_PUBLIC_INPUTS);
+        assert_eq!(
+            input.expected_instances.len(),
+            LAYER_HASHES_NUM_PUBLIC_INPUTS
+        );
         // num_layers byte at preimage[0].
         assert_eq!(input.layer_hashes_preimage[0], 5);
         // Depth-4 block-id opening: exactly 4 sibling entries.

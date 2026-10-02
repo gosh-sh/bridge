@@ -173,15 +173,19 @@ pub trait BridgeClient: Send + Sync {
 #[async_trait]
 pub trait WithdrawBridge: Send + Sync {
     async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError>;
-    async fn dry_run_withdraw(
+    async fn dry_run_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<DryRunOutcome, RelayerError>;
-    async fn submit_withdraw(
+    async fn submit_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<WithdrawSubmitOutcome, RelayerError>;
 }
 
@@ -195,20 +199,38 @@ where
         EthBridgeClient::is_nullifier_used(self, nullifier).await
     }
 
-    async fn dry_run_withdraw(
+    async fn dry_run_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<DryRunOutcome, RelayerError> {
-        EthBridgeClient::dry_run_withdraw(self, proof, pub_inputs).await
+        EthBridgeClient::dry_run_withdraw_bundle(
+            self,
+            pub_inputs,
+            proof,
+            hop_public_inputs,
+            hop_proofs,
+        )
+        .await
     }
 
-    async fn submit_withdraw(
+    async fn submit_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
+        proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-        EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
+        EthBridgeClient::submit_withdraw_bundle(
+            self,
+            pub_inputs,
+            proof,
+            hop_public_inputs,
+            hop_proofs,
+        )
+        .await
     }
 }
 
@@ -563,11 +585,23 @@ mod sol_bindings {
                 uint256 nullifier;
                 uint256 finalRoot;
                 uint256 anchorLayer;
+                uint256 xBlockId;
+                uint256 yBlockId;
             }
 
-            function withdrawByProof(
-                bytes calldata proof,
-                WithdrawalPublicInputs calldata pub
+            /// Multi-hop bundle withdrawal: `finalProof` is the Circuit 4
+            /// SHPLONK proof whose 13 public inputs already commit to
+            /// `xBlockId → yBlockId`; `hopProofs`/`hopPubInputs` are the
+            /// per-hop BridgeMultiHopProof (2-PI: `hopStart`, `hopEnd`)
+            /// snarks that chain `xBlockId` back to a known layer anchor.
+            /// Same-thread events pass empty `hopProofs`/`hopPubInputs`
+            /// arrays; the contract accepts them when the FinalProof PIs
+            /// have `xBlockId == yBlockId`.
+            function withdrawByProofBundle(
+                uint256[] calldata finalPI,
+                bytes calldata finalProof,
+                uint256[][] calldata hopPI,
+                bytes[] calldata hopProofs
             ) external returns (bool success);
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
@@ -595,7 +629,8 @@ mod sol_bindings {
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
-            function bridgeWithdrawalVerifier() external view returns (address);
+            function bridgeWithdrawalFinalVerifier() external view returns (address);
+            function bridgeMultiHopVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
 
@@ -610,9 +645,28 @@ mod sol_bindings {
                 uint8 finType,
                 uint8 numLayers
             );
+
+            // Custom errors that `withdrawByProofBundle(...)` can revert with.
+            // Mirrors `AckiNackiBridge.sol:461-472`. Adding them here lets
+            // `alloy::contract::Error::as_decoded_interface_error::<AckiNackiBridgeErrors>()`
+            // recover a human-readable variant name (and its args, when the
+            // Solidity error carries any) from a revert instead of leaving
+            // callers with an opaque 4-byte selector in the log.
+            error WithdrawByProofBundleDisabled();
+            error PartialBundleWiring();
+            error HopBundleLengthOverflow(uint256 got, uint256 max);
+            error HopPublicInputsHopProofsLengthMismatch(uint256 hopPublicInputs, uint256 hopProofs);
+            error FinalPublicInputsBadLength(uint256 got, uint256 expected);
+            error HopPublicInputsBadLength(uint256 at, uint256 got, uint256 expected);
+            error SameThreadEndpointsMismatch();
+            error SameThreadRequiresEmptyHopChain(uint256 hopCount);
+            error HopChainHeadMismatch();
+            error HopChainTailMismatch();
+            error AdjacentHopBlockIdMismatch(uint256 at);
+            error MultiHopProofRejected(uint256 at);
         }
 
-        /// The two links between `bridgeWithdrawalVerifier` and the
+        /// The two links between `bridgeWithdrawalFinalVerifier` and the
         /// deployed Yul verifier. Declared here so the CLI can walk
         /// `adapter → shplonkVerifier() → yulVerifier()` the same way
         /// `deploy/shellnet-l2/scripts/preflight.sh:28` does: a non-zero
@@ -716,32 +770,80 @@ where
         }
     }
 
-    /// Simulate `withdrawByProof(...)` via `eth_call`.
-    pub async fn dry_run_withdraw(
+    /// Simulate `withdrawByProofBundle(...)` via `eth_call`. `hop_proofs`
+    /// and `hop_public_inputs` must be same-length arrays; pass empty
+    /// slices for same-thread events, in which case the FinalProof PIs
+    /// must have `xBlockId == yBlockId` for the contract to accept them.
+    pub async fn dry_run_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
-        pub_inputs: &WithdrawalPublicInputs,
+        final_public_inputs: &WithdrawalPublicInputs,
+        final_proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<DryRunOutcome, RelayerError> {
-        let call = self
-            .contract
-            .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
+        let final_pi = to_sol_withdrawal_pub(final_public_inputs);
+        let final_pi_vec = vec![
+            final_pi.tokenId,
+            final_pi.amount,
+            final_pi.recipientHi,
+            final_pi.recipientLo,
+            final_pi.dstChainId,
+            final_pi.senderAccFr,
+            final_pi.dappFr,
+            final_pi.accFr,
+            final_pi.nullifier,
+            final_pi.finalRoot,
+            final_pi.anchorLayer,
+            final_pi.xBlockId,
+            final_pi.yBlockId,
+        ];
+        let call = self.contract.withdrawByProofBundle(
+            final_pi_vec,
+            final_proof.clone(),
+            hop_public_inputs.to_vec(),
+            hop_proofs.to_vec(),
+        );
         match call.call().await {
             Ok(_) => Ok(DryRunOutcome::WouldSucceed),
             Err(e) => Ok(DryRunOutcome::WouldRevert {
-                reason: format!("{e}"),
+                reason: decode_bundle_revert(&e),
             }),
         }
     }
 
-    /// Submit Circuit 4 `withdrawByProof` to Sepolia/mainnet.
-    pub async fn submit_withdraw(
+    /// Submit Circuit 4 `withdrawByProofBundle` to Sepolia/mainnet.
+    /// Empty `hop_proofs`/`hop_public_inputs` slices signal a same-thread
+    /// event; the contract accepts them when the FinalProof PIs have
+    /// `xBlockId == yBlockId`.
+    pub async fn submit_withdraw_bundle(
         &self,
-        proof: &alloy::primitives::Bytes,
-        pub_inputs: &WithdrawalPublicInputs,
+        final_public_inputs: &WithdrawalPublicInputs,
+        final_proof: &alloy::primitives::Bytes,
+        hop_public_inputs: &[Vec<U256>],
+        hop_proofs: &[alloy::primitives::Bytes],
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-        let call = self
-            .contract
-            .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
+        let final_pi = to_sol_withdrawal_pub(final_public_inputs);
+        let final_pi_vec = vec![
+            final_pi.tokenId,
+            final_pi.amount,
+            final_pi.recipientHi,
+            final_pi.recipientLo,
+            final_pi.dstChainId,
+            final_pi.senderAccFr,
+            final_pi.dappFr,
+            final_pi.accFr,
+            final_pi.nullifier,
+            final_pi.finalRoot,
+            final_pi.anchorLayer,
+            final_pi.xBlockId,
+            final_pi.yBlockId,
+        ];
+        let call = self.contract.withdrawByProofBundle(
+            final_pi_vec,
+            final_proof.clone(),
+            hop_public_inputs.to_vec(),
+            hop_proofs.to_vec(),
+        );
         match call.send().await {
             Ok(pending) => match pending.get_receipt().await {
                 Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
@@ -760,7 +862,10 @@ where
                 },
             },
             Err(e) => {
-                let reason = format!("withdrawByProof send failed: {e}");
+                let reason = format!(
+                    "withdrawByProofBundle send failed: {}",
+                    decode_bundle_revert(&e)
+                );
                 let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
                 Ok(WithdrawSubmitOutcome::Reverted {
                     reason,
@@ -836,12 +941,12 @@ where
             .map_err(map_contract_err)
     }
 
-    /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`
+    /// `IBridgeWithdrawalFinalVerifier public immutable bridgeWithdrawalFinalVerifier`
     /// (`AckiNackiBridge.sol:208`). Zero disables withdrawals entirely —
-    /// `withdrawByProof` reverts `WithdrawByProofDisabled` (`:1160`).
+    /// `withdrawByProofBundle` reverts `WithdrawByProofBundleDisabled` (`:1160`).
     pub async fn withdrawal_verifier(&self) -> Result<Address, RelayerError> {
         self.contract
-            .bridgeWithdrawalVerifier()
+            .bridgeWithdrawalFinalVerifier()
             .call()
             .await
             .map_err(map_contract_err)
@@ -1101,7 +1206,7 @@ where
     }
 }
 
-/// Outcome of [`EthBridgeClient::submit_withdraw`].
+/// Outcome of [`EthBridgeClient::submit_withdraw_bundle`].
 #[derive(Clone, Debug)]
 pub enum WithdrawSubmitOutcome {
     Paid {
@@ -1196,6 +1301,8 @@ fn to_sol_withdrawal_pub(
         nullifier: pub_inputs.nullifier,
         finalRoot: pub_inputs.final_root,
         anchorLayer: pub_inputs.anchor_layer,
+        xBlockId: pub_inputs.x_block_id,
+        yBlockId: pub_inputs.y_block_id,
     }
 }
 
@@ -1454,6 +1561,127 @@ where
 
 fn map_contract_err(e: AlloyContractError) -> RelayerError {
     RelayerError::other(format!("contract call failed: {e}"))
+}
+
+/// Best-effort decoder for a `withdrawByProofBundle` revert. Uses alloy's
+/// [`AlloyContractError::as_decoded_interface_error`] to lift the 4-byte
+/// selector + ABI-encoded args back into the matching sol!-generated
+/// variant of [`sol_bindings::AckiNackiBridge::AckiNackiBridgeErrors`], then
+/// prints a human-readable `Name { arg = value, ... }` string. When the
+/// revert isn't one of the twelve declared bundle errors (or the revert data
+/// is unavailable — e.g. the RPC returned a bare "execution reverted"), the
+/// original alloy error string is returned unchanged, so no signal is lost.
+fn decode_bundle_revert(e: &AlloyContractError) -> String {
+    use sol_bindings::AckiNackiBridge::AckiNackiBridgeErrors as E;
+
+    if let Some(decoded) = e.as_decoded_interface_error::<E>() {
+        let head = match &decoded {
+            E::WithdrawByProofBundleDisabled(_) => {
+                "WithdrawByProofBundleDisabled: bundle wiring is off — bridgeWithdrawalFinalVerifier and/or bridgeMultiHopVerifier is zero at deploy".to_string()
+            }
+            E::PartialBundleWiring(_) => {
+                "PartialBundleWiring: constructor received only one of {withdrawal-final, multi-hop} verifiers; both must be set together".to_string()
+            }
+            E::HopBundleLengthOverflow(v) => format!(
+                "HopBundleLengthOverflow: got {} hops, cap is {} (N_BUNDLE_MAX)",
+                v.got, v.max
+            ),
+            E::HopPublicInputsHopProofsLengthMismatch(v) => format!(
+                "HopPublicInputsHopProofsLengthMismatch: {} PI arrays vs {} proof blobs",
+                v.hopPublicInputs, v.hopProofs
+            ),
+            E::FinalPublicInputsBadLength(v) => format!(
+                "FinalPublicInputsBadLength: got {}, expected {} (must match FINAL_PUBLIC_INPUTS)",
+                v.got, v.expected
+            ),
+            E::HopPublicInputsBadLength(v) => format!(
+                "HopPublicInputsBadLength at hop {}: got {}, expected {} (must equal HOP_PUBLIC_INPUTS = 2)",
+                v.at, v.got, v.expected
+            ),
+            E::SameThreadEndpointsMismatch(_) => {
+                "SameThreadEndpointsMismatch: xBlockId != yBlockId with no hops — either supply a cross-thread hop chain or pin a same-thread claim".to_string()
+            }
+            E::SameThreadRequiresEmptyHopChain(v) => format!(
+                "SameThreadRequiresEmptyHopChain: xBlockId == yBlockId but hopCount = {} — drop the hops for a same-thread claim",
+                v.hopCount
+            ),
+            E::HopChainHeadMismatch(_) => {
+                "HopChainHeadMismatch: hop[0].hopStart != finalProof.xBlockId — first hop must start at the event thread's block id".to_string()
+            }
+            E::HopChainTailMismatch(_) => {
+                "HopChainTailMismatch: hop[last].hopEnd != finalProof.yBlockId — last hop must land on the anchor thread's block id".to_string()
+            }
+            E::AdjacentHopBlockIdMismatch(v) => format!(
+                "AdjacentHopBlockIdMismatch at hop boundary {}: hop[{}].hopEnd != hop[{}].hopStart",
+                v.at, v.at, v.at
+            ),
+            E::MultiHopProofRejected(v) => format!(
+                "MultiHopProofRejected at hop {}: BridgeMultiHopAggregatorVerifier rejected the SHPLONK proof",
+                v.at
+            ),
+            // Shared withdrawal-validation errors (main PR #67). These are
+            // declared under `withdrawByProof` historically but `withdrawByProofBundle`
+            // runs the same validation (identity/amount/anchor/nullifier/etc.)
+            // and reverts with the same selectors.
+            E::WithdrawalProofRejected(_) => {
+                "WithdrawalProofRejected: the SHPLONK outer proof failed verification \
+                 against BridgeWithdrawalAggregatorVerifier (bad inner proof, wrong \
+                 VK digest, or re-exposed instance mismatch)".to_string()
+            }
+            E::NullifierAlreadyUsed(v) => format!(
+                "NullifierAlreadyUsed: nullifier {} is already spent on this bridge",
+                v.nullifier
+            ),
+            E::FieldElementOutOfRange(v) => format!(
+                "FieldElementOutOfRange: public input {} is ≥ BN254 scalar modulus",
+                v.value
+            ),
+            E::DstChainIdMismatch(v) => format!(
+                "DstChainIdMismatch: proof carries dstChainId={}, this bridge expects {}",
+                v.supplied, v.expected
+            ),
+            E::RecipientHalfOutOfRange(v) => format!(
+                "RecipientHalfOutOfRange: recipientHi/Lo half {} does not fit the 160-bit \
+                 Ethereum address encoding",
+                v.value
+            ),
+            E::WithdrawIdentityMismatch(_) => {
+                "WithdrawIdentityMismatch: proof's (dappFr, accFr) do not match this bridge's \
+                 immutable identity pair".to_string()
+            }
+            E::UnknownAnchor(v) => format!(
+                "UnknownAnchor: finalRoot {} is not in any _layerWindows[L] buffer — the \
+                 verifyBlock lane has not yet registered an anchor for this layer, retry",
+                v.finalRoot
+            ),
+            E::InvalidNumLayers(v) => format!(
+                "InvalidNumLayers: anchorLayer {} is outside the supported range",
+                v.anchorLayer
+            ),
+            E::UnsupportedTokenId(v) => format!(
+                "UnsupportedTokenId: tokenId {} is not registered on this bridge",
+                v.tokenId
+            ),
+            E::InvalidRecipient(_) => {
+                "InvalidRecipient: recipient address is zero or otherwise malformed".to_string()
+            }
+            E::WithdrawTreasuryShortfall(v) => format!(
+                "WithdrawTreasuryShortfall: requested {}, treasury holds {} — the Aave sink \
+                 may be slow to redeem; retry once the treasury refills",
+                v.requested, v.available
+            ),
+            // Legacy: the pre-bundle `withdrawByProof` entry point was
+            // removed on multi-thread; this error only reaches live callers
+            // if a stale ABI is talking to a current bridge.
+            E::WithdrawByProofDisabled(_) => {
+                "WithdrawByProofDisabled (legacy): the on-chain bridge has removed the \
+                 pre-bundle withdrawByProof entry point — the current entry is \
+                 withdrawByProofBundle, your binding is stale".to_string()
+            }
+        };
+        return format!("{head} [raw: {e}]");
+    }
+    format!("{e}")
 }
 
 // ─────────────────────────────────────────────────────────────────────

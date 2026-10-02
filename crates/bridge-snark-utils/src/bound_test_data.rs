@@ -27,16 +27,14 @@
 //! generated public inputs in JSON and reuses them in Foundry fixtures; we
 //! never need byte-level reproducibility, only same-process consistency.
 //!
-//! For the Poseidon re-prove pass (R15 aggregator), [`save_bound_witness_cache`]
-//! / [`load_bound_witness_cache`] persist the exact witness so Phase A2 does
-//! not regenerate a different random scenario.
+//! For the Poseidon re-prove pass (R15 aggregator),
+//! [`save_bound_witness_cache`] / [`load_bound_witness_cache`] persist the
+//! exact witness so Phase A2 does not regenerate a different random scenario.
 
-use std::{
-    collections::HashMap,
-    path::Path,
-};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Context;
+use bridge_prover_lib::layer_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
 use bridge_test_data_gen::{
     bls::{Secret, SignerIndex},
     envelope_hash::poseidon_hash_bytes,
@@ -51,8 +49,6 @@ use halo2_base::halo2_proofs::halo2curves::{bn256::Fr, ff::PrimeField};
 use historical_layer_hashes_movement_checker_circuit::{
     test_helpers::bytes_le_to_fr, LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
 };
-
-use bridge_prover_lib::layer_prover::LAYER_HASHES_NUM_PUBLIC_INPUTS;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DenseChainLinkCache {
@@ -310,11 +306,11 @@ pub fn promote_bridge_test_data(
     let prev_max_level_layer_hash = bytes_le_to_fr(&td.layer_hash_chain.prev_max_level_layer_hash);
     // Off-by-one bridge between partner-generator and circuit semantics.
     //
-    // The partner's `generate_layer_hash_chain_with_depth(num_layers, num_prev_chain_steps, TREE_DEPTH)`
-    // builds `num_prev_chain_steps + 1` ACTIVE trees (the trailing `+1` is the
-    // current block's tree, whose root *is* `root_hashes[num_layers-1]`) but
-    // records only the count of *previous* steps in
-    // `LayerHashChainData.num_prev_chain_steps`.
+    // The partner's `generate_layer_hash_chain_with_depth(num_layers,
+    // num_prev_chain_steps, TREE_DEPTH)` builds `num_prev_chain_steps + 1`
+    // ACTIVE trees (the trailing `+1` is the current block's tree, whose root
+    // *is* `root_hashes[num_layers-1]`) but records only the count of
+    // *previous* steps in `LayerHashChainData.num_prev_chain_steps`.
     //
     // The circuit, however, treats this value as `num_active_steps` and inside
     // `verify_chain_of_dense_proofs` marks links `0..num_active_steps` active
@@ -359,7 +355,10 @@ pub fn promote_bridge_test_data(
 
     // ---- Optional fallback attestation (same natural-BE block_id) ----
     let attestation_fallback_bytes = if with_fallback {
-        Some(build_attestation_envelope(&td, AttestationTargetType::Fallback)?)
+        Some(build_attestation_envelope(
+            &td,
+            AttestationTargetType::Fallback,
+        )?)
     } else {
         None
     };
@@ -414,8 +413,8 @@ fn build_attestation_envelope(
         .collect();
 
     let attestation_data = create_attestation_data(td.block_id, target_type);
-    let envelope = sign_attestation_multi(attestation_data, &signers)
-        .context("signing attestation failed")?;
+    let envelope =
+        sign_attestation_multi(attestation_data, &signers).context("signing attestation failed")?;
     let bytes = bincode::serialize(&envelope).context("bincoding attestation envelope failed")?;
     Ok(bytes)
 }
@@ -454,7 +453,9 @@ pub fn compose_layer_hashes_input<'a>(
 /// Mirror of `prover.rs::extract_block_seq_no`. Re-implemented to keep this
 /// module's surface independent of the prover's private helpers.
 fn extract_block_seq_no(attestation_bytes: &[u8]) -> u32 {
-    use attestation_bls_checker_circuit::attestation_data_parser::{attestation_data_offset, parse_num_signers};
+    use attestation_bls_checker_circuit::attestation_data_parser::{
+        attestation_data_offset, parse_num_signers,
+    };
     const BLOCK_SEQ_NO_REL_OFFSET: usize = 80;
 
     let num_signers = parse_num_signers(attestation_bytes);

@@ -8,7 +8,7 @@ edition = "2021"
 # Translates the `PrivateWitness` JSON schema produced by the
 # `bridge-event-private-witness-export` and `bridge-event-witness-builder`
 # binaries (both in the `bridge-event-witness` crate) into a
-# `BridgeEventProveCircuit` and drives proof generation / verification.
+# `BridgeEventFinalProof` and drives proof generation / verification.
 #
 # Borrows the on-demand PK/VK/SRS lifecycle from `bridge-prover-lib`'s
 # `KeyManager` — there is no separate key cache here.
@@ -22,6 +22,7 @@ halo2-base = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

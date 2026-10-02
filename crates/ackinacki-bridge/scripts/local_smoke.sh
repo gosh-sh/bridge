@@ -9,7 +9,7 @@
 # flags, key file perms, single-custodian check, USDCBridge resolution,
 # and the ECC[3] balance, then stops. It does NOT compose the burn
 # message, wait for the WithdrawalInitiated event, produce the
-# Circuit-4 proof, or call `dry_run_withdraw` on the EVM side. Exit
+# Circuit-4 proof, or call `dry_run_withdraw_bundle` on the EVM side. Exit
 # code 0 means "argument shape is sane and the source multisig is in a
 # burnable state", not "every stage of a real run would have
 # succeeded" — for that, drop `--dry-run` and use `live_smoke.sh`.

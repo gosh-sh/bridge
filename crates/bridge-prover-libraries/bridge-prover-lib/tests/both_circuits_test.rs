@@ -1,4 +1,5 @@
-//! Integration test: Circuit 1a (real data from shellnet) + Circuit 2 (MockProver).
+//! Integration test: Circuit 1a (real data from shellnet) + Circuit 2
+//! (MockProver).
 //!
 //! Demonstrates that both circuits work correctly:
 //! - Circuit 1a: real attestation from shellnet → proof gen → verification
@@ -7,28 +8,28 @@
 //!
 //! Run: cargo test --release test_both_circuits -- --nocapture
 
-use std::path::Path;
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-use halo2_base::halo2_proofs::dev::MockProver;
-
-use bridge_prover_lib::keys::KeyManager;
 use bridge_poseidon as poseidon;
-use bridge_prover_lib::prover;
-use bridge_prover_lib::verifier;
-
+use bridge_prover_lib::{keys::KeyManager, prover, verifier};
+use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink};
+use halo2_base::halo2_proofs::{
+    dev::MockProver,
+    halo2curves::{bn256::Fr, group::ff::PrimeField},
+};
 use historical_layer_hashes_movement_checker_circuit::{
     circuit::LayerHashesMovementCheckerCircuit,
+    test_helpers::{
+        bytes_le_to_fr, K as LAYER_K, LOOKUP_BITS as LAYER_LOOKUP,
+        NUM_UNUSABLE_ROWS as LAYER_UNUSABLE,
+    },
     LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
-    test_helpers::{K as LAYER_K, NUM_UNUSABLE_ROWS as LAYER_UNUSABLE, LOOKUP_BITS as LAYER_LOOKUP, bytes_le_to_fr},
 };
-use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink};
 
 /// Test Circuit 2 (Layer Hashes Movement Checker) with MockProver.
 ///
-/// This validates that the circuit constraints are satisfied with synthetic data.
+/// This validates that the circuit constraints are satisfied with synthetic
+/// data.
 #[test]
 fn test_circuit2_mockprover() {
     let t_total = Instant::now();
@@ -149,18 +150,22 @@ fn test_circuit2_mockprover() {
 fn test_circuit1a_real_proof() {
     let t_total = Instant::now();
 
-    // 1. Load BK set. The former GraphQL fallback (`fetch_bk_set`) was
-    //    disabled on 2026-07-22 as architecturally broken; if the JSON is
-    //    absent, skip the test rather than fabricate an incorrect set.
-    let bk_set = match bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config("./bk_set.json") {
+    // 1. Load BK set. The former GraphQL fallback (`fetch_bk_set`) was disabled on
+    //    2026-07-22 as architecturally broken; if the JSON is absent, skip the test
+    //    rather than fabricate an incorrect set.
+    let bk_set = match bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config("./bk_set.json")
+    {
         Ok(bk) => {
             println!("BK set loaded from config: {} signers", bk.len());
             bk
-        }
+        },
         Err(e) => {
-            println!("SKIPPING test_circuit1a_real_proof: no BK set config available ({})", e);
+            println!(
+                "SKIPPING test_circuit1a_real_proof: no BK set config available ({})",
+                e
+            );
             return;
-        }
+        },
     };
 
     if bk_set.is_empty() {
@@ -182,10 +187,9 @@ fn test_circuit1a_real_proof() {
 
     // 3. Fetch a real attestation from shellnet.
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let gql = bridge_gql_fetcher::gql_client::create_client(
-        "https://shellnet.ackinacki.org/graphql",
-    )
-    .unwrap();
+    let gql =
+        bridge_gql_fetcher::gql_client::create_client("https://shellnet.ackinacki.org/graphql")
+            .unwrap();
 
     let blocks = rt.block_on(gql.query_latest_blocks(20)).unwrap();
     let latest_seq = blocks.iter().map(|(_, s)| *s).max().unwrap_or(0);
@@ -197,17 +201,22 @@ fn test_circuit1a_real_proof() {
     ) {
         Ok(ev) => ev,
         Err(e) => {
-            println!("SKIPPING: attestation not available for block {}: {}", target_seq, e);
+            println!(
+                "SKIPPING: attestation not available for block {}: {}",
+                target_seq, e
+            );
             return;
-        }
+        },
     };
 
     let attestation = match ev {
         bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Primary(p) => p,
-        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback { .. } => {
+        bridge_gql_fetcher::attestation_fetcher::AttestationEvidence::Fallback {
+            ..
+        } => {
             println!("SKIPPING: got fallback attestation");
             return;
-        }
+        },
     };
 
     // Check signers in BK set.
@@ -232,13 +241,9 @@ fn test_circuit1a_real_proof() {
     let last_seen = target_seq.saturating_sub(1);
     println!("generating Circuit 1a proof (last_seen={})...", last_seen);
     let t = Instant::now();
-    let proof_output = prover::generate_primary_proof(
-        &key_manager,
-        &attestation.raw_bytes,
-        &bk_set,
-        last_seen,
-    )
-    .unwrap();
+    let proof_output =
+        prover::generate_primary_proof(&key_manager, &attestation.raw_bytes, &bk_set, last_seen)
+            .unwrap();
     let proof_time = t.elapsed();
     println!("[timing] Circuit 1a proof generation: {:?}", proof_time);
     println!("proof size: {} bytes", proof_output.proof_bytes.len());
@@ -252,11 +257,8 @@ fn test_circuit1a_real_proof() {
     ];
 
     let t = Instant::now();
-    let verified = verifier::verify_primary_proof(
-        &key_manager,
-        &proof_output.proof_bytes,
-        &instances,
-    );
+    let verified =
+        verifier::verify_primary_proof(&key_manager, &proof_output.proof_bytes, &instances);
     let verify_time = t.elapsed();
     println!("[timing] Circuit 1a verification: {:?}", verify_time);
 
@@ -283,7 +285,10 @@ fn test_circuit2_keygen() {
     // Verify VK is loaded in memory and PK exists on disk. `ensure_keys`
     // intentionally drops the PK from memory after keygen — call
     // `key_manager.layer.load_pk()` if you need it back.
-    assert!(key_manager.layer.vk_opt().is_some(), "layer VK should be loaded");
+    assert!(
+        key_manager.layer.vk_opt().is_some(),
+        "layer VK should be loaded"
+    );
     assert!(
         key_manager.params_dir.join("layer_pk.bin").exists(),
         "layer PK should be cached on disk"

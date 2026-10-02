@@ -441,7 +441,31 @@ def deploy_contract(
         time.sleep(10)
 
 
+GIVER_SEND_METHODS = (
+    "sendTransaction",
+    "sendCurrency",
+    "sendWithBody",
+    "sendCurrencyWithFlag",
+    "sendCurrencyWithBody",
+    "sendFreeToken",
+)
+
+
 def call_contract(address: str, abi: str, keys: str|None, method: str, params=None, print_output=False) -> dict:
+    # GiverV3 cross-DApp upgrade: the 5 classic send methods now take a trailing
+    # `dapp_id` arg prokinutyi into `dest.transfer({..., dest_dapp_id: ...})`.
+    # Default to "0" (DEFAULT_DAPP_ID) so legacy callers keep working; callers
+    # that need cross-DApp routing pass `dapp_id` explicitly.
+    # NB: dapp_id must be serialized as a decimal string — tvm-cli rejects the
+    # bare JSON numeric form once the value exceeds ~1e16 (gets emitted as a
+    # scientific-notation float, which it cannot parse into a uint256).
+    if "GiverV3" in abi and method in GIVER_SEND_METHODS:
+        if params is None:
+            params = {}
+        if isinstance(params, dict):
+            params = dict(params)
+            params["dapp_id"] = str(params.get("dapp_id", 0))
+
     if isinstance(params, dict) or params is None:
         params = format_params(params)
 

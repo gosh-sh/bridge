@@ -194,9 +194,9 @@ fn main() -> anyhow::Result<()> {
     km.unload_primary_pk();
 
     // ------------------------------------------------------------------
-    // 3. Circuit 1B (Fallback attestation) — K=21 (SHPLONK-production degree;
-    //    the shared K=21 KZG SRS on `KeyManager` also covers the K=20 primary
-    //    and K=17 layer circuits).
+    // 3. Circuit 1B (Fallback attestation) — K=21 (SHPLONK-production degree; the
+    //    shared K=21 KZG SRS on `KeyManager` also covers the K=20 primary and K=17
+    //    layer circuits).
     //
     //    Drives `FallbackAttestationBlsCheckerCircuit` against the same
     //    `bound.attestation_primary_bytes` *and* the freshly-signed
@@ -248,9 +248,9 @@ fn main() -> anyhow::Result<()> {
     km.unload_fallback_pk();
 
     // ------------------------------------------------------------------
-    // 4. Circuit 2 (Layer hashes movement) — K=17. `ensure_layer_keys` builds
-    //    its own synthetic reference witness internally (correct shape at
-    //    production tree depth), so no reference witness is threaded here.
+    // 4. Circuit 2 (Layer hashes movement) — K=17. `ensure_layer_keys` builds its
+    //    own synthetic reference witness internally (correct shape at production
+    //    tree depth), so no reference witness is threaded here.
     // ------------------------------------------------------------------
     km.ensure_layer_keys()
         .context("ensure layer-hashes keys failed")?;

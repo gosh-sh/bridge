@@ -46,7 +46,7 @@ of them, and stage 1 refuses without them — before anything is broadcast.
   repository's `scripts/deploy_msig_and_mint.sh` deploys one and seeds it
   with 1 USDC — that one needs a checkout and `tvm-cli`, neither of which a
   withdrawal does.)
-- **A Sepolia wallet with ~0.02 ETH** to pay for `withdrawByProof`. Use a
+- **A Sepolia wallet with ~0.02 ETH** to pay for `withdrawByProofBundle`. Use a
   fresh, disposable one — never a wallet holding real funds.
 
 ## 3. Set your values
@@ -116,7 +116,7 @@ Six stages, and the log names each one:
 | 4 capture | finds your `WithdrawalInitiated` event | ~2 s |
 | 4b coverage | waits for the bundle covering your block | **~45–91 min** |
 | 5 prove | Circuit-4 proof and SHPLONK aggregation | ~3–20 min |
-| 6 submit | `withdrawByProof` on the EVM chain | ~30 s |
+| 6 submit | `withdrawByProofBundle` on the EVM chain | ~30 s |
 
 Stage 4b is the wait. Leave it running.
 
@@ -130,7 +130,7 @@ Stage 4b is the wait. Leave it running.
 | 10 | do not treat this withdrawal as untouched | may be burned |
 | 11 | burned, the event was not captured in time | burned |
 | 12 | burned, the proof failed | burned |
-| 13 | burned, `withdrawByProof` reverted | burned |
+| 13 | burned, `withdrawByProofBundle` reverted | burned |
 
 **Codes 2 and 3 are safe.** Fix what the message names and run again.
 

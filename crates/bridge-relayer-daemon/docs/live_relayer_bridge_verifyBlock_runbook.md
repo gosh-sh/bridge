@@ -34,8 +34,12 @@ Live BK set (5 signers, fixed from genesis) is committed at
 - SHA-256 of `bk_set.shellnet.json` (tamper-detection):
   `c77e3d6de5e6ea8ee96c6902f1b6ecb011bba2d631e76fa546e44ee67173898f`
 
-Event-level withdrawal proofs (Circuit 4 / `withdrawByProof`) are **out of scope** — that path is
-covered in [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
+Event-level withdrawal proofs (Circuit 4 FinalProof + optional MultiHop
+hops, submitted through `withdrawByProofBundle`) are **out of scope** —
+that path is covered in
+[`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
+The file keeps its `withdrawByProof` name for git-history continuity;
+the on-chain entry-point is `withdrawByProofBundle`.
 
 > **Notation.** `seq_no` is the Acki Nacki block sequence number.
 > A **key block** is a block at height `seq_no`, where `seq_no % W == 0` (producer-side,
@@ -62,7 +66,7 @@ system viable:
   therefore how often a user can withdraw.
   - `L1` (stride `W·P = 1024`, ~5 min shellnet-time) — every bundle is
     an anchor. Convenient for one-fire-and-withdraw E2E tests and CI:
-    a user's `withdrawByProof` becomes provable faster within one bundle cycle.
+    a user's `withdrawByProofBundle` becomes provable faster within one bundle cycle.
     Used for all dev/iteration work here. About 30-50 minutes per test.
   - `L2` (stride `W² = 16384`, ~91 min shellnet-time) — the production
     variant. Thinning does **not** apply here: the daemon proves one
@@ -72,7 +76,7 @@ system viable:
     withdrawal to become provable — a *constant* cadence — in exchange
     for far fewer on-chain writes and lower gas.
 
-Operational impact on `withdrawByProof` is detailed in
+Operational impact on `withdrawByProofBundle` is detailed in
 [`live_withdrawByProof_runbook.md`](live_withdrawByProof_runbook.md).
 
 > **Runtime layout.** For a long-running L2 server, use the production
@@ -245,6 +249,31 @@ Passing any `--k` replaces the program's default set, so list all five values;
 `--k 22` alone would provision only K=22. Pin and verify the resulting artifact
 manifest before starting a production container.
 
+### Step 3.5 — Offline keygen (optional but recommended)
+
+Both bundle-lane circuits (`BridgeEventFinalProof` at K=19,
+`BridgeMultiHopProof` at K=17) build their proving keys deterministically
+from the SRS + a per-circuit revision counter (see
+`bridge_prover_lib::keys::{EventKeyManager, MultiHopKeyManager}`). If you
+skip this step the daemon runs keygen synchronously on first launch: ~7 min
+at K=19 with RSS >10 GB, blocking the read loop the whole time. Running
+the keygen bins now produces the same on-disk artefacts (`event_pk.bin`,
+`multi_hop_pk.bin`, `*_manifest.json`) that the daemon would produce and
+warm-caches them under `$BRIDGE_PARAMS_DIR`.
+
+```bash
+# Requires kzg_bn254_{17,19}.srs already present in $BRIDGE_PARAMS_DIR
+# (produced by Step 3 above). ≥20 GB free needed for both PKs.
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_final -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_multi_hop -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+```
+
+Both bins are idempotent (warm cache → info log + exit 0) and `flock`-guarded
+on their own lockfiles, so re-running alongside a live daemon is safe. See
+`MULTITHREAD_MIGRATION_PLAN.md` §8 (Commit-7 context).
+
 ### Step 4 — Source the mode env file
 
 ```bash
@@ -350,12 +379,19 @@ Faucets that require depositing ≥0.001 ETH on mainnet first (Alchemy /
 Infura / QuickNode) are usable once you're funded; they hand out
 0.05–0.5 ETH/day and are the practical top-up path after bootstrap.
 
-**Budget.** The one-shot deploy creates six logical components
-(`AckiNackiBridge`, four verifier lanes and `MockBlockHeaderOracle`) through
-14 physical `CREATE` transactions (the four lanes each include adapter,
-wrapper and Yul verifier). It cost **0.063 ETH** on 2026-08-13 (30M gas @
-2.1 gwei). Add a running budget of ~0.001–0.003 ETH per `verifyBlock`
-submit (one per bundle stride — 1024 blocks in L1 mode, 16384 in L2).
+**Budget.** The one-shot deploy creates seven logical components
+(`AckiNackiBridge`, **five** aggregator verifiers — primary Circuit 1A,
+fallback Circuit 1B, layer-hashes Circuit 2, withdrawal-final Circuit 4,
+and the multi-hop cross-thread verifier — plus `MockBlockHeaderOracle`)
+through 17 physical `CREATE` transactions (each of the five lanes includes
+adapter, wrapper and Yul verifier). The 2026-08-13 measurement of
+**0.063 ETH** (30M gas @ 2.1 gwei) was captured before the multi-hop lane
+was added; today's deploy is closer to **~0.075 ETH** at the same gas
+price. Add a running budget of ~0.001–0.003 ETH per `verifyBlock` submit
+(one per bundle stride — 1024 blocks in L1 mode, 16384 in L2), plus
+~0.002–0.008 ETH per `withdrawByProofBundle` (same-thread claims are on
+the low end; cross-thread claims that carry a non-empty hop-chain cost
+proportionally more).
 **Target ≥ 0.1 ETH before deploy**, ≥ 0.5 ETH for a multi-day E2E run.
 The [Health checks](#health-checks-run-any-time) block includes a
 wallet-balance line — refill from either faucet when it drops below

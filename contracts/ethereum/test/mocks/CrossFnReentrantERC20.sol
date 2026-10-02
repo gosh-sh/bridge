@@ -3,7 +3,6 @@ pragma solidity ^0.8.19;
 
 import "./MockERC20.sol";
 import "../../src/AckiNackiBridge.sol";
-import "../../src/IBridgeWithdrawalVerifier.sol";
 
 /// @title CrossFnReentrantERC20
 /// @notice Malicious ERC20: reenters a wired bridge entrypoint from `transferFrom`.
@@ -15,7 +14,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
         Deposit,
         VerifyBlock,
         ApplyBkSetUpdate,
-        WithdrawByProof,
+        WithdrawByProofBundle,
         SupplyToAave,
         WithdrawFromAave,
         EmergencyWithdrawAll,
@@ -48,9 +47,11 @@ contract CrossFnReentrantERC20 is MockERC20 {
     bytes32 internal bkSib4_7;
     bytes32 internal bkSib8_15;
 
-    // withdrawByProof reenter bundle
-    bytes internal wdProof;
-    IBridgeWithdrawalVerifier.WithdrawalPublicInputs internal wdPub;
+    // withdrawByProofBundle reenter bundle
+    uint256[] internal wdFinalPublicInputs;
+    bytes internal wdFinalProof;
+    uint256[][] internal wdHopPublicInputs;
+    bytes[] internal wdHopProofs;
 
     constructor() MockERC20("X", "X", 6) { }
 
@@ -108,14 +109,24 @@ contract CrossFnReentrantERC20 is MockERC20 {
         bkSib8_15 = sib8_15;
     }
 
-    function wireWithdrawByProof(
-        bytes calldata proof,
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
+    function wireWithdrawByProofBundle(
+        uint256[] calldata finalPublicInputs,
+        bytes calldata finalProof,
+        uint256[][] calldata hopPublicInputs,
+        bytes[] calldata hopProofs
     ) external {
         armed = true;
-        target = CrossFnTarget.WithdrawByProof;
-        wdProof = proof;
-        wdPub = pub;
+        target = CrossFnTarget.WithdrawByProofBundle;
+        wdFinalPublicInputs = finalPublicInputs;
+        wdFinalProof = finalProof;
+        delete wdHopPublicInputs;
+        for (uint256 i = 0; i < hopPublicInputs.length; i++) {
+            wdHopPublicInputs.push(hopPublicInputs[i]);
+        }
+        delete wdHopProofs;
+        for (uint256 i = 0; i < hopProofs.length; i++) {
+            wdHopProofs.push(hopProofs[i]);
+        }
     }
 
     function wireOwnerTarget(CrossFnTarget t, uint256 amount) external {
@@ -174,8 +185,10 @@ contract CrossFnReentrantERC20 is MockERC20 {
                 bkSib4_7,
                 bkSib8_15
             );
-        } else if (target == CrossFnTarget.WithdrawByProof) {
-            bridge.withdrawByProof(wdProof, wdPub);
+        } else if (target == CrossFnTarget.WithdrawByProofBundle) {
+            bridge.withdrawByProofBundle(
+                wdFinalPublicInputs, wdFinalProof, wdHopPublicInputs, wdHopProofs
+            );
         } else if (target == CrossFnTarget.SupplyToAave) {
             bridge.supplyToAave(reenterAmount);
         } else if (target == CrossFnTarget.WithdrawFromAave) {

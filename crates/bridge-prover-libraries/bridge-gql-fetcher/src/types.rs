@@ -15,7 +15,10 @@ pub struct AccountRouting {
 
 impl AccountRouting {
     pub fn new(dapp_id: [u8; 32], account_id: [u8; 32]) -> Self {
-        Self { dapp_id, account_id }
+        Self {
+            dapp_id,
+            account_id,
+        }
     }
 
     pub fn unpack_for_hash(&self) -> ([u8; 32], [u8; 32]) {
@@ -28,16 +31,26 @@ impl FromStr for AccountRouting {
 
     /// Accepts both encodings the node may emit:
     ///   * `"hexdapp::hexaccount"` (64 hex chars `::` 64 hex chars)
-    ///   * 128 hex chars without separator (dapp || account)
-    ///     Also tolerates the redirect form `"::hexaccount"` (dapp = account).
+    ///   * 128 hex chars without separator (dapp || account) Also tolerates the
+    ///     redirect form `"::hexaccount"` (dapp = account).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some((dapp, account)) = s.split_once("::") {
             let account_id = decode_32(account)?;
-            let dapp_id = if dapp.is_empty() { account_id } else { decode_32(dapp)? };
-            Ok(Self { dapp_id, account_id })
+            let dapp_id = if dapp.is_empty() {
+                account_id
+            } else {
+                decode_32(dapp)?
+            };
+            Ok(Self {
+                dapp_id,
+                account_id,
+            })
         } else if s.len() == 128 && s.chars().all(|c| c.is_ascii_hexdigit()) {
             let (dapp, account) = s.split_at(64);
-            Ok(Self { dapp_id: decode_32(dapp)?, account_id: decode_32(account)? })
+            Ok(Self {
+                dapp_id: decode_32(dapp)?,
+                account_id: decode_32(account)?,
+            })
         } else {
             Err(anyhow::anyhow!("Invalid account routing [{s}]"))
         }
@@ -46,7 +59,12 @@ impl FromStr for AccountRouting {
 
 impl std::fmt::Display for AccountRouting {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}::{}", hex::encode(self.dapp_id), hex::encode(self.account_id))
+        write!(
+            f,
+            "{}::{}",
+            hex::encode(self.dapp_id),
+            hex::encode(self.account_id)
+        )
     }
 }
 
@@ -56,7 +74,7 @@ fn decode_32(s: &str) -> anyhow::Result<[u8; 32]> {
     Ok(out)
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ThreadIdentifier([u8; 34]);
 
 impl Default for ThreadIdentifier {

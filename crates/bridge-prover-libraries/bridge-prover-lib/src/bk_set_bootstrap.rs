@@ -13,14 +13,12 @@
 //! explicit argument. See [`resolve_bk_set_config_path`] for the shared
 //! env-based resolver the prover-daemon uses.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Context};
-use tracing::info;
-
 use bridge_gql_fetcher::gql_client::GqlClient;
 use bridge_poseidon as poseidon;
+use tracing::info;
 
 use crate::prover_bk_set::ProverBkSet;
 
@@ -36,14 +34,13 @@ pub const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
 
 /// Env var selecting the bootstrap mode. Values:
 ///
-///   - `file` (default): treat the JSON file as the current BK set. Correct
-///     on fresh chains and on rotating chains booted from genesis.
+///   - `file` (default): treat the JSON file as the current BK set. Correct on
+///     fresh chains and on rotating chains booted from genesis.
 ///   - `fold_at_height`: treat the JSON file as the *genesis* snapshot and
 ///     apply all `bkSetUpdates` up to [`ENV_BK_SET_TARGET_SEQNO`] (or the
-///     caller-supplied `explicit_bootstrap_seqno` if that env is unset)
-///     via `bk_set_at_height`. Use this when cold-starting the daemon
-///     against a long-running chain whose committee has rotated many
-///     times since genesis.
+///     caller-supplied `explicit_bootstrap_seqno` if that env is unset) via
+///     `bk_set_at_height`. Use this when cold-starting the daemon against a
+///     long-running chain whose committee has rotated many times since genesis.
 ///
 /// Consulted only on first bootstrap; a persisted `prover_bk_set.json` is
 /// the source of truth on Resume regardless of this setting.
@@ -64,10 +61,10 @@ pub fn resolve_bk_set_config_path() -> String {
 
 /// Load the initial BK set. Mode is selected via [`ENV_BK_SET_BOOTSTRAP`]:
 ///
-///   - `file` (default): read JSON at `bk_set_config` verbatim — correct
-///     for fresh chains and for cold starts anchored at genesis.
-///   - `fold_at_height`: read JSON as the *genesis* snapshot, then apply
-///     all `bkSetUpdates` up to [`ENV_BK_SET_TARGET_SEQNO`] (falls back to
+///   - `file` (default): read JSON at `bk_set_config` verbatim — correct for
+///     fresh chains and for cold starts anchored at genesis.
+///   - `fold_at_height`: read JSON as the *genesis* snapshot, then apply all
+///     `bkSetUpdates` up to [`ENV_BK_SET_TARGET_SEQNO`] (falls back to
 ///     `explicit_bootstrap_seqno` if unset) via
 ///     `bk_set_fetcher::bk_set_at_height`.
 ///
@@ -90,7 +87,7 @@ pub async fn load_bk_set(
                 bk_set_config
             );
             Ok(json)
-        }
+        },
         "fold_at_height" => {
             let target = match std::env::var(ENV_BK_SET_TARGET_SEQNO) {
                 Ok(s) => s.parse::<u64>().with_context(|| {
@@ -98,8 +95,8 @@ pub async fn load_bk_set(
                 })?,
                 Err(_) => explicit_bootstrap_seqno.ok_or_else(|| {
                     anyhow::format_err!(
-                        "BRIDGE_BK_SET_BOOTSTRAP=fold_at_height requires either \
-                         {} to be set or an explicit bootstrap_seqno to be passed in",
+                        "BRIDGE_BK_SET_BOOTSTRAP=fold_at_height requires either {} to be set or \
+                         an explicit bootstrap_seqno to be passed in",
                         ENV_BK_SET_TARGET_SEQNO,
                     )
                 })?,
@@ -112,7 +109,7 @@ pub async fn load_bk_set(
             bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height(gql, json, target)
                 .await
                 .with_context(|| format!("bk_set_at_height failed for target_height={}", target))
-        }
+        },
         other => bail!(
             "unknown {}='{}', expected 'file' or 'fold_at_height'",
             ENV_BK_SET_BOOTSTRAP,
@@ -128,24 +125,24 @@ pub async fn load_bk_set(
 ///
 /// Behaviour:
 /// * Match — silent pass.
-/// * File missing — silent pass (config was hand-set to a path we don't
-///   own; the runtime L2 check in `bk_update.rs` remains as a safety net).
-/// * Mismatch AND `last_applied_update_seq_no == 0` — BAIL. The daemon
-///   has never processed a rotation, so a fresh chain overwriting the
-///   seed file while `./state/` persisted from the previous chain
-///   instance is the overwhelmingly likely explanation.
-/// * Mismatch AND `last_applied_update_seq_no > 0` — INFO log only.
-///   Expected on any chain where BK rotation is enabled and the seed
-///   file is only the genesis snapshot; the daemon has legitimately
-///   moved past it via the bk-update lane.
+/// * File missing — silent pass (config was hand-set to a path we don't own;
+///   the runtime L2 check in `bk_update.rs` remains as a safety net).
+/// * Mismatch AND `last_applied_update_seq_no == 0` — BAIL. The daemon has
+///   never processed a rotation, so a fresh chain overwriting the seed file
+///   while `./state/` persisted from the previous chain instance is the
+///   overwhelmingly likely explanation.
+/// * Mismatch AND `last_applied_update_seq_no > 0` — INFO log only. Expected on
+///   any chain where BK rotation is enabled and the seed file is only the
+///   genesis snapshot; the daemon has legitimately moved past it via the
+///   bk-update lane.
 pub fn verify_prover_bk_set_matches_config_file(
     bk_set_config: &str,
     prover_bk_set: &ProverBkSet,
 ) -> anyhow::Result<()> {
     if !Path::new(bk_set_config).exists() {
         info!(
-            "chain-config check skipped: {} not found (this is fine on \
-             warm restarts where the file is intentionally absent)",
+            "chain-config check skipped: {} not found (this is fine on warm restarts where the \
+             file is intentionally absent)",
             bk_set_config,
         );
         return Ok(());
@@ -162,15 +159,11 @@ pub fn verify_prover_bk_set_matches_config_file(
     }
     if prover_bk_set.last_applied_update_seq_no == 0 {
         anyhow::bail!(
-            "chain-config check FAILED:\n  \
-             {} commitment: {}\n  \
-             prover_bk_set:      {}\n\
-             prover_bk_set.last_applied_update_seq_no == 0 — the daemon \
-             has never processed a rotation, so this almost certainly \
-             means the chain was re-initialised (fresh devnet zerostate \
-             rewrote {}) while ./state/ persisted from the previous \
-             chain instance. Wipe ./state/ and restart, or restore the \
-             paired {} from backup.",
+            "chain-config check FAILED:\n  {} commitment: {}\n  prover_bk_set:      \
+             {}\nprover_bk_set.last_applied_update_seq_no == 0 — the daemon has never processed a \
+             rotation, so this almost certainly means the chain was re-initialised (fresh devnet \
+             zerostate rewrote {}) while ./state/ persisted from the previous chain instance. \
+             Wipe ./state/ and restart, or restore the paired {} from backup.",
             bk_set_config,
             hex::encode(file_commitment),
             hex::encode(prover_bk_set.commitment),
@@ -179,8 +172,8 @@ pub fn verify_prover_bk_set_matches_config_file(
         );
     }
     info!(
-        "chain-config check: {} commitment {} != prover_bk_set {} (cursor {}) \
-         — daemon has rotated past the genesis snapshot; not an issue",
+        "chain-config check: {} commitment {} != prover_bk_set {} (cursor {}) — daemon has \
+         rotated past the genesis snapshot; not an issue",
         bk_set_config,
         hex::encode(file_commitment),
         hex::encode(prover_bk_set.commitment),

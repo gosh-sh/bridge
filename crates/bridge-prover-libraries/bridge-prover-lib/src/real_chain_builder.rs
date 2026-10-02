@@ -9,38 +9,39 @@
 //!
 //! The daemon proves one key block every `W · P` blocks (`W = 128`,
 //! `P = 8` → 1024-block cadence). Circuit 2 requires the chain to end at the
-//! target block's top-layer root: `chain_result == layer_hash_frs[num_layers-1]`.
+//! target block's top-layer root: `chain_result ==
+//! layer_hash_frs[num_layers-1]`.
 //!
 //! Two cases occur under this cadence:
 //!
 //! * **Same-layer bundle** (`num_layers == prev_num_layers`) — the common case
 //!   (~15 out of every 16 bundles). Chain **exactly `P = 8` layer-1 rungs** via
 //!   [`build_chain_same_layer`], connecting the prev proved block's L1 root to
-//!   the target block's `layer_hashes_preimage[0]` (also an L1 root). Each
-//!   rung proves the L1 evolution over W blocks explicitly.
+//!   the target block's `layer_hashes_preimage[0]` (also an L1 root). Each rung
+//!   proves the L1 evolution over W blocks explicitly.
 //!
 //! * **New-layer bundle** (`num_layers > prev_num_layers`) — fires at every
 //!   `W^L` boundary (with L = 2 that is every W² = 16384 blocks, i.e. every
-//!   16th bundle at P = 8; L = 3 every W³ = 2_097_152 blocks; etc.). Chain **G =
-//!   num_layers − prev_num_layers rungs vertically** (one rung per new layer)
+//!   16th bundle at P = 8; L = 3 every W³ = 2_097_152 blocks; etc.). Chain **G
+//!   = num_layers − prev_num_layers rungs vertically** (one rung per new layer)
 //!   via [`build_chain_for_new_layer`]:
 //!     * Rung 1 — target's L(prev_num_layers+1) tree holds prev's
 //!       L(prev_num_layers) root as one of its `W` data leaves (positions
 //!       2..W+2); opening at that data-leaf position produces target's
 //!       L(prev_num_layers+1) root.
 //!     * Rungs 2..G — each intermediate L(L) tree at target carries target's
-//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`).
-//!       The source of truth for this layout is the acki-nacki node's
+//!       L(L−1) root at its LAST data-leaf position (index `2 + W − 1`). The
+//!       source of truth for this layout is the acki-nacki node's
 //!       `HistoryBlockData::calculate_root_hash` (the reference cited at
 //!       [`build_chain_for_new_layer`] line 368), which places the W L(L−1)
-//!       contributions of a target-L(L) tree in ascending seq_no order —
-//!       so target's own L(L−1) contribution lands in `data_leaves[W−1]` =
-//!       `leaves[2 + W − 1]`. Our [`build_layer_n_leaves`] mirrors that
-//!       order verbatim, and a runtime `ensure!` in
-//!       [`build_chain_for_new_layer`] (around line 430) checks the
-//!       correspondence for each rung — surfacing a loud parse error if
-//!       the node ever changes the layout. Every rung `L−1 → L` opens at
-//!       that fixed slot; each opening walks up exactly one layer.
+//!       contributions of a target-L(L) tree in ascending seq_no order — so
+//!       target's own L(L−1) contribution lands in `data_leaves[W−1]` =
+//!       `leaves[2 + W − 1]`. Our [`build_layer_n_leaves`] mirrors that order
+//!       verbatim, and a runtime `ensure!` in [`build_chain_for_new_layer`]
+//!       (around line 430) checks the correspondence for each rung — surfacing
+//!       a loud parse error if the node ever changes the layout. Every rung
+//!       `L−1 → L` opens at that fixed slot; each opening walks up exactly one
+//!       layer.
 //!   Under steady-state W·P cadence G is always 1 (single-layer jump per
 //!   bundle). G ≥ 2 only occurs on fresh mid-chain bootstrap that lands at a
 //!   compound boundary (e.g. seeding `layers=1` right before an L3 boundary,
@@ -49,37 +50,40 @@
 //!   testing.
 //!
 //! Endpoints (both cases):
-//!   * **start** = prev's max-level layer hash (`BridgeState::prev_max_level_layer_hash_for`)
+//!   * **start** = prev's max-level layer hash
+//!     (`BridgeState::prev_max_level_layer_hash_for`)
 //!   * **end**   = target's top-layer root (`layer_hash_frs[num_layers-1]`)
 //!
 //! # L1 tree layout per rung (W = 128)
-//!   Leaf [0]:        higher_layer_root (layer 2 root at prior L2 boundary, or zero)
-//!   Leaf [1]:        prev_same_layer_root (chain position; L1 root of the previous rung)
-//!   Leaf [2..130]:   block leaves — Poseidon(block_id ‖ envelope_hash ‖ ext_msg_root) × W
-//!   Leaf [130..256]: zero padding (to next power of 2)
-//! Total: 256 leaves, depth 8.
+//!   Leaf [0]:        higher_layer_root (layer 2 root at prior L2 boundary, or
+//! zero)   Leaf [1]:        prev_same_layer_root (chain position; L1 root of
+//! the previous rung)   Leaf [2..130]:   block leaves — Poseidon(block_id ‖
+//! envelope_hash ‖ ext_msg_root) × W   Leaf [130..256]: zero padding (to next
+//! power of 2) Total: 256 leaves, depth 8.
 //!
 //! # L(N≥2) tree layout (W = 128)
-//!   Leaf [0]:        higher_layer_root (layer N+1 root at prior L(N+1) boundary, or zero if none yet on chain)
-//!   Leaf [1]:        prev_same_layer_root (layer N root at prior L(N) boundary = `target - W^N`;
-//!                    zero ONLY when `target == W^N`, i.e., very first L(N) boundary ever on chain).
-//!                    NOTE: this is a property of the chain's tree construction; it is unrelated
-//!                    to whether the bridge state has observed any prior L(N) boundary.
-//!   Leaf [2..130]:   layer-(N-1) roots from W past L(N-1)-keyblocks
-//!   Leaf [130..256]: zero padding
-//! Same shape and depth as L1 → `DenseChainLink` padding stays consistent.
+//!   Leaf [0]:        higher_layer_root (layer N+1 root at prior L(N+1)
+//! boundary, or zero if none yet on chain)   Leaf [1]:
+//! prev_same_layer_root (layer N root at prior L(N) boundary = `target - W^N`;
+//!                    zero ONLY when `target == W^N`, i.e., very first L(N)
+//! boundary ever on chain).                    NOTE: this is a property of the
+//! chain's tree construction; it is unrelated                    to whether the
+//! bridge state has observed any prior L(N) boundary.   Leaf [2..130]:
+//! layer-(N-1) roots from W past L(N-1)-keyblocks   Leaf [130..256]: zero
+//! padding Same shape and depth as L1 → `DenseChainLink` padding stays
+//! consistent.
 
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context};
+use bridge_gql_fetcher::gql_client::GqlClient;
 use gosh_dense_balanced_tree::DenseChainLink;
 use tracing::{info, warn};
 
-use crate::bridge_state::{BridgeState, MAX_LAYERS};
-use crate::chain_proof_builder::{
-    self, build_chain_proofs, pad_leaves_to_power_of_2, LayerTreeData,
+use crate::{
+    bridge_state::{BridgeState, MAX_LAYERS},
+    chain_proof_builder::{self, build_chain_proofs, pad_leaves_to_power_of_2, LayerTreeData},
 };
-use bridge_gql_fetcher::gql_client::GqlClient;
 
 /// Result of building chain proofs from real block data.
 pub struct RealChainResult {
@@ -102,11 +106,11 @@ pub struct RealChainResult {
 ///   vertically via [`build_chain_for_new_layer`]. G = 1 is the steady-state
 ///   case (prev L(N) root sits at a data leaf of target's L(N+1) tree). G ≥ 2
 ///   only occurs on fresh mid-chain bootstrap landing at a compound boundary
-///   (e.g. seeding `layers=1` right before an L3 boundary — which is also an
-///   L2 and L1 boundary, giving a 1→3 jump). Under W·P steady-state cadence
-///   at most one W^L boundary can be crossed per bundle, so G ≥ 2 is logged
-///   loudly as it usually means fresh-bootstrap; a mid-run occurrence would
-///   indicate the bridge state skipped an update.
+///   (e.g. seeding `layers=1` right before an L3 boundary — which is also an L2
+///   and L1 boundary, giving a 1→3 jump). Under W·P steady-state cadence at
+///   most one W^L boundary can be crossed per bundle, so G ≥ 2 is logged loudly
+///   as it usually means fresh-bootstrap; a mid-run occurrence would indicate
+///   the bridge state skipped an update.
 pub async fn build_real_chain(
     gql: &GqlClient,
     state: &BridgeState,
@@ -125,10 +129,12 @@ pub async fn build_real_chain(
     // end = target's top-layer root (= layer_hash_frs[num_layers-1]).
     let target_hash = *target_history_proofs
         .get(&(num_layers as u8))
-        .ok_or_else(|| anyhow::format_err!(
-            "target block missing top layer {} in history_proofs",
-            num_layers
-        ))?;
+        .ok_or_else(|| {
+            anyhow::format_err!(
+                "target block missing top layer {} in history_proofs",
+                num_layers
+            )
+        })?;
 
     info!(
         "building real chain: num_layers={}, prev_num_layers={}, prev_top={}, target_top={}",
@@ -203,10 +209,11 @@ async fn build_chain_same_layer_n(
     // release too; caller (`chain_proof_builder`) propagates the error.
     ensure!(
         num_steps == 1,
-        "Case D (L{} same-layer) must produce exactly 1 chain step, got {} \
-         — driver dispatched Case D at a mis-aligned target or \
-         build_chain_proofs disagreed with build_layer_n_tree on step count",
-        layer, num_steps,
+        "Case D (L{} same-layer) must produce exactly 1 chain step, got {} — driver dispatched \
+         Case D at a mis-aligned target or build_chain_proofs disagreed with build_layer_n_tree \
+         on step count",
+        layer,
+        num_steps,
     );
 
     Ok(RealChainResult {
@@ -242,12 +249,10 @@ async fn build_chain_same_layer(
     let prev_num_layers = state.num_active_layers();
     if prev_num_layers >= 2 {
         warn!(
-            "build_chain_same_layer (L1-only path) fired with num_active_layers={} — \
-             expected 1. Driver likely mis-picked target under L2 anchoring; \
-             expect on-chain PrevAnchorMismatch. target_seqno={}, prev_seqno={}",
-            prev_num_layers,
-            target_seqno,
-            state.stored_last_seen_block_seq_no,
+            "build_chain_same_layer (L1-only path) fired with num_active_layers={} — expected 1. \
+             Driver likely mis-picked target under L2 anchoring; expect on-chain \
+             PrevAnchorMismatch. target_seqno={}, prev_seqno={}",
+            prev_num_layers, target_seqno, state.stored_last_seen_block_seq_no,
         );
     }
 
@@ -267,8 +272,7 @@ async fn build_chain_same_layer(
     );
     ensure!(
         prev_seqno % step_size == 0,
-        "prev_seqno {} not aligned to L1 step {} (bridge state stored a \
-         non-key-block seqno)",
+        "prev_seqno {} not aligned to L1 step {} (bridge state stored a non-key-block seqno)",
         prev_seqno,
         step_size,
     );
@@ -297,9 +301,12 @@ async fn build_chain_same_layer(
     // both same-file invariants have the same strength in release builds.
     ensure!(
         !key_seqnos.is_empty() && key_seqnos.last().copied() == Some(target_seqno),
-        "L1 walk did not end at target_seqno by construction: \
-         prev_seqno={}, target_seqno={}, step_size={}, walk={:?}",
-        prev_seqno, target_seqno, step_size, key_seqnos,
+        "L1 walk did not end at target_seqno by construction: prev_seqno={}, target_seqno={}, \
+         step_size={}, walk={:?}",
+        prev_seqno,
+        target_seqno,
+        step_size,
+        key_seqnos,
     );
 
     if key_seqnos.len() > gosh_dense_balanced_tree::MAX_CHAIN_LEN {
@@ -328,10 +335,16 @@ async fn build_chain_same_layer(
             .with_context(|| format!("building layer 1 tree at seq={}", key_seq))?;
 
         // The root of this tree becomes the chain_leaf_value for the next step.
-        let (root, _) = chain_proof_builder::build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
+        let (root, _) =
+            chain_proof_builder::build_tree_and_proof(&tree.leaves, tree.chain_leaf_position);
 
         // Log leaves and computed root for debugging tree reconstruction.
-        info!("  tree at seq={}: {} leaves, chain_pos={}", key_seq, tree.leaves.len(), tree.chain_leaf_position);
+        info!(
+            "  tree at seq={}: {} leaves, chain_pos={}",
+            key_seq,
+            tree.leaves.len(),
+            tree.chain_leaf_position
+        );
         for (i, l) in tree.leaves.iter().enumerate() {
             info!("    leaf[{}]: {}", i, hex::encode(l));
         }
@@ -363,18 +376,17 @@ async fn build_chain_same_layer(
 /// Walks the chain **vertically** with `G = num_layers − prev_num_layers`
 /// rungs, one per new layer:
 ///
-///   * Rung 1 (`layer = prev_num_layers + 1`): chain leaf = `prev_hash`, at
-///     the data-leaf position where prev's L(prev_num_layers) root appears in
-///     target's L(prev_num_layers+1) tree. Under W·P cadence
-///     `prev_seqno = target − P·W`, so the inclusion slot is deterministic
-///     (leaf index `2 + (W − 1 − (P − 1))`).
+///   * Rung 1 (`layer = prev_num_layers + 1`): chain leaf = `prev_hash`, at the
+///     data-leaf position where prev's L(prev_num_layers) root appears in
+///     target's L(prev_num_layers+1) tree. Under W·P cadence `prev_seqno =
+///     target − P·W`, so the inclusion slot is deterministic (leaf index `2 +
+///     (W − 1 − (P − 1))`).
 ///   * Rungs 2..G (`layer = prev_num_layers + 1 + k`): chain leaf = target's
-///     L(layer−1) root, at the LAST data-leaf position (index `2 + W − 1`).
-///     By canonical construction of `data_leaves` in
-///     [`build_layer_n_leaves`], `data_leaves[i]` is `fetch_layer_root(target
-///     − (W − 1 − i)·W^(layer−1), layer−1)`, so `data_leaves[W−1]` is
-///     `fetch_layer_root(target, layer−1)` — i.e., target's L(layer−1) root
-///     itself.
+///     L(layer−1) root, at the LAST data-leaf position (index `2 + W − 1`). By
+///     canonical construction of `data_leaves` in [`build_layer_n_leaves`],
+///     `data_leaves[i]` is `fetch_layer_root(target − (W − 1 − i)·W^(layer−1),
+///     layer−1)`, so `data_leaves[W−1]` is `fetch_layer_root(target, layer−1)`
+///     — i.e., target's L(layer−1) root itself.
 ///
 /// `build_chain_proofs` then produces one `DenseChainLink` per tree; Circuit
 /// 2 enforces `link[k+1].chain_leaf_value == link[k].computed_root`,
@@ -396,10 +408,10 @@ async fn build_chain_for_new_layer(
     let gap = num_layers - prev_num_layers;
     if gap >= 2 {
         warn!(
-            "multi-layer jump G={} (prev_num_layers={} → num_layers={}) at seq={} — \
-             not a steady-state W·P cadence scenario; expected only on fresh mid-chain \
-             bootstrap landing at a compound boundary. In production this would indicate \
-             the bridge state skipped an intervening update.",
+            "multi-layer jump G={} (prev_num_layers={} → num_layers={}) at seq={} — not a \
+             steady-state W·P cadence scenario; expected only on fresh mid-chain bootstrap \
+             landing at a compound boundary. In production this would indicate the bridge state \
+             skipped an intervening update.",
             gap, prev_num_layers, num_layers, target_seqno,
         );
     }
@@ -430,8 +442,12 @@ async fn build_chain_for_new_layer(
                     format!(
                         "fetching prev L{} root from block {} for L{} tree at seq={} \
                          (vertical-chain rung {}/{})",
-                        layer_num, prev_same_seqno, layer_num, target_seqno,
-                        step + 1, gap,
+                        layer_num,
+                        prev_same_seqno,
+                        layer_num,
+                        target_seqno,
+                        step + 1,
+                        gap,
                     )
                 })?
         } else {
@@ -440,7 +456,8 @@ async fn build_chain_for_new_layer(
 
         info!(
             "  rung {}/{}: L{} tree at seq={}, prev_same_root={} (prev L{} boundary={})",
-            step + 1, gap,
+            step + 1,
+            gap,
             layer_num,
             target_seqno,
             hex::encode(prev_same_root),
@@ -448,18 +465,18 @@ async fn build_chain_for_new_layer(
             target_seqno.saturating_sub(same_layer_step),
         );
 
-        let leaves = build_layer_n_leaves(
-            gql,
-            target_seqno,
-            layer_num,
-            prev_same_root,
-            window_size,
-        )
-        .await
-        .with_context(|| format!(
-            "building L{} leaves at seq={} (vertical-chain rung {}/{})",
-            layer_num, target_seqno, step + 1, gap,
-        ))?;
+        let leaves =
+            build_layer_n_leaves(gql, target_seqno, layer_num, prev_same_root, window_size)
+                .await
+                .with_context(|| {
+                    format!(
+                        "building L{} leaves at seq={} (vertical-chain rung {}/{})",
+                        layer_num,
+                        target_seqno,
+                        step + 1,
+                        gap,
+                    )
+                })?;
 
         let position = if step == 0 {
             // First rung: chain leaf = prev_hash sits at whichever data-leaf
@@ -471,8 +488,7 @@ async fn build_chain_for_new_layer(
                 .find_map(|(i, l)| (i >= 2 && *l == chain_leaf_value).then_some(i))
                 .ok_or_else(|| {
                     anyhow::format_err!(
-                        "prev_hash {} not found among L{} tree data leaves at seq={} \
-                         (rung 1/{})",
+                        "prev_hash {} not found among L{} tree data leaves at seq={} (rung 1/{})",
                         hex::encode(chain_leaf_value),
                         layer_num,
                         target_seqno,
@@ -485,8 +501,8 @@ async fn build_chain_for_new_layer(
             let last_data_position = 2 + window_size as usize - 1;
             ensure!(
                 leaves[last_data_position] == chain_leaf_value,
-                "L{} tree last data leaf {} != expected chain leaf {} at seq={} \
-                 (rung {}/{}); GQL data anomaly or canonical construction mismatch",
+                "L{} tree last data leaf {} != expected chain leaf {} at seq={} (rung {}/{}); GQL \
+                 data anomaly or canonical construction mismatch",
                 layer_num,
                 hex::encode(leaves[last_data_position]),
                 hex::encode(chain_leaf_value),
@@ -499,7 +515,10 @@ async fn build_chain_for_new_layer(
 
         info!(
             "  rung {}/{}: chain_leaf at position {} of {} leaves",
-            step + 1, gap, position, leaves.len(),
+            step + 1,
+            gap,
+            position,
+            leaves.len(),
         );
 
         trees.push(LayerTreeData {
@@ -516,10 +535,16 @@ async fn build_chain_for_new_layer(
         if step + 1 < gap {
             chain_leaf_value = fetch_layer_root(gql, target_seqno, layer_num)
                 .await
-                .with_context(|| format!(
-                    "fetching target's L{} root at seq={} for vertical-chain rung {}/{} seeding",
-                    layer_num, target_seqno, step + 2, gap,
-                ))?;
+                .with_context(|| {
+                    format!(
+                        "fetching target's L{} root at seq={} for vertical-chain rung {}/{} \
+                         seeding",
+                        layer_num,
+                        target_seqno,
+                        step + 2,
+                        gap,
+                    )
+                })?;
         }
     }
 
@@ -536,9 +561,9 @@ async fn build_chain_for_new_layer(
 ///
 /// Leaf layout (see crate-level docs for the concrete W=128 example):
 ///   [0]:         higher_layer_root (layer 2 root from this block, or zero)
-///   [1]:         prev_same_layer_root = chain_leaf_value (from previous key block)
-///   [2..W+2]:    Poseidon(block_id || envelope_hash || ext_msg_root) for the
-///                HISTORY_PROOF_WINDOW_SIZE (W) blocks in the window
+///   [1]:         prev_same_layer_root = chain_leaf_value (from previous key
+/// block)   [2..W+2]:    Poseidon(block_id || envelope_hash || ext_msg_root)
+/// for the                HISTORY_PROOF_WINDOW_SIZE (W) blocks in the window
 ///   [W+2..pow2]: zero padding (to next power of 2)
 pub async fn build_layer1_tree(
     gql: &GqlClient,
@@ -576,8 +601,8 @@ pub async fn build_layer1_tree(
         }
     };
 
-    // Fetch block metadata for the HISTORY_PROOF_WINDOW_SIZE (W) blocks in this window.
-    // Window for layer 1 at height H: blocks [H - W, ..., H - 1].
+    // Fetch block metadata for the HISTORY_PROOF_WINDOW_SIZE (W) blocks in this
+    // window. Window for layer 1 at height H: blocks [H - W, ..., H - 1].
     // The key block itself is NOT in the window — the window contains
     // the W blocks BEFORE the key block.
     let window_start = key_block_seqno - window_size;
@@ -621,14 +646,8 @@ async fn build_layer_n_tree(
     chain_leaf_value: [u8; 32],
     window_size: u64,
 ) -> anyhow::Result<LayerTreeData> {
-    let leaves = build_layer_n_leaves(
-        gql,
-        key_block_seqno,
-        layer,
-        chain_leaf_value,
-        window_size,
-    )
-    .await?;
+    let leaves =
+        build_layer_n_leaves(gql, key_block_seqno, layer, chain_leaf_value, window_size).await?;
 
     Ok(LayerTreeData {
         leaves,
@@ -681,8 +700,9 @@ async fn build_layer_n_leaves(
     let lower_layer = layer - 1;
     let lower_step = window_size.pow(lower_layer as u32);
 
-    // The HISTORY_PROOF_WINDOW_SIZE (W) key blocks contributing to this layer N tree:
-    // [key_block_seqno - (W-1)*lower_step, ..., key_block_seqno - lower_step, key_block_seqno]
+    // The HISTORY_PROOF_WINDOW_SIZE (W) key blocks contributing to this layer N
+    // tree: [key_block_seqno - (W-1)*lower_step, ..., key_block_seqno -
+    // lower_step, key_block_seqno]
     let mut data_leaves = Vec::with_capacity(window_size as usize);
     for i in 0..window_size {
         let offset = (window_size - 1 - i) * lower_step;
@@ -720,17 +740,16 @@ async fn build_layer_n_leaves(
 //
 // Two topologies are supported here:
 //
-// * `target_layer = 1` — horizontal L1 walk from `H_e` (event's W-aligned
-//   L1 KB) to `K` (the next W·P-aligned KB, which the verifier stores). The
-//   chain has ≤ P−1 active rungs. Wait time budget: up to W·P−1 blocks after
-//   the event before its K is proven.
+// * `target_layer = 1` — horizontal L1 walk from `H_e` (event's W-aligned L1
+//   KB) to `K` (the next W·P-aligned KB, which the verifier stores). The chain
+//   has ≤ P−1 active rungs. Wait time budget: up to W·P−1 blocks after the
+//   event before its K is proven.
 //
-// * `target_layer = n` (2 ≤ n ≤ MAX_LAYERS) — a stack of `n − 1` vertical
-//   rungs L1→L2, L2→L3, …, L(n−1)→L(n). Each rung `m → m+1` opens the
-//   L(m) root at `T_m` inside the L(m+1) tree at `T_{m+1}`, where
-//   `T_m = ⌈event_seq / W^m⌉·W^m` and `T_1 = H_e`. Wait time budget: up to
-//   `W^n − 1` blocks after the event. Terminates at the L(n) root the
-//   verifier mirrors at `T_n`.
+// * `target_layer = n` (2 ≤ n ≤ MAX_LAYERS) — a stack of `n − 1` vertical rungs
+//   L1→L2, L2→L3, …, L(n−1)→L(n). Each rung `m → m+1` opens the L(m) root at
+//   `T_m` inside the L(m+1) tree at `T_{m+1}`, where `T_m = ⌈event_seq /
+//   W^m⌉·W^m` and `T_1 = H_e`. Wait time budget: up to `W^n − 1` blocks after
+//   the event. Terminates at the L(n) root the verifier mirrors at `T_n`.
 
 /// Return value of [`build_event_anchor_chain`].
 pub struct EventAnchorChainResult {
@@ -738,7 +757,8 @@ pub struct EventAnchorChainResult {
     /// `DenseChainLink::inactive(final_chain_root, link_depth)`.
     pub active_links: Vec<DenseChainLink>,
     /// Root at the end of the chain. Should equal the verifier's mirrored
-    /// L(target_layer) root at `anchor_kb_seqno` when all inputs are consistent.
+    /// L(target_layer) root at `anchor_kb_seqno` when all inputs are
+    /// consistent.
     pub final_chain_root: [u8; 32],
     /// Depth of each link's Merkle proof (padded L1/L(N) tree depth).
     pub link_depth: usize,
@@ -767,10 +787,11 @@ pub async fn build_event_anchor_chain(
         1 => build_event_anchor_chain_l1(gql, event_seq, event_l1_root, w, thinning_factor_p).await,
         n if (2..=MAX_LAYERS as u8).contains(&n) => {
             build_event_anchor_chain_ln(gql, event_seq, event_l1_root, n, w).await
-        }
+        },
         n => bail!(
             "target_layer={} out of range: must be in 1..={} (MAX_LAYERS).",
-            n, MAX_LAYERS,
+            n,
+            MAX_LAYERS,
         ),
     }
 }
@@ -778,22 +799,21 @@ pub async fn build_event_anchor_chain(
 /// Pure boundary math for L1 event anchoring.
 ///
 /// Given an event's block seq_no, returns the triple `(H_e, K, hops)`:
-/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1
-///   root of the batch containing `event_seq` is emitted. Per the History-
-///   proofs proposal (§ "Construct the Layer 1 Batch Proof" and the
-///   L1 example), batch `M` covers block heights `[M·W, (M+1)·W − 1]`
-///   and its root `#L1(M)` is stored **in the common section of the
-///   first block of batch M+1**, which sits at height `(M+1)·W`. With
-///   `M = ⌊event_seq/W⌋`, that height is exactly what the code computes.
-///   Note this is *not* `⌈event_seq/W⌉·W`: when `event_seq` is itself
-///   the first block of a batch (a KB, `event_seq % W == 0`), the
-///   ceiling formula returns `event_seq` itself — the tree whose root
+/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1 root of
+///   the batch containing `event_seq` is emitted. Per the History- proofs
+///   proposal (§ "Construct the Layer 1 Batch Proof" and the L1 example), batch
+///   `M` covers block heights `[M·W, (M+1)·W − 1]` and its root `#L1(M)` is
+///   stored **in the common section of the first block of batch M+1**, which
+///   sits at height `(M+1)·W`. With `M = ⌊event_seq/W⌋`, that height is exactly
+///   what the code computes. Note this is *not* `⌈event_seq/W⌉·W`: when
+///   `event_seq` is itself the first block of a batch (a KB, `event_seq % W ==
+///   0`), the ceiling formula returns `event_seq` itself — the tree whose root
 ///   sits *there* covers the previous batch `[event_seq − W, event_seq − 1]`
 ///   and does NOT include the event. We must advance to the next KB.
-/// * `K = ⌊event_seq/(W·P)⌋·(W·P) + (W·P)` — seq_no of the next thinned
-///   L1 anchor the verifier mirrors on-chain (the verifier stores L1
-///   roots at every W·P-th KB, not every KB). Same "strictly next
-///   multiple" pattern as `H_e`.
+/// * `K = ⌊event_seq/(W·P)⌋·(W·P) + (W·P)` — seq_no of the next thinned L1
+///   anchor the verifier mirrors on-chain (the verifier stores L1 roots at
+///   every W·P-th KB, not every KB). Same "strictly next multiple" pattern as
+///   `H_e`.
 /// * `hops = (K − H_e) / W` — forward-hop rung count between them.
 ///
 /// Invariants: `H_e ≤ K`, `(K − H_e) % W == 0`, `hops < P`.
@@ -812,25 +832,24 @@ pub fn l1_anchor_boundaries(event_seq: u64, w: u64, p: u64) -> (u64, u64, u64) {
 /// Pure boundary math for L2 event anchoring.
 ///
 /// Returns `(H_e, T_2, position)`:
-/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1
-///   root of the batch containing `event_seq` is emitted (see
-///   [`l1_anchor_boundaries`] for the derivation).
-/// * `T_2 = ⌊event_seq/W²⌋·W² + W²` — seq_no of the KEY BLOCK where the
-///   L2 root of the L2-batch containing `event_seq` is emitted. Per the
-///   proposal (§ "Layer 2" example), the L2 batch `M₂ = ⌊event_seq/W²⌋`
-///   covers L1 batches `[M₂·W, (M₂+1)·W − 1]` (i.e. block heights
-///   `[M₂·W², (M₂+1)·W² − 1]`), and its root `#L2(M₂)` lives in the
-///   common section of the first block of L2-batch `M₂+1`, at seq_no
-///   `(M₂+1)·W²`. Same "strictly next multiple" pattern as `H_e`: on an
-///   exact `W²` boundary the code advances to the next KB, because the
-///   root sitting at `event_seq` itself covers the *previous* L2 batch.
+/// * `H_e = ⌊event_seq/W⌋·W + W` — seq_no of the KEY BLOCK where the L1 root of
+///   the batch containing `event_seq` is emitted (see [`l1_anchor_boundaries`]
+///   for the derivation).
+/// * `T_2 = ⌊event_seq/W²⌋·W² + W²` — seq_no of the KEY BLOCK where the L2 root
+///   of the L2-batch containing `event_seq` is emitted. Per the proposal (§
+///   "Layer 2" example), the L2 batch `M₂ = ⌊event_seq/W²⌋` covers L1 batches
+///   `[M₂·W, (M₂+1)·W − 1]` (i.e. block heights `[M₂·W², (M₂+1)·W² − 1]`), and
+///   its root `#L2(M₂)` lives in the common section of the first block of
+///   L2-batch `M₂+1`, at seq_no `(M₂+1)·W²`. Same "strictly next multiple"
+///   pattern as `H_e`: on an exact `W²` boundary the code advances to the next
+///   KB, because the root sitting at `event_seq` itself covers the *previous*
+///   L2 batch.
 /// * `position` — data-leaf index of `H_e` inside the L2 tree at `T_2`:
-///   `position = 2 + (W − 1 − k)` where `k = (T_2 − H_e)/W`. The `+2`
-///   offset accounts for the first two L2 leaves being
-///   `[higher_layer_root, prev_same_layer_root]`, matching the
-///   chronological data-leaf layout of `HistoryBlockData::calculate_root_hash`
-///   in the acki-nacki node. `k < W` always holds because
-///   `H_e ∈ (T_2 − W², T_2]`.
+///   `position = 2 + (W − 1 − k)` where `k = (T_2 − H_e)/W`. The `+2` offset
+///   accounts for the first two L2 leaves being `[higher_layer_root,
+///   prev_same_layer_root]`, matching the chronological data-leaf layout of
+///   `HistoryBlockData::calculate_root_hash` in the acki-nacki node. `k < W`
+///   always holds because `H_e ∈ (T_2 − W², T_2]`.
 ///
 /// Pub for the same reason as [`l1_anchor_boundaries`].
 pub fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
@@ -846,17 +865,16 @@ pub fn l2_anchor_boundaries(event_seq: u64, w: u64) -> (u64, u64, usize) {
 ///
 /// Returns the boundary stack `[T_1, T_2, …, T_n]`, each entry being the
 /// seq_no of a KEY BLOCK (*not* a tree):
-/// * `T_1 = H_e = ⌊event_seq/W⌋·W + W` — the KB emitting the L1 root of
-///   the batch containing the event (see [`l1_anchor_boundaries`]).
-/// * `T_m = ⌊event_seq/W^m⌋·W^m + W^m` for `m ≥ 2` — the KB emitting the
-///   L(m) root of the L(m)-batch containing the event. This is the
-///   recursive generalisation of the L1/L2 rule from the History-proofs
-///   proposal: L(m)-batch `M_m = ⌊event_seq/W^m⌋` covers `W` consecutive
-///   L(m−1) batches, and its root `#L(m)(M_m)` is emitted in the common
-///   section of the first block of L(m)-batch `M_m + 1`, at seq_no
-///   `(M_m + 1)·W^m`. Not `⌈event_seq/W^m⌉·W^m`: on an exact `W^m`
-///   boundary the root at `event_seq` covers the *previous* L(m) batch,
-///   so we advance to the next KB.
+/// * `T_1 = H_e = ⌊event_seq/W⌋·W + W` — the KB emitting the L1 root of the
+///   batch containing the event (see [`l1_anchor_boundaries`]).
+/// * `T_m = ⌊event_seq/W^m⌋·W^m + W^m` for `m ≥ 2` — the KB emitting the L(m)
+///   root of the L(m)-batch containing the event. This is the recursive
+///   generalisation of the L1/L2 rule from the History-proofs proposal:
+///   L(m)-batch `M_m = ⌊event_seq/W^m⌋` covers `W` consecutive L(m−1) batches,
+///   and its root `#L(m)(M_m)` is emitted in the common section of the first
+///   block of L(m)-batch `M_m + 1`, at seq_no `(M_m + 1)·W^m`. Not
+///   `⌈event_seq/W^m⌉·W^m`: on an exact `W^m` boundary the root at `event_seq`
+///   covers the *previous* L(m) batch, so we advance to the next KB.
 ///
 /// Each consecutive pair `(T_m, T_{m+1})` describes one vertical rung of
 /// the L(n) chain: the L(m) root at `T_m` is opened at data-leaf position
@@ -909,7 +927,11 @@ async fn build_event_anchor_chain_l1(
         link_depth = siblings.len();
         info!(
             "  L1 hop {}/{}: tree at seq={}, chain_pos={}, root={}",
-            i, hops, seq_i, tree.chain_leaf_position, hex::encode(root_i),
+            i,
+            hops,
+            seq_i,
+            tree.chain_leaf_position,
+            hex::encode(root_i),
         );
         active_links.push(DenseChainLink {
             active: true,
@@ -955,11 +977,13 @@ async fn build_event_anchor_chain_ln(
     ensure!(
         (2..=MAX_LAYERS as u8).contains(&n),
         "internal: build_event_anchor_chain_ln called with n={} (must be 2..={})",
-        n, MAX_LAYERS,
+        n,
+        MAX_LAYERS,
     );
 
     let boundaries = l_n_anchor_boundaries(event_seq, w, n);
-    // boundaries[i-1] == T_i, so boundaries[0] = H_e (= T_1), boundaries[n-1] = T_n.
+    // boundaries[i-1] == T_i, so boundaries[0] = H_e (= T_1), boundaries[n-1] =
+    // T_n.
     let h_e = boundaries[0];
     let t_n = *boundaries.last().unwrap();
 
@@ -981,13 +1005,25 @@ async fn build_event_anchor_chain_ln(
         ensure!(
             t_m <= t_m1 && (t_m1 - t_m) % w_m == 0,
             "internal: T_{}={} not W^{}-aligned inside L{} tree at T_{}={} (W={})",
-            m, t_m, m, target_layer, target_layer, t_m1, w,
+            m,
+            t_m,
+            m,
+            target_layer,
+            target_layer,
+            t_m1,
+            w,
         );
         let k_m = (t_m1 - t_m) / w_m;
         ensure!(
             k_m < w,
             "internal: L{} rung offset k={} exceeds W-1 (W={}) — T_{}={} outside T_{}={}'s window",
-            target_layer, k_m, w, m, t_m, target_layer, t_m1,
+            target_layer,
+            k_m,
+            w,
+            m,
+            t_m,
+            target_layer,
+            t_m1,
         );
         let position = 2 + (w - 1 - k_m) as usize;
 
@@ -999,10 +1035,16 @@ async fn build_event_anchor_chain_ln(
                 .await
                 .with_context(|| {
                     format!(
-                        "fetching prev L{} root from block {} for L{} tree at T_{}={} \
-                         (vertical L{}→L{} rung, event_seq={})",
-                        target_layer, prev_seq, target_layer, target_layer, t_m1,
-                        m, target_layer, event_seq,
+                        "fetching prev L{} root from block {} for L{} tree at T_{}={} (vertical \
+                         L{}→L{} rung, event_seq={})",
+                        target_layer,
+                        prev_seq,
+                        target_layer,
+                        target_layer,
+                        t_m1,
+                        m,
+                        target_layer,
+                        event_seq,
                     )
                 })?
         } else {
@@ -1021,19 +1063,25 @@ async fn build_event_anchor_chain_ln(
         ensure!(
             position < leaves.len(),
             "internal: L{} rung leaf position {} out of bounds (len={})",
-            target_layer, position, leaves.len(),
+            target_layer,
+            position,
+            leaves.len(),
         );
         if leaves[position] != chain_leaf_value {
             bail!(
-                "L{} data leaf at position {} = {} does not match chain leaf {} \
-                 (rung L{}→L{}, T_{}={}, T_{}={}, event_seq={}). Either GQL data \
-                 drifted since the previous rung was built, or the boundary stack \
-                 is inconsistent for this event.",
-                target_layer, position,
+                "L{} data leaf at position {} = {} does not match chain leaf {} (rung L{}→L{}, \
+                 T_{}={}, T_{}={}, event_seq={}). Either GQL data drifted since the previous rung \
+                 was built, or the boundary stack is inconsistent for this event.",
+                target_layer,
+                position,
                 hex::encode(leaves[position]),
                 hex::encode(chain_leaf_value),
-                m, target_layer,
-                m, t_m, target_layer, t_m1,
+                m,
+                target_layer,
+                m,
+                t_m,
+                target_layer,
+                t_m1,
                 event_seq,
             );
         }
@@ -1041,10 +1089,18 @@ async fn build_event_anchor_chain_ln(
         let (root, siblings) = chain_proof_builder::build_tree_and_proof(&leaves, position);
         link_depth = siblings.len();
         info!(
-            "L{}→L{} rung: tree at T_{}={}, T_{}={} at data-leaf position {} (k={}), \
-             computed L{} root = {}",
-            m, target_layer, target_layer, t_m1, m, t_m, position, k_m,
-            target_layer, hex::encode(root),
+            "L{}→L{} rung: tree at T_{}={}, T_{}={} at data-leaf position {} (k={}), computed L{} \
+             root = {}",
+            m,
+            target_layer,
+            target_layer,
+            t_m1,
+            m,
+            t_m,
+            position,
+            k_m,
+            target_layer,
+            hex::encode(root),
         );
 
         active_links.push(DenseChainLink {
@@ -1056,7 +1112,8 @@ async fn build_event_anchor_chain_ln(
         chain_leaf_value = root;
     }
 
-    // Silence unused-var warning when n == 2 (h_e only appears in log context above).
+    // Silence unused-var warning when n == 2 (h_e only appears in log context
+    // above).
     let _ = h_e;
 
     Ok(EventAnchorChainResult {
@@ -1073,14 +1130,13 @@ async fn build_event_anchor_chain_ln(
 /// layer roots without going through the full chain builder.
 pub async fn fetch_layer_root(gql: &GqlClient, seqno: u64, layer: u8) -> anyhow::Result<[u8; 32]> {
     let block = gql.query_proof_block_by_seqno(seqno).await?;
-    block
-        .history_proofs
-        .get(&layer)
-        .copied()
-        .ok_or_else(|| anyhow::format_err!("block {} has no layer {} in history_proofs", seqno, layer))
+    block.history_proofs.get(&layer).copied().ok_or_else(|| {
+        anyhow::format_err!("block {} has no layer {} in history_proofs", seqno, layer)
+    })
 }
 
-/// Fetch a block's leaf hash directly from GQL (block_id, envelope_hash, ext_out_root).
+/// Fetch a block's leaf hash directly from GQL (block_id, envelope_hash,
+/// ext_out_root).
 async fn fetch_block_leaf_hash_from_boc(gql: &GqlClient, seqno: u64) -> anyhow::Result<[u8; 32]> {
     let block = gql.query_proof_block_by_seqno(seqno).await?;
     Ok(crate::poseidon_dense::compute_block_leaf_hash(
@@ -1156,7 +1212,10 @@ mod tests {
             assert_eq!(k % (W * P), 0, "K must be W·P-aligned (event_seq={offset})");
             assert_eq!(h_e % W, 0, "H_e must be W-aligned (event_seq={offset})");
             assert!(h_e <= k, "H_e must not exceed K (event_seq={offset})");
-            assert!(hops < P, "hops < P must hold (event_seq={offset}, hops={hops})");
+            assert!(
+                hops < P,
+                "hops < P must hold (event_seq={offset}, hops={hops})"
+            );
             assert_eq!((k - h_e) / W, hops);
         }
     }
@@ -1210,7 +1269,8 @@ mod tests {
             assert!(
                 position >= 2 && position <= (W + 1) as usize,
                 "position {} out of [2, W+1] (event_seq={})",
-                position, base + offset,
+                position,
+                base + offset,
             );
         }
     }
@@ -1239,7 +1299,10 @@ mod tests {
             let (h_e_l1, _, _) = l1_anchor_boundaries(offset, W, P);
             let (h_e_l2, t2, _) = l2_anchor_boundaries(offset, W);
             assert_eq!(boundaries[0], h_e_l1, "T_1 mismatch (event_seq={offset})");
-            assert_eq!(boundaries[0], h_e_l2, "T_1 mismatch vs L2 (event_seq={offset})");
+            assert_eq!(
+                boundaries[0], h_e_l2,
+                "T_1 mismatch vs L2 (event_seq={offset})"
+            );
             assert_eq!(boundaries[1], t2, "T_2 mismatch (event_seq={offset})");
         }
     }
@@ -1250,8 +1313,8 @@ mod tests {
         // k_m = (T_{m+1} - T_m) / W^m ∈ [0, W-1], and position = 2 + (W-1-k_m)
         // must lie in [2, W+1]. Sweep an arbitrary L3 window.
         let base = 3 * W.pow(3); // arbitrary later L3 window
-        // W^3 = 128^3 = 2_097_152 — too many to sweep exhaustively; take a
-        // representative stride.
+                                 // W^3 = 128^3 = 2_097_152 — too many to sweep exhaustively; take a
+                                 // representative stride.
         let step = W * W / 8; // 2048 samples per L3 window
         let mut offset = 0u64;
         while offset < W.pow(3) {
@@ -1260,20 +1323,35 @@ mod tests {
                 let t_m = boundaries[m_idx];
                 let t_m1 = boundaries[m_idx + 1];
                 let w_m = W.pow((m_idx + 1) as u32);
-                assert!(t_m <= t_m1, "T_{} > T_{} (event_seq={})", m_idx + 1, m_idx + 2, base + offset);
+                assert!(
+                    t_m <= t_m1,
+                    "T_{} > T_{} (event_seq={})",
+                    m_idx + 1,
+                    m_idx + 2,
+                    base + offset
+                );
                 assert_eq!(
                     (t_m1 - t_m) % w_m,
                     0,
                     "T_{} − T_{} not W^{}-aligned",
-                    m_idx + 2, m_idx + 1, m_idx + 1,
+                    m_idx + 2,
+                    m_idx + 1,
+                    m_idx + 1,
                 );
                 let k_m = (t_m1 - t_m) / w_m;
-                assert!(k_m < W, "k_{} = {} exceeds W-1 (event_seq={})", m_idx + 1, k_m, base + offset);
+                assert!(
+                    k_m < W,
+                    "k_{} = {} exceeds W-1 (event_seq={})",
+                    m_idx + 1,
+                    k_m,
+                    base + offset
+                );
                 let position = 2 + (W - 1 - k_m) as usize;
                 assert!(
                     position >= 2 && position <= (W + 1) as usize,
                     "L{} rung position {} out of [2, W+1]",
-                    m_idx + 2, position,
+                    m_idx + 2,
+                    position,
                 );
             }
             offset += step;

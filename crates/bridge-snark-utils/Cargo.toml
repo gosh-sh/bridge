@@ -79,6 +79,10 @@ name = "export-c4-poseidon-snark"
 path = "src/bin/export_c4_poseidon_snark.rs"
 
 [[bin]]
+name = "export-multi-hop-poseidon-snark"
+path = "src/bin/export_multi_hop_poseidon_snark.rs"
+
+[[bin]]
 name = "export-1a1b2-poseidon-snark"
 path = "src/bin/export_1a1b2_poseidon_snark.rs"
 

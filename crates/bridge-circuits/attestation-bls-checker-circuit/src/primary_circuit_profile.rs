@@ -4,47 +4,52 @@
 //! large profiling test does not clutter `primary_circuit.rs`.
 //!
 //! Two passes:
-//!   1. **Instrumented body** — replays each circuit section manually so we
-//!      can call `builder.statistics()` between sections and report deltas.
-//!      Intentionally mirrors `build_primary_constraints` step-for-step:
-//!      keep section ordering in sync if either side changes.
+//!   1. **Instrumented body** — replays each circuit section manually so we can
+//!      call `builder.statistics()` between sections and report deltas.
+//!      Intentionally mirrors `build_primary_constraints` step-for-step: keep
+//!      section ordering in sync if either side changes.
 //!   2. **K sweep** — for k ∈ [18, 19, 20, 21], builds the full circuit via
 //!      `build_primary_constraints` (no duplication) and prints what
 //!      `calculate_params` suggests.
 //!
-//! Run: `cargo test -p attestation-bls-checker-circuit test_profile_cell_costs -- --nocapture`
+//! Run: `cargo test -p attestation-bls-checker-circuit test_profile_cell_costs
+//! -- --nocapture`
 
 use std::time::Instant;
-
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::gates::{GateInstructions, RangeInstructions};
-use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::group::ff::Field;
-use halo2_base::QuantumCell;
-use halo2_ecc::bls12_381::{Fp2Chip, FpChip};
-use halo2_ecc::ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip};
-
-use gosh_sha256_chip::Sha256Chip;
-use gosh_bls_verification::{
-    compute_all_pub_sum, load_bk_set_pubkeys,
-    verify_bls_attestation_with_assigned_msghash, ThresholdMode,
-};
-use gosh_bls_verification::helpers::{deserialize_g1_pubkey, deserialize_g2_signature, DST};
 
 use bridge_poseidon::{
     compute_bk_set_commitment_padded, LIMB_BITS, MAX_SIGNERS, NUM_LIMBS, PADDING_SIGNER_INDEX,
 };
-
-use crate::attestation_data_parser::{parse_attestation_data_bytes, parse_signature_bytes, parse_signer_entries};
-use crate::primary_circuit::build_primary_constraints;
-use crate::{
-    constraint_block_seqno_gt_last_seen, ATTESTATION_DATA_LEN, BLOCK_ID_REL_OFFSET,
-    NUM_UNUSABLE_ROWS, TARGET_TYPE_REL_OFFSET,
+use gosh_bls_verification::{
+    compute_all_pub_sum,
+    helpers::{deserialize_g1_pubkey, deserialize_g2_signature, DST},
+    load_bk_set_pubkeys, verify_bls_attestation_with_assigned_msghash, ThresholdMode,
+};
+use gosh_sha256_chip::Sha256Chip;
+use halo2_base::{
+    gates::{
+        circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
+        GateInstructions, RangeInstructions,
+    },
+    halo2_proofs::halo2curves::{bls12_381::G1Affine, bn256::Fr, group::ff::Field},
+    QuantumCell,
+};
+use halo2_ecc::{
+    bls12_381::{Fp2Chip, FpChip},
+    ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip},
 };
 
-/// Profile cell costs per section and report `calculate_params` for K ∈ [18..21].
+use crate::{
+    attestation_data_parser::{
+        parse_attestation_data_bytes, parse_signature_bytes, parse_signer_entries,
+    },
+    constraint_block_seqno_gt_last_seen,
+    primary_circuit::build_primary_constraints,
+    ATTESTATION_DATA_LEN, BLOCK_ID_REL_OFFSET, NUM_UNUSABLE_ROWS, TARGET_TYPE_REL_OFFSET,
+};
+
+/// Profile cell costs per section and report `calculate_params` for K ∈
+/// [18..21].
 #[test]
 fn test_profile_cell_costs() {
     let test_data = bridge_test_data_gen::generator::generate_test_data_all_sign(10)
@@ -131,7 +136,11 @@ fn test_profile_cell_costs() {
     }
     let _seqno = constraint_block_seqno_gt_last_seen(&mut builder, &range, &assigned_msg, 0);
     let s1 = builder.statistics().gate.total_advice_per_phase[0];
-    println!("[cells] field extraction + constraints: {} (delta: {})", s1, s1 - s0);
+    println!(
+        "[cells] field extraction + constraints: {} (delta: {})",
+        s1,
+        s1 - s0
+    );
 
     // -- Section: load BK set pubkeys --
     let assigned_pks = {
@@ -139,7 +148,12 @@ fn test_profile_cell_costs() {
         load_bk_set_pubkeys(ctx, &range, &bk_set_pubkeys, LIMB_BITS, NUM_LIMBS)
     };
     let s2 = builder.statistics().gate.total_advice_per_phase[0];
-    println!("[cells] load_bk_set_pubkeys ({}): {} (delta: {})", MAX_SIGNERS, s2, s2 - s1);
+    println!(
+        "[cells] load_bk_set_pubkeys ({}): {} (delta: {})",
+        MAX_SIGNERS,
+        s2,
+        s2 - s1
+    );
 
     // -- Section: compute_all_pub_sum --
     let t = Instant::now();
@@ -150,7 +164,10 @@ fn test_profile_cell_costs() {
     let s3 = builder.statistics().gate.total_advice_per_phase[0];
     println!(
         "[cells] compute_all_pub_sum ({}): {} (delta: {}) [{:?}]",
-        MAX_SIGNERS, s3, s3 - s2, t.elapsed()
+        MAX_SIGNERS,
+        s3,
+        s3 - s2,
+        t.elapsed()
     );
 
     // -- Section: Poseidon commitment --
@@ -163,7 +180,12 @@ fn test_profile_cell_costs() {
         actual_bk_set_size,
     );
     let s4 = builder.statistics().gate.total_advice_per_phase[0];
-    println!("[cells] poseidon commitment ({}): {} (delta: {})", MAX_SIGNERS, s4, s4 - s3);
+    println!(
+        "[cells] poseidon commitment ({}): {} (delta: {})",
+        MAX_SIGNERS,
+        s4,
+        s4 - s3
+    );
 
     // -- Section: hash_to_curve --
     let t = Instant::now();
@@ -183,7 +205,12 @@ fn test_profile_cell_costs() {
             .unwrap();
     }
     let s5 = builder.statistics().gate.total_advice_per_phase[0];
-    println!("[cells] hash_to_curve: {} (delta: {}) [{:?}]", s5, s5 - s4, t.elapsed());
+    println!(
+        "[cells] hash_to_curve: {} (delta: {}) [{:?}]",
+        s5,
+        s5 - s4,
+        t.elapsed()
+    );
 
     // -- Section: BLS verification --
     let t = Instant::now();
@@ -205,7 +232,12 @@ fn test_profile_cell_costs() {
         );
     }
     let s6 = builder.statistics().gate.total_advice_per_phase[0];
-    println!("[cells] BLS verification: {} (delta: {}) [{:?}]", s6, s6 - s5, t.elapsed());
+    println!(
+        "[cells] BLS verification: {} (delta: {}) [{:?}]",
+        s6,
+        s6 - s5,
+        t.elapsed()
+    );
 
     let lookup_cells = builder.statistics().total_lookup_advice_per_phase[0];
     println!("\n=== TOTAL ===");
@@ -246,7 +278,12 @@ fn test_profile_cell_costs() {
         let rows = (1usize << k) - NUM_UNUSABLE_ROWS;
         println!(
             "K={}: {} advice cols + {} lookup cols = {} total cols, {} usable rows, capacity={}",
-            k, adv, lkp, adv + lkp, rows, (adv + lkp) * rows
+            k,
+            adv,
+            lkp,
+            adv + lkp,
+            rows,
+            (adv + lkp) * rows
         );
     }
 }

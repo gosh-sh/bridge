@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 import "forge-std/Test.sol";
 
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
@@ -27,31 +27,41 @@ contract ShplonkArtefactPairingTest is Test {
         }
     }
 
+    function _readFinalPub(bytes memory cd)
+        internal
+        pure
+        returns (IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub)
+    {
+        pub.tokenId     = _word(cd, ACC + 0);
+        pub.amount      = _word(cd, ACC + 1);
+        pub.recipientHi = _word(cd, ACC + 2);
+        pub.recipientLo = _word(cd, ACC + 3);
+        pub.dstChainId  = _word(cd, ACC + 4);
+        pub.senderAccFr = _word(cd, ACC + 5);
+        pub.dappFr      = _word(cd, ACC + 6);
+        pub.accFr       = _word(cd, ACC + 7);
+        pub.nullifier   = _word(cd, ACC + 8);
+        pub.finalRoot   = _word(cd, ACC + 9);
+        pub.anchorLayer = _word(cd, ACC + 10);
+        pub.xBlockId    = _word(cd, ACC + 11);
+        pub.yBlockId    = _word(cd, ACC + 12);
+    }
+
     function test_eth6_withdrawalCalldata_verifies() public {
         bytes memory bin = vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier.bin");
         require(bin.length > 0, "missing or empty BridgeWithdrawalAggregatorVerifier.bin");
         bytes memory cd =
             vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
-        IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
+        IBridgeWithdrawalFinalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
             "verifiers/BridgeWithdrawalAggregatorVerifier.bin"
         );
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
-        pub.tokenId = _word(cd, ACC + 0);
-        pub.amount = _word(cd, ACC + 1);
-        pub.recipientHi = _word(cd, ACC + 2);
-        pub.recipientLo = _word(cd, ACC + 3);
-        pub.dstChainId = _word(cd, ACC + 4);
-        pub.senderAccFr = _word(cd, ACC + 5);
-        pub.dappFr = _word(cd, ACC + 6);
-        pub.accFr = _word(cd, ACC + 7);
-        pub.nullifier = _word(cd, ACC + 8);
-        pub.finalRoot = _word(cd, ACC + 9);
-        pub.anchorLayer = _word(cd, ACC + 10);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub = _readFinalPub(cd);
         assertTrue(
-            v.verifyWithdrawal(cd, pub), "Withdrawal .bin must accept its committed calldata"
+            v.verifyWithdrawalFinal(cd, pub),
+            "Withdrawal .bin must accept its committed calldata"
         );
         uint256 g0 = gasleft();
-        bool ok = v.verifyWithdrawal(cd, pub);
+        bool ok = v.verifyWithdrawalFinal(cd, pub);
         uint256 used = g0 - gasleft();
         assertTrue(ok);
         assertLt(used, VERIFY_GAS_CAP, "Circuit 4 accept must fit VERIFY_GAS_CAP");
@@ -59,27 +69,16 @@ contract ShplonkArtefactPairingTest is Test {
 
     /// @dev A crypto reject must not consume the remaining tx gas.
     function test_eth19_withdrawalReject_staysUnderGasCap() public {
-        IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
+        IBridgeWithdrawalFinalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
             "verifiers/BridgeWithdrawalAggregatorVerifier.bin"
         );
         bytes memory cd =
             vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
         require(cd.length > 32, "short calldata");
         cd[cd.length - 1] ^= 0x01;
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
-        pub.tokenId = _word(cd, ACC + 0);
-        pub.amount = _word(cd, ACC + 1);
-        pub.recipientHi = _word(cd, ACC + 2);
-        pub.recipientLo = _word(cd, ACC + 3);
-        pub.dstChainId = _word(cd, ACC + 4);
-        pub.senderAccFr = _word(cd, ACC + 5);
-        pub.dappFr = _word(cd, ACC + 6);
-        pub.accFr = _word(cd, ACC + 7);
-        pub.nullifier = _word(cd, ACC + 8);
-        pub.finalRoot = _word(cd, ACC + 9);
-        pub.anchorLayer = _word(cd, ACC + 10);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub = _readFinalPub(cd);
         uint256 g0 = gasleft();
-        bool ok = v.verifyWithdrawal(cd, pub);
+        bool ok = v.verifyWithdrawalFinal(cd, pub);
         uint256 used = g0 - gasleft();
         assertFalse(ok, "mutated proof must fail");
         assertLt(used, VERIFY_GAS_CAP + 200_000, "reject-path gas bound");
@@ -192,5 +191,13 @@ contract ShplonkArtefactPairingTest is Test {
         address yul =
             ShplonkDeployLib.deployYulFromBin("verifiers/LayerHashesAggregatorVerifier.bin", pin);
         assertEq(yul.codehash, pin, "LayerHashes CREATE runtime must match pin");
+    }
+
+    function test_eth6_multiHopYul_extcodehashMatchesPin() public {
+        bytes32 pin = 0xd1cfbbd8f1b9879070b1b61eb3541111b57743fd011da5f4b4a152d7cc1e46a5;
+        address yul = ShplonkDeployLib.deployYulFromBin(
+            "verifiers/BridgeMultiHopAggregatorVerifier.bin", pin
+        );
+        assertEq(yul.codehash, pin, "MultiHop CREATE runtime must match pin");
     }
 }

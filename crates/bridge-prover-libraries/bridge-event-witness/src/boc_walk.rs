@@ -17,8 +17,10 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use tvm_types::cell::{DEPTH_SIZE, SHA256_SIZE};
-use tvm_types::{Cell, CellType, LevelMask};
+use tvm_types::{
+    cell::{DEPTH_SIZE, SHA256_SIZE},
+    Cell, CellType, LevelMask,
+};
 
 /// Flat representation of a single cell from a serialized BOC tree.
 /// Field-for-field equivalent of

@@ -1,36 +1,36 @@
 pub mod attestation_data_parser;
-pub mod primary_circuit;
 pub mod fallback_circuit;
+pub mod primary_circuit;
 
 #[cfg(test)]
 mod primary_circuit_profile;
 
 pub mod test_instances;
 
-use halo2_base::utils::{BigPrimeField, ScalarField};
 use halo2_base::{
     gates::{
         circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, BaseConfig},
         GateInstructions, RangeChip, RangeInstructions,
     },
     halo2_proofs::plonk::{Circuit, ConstraintSystem},
+    utils::{BigPrimeField, ScalarField},
     AssignedValue, QuantumCell,
 };
 
-/// Byte offset of the `block_id` hash within bincode-serialized `AttestationData`.
-/// = parent_block_id(40) + block_id_length_prefix(8) = 48
+/// Byte offset of the `block_id` hash within bincode-serialized
+/// `AttestationData`. = parent_block_id(40) + block_id_length_prefix(8) = 48
 /// BlockIdentifier is serialized as 8-byte u64 LE length (=32) + 32 bytes.
 pub const BLOCK_ID_REL_OFFSET: usize = 48;
 
-/// Byte offset of the `block_seq_no` field within bincode-serialized `AttestationData`.
-/// = parent_block_id(40) + block_id(40) = 80
+/// Byte offset of the `block_seq_no` field within bincode-serialized
+/// `AttestationData`. = parent_block_id(40) + block_id(40) = 80
 /// Bincode serializes `BlockSeqNo(u32)` as 4 bytes little-endian.
 pub const BLOCK_SEQ_NO_REL_OFFSET: usize = 80;
 
-/// Byte offset of the `target_type` field within bincode-serialized `AttestationData`.
-/// = parent_block_id(40) + block_id(40) + block_seq_no(4) + envelope_hash(32) = 116
-/// Bincode serializes the `#[repr(u8)]` enum as a u32 LE discriminant:
-/// Primary = 0x00000000, Fallback = 0x01000000.
+/// Byte offset of the `target_type` field within bincode-serialized
+/// `AttestationData`. = parent_block_id(40) + block_id(40) + block_seq_no(4) +
+/// envelope_hash(32) = 116 Bincode serializes the `#[repr(u8)]` enum as a u32
+/// LE discriminant: Primary = 0x00000000, Fallback = 0x01000000.
 pub const TARGET_TYPE_REL_OFFSET: usize = 116;
 
 /// Expected byte length of bincode 1.x–serialized AttestationData.
@@ -68,7 +68,9 @@ impl<F: ScalarField> AttestationBlsCheckerConfig<F> {
     ) -> Self {
         let base_config =
             <BaseCircuitBuilder<F> as Circuit<F>>::configure_with_params(meta, params);
-        AttestationBlsCheckerConfig { base_config }
+        AttestationBlsCheckerConfig {
+            base_config,
+        }
     }
 }
 
@@ -82,7 +84,8 @@ impl<F: ScalarField> AttestationBlsCheckerConfig<F> {
 /// last_seen_block_seqno as a witness, and proves the strict inequality
 /// via range-checking `(block_seq_no - last_seen - 1)` fits in 32 bits.
 ///
-/// Returns `(block_seq_no_fr, last_seen_assigned)` for public instance exposure.
+/// Returns `(block_seq_no_fr, last_seen_assigned)` for public instance
+/// exposure.
 pub(crate) fn constraint_block_seqno_gt_last_seen<F: BigPrimeField>(
     builder: &mut BaseCircuitBuilder<F>,
     range: &RangeChip<F>,
@@ -93,8 +96,7 @@ pub(crate) fn constraint_block_seqno_gt_last_seen<F: BigPrimeField>(
     let gate = range.gate();
 
     // Extract block_seq_no (4 bytes LE at BLOCK_SEQ_NO_REL_OFFSET).
-    let seqno_cells =
-        &assigned_msg[BLOCK_SEQ_NO_REL_OFFSET..BLOCK_SEQ_NO_REL_OFFSET + 4];
+    let seqno_cells = &assigned_msg[BLOCK_SEQ_NO_REL_OFFSET..BLOCK_SEQ_NO_REL_OFFSET + 4];
     let block_seq_no_fr = gate.inner_product(
         ctx,
         seqno_cells.iter().map(|&b| QuantumCell::Existing(b)),

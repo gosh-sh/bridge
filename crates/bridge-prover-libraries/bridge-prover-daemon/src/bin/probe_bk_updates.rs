@@ -24,13 +24,14 @@
 //! - Walks the full `bkSetUpdates` stream in ascending order via the same
 //!   500-event-page pagination the prover uses.
 //! - With `--last N`, keeps only the last N events after the full walk.
-//!   (Server-side `last: N` is *not* used — it doesn't tell us the seq_no
-//!   of the earliest event, which we want for a full-history summary.)
+//!   (Server-side `last: N` is *not* used — it doesn't tell us the seq_no of
+//!   the earliest event, which we want for a full-history summary.)
 //! - Prints one line per event with `(height, delta_from_prev, block_id)`.
-//! - Prints a summary block: count, first/last height, gaps (min/median/p90/max),
-//!   bursts (consecutive events with delta <= `--gap-threshold`).
-//! - With `--json`, prints only a single JSON object with the summary +
-//!   the per-event array (script-friendly).
+//! - Prints a summary block: count, first/last height, gaps
+//!   (min/median/p90/max), bursts (consecutive events with delta <=
+//!   `--gap-threshold`).
+//! - With `--json`, prints only a single JSON object with the summary + the
+//!   per-event array (script-friendly).
 //!
 //! Deliberately keeps zero coupling to `bridge-prover-lib` — this is an
 //! operational tool, not a code path the daemon depends on.
@@ -95,28 +96,25 @@ async fn main() -> anyhow::Result<()> {
                         .parse()
                         .context("--last must be usize")?,
                 );
-            }
+            },
             "--gap-threshold" => {
                 gap_threshold = args
                     .next()
                     .context("--gap-threshold needs a value")?
                     .parse()
                     .context("--gap-threshold must be u64")?;
-            }
+            },
             "--json" => json_out = true,
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: probe_bk_updates [--gql URL] [--last N] \
-                     [--gap-threshold SEQNO] [--json]\n\
-                    \n\
-                    Reads BRIDGE_GQL_ENDPOINT if --gql omitted.\n\
-                    Walks full bkSetUpdates history in ascending order; \
-                    --last N truncates to the last N after walking.\n\
-                    Bursts = maximal runs of events whose gap to the \
-                    previous event is <= --gap-threshold seq_no."
+                    "usage: probe_bk_updates [--gql URL] [--last N] [--gap-threshold SEQNO] \
+                     [--json]\n\nReads BRIDGE_GQL_ENDPOINT if --gql omitted.\nWalks full \
+                     bkSetUpdates history in ascending order; --last N truncates to the last N \
+                     after walking.\nBursts = maximal runs of events whose gap to the previous \
+                     event is <= --gap-threshold seq_no."
                 );
                 return Ok(());
-            }
+            },
             other => bail!("unknown arg: {other}"),
         }
     }
@@ -135,11 +133,7 @@ async fn main() -> anyhow::Result<()> {
     let mut pages = 0usize;
     loop {
         let (page, next) = client
-            .query_bk_set_updates_paged(
-                GRAPHQL_SIGNED_INT_MAX,
-                PAGE_SIZE,
-                cursor.as_deref(),
-            )
+            .query_bk_set_updates_paged(GRAPHQL_SIGNED_INT_MAX, PAGE_SIZE, cursor.as_deref())
             .await
             .with_context(|| format!("page {} (cursor={:?})", pages, cursor))?;
         pages += 1;
@@ -236,7 +230,10 @@ async fn main() -> anyhow::Result<()> {
     let mut bursts: Vec<usize> = Vec::new();
     let mut run: VecDeque<()> = VecDeque::new();
     for r in &rows {
-        if r.delta_from_prev.map(|d| d <= gap_threshold).unwrap_or(false) {
+        if r.delta_from_prev
+            .map(|d| d <= gap_threshold)
+            .unwrap_or(false)
+        {
             run.push_back(());
         } else {
             if run.len() >= 1 {
@@ -273,7 +270,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if json_out {
-        let out = ProbeOutput { summary, events: rows };
+        let out = ProbeOutput {
+            summary,
+            events: rows,
+        };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!("=== bkSetUpdates cadence probe ===");
@@ -298,13 +298,22 @@ async fn main() -> anyhow::Result<()> {
         println!("--- gap seqno stats ---");
         println!(
             "min / median / p90 / max : {} / {} / {} / {}",
-            summary.gap_min.map(|g| g.to_string()).unwrap_or_else(|| "-".into()),
+            summary
+                .gap_min
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "-".into()),
             summary
                 .gap_median
                 .map(|g| g.to_string())
                 .unwrap_or_else(|| "-".into()),
-            summary.gap_p90.map(|g| g.to_string()).unwrap_or_else(|| "-".into()),
-            summary.gap_max.map(|g| g.to_string()).unwrap_or_else(|| "-".into()),
+            summary
+                .gap_p90
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "-".into()),
+            summary
+                .gap_max
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "-".into()),
         );
         println!(
             "mean             : {}",

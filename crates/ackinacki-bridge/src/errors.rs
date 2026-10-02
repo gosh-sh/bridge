@@ -20,7 +20,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     /// Full success — AN burn broadcast, WithdrawalInitiated captured, C4
-    /// proof accepted by the on-chain Yul verifier, `withdrawByProof` mined
+    /// proof accepted by the on-chain Yul verifier, `withdrawByProofBundle` mined
     /// (or `--dry-run` returned WouldSucceed).
     Success = 0,
     /// Preflight refusal. Nothing broadcast on either chain. Includes:
@@ -74,7 +74,7 @@ pub enum ExitCode {
     /// (event, prover_state) so re-running once the daemon has caught up
     /// regenerates the same proof against warm caches.
     ProofFailed = 12,
-    /// Proof produced but the on-chain `withdrawByProof` failed (dry-run
+    /// Proof produced but the on-chain `withdrawByProofBundle` failed (dry-run
     /// revert, tx revert, `WithdrawTreasuryShortfall`, etc.). Fix the
     /// on-chain side (unpause, seed treasury) and re-run — the proof is
     /// deterministic and cache-warm.

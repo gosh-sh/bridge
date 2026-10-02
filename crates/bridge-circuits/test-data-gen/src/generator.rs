@@ -1,22 +1,17 @@
 use std::collections::HashMap;
 
-use crate::bls::gen_keypair;
-use crate::bls::PubKey;
-use crate::bls::Secret;
-use crate::bls::SignerIndex;
-use crate::envelope_hash::{
-    build_layer_hashes_preimage, poseidon_hash_bytes, sha256_hash,
+use crate::{
+    bls::{gen_keypair, PubKey, Secret, SignerIndex},
+    envelope_hash::{build_layer_hashes_preimage, poseidon_hash_bytes, sha256_hash},
+    layer_hashes::{
+        block_merkle_root, generate_layer_hash_chain_with_depth, l0_opening_siblings,
+        LayerHashChainData, BLOCK_ID_TREE_LEAF_COUNT, NUM_MERKLE_SIBLINGS, TREE_DEPTH,
+    },
+    types::{
+        AckiNackiEnvelopeHash, AttestationData, AttestationTargetType, BlockIdentifier, BlockSeqNo,
+        Envelope,
+    },
 };
-use crate::layer_hashes::{
-    block_merkle_root, generate_layer_hash_chain_with_depth, l0_opening_siblings,
-    LayerHashChainData, BLOCK_ID_TREE_LEAF_COUNT, NUM_MERKLE_SIBLINGS, TREE_DEPTH,
-};
-use crate::types::AckiNackiEnvelopeHash;
-use crate::types::AttestationData;
-use crate::types::AttestationTargetType;
-use crate::types::BlockIdentifier;
-use crate::types::BlockSeqNo;
-use crate::types::Envelope;
 
 /// All generated test data for attestation BLS verification.
 pub struct TestData {
@@ -26,7 +21,8 @@ pub struct TestData {
     pub bk_set: HashMap<SignerIndex, Vec<u8>>,
     /// Serialized Envelope<AttestationData> (raw bytes)
     pub attestation_bytes: Vec<u8>,
-    /// Second attestation for fallback finalization (None for primary-only tests)
+    /// Second attestation for fallback finalization (None for primary-only
+    /// tests)
     pub attestation_2_bytes: Option<Vec<u8>>,
     /// The block_id embedded in the attestation (random for synthetic tests)
     pub block_id: [u8; 32],
@@ -43,7 +39,9 @@ pub fn generate_bls_keypairs(n: usize) -> Vec<(Secret, PubKey, SignerIndex)> {
 }
 
 /// Build a BK set map from keypairs: signer_index -> 48-byte compressed pubkey.
-pub fn build_bk_set_map(keypairs: &[(Secret, PubKey, SignerIndex)]) -> HashMap<SignerIndex, Vec<u8>> {
+pub fn build_bk_set_map(
+    keypairs: &[(Secret, PubKey, SignerIndex)],
+) -> HashMap<SignerIndex, Vec<u8>> {
     keypairs
         .iter()
         .map(|(_, pk, idx)| (*idx, pk.to_bytes().to_vec()))
@@ -52,8 +50,9 @@ pub fn build_bk_set_map(keypairs: &[(Secret, PubKey, SignerIndex)]) -> HashMap<S
 
 /// Create AttestationData with the given block_id Merkle root.
 ///
-/// The `block_id_hash` is the 16-leaf (depth-4) SHA-256 Merkle root (block identifier).
-/// The `envelope_hash` field gets a random value (circuits use block_id, not envelope_hash).
+/// The `block_id_hash` is the 16-leaf (depth-4) SHA-256 Merkle root (block
+/// identifier). The `envelope_hash` field gets a random value (circuits use
+/// block_id, not envelope_hash).
 pub fn create_attestation_data(
     block_id_hash: [u8; 32],
     target_type: AttestationTargetType,
@@ -94,7 +93,9 @@ fn random_block_id() -> [u8; 32] {
 }
 
 /// Generate BLS keypairs with custom (non-contiguous) signer indices.
-pub fn generate_bls_keypairs_with_indices(indices: &[SignerIndex]) -> Vec<(Secret, PubKey, SignerIndex)> {
+pub fn generate_bls_keypairs_with_indices(
+    indices: &[SignerIndex],
+) -> Vec<(Secret, PubKey, SignerIndex)> {
     indices
         .iter()
         .map(|&idx| {
@@ -109,7 +110,9 @@ pub fn generate_bls_keypairs_with_indices(indices: &[SignerIndex]) -> Vec<(Secre
 /// Uses the provided `indices` as signer indices instead of 0..n.
 /// Exercises the index-remapping logic that maps protocol-level indices
 /// to sorted array positions.
-pub fn generate_test_data_all_sign_custom_indices(indices: &[SignerIndex]) -> anyhow::Result<TestData> {
+pub fn generate_test_data_all_sign_custom_indices(
+    indices: &[SignerIndex],
+) -> anyhow::Result<TestData> {
     assert!(!indices.is_empty(), "need at least 1 signer");
 
     let keypairs = generate_bls_keypairs_with_indices(indices);
@@ -125,10 +128,8 @@ pub fn generate_test_data_all_sign_custom_indices(indices: &[SignerIndex]) -> an
     let attestation_envelope = sign_attestation_multi(attestation_data, &attestation_signers)?;
     let attestation_bytes = bincode::serialize(&attestation_envelope)?;
 
-    let att_pubkeys: Vec<(PubKey, usize)> = keypairs
-        .iter()
-        .map(|(_, pk, _)| (pk.clone(), 1))
-        .collect();
+    let att_pubkeys: Vec<(PubKey, usize)> =
+        keypairs.iter().map(|(_, pk, _)| (pk.clone(), 1)).collect();
     assert!(
         crate::bls::verify(
             &attestation_envelope.aggregated_signature,
@@ -169,10 +170,8 @@ pub fn generate_test_data_all_sign(bk_set_size: usize) -> anyhow::Result<TestDat
     let attestation_bytes = bincode::serialize(&attestation_envelope)?;
 
     // Verify BLS signature off-circuit.
-    let att_pubkeys: Vec<(PubKey, usize)> = keypairs
-        .iter()
-        .map(|(_, pk, _)| (pk.clone(), 1))
-        .collect();
+    let att_pubkeys: Vec<(PubKey, usize)> =
+        keypairs.iter().map(|(_, pk, _)| (pk.clone(), 1)).collect();
     assert!(
         crate::bls::verify(
             &attestation_envelope.aggregated_signature,
@@ -191,7 +190,8 @@ pub fn generate_test_data_all_sign(bk_set_size: usize) -> anyhow::Result<TestDat
     })
 }
 
-/// Generate test data with exactly ceil(2n/3) signers (Primary threshold minimum).
+/// Generate test data with exactly ceil(2n/3) signers (Primary threshold
+/// minimum).
 pub fn generate_test_data_primary_threshold(bk_set_size: usize) -> anyhow::Result<TestData> {
     assert!(bk_set_size >= 1, "need at least 1 signer");
 
@@ -233,10 +233,13 @@ pub fn generate_test_data_primary_threshold(bk_set_size: usize) -> anyhow::Resul
     })
 }
 
-/// Generate test data with only floor(n/2)+1 signers — Primary type but below 2/3 threshold.
-/// Circuit should FAIL verification.
+/// Generate test data with only floor(n/2)+1 signers — Primary type but below
+/// 2/3 threshold. Circuit should FAIL verification.
 pub fn generate_test_data_primary_below_threshold(bk_set_size: usize) -> anyhow::Result<TestData> {
-    assert!(bk_set_size >= 2, "need at least 2 signers for below-threshold test");
+    assert!(
+        bk_set_size >= 2,
+        "need at least 2 signers for below-threshold test"
+    );
 
     let keypairs = generate_bls_keypairs(bk_set_size);
     let bk_set = build_bk_set_map(&keypairs);
@@ -290,16 +293,22 @@ pub fn generate_test_data_fallback_all_sign(bk_set_size: usize) -> anyhow::Resul
     let attestation_2_bytes = bincode::serialize(&att_envelope_2)?;
 
     // Verify both BLS signatures off-circuit.
-    let att_pubkeys: Vec<(PubKey, usize)> = keypairs
-        .iter()
-        .map(|(_, pk, _)| (pk.clone(), 1))
-        .collect();
+    let att_pubkeys: Vec<(PubKey, usize)> =
+        keypairs.iter().map(|(_, pk, _)| (pk.clone(), 1)).collect();
     assert!(
-        crate::bls::verify(&att_envelope_1.aggregated_signature, &att_pubkeys, &att_envelope_1.data)?,
+        crate::bls::verify(
+            &att_envelope_1.aggregated_signature,
+            &att_pubkeys,
+            &att_envelope_1.data
+        )?,
         "Primary attestation BLS verification failed!"
     );
     assert!(
-        crate::bls::verify(&att_envelope_2.aggregated_signature, &att_pubkeys, &att_envelope_2.data)?,
+        crate::bls::verify(
+            &att_envelope_2.aggregated_signature,
+            &att_pubkeys,
+            &att_envelope_2.data
+        )?,
         "Fallback attestation BLS verification failed!"
     );
 
@@ -312,13 +321,17 @@ pub fn generate_test_data_fallback_all_sign(bk_set_size: usize) -> anyhow::Resul
     })
 }
 
-/// Generate fallback test data with floor(n/2)+1 signers per attestation (just above 50%).
+/// Generate fallback test data with floor(n/2)+1 signers per attestation (just
+/// above 50%).
 ///
 /// - att1: Primary type, first floor(n/2)+1 signers
 /// - att2: Fallback type, last floor(n/2)+1 signers
 /// - Same block_id for both
 pub fn generate_test_data_fallback_threshold(bk_set_size: usize) -> anyhow::Result<TestData> {
-    assert!(bk_set_size >= 2, "need at least 2 signers for threshold test");
+    assert!(
+        bk_set_size >= 2,
+        "need at least 2 signers for threshold test"
+    );
 
     let keypairs = generate_bls_keypairs(bk_set_size);
     let bk_set = build_bk_set_map(&keypairs);
@@ -351,7 +364,11 @@ pub fn generate_test_data_fallback_threshold(bk_set_size: usize) -> anyhow::Resu
         .map(|(_, pk, _)| (pk.clone(), 1))
         .collect();
     assert!(
-        crate::bls::verify(&att_envelope_1.aggregated_signature, &att_pubkeys_1, &att_envelope_1.data)?,
+        crate::bls::verify(
+            &att_envelope_1.aggregated_signature,
+            &att_pubkeys_1,
+            &att_envelope_1.data
+        )?,
         "Primary attestation BLS verification failed!"
     );
     let att_pubkeys_2: Vec<(PubKey, usize)> = keypairs[bk_set_size - num_signers..]
@@ -359,7 +376,11 @@ pub fn generate_test_data_fallback_threshold(bk_set_size: usize) -> anyhow::Resu
         .map(|(_, pk, _)| (pk.clone(), 1))
         .collect();
     assert!(
-        crate::bls::verify(&att_envelope_2.aggregated_signature, &att_pubkeys_2, &att_envelope_2.data)?,
+        crate::bls::verify(
+            &att_envelope_2.aggregated_signature,
+            &att_pubkeys_2,
+            &att_envelope_2.data
+        )?,
         "Fallback attestation BLS verification failed!"
     );
 
@@ -372,10 +393,13 @@ pub fn generate_test_data_fallback_threshold(bk_set_size: usize) -> anyhow::Resu
     })
 }
 
-/// Generate fallback test data with only floor(n/2) signers per attestation (<=50%).
-/// Circuit should FAIL verification (needs >50%).
+/// Generate fallback test data with only floor(n/2) signers per attestation
+/// (<=50%). Circuit should FAIL verification (needs >50%).
 pub fn generate_test_data_fallback_below_threshold(bk_set_size: usize) -> anyhow::Result<TestData> {
-    assert!(bk_set_size >= 4, "need at least 4 signers for below-threshold fallback test");
+    assert!(
+        bk_set_size >= 4,
+        "need at least 4 signers for below-threshold fallback test"
+    );
 
     let keypairs = generate_bls_keypairs(bk_set_size);
     let bk_set = build_bk_set_map(&keypairs);
@@ -431,13 +455,13 @@ pub struct BridgeTestData {
     pub bk_set: HashMap<SignerIndex, Vec<u8>>,
     /// Serialized Envelope<AttestationData> (raw bytes)
     pub attestation_bytes: Vec<u8>,
-    /// Second attestation for fallback finalization (None for primary-only tests)
+    /// Second attestation for fallback finalization (None for primary-only
+    /// tests)
     pub attestation_2_bytes: Option<Vec<u8>>,
     /// The block_id = 16-leaf depth-4 SHA-256 Merkle root.
     pub block_id: [u8; 32],
 
     // ---- Block-id Merkle tree (16 leaves, depth 4) ----
-
     /// All 16 leaves L0..L15 of the block-id tree. L0 is
     /// `Poseidon(layer_hashes_preimage)`; L9..L15 are protocol-fixed zero.
     pub block_merkle_leaves: [[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT],
@@ -445,7 +469,6 @@ pub struct BridgeTestData {
     pub l0_opening_siblings: [[u8; 32]; NUM_MERKLE_SIBLINGS],
 
     // ---- Circuit 2 data ----
-
     /// Layer hashes preimage (331 bytes).
     pub layer_hashes_preimage: Vec<u8>,
     /// Layer hash chain data (root hashes, chain proofs, prev hash).
@@ -488,24 +511,19 @@ pub fn generate_bridge_test_data(
     let bk_set = build_bk_set_map(&keypairs);
 
     // 2. Generate layer hash chain at production tree depth (the only
-    //    mainnet-acceptable shape; smaller depths are deliberately not
-    //    supported — see test-data-gen::layer_hashes module docs).
-    let layer_hash_chain = generate_layer_hash_chain_with_depth(
-        num_layers,
-        num_prev_chain_steps,
-        TREE_DEPTH,
-    );
+    //    mainnet-acceptable shape; smaller depths are deliberately not supported —
+    //    see test-data-gen::layer_hashes module docs).
+    let layer_hash_chain =
+        generate_layer_hash_chain_with_depth(num_layers, num_prev_chain_steps, TREE_DEPTH);
 
     // 3. Build layer hashes preimage (331 bytes).
-    let layer_hashes_preimage = build_layer_hashes_preimage(
-        layer_hash_chain.num_layers,
-        &layer_hash_chain.root_hashes,
-    );
+    let layer_hashes_preimage =
+        build_layer_hashes_preimage(layer_hash_chain.num_layers, &layer_hash_chain.root_hashes);
 
-    // 4. Compute L0 = Poseidon(preimage split into 31-byte Fr chunks).
-    //    Circuit 2 opens this leaf; L1..L8 are opaque here (random SHA-256
-    //    fillers stand in for the canonical protocol leaves); L9..L15 are
-    //    protocol-fixed zero padding.
+    // 4. Compute L0 = Poseidon(preimage split into 31-byte Fr chunks). Circuit 2
+    //    opens this leaf; L1..L8 are opaque here (random SHA-256 fillers stand in
+    //    for the canonical protocol leaves); L9..L15 are protocol-fixed zero
+    //    padding.
     let l0 = poseidon_hash_bytes(&layer_hashes_preimage);
     let l1 = random_sha256_leaf(196);
     let l2 = random_sha256_leaf(64);
@@ -534,8 +552,7 @@ pub fn generate_bridge_test_data(
     let siblings = l0_opening_siblings(&block_merkle_leaves);
 
     // 6. Create attestation with block_id = block-id tree root.
-    let attestation_data =
-        create_attestation_data(block_id, AttestationTargetType::Primary);
+    let attestation_data = create_attestation_data(block_id, AttestationTargetType::Primary);
 
     let attestation_signers: Vec<(SignerIndex, &Secret)> = keypairs
         .iter()
@@ -545,10 +562,8 @@ pub fn generate_bridge_test_data(
     let attestation_bytes = bincode::serialize(&attestation_envelope)?;
 
     // Verify BLS signature off-circuit.
-    let att_pubkeys: Vec<(PubKey, usize)> = keypairs
-        .iter()
-        .map(|(_, pk, _)| (pk.clone(), 1))
-        .collect();
+    let att_pubkeys: Vec<(PubKey, usize)> =
+        keypairs.iter().map(|(_, pk, _)| (pk.clone(), 1)).collect();
     assert!(
         crate::bls::verify(
             &attestation_envelope.aggregated_signature,
@@ -596,7 +611,10 @@ mod bridge_tests {
 
         // Verify L9..L15 are the protocol-fixed zero padding.
         for i in 9..BLOCK_ID_TREE_LEAF_COUNT {
-            assert_eq!(data.block_merkle_leaves[i], [0u8; 32], "leaf L{i} must be zero");
+            assert_eq!(
+                data.block_merkle_leaves[i], [0u8; 32],
+                "leaf L{i} must be zero"
+            );
         }
     }
 

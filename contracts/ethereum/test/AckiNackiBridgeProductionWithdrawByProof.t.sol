@@ -3,21 +3,23 @@ pragma solidity ^0.8.19;
 
 import "forge-std/Test.sol";
 
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
 import "../script/ShplonkDeployLib.sol";
 
 /// @title AckiNackiBridgeProductionWithdrawByProofTest
-/// @notice M7 on-chain harness for Circuit 4 (withdrawal): deploys the committed
-///         `BridgeWithdrawalAggregatorVerifier.bin` (real SHPLONK aggregator Yul)
-///         and feeds it the real aggregator calldata produced by
+/// @notice M7 on-chain harness for Circuit 4 (withdrawal, multi-thread
+///         `BridgeEventFinalProof`): deploys the committed
+///         `BridgeWithdrawalAggregatorVerifier.bin` (real SHPLONK aggregator
+///         Yul) and feeds it the real aggregator calldata produced by
 ///         `aggregate-proof` / `export-inner-aggregator`. Proves the *deployed*
 ///         verifier accepts real Poseidon-inner aggregated calldata — i.e. the
 ///         withdraw path is cryptographically real, not a mock.
 /// @dev Mirrors `AckiNackiBridgeProductionVerifyBlockTest` (which covers 1A/1B/2).
-///      The 11 Circuit-4 public inputs are re-exposed inside the calldata at
-///      instance slots 12..=22 (indices 12,13,…,22 inclusive — eleven
-///      slots), so we extract `WithdrawalPublicInputs` directly from the
-///      calldata rather than a sidecar file.
+///      The 13 Circuit-4 public inputs are re-exposed inside the calldata at
+///      instance slots 12..=24 (indices 12,13,…,24 inclusive — thirteen
+///      slots, adding `xBlockId`/`yBlockId` for the bundle path), so we
+///      extract `WithdrawalFinalPublicInputs` directly from the calldata
+///      rather than a sidecar file.
 contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     string internal constant WITHDRAWAL_BIN = "verifiers/BridgeWithdrawalAggregatorVerifier.bin";
     string internal constant WITHDRAWAL_CALLDATA_DEFAULT =
@@ -61,19 +63,21 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     function _pubFromCalldata(bytes memory cd)
         internal
         pure
-        returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub)
+        returns (IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub)
     {
-        pub.tokenId = _word(cd, ACC + 0);
-        pub.amount = _word(cd, ACC + 1);
+        pub.tokenId     = _word(cd, ACC + 0);
+        pub.amount      = _word(cd, ACC + 1);
         pub.recipientHi = _word(cd, ACC + 2);
         pub.recipientLo = _word(cd, ACC + 3);
-        pub.dstChainId = _word(cd, ACC + 4);
+        pub.dstChainId  = _word(cd, ACC + 4);
         pub.senderAccFr = _word(cd, ACC + 5);
-        pub.dappFr = _word(cd, ACC + 6);
-        pub.accFr = _word(cd, ACC + 7);
-        pub.nullifier = _word(cd, ACC + 8);
-        pub.finalRoot = _word(cd, ACC + 9);
+        pub.dappFr      = _word(cd, ACC + 6);
+        pub.accFr       = _word(cd, ACC + 7);
+        pub.nullifier   = _word(cd, ACC + 8);
+        pub.finalRoot   = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.xBlockId    = _word(cd, ACC + 11);
+        pub.yBlockId    = _word(cd, ACC + 12);
     }
 
     function test_productionWithdrawal_isolated_verifies() public {
@@ -81,32 +85,34 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
             _artefactsPresent(),
             "verifiers/BridgeWithdrawalAggregatorVerifier{,_calldata}.bin required"
         );
-        IBridgeWithdrawalVerifier verifier =
+        IBridgeWithdrawalFinalVerifier verifier =
             ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
         bytes memory cd = vm.readFileBinary(_calldataPath());
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromCalldata(cd);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            _pubFromCalldata(cd);
 
         assertTrue(
-            verifier.verifyWithdrawal(cd, pub),
+            verifier.verifyWithdrawalFinal(cd, pub),
             "Circuit 4 SHPLONK aggregator calldata must verify on the deployed Yul verifier"
         );
     }
 
-    /// Tampering a byte in the proof region (past the 24 instance words) makes the
+    /// Tampering a byte in the proof region (past the 26 instance words) makes the
     /// SHPLONK pairing fail -> the Yul verifier reverts.
     function test_productionWithdrawal_tamperedProof_reverts() public {
         require(_artefactsPresent(), "C4 verifier artefacts required");
-        IBridgeWithdrawalVerifier verifier =
+        IBridgeWithdrawalFinalVerifier verifier =
             ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
         bytes memory cd = vm.readFileBinary(_calldataPath());
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromCalldata(cd);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            _pubFromCalldata(cd);
 
         // Flip the last byte (in the proof region, not an instance word).
         cd[cd.length - 1] = bytes1(uint8(cd[cd.length - 1]) ^ 0xFF);
 
         // A tampered proof must be rejected — either by a revert inside the Yul
         // pairing or by returning false. Both are acceptable rejections.
-        try verifier.verifyWithdrawal(cd, pub) returns (bool ok) {
+        try verifier.verifyWithdrawalFinal(cd, pub) returns (bool ok) {
             assertFalse(ok, "tampered proof must not verify");
         } catch {
             // revert is an acceptable rejection
@@ -117,15 +123,16 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
     /// (returns false, no revert) before the pairing is even reached.
     function test_productionWithdrawal_mismatchedPub_returnsFalse() public {
         require(_artefactsPresent(), "C4 verifier artefacts required");
-        IBridgeWithdrawalVerifier verifier =
+        IBridgeWithdrawalFinalVerifier verifier =
             ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
         bytes memory cd = vm.readFileBinary(_calldataPath());
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromCalldata(cd);
+        IBridgeWithdrawalFinalVerifier.WithdrawalFinalPublicInputs memory pub =
+            _pubFromCalldata(cd);
 
         pub.amount = pub.amount ^ 1; // lie about the amount
 
         assertFalse(
-            verifier.verifyWithdrawal(cd, pub),
+            verifier.verifyWithdrawalFinal(cd, pub),
             "amount mismatch vs re-exposed instance must be rejected"
         );
     }

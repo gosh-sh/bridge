@@ -1,15 +1,9 @@
-use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
+use std::{collections::HashMap, fmt, str::FromStr};
 
-use serde::Deserialize;
-use serde::Deserializer;
-use serde::Serialize;
-use serde::Serializer;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
 
-use crate::bls::Signature;
-use crate::bls::SignerIndex;
+use crate::bls::{Signature, SignerIndex};
 
 // ---------------------------------------------------------------------------
 // BlockIdentifier — 32 bytes, serde_with::Bytes (bincode: u64 len + 32 bytes)

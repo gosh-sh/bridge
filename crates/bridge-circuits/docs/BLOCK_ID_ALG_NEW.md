@@ -17,6 +17,9 @@ at `node/src/types/ackinacki_block/mod.rs:400`
 on `acki-nacki@poseidon_profile_new` — with
 `pub const BLOCK_MERKLE_LEAF_COUNT: usize = 16`.
 
+Discrepancy note: `BLOCK_ID_ALG_NEW.md:42` still describes L8 as "SHA-256 root". That row was accurate at commit `36cd98721` (2026-07-07); the AN node has since switched L8 to a Poseidon dense-Merkle (matching this circuit's `walk_dense_merkle_bind_pos` at `bridge_event_prove_circuit.rs:810`, and matching DEX §2.4). Treat DEX §2.4 as the source of truth pending a doc refresh on the bridge side.
+
+
 ---
 
 ## Construction

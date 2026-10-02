@@ -1,0 +1,15 @@
+# Tool binaries are populated per-machine — see bins_macOS/README.md.
+# env.sh and README.md in each bins_<OS>/ are tracked; the binaries are not.
+bins_macOS/*
+!bins_macOS/env.sh
+!bins_macOS/README.md
+bins_linux/*
+!bins_linux/env.sh
+!bins_linux/README.md
+
+# Legacy override target (see tools/README.md); unused by the default runbook.
+tools/*
+!tools/README.md
+
+# Session outputs
+research/stats/

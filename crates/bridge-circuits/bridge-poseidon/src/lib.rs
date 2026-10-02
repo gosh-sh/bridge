@@ -1,28 +1,27 @@
 //! Unified native Poseidon hashing for the Acki Nacki → Ethereum bridge.
 //!
-//! This crate is the single source of truth for all off-circuit (native) Poseidon
-//! hashing used by bridge circuits, test-data generators, and the prover.
+//! This crate is the single source of truth for all off-circuit (native)
+//! Poseidon hashing used by bridge circuits, test-data generators, and the
+//! prover.
 //!
 //! Two input encodings:
-//! - **Bytes encoding** ([`poseidon_hash_bytes`]): raw bytes split into 31-byte chunks,
-//!   zero-padded to 32 bytes, each chunk loaded as an LE Fr element. Equivalent to
-//!   `PoseidonSponge::hash_bytes_flat()` in tvm-sdk.
-//! - **Fr encoding** ([`poseidon_hash_fr`]): pre-constructed Fr elements fed directly
-//!   into the sponge. Used for BK set commitments.
+//! - **Bytes encoding** ([`poseidon_hash_bytes`]): raw bytes split into 31-byte
+//!   chunks, zero-padded to 32 bytes, each chunk loaded as an LE Fr element.
+//!   Equivalent to `PoseidonSponge::hash_bytes_flat()` in tvm-sdk.
+//! - **Fr encoding** ([`poseidon_hash_fr`]): pre-constructed Fr elements fed
+//!   directly into the sponge. Used for BK set commitments.
 
 use std::collections::HashMap;
 
 use gosh_bls_verification::helpers::deserialize_g1_pubkey;
-use halo2_base::gates::{
-    circuit::builder::BaseCircuitBuilder, GateInstructions, RangeChip, RangeInstructions,
+use halo2_base::{
+    gates::{circuit::builder::BaseCircuitBuilder, GateInstructions, RangeChip, RangeInstructions},
+    halo2_proofs::halo2curves::{bn256::Fr, group::ff::PrimeField},
+    poseidon::hasher::{spec::OptimizedPoseidonSpec, PoseidonHasher},
+    utils::BigPrimeField,
+    AssignedValue,
 };
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-use halo2_base::poseidon::hasher::{spec::OptimizedPoseidonSpec, PoseidonHasher};
-use halo2_base::utils::BigPrimeField;
-use halo2_base::AssignedValue;
-use halo2_ecc::bigint::ProperCrtUint;
-use halo2_ecc::ecc::EcPoint;
+use halo2_ecc::{bigint::ProperCrtUint, ecc::EcPoint};
 use num_bigint::BigUint;
 use pse_poseidon::Poseidon;
 
@@ -73,7 +72,8 @@ pub fn poseidon_elements_per_pubkey(num_limbs: usize) -> usize {
 /// 1. Split `data` into chunks of 31 bytes
 /// 2. Zero-pad each chunk to 32 bytes
 /// 3. Convert each to Fr via `Fr::from_repr` (little-endian)
-/// 4. Feed all Fr elements into the Poseidon sponge (T=3, RATE=2, R_F=8, R_P=57)
+/// 4. Feed all Fr elements into the Poseidon sponge (T=3, RATE=2, R_F=8,
+///    R_P=57)
 /// 5. Return `squeeze().to_repr()` (32 bytes LE)
 pub fn poseidon_hash_bytes(data: &[u8]) -> [u8; 32] {
     let num_chunks = (data.len() + 30) / 31; // ceil division
@@ -143,7 +143,8 @@ pub fn decompose_pubkey_x_to_limbs(pubkey_bytes: &[u8]) -> [Fr; NUM_LIMBS] {
 /// Compute Poseidon commitment of a BK set, padded to `max_signers` entries.
 ///
 /// Real entries use pubkey x-coordinate CRT limbs; padding entries
-/// (when `bk_set.len() < max_signers`) use sentinel index `PADDING_SIGNER_INDEX`
+/// (when `bk_set.len() < max_signers`) use sentinel index
+/// `PADDING_SIGNER_INDEX`
 /// + zero x-limbs.
 ///
 /// Input: `bk_set` maps signer_index (u16) → compressed BLS pubkey (48 bytes).
@@ -215,24 +216,28 @@ pub fn compute_bk_set_poseidon(bk_set: &HashMap<u16, Vec<u8>>) -> (Fr, [u8; 32])
 
 /// In-circuit Poseidon commitment to a BK set using EC point x-coordinates.
 ///
-/// `assigned_pks` and `sorted_bk_set_indices` are always padded to `assigned_pks.len()`
-/// (typically `MAX_SIGNERS`). Real entries (k < `actual_bk_set_size`) use the EC
-/// point's x-coordinate CRT limbs. Padding entries (k >= `actual_bk_set_size`) use
-/// zero x-limbs and sentinel index `PADDING_SIGNER_INDEX` (`0xFFFF`).
+/// `assigned_pks` and `sorted_bk_set_indices` are always padded to
+/// `assigned_pks.len()` (typically `MAX_SIGNERS`). Real entries (k <
+/// `actual_bk_set_size`) use the EC point's x-coordinate CRT limbs. Padding
+/// entries (k >= `actual_bk_set_size`) use zero x-limbs and sentinel index
+/// `PADDING_SIGNER_INDEX` (`0xFFFF`).
 ///
-/// The Poseidon input is always `assigned_pks.len() × (1 + num_limbs)` elements,
-/// ensuring a fixed circuit structure regardless of actual BK set size.
+/// The Poseidon input is always `assigned_pks.len() × (1 + num_limbs)`
+/// elements, ensuring a fixed circuit structure regardless of actual BK set
+/// size.
 ///
-/// **Single-VK support:** All signer indices are loaded as witnesses (not constants),
-/// and limb selection uses `gate.mul(limb, is_real)` for all entries. The
-/// copy-constraint pattern is identical regardless of `actual_bk_set_size`, so a
-/// single VK/PK works for any BK set size up to `assigned_pks.len()`.
+/// **Single-VK support:** All signer indices are loaded as witnesses (not
+/// constants), and limb selection uses `gate.mul(limb, is_real)` for all
+/// entries. The copy-constraint pattern is identical regardless of
+/// `actual_bk_set_size`, so a single VK/PK works for any BK set size up to
+/// `assigned_pks.len()`.
 ///
 /// Soundness: the Poseidon output must match the public instance, which forces
-/// the prover to use correct index and limb values (Poseidon collision resistance).
+/// the prover to use correct index and limb values (Poseidon collision
+/// resistance).
 ///
-/// Returns `(commitment, n_real_pubkeys)` where `n_real_pubkeys` is the in-circuit
-/// count of real (non-padding) entries, for use in threshold checks.
+/// Returns `(commitment, n_real_pubkeys)` where `n_real_pubkeys` is the
+/// in-circuit count of real (non-padding) entries, for use in threshold checks.
 pub fn compute_bk_set_commitment_padded<F: BigPrimeField>(
     builder: &mut BaseCircuitBuilder<F>,
     range: &RangeChip<F>,
@@ -267,7 +272,11 @@ pub fn compute_bk_set_commitment_padded<F: BigPrimeField>(
 
     for k in 0..assigned_pks.len() {
         // is_real: 1 for real entries, 0 for padding (witness, bit-constrained).
-        let is_real_val = if k < actual_bk_set_size { F::ONE } else { F::ZERO };
+        let is_real_val = if k < actual_bk_set_size {
+            F::ONE
+        } else {
+            F::ZERO
+        };
         let is_real = ctx.load_witness(is_real_val);
         gate.assert_bit(ctx, is_real);
         n_real = gate.add(ctx, n_real, is_real);

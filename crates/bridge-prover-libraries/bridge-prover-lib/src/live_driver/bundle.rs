@@ -9,33 +9,32 @@
 //!
 //! Behavioural differences from the pre-refactor main.rs:
 //!
-//! * On "attestation evidence not ready yet" — returns `Ok(None)` so the
-//!   caller retries on the next poll. The pre-refactor daemon slept +
-//!   `continue`d; here that's the caller's job.
-//! * On "signers not in current BK-set" — returns `Ok(None)`. The
-//!   pre-refactor daemon silently advanced the cursor and continued; that
-//!   was arguably wrong because a stale set can be repaired by draining a
-//!   pending bk-update, so returning `None` (leaving the cursor alone) is
-//!   the safer default. If the mismatch is genuine the caller can add a
-//!   policy layer on top.
+//! * On "attestation evidence not ready yet" — returns `Ok(None)` so the caller
+//!   retries on the next poll. The pre-refactor daemon slept + `continue`d;
+//!   here that's the caller's job.
+//! * On "signers not in current BK-set" — returns `Ok(None)`. The pre-refactor
+//!   daemon silently advanced the cursor and continued; that was arguably wrong
+//!   because a stale set can be repaired by draining a pending bk-update, so
+//!   returning `None` (leaving the cursor alone) is the safer default. If the
+//!   mismatch is genuine the caller can add a policy layer on top.
 //! * On proof-generation failure — propagates the error. The pre-refactor
 //!   daemon silently advanced past failed proofs; that hid real bugs. The
 //!   caller decides restart / retry policy.
 
-use anyhow::Context;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-use tracing::{info, warn};
 use std::time::Instant;
 
+use anyhow::Context;
 use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
-use crate::block_id_tree;
-use crate::bridge_state::MAX_LAYERS;
-use crate::layer_prover;
-use crate::prover;
-use crate::real_chain_builder;
-use crate::transcript::TranscriptKind;
+use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use tracing::{info, warn};
 
-use super::{BundleFinalizationType, BundleProofArtifacts, DriverError, DriverResult, LiveProverDriver};
+use super::{
+    BundleFinalizationType, BundleProofArtifacts, DriverError, DriverResult, LiveProverDriver,
+};
+use crate::{
+    block_id_tree, bridge_state::MAX_LAYERS, layer_prover, prover, real_chain_builder,
+    transcript::TranscriptKind,
+};
 
 /// Drive one Circuit 1A/1B + Circuit 2 bundle. Returns `Some(artifacts)`
 /// on success, `None` on transient conditions the caller should retry
@@ -50,21 +49,20 @@ pub(super) async fn drive_next_bundle(
     info!("=== Processing key block at seq_no {} ===", target_seqno);
 
     // Fetch and classify attestation evidence.
-    let evidence = match attestation_fetcher::fetch_attestation_evidence(
-        driver.gql(),
-        target_seqno as u32,
-    )
-    .await
-    {
-        Ok(ev) => ev,
-        Err(e) => {
-            warn!(
-                "key block {}: attestation evidence not ready ({}); returning None so caller retries",
-                target_seqno, e,
-            );
-            return Ok(None);
-        }
-    };
+    let evidence =
+        match attestation_fetcher::fetch_attestation_evidence(driver.gql(), target_seqno as u32)
+            .await
+        {
+            Ok(ev) => ev,
+            Err(e) => {
+                warn!(
+                    "key block {}: attestation evidence not ready ({}); returning None so caller \
+                     retries",
+                    target_seqno, e,
+                );
+                return Ok(None);
+            },
+        };
 
     // Decode the prover's BK pubkey table once from `prover_bk_set`
     // (the sole in-driver source of truth). `pubkeys()` re-hexes
@@ -128,8 +126,11 @@ pub(super) async fn drive_next_bundle(
                 BundleFinalizationType::Primary,
                 res.map_err(|e| DriverError::proof_gen(target_seqno, e))?,
             )
-        }
-        AttestationEvidence::Fallback { primary, fallback } => {
+        },
+        AttestationEvidence::Fallback {
+            primary,
+            fallback,
+        } => {
             info!(
                 "key block {}: FALLBACK path → Circuit 1b (transcript={:?})",
                 target_seqno, transcript,
@@ -152,7 +153,7 @@ pub(super) async fn drive_next_bundle(
                 BundleFinalizationType::Fallback,
                 res.map_err(|e| DriverError::proof_gen(target_seqno, e))?,
             )
-        }
+        },
     };
     let attestation_proof_gen_ms = t_primary.elapsed().as_millis() as u64;
     info!(
@@ -169,8 +170,7 @@ pub(super) async fn drive_next_bundle(
         .with_context(|| format!("key block {}: load_layer_pk", target_seqno))
         .map_err(|e| DriverError::proof_gen(target_seqno, e))?;
     let t_layer = Instant::now();
-    let layer_result =
-        generate_layer_proof_for_key_block(driver, target_seqno, transcript).await;
+    let layer_result = generate_layer_proof_for_key_block(driver, target_seqno, transcript).await;
     driver.key_manager_mut().unload_layer_pk();
     let (layer_proof, state_layer_hashes, observed_height, block_id_be) = layer_result?;
     let layer_proof_gen_ms = t_layer.elapsed().as_millis() as u64;
@@ -189,23 +189,21 @@ pub(super) async fn drive_next_bundle(
     // proof-build time instead of silently mis-mirroring state on-chain.
     debug_assert_eq!(
         primary_proof.block_id_fr, layer_proof.block_id_fr,
-        "Circuit 1 and Circuit 2 must agree on block_id_fr; a mismatch means \
-         one of the circuits regressed to the pre-fix byte-order convention",
+        "Circuit 1 and Circuit 2 must agree on block_id_fr; a mismatch means one of the circuits \
+         regressed to the pre-fix byte-order convention",
     );
     debug_assert_eq!(
         crate::ipc::fold_hash_be_to_fr(&block_id_be),
         primary_proof.block_id_fr,
-        "fold(reverse(raw_hash)) must equal Circuit 1's committed block_id_fr; \
-         a mismatch means bundle.block_id_be is not the raw chain hash BE",
+        "fold(reverse(raw_hash)) must equal Circuit 1's committed block_id_fr; a mismatch means \
+         bundle.block_id_be is not the raw chain hash BE",
     );
     let bk_set_commitment_be: [u8; 32] = driver.bk_set_commitment_fr().to_repr();
     let mut layer_hashes_be: [[u8; 32]; MAX_LAYERS] = [[0u8; 32]; MAX_LAYERS];
     for (i, fr) in layer_proof.layer_hash_frs.iter().enumerate() {
         layer_hashes_be[i] = fr.to_repr();
     }
-    let prev_max_level_layer_hash_be: [u8; 32] = layer_proof
-        .prev_max_level_layer_hash_fr
-        .to_repr();
+    let prev_max_level_layer_hash_be: [u8; 32] = layer_proof.prev_max_level_layer_hash_fr.to_repr();
 
     Ok(Some(BundleProofArtifacts {
         block_seq_no: target_seqno,
@@ -281,8 +279,8 @@ async fn generate_layer_proof_for_key_block(
     }
     let preimage = block_id_tree::build_layer_hashes_preimage(num_layers as usize, &root_hashes);
 
-    // 2. Build the 16-leaf depth-4 SHA-256 Merkle tree from the GQL leaves
-    //    and pull the four siblings that open L0 up to `block_id`.
+    // 2. Build the 16-leaf depth-4 SHA-256 Merkle tree from the GQL leaves and pull
+    //    the four siblings that open L0 up to `block_id`.
     let tree = block_id_tree::BlockIdMerkleTree::from_leaves(leaves);
 
     // Structural sanity: the tree we just folded must agree with the
@@ -293,8 +291,8 @@ async fn generate_layer_proof_for_key_block(
     // Mirror of the same check on the bk-update path in bk_update.rs.
     if tree.root != block.block_id {
         return Err(DriverError::gql_schema(anyhow::anyhow!(
-            "layer {}: reconstructed tree.root {} != block.block_id {} — \
-             GQL leaves inconsistent with block header",
+            "layer {}: reconstructed tree.root {} != block.block_id {} — GQL leaves inconsistent \
+             with block header",
             target_seqno,
             hex::encode(tree.root),
             hex::encode(block.block_id),
@@ -313,8 +311,8 @@ async fn generate_layer_proof_for_key_block(
     let bk_hash_bytes: [u8; 32] = driver.bk_set_commitment_fr().to_repr();
     if bk_hash_bytes != leaves[2] {
         return Err(DriverError::state_inconsistent(anyhow::anyhow!(
-            "loaded BK set Poseidon commitment ({}) does not match block.leaves[2] ({}) — \
-             stale BK set or the chain rotated keys",
+            "loaded BK set Poseidon commitment ({}) does not match block.leaves[2] ({}) — stale \
+             BK set or the chain rotated keys",
             hex::encode(bk_hash_bytes),
             hex::encode(leaves[2]),
         )));
@@ -349,17 +347,22 @@ async fn generate_layer_proof_for_key_block(
     )
     .map_err(|e| DriverError::proof_gen(target_seqno, e))?;
 
-    // 6. Extract the per-layer bundle + authoritative block height for
-    //    ack_bundle to feed BridgeState::append_bundle. Also surface the raw
-    //    SHA-256 root (= chain `Block.id`) so the caller can populate
-    //    `BundleProofArtifacts.block_id_be` from the ground-truth hash, not
-    //    from any circuit's `Fr::to_repr()` (which would lose the top 2 bits
-    //    when the hash `>= p`).
+    // 6. Extract the per-layer bundle + authoritative block height for ack_bundle
+    //    to feed BridgeState::append_bundle. Also surface the raw SHA-256 root (=
+    //    chain `Block.id`) so the caller can populate
+    //    `BundleProofArtifacts.block_id_be` from the ground-truth hash, not from
+    //    any circuit's `Fr::to_repr()` (which would lose the top 2 bits when the
+    //    hash `>= p`).
     let state_layer_hashes: Vec<([u8; 32], u8)> = block
         .history_proofs
         .iter()
         .map(|(&layer, root)| (*root, layer))
         .collect();
 
-    Ok((layer_proof, state_layer_hashes, block.height, tree.block_id()))
+    Ok((
+        layer_proof,
+        state_layer_hashes,
+        block.height,
+        tree.block_id(),
+    ))
 }

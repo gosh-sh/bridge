@@ -15,7 +15,16 @@ use serde::{Deserialize, Serialize};
 
 /// On-disk schema version. Bump whenever the JSON shape changes in a
 /// non-backwards-compatible way.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2: `PrivateWitness.h07_sibling_hex` added for the multi-thread
+/// `BridgeEventFinalProof` circuit (13 public inputs). The circuit
+/// reconstructs `x_block_id` from `(ext_out_root, h07_sibling)` via the
+/// depth-4 SHA-256 L8 opening — there is no way to derive `h07_sibling`
+/// from the other fields, so it must be supplied. Same-thread claims
+/// still use `y_block_id = block_id_hex` (auto-derived by the prover);
+/// cross-thread claims will carry `y_block_id` through the future
+/// `MultiHopBundleWitnessJson` wire.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Top-level export record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +67,21 @@ pub struct PrivateWitness {
     /// Anchor to a layer hash already verified by `bridge-verifier-daemon`.
     /// `None` until populated by the daemon.
     pub anchor: Option<AnchorRef>,
+
+    /// Opaque left-aggregate sibling of the depth-4 SHA-256 block-id tree
+    /// (aggregate of leaves 0..=7 of the X-block's block-id tree).
+    ///
+    /// Required by the multi-thread `BridgeEventFinalProof` circuit: the
+    /// in-circuit L8 opening reconstructs `x_block_id` from
+    /// `(ext_out_root, h07_sibling)`; this value cannot be derived from
+    /// the other witness fields — it must be fetched from the source
+    /// block (GraphQL / node RPC).
+    ///
+    /// 32-byte lowercase hex. Defaults to all-zeros so witnesses produced
+    /// by the pre-v2 exporter (before GQL wiring is complete) still parse;
+    /// enrichment code owns populating the real value.
+    #[serde(default)]
+    pub h07_sibling_hex: String,
 }
 
 /// Mirror of `bridge-event-prove-circuit::boc_helper::BocFlattenData` with
@@ -120,9 +144,9 @@ pub struct MerkleProofData {
 
 /// Reference to a layer hash already mirrored by the verifier — the
 /// "anchor" the event proof binds to. The daemon (Track D) populates this
-/// from `state/verifier_state.json`. circuit exposes a single `final_root` public input, so the daemon only
-/// needs to supply the matching anchor hash (and the dense chain to
-/// rebuild it inside the circuit).
+/// from `state/verifier_state.json`. circuit exposes a single `final_root`
+/// public input, so the daemon only needs to supply the matching anchor hash
+/// (and the dense chain to rebuild it inside the circuit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnchorRef {
     /// Which layer in `layer_windows` we chose (0 = L1, 1 = L2, ...).
@@ -146,4 +170,189 @@ pub struct DenseChainLinkSer {
     pub position: u32,
     pub siblings_hex: Vec<String>,
     pub leaf_hex: String,
+}
+
+// ---------------------------------------------------------------------------
+// Cross-thread bundle witness — JSON mirrors of
+// `bridge_event_prove_circuit::multi_hop_witness::{BlockWitness, HopWitness,
+// MultiHopProofWitness}`.
+//
+// Constants below duplicate the canonical values in that module because this
+// crate deliberately avoids a circuit-crate dep at the schema layer (see the
+// mirror pattern used by `CellRecord` above). Keep in sync — a mismatch will
+// surface at circuit ingest, not JSON parse.
+// ---------------------------------------------------------------------------
+
+/// SHA-256 leaves in the per-block outer merkle. Mirrors
+/// `multi_hop_witness::BLOCK_MERKLE_LEAF_COUNT`.
+pub const BLOCK_MERKLE_LEAF_COUNT: usize = 16;
+
+/// Depth of the per-block SHA-256 merkle. Mirrors
+/// `multi_hop_witness::BLOCK_MERKLE_DEPTH`.
+pub const BLOCK_MERKLE_DEPTH: usize = 4;
+
+/// Hops per BridgeMultiHopProof snark. Mirrors
+/// `multi_hop_witness::H_HOPS_PER_PROOF`.
+pub const H_HOPS_PER_PROOF: usize = 1;
+
+/// Maximum BridgeMultiHopProof snarks per bundle at the prototype cap.
+/// Mirrors `multi_hop_witness::N_BUNDLE_MAX`.
+pub const N_BUNDLE_MAX: usize = 20;
+
+/// Depth of the in-circuit L7 inner-path fold (padded regardless of the
+/// per-hop `refs_tree_depth`). Mirrors
+/// `multi_hop_witness::MAX_PROOF_BLOCK_REFS_DEPTH`.
+pub const MAX_PROOF_BLOCK_REFS_DEPTH: usize = 8;
+
+/// JSON mirror of `multi_hop_witness::BlockWitness`. All 32-byte fields are
+/// lowercase hex.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockWitnessJson {
+    /// 32-byte block id (`BlockWitness::block_id`), lowercase hex.
+    pub block_id_hex: String,
+    /// The 16 SHA-256 leaves L0..L15
+    /// (`BlockWitness::block_merkle_tree_leaves`), each 32 bytes hex.
+    pub block_merkle_tree_leaves_hex: [String; BLOCK_MERKLE_LEAF_COUNT],
+    /// Variable-length referenced-block-id list
+    /// (`BlockWitness::proof_block_refs`), each 32 bytes hex. Length ≤
+    /// `multi_hop_witness::MAX_PROOF_BLOCK_REFS` (protocol cap; enforced by
+    /// the circuit ingest, not by JSON parse).
+    pub proof_block_refs_hex: Vec<String>,
+}
+
+/// JSON mirror of `multi_hop_witness::HopWitness`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HopWitnessJson {
+    /// Real-vs-padding flag (`HopWitness::is_active`). Padded hops satisfy
+    /// `hop_start_block_id_hex == hop_end_block_id_hex`.
+    pub is_active: bool,
+    /// The hop's **start** block (`HopWitness::block`) under Direction (a):
+    /// `block.block_id_hex` == `hop_start_block_id_hex` (current/newer). The
+    /// hop's end (older ref) lives in `block.proof_block_refs_hex[ref_index]`.
+    pub block: BlockWitnessJson,
+    /// SHA-256 merkle opening for L7 against `block.block_id_hex`,
+    /// `BLOCK_MERKLE_DEPTH = 4` siblings.
+    pub block_merkle_leaf_proof_l7_hex: [String; BLOCK_MERKLE_DEPTH],
+    /// Index of the referenced block within `block.proof_block_refs_hex`.
+    /// Slot 0 (same-thread `parent_block_id`) and slots ≥ 1 (cross-thread
+    /// `refs[k]`) are both valid hop edges; the circuit selects the matching
+    /// Poseidon-leaf tag layout per hop.
+    pub ref_index: u32,
+    /// Real depth of the L7 dense-merkle tree for this hop, in
+    /// `[0, MAX_PROOF_BLOCK_REFS_DEPTH]`.
+    pub refs_tree_depth: u8,
+    /// Dense-merkle siblings for the L7 opening, padded to
+    /// `MAX_PROOF_BLOCK_REFS_DEPTH = 8`. Only the first `refs_tree_depth`
+    /// entries are used inside the circuit.
+    pub proof_block_ref_inner_path_hex: [String; MAX_PROOF_BLOCK_REFS_DEPTH],
+    /// Hop's start endpoint as clear bytes, hex — Direction (a): the current
+    /// (newer) block whose L7 walk this hop closes. Equal to
+    /// `block.block_id_hex` for active hops.
+    pub hop_start_block_id_hex: String,
+    /// Hop's end endpoint as clear bytes, hex — Direction (a): the older ref
+    /// extracted from `block.proof_block_refs_hex[ref_index]`. Threads into
+    /// the next hop's `hop_start_block_id_hex` as intra-bundle continuity.
+    pub hop_end_block_id_hex: String,
+}
+
+/// JSON mirror of `multi_hop_witness::MultiHopProofWitness` — one
+/// BridgeMultiHopProof snark's worth of hops.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiHopProofWitnessJson {
+    pub hops: [HopWitnessJson; H_HOPS_PER_PROOF],
+}
+
+/// A whole cross-thread bundle: up to `N_BUNDLE_MAX` snarks. Same-thread
+/// claims serialize as `{ "snarks": [] }` (a zero-length bundle is the
+/// signal that the payload is not cross-thread).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MultiHopBundleWitnessJson {
+    pub snarks: Vec<MultiHopProofWitnessJson>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h32(byte: u8) -> String {
+        hex::encode([byte; 32])
+    }
+
+    fn sample_block(seed: u8) -> BlockWitnessJson {
+        let leaves: [String; BLOCK_MERKLE_LEAF_COUNT] =
+            std::array::from_fn(|i| h32(seed ^ i as u8));
+        BlockWitnessJson {
+            block_id_hex: h32(seed),
+            block_merkle_tree_leaves_hex: leaves,
+            proof_block_refs_hex: vec![h32(seed ^ 0xF0), h32(seed ^ 0xF1)],
+        }
+    }
+
+    fn sample_hop(seed: u8, active: bool) -> HopWitnessJson {
+        let siblings: [String; BLOCK_MERKLE_DEPTH] =
+            std::array::from_fn(|i| h32(seed ^ 0x10 ^ i as u8));
+        let inner: [String; MAX_PROOF_BLOCK_REFS_DEPTH] =
+            std::array::from_fn(|i| h32(seed ^ 0x20 ^ i as u8));
+        HopWitnessJson {
+            is_active: active,
+            block: sample_block(seed),
+            block_merkle_leaf_proof_l7_hex: siblings,
+            ref_index: 1,
+            refs_tree_depth: 1,
+            proof_block_ref_inner_path_hex: inner,
+            hop_start_block_id_hex: h32(seed ^ 0xA0),
+            hop_end_block_id_hex: h32(seed ^ 0xA1),
+        }
+    }
+
+    fn sample_snark(seed: u8) -> MultiHopProofWitnessJson {
+        let hops: [HopWitnessJson; H_HOPS_PER_PROOF] =
+            std::array::from_fn(|i| sample_hop(seed ^ i as u8, i < 3));
+        MultiHopProofWitnessJson {
+            hops,
+        }
+    }
+
+    #[test]
+    fn multi_hop_proof_json_roundtrip() {
+        let s = sample_snark(0x42);
+        let raw = serde_json::to_string(&s).expect("serialize");
+        let back: MultiHopProofWitnessJson = serde_json::from_str(&raw).expect("deserialize");
+        // Spot-check a few fields — array PartialEq is not derived, so
+        // compare via re-serialisation.
+        assert_eq!(back.hops.len(), H_HOPS_PER_PROOF);
+        assert_eq!(
+            back.hops[0].block.block_id_hex,
+            s.hops[0].block.block_id_hex
+        );
+        assert_eq!(
+            back.hops[0].proof_block_ref_inner_path_hex,
+            s.hops[0].proof_block_ref_inner_path_hex
+        );
+        let raw2 = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(raw, raw2);
+    }
+
+    #[test]
+    fn multi_hop_bundle_json_roundtrip() {
+        let bundle = MultiHopBundleWitnessJson {
+            snarks: (0..N_BUNDLE_MAX)
+                .map(|i| sample_snark(0x10 + i as u8))
+                .collect(),
+        };
+        let raw = serde_json::to_string(&bundle).expect("serialize");
+        let back: MultiHopBundleWitnessJson = serde_json::from_str(&raw).expect("deserialize");
+        assert_eq!(back.snarks.len(), N_BUNDLE_MAX);
+        let raw2 = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(raw, raw2);
+    }
+
+    #[test]
+    fn empty_bundle_signals_same_thread() {
+        let bundle = MultiHopBundleWitnessJson::default();
+        let raw = serde_json::to_string(&bundle).expect("serialize");
+        assert_eq!(raw, r#"{"snarks":[]}"#);
+        let back: MultiHopBundleWitnessJson = serde_json::from_str(&raw).expect("deserialize");
+        assert!(back.snarks.is_empty());
+    }
 }

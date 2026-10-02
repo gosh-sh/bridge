@@ -138,7 +138,7 @@ not generator drift.
 
 ## What must not be done
 
-**Remove stage 5 from the protocol.** `withdrawByProof` does not pay without a proof
+**Remove stage 5 from the protocol.** `withdrawByProofBundle` does not pay without a proof
 (`contracts/ethereum/src/AckiNackiBridge.sol:1156`): the recipient is a public input of the proof
 (`:1181-1191`), the `nullifier` guards against replay (`:1193-1195`), and the identity pair is
 checked before the cryptography (`:1165-1167`). Without a proof the EVM side has no way to know the

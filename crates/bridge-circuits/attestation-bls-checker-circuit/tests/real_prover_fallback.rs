@@ -2,34 +2,38 @@
 //!
 //! Generates a single proving key / verification key, then creates and verifies
 //! proofs for different BK set sizes (10, 100, 299) using the same key.
-//! Reports timings for SRS generation, keygen, proof generation, and verification.
-//! Caches SRS, VK, and PK to disk for faster re-runs.
+//! Reports timings for SRS generation, keygen, proof generation, and
+//! verification. Caches SRS, VK, and PK to disk for faster re-runs.
 //!
-//! Run: `cargo test -p attestation-bls-checker-circuit --test real_prover_fallback -- --nocapture`
+//! Run: `cargo test -p attestation-bls-checker-circuit --test
+//! real_prover_fallback -- --nocapture`
 
-use std::path::Path;
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use attestation_bls_checker_circuit::{
     fallback_circuit::FallbackAttestationBlsCheckerCircuit,
-    test_instances::expected_public_instances,
-    K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
+    test_instances::expected_public_instances, K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
 };
 use bridge_poseidon::{LIMB_BITS, MAX_SIGNERS, NUM_LIMBS};
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use gosh_zk_snark_halo2_utils::{
+    io::{
+        read_vk_from_path, save_bytes, save_config_params, save_pk_to_path, save_vk_to_path,
+        try_read_config_params,
+    },
+    proof::Proof,
 };
-use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
-use halo2_base::utils::fs::gen_srs;
-
-use gosh_zk_snark_halo2_utils::io::{
-    read_vk_from_path, save_bytes, save_config_params, save_pk_to_path, save_vk_to_path,
-    try_read_config_params,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::{
+            bn256::{Bn256, Fr, G1Affine},
+            ff::PrimeField,
+        },
+        plonk::{keygen_pk, keygen_vk, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
+    utils::fs::gen_srs,
 };
-use gosh_zk_snark_halo2_utils::proof::Proof;
 
 const ARTIFACT_DIR: &str = "params";
 
@@ -40,19 +44,13 @@ const ARTIFACT_DIR: &str = "params";
 fn build_fallback_circuit(
     bk_set_size: usize,
     shared_params: Option<&BaseCircuitParams>,
-) -> (
-    FallbackAttestationBlsCheckerCircuit<Fr>,
-    Vec<Fr>,
-) {
+) -> (FallbackAttestationBlsCheckerCircuit<Fr>, Vec<Fr>) {
     let test_data =
         bridge_test_data_gen::generator::generate_test_data_fallback_all_sign(bk_set_size)
             .expect("generate_test_data_fallback_all_sign failed");
 
-    let (last_seen_block_seqno, instances) = expected_public_instances(
-        &test_data.attestation_bytes,
-        &test_data.bk_set,
-        MAX_SIGNERS,
-    );
+    let (last_seen_block_seqno, instances) =
+        expected_public_instances(&test_data.attestation_bytes, &test_data.bk_set, MAX_SIGNERS);
 
     let mut circuit = FallbackAttestationBlsCheckerCircuit::<Fr>::new(
         test_data.attestation_bytes,
@@ -83,7 +81,10 @@ fn keygen_and_cache(
     pk_path: &str,
     config_path: &str,
 ) -> (VerifyingKey<G1Affine>, BaseCircuitParams) {
-    println!("  Cache miss — running keygen (reference BK set size = {})", ref_bk_set_size);
+    println!(
+        "  Cache miss — running keygen (reference BK set size = {})",
+        ref_bk_set_size
+    );
     let t = Instant::now();
     let (ref_circuit, _) = build_fallback_circuit(ref_bk_set_size, None);
     let base_params = ref_circuit.params.base_circuit_params.clone();
@@ -182,7 +183,11 @@ fn test_real_prover_fallback_multi_bk_set() {
             let t = Instant::now();
             let valid = proof.verify_with_vk(&vk, &params, &inst_refs);
             verify_times.push(t.elapsed());
-            assert!(valid, "Proof verification failed for bk_set_size={}", bk_set_size);
+            assert!(
+                valid,
+                "Proof verification failed for bk_set_size={}",
+                bk_set_size
+            );
         }
         let avg_verify = verify_times.iter().sum::<std::time::Duration>() / 5;
         println!("[timing] verification (avg of 5): {:?}", avg_verify);

@@ -15,7 +15,8 @@
 //! ## Design notes
 //!
 //! * **No persistence.** The driver holds `BridgeState` + `ProverBkSet` in
-//!   memory only. The caller calls [`snapshot_state`](LiveProverDriver::snapshot_state)
+//!   memory only. The caller calls
+//!   [`snapshot_state`](LiveProverDriver::snapshot_state)
 //!   + [`snapshot_prover_bk_set`](LiveProverDriver::snapshot_prover_bk_set)
 //!   after every ack and saves them itself. Our daemon uses `./state/*.json`;
 //!   Sergey's uses whatever fits his layout.
@@ -23,21 +24,21 @@
 //!   even when there is nothing new (e.g. [`LiveBundleEvent::Nothing`]). The
 //!   caller owns the poll interval and backoff.
 //! * **No `Fr` in the public payloads.** [`BundleProofArtifacts`] and
-//!   [`BkUpdateProofArtifacts`] carry only `[u8; 32]` (canonical
-//!   `fr.to_repr()` bytes) so consumers do not transitively pull the halo2
-//!   field type. Our IPC verifier and Sergey's `AnBlockData` both convert
-//!   with a trivial `From` impl on their side.
+//!   [`BkUpdateProofArtifacts`] carry only `[u8; 32]` (canonical `fr.to_repr()`
+//!   bytes) so consumers do not transitively pull the halo2 field type. Our IPC
+//!   verifier and Sergey's `AnBlockData` both convert with a trivial `From`
+//!   impl on their side.
 //! * **Idempotent acks.** [`LiveProverDriver::ack_bundle`] and
 //!   [`LiveProverDriver::ack_bk_update`] compare `block_seq_no` to the
 //!   in-memory cursor and no-op if the state is already past. This means the
 //!   caller can re-ack after a crash-restart without corrupting state.
 //! * **Pending rotations no longer block bundles.** On-chain
-//!   `applyBkSetUpdate(N)` may land before `verifyBlock` covers N.
-//!   The relayer acks this driver only once the next bundle
-//!   target is above N, so the outgoing set stays available for
-//!   `seqNo <= N`. [`LiveProverDriver::poll_next_bundle`] still
-//!   reports `blocked_by_pending_bk_update` when a rotation sits at or
-//!   below the next target, but it keeps proving the bundle.
+//!   `applyBkSetUpdate(N)` may land before `verifyBlock` covers N. The relayer
+//!   acks this driver only once the next bundle target is above N, so the
+//!   outgoing set stays available for `seqNo <= N`.
+//!   [`LiveProverDriver::poll_next_bundle`] still reports
+//!   `blocked_by_pending_bk_update` when a rotation sits at or below the next
+//!   target, but it keeps proving the bundle.
 //!
 //! This module's public API *is* the two-daemon integration contract
 //! (`poll_next_bundle` / `ack_bundle` and their bk-update siblings)
@@ -47,13 +48,14 @@
 //!
 //! External consumers wire the driver into their own poll loop by:
 //!
-//! 1. building a [`bridge_gql_fetcher::gql_client::GqlClient`] pointed at an AN node,
+//! 1. building a [`bridge_gql_fetcher::gql_client::GqlClient`] pointed at an AN
+//!    node,
 //! 2. constructing a [`KeyManager`] and calling `ensure_primary_keys` /
 //!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
-//! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
-//!    their own persistence layer,
-//! 4. bootstrapping the initial BK-set map by folding rotation events on top
-//!    of a genesis anchor via
+//! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from their
+//!    own persistence layer,
+//! 4. bootstrapping the initial BK-set map by folding rotation events on top of
+//!    a genesis anchor via
 //!    [`bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height`] (the old
 //!    `fetch_bk_set` replayed the delta log from ∅ and missed the un-emitted
 //!    genesis committee — disabled 2026-07-22), and
@@ -82,19 +84,19 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use bridge_gql_fetcher::{attestation_fetcher::AttestationEvidence, gql_client::GqlClient};
+use bridge_poseidon as poseidon;
+use halo2_base::halo2_proofs::halo2curves::{bn256::Fr, group::ff::PrimeField};
 use thiserror::Error;
 use tracing::{info, warn};
 
-use bridge_gql_fetcher::attestation_fetcher::AttestationEvidence;
-use crate::bootstrap::BootstrapSeed;
-use crate::bridge_state::{BridgeState, MAX_LAYERS};
-use bridge_gql_fetcher::gql_client::GqlClient;
-use crate::keys::KeyManager;
-use bridge_poseidon as poseidon;
-use crate::prover_bk_set::ProverBkSet;
-use crate::transcript::TranscriptKind;
+use crate::{
+    bootstrap::BootstrapSeed,
+    bridge_state::{BridgeState, MAX_LAYERS},
+    keys::KeyManager,
+    prover_bk_set::ProverBkSet,
+    transcript::TranscriptKind,
+};
 
 mod bk_update;
 mod bundle;
@@ -105,8 +107,7 @@ pub use thinning::find_next_thinned_key_block;
 /// History window `W` — pulled from the vendored `poseidon_dense` constant so
 /// the driver and its callers always agree without depending on any node
 /// crate.
-pub const HISTORY_WINDOW_SIZE: u64 =
-    crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64;
+pub const HISTORY_WINDOW_SIZE: u64 = crate::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE as u64;
 
 /// Safety cap on how many rotations
 /// [`LiveProverDriver::poll_next_bk_update`] will surface between two
@@ -174,13 +175,10 @@ pub enum DriverError {
     /// `cursor + stride > rotation_seqno`, then re-ack the same
     /// artifacts (idempotent).
     #[error(
-        "ack_bk_update too early: cursor {cursor} + stride ≤ rotation {rotation_seqno} \
-         (bundle the next OLD-signed key block first, then re-ack)"
+        "ack_bk_update too early: cursor {cursor} + stride ≤ rotation {rotation_seqno} (bundle \
+         the next OLD-signed key block first, then re-ack)"
     )]
-    AckTooEarly {
-        cursor: u64,
-        rotation_seqno: u64,
-    },
+    AckTooEarly { cursor: u64, rotation_seqno: u64 },
 
     /// Bootstrap-phase signal: driver is still waiting for chain head to
     /// catch up to the seed height. Not an error in the usual sense; both
@@ -223,7 +221,10 @@ impl DriverError {
     /// known target `seq_no`. Callers should alert and halt the pipeline;
     /// re-running the same witness will fail the same way.
     pub(crate) fn proof_gen(seq_no: u64, err: impl Into<anyhow::Error>) -> Self {
-        DriverError::ProofGen { seq_no, source: err.into() }
+        DriverError::ProofGen {
+            seq_no,
+            source: err.into(),
+        }
     }
 
     /// Site-specific constructor for state-inconsistency errors (BK-set
@@ -259,7 +260,8 @@ pub struct LiveProverConfig {
     /// `docs/l2_anchoring_proposal.md`.
     ///
     /// Fully wired: every stride-dependent call site — `SeedPolicy::Explicit`
-    /// alignment check, [`crate::live_driver::thinning::find_next_bundle_boundary`],
+    /// alignment check,
+    /// [`crate::live_driver::thinning::find_next_bundle_boundary`],
     /// `advance_bootstrap`, and `next_target_seqno_upper_bound` — routes
     /// through [`LiveProverConfig::bundle_stride`], which delegates to
     /// [`crate::AnchorMode::stride`]. Flipping the mode is a single-source
@@ -278,8 +280,8 @@ pub struct LiveProverConfig {
     /// * [`TranscriptKind::Blake2b`] (default) — AN-side verifier flavour;
     ///   accepted by the AN VM's `ZKHALO2VERIFYWITHVK` opcode and by our
     ///   `bridge-prover-daemon` verifier.
-    /// * [`TranscriptKind::Poseidon`] — ETH-side aggregator flavour; the
-    ///   raw proof bytes are consumable by `snark-verifier-sdk`'s
+    /// * [`TranscriptKind::Poseidon`] — ETH-side aggregator flavour; the raw
+    ///   proof bytes are consumable by `snark-verifier-sdk`'s
     ///   `AggregationCircuit` (see `crates/bridge-evm-aggregator`).
     ///
     /// One driver produces exactly one flavour per `poll_next_*` call —
@@ -349,7 +351,10 @@ pub enum SeedPolicy {
 pub enum LiveBundleEvent {
     /// Driver is still waiting for the chain to reach the bootstrap seed
     /// height. The caller should sleep + retry.
-    Bootstrapping { seed_seqno: u64, chain_head_seqno: u64 },
+    Bootstrapping {
+        seed_seqno: u64,
+        chain_head_seqno: u64,
+    },
     /// No new thinned key block is available (yet). Not an error.
     Nothing {
         /// Next thinned-key-block seqno the driver is aiming for.
@@ -376,7 +381,10 @@ pub enum LiveBundleEvent {
 pub enum LiveBkUpdateEvent {
     /// Driver is still bootstrapping (same semantics as
     /// [`LiveBundleEvent::Bootstrapping`]).
-    Bootstrapping { seed_seqno: u64, chain_head_seqno: u64 },
+    Bootstrapping {
+        seed_seqno: u64,
+        chain_head_seqno: u64,
+    },
     /// No new bk-set rotation past the applied cursor. Not an error.
     Nothing,
     /// A fully proven bk-set rotation ready for `applyBkSetUpdate`. The
@@ -504,7 +512,9 @@ impl From<&AttestationEvidence> for BundleFinalizationType {
     fn from(ev: &AttestationEvidence) -> Self {
         match ev {
             AttestationEvidence::Primary(_) => BundleFinalizationType::Primary,
-            AttestationEvidence::Fallback { .. } => BundleFinalizationType::Fallback,
+            AttestationEvidence::Fallback {
+                ..
+            } => BundleFinalizationType::Fallback,
         }
     }
 }
@@ -557,10 +567,9 @@ impl LiveProverDriver {
     ///   driver does NOT eagerly re-load keys — it drives on-demand load /
     ///   unload during proof generation to stay within the single-PK memory
     ///   envelope.
-    /// * `prover_bk_set` is the sole authoritative BK-pubkey source. The
-    ///   ctor re-derives its Poseidon commitment from `prover_bk_set.pubkeys()`
-    ///   and cross-checks against `state.stored_bk_set_commitment` on a
-    ///   warm start.
+    /// * `prover_bk_set` is the sole authoritative BK-pubkey source. The ctor
+    ///   re-derives its Poseidon commitment from `prover_bk_set.pubkeys()` and
+    ///   cross-checks against `state.stored_bk_set_commitment` on a warm start.
     ///
     /// The `seed_policy` inside `cfg` is resolved lazily on the first
     /// poll — nothing is fetched or applied at construction time.
@@ -574,13 +583,13 @@ impl LiveProverDriver {
     ///
     /// Which methods touch halo2 keys:
     ///
-    /// * **Proof-generating (require `ensure_*_keys` up front, drive
-    ///   on-demand PK load/unload internally):** [`poll_next_bundle`],
+    /// * **Proof-generating (require `ensure_*_keys` up front, drive on-demand
+    ///   PK load/unload internally):** [`poll_next_bundle`],
     ///   [`poll_next_bk_update`].
     /// * **State-only, no key access:** [`ack_bundle`], [`ack_bk_update`]
     ///   (cursor advance + in-memory commitment rotation only),
-    ///   [`snapshot_state`], [`snapshot_prover_bk_set`] (borrow-only
-    ///   reads for the caller to persist).
+    ///   [`snapshot_state`], [`snapshot_prover_bk_set`] (borrow-only reads for
+    ///   the caller to persist).
     ///
     /// A read-only consumer that only calls the `snapshot_*` / `ack_*`
     /// surface still transitively links halo2 (see above) but never
@@ -625,17 +634,14 @@ impl LiveProverDriver {
             poseidon::compute_bk_set_poseidon(&pubkeys);
         anyhow::ensure!(
             bk_set_commitment_bytes == prover_bk_set.commitment,
-            "prover_bk_set self-inconsistent: pubkeys hash to {} but stored \
-             commitment is {}",
+            "prover_bk_set self-inconsistent: pubkeys hash to {} but stored commitment is {}",
             hex::encode(bk_set_commitment_bytes),
             hex::encode(prover_bk_set.commitment),
         );
 
         // Sanity check: on a warm start the caller's `state` must agree with
         // its `bk_set`. Refuse to run silently in a mixed state.
-        if state.initialized
-            && state.stored_bk_set_commitment != bk_set_commitment_bytes
-        {
+        if state.initialized && state.stored_bk_set_commitment != bk_set_commitment_bytes {
             anyhow::bail!(
                 "LiveProverDriver::new: bk_set commitment {} disagrees with \
                  BridgeState.stored_bk_set_commitment {}",
@@ -653,7 +659,7 @@ impl LiveProverDriver {
                     "LiveProverDriver::new: SeedPolicy::Resume requires an initialized \
                      BridgeState — got initialized=false"
                 );
-            }
+            },
             (SeedPolicy::Explicit(n), false) => {
                 let step = cfg.bundle_stride();
                 anyhow::ensure!(
@@ -666,9 +672,13 @@ impl LiveProverDriver {
                     HISTORY_WINDOW_SIZE,
                     crate::THINNING_FACTOR_P,
                 );
-                DriverStage::NeedsSeed { seed_seqno: Some(n) }
-            }
-            (SeedPolicy::Auto, false) => DriverStage::NeedsSeed { seed_seqno: None },
+                DriverStage::NeedsSeed {
+                    seed_seqno: Some(n),
+                }
+            },
+            (SeedPolicy::Auto, false) => DriverStage::NeedsSeed {
+                seed_seqno: None,
+            },
         };
 
         Ok(Self {
@@ -697,7 +707,10 @@ impl LiveProverDriver {
     async fn poll_next_bundle_inner(&mut self) -> DriverResult<LiveBundleEvent> {
         // Bootstrap gate: while `NeedsSeed`, drive the seed and either
         // apply it (transition to Steady) or return Bootstrapping.
-        if let DriverStage::NeedsSeed { .. } = self.stage {
+        if let DriverStage::NeedsSeed {
+            ..
+        } = self.stage
+        {
             let (chain_head, still_waiting) = self.advance_bootstrap().await?;
             if let Some(seed_seqno) = still_waiting {
                 return Ok(LiveBundleEvent::Bootstrapping {
@@ -732,7 +745,7 @@ impl LiveProverDriver {
                     chain_head_seqno,
                     blocked_by_pending_bk_update: blocked,
                 });
-            }
+            },
         };
 
         // Rotation-hold guard.
@@ -743,22 +756,16 @@ impl LiveProverDriver {
         // (`prover_bk_set`). Circuit 1 witness gen for the next key
         // block requires whichever set signed that block:
         //
-        //   * next_target_seqno <= N  → key block is signed by OLD set
-        //                               (last acts of the outgoing
-        //                               committee). We still have OLD
-        //                               in `prover_bk_set` because ack
-        //                               is gated on cursor > N — proceed.
-        //   * next_target_seqno == N  → the rotation block itself IS a
-        //                               key block, signed by OLD (last
-        //                               act). Proceed and bundle it;
-        //                               the caller will ack the rotation
-        //                               immediately after.
-        //   * next_target_seqno >  N  → key block after the rotation,
-        //                               signed by NEW. `prover_bk_set`
-        //                               is still OLD, so witness gen
-        //                               would fail at the pairing check.
-        //                               Refuse — return `Nothing{blocked=true}`
-        //                               so caller drains the rotation first.
+        //   * next_target_seqno <= N  → key block is signed by OLD set (last acts of
+        //     the outgoing committee). We still have OLD in `prover_bk_set` because ack
+        //     is gated on cursor > N — proceed.
+        //   * next_target_seqno == N  → the rotation block itself IS a key block,
+        //     signed by OLD (last act). Proceed and bundle it; the caller will ack the
+        //     rotation immediately after.
+        //   * next_target_seqno >  N  → key block after the rotation, signed by NEW.
+        //     `prover_bk_set` is still OLD, so witness gen would fail at the pairing
+        //     check. Refuse — return `Nothing{blocked=true}` so caller drains the
+        //     rotation first.
         //
         // This is the "no bundle produced while rotation pending at
         // height < next_target" invariant. Sergey removed the strict
@@ -766,8 +773,7 @@ impl LiveProverDriver {
         // this restores structural enforcement for the case where the
         // caller violation would actually break proof generation.
         let pending_rot = self.pending_bk_update_height().await?;
-        let unsafe_pending =
-            pending_rot.map(|h| h < next_target_seqno).unwrap_or(false);
+        let unsafe_pending = pending_rot.map(|h| h < next_target_seqno).unwrap_or(false);
         if unsafe_pending {
             return Ok(LiveBundleEvent::Nothing {
                 next_target_seqno,
@@ -802,7 +808,10 @@ impl LiveProverDriver {
     }
 
     async fn poll_next_bk_update_inner(&mut self) -> DriverResult<LiveBkUpdateEvent> {
-        if let DriverStage::NeedsSeed { .. } = self.stage {
+        if let DriverStage::NeedsSeed {
+            ..
+        } = self.stage
+        {
             let (chain_head, still_waiting) = self.advance_bootstrap().await?;
             if let Some(seed_seqno) = still_waiting {
                 return Ok(LiveBkUpdateEvent::Bootstrapping {
@@ -823,7 +832,8 @@ impl LiveProverDriver {
     /// [`BridgeState::append_bundle`]. Idempotent by `block_seq_no`: no-op
     /// when the cursor is already past.
     pub fn ack_bundle(&mut self, artifacts: &BundleProofArtifacts) -> DriverResult<()> {
-        self.ack_bundle_inner(artifacts).map_err(DriverError::StateInconsistent)
+        self.ack_bundle_inner(artifacts)
+            .map_err(DriverError::StateInconsistent)
     }
 
     fn ack_bundle_inner(&mut self, artifacts: &BundleProofArtifacts) -> anyhow::Result<()> {
@@ -857,10 +867,7 @@ impl LiveProverDriver {
     /// downstream. Advances the in-memory [`BridgeState`] +
     /// [`ProverBkSet`] cursors and rotates the driver's in-memory pubkey
     /// table + Poseidon commitment. Idempotent by `block_seq_no`.
-    pub fn ack_bk_update(
-        &mut self,
-        artifacts: &BkUpdateProofArtifacts,
-    ) -> DriverResult<()> {
+    pub fn ack_bk_update(&mut self, artifacts: &BkUpdateProofArtifacts) -> DriverResult<()> {
         // Structural guard on the two-slot BK-set model.
         //
         // The rotation on-chain (`applyBkSetUpdate(N)`) may land BEFORE
@@ -879,13 +886,12 @@ impl LiveProverDriver {
         // prover is free to rotate its in-memory set.
         //
         // Concretely (stride=16):
-        //   * N=100, cursor=80: cursor+16=96 ≤ 100 → block. Bundle 96
-        //     (OLD-signed) still pending.
-        //   * N=100, cursor=96: cursor+16=112 > 100 → safe. Bundles 80,
-        //     96 done; 112 is post-rotation NEW-signed.
-        //   * N=112 (KB boundary), cursor=96: cursor+16=112 ≤ 112 →
-        //     block. Bundle 112 itself is OLD-signed
-        //     (`_expectedBkSetFor(112)` returns OLD when
+        //   * N=100, cursor=80: cursor+16=96 ≤ 100 → block. Bundle 96 (OLD-signed)
+        //     still pending.
+        //   * N=100, cursor=96: cursor+16=112 > 100 → safe. Bundles 80, 96 done; 112 is
+        //     post-rotation NEW-signed.
+        //   * N=112 (KB boundary), cursor=96: cursor+16=112 ≤ 112 → block. Bundle 112
+        //     itself is OLD-signed (`_expectedBkSetFor(112)` returns OLD when
         //     storedLastBkSetUpdateSeqNo == 112).
         //   * N=112, cursor=112: cursor+16=128 > 112 → safe.
         //
@@ -905,13 +911,11 @@ impl LiveProverDriver {
                 rotation_seqno: artifacts.block_seq_no,
             });
         }
-        self.ack_bk_update_inner(artifacts).map_err(DriverError::StateInconsistent)
+        self.ack_bk_update_inner(artifacts)
+            .map_err(DriverError::StateInconsistent)
     }
 
-    fn ack_bk_update_inner(
-        &mut self,
-        artifacts: &BkUpdateProofArtifacts,
-    ) -> anyhow::Result<()> {
+    fn ack_bk_update_inner(&mut self, artifacts: &BkUpdateProofArtifacts) -> anyhow::Result<()> {
         if artifacts.block_seq_no <= self.state.stored_last_bk_set_update_seq_no {
             info!(
                 "ack_bk_update: no-op — artifacts.block_seq_no={} <= stored_last_bk_set_update={}",
@@ -953,10 +957,7 @@ impl LiveProverDriver {
     /// `bridge-prover-daemon`'s `self-verify` feature — the ring buffer is
     /// diagnostic metadata for the CI smoke test's post-run assertions.
     /// Callers not using `self-verify` should ignore this method.
-    pub fn record_self_verify_result(
-        &mut self,
-        result: crate::bridge_state::BundleResult,
-    ) {
+    pub fn record_self_verify_result(&mut self, result: crate::bridge_state::BundleResult) {
         self.state.push_bundle_result(result);
     }
 
@@ -1025,12 +1026,12 @@ impl LiveProverDriver {
             Ok(None) => Ok(None),
             Err(e) => {
                 warn!(
-                    "pending_bk_update_height: next_update_after failed ({}), \
-                     assuming no pending update",
+                    "pending_bk_update_height: next_update_after failed ({}), assuming no pending \
+                     update",
                     e,
                 );
                 Ok(None)
-            }
+            },
         }
     }
 
@@ -1048,16 +1049,22 @@ impl LiveProverDriver {
         // Resolve the seed seqno (Auto: snap once and cache; Explicit:
         // already set at construction).
         let seed_seqno = match self.stage {
-            DriverStage::NeedsSeed { seed_seqno: Some(n) } => n,
-            DriverStage::NeedsSeed { seed_seqno: None } => {
+            DriverStage::NeedsSeed {
+                seed_seqno: Some(n),
+            } => n,
+            DriverStage::NeedsSeed {
+                seed_seqno: None,
+            } => {
                 let n = ((chain_head / step) + 1) * step;
                 info!(
                     "live_driver: Auto seed pinned at seq_no={} (chain head at {})",
                     n, chain_head,
                 );
-                self.stage = DriverStage::NeedsSeed { seed_seqno: Some(n) };
+                self.stage = DriverStage::NeedsSeed {
+                    seed_seqno: Some(n),
+                };
                 n
-            }
+            },
             DriverStage::Steady => return Ok((chain_head, None)),
         };
 
@@ -1082,11 +1089,12 @@ impl LiveProverDriver {
             chain_head_seqno: chain_head,
             source: e,
         })?;
-        seed.apply(&mut self.state).map_err(|e| DriverError::Bootstrapping {
-            seed_seqno,
-            chain_head_seqno: chain_head,
-            source: e,
-        })?;
+        seed.apply(&mut self.state)
+            .map_err(|e| DriverError::Bootstrapping {
+                seed_seqno,
+                chain_head_seqno: chain_head,
+                source: e,
+            })?;
         info!(
             "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
             seed.block_seq_no,
@@ -1146,7 +1154,10 @@ mod tests {
         // top-level constants). Bundle stride is derived from anchor_mode
         // via AnchorMode::stride().
         assert_eq!(cfg.anchor_mode, crate::AnchorMode::L1);
-        assert_eq!(cfg.bundle_stride(), HISTORY_WINDOW_SIZE * crate::THINNING_FACTOR_P);
+        assert_eq!(
+            cfg.bundle_stride(),
+            HISTORY_WINDOW_SIZE * crate::THINNING_FACTOR_P
+        );
         assert_eq!(cfg.seed_policy, SeedPolicy::Resume);
         // Blake2b default preserves the AN-opcode-compatible flavour for
         // every caller that doesn't override — both our own daemon and
@@ -1184,7 +1195,10 @@ mod tests {
         ));
         assert!(matches!(
             DriverError::proof_gen(42, src()),
-            DriverError::ProofGen { seq_no: 42, .. },
+            DriverError::ProofGen {
+                seq_no: 42,
+                ..
+            },
         ));
         assert!(matches!(
             DriverError::state_inconsistent(src()),

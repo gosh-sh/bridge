@@ -2,12 +2,10 @@
 //!
 //! Supports both Circuit 1a (primary attestation) and Circuit 2 (layer hashes).
 
-use std::path::Path;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use anyhow::Context;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use halo2_base::halo2_proofs::halo2curves::{bn256::Fr, group::ff::PrimeField};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
@@ -28,7 +26,9 @@ pub enum AttestationCircuit {
     Fallback,
 }
 
-fn default_attestation_circuit() -> AttestationCircuit { AttestationCircuit::Primary }
+fn default_attestation_circuit() -> AttestationCircuit {
+    AttestationCircuit::Primary
+}
 
 /// JSON structure for combined proof files (Circuit 1a or 1b + Circuit 2).
 #[derive(Serialize, Deserialize, Debug)]
@@ -51,8 +51,8 @@ pub struct ProofRequest {
     pub block_id_hex: String,
 
     // ---- Attestation circuit (1a Primary or 1b Fallback) ----
-    /// Which attestation circuit produced `attestation_proof_hex` — discriminates
-    /// the verifying key (Primary vs Fallback).
+    /// Which attestation circuit produced `attestation_proof_hex` —
+    /// discriminates the verifying key (Primary vs Fallback).
     #[serde(default = "default_attestation_circuit")]
     pub attestation_circuit: AttestationCircuit,
     /// Hex-encoded attestation-circuit proof bytes (1a or 1b — discriminated
@@ -97,7 +97,11 @@ pub fn proof_file_path(seq_no: u32) -> String {
 }
 
 pub fn result_file_path(seq_no: u32) -> String {
-    format!("{}/result_{:06}.json", paths::proofs_dir().display(), seq_no)
+    format!(
+        "{}/result_{:06}.json",
+        paths::proofs_dir().display(),
+        seq_no
+    )
 }
 
 pub fn ensure_proofs_dir() {
@@ -279,12 +283,22 @@ pub struct BkUpdateResult {
 
 /// Path of the proof JSON file the prover writes for a bk-update bundle.
 pub fn bkupd_file_path(seq_no: u32) -> String {
-    format!("{}/{}_{:06}.json", paths::proofs_dir().display(), BKUPD_PREFIX, seq_no)
+    format!(
+        "{}/{}_{:06}.json",
+        paths::proofs_dir().display(),
+        BKUPD_PREFIX,
+        seq_no
+    )
 }
 
 /// Path of the result JSON file the verifier writes for a bk-update bundle.
 pub fn bkupd_result_file_path(seq_no: u32) -> String {
-    format!("{}/{}_result_{:06}.json", paths::proofs_dir().display(), BKUPD_PREFIX, seq_no)
+    format!(
+        "{}/{}_result_{:06}.json",
+        paths::proofs_dir().display(),
+        BKUPD_PREFIX,
+        seq_no
+    )
 }
 
 /// Write a bk-update bundle (prover side).
@@ -321,10 +335,9 @@ pub async fn wait_for_bk_update_result(
     let start = std::time::Instant::now();
     loop {
         if Path::new(&path).exists() {
-            let data = std::fs::read_to_string(&path)
-                .context("failed to read bk-update result file")?;
-            return serde_json::from_str(&data)
-                .context("failed to parse bk-update result JSON");
+            let data =
+                std::fs::read_to_string(&path).context("failed to read bk-update result file")?;
+            return serde_json::from_str(&data).context("failed to parse bk-update result JSON");
         }
         if start.elapsed() > timeout {
             anyhow::bail!(
@@ -355,7 +368,10 @@ mod tests {
         // READER of the same variables. It takes the same lock.
         let _g = crate::paths::EnvGuard::new();
         assert_eq!(bkupd_file_path(42), "proofs/bkupd_000042.json");
-        assert_eq!(bkupd_result_file_path(42), "proofs/bkupd_result_000042.json");
+        assert_eq!(
+            bkupd_result_file_path(42),
+            "proofs/bkupd_result_000042.json"
+        );
     }
 
     #[test]

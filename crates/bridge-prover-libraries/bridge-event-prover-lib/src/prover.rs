@@ -1,16 +1,16 @@
 //! Circuit 4 (Event Prove — `WithdrawalInitiated`) proof generation.
 //!
-//! Bridges the JSON schema
-//! produced by `bridge-event-private-witness-export` to the
-//! `bridge-event-prove-circuit::BridgeEventProveCircuit` halo2 circuit
+//! Bridges the JSON schema produced by `bridge-event-private-witness-export`
+//! to the multi-thread `bridge-event-prove-circuit::bridge_event_final_proof::
+//! BridgeEventFinalProof` halo2 circuit.
 //!
 //! Two responsibilities:
 //!   1. **Input conversion** — deserialize the witness JSON, hex-decode cell
-//!      records, and assemble a `BridgeEventProveCircuit` instance.
-//!   2. **Public instance derivation** — build the 11-slot vector `[token_id,
+//!      records, and assemble a `BridgeEventFinalProof` instance.
+//!   2. **Public instance derivation** — build the 13-slot vector `[token_id,
 //!      amount, recipient_hi, recipient_lo, dst_chain_id, sender_acc_fr,
-//!      dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` that the
-//!      verifier checks.
+//!      dapp_fr, acc_fr, nullifier, final_root, anchor_layer, x_block_id,
+//!      y_block_id]` that the verifier checks.
 //!
 //! ### Anchor binding contract
 //!
@@ -19,28 +19,46 @@
 //! becomes `PUB_ANCHOR_LAYER`. The circuit computes `final_root` by
 //! climbing the supplied dense chain and range-checks the layer. The
 //! on-chain adapter checks `final_root` against that layer's window.
+//!
+//! ### Cross-thread vs same-thread
+//!
+//! `y_block_id` is derived from the accompanying [`MultiHopBundleWitnessJson`]:
+//! same-thread callers pass `&MultiHopBundleWitnessJson::default()` (an empty
+//! `snarks: []`) and get `y_block_id = x_block_id = block_id_hex` with
+//! `is_same_thread = true`; cross-thread callers pass a bundle whose last
+//! snark's last hop supplies `hop_end_block_id_hex`, which becomes
+//! `y_block_id` and flips `is_same_thread = false`.
 
 use std::convert::TryInto;
 
 use anyhow::{bail, Context, Result};
 use bridge_event_prove_circuit::{
     boc_helper::BocFlattenData,
-    bridge_event_prove_circuit::{
-        be_bytes_to_fr, BridgeEventProveCircuit, EVENT_AMOUNT_END, EVENT_AMOUNT_START,
-        EVENT_DST_CHAIN_ID_END, EVENT_DST_CHAIN_ID_START, MAX_ANCHOR_LAYER, MAX_EVENTS_TREE_DEPTH,
-        RECIPIENT_HI_END, RECIPIENT_HI_START, RECIPIENT_LO_END, RECIPIENT_LO_START,
-        TOTAL_PUBLIC_INPUTS,
+    bridge_event_final_proof::{BridgeEventFinalProof, TOTAL_PUBLIC_INPUTS},
+    event_primitives::{
+        be_bytes_to_fr, EVENT_AMOUNT_END, EVENT_AMOUNT_START, EVENT_DST_CHAIN_ID_END,
+        EVENT_DST_CHAIN_ID_START, MAX_ANCHOR_LAYER, MAX_EVENTS_TREE_DEPTH, RECIPIENT_HI_END,
+        RECIPIENT_HI_START, RECIPIENT_LO_END, RECIPIENT_LO_START,
     },
-    test_helpers::{decode_sender_account_id_from_cell, nullifier_native},
+    multi_hop_proof::{BridgeMultiHopProof, MULTI_HOP_PUBLIC_LEN},
+    multi_hop_witness::{
+        BlockWitness as CircuitBlockWitness, HopWitness as CircuitHopWitness,
+        MultiHopProofWitness as CircuitMultiHopProofWitness, BLOCK_MERKLE_DEPTH,
+        BLOCK_MERKLE_LEAF_COUNT, H_HOPS_PER_PROOF, MAX_PROOF_BLOCK_REFS_DEPTH,
+    },
+    test_helpers::{
+        decode_sender_account_id_from_cell, multi_hop_base_circuit_params, nullifier_native,
+    },
 };
 // Re-export the witness JSON types so the daemon doesn't need to pull
 // `bridge-event-witness` directly.
 pub use bridge_event_witness::schema::{
-    AnchorRef, BlockContext, CellRecord, DenseChainLinkSer, MerkleProofData, PrivateWitness,
-    WithdrawalInitiated, SCHEMA_VERSION,
+    AnchorRef, BlockContext, CellRecord, DenseChainLinkSer, HopWitnessJson, MerkleProofData,
+    MultiHopBundleWitnessJson, MultiHopProofWitnessJson, PrivateWitness, WithdrawalInitiated,
+    SCHEMA_VERSION,
 };
 use bridge_prover_lib::{
-    keys::EventKeyManager,
+    keys::{EventKeyManager, MultiHopKeyManager},
     transcript::{PoseidonWrite, TranscriptKind},
 };
 use gosh_dense_balanced_tree::{bytes_to_fr, DenseChainLink, MAX_CHAIN_LEN};
@@ -54,6 +72,8 @@ use halo2_base::halo2_proofs::{
 };
 use rand::rngs::OsRng;
 use tracing::info;
+
+use crate::bundle::EventBundle;
 
 /// Conservative base-circuit params for first-cut Circuit 4 work. Mirrors
 /// `bridge-event-prove-circuit::test_helpers::base_circuit_params`. Future
@@ -71,7 +91,7 @@ pub fn default_event_circuit_params() -> BaseCircuitParams {
 
 /// Bundle of everything the verifier needs once a Circuit 4 proof is generated.
 pub struct EventProofInputs {
-    pub circuit: BridgeEventProveCircuit,
+    pub circuit: BridgeEventFinalProof,
     pub public_instances: Vec<Fr>,
 }
 
@@ -139,14 +159,20 @@ fn dense_chain_to_native(links: &[DenseChainLinkSer]) -> Result<Vec<DenseChainLi
     Ok(out)
 }
 
-/// Build a `BridgeEventProveCircuit` + public-instance vector from a fully
+/// Build a `BridgeEventFinalProof` + public-instance vector from a fully
 /// populated [`PrivateWitness`].
 ///
 /// "Fully populated" means `events_tree_proof`, `block_tree_proof`, and
 /// `anchor` are all `Some(_)` — the per-tx exporter leaves them `None` and
 /// the daemon fills them in from verifier state.
+///
+/// `hop_bundle` supplies the cross-thread endpoint: same-thread callers pass
+/// `&MultiHopBundleWitnessJson::default()` (empty `snarks`) to get
+/// `y_block_id = x_block_id`; cross-thread callers pass a bundle whose last
+/// snark's last hop provides `hop_end_block_id_hex`.
 pub fn build_proof_inputs(
     witness: &PrivateWitness,
+    hop_bundle: &MultiHopBundleWitnessJson,
     base_circuit_params: BaseCircuitParams,
 ) -> Result<EventProofInputs> {
     if witness.schema_version != SCHEMA_VERSION {
@@ -184,10 +210,10 @@ pub fn build_proof_inputs(
             events_siblings.len(),
         );
     }
-    // Mirror `BridgeEventProveCircuit::assert_invariants`'s events_pos range
+    // Mirror `BridgeEventFinalProof::assert_invariants`'s events_pos range
     // check here so an out-of-range witness surfaces as a decoded error with
     // context rather than a panic. `assert_invariants` fires from
-    // `BridgeEventProveCircuit::new` further down in this same function
+    // `BridgeEventFinalProof::new` further down in this same function
     // (`build_proof_inputs`), so without this mirror an out-of-range witness
     // would panic on the caller's thread, not on a worker.
     //
@@ -196,7 +222,8 @@ pub fn build_proof_inputs(
     let events_pos_max = 1usize << events_siblings.len();
     if events_pos >= events_pos_max {
         bail!(
-            "events_tree_proof position {events_pos} out of range for depth {} (max={events_pos_max})",
+            "events_tree_proof position {events_pos} out of range for depth {} \
+             (max={events_pos_max})",
             events_siblings.len(),
         );
     }
@@ -276,11 +303,12 @@ pub fn build_proof_inputs(
     let anchor_layer_u8 = u8::try_from(anchor_layer).expect("checked against MAX_ANCHOR_LAYER");
     let anchor_layer_fr = Fr::from(u64::from(anchor_layer));
 
-    // 11-slot public-instance layout (see
-    // `bridge-event-prove-circuit::bridge_event_prove_circuit` PUB_* constants):
+    // 13-slot public-instance layout (see
+    // `bridge-event-prove-circuit::bridge_event_final_proof` PUB_* constants):
     //   [0] token_id, [1] amount, [2] recipient_hi, [3] recipient_lo,
     //   [4] dst_chain_id, [5] sender_acc_fr, [6] dapp_fr, [7] acc_fr,
-    //   [8] nullifier, [9] final_root, [10] anchor_layer.
+    //   [8] nullifier, [9] final_root, [10] anchor_layer,
+    //   [11] x_block_id, [12] y_block_id.
     let body = &entries[1].cell_repr_data;
     let recipient_payload = &entries[2].cell_repr_data;
     let sender_payload = &entries[3].cell_repr_data;
@@ -305,6 +333,36 @@ pub fn build_proof_inputs(
         Fr::from(events_pos as u64),
     );
 
+    // Multi-thread witness fields. `x_block_id` is always the event block;
+    // `y_block_id` is either the same (same-thread claim, `hop_bundle.snarks`
+    // is empty) or the terminal endpoint of the hop chain — the last snark's
+    // last hop's `hop_end_block_id_hex`. `h07_sibling` completes the L8
+    // opening pair — the circuit reconstructs `x_block_id` from
+    // `(ext_out_root, h07_sibling)` via a depth-4 SHA opening and
+    // copy-constrains equality with the witness.
+    let h07_sibling = parse_hex_array::<32>("h07_sibling_hex", &witness.h07_sibling_hex)?;
+    let x_block_id = block_id;
+    let x_block_id_fr = block_id_fr;
+    let (y_block_id, is_same_thread) = match hop_bundle.snarks.last() {
+        None => (block_id, true),
+        Some(last_snark) => {
+            // `MultiHopProofWitnessJson.hops` is `[HopWitnessJson;
+            // H_HOPS_PER_PROOF]` with `H_HOPS_PER_PROOF >= 1`, so
+            // `hops.last()` is always `Some(_)` — the array-length invariant
+            // is enforced by the type system, not the JSON decoder.
+            let last_hop = last_snark
+                .hops
+                .last()
+                .expect("MultiHopProofWitnessJson.hops has H_HOPS_PER_PROOF>=1 elements");
+            let y = parse_hex_array::<32>(
+                "hop_bundle.snarks.last.hops.last.hop_end_block_id_hex",
+                &last_hop.hop_end_block_id_hex,
+            )?;
+            (y, false)
+        },
+    };
+    let y_block_id_fr = bytes_to_fr(&y_block_id);
+
     let mut public_instances = Vec::with_capacity(TOTAL_PUBLIC_INPUTS);
     public_instances.push(token_id_fr);
     public_instances.push(amount_fr);
@@ -317,14 +375,19 @@ pub fn build_proof_inputs(
     public_instances.push(nullifier_fr);
     public_instances.push(final_root_fr);
     public_instances.push(anchor_layer_fr);
+    public_instances.push(x_block_id_fr);
+    public_instances.push(y_block_id_fr);
 
-    let circuit = BridgeEventProveCircuit::new(
+    let circuit = BridgeEventFinalProof::new(
         entries,
         events_siblings,
         events_pos,
         account_dapp_id,
         account_id,
-        block_id,
+        x_block_id,
+        y_block_id,
+        h07_sibling,
+        is_same_thread,
         envelope_hash,
         block_siblings,
         block_pos,
@@ -341,7 +404,7 @@ pub fn build_proof_inputs(
 }
 
 /// Token ID is `BE_pack(body[54..58))` — same derivation as
-/// `bridge_event_prove_circuit::bridge_event_prove_circuit::extract_event_public_fields`,
+/// `bridge_event_prove_circuit::bridge_event_final_proof::extract_event_public_fields`,
 /// but accepting the decoded `BocFlattenData` directly so the caller doesn't
 /// need to construct the full `[BocFlattenData; 4]` array twice.
 fn derive_token_id_fr(body: &BocFlattenData) -> Result<Fr> {
@@ -362,10 +425,11 @@ fn derive_token_id_fr(body: &BocFlattenData) -> Result<Fr> {
 /// Output of a Circuit 4 proof generation pass.
 ///
 /// `proof_bytes` is the SHPLONK/Blake2b-encoded proof; `public_instances`
-/// is the 11-slot vector
+/// is the 13-slot vector
 /// `[token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-/// sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` — what
-/// the verifier (or the on-chain bridge) checks against.
+/// sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer,
+/// x_block_id, y_block_id]` — what the verifier (or the on-chain bridge)
+/// checks against.
 #[derive(Clone)]
 pub struct EventProofOutput {
     pub proof_bytes: Vec<u8>,
@@ -374,6 +438,9 @@ pub struct EventProofOutput {
 
 /// Generate a Circuit 4 proof from a fully-populated [`PrivateWitness`].
 ///
+/// `hop_bundle` supplies the `y_block_id` endpoint — pass
+/// `&MultiHopBundleWitnessJson::default()` for same-thread claims.
+///
 /// Caller is responsible for ensuring the event PK is loaded into memory
 /// before calling — i.e. `event_km.load_pk()?` first, then
 /// `event_km.unload_pk()` after. The same on-demand pattern
@@ -381,8 +448,9 @@ pub struct EventProofOutput {
 pub fn generate_event_proof(
     event_km: &EventKeyManager,
     witness: &PrivateWitness,
+    hop_bundle: &MultiHopBundleWitnessJson,
 ) -> Result<EventProofOutput> {
-    generate_event_proof_with_transcript(event_km, witness, TranscriptKind::Blake2b)
+    generate_event_proof_with_transcript(event_km, witness, hop_bundle, TranscriptKind::Blake2b)
 }
 
 /// Generate a Circuit 4 proof from a fully-populated [`PrivateWitness`] with
@@ -393,9 +461,10 @@ pub fn generate_event_proof(
 pub fn generate_event_proof_with_transcript(
     event_km: &EventKeyManager,
     witness: &PrivateWitness,
+    hop_bundle: &MultiHopBundleWitnessJson,
     transcript: TranscriptKind,
 ) -> Result<EventProofOutput> {
-    let inputs = build_proof_inputs(witness, event_km.config().clone())
+    let inputs = build_proof_inputs(witness, hop_bundle, event_km.config().clone())
         .context("build_proof_inputs failed (translating witness JSON → circuit)")?;
     let EventProofInputs {
         circuit,
@@ -409,14 +478,14 @@ pub fn generate_event_proof_with_transcript(
     )
 }
 
-/// Lower-level entry point: prove an already-built [`BridgeEventProveCircuit`]
+/// Lower-level entry point: prove an already-built [`BridgeEventFinalProof`]
 /// against its public instances. Used by the `--selftest` mode of the
 /// `bridge-event-prove` binary, which gets its circuit from
-/// `bridge-event-prove-circuit::test_helpers::build_synthetic_event_keygen_inputs`
+/// `bridge-event-prove-circuit::test_helpers::build_synthetic_final_proof_keygen_inputs`
 /// rather than from a daemon-side [`PrivateWitness`].
 pub fn generate_event_proof_from_circuit(
     event_km: &EventKeyManager,
-    circuit: BridgeEventProveCircuit,
+    circuit: BridgeEventFinalProof,
     public_instances: Vec<Fr>,
 ) -> Result<EventProofOutput> {
     generate_event_proof_from_circuit_with_transcript(
@@ -436,7 +505,7 @@ pub fn generate_event_proof_from_circuit(
 /// `ZKHALO2VERIFYWITHVK` opcode).
 pub fn generate_event_proof_from_circuit_with_transcript(
     event_km: &EventKeyManager,
-    circuit: BridgeEventProveCircuit,
+    circuit: BridgeEventFinalProof,
     public_instances: Vec<Fr>,
     transcript: TranscriptKind,
 ) -> Result<EventProofOutput> {
@@ -494,5 +563,337 @@ pub fn generate_event_proof_from_circuit_with_transcript(
     Ok(EventProofOutput {
         proof_bytes,
         public_instances,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// BridgeMultiHopProof (cross-thread hop-chain snark)
+// ---------------------------------------------------------------------------
+
+/// Output of a `BridgeMultiHopProof` generation pass.
+///
+/// `proof_bytes` is the SHPLONK/Blake2b-encoded proof; `public_instances`
+/// is the 2-slot vector `[hopStartBlockId, hopEndBlockId]` (see
+/// `bridge_event_prove_circuit::multi_hop_proof::MULTI_HOP_PUBLIC_LEN`).
+#[derive(Clone)]
+pub struct MultiHopProofOutput {
+    pub proof_bytes: Vec<u8>,
+    pub public_instances: Vec<Fr>,
+}
+
+/// Native: assemble one `MultiHopProofWitness` from its JSON mirror.
+///
+/// Hex-decodes every `_hex` field, populates the fixed-size `HopWitness`
+/// slots and re-asserts the JSON-side length invariants that the circuit
+/// crate exposes as `assert_*` helpers. Bailing here rather than panicking
+/// downstream keeps the daemon error path decoded.
+pub fn build_multi_hop_witness_from_json(
+    json: &MultiHopProofWitnessJson,
+) -> Result<CircuitMultiHopProofWitness> {
+    if json.hops.len() != H_HOPS_PER_PROOF {
+        bail!(
+            "multi_hop_witness.hops length {} != H_HOPS_PER_PROOF ({H_HOPS_PER_PROOF})",
+            json.hops.len(),
+        );
+    }
+    let hops: [CircuitHopWitness; H_HOPS_PER_PROOF] = std::array::from_fn(|_| {
+        // Placeholder — overwritten in the loop below. We can't use
+        // `from_fn` with `?` directly because the closure isn't fallible.
+        default_hop_witness()
+    });
+    let mut hops = hops;
+    for (i, hop_json) in json.hops.iter().enumerate() {
+        hops[i] = build_hop_witness_from_json(hop_json, i)?;
+    }
+    Ok(CircuitMultiHopProofWitness {
+        hops,
+    })
+}
+
+fn default_hop_witness() -> CircuitHopWitness {
+    CircuitHopWitness {
+        is_active: false,
+        block: CircuitBlockWitness {
+            block_id: [0u8; 32],
+            block_merkle_tree_leaves: [[0u8; 32]; BLOCK_MERKLE_LEAF_COUNT],
+            proof_block_refs: Vec::new(),
+        },
+        block_merkle_leaf_proof_l7: [[0u8; 32]; BLOCK_MERKLE_DEPTH],
+        ref_index: 0,
+        refs_tree_depth: 0,
+        proof_block_ref_inner_path: [[0u8; 32]; MAX_PROOF_BLOCK_REFS_DEPTH],
+        hop_start_block_id: [0u8; 32],
+        hop_end_block_id: [0u8; 32],
+    }
+}
+
+fn build_hop_witness_from_json(json: &HopWitnessJson, index: usize) -> Result<CircuitHopWitness> {
+    let label = |field: &str| format!("hops[{index}].{field}");
+
+    let block_id = parse_hex_array::<32>(&label("block.block_id_hex"), &json.block.block_id_hex)?;
+
+    if json.block.block_merkle_tree_leaves_hex.len() != BLOCK_MERKLE_LEAF_COUNT {
+        bail!(
+            "{}.block.block_merkle_tree_leaves_hex length {} != BLOCK_MERKLE_LEAF_COUNT \
+             ({BLOCK_MERKLE_LEAF_COUNT})",
+            label(""),
+            json.block.block_merkle_tree_leaves_hex.len(),
+        );
+    }
+    let mut block_merkle_tree_leaves = [[0u8; 32]; BLOCK_MERKLE_LEAF_COUNT];
+    for (i, leaf_hex) in json.block.block_merkle_tree_leaves_hex.iter().enumerate() {
+        block_merkle_tree_leaves[i] = parse_hex_array::<32>(
+            &label(&format!("block.block_merkle_tree_leaves_hex[{i}]")),
+            leaf_hex,
+        )?;
+    }
+
+    let mut proof_block_refs = Vec::with_capacity(json.block.proof_block_refs_hex.len());
+    for (i, ref_hex) in json.block.proof_block_refs_hex.iter().enumerate() {
+        proof_block_refs.push(parse_hex_array::<32>(
+            &label(&format!("block.proof_block_refs_hex[{i}]")),
+            ref_hex,
+        )?);
+    }
+
+    if json.block_merkle_leaf_proof_l7_hex.len() != BLOCK_MERKLE_DEPTH {
+        bail!(
+            "{}.block_merkle_leaf_proof_l7_hex length {} != BLOCK_MERKLE_DEPTH \
+             ({BLOCK_MERKLE_DEPTH})",
+            label(""),
+            json.block_merkle_leaf_proof_l7_hex.len(),
+        );
+    }
+    let mut block_merkle_leaf_proof_l7 = [[0u8; 32]; BLOCK_MERKLE_DEPTH];
+    for (i, s) in json.block_merkle_leaf_proof_l7_hex.iter().enumerate() {
+        block_merkle_leaf_proof_l7[i] =
+            parse_hex_array::<32>(&label(&format!("block_merkle_leaf_proof_l7_hex[{i}]")), s)?;
+    }
+
+    if json.proof_block_ref_inner_path_hex.len() != MAX_PROOF_BLOCK_REFS_DEPTH {
+        bail!(
+            "{}.proof_block_ref_inner_path_hex length {} != MAX_PROOF_BLOCK_REFS_DEPTH \
+             ({MAX_PROOF_BLOCK_REFS_DEPTH})",
+            label(""),
+            json.proof_block_ref_inner_path_hex.len(),
+        );
+    }
+    let mut proof_block_ref_inner_path = [[0u8; 32]; MAX_PROOF_BLOCK_REFS_DEPTH];
+    for (i, s) in json.proof_block_ref_inner_path_hex.iter().enumerate() {
+        proof_block_ref_inner_path[i] =
+            parse_hex_array::<32>(&label(&format!("proof_block_ref_inner_path_hex[{i}]")), s)?;
+    }
+
+    let hop_start_block_id = parse_hex_array::<32>(
+        &label("hop_start_block_id_hex"),
+        &json.hop_start_block_id_hex,
+    )?;
+    let hop_end_block_id =
+        parse_hex_array::<32>(&label("hop_end_block_id_hex"), &json.hop_end_block_id_hex)?;
+
+    let refs_tree_depth_usize = json.refs_tree_depth as usize;
+    if refs_tree_depth_usize > MAX_PROOF_BLOCK_REFS_DEPTH {
+        bail!(
+            "{}.refs_tree_depth {} exceeds MAX_PROOF_BLOCK_REFS_DEPTH \
+             ({MAX_PROOF_BLOCK_REFS_DEPTH})",
+            label(""),
+            json.refs_tree_depth,
+        );
+    }
+
+    Ok(CircuitHopWitness {
+        is_active: json.is_active,
+        block: CircuitBlockWitness {
+            block_id,
+            block_merkle_tree_leaves,
+            proof_block_refs,
+        },
+        block_merkle_leaf_proof_l7,
+        ref_index: json.ref_index as usize,
+        refs_tree_depth: json.refs_tree_depth,
+        proof_block_ref_inner_path,
+        hop_start_block_id,
+        hop_end_block_id,
+    })
+}
+
+/// Derive the 2-slot `BridgeMultiHopProof` public instances
+/// `[hopStartBlockId, hopEndBlockId]` from the raw witness endpoints:
+/// first hop's `hop_start_block_id`, last hop's `hop_end_block_id`.
+fn multi_hop_public_instances(witness: &CircuitMultiHopProofWitness) -> Vec<Fr> {
+    let start = bytes_to_fr(&witness.hops[0].hop_start_block_id);
+    let end = bytes_to_fr(&witness.hops[H_HOPS_PER_PROOF - 1].hop_end_block_id);
+    vec![start, end]
+}
+
+/// Generate a `BridgeMultiHopProof` from a JSON witness (Blake2b transcript).
+///
+/// Caller is responsible for loading the multi-hop PK before calling
+/// (`mh_km.load_pk()?` first, `mh_km.unload_pk()` after) — same on-demand
+/// pattern the daemon uses for the primary / layer / event PKs.
+pub fn generate_multi_hop_proof(
+    mh_km: &MultiHopKeyManager,
+    witness_json: &MultiHopProofWitnessJson,
+) -> Result<MultiHopProofOutput> {
+    generate_multi_hop_proof_with_transcript(mh_km, witness_json, TranscriptKind::Blake2b)
+}
+
+/// Generate a `BridgeMultiHopProof` from a JSON witness with the chosen
+/// Fiat–Shamir transcript. See
+/// [`generate_event_proof_with_transcript`] for transcript semantics.
+pub fn generate_multi_hop_proof_with_transcript(
+    mh_km: &MultiHopKeyManager,
+    witness_json: &MultiHopProofWitnessJson,
+    transcript: TranscriptKind,
+) -> Result<MultiHopProofOutput> {
+    let native_witness = build_multi_hop_witness_from_json(witness_json)
+        .context("build_multi_hop_witness_from_json failed (JSON → native)")?;
+    let public_instances = multi_hop_public_instances(&native_witness);
+    let circuit = BridgeMultiHopProof::new(native_witness.hops, mh_km.config().clone());
+    generate_multi_hop_proof_from_circuit_with_transcript(
+        mh_km,
+        circuit,
+        public_instances,
+        transcript,
+    )
+}
+
+/// Lower-level entry point: prove an already-built `BridgeMultiHopProof`
+/// against its public instances (Blake2b transcript).
+pub fn generate_multi_hop_proof_from_circuit(
+    mh_km: &MultiHopKeyManager,
+    circuit: BridgeMultiHopProof,
+    public_instances: Vec<Fr>,
+) -> Result<MultiHopProofOutput> {
+    generate_multi_hop_proof_from_circuit_with_transcript(
+        mh_km,
+        circuit,
+        public_instances,
+        TranscriptKind::Blake2b,
+    )
+}
+
+/// Lower-level entry point with the chosen Fiat–Shamir transcript. Same
+/// contract as [`generate_multi_hop_proof_from_circuit`] otherwise.
+pub fn generate_multi_hop_proof_from_circuit_with_transcript(
+    mh_km: &MultiHopKeyManager,
+    circuit: BridgeMultiHopProof,
+    public_instances: Vec<Fr>,
+    transcript: TranscriptKind,
+) -> Result<MultiHopProofOutput> {
+    if public_instances.len() != MULTI_HOP_PUBLIC_LEN {
+        bail!(
+            "multi-hop public instances length {} != MULTI_HOP_PUBLIC_LEN ({MULTI_HOP_PUBLIC_LEN})",
+            public_instances.len(),
+        );
+    }
+    let instance_refs: &[&[Fr]] = &[&public_instances];
+    info!(
+        "generating BridgeMultiHopProof: {} public instances, transcript={:?}",
+        public_instances.len(),
+        transcript,
+    );
+
+    let proof_bytes = match transcript {
+        TranscriptKind::Blake2b => {
+            let mut t = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                Challenge255<G1Affine>,
+                _,
+                Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
+                _,
+            >(
+                mh_km.srs(),
+                mh_km.pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("BridgeMultiHopProof proof generation failed (Blake2b transcript)")?;
+            t.finalize()
+        },
+        TranscriptKind::Poseidon => {
+            let mut t = PoseidonWrite::init(vec![]);
+            create_proof::<
+                KZGCommitmentScheme<Bn256>,
+                ProverSHPLONK<'_, Bn256>,
+                _,
+                _,
+                PoseidonWrite<Vec<u8>>,
+                _,
+            >(
+                mh_km.srs(),
+                mh_km.pk(),
+                &[circuit],
+                &[instance_refs],
+                OsRng,
+                &mut t,
+            )
+            .context("BridgeMultiHopProof proof generation failed (Poseidon transcript)")?;
+            t.finalize()
+        },
+    };
+    info!(
+        "BridgeMultiHopProof proof generated: {} bytes",
+        proof_bytes.len()
+    );
+
+    // Silence dead-code warning for the params helper re-export — it's kept
+    // around so callers can build ad-hoc circuits at the same shape used by
+    // `MultiHopKeyManager::new`.
+    let _ = multi_hop_base_circuit_params;
+
+    Ok(MultiHopProofOutput {
+        proof_bytes,
+        public_instances,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end `EventBundle` generation (final + optional hop chain)
+// ---------------------------------------------------------------------------
+
+/// Generate an [`EventBundle`] for a `WithdrawalInitiated` event.
+///
+/// * Same-thread claim (`hop_bundle.snarks.is_empty()`): produces exactly one
+///   Circuit 4 (`BridgeEventFinalProof`) snark; `hop_blobs` and
+///   `hop_public_instances` are empty.
+/// * Cross-thread claim (`hop_bundle.snarks` non-empty): produces the final
+///   snark plus one `BridgeMultiHopProof` per element in `hop_bundle.snarks`,
+///   in order.
+///
+/// The caller is responsible for loading both PKs into memory before calling
+/// (`event_km.load_pk()?` and `mh_km.load_pk()?` when hops present) — same
+/// on-demand pattern the daemon uses for the primary and layer PKs. Both may
+/// be unloaded after the call returns.
+///
+/// This function does **not** verify the produced bundle. Call
+/// [`crate::verifier::verify_bundle`] for a full self-check.
+pub fn generate_event_bundle(
+    event_km: &EventKeyManager,
+    mh_km: &MultiHopKeyManager,
+    witness: &PrivateWitness,
+    hop_bundle: &MultiHopBundleWitnessJson,
+) -> Result<EventBundle> {
+    let final_out = generate_event_proof(event_km, witness, hop_bundle)
+        .context("generate_event_proof failed inside generate_event_bundle")?;
+
+    let mut hop_blobs = Vec::with_capacity(hop_bundle.snarks.len());
+    let mut hop_public_instances = Vec::with_capacity(hop_bundle.snarks.len());
+    for (i, snark_json) in hop_bundle.snarks.iter().enumerate() {
+        let mh_out = generate_multi_hop_proof(mh_km, snark_json)
+            .with_context(|| format!("generate_multi_hop_proof failed for hop snark #{i}"))?;
+        hop_blobs.push(mh_out.proof_bytes);
+        hop_public_instances.push(mh_out.public_instances);
+    }
+
+    Ok(EventBundle {
+        final_blob: final_out.proof_bytes,
+        final_public_instances: final_out.public_instances,
+        hop_blobs,
+        hop_public_instances,
     })
 }

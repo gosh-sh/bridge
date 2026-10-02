@@ -53,7 +53,7 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
                   resurrects the prover's mirror of `AckiNackiBridge` state from the on-chain \
                   contract at --bridge-address, waits for the covering L1/L2 anchor bundle to \
                   land (fed by a relayer running on some other host), produces the Circuit-4 \
-                  SHPLONK proof, and submits withdrawByProof on the EVM side.\n\nThird-party \
+                  SHPLONK proof, and submits withdrawByProofBundle on the EVM side.\n\nThird-party \
                   end-user CLI: expects only an EVM RPC URL and the deployed AckiNackiBridge \
                   address — no local `prover_state.json`, no daemon on this machine."
 )]
@@ -204,7 +204,7 @@ pub struct WithdrawArgs {
     #[arg(long, env = "BRIDGE_ADDRESS")]
     pub bridge_address: Address,
 
-    /// Signer key for the EVM `withdrawByProof` tx. Distinct from
+    /// Signer key for the EVM `withdrawByProofBundle` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the USDC is `--to`, not this signer.
     #[arg(long, env = "BURNER_PRIVATE_KEY", value_name = "0x…")]
@@ -373,7 +373,7 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         })?
     };
 
-    // Refuse the zero address unconditionally. `withdrawByProof` on the
+    // Refuse the zero address unconditionally. `withdrawByProofBundle` on the
     // deployed `AckiNackiBridge` transfers USDC to `pub.recipient`; a
     // successful submit against `0x0` would burn the treasury draw to
     // an unrecoverable address. The on-chain contract does not guard

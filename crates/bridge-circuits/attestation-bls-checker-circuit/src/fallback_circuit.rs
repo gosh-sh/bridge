@@ -1,8 +1,12 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
-use halo2_base::halo2_proofs::halo2curves::bls12_381::{G1Affine, G2Affine};
-use halo2_base::utils::BigPrimeField;
+use bridge_poseidon::{compute_bk_set_commitment_padded, PADDING_SIGNER_INDEX};
+use gosh_bls_verification::{
+    compute_all_pub_sum,
+    helpers::{deserialize_g1_pubkey, deserialize_g2_signature, DST},
+    load_bk_set_pubkeys, verify_bls_attestation_with_assigned_msghash, ThresholdMode,
+};
+use gosh_sha256_chip::Sha256Chip;
 use halo2_base::{
     gates::{
         circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
@@ -10,28 +14,24 @@ use halo2_base::{
     },
     halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner},
+        halo2curves::bls12_381::{G1Affine, G2Affine},
         plonk::{Circuit, ConstraintSystem, Error},
     },
+    utils::BigPrimeField,
     AssignedValue, QuantumCell,
 };
-use halo2_ecc::bls12_381::{Fp2Chip, FpChip};
-use halo2_ecc::ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip};
-use gosh_sha256_chip::Sha256Chip;
-use gosh_bls_verification::{
-    compute_all_pub_sum, load_bk_set_pubkeys,
-    verify_bls_attestation_with_assigned_msghash, ThresholdMode,
+use halo2_ecc::{
+    bls12_381::{Fp2Chip, FpChip},
+    ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip},
 };
-use gosh_bls_verification::helpers::{deserialize_g1_pubkey, deserialize_g2_signature, DST};
 
-use crate::attestation_data_parser::{
-    parse_attestation_data_bytes, parse_signature_bytes, parse_signer_entries,
-};
-use bridge_poseidon::{compute_bk_set_commitment_padded, PADDING_SIGNER_INDEX};
 use crate::{
-    constraint_block_seqno_gt_last_seen,
-    AttestationBlsCheckerCircuitParams, AttestationBlsCheckerConfig,
-    ATTESTATION_DATA_LEN, BLOCK_SEQ_NO_REL_OFFSET, BLOCK_ID_REL_OFFSET,
-    TARGET_TYPE_REL_OFFSET,
+    attestation_data_parser::{
+        parse_attestation_data_bytes, parse_signature_bytes, parse_signer_entries,
+    },
+    constraint_block_seqno_gt_last_seen, AttestationBlsCheckerCircuitParams,
+    AttestationBlsCheckerConfig, ATTESTATION_DATA_LEN, BLOCK_ID_REL_OFFSET,
+    BLOCK_SEQ_NO_REL_OFFSET, TARGET_TYPE_REL_OFFSET,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,7 +40,8 @@ use crate::{
 
 /// Build all circuit constraints for Fallback finalization:
 /// - Two attestations (primary-typed + fallback-typed) with matching block_id
-/// - target_type checks: att1 == Primary (0x00000000), att2 == Fallback (0x01000000)
+/// - target_type checks: att1 == Primary (0x00000000), att2 == Fallback
+///   (0x01000000)
 /// - Hash-to-curve + BLS verification for each attestation with > 50% threshold
 /// - Poseidon(bk_set) → public instance [1]
 /// - block_seq_no > last_seen_block_seqno → public instances [2], [3]
@@ -61,10 +62,16 @@ fn build_fallback_constraints<F: BigPrimeField>(
     num_limbs: usize,
     last_seen_block_seqno: u32,
     actual_bk_set_size: usize,
-) -> (AssignedValue<F>, AssignedValue<F>, AssignedValue<F>, AssignedValue<F>) {
+) -> (
+    AssignedValue<F>,
+    AssignedValue<F>,
+    AssignedValue<F>,
+    AssignedValue<F>,
+) {
     let range = builder.range_chip();
 
-    // Load attestation 1 (Primary) bytes as witnesses (exactly ATTESTATION_DATA_LEN bytes).
+    // Load attestation 1 (Primary) bytes as witnesses (exactly ATTESTATION_DATA_LEN
+    // bytes).
     let attestation_data_1 =
         &parse_attestation_data_bytes(attestation_primary_bytes)[..ATTESTATION_DATA_LEN];
     let assigned_msg_1: Vec<AssignedValue<F>> = {
@@ -75,7 +82,8 @@ fn build_fallback_constraints<F: BigPrimeField>(
             .collect()
     };
 
-    // Load attestation 2 (Fallback) bytes as witnesses (exactly ATTESTATION_DATA_LEN bytes).
+    // Load attestation 2 (Fallback) bytes as witnesses (exactly
+    // ATTESTATION_DATA_LEN bytes).
     let attestation_data_2 =
         &parse_attestation_data_bytes(attestation_fallback_bytes)[..ATTESTATION_DATA_LEN];
     let assigned_msg_2: Vec<AssignedValue<F>> = {
@@ -99,11 +107,13 @@ fn build_fallback_constraints<F: BigPrimeField>(
     let block_id_fr = {
         let ctx = builder.main(0);
         let gate = range.gate();
-        let block_id_cells_1 =
-            &assigned_msg_1[BLOCK_ID_REL_OFFSET..BLOCK_ID_REL_OFFSET + 32];
+        let block_id_cells_1 = &assigned_msg_1[BLOCK_ID_REL_OFFSET..BLOCK_ID_REL_OFFSET + 32];
         gate.inner_product(
             ctx,
-            block_id_cells_1.iter().rev().map(|&b| QuantumCell::Existing(b)),
+            block_id_cells_1
+                .iter()
+                .rev()
+                .map(|&b| QuantumCell::Existing(b)),
             (0..32).map(|i| QuantumCell::Constant(F::from(256u64).pow([i as u64]))),
         )
     };
@@ -119,7 +129,8 @@ fn build_fallback_constraints<F: BigPrimeField>(
         }
     }
 
-    // A''. Constrain block_seq_no bytes equal between both attestations (defense-in-depth).
+    // A''. Constrain block_seq_no bytes equal between both attestations
+    // (defense-in-depth).
     {
         let ctx = builder.main(0);
         for i in 0..4 {
@@ -163,9 +174,13 @@ fn build_fallback_constraints<F: BigPrimeField>(
         ctx.constrain_equal(&tt2_byte3, &zero);
     }
 
-    // B'. Constrain block_seq_no > last_seen_block_seqno (from primary attestation).
+    // B'. Constrain block_seq_no > last_seen_block_seqno (from primary
+    // attestation).
     let (block_seq_no_fr, last_seen_seqno) = constraint_block_seqno_gt_last_seen(
-        builder, &range, &assigned_msg_1, last_seen_block_seqno,
+        builder,
+        &range,
+        &assigned_msg_1,
+        last_seen_block_seqno,
     );
 
     // C. Load BK set pubkeys as assigned cells once, shared by both verifications.
@@ -265,7 +280,12 @@ fn build_fallback_constraints<F: BigPrimeField>(
         );
     }
 
-    (block_id_fr, bk_set_commitment, block_seq_no_fr, last_seen_seqno)
+    (
+        block_id_fr,
+        bk_set_commitment,
+        block_seq_no_fr,
+        last_seen_seqno,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +411,9 @@ impl<F: BigPrimeField> FallbackAttestationBlsCheckerCircuit<F> {
     /// Override the base circuit params (e.g., to use a shared vk/pk).
     pub fn override_base_circuit_params(&mut self, base_params: BaseCircuitParams) {
         self.params.base_circuit_params = base_params.clone();
-        self.base_circuit_builder.borrow_mut().set_params(base_params);
+        self.base_circuit_builder
+            .borrow_mut()
+            .set_params(base_params);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -501,11 +523,7 @@ impl<F: BigPrimeField> Circuit<F> for FallbackAttestationBlsCheckerCircuit<F> {
         unreachable!("Use configure_with_params")
     }
 
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        layouter: impl Layouter<F>,
-    ) -> Result<(), Error> {
+    fn synthesize(&self, config: Self::Config, layouter: impl Layouter<F>) -> Result<(), Error> {
         self.generate_witnesses();
         self.base_circuit_builder
             .borrow()
@@ -521,18 +539,17 @@ impl<F: BigPrimeField> Circuit<F> for FallbackAttestationBlsCheckerCircuit<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{K, LOOKUP_BITS, NUM_UNUSABLE_ROWS};
+    use std::time::Instant;
+
     use bridge_poseidon::{LIMB_BITS, MAX_SIGNERS, NUM_LIMBS};
+    use bridge_test_data_gen::generator::TestData;
     use gosh_bls_verification::helpers::{
         compute_agg_pubkey, compute_msg_hash, resolve_pubkeys, verify_bls_native,
     };
     use halo2_base::halo2_proofs::{dev::MockProver, halo2curves::bn256::Fr};
 
-    use crate::test_instances::expected_public_instances;
-
-    use bridge_test_data_gen::generator::TestData;
-    use std::time::Instant;
+    use super::*;
+    use crate::{test_instances::expected_public_instances, K, LOOKUP_BITS, NUM_UNUSABLE_ROWS};
 
     /// One "should-pass" mock case for the fallback circuit: a label + a
     /// closure that materialises the (primary + fallback) test data
@@ -605,7 +622,10 @@ mod tests {
                 lbl
             );
         }
-        println!("[timing] off-circuit BLS verification (both): {:?}", t.elapsed());
+        println!(
+            "[timing] off-circuit BLS verification (both): {:?}",
+            t.elapsed()
+        );
 
         let (last_seen_block_seqno, instances) =
             expected_public_instances(&att_primary, &bk_set, case.max_signers);
@@ -668,11 +688,8 @@ mod tests {
             bridge_test_data_gen::generator::generate_test_data_fallback_below_threshold(10)
                 .expect("generate_test_data_fallback_below_threshold failed");
 
-        let (last_seen_block_seqno, instances) = expected_public_instances(
-            &test_data.attestation_bytes,
-            &test_data.bk_set,
-            MAX_SIGNERS,
-        );
+        let (last_seen_block_seqno, instances) =
+            expected_public_instances(&test_data.attestation_bytes, &test_data.bk_set, MAX_SIGNERS);
 
         let circuit = FallbackAttestationBlsCheckerCircuit::<Fr>::new(
             test_data.attestation_bytes,

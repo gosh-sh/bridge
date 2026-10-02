@@ -1,18 +1,5 @@
 pub mod circuit;
 
-use halo2_base::{
-    gates::{
-        circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, BaseConfig},
-        GateInstructions, RangeChip, RangeInstructions,
-    },
-    halo2_proofs::{
-        halo2curves::bn256::Fr,
-        halo2curves::group::ff::{Field, PrimeField},
-        plonk::{Circuit, ConstraintSystem},
-    },
-    AssignedValue, QuantumCell,
-};
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -20,6 +7,20 @@ use halo2_base::{
 // Poseidon parameters and layer-hashes sizes are sourced from bridge_poseidon.
 pub use bridge_poseidon::{
     LAYER_PREIMAGE_SIZE, MAX_LAYERS, POSEIDON_RATE, POSEIDON_R_F, POSEIDON_R_P, POSEIDON_T,
+};
+use halo2_base::{
+    gates::{
+        circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, BaseConfig},
+        GateInstructions, RangeChip, RangeInstructions,
+    },
+    halo2_proofs::{
+        halo2curves::{
+            bn256::Fr,
+            group::ff::{Field, PrimeField},
+        },
+        plonk::{Circuit, ConstraintSystem},
+    },
+    AssignedValue, QuantumCell,
 };
 
 /// Number of SHA-256 Merkle siblings the circuit walks up the block-id tree
@@ -64,7 +65,9 @@ impl LayerHashesConfig {
     ) -> Self {
         let base_config =
             <BaseCircuitBuilder<Fr> as Circuit<Fr>>::configure_with_params(meta, params);
-        LayerHashesConfig { base_config }
+        LayerHashesConfig {
+            base_config,
+        }
     }
 }
 
@@ -108,9 +111,11 @@ pub mod test_helpers {
     pub const NUM_UNUSABLE_ROWS: usize = 109;
     pub const LOOKUP_BITS: usize = 16;
 
-    /// Convert up to 32 LE bytes to Fr using inner_product with powers of 256 (native).
+    /// Convert up to 32 LE bytes to Fr using inner_product with powers of 256
+    /// (native).
     ///
-    /// This matches the in-circuit `gate.inner_product(bytes, [256^0, 256^1, ...])`.
+    /// This matches the in-circuit `gate.inner_product(bytes, [256^0, 256^1,
+    /// ...])`.
     pub fn bytes_le_to_fr(bytes: &[u8]) -> Fr {
         assert!(bytes.len() <= 32);
         let mut result = Fr::zero();

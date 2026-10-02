@@ -38,7 +38,7 @@ ever needed.**
 
 ## 2. Anchor sweep on W=128 — open mitigation menu
 
-`withdrawByProof` accepts `finalRoot` if it appears in **any** `_layerWindows[L]`
+`withdrawByProofBundle` accepts `finalRoot` if it appears in **any** `_layerWindows[L]`
 (`AckiNackiBridge.sol:1044-1057`, flagged as an open soundness gap in
 `EVM-contracts-spec.md:751` — "Anchor layer is not asserted"). Worst-case sweep on
 `W = 128, MAX_LAYERS = 10` is 1 280 SLOADs.

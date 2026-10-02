@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 
+use gosh_dense_balanced_tree::{verify_chain_of_dense_proofs, DenseChainLink, MAX_CHAIN_LEN};
+use gosh_sha256_chip::Sha256Chip;
 use halo2_base::{
     gates::{
         circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
@@ -7,22 +9,16 @@ use halo2_base::{
     },
     halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner},
-        halo2curves::bn256::Fr,
+        halo2curves::{bn256::Fr, group::ff::Field},
         plonk::{Circuit, ConstraintSystem, Error},
     },
     poseidon::hasher::{spec::OptimizedPoseidonSpec, PoseidonHasher},
     AssignedValue, QuantumCell,
 };
-use halo2_base::halo2_proofs::halo2curves::group::ff::Field;
-use gosh_sha256_chip::Sha256Chip;
-use gosh_dense_balanced_tree::{
-    verify_chain_of_dense_proofs, DenseChainLink, MAX_CHAIN_LEN,
-};
 
 use crate::{
-    decompose_fr_to_bytes, LayerHashesCircuitParams, LayerHashesConfig,
-    LAYER_PREIMAGE_SIZE, MAX_LAYERS, NUM_MERKLE_SIBLINGS,
-    POSEIDON_R_F, POSEIDON_R_P, POSEIDON_RATE, POSEIDON_T,
+    decompose_fr_to_bytes, LayerHashesCircuitParams, LayerHashesConfig, LAYER_PREIMAGE_SIZE,
+    MAX_LAYERS, NUM_MERKLE_SIBLINGS, POSEIDON_RATE, POSEIDON_R_F, POSEIDON_R_P, POSEIDON_T,
 };
 
 // ---------------------------------------------------------------------------
@@ -266,7 +262,12 @@ fn build_layer_hashes_constraints(
         poseidon.initialize_consts(ctx, gate);
 
         verify_chain_of_dense_proofs(
-            ctx, &range, &poseidon, prev_hash_cell, prev_chain_proofs, num_steps_cell,
+            ctx,
+            &range,
+            &poseidon,
+            prev_hash_cell,
+            prev_chain_proofs,
+            num_steps_cell,
         )
     };
 
@@ -306,13 +307,13 @@ fn build_layer_hashes_constraints(
     // Collect public instances.
     // -----------------------------------------------------------------------
     let mut instances = Vec::with_capacity(14);
-    instances.push(block_id_fr);       // [0]
-    instances.push(bk_set_hash_cell);       // [1]
-    instances.push(num_layers_cell);        // [2]
+    instances.push(block_id_fr); // [0]
+    instances.push(bk_set_hash_cell); // [1]
+    instances.push(num_layers_cell); // [2]
     for i in 0..MAX_LAYERS {
-        instances.push(layer_hash_frs[i]);  // [3..12]
+        instances.push(layer_hash_frs[i]); // [3..12]
     }
-    instances.push(prev_hash_cell);         // [13]
+    instances.push(prev_hash_cell); // [13]
 
     instances
 }
@@ -378,7 +379,8 @@ impl LayerHashesMovementCheckerCircuit {
         }
     }
 
-    /// Override the base circuit params (for reusing cached VK/PK across different inputs).
+    /// Override the base circuit params (for reusing cached VK/PK across
+    /// different inputs).
     pub fn override_base_circuit_params(&mut self, params: BaseCircuitParams) {
         self.params.base_circuit_params = params.clone();
         self.base_circuit_builder.borrow_mut().set_params(params);
@@ -460,7 +462,10 @@ impl Circuit<Fr> for LayerHashesMovementCheckerCircuit {
         unimplemented!()
     }
 
-    fn configure_with_params(meta: &mut ConstraintSystem<Fr>, params: Self::Params) -> Self::Config {
+    fn configure_with_params(
+        meta: &mut ConstraintSystem<Fr>,
+        params: Self::Params,
+    ) -> Self::Config {
         LayerHashesConfig::configure_with_params(meta, params.base_circuit_params)
     }
 
@@ -468,11 +473,7 @@ impl Circuit<Fr> for LayerHashesMovementCheckerCircuit {
         unreachable!("Use configure_with_params")
     }
 
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        layouter: impl Layouter<Fr>,
-    ) -> Result<(), Error> {
+    fn synthesize(&self, config: Self::Config, layouter: impl Layouter<Fr>) -> Result<(), Error> {
         self.generate_witnesses();
         self.base_circuit_builder
             .borrow()
@@ -488,15 +489,17 @@ impl Circuit<Fr> for LayerHashesMovementCheckerCircuit {
 
 #[cfg(test)]
 mod tests {
+    use gosh_dense_balanced_tree::{
+        bytes_to_fr, fr_to_bytes, preprocess_dense_proof, DenseChainLink, MAX_CHAIN_LEN,
+    };
+    use halo2_base::halo2_proofs::{
+        dev::MockProver,
+        halo2curves::{bn256::Fr, group::ff::PrimeField},
+    };
+    use sha2::{Digest, Sha256};
+
     use super::*;
     use crate::test_helpers::*;
-    use gosh_dense_balanced_tree::{
-        bytes_to_fr, fr_to_bytes,
-        preprocess_dense_proof, DenseChainLink, MAX_CHAIN_LEN,
-    };
-    use halo2_base::halo2_proofs::{dev::MockProver, halo2curves::bn256::Fr};
-    use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
-    use sha2::{Digest, Sha256};
 
     /// Build a synthetic layer_hashes preimage with `num_layers` active layers.
     /// Returns (preimage, layer_hash_frs) where layer_hash_frs has 10 entries
@@ -531,7 +534,8 @@ mod tests {
         (preimage, layer_hash_frs)
     }
 
-    /// Compute the Poseidon hash of a 331-byte preimage using bridge_poseidon::poseidon_hash_bytes.
+    /// Compute the Poseidon hash of a 331-byte preimage using
+    /// bridge_poseidon::poseidon_hash_bytes.
     fn compute_preimage_poseidon(preimage: &[u8; LAYER_PREIMAGE_SIZE]) -> Fr {
         let hash_bytes = bridge_poseidon::poseidon_hash_bytes(preimage);
         Fr::from_repr(hash_bytes).unwrap()
@@ -558,12 +562,10 @@ mod tests {
 
     /// Build a test Poseidon dense Merkle chain.
     ///
-    /// Creates a chain where each step uses a depth-1 tree (2 leaves, 1 sibling).
-    /// Returns (chain_links, prev_hash_fr).
+    /// Creates a chain where each step uses a depth-1 tree (2 leaves, 1
+    /// sibling). Returns (chain_links, prev_hash_fr).
     /// The caller must set layer_hash_frs[num_layers-1] to the chain result.
-    fn build_test_chain(
-        num_steps: usize,
-    ) -> (Vec<DenseChainLink>, Fr) {
+    fn build_test_chain(num_steps: usize) -> (Vec<DenseChainLink>, Fr) {
         assert!(num_steps >= 1 && num_steps <= MAX_CHAIN_LEN);
 
         // Start with deterministic leaf bytes.
@@ -614,11 +616,7 @@ mod tests {
             if j >= num_steps {
                 break;
             }
-            let proof = preprocess_dense_proof(
-                cur_bytes,
-                &link.siblings,
-                link.position,
-            );
+            let proof = preprocess_dense_proof(cur_bytes, &link.siblings, link.position);
             let root_fr = gosh_dense_balanced_tree::compute_root_native(&proof);
             cur_bytes = fr_to_bytes(root_fr);
         }
@@ -639,9 +637,8 @@ mod tests {
         // 2. Build chain.
         let (chain_links, prev_hash_fr) = build_test_chain(num_chain_steps as usize);
 
-        let chain_result = compute_chain_result_native(
-            prev_hash_fr, &chain_links, num_chain_steps as usize,
-        );
+        let chain_result =
+            compute_chain_result_native(prev_hash_fr, &chain_links, num_chain_steps as usize);
 
         // Update the preimage so that layer_hash_frs[num_layers-1] == chain_result.
         let target_idx = (num_layers - 1) as usize;
@@ -654,8 +651,8 @@ mod tests {
         let l0_fr = compute_preimage_poseidon(&preimage);
         let l0_bytes: [u8; 32] = l0_fr.to_repr();
 
-        // 4. Generate deterministic merkle siblings for the L0 opening path
-        //    up the depth-4 block-id tree, and compute the SHA-256 root.
+        // 4. Generate deterministic merkle siblings for the L0 opening path up the
+        //    depth-4 block-id tree, and compute the SHA-256 root.
         let siblings: [[u8; 32]; NUM_MERKLE_SIBLINGS] = {
             let mut s = [[0u8; 32]; NUM_MERKLE_SIBLINGS];
             for i in 0..NUM_MERKLE_SIBLINGS {
@@ -678,11 +675,7 @@ mod tests {
         // 6. Compute expected public instances.
         let num_layers_fr = Fr::from(num_layers as u64);
 
-        let mut expected_instances = vec![
-            block_id_fr,
-            bk_set_poseidon_hash,
-            num_layers_fr,
-        ];
+        let mut expected_instances = vec![block_id_fr, bk_set_poseidon_hash, num_layers_fr];
         for i in 0..MAX_LAYERS {
             expected_instances.push(layer_hash_frs[i]);
         }
@@ -717,12 +710,7 @@ mod tests {
         // 8. Run MockProver.
         println!("Running MockProver at K={}...", K);
         let t = Instant::now();
-        let prover = MockProver::run(
-            K,
-            &circuit,
-            vec![expected_instances],
-        )
-        .unwrap();
+        let prover = MockProver::run(K, &circuit, vec![expected_instances]).unwrap();
         println!("[timing] MockProver::run (witness gen): {:?}", t.elapsed());
 
         let t = Instant::now();
@@ -733,7 +721,10 @@ mod tests {
         );
 
         println!("[timing] TOTAL: {:?}", t_total.elapsed());
-        println!("MockProver passed ({} layers, {} chain steps)!", num_layers, num_chain_steps);
+        println!(
+            "MockProver passed ({} layers, {} chain steps)!",
+            num_layers, num_chain_steps
+        );
     }
 
     #[test]
@@ -748,9 +739,8 @@ mod tests {
 
         let (chain_links, prev_hash_fr) = build_test_chain(num_chain_steps as usize);
 
-        let chain_result = compute_chain_result_native(
-            prev_hash_fr, &chain_links, num_chain_steps as usize,
-        );
+        let chain_result =
+            compute_chain_result_native(prev_hash_fr, &chain_links, num_chain_steps as usize);
 
         let target_idx = (num_layers - 1) as usize;
         let chain_result_bytes: [u8; 32] = chain_result.to_repr();
@@ -806,12 +796,7 @@ mod tests {
 
         println!("Running MockProver at K={}...", K);
         let t = Instant::now();
-        let prover = MockProver::run(
-            K,
-            &circuit,
-            vec![expected_instances],
-        )
-        .unwrap();
+        let prover = MockProver::run(K, &circuit, vec![expected_instances]).unwrap();
         println!("[timing] MockProver::run: {:?}", t.elapsed());
 
         let t = Instant::now();
@@ -831,9 +816,8 @@ mod tests {
         let (mut preimage, mut layer_hash_frs) = build_test_preimage(num_layers);
 
         let (chain_links, prev_hash_fr) = build_test_chain(num_chain_steps as usize);
-        let chain_result = compute_chain_result_native(
-            prev_hash_fr, &chain_links, num_chain_steps as usize,
-        );
+        let chain_result =
+            compute_chain_result_native(prev_hash_fr, &chain_links, num_chain_steps as usize);
 
         let target_idx = (num_layers - 1) as usize;
         let chain_result_bytes: [u8; 32] = chain_result.to_repr();
@@ -855,12 +839,12 @@ mod tests {
         };
 
         let _root_be = compute_sha256_merkle_root(&l0_bytes, &siblings);
-        
+
         let wrong_block_id = Fr::from(0x12345678u64);
         let bk_set_poseidon_hash = Fr::from(0xDEADBEEFu64);
 
         let mut expected_instances = vec![
-            wrong_block_id,  // WRONG!
+            wrong_block_id, // WRONG!
             bk_set_poseidon_hash,
             Fr::from(num_layers as u64),
         ];

@@ -8,7 +8,8 @@ import "../src/AxiomBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
 /**
@@ -28,13 +29,14 @@ import "./ShplonkDeployLib.sol";
  *     + `LayerHashesAggregatorVerifier.bin` (or SHPLONK_BIN_PRIMARY / SHPLONK_BIN_FALLBACK /
  *     SHPLONK_BIN_LAYER_HASHES). All three circuits use the R15 SHPLONK aggregator path.
  *
- * withdrawByProof wiring:
- *   - MANDATORY on the production script (NB-Q8): the C4 aggregator `.bin` is
- *     committed and the Yul adapter is production-ready, so silently shipping
- *     with `address(0)` here bricks user withdrawals. Requires WITHDRAW_ACC_FR
- *     (non-zero). Optional: WITHDRAW_DAPP_FR, alt dst/token ids. This
- *     script always wires Circuit 4, so WIRE_VERIFY_BLOCK=true is required on
- *     every chain (`WithdrawRequiresVerifyBlock`). VerifyBlock-only bring-up:
+ * withdrawByProofBundle wiring:
+ *   - MANDATORY on the production script (NB-Q8): the C4 aggregator `.bin` and
+ *     the multi-hop `.bin` are committed and their Yul adapters are
+ *     production-ready, so silently shipping with `address(0)` here bricks user
+ *     withdrawals. Requires WITHDRAW_ACC_FR (non-zero). Optional:
+ *     WITHDRAW_DAPP_FR, alt dst/token ids. This script always wires the bundle
+ *     verifier pair, so WIRE_VERIFY_BLOCK=true is required on every chain
+ *     (`WithdrawRequiresVerifyBlock`). VerifyBlock-only bring-up:
  *     DeployShellnetE2EBridge on local anvil.
  */
 contract DeployRealBridge is Script {
@@ -55,7 +57,8 @@ contract DeployRealBridge is Script {
         address primaryVerifierAddr;
         address fallbackVerifierAddr;
         address layerHashesVerifierAddr;
-        address withdrawalVerifierAddr;
+        address withdrawalFinalVerifierAddr;
+        address multiHopVerifierAddr;
     }
 
     struct DeploymentJsonArgs {
@@ -67,7 +70,8 @@ contract DeployRealBridge is Script {
         address primaryVerifierAddr;
         address fallbackVerifierAddr;
         address layerHashesVerifierAddr;
-        address withdrawalVerifierAddr;
+        address withdrawalFinalVerifierAddr;
+        address multiHopVerifierAddr;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevAnchor;
     }
@@ -119,7 +123,8 @@ contract DeployRealBridge is Script {
                 primaryVerifierAddr: r.primaryVerifierAddr,
                 fallbackVerifierAddr: r.fallbackVerifierAddr,
                 layerHashesVerifierAddr: r.layerHashesVerifierAddr,
-                withdrawalVerifierAddr: r.withdrawalVerifierAddr,
+                withdrawalFinalVerifierAddr: r.withdrawalFinalVerifierAddr,
+                multiHopVerifierAddr: r.multiHopVerifierAddr,
                 genesisBkSetCommitment: w.genesisBkSetCommitment,
                 genesisPrevAnchor: w.genesisPrevAnchor
             })
@@ -140,9 +145,10 @@ contract DeployRealBridge is Script {
             w.genesisPrevAnchor = vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH");
             require(w.genesisBkSetCommitment != 0, "GENESIS_BK_SET_COMMITMENT required");
         }
-        // NB-Q8: withdrawByProof wiring is mandatory on RealBridge. The C4 `.bin`
-        // is committed and the Yul adapter is production-ready — a deploy that
-        // silently ships with `address(0)` bricks user withdrawals.
+        // NB-Q8: withdrawByProofBundle wiring is mandatory on RealBridge. The C4
+        // and multi-hop `.bin`s are committed and their Yul adapters are
+        // production-ready — a deploy that silently ships with `address(0)`
+        // bricks user withdrawals.
         w.withdrawAccFr = vm.envUint("WITHDRAW_ACC_FR");
         require(w.withdrawAccFr != 0, "WITHDRAW_ACC_FR required (NB-Q8: withdraw wiring mandatory)");
         w.withdrawDappFr = vm.envOr("WITHDRAW_DAPP_FR", uint256(0));
@@ -169,7 +175,8 @@ contract DeployRealBridge is Script {
             r.fallbackVerifierAddr = address(vb.fallbackVerifier);
             r.layerHashesVerifierAddr = address(vb.layerHashesVerifier);
         }
-        r.withdrawalVerifierAddr = address(bw.bridgeWithdrawalVerifier);
+        r.withdrawalFinalVerifierAddr = address(bw.withdrawalFinalVerifier);
+        r.multiHopVerifierAddr = address(bw.multiHopVerifier);
 
         console.log("Deploying AckiNackiBridge (Shplonk verifiers only)...");
         AckiNackiBridge bridge = new AckiNackiBridge(oracleAddr, usdcAddr, aavePool, aUSDC, vb, bw);
@@ -194,7 +201,8 @@ contract DeployRealBridge is Script {
             console.log("FallbackAggregatorVerifier:", r.fallbackVerifierAddr);
             console.log("LayerHashesAggregatorVerifier:", r.layerHashesVerifierAddr);
         }
-        console.log("BridgeWithdrawalAggregatorVerifier:", r.withdrawalVerifierAddr);
+        console.log("BridgeWithdrawalAggregatorVerifier:", r.withdrawalFinalVerifierAddr);
+        console.log("BridgeMultiHopAggregatorVerifier:", r.multiHopVerifierAddr);
         if (!useAxiomOracle) {
             console.log("\n  ** WARNING: MockBlockHeaderOracle - NOT for production **");
         }
@@ -290,17 +298,23 @@ contract DeployRealBridge is Script {
         uint256 altTokenId
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");
-        IBridgeWithdrawalVerifier w =
+        IBridgeWithdrawalFinalVerifier wFinal =
             ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
-        console.log("  BridgeWithdrawalAggregatorVerifier:", address(w));
+        console.log("  BridgeWithdrawalAggregatorVerifier:", address(wFinal));
+
+        console.log("Deploying Shplonk BridgeMultiHopAggregatorVerifier...");
+        IBridgeMultiHopVerifier wHop =
+            ShplonkDeployLib.deployMultiHopAdapter(ShplonkDeployLib.multiHopBinPath());
+        console.log("  BridgeMultiHopAggregatorVerifier:", address(wHop));
 
         return AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: w,
             dappFr: dappFr,
             accFr: accFr,
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
-            altTokenId: altTokenId
+            altTokenId: altTokenId,
+            withdrawalFinalVerifier: wFinal,
+            multiHopVerifier: wHop
         });
     }
 
@@ -330,8 +344,11 @@ contract DeployRealBridge is Script {
         verifierJson = string(
             abi.encodePacked(
                 verifierJson,
-                '  "withdrawal_verifier": "',
-                vm.toString(a.withdrawalVerifierAddr),
+                '  "withdrawal_final_verifier": "',
+                vm.toString(a.withdrawalFinalVerifierAddr),
+                '",\n',
+                '  "multi_hop_verifier": "',
+                vm.toString(a.multiHopVerifierAddr),
                 '",\n'
             )
         );

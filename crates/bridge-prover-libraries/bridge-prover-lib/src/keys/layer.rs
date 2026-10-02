@@ -8,18 +8,20 @@
 //! on-demand PK load/unload, accessor plumbing) is delegated to the shared
 //! [`super::state::KeyManagerState`]. Only the circuit-specific
 //! reference-witness construction and the extra
-//! [`LayerHashesKeyManager::num_unusable_rows`] / [`LayerHashesKeyManager::lookup_bits`]
-//! accessors live here.
+//! [`LayerHashesKeyManager::num_unusable_rows`] /
+//! [`LayerHashesKeyManager::lookup_bits`] accessors live here.
 
 use std::path::Path;
 
 use bridge_test_data_gen::layer_hashes::LayerHashChainData;
 use gosh_dense_balanced_tree::DenseChainLink;
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{ProvingKey, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::bn256::{Bn256, Fr, G1Affine},
+        plonk::{ProvingKey, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
 };
 use historical_layer_hashes_movement_checker_circuit::{
     circuit::LayerHashesMovementCheckerCircuit, LAYER_PREIMAGE_SIZE, NUM_MERKLE_SIBLINGS,
@@ -33,6 +35,16 @@ pub(super) const PREFIX: &str = "layer";
 pub(super) const NUM_UNUSABLE_ROWS: usize = 109;
 pub(super) const LOOKUP_BITS: usize = 16;
 
+/// Bumped **by hand** whenever the layer-hashes circuit definition changes
+/// in a way that invalidates cached keys. Same discipline as
+/// [`super::event::EVENT_CIRCUIT_REVISION`]: edit the circuit, bump this in
+/// the same PR.
+///
+/// Rev 1: `KEYGEN_SRS_K` dropped 20 → 17 to match the circuit's actual K.
+/// Old K=20 PKs on disk are invalidated and force fresh keygen at K=17
+/// (~8× smaller). See `KEYGEN_SRS_K` doc-comment for the rationale.
+pub(super) const LAYER_CIRCUIT_REVISION: u32 = 1;
+
 pub struct LayerHashesKeyManager {
     state: KeyManagerState,
 }
@@ -43,27 +55,32 @@ impl LayerHashesKeyManager {
     /// `LayerHashesMovementCheckerCircuit::new`.
     pub const DEFAULT_K: u32 = 17;
 
-    /// SRS degree used at keygen / prove / verify.
+    /// SRS degree used at keygen / prove / verify. Matches the circuit's
+    /// arithmetic K so `vk.domain.k == 17` — halo2-axiom bakes `params.k()`
+    /// into `vk.domain`, so an oversized SRS (K=20) would produce a
+    /// K=20-domain PK even though the circuit only uses 2^17 rows.
     ///
-    /// halo2-axiom's `keygen_vk` sizes `vk.domain` from `params.k()`, **not**
-    /// from the circuit's logical k. Partner PKs were keygen'd against the
-    /// shared K=20 ceremony, so `pk.domain.k() == 20` even though
-    /// `config.k == 17`. Loading an SRS at [`Self::DEFAULT_K`] makes
-    /// `create_proof` panic (`domain.n()=2^20` vs `params.n()=2^17`).
-    pub const KEYGEN_SRS_K: u32 = 20;
+    /// Historical note: this was K=20 for partner-shipped PK compatibility;
+    /// dropping to K=17 rotates the VK (breaking change — the deployed
+    /// `LayerHashesAggregatorVerifier` Yul must be redeployed against the
+    /// new inner VK). The outer SHPLONK aggregator reads inner domain from
+    /// the VK at compile time, so no inner-K pinning outside this constant.
+    pub const KEYGEN_SRS_K: u32 = 17;
 
     pub fn new(params_dir: &Path) -> Self {
         Self::new_with_k(params_dir, Self::DEFAULT_K)
     }
 
     pub fn new_with_k(params_dir: &Path, k: u32) -> Self {
-        // SRS must match the degree baked into cached PKs (see KEYGEN_SRS_K).
         let srs_k = Self::KEYGEN_SRS_K.max(k);
         Self {
-            // `None`: this circuit does not version its keys. When it
-            // grows a manifest this becomes `Some(..)` and it inherits
-            // the whole mechanism.
-            state: KeyManagerState::new(params_dir, PREFIX, k, srs_k, None),
+            state: KeyManagerState::new(
+                params_dir,
+                PREFIX,
+                k,
+                srs_k,
+                Some(LAYER_CIRCUIT_REVISION),
+            ),
         }
     }
 
@@ -160,9 +177,11 @@ impl LayerHashesKeyManager {
     }
 }
 
-// ---- Helpers for layer-circuit keygen (layer-specific — kept private to this module) ----
+// ---- Helpers for layer-circuit keygen (layer-specific — kept private to this
+// module) ----
 
-/// Build a 331-byte preimage from `LayerHashChainData` for reference-circuit keygen.
+/// Build a 331-byte preimage from `LayerHashChainData` for reference-circuit
+/// keygen.
 fn build_reference_preimage(chain_data: &LayerHashChainData) -> [u8; LAYER_PREIMAGE_SIZE] {
     let mut preimage = [0u8; LAYER_PREIMAGE_SIZE];
     preimage[0] = chain_data.num_layers as u8;
@@ -170,8 +189,7 @@ fn build_reference_preimage(chain_data: &LayerHashChainData) -> [u8; LAYER_PREIM
         let offset = 1 + i * 33;
         preimage[offset] = (i + 1) as u8;
         if i < chain_data.num_layers {
-            preimage[offset + 1..offset + 1 + 32]
-                .copy_from_slice(&chain_data.root_hashes[i]);
+            preimage[offset + 1..offset + 1 + 32].copy_from_slice(&chain_data.root_hashes[i]);
         }
     }
     preimage

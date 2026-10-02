@@ -259,7 +259,7 @@ enum Cmd {
         pk_cache_dir: Option<PathBuf>,
     },
     /// Long-running daemon reading `proof_event_*.json` bundles and submitting
-    /// `withdrawByProof` on Ethereum. The withdraw-side twin of
+    /// `withdrawByProofBundle` on Ethereum. The withdraw-side twin of
     /// `daemon-prover`: skips nullifiers already consumed on-chain (idempotent
     /// restart) and retries transient reverts with exponential backoff until
     /// SIGINT/SIGTERM.
@@ -295,7 +295,7 @@ enum Cmd {
     ///   1. one `daemon-prover` tick — advance the on-chain AN anchor from the
     ///      next available partner `proof_<seqno>.json` (`verifyBlock`);
     ///   2. one `daemon-withdraw` scan — pay out every ready
-    ///      `proof_event_*.json` (`withdrawByProof`), skipping nullifiers
+    ///      `proof_event_*.json` (`withdrawByProofBundle`), skipping nullifiers
     ///      already used on-chain.
     ///
     /// Both legs read the SAME `--proofs-dir`. Because the two legs run
@@ -324,7 +324,7 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
         /// Simulate (`eth_call`) the withdraw leg but never send a
-        /// `withdrawByProof` transaction. The prover leg still submits
+        /// `withdrawByProofBundle` transaction. The prover leg still submits
         /// `verifyBlock` (there is no dry-run for the anchor advance).
         #[arg(long)]
         dry_run: bool,
@@ -406,7 +406,7 @@ enum Cmd {
         #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
         anchor_level: u8,
     },
-    /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
+    /// Submit one Circuit 4 `withdrawByProofBundle` from `proof_event_*.json`.
     SubmitWithdraw {
         #[arg(long)]
         proof_event: PathBuf,
@@ -436,7 +436,7 @@ enum Cmd {
     },
     /// End-to-end withdraw pipeline: capture live `WithdrawalInitiated`
     /// ExtOut event → export partial witness → enrich → prove → optional
-    /// on-chain `withdrawByProof`.
+    /// on-chain `withdrawByProofBundle`.
     ///
     /// Replaces the Python driver's steps 5–7 with a single in-process
     /// call (see `bridge_relayer_daemon::withdraw_e2e`). If any of the
@@ -520,7 +520,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         prover_seq_no: u32,
         /// If set together with `--bridge-address` + `--private-key`,
-        /// also drive `withdrawByProof` on Ethereum after proving.
+        /// also drive `withdrawByProofBundle` on Ethereum after proving.
         #[arg(long, env = "RPC_URL")]
         rpc_url: Option<String>,
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -1443,7 +1443,7 @@ async fn shutdown_signal() {
 }
 
 /// Run **one full scan** of `proofs_dir` for ready `proof_event_*.json`
-/// bundles, submitting `withdrawByProof` for each. Skips nullifiers already
+/// bundles, submitting `withdrawByProofBundle` for each. Skips nullifiers already
 /// consumed on-chain, and (when `dry_run`) only `eth_call`-simulates.
 ///
 /// Returns `Ok(true)` when a *transient* failure occurred (a read/dry-run/
@@ -1528,10 +1528,26 @@ where
             },
         };
 
+        // Cross-thread hop chain: empty for same-thread claims (`xBlockId ==
+        // yBlockId`), N-long for cross-thread walks. The bundle contract
+        // enforces the invariant on both cases — parking on a decode error
+        // rather than paying out with an under-specified claim.
+        let (hop_pis, hop_proofs) = match (bundle.hop_pis(), bundle.hop_proofs()) {
+            (Ok(pis), Ok(proofs)) => (pis, proofs),
+            (Err(e), _) | (_, Err(e)) => {
+                warn!(?e, proof = %proof_path.display(), "malformed hops_hex; parking");
+                st.done.insert(proof_path);
+                continue;
+            },
+        };
+
         if dry_run {
-            match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
+            match bridge
+                .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
+                .await?
+            {
                 DryRunOutcome::WouldSucceed => {
-                    info!(proof = %proof_path.display(), "dry-run: withdrawByProof would succeed");
+                    info!(proof = %proof_path.display(), hops = hop_pis.len(), "dry-run: withdrawByProofBundle would succeed");
                     st.done.insert(proof_path);
                 },
                 DryRunOutcome::WouldRevert {
@@ -1570,11 +1586,14 @@ where
             continue;
         }
 
-        match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
+        match bridge
+            .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
+            .await?
+        {
             WithdrawSubmitOutcome::Paid {
                 tx_hash,
             } => {
-                info!(proof = %proof_path.display(), ?tx_hash, "withdrawByProof PAID");
+                info!(proof = %proof_path.display(), ?tx_hash, "withdrawByProofBundle PAID");
                 st.paid += 1;
                 st.done.insert(proof_path);
             },
@@ -1606,7 +1625,7 @@ where
                 reason,
                 permanent: false,
             } => {
-                warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
+                warn!(proof = %proof_path.display(), %reason, "withdrawByProofBundle reverted; will retry with backoff");
                 had_transient_failure = true;
                 break;
             },
@@ -1619,7 +1638,7 @@ where
 /// Withdraw-side twin of `run_prover_daemon`. Polls `proofs_dir` for
 /// `proof_event_*.json` bundles, skips nullifiers already consumed on-chain
 /// (so restarts are idempotent and re-scanning the same directory is cheap),
-/// and submits `withdrawByProof`. Transient reverts (e.g. anchor not yet
+/// and submits `withdrawByProofBundle`. Transient reverts (e.g. anchor not yet
 /// registered by the verifyBlock lane) back off exponentially and are
 /// retried; permanent per-proof failures are logged and the proof is parked
 /// so the loop keeps draining the rest of the directory.
@@ -1697,7 +1716,7 @@ async fn run_withdraw_daemon(
 ///   1. one prover tick — `Relayer::tick()` advances the on-chain anchor from
 ///      the next available `proof_<seqno>.json` (`verifyBlock`);
 ///   2. one withdraw scan — `withdraw_scan_once` pays out every ready
-///      `proof_event_*.json` (`withdrawByProof`).
+///      `proof_event_*.json` (`withdrawByProofBundle`).
 ///
 /// Running them sequentially in one task, sharing one provider, means there
 /// is never more than one in-flight transaction, so the shared EOA's nonces
@@ -1743,7 +1762,7 @@ async fn run_bridge_daemon(
         proofs_dir = %proofs_dir.display(),
         ?poll_interval,
         dry_run,
-        "daemon-bridge starting (unified verifyBlock + withdrawByProof)"
+        "daemon-bridge starting (unified verifyBlock + withdrawByProofBundle)"
     );
 
     let mut current_backoff = backoff.initial;
@@ -1801,7 +1820,7 @@ async fn run_bridge_daemon(
             },
         }
 
-        // ── Leg 2: pay out ready withdrawal proofs (withdrawByProof). ──
+        // ── Leg 2: pay out ready withdrawal proofs (withdrawByProofBundle). ──
         match withdraw_scan_once(&wd_bridge, &proofs_dir, dry_run, &mut wd_state).await {
             Ok(transient) => had_transient |= transient,
             Err(e) => {
@@ -1852,12 +1871,21 @@ async fn submit_withdraw(
     let bundle = PartnerWithdrawalProof::from_json_bytes(&std::fs::read(&proof_event)?)?;
     let proof = bundle.proof_bytes()?;
     let pub_inputs = bundle.public_inputs()?;
+    // Empty vecs for same-thread claims (`xBlockId == yBlockId`), N-long for
+    // cross-thread walks. Parity with `daemon-bridge`'s hop-plumbing.
+    let hop_pis = bundle.hop_pis()?;
+    let hop_proofs = bundle.hop_proofs()?;
 
     if dry_run {
         let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
-        match bridge.dry_run_withdraw(&proof, &pub_inputs).await? {
-            DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
+        match bridge
+            .dry_run_withdraw_bundle(&pub_inputs, &proof, &hop_pis, &hop_proofs)
+            .await?
+        {
+            DryRunOutcome::WouldSucceed => {
+                info!(hops = hop_pis.len(), "dry-run: withdrawByProofBundle would succeed")
+            },
             DryRunOutcome::WouldRevert {
                 reason,
             } => {
@@ -1876,16 +1904,19 @@ async fn submit_withdraw(
         .connect_http(rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
-    match bridge.submit_withdraw(&proof, &pub_inputs).await? {
+    match bridge
+        .submit_withdraw_bundle(&pub_inputs, &proof, &hop_pis, &hop_proofs)
+        .await?
+    {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
-        } => info!(?tx_hash, "withdrawByProof paid out"),
+        } => info!(?tx_hash, "withdrawByProofBundle paid out"),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
         } => {
             let kind = if permanent { "permanent" } else { "transient" };
-            anyhow::bail!("withdrawByProof reverted ({kind}): {reason}");
+            anyhow::bail!("withdrawByProofBundle reverted ({kind}): {reason}");
         },
     }
     Ok(())
@@ -1977,12 +2008,22 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
 
     let proof_bytes = summary.proof.proof_bytes()?;
     let pub_inputs = summary.proof.public_inputs()?;
+    // The driver populated `summary.proof.hops_hex` from `hop_blobs` before
+    // returning — same in-memory decode path as the disk-loaded daemon paths,
+    // no round-trip through JSON needed. Empty for same-thread events.
+    let hop_pis = summary.proof.hop_pis()?;
+    let hop_proofs = summary.proof.hop_proofs()?;
 
     if args.dry_run {
         let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
-        match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
-            DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
+        match bridge
+            .dry_run_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
+            .await?
+        {
+            DryRunOutcome::WouldSucceed => {
+                info!(hops = hop_pis.len(), "dry-run: withdrawByProofBundle would succeed")
+            },
             DryRunOutcome::WouldRevert {
                 reason,
             } => anyhow::bail!("dry-run reverted: {reason}"),
@@ -1999,16 +2040,19 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         .connect_http(rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
-    match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
+    match bridge
+        .submit_withdraw_bundle(&pub_inputs, &proof_bytes, &hop_pis, &hop_proofs)
+        .await?
+    {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
-        } => info!(?tx_hash, "withdrawByProof paid out"),
+        } => info!(?tx_hash, "withdrawByProofBundle paid out"),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
         } => {
             let kind = if permanent { "permanent" } else { "transient" };
-            anyhow::bail!("withdrawByProof reverted ({kind}): {reason}");
+            anyhow::bail!("withdrawByProofBundle reverted ({kind}): {reason}");
         },
     }
     Ok(())
@@ -2532,10 +2576,12 @@ mod withdraw_scan_tests {
             Ok(self.nullifier_used)
         }
 
-        async fn dry_run_withdraw(
+        async fn dry_run_withdraw_bundle(
             &self,
-            _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
+            _p: &alloy::primitives::Bytes,
+            _hop_pis: &[Vec<alloy::primitives::U256>],
+            _hop_proofs: &[alloy::primitives::Bytes],
         ) -> Result<DryRunOutcome, RelayerError> {
             self.calls.lock().unwrap().dry_run += 1;
             match &self.dry_run_reason {
@@ -2546,10 +2592,12 @@ mod withdraw_scan_tests {
             }
         }
 
-        async fn submit_withdraw(
+        async fn submit_withdraw_bundle(
             &self,
-            _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
+            _p: &alloy::primitives::Bytes,
+            _hop_pis: &[Vec<alloy::primitives::U256>],
+            _hop_proofs: &[alloy::primitives::Bytes],
         ) -> Result<WithdrawSubmitOutcome, RelayerError> {
             self.calls.lock().unwrap().submit += 1;
             match &self.submit_reason {

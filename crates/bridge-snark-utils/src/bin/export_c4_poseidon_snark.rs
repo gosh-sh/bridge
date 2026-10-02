@@ -4,13 +4,14 @@
 //! `export-inner-aggregator --name BridgeWithdrawalAggregatorVerifier` wraps
 //! into the production Yul EVM verifier.
 //!
-//! The reference witness is synthetic by default (`build_synthetic_event_keygen_inputs`):
-//! only the **circuit shape** determines the aggregator Yul, so any valid
-//! Circuit 4 proof pins the same VK, and real withdrawal proofs generated from
-//! live Acki Nacki blocks verify against the emitted verifier byte-for-byte.
+//! The reference witness is synthetic by default
+//! (`build_synthetic_final_proof_keygen_inputs`): only the **circuit shape**
+//! determines the aggregator Yul, so any valid Circuit 4 proof pins the same
+//! VK, and real withdrawal proofs generated from live Acki Nacki blocks verify
+//! against the emitted verifier byte-for-byte.
 //!
-//! Pass `--fixture <PrivateWitness.json>` to prove a **real** withdrawal witness
-//! (built by the live `bridge-event-witness-builder` from an on-chain
+//! Pass `--fixture <PrivateWitness.json>` to prove a **real** withdrawal
+//! witness (built by the live `bridge-event-witness-builder` from an on-chain
 //! `WithdrawalInitiated` event) instead of the synthetic one — the ETH-side
 //! prover leg of the M7 pipeline (`our_side_reprove`).
 //!
@@ -30,13 +31,13 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bridge_event_prove_circuit::test_helpers::build_synthetic_event_keygen_inputs;
+use bridge_event_prove_circuit::test_helpers::build_synthetic_final_proof_keygen_inputs;
 use bridge_event_prover_lib::{
     prover::{
         generate_event_proof_from_circuit_with_transcript, generate_event_proof_with_transcript,
     },
     verifier::verify_event_proof_with_transcript,
-    PrivateWitness,
+    MultiHopBundleWitnessJson, PrivateWitness,
 };
 use bridge_prover_lib::{keys::KeyManager, transcript::TranscriptKind};
 use bridge_snark_utils::{
@@ -52,7 +53,11 @@ use halo2_base::halo2_proofs::poly::commitment::Params;
 /// `s_g2` than the keygen ceremony, which makes the aggregator unable to verify
 /// the inner proof. The downsize preserves `g2`/`s_g2` (degree-independent) so
 /// the K=19 file shares the K=21 ceremony.
-fn ensure_srs_for_event(km: &KeyManager, params_dir: &std::path::Path, event_k: u32) -> anyhow::Result<()> {
+fn ensure_srs_for_event(
+    km: &KeyManager,
+    params_dir: &std::path::Path,
+    event_k: u32,
+) -> anyhow::Result<()> {
     use std::io::Write;
     let srs_path = params_dir.join(format!("kzg_bn254_{event_k}.srs"));
     if srs_path.exists() {
@@ -95,18 +100,20 @@ struct Args {
     /// Output snark basename (without extension).
     #[arg(long, default_value = "circuit4")]
     name: String,
-    /// Seed for the synthetic reference witness. The default pins the same VK as
-    /// the committed verifier; pass a different value to produce a distinct inner
-    /// snark (different public inputs, same circuit shape) for the M7
-    /// universality check — the deployed verifier must accept both.
+    /// Seed for the synthetic reference witness. The default pins the same VK
+    /// as the committed verifier; pass a different value to produce a
+    /// distinct inner snark (different public inputs, same circuit shape)
+    /// for the M7 universality check — the deployed verifier must accept
+    /// both.
     #[arg(long)]
     seed: Option<u64>,
     /// Path to a real `PrivateWitness` JSON (produced by the live
     /// `bridge-event-witness-builder` from an on-chain `WithdrawalInitiated`
-    /// event). When set, the inner snark is proven from **real Acki Nacki data**
-    /// instead of the synthetic reference witness (`--seed` is then ignored).
-    /// The circuit shape — hence the aggregator VK — is identical, so the
-    /// resulting snark aggregates against the same committed verifier `.bin`.
+    /// event). When set, the inner snark is proven from **real Acki Nacki
+    /// data** instead of the synthetic reference witness (`--seed` is then
+    /// ignored). The circuit shape — hence the aggregator VK — is
+    /// identical, so the resulting snark aggregates against the same
+    /// committed verifier `.bin`.
     #[arg(long)]
     fixture: Option<PathBuf>,
 }
@@ -125,18 +132,16 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&snark_dir)?;
 
     // KeyManager owns four per-circuit sub-managers; the event sub-manager
-    // keygens the event circuit against the K=20 KZG SRS
+    // keygens the event circuit against the K=19 KZG SRS
     // (`EventKeyManager::KEYGEN_SRS_K`, matching the event circuit's
-    // `vk.domain.k`) even though `event_config_params.json` records k = 19
-    // for the arithmetization. `ensure_srs_for_event` below provisions a
-    // K=19 slice from the same ceremony as a defensive fallback for any
-    // future consumer that keys off `event_config().k`; the current
-    // export path pins `srs_k_override = Some(KEYGEN_SRS_K)` when it
-    // invokes `export_poseidon_snark_with_srs_k` further down, so the
-    // in-line `gen_srs()` re-load reads `kzg_bn254_20.srs` and
-    // `snark-verifier::compile()` sees `params.k == vk.domain.k`.
+    // arithmetic K and `vk.domain.k`). `ensure_srs_for_event` below
+    // provisions a K=19 slice from the same K=21 ceremony (downsize
+    // preserves g2/s_g2) so the in-line `gen_srs()` re-load reads
+    // `kzg_bn254_19.srs` and `snark-verifier::compile()` sees
+    // `params.k == vk.domain.k`.
     let mut km = KeyManager::new(&params_dir);
-    km.ensure_event_keys().context("ensure_event_keys failed (keygen)")?;
+    km.ensure_event_keys()
+        .context("ensure_event_keys failed (keygen)")?;
 
     // Provision the event-degree (K=19) SRS from the same ceremony as
     // keygen before the Snark export re-loads it via gen_srs. Downsized
@@ -154,14 +159,27 @@ fn main() -> anyhow::Result<()> {
         println!("proving REAL witness from {}", fixture.display());
         let raw = std::fs::read_to_string(fixture)
             .with_context(|| format!("failed to read fixture {}", fixture.display()))?;
-        let witness: PrivateWitness = serde_json::from_str(&raw)
-            .with_context(|| format!("failed to parse PrivateWitness JSON from {}", fixture.display()))?;
-        generate_event_proof_with_transcript(&km.event, &witness, TranscriptKind::Poseidon)
-            .context("Circuit 4 Poseidon proof generation failed (real witness)")?
+        let witness: PrivateWitness = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "failed to parse PrivateWitness JSON from {}",
+                fixture.display()
+            )
+        })?;
+        // Same-thread export — the aggregator VK is shape-defined and does
+        // not consume hop snarks here; `MultiHopBundleWitnessJson::default()`
+        // (empty `snarks`) keeps `y_block_id == x_block_id` in the produced
+        // public instances.
+        generate_event_proof_with_transcript(
+            &km.event,
+            &witness,
+            &MultiHopBundleWitnessJson::default(),
+            TranscriptKind::Poseidon,
+        )
+        .context("Circuit 4 Poseidon proof generation failed (real witness)")?
     } else {
         let seed = args.seed.unwrap_or(C4_SEED);
         println!("proving SYNTHETIC witness (seed={seed:#x})");
-        let (circuit, instances) = build_synthetic_event_keygen_inputs(seed);
+        let (circuit, instances) = build_synthetic_final_proof_keygen_inputs(seed);
         generate_event_proof_from_circuit_with_transcript(
             &km.event,
             circuit,
@@ -181,7 +199,10 @@ fn main() -> anyhow::Result<()> {
         TranscriptKind::Poseidon,
     );
     km.unload_event_pk();
-    println!("SELF_VERIFY circuit4 (Poseidon native): {}", if ok { "PASS" } else { "FAIL" });
+    println!(
+        "SELF_VERIFY circuit4 (Poseidon native): {}",
+        if ok { "PASS" } else { "FAIL" }
+    );
     anyhow::ensure!(
         ok,
         "Circuit 4 Poseidon inner snark failed native verification — refusing to export an \
@@ -194,9 +215,10 @@ fn main() -> anyhow::Result<()> {
     save_instances_binary(&out.public_instances, &instances_path)?;
     let out_snark = snark_dir.join(format!("{}.snark", args.name));
 
-    // Event circuit has config.k = 19 but VK was keygen'd against K=20
-    // (see `EventKeyManager::KEYGEN_SRS_K`). Pass explicit SRS override so
-    // snark-verifier's `compile()` sees `params.k = 20 == vk.domain.k`.
+    // Event circuit uses config.k = 19 and VK is keygen'd against K=19
+    // (see `EventKeyManager::KEYGEN_SRS_K`). Pass explicit SRS override for
+    // symmetry with sibling exporters — snark-verifier's `compile()`
+    // sees `params.k = 19 == vk.domain.k`, no downsize needed.
     export_poseidon_snark_with_srs_k(
         &params_dir.join("event_vk.bin"),
         &params_dir.join("event_config_params.json"),

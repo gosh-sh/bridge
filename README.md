@@ -29,7 +29,7 @@ TVL limit.
 |---|---|
 | `verifyBlock` | Advances the rolling commitment to AN state from a cross-bound pair of proofs: Circuit 1A (≥ 2/3 attestation quorum) **or** 1B (> 1/2 split), plus Circuit 2 (layer-hash movement). |
 | `applyBkSetUpdate` | Rotates the AN validator-set (BK-set) commitment through a 16-leaf, depth-4 block-id tree. |
-| `withdrawByProof` | Pays out USDC against a Circuit-4 proof of a `WithdrawalInitiated` event, anchored into state that `verifyBlock` already recorded. Nullifier-guarded and chain-id scoped. |
+| `withdrawByProofBundle` | Pays out USDC against a bundle of Circuit-4 proofs: one `BridgeEventFinalProof` for the `WithdrawalInitiated` event (13 public inputs, adding `xBlockId`/`yBlockId` endpoints) and zero or more `BridgeMultiHopProof` hops (2 public inputs each) that walk the cross-thread chain when the event thread differs from the anchor. Anchored into state that `verifyBlock` already recorded, nullifier-guarded and chain-id scoped. |
 
 There is no refund-style `withdraw(depositId, …)`; it was retired. There is no pause switch and no
 upgrade path — every verifier binding is `immutable`, so replacing a verifier means deploying a new
@@ -61,11 +61,11 @@ collect it do not appear in the principal-accounting equation at all. Contract d
                  Acki Nacki → Ethereum (state + payout)
   AN node ──GraphQL──▶ bridge-prover-libraries ──Circuits 1A/1B, 2, 4──▶ bridge-relayer-daemon
                                                                           │
-                                              verifyBlock / applyBkSetUpdate / withdrawByProof
+                                          verifyBlock / applyBkSetUpdate / withdrawByProofBundle
                                                                           ▼
                                                                   AckiNackiBridge
                                                                           │
-                                    Primary / Fallback / LayerHashes / BridgeWithdrawal adapters
+                        Primary / Fallback / LayerHashes / BridgeWithdrawalFinal / BridgeMultiHop adapters
                                                                           ▼
                                               ShplonkHalo2Verifier ──▶ Yul Halo2Verifier (CREATE)
 ```
@@ -123,7 +123,7 @@ Contracts on their own:
 ```bash
 cd contracts/ethereum
 forge test                                                   # full suite
-forge test --match-contract AckiNackiBridgeWithdrawByProof -vv
+forge test --match-contract AckiNackiBridgeWithdrawByProofBundle -vv
 FOUNDRY_PROFILE=fork forge test --match-contract AaveFork     # needs a mainnet RPC
 ```
 

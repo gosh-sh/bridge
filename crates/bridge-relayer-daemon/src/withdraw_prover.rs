@@ -55,9 +55,10 @@ pub trait WithdrawalProver: Send + Sync {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic withdrawal prover for tests. Returns a canned, self-verified
-/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + eleven 32-byte LE
-/// public inputs, matching the post-anchorLayer `WITHDRAWAL_PUBLIC_INPUTS = 11`
-/// layout) so the submit path is exercised end-to-end without running halo2.
+/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + thirteen 32-byte LE
+/// public inputs, matching the `WITHDRAWAL_PUBLIC_INPUTS = 13` layout with
+/// `x_block_id`/`y_block_id` appended) so the submit path is exercised
+/// end-to-end without running halo2.
 #[derive(Clone, Debug)]
 pub struct MockWithdrawalProver {
     canned: PartnerWithdrawalProof,
@@ -66,12 +67,12 @@ pub struct MockWithdrawalProver {
 }
 
 impl MockWithdrawalProver {
-    /// A valid canned proof: eleven ascending public inputs (matching the
-    /// post-anchorLayer `WITHDRAWAL_PUBLIC_INPUTS = 11` layout) and a
-    /// SHPLONK-shaped proof blob long enough to pass
+    /// A valid canned proof: thirteen ascending public inputs (matching the
+    /// `WITHDRAWAL_PUBLIC_INPUTS = 13` layout including `x_block_id`/
+    /// `y_block_id`) and a SHPLONK-shaped proof blob long enough to pass
     /// [`PartnerWithdrawalProof::proof_bytes`].
     pub fn valid() -> Self {
-        let public_instances_hex = (0u8..11)
+        let public_instances_hex = (0u8..13)
             .map(|i| {
                 let mut le = [0u8; 32];
                 le[0] = i;
@@ -88,6 +89,7 @@ impl MockWithdrawalProver {
                 ]),
                 public_instances_hex,
                 self_verified: true,
+                hops_hex: Vec::new(),
             },
             fail: false,
         }
@@ -281,7 +283,9 @@ mod tests {
             .await
             .unwrap();
         assert!(proof.self_verified);
-        assert_eq!(proof.public_instances_hex.len(), 11);
+        // 13 = `WITHDRAWAL_PUBLIC_INPUTS` after the multi-thread migration
+        // (11 legacy slots + `x_block_id` + `y_block_id`).
+        assert_eq!(proof.public_instances_hex.len(), 13);
         // Canned proof is submit-shaped (SHPLONK aggregator calldata).
         assert!(proof.proof_bytes().is_ok());
         let pi = proof.public_inputs().unwrap();

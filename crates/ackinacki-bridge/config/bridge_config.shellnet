@@ -43,7 +43,7 @@ BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 # On-chain USDCBridge account id (64 hex, no `0x`). The dapp_id is
 # resolved live via GraphQL, so only the account id is needed here.
 #
-# This value is NOT free-form: `withdrawByProof` compares the pair
+# This value is NOT free-form: `withdrawByProofBundle` compares the pair
 # (dappFr, accFr) it derives from a proof against the pair the deploy
 # was pinned to at construction, BEFORE verifying the proof itself, so
 # a mismatch is a refusal after the burn. Preflight checks it up front

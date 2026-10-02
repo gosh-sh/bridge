@@ -4,7 +4,8 @@
 //! to the highest active layer hash in the new key block.
 //!
 //! The chain operates at the layer-hash level: each step proves that a value
-//! is a leaf in a Poseidon Merkle tree whose root is the next value in the chain.
+//! is a leaf in a Poseidon Merkle tree whose root is the next value in the
+//! chain.
 
 use gosh_dense_balanced_tree::{
     compute_root_native, fr_to_bytes, preprocess_dense_proof, DenseChainLink, MAX_CHAIN_LEN,
@@ -16,8 +17,9 @@ use crate::poseidon_dense::PoseidonHasher;
 #[derive(Clone, Debug)]
 pub struct LayerTreeData {
     /// All leaves of the Poseidon Merkle tree (must be power of 2).
-    /// For layer 1: [higher_root, prev_same_root, block_leaf_0, ..., block_leaf_{n-2}]
-    /// For layer 2+: [higher_root, prev_same_root, layer_N-1_hash_0, ...]
+    /// For layer 1: [higher_root, prev_same_root, block_leaf_0, ...,
+    /// block_leaf_{n-2}] For layer 2+: [higher_root, prev_same_root,
+    /// layer_N-1_hash_0, ...]
     pub leaves: Vec<[u8; 32]>,
     /// Position of the chain leaf (the previous root value) in the tree.
     /// Typically 1 (second leaf = prev_same_layer_root).
@@ -35,10 +37,11 @@ fn node_dense_combine(hasher: &PoseidonHasher, left: &[u8; 32], right: &[u8; 32]
     hasher.digest(&buf)
 }
 
-/// Build a Poseidon Merkle tree from leaves and extract a Merkle proof for a given position.
+/// Build a Poseidon Merkle tree from leaves and extract a Merkle proof for a
+/// given position.
 ///
-/// Uses the workspace `PoseidonHasher` (delegates to `bridge_poseidon`) for tree
-/// combine to ensure byte-identical results with the acki-nacki node's
+/// Uses the workspace `PoseidonHasher` (delegates to `bridge_poseidon`) for
+/// tree combine to ensure byte-identical results with the acki-nacki node's
 /// `dense_merkle_tree`.
 ///
 /// Returns (root_bytes, siblings) where siblings is bottom-up.
@@ -85,8 +88,10 @@ pub fn build_tree_and_proof(
     let verify_root = fr_to_bytes(compute_root_native(&proof));
     if root != verify_root {
         tracing::warn!(
-            "Workspace Poseidon root differs from gosh-dense-balanced-tree root!\n  workspace: {}\n  gosh: {}",
-            hex::encode(root), hex::encode(verify_root)
+            "Workspace Poseidon root differs from gosh-dense-balanced-tree root!\n  workspace: \
+             {}\n  gosh: {}",
+            hex::encode(root),
+            hex::encode(verify_root)
         );
     }
 
@@ -95,14 +100,12 @@ pub fn build_tree_and_proof(
 
 /// Build a chain of DenseChainLinks from intermediate key block tree data.
 ///
-/// Each element of `trees` describes one step: a Poseidon Merkle tree that contains
-/// the previous value as a leaf. The chain starts from `prev_hash` and should arrive
-/// at the root of the last tree.
+/// Each element of `trees` describes one step: a Poseidon Merkle tree that
+/// contains the previous value as a leaf. The chain starts from `prev_hash` and
+/// should arrive at the root of the last tree.
 ///
 /// Returns (chain_links padded to MAX_CHAIN_LEN, num_active_steps).
-pub fn build_chain_proofs(
-    trees: &[LayerTreeData],
-) -> (Vec<DenseChainLink>, u8) {
+pub fn build_chain_proofs(trees: &[LayerTreeData]) -> (Vec<DenseChainLink>, u8) {
     let num_steps = trees.len();
     assert!(
         num_steps >= 1 && num_steps <= MAX_CHAIN_LEN,
@@ -114,10 +117,8 @@ pub fn build_chain_proofs(
     let mut last_root_bytes = [0u8; 32];
 
     for tree_data in trees {
-        let (root, siblings) = build_tree_and_proof(
-            &tree_data.leaves,
-            tree_data.chain_leaf_position,
-        );
+        let (root, siblings) =
+            build_tree_and_proof(&tree_data.leaves, tree_data.chain_leaf_position);
 
         chain_links.push(DenseChainLink {
             active: true,

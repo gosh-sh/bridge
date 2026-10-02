@@ -7,10 +7,12 @@ import "../src/ShplonkHalo2Verifier.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "../src/PrimaryAggregatorVerifier.sol";
 import "../src/LayerHashesAggregatorVerifier.sol";
 import "../src/BridgeWithdrawalAggregatorVerifier.sol";
+import "../src/BridgeMultiHopAggregatorVerifier.sol";
 import "../src/FallbackAggregatorVerifier.sol";
 
 /// @title ShplonkDeployLib
@@ -35,13 +37,19 @@ library ShplonkDeployLib {
     /// @dev keccak256 of runtime after CREATE of the committed `.bin`.
     ///      Re-measure (`extcodehash`) when n14 regenerates artefacts.
     bytes32 internal constant PRIMARY_YUL_CODEHASH =
-        0x87667b88a829e82cd3a840d7840e531cc479b46c383081c906ed6ab77c8f7d7c;
+        0x26a629eca2d1272c0b776663b01c9151ddffbb5b29b9164d20a582648dd59ef2;
     bytes32 internal constant FALLBACK_YUL_CODEHASH =
-        0xea25ba9c1cab6df9616122cb951875a47f41c962ebc699dfb53819215efaf963;
+        0xa5173ba41e794f5b3a9ed1b4da1b93af58764b1f44329bb5ebf9794c97d1e923;
     bytes32 internal constant LAYER_HASHES_YUL_CODEHASH =
-        0xe1f47d047e03d59dcacb747fd168efe120da942a84a4e7003d74e8208d99f07b;
+        0x22b194cfa002ac041e6e680d992e76f8ef9d2f383954d055e8988ddb34134437;
     bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
-        0xf3a462e3006568299a439c58c12da7356abf3b73b4ae84c5c168aa0b44ffc18f;
+        0x3a8372c70b067cbf6c988308841d98ac225f30417086636e80fe11751cb84a7c;
+    /// @dev Multi-hop verifier codehash, computed from the committed
+    ///      `verifiers/BridgeMultiHopAggregatorVerifier.bin` via
+    ///      `script/PrintMultiHopCodehash.s.sol`. Regenerate + update this
+    ///      constant in the same commit as any artefact bump.
+    bytes32 internal constant MULTI_HOP_YUL_CODEHASH =
+        0xdf0198b19eada3ad81ca27a4e7a902076f48fd85811dfed076f0d8f2ef70946f;
 
     /// @dev Poseidon digest of the inner-circuit VK witnesses, in the exact
     ///      32-byte layout the aggregator emits at instance slot `12 + NUM_INNER`.
@@ -52,9 +60,11 @@ library ShplonkDeployLib {
     bytes32 internal constant FALLBACK_VK_DIGEST =
         0x02eabb18cdc35deba417d2a3a9326bb41a722c333d11eccb45f4ae52ccba1484;
     bytes32 internal constant LAYER_HASHES_VK_DIGEST =
-        0x022fe6c98b76a4733105a03be905bf3cfcf4cb4373fb856c53ec894a27bb4e17;
+        0x013503ca3e2be627a4f0a0492a9d4c97986eb686874c9691218ed5e8de250f0f;
     bytes32 internal constant WITHDRAWAL_VK_DIGEST =
-        0x1e91c1fe1986129e357231c9b2158797e2feb6fc9caddd9caea846ff5614e0ab;
+        0x18b4ba34b1d094f0f3328864a9db3d0771c4987679ed4848479c8eb92faab7b3;
+    bytes32 internal constant MULTI_HOP_VK_DIGEST =
+        0x25cc953588b169004317bb42f90a6c9fe0166cb7ec69b0a9cb27d56117fba1ea;
 
     struct VerifyBlockVerifiers {
         IPrimaryVerifier primary;
@@ -80,6 +90,12 @@ library ShplonkDeployLib {
     function withdrawalBinPath() internal view returns (string memory) {
         return VM.envOr(
             "SHPLONK_BIN_WITHDRAWAL", string("verifiers/BridgeWithdrawalAggregatorVerifier.bin")
+        );
+    }
+
+    function multiHopBinPath() internal view returns (string memory) {
+        return VM.envOr(
+            "SHPLONK_BIN_MULTI_HOP", string("verifiers/BridgeMultiHopAggregatorVerifier.bin")
         );
     }
 
@@ -132,11 +148,28 @@ library ShplonkDeployLib {
 
     function deployWithdrawalAdapter(string memory binPath)
         internal
-        returns (IBridgeWithdrawalVerifier)
+        returns (IBridgeWithdrawalFinalVerifier)
     {
         address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, WITHDRAWAL_YUL_CODEHASH));
-        return IBridgeWithdrawalVerifier(
+        return IBridgeWithdrawalFinalVerifier(
             address(new BridgeWithdrawalAggregatorVerifier(wrapper, WITHDRAWAL_VK_DIGEST))
+        );
+    }
+
+    /// @notice Multi-thread cross-thread hop-chain adapter for
+    ///         `withdrawByProofBundle`. Companion to the withdrawal-final
+    ///         adapter — deploy both together whenever bundle wiring is
+    ///         enabled on `AckiNackiBridge`. Pinned to
+    ///         `MULTI_HOP_YUL_CODEHASH`, mirroring the other four verifier
+    ///         adapters — a deploy against a mismatched `.bin` reverts with
+    ///         `YulCodehashMismatch`.
+    function deployMultiHopAdapter(string memory binPath)
+        internal
+        returns (IBridgeMultiHopVerifier)
+    {
+        address wrapper = deployShplonkWrapper(deployYulFromBin(binPath, MULTI_HOP_YUL_CODEHASH));
+        return IBridgeMultiHopVerifier(
+            address(new BridgeMultiHopAggregatorVerifier(wrapper, MULTI_HOP_VK_DIGEST))
         );
     }
 

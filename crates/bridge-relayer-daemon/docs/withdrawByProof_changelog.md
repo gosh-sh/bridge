@@ -2,6 +2,105 @@
 
 Newest first.
 
+### 2026-09-27 — `withdrawByProof` renamed to `withdrawByProofBundle`; verifier split
+
+- **Change.** The single-shot withdrawal entry-point
+  `withdrawByProof(bytes proof, WithdrawalPublicInputs pub)` has been
+  replaced by
+  `withdrawByProofBundle(uint256[] finalPublicInputs, bytes finalProof, uint256[][] hopPublicInputs, bytes[] hopProofs)`
+  (`AckiNackiBridge.sol:1385`). The 11 legacy PI slots survive at
+  positions `[0..10]` of `finalPublicInputs`; two new slots are appended
+  at fixed offsets `PUB_X_BLOCK_ID = 11` and `PUB_Y_BLOCK_ID = 12`, so
+  `FINAL_PI_LEN = 13`. Each hop is exactly two PIs
+  `[HOP_START = 0, HOP_END = 1]` (`MULTI_HOP_PI_LEN = 2`), and
+  `hopPublicInputs.length == hopProofs.length ≤ N_BUNDLE_MAX = 20`
+  (`AckiNackiBridge.sol:89, 1347–1357`).
+- **Same-thread vs cross-thread claims.** Same-thread proofs pass
+  empty `hopPublicInputs` / `hopProofs` slices; the contract requires
+  `finalPublicInputs[PUB_X_BLOCK_ID] == finalPublicInputs[PUB_Y_BLOCK_ID]`
+  or reverts with `SameThreadEndpointsMismatch()`
+  (`AckiNackiBridge.sol:1482–1485, 467`). Cross-thread proofs must
+  supply at least one hop; the contract folds
+  `xBlockId → hop0.start → hop0.end → hop1.start → … → hopLast.end → yBlockId`
+  and reverts with `HopChainHeadMismatch`, `AdjacentHopBlockIdMismatch(i)`
+  or `HopChainTailMismatch` on any break
+  (`AckiNackiBridge.sol:1503–1513`), and with
+  `SameThreadRequiresEmptyHopChain(hopCount)` if a caller supplies hops
+  but sets `xBlockId == yBlockId` (`AckiNackiBridge.sol:1492–1494`).
+- **Verifier split.** The single `bridgeWithdrawalVerifier()` getter of
+  type `IBridgeWithdrawalVerifier` is gone; its role is now shared
+  between `bridgeWithdrawalFinalVerifier()` (type
+  `IBridgeWithdrawalFinalVerifier`) and `bridgeMultiHopVerifier()` (type
+  `IBridgeMultiHopVerifier`), both `immutable`
+  (`AckiNackiBridge.sol:256, 263, 705–706`). Either address unset
+  disables the entry-point and reverts with
+  `WithdrawByProofBundleDisabled()` (`AckiNackiBridge.sol:461, 1391–1394`).
+- **Deploy-script env var rename.** `WITHDRAWAL_VERIFIER` is gone; the
+  reuse-verifiers and genesis-cursor deploy scripts read
+  `WITHDRAWAL_FINAL_VERIFIER` + `MULTI_HOP_VERIFIER`
+  (`DeployReuseVerifiersBridge.s.sol:47–49`,
+  `DeployGenesisCursorBridge.s.sol:74–76`). The JSON output of the real
+  deploy script emits the paired keys `withdrawal_final_verifier` +
+  `multi_hop_verifier` (`DeployRealBridge.s.sol:347, 350`). The
+  `WIRE_WITHDRAW_BY_PROOF` env var name is unchanged and still gates
+  wiring on shellnet/mainnet; `false` is accepted only on anvil
+  (chainid 31337) (`DeployShellnetE2EBridge.s.sol:62–65`).
+- **Verifier artefacts.** `verifiers/BridgeWithdrawalAggregatorVerifier.{sol,bin}`
+  is the FinalProof lane (previously `WithdrawalAggregatorVerifier.*`).
+  `verifiers/BridgeMultiHopAggregatorVerifier.{sol,bin}` is the new
+  MultiHopProof lane; both `.bin` are checked by
+  `.woodpecker/verifier_sources.yaml` byte-for-byte against solc 0.8.19
+  compilation of the `.sol` (see the SHA256SUMS/SIZES manifests in
+  `contracts/ethereum/verifiers/`).
+- **Rust client API rename (PI/proof ORDER SWAP).** The relayer
+  client methods have been renamed and the argument order has changed:
+  - `EthBridgeClient::dry_run_withdraw(proof, pub)` →
+    `dry_run_withdraw_bundle(final_public_inputs, final_proof, hop_public_inputs, hop_proofs)`
+    (`bridge.rs:663–698`).
+  - `EthBridgeClient::submit_withdraw(proof, pub)` →
+    `submit_withdraw_bundle(final_public_inputs, final_proof, hop_public_inputs, hop_proofs)`
+    (`bridge.rs:704–732`).
+  Both call-sites internally build the 13-slot `uint256[]` and forward
+  through to `withdrawByProofBundle` on the bound contract binding. The
+  current in-tree callers under
+  `crates/bridge-relayer-daemon/src/bin/relayer.rs` and
+  `crates/ackinacki-bridge/src/orchestrator.rs` pass `&[]` for the two
+  hop slices — same-thread-only in practice today; cross-thread wiring
+  is scaffolded but not yet exercised end-to-end from the CLI.
+- **Cast-CLI signature swap.** Any `cast call`/`cast send` snippets that
+  used `'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))'`
+  must become
+  `'withdrawByProofBundle(uint256[],bytes,uint256[][],bytes[])'`,
+  with `finalPublicInputs` supplied as a 13-element `[...]` array (11
+  legacy slots + `xBlockId` + `yBlockId`) and `hopPublicInputs` as a
+  `[]` or `[[start,end], …]` array of length ≤ 20. See the
+  [Case 3b decode block](./live_withdrawByProof_runbook.md#case-3b--on-chain-withdrawbyproofbundle-revert)
+  in the runbook.
+- **Revert-selector rename.** `WithdrawByProofDisabled()` is retired;
+  the equivalent revert is now `WithdrawByProofBundleDisabled()`. New
+  bundle-shape reverts to watch for are
+  `SameThreadEndpointsMismatch()`,
+  `SameThreadRequiresEmptyHopChain(uint256)`,
+  `HopChainHeadMismatch()`, `HopChainTailMismatch()`,
+  `AdjacentHopBlockIdMismatch(uint256)`,
+  `HopBundleLengthOverflow(uint256,uint256)`,
+  `FinalPublicInputsBadLength(uint256,uint256)`,
+  `HopPublicInputsBadLength(uint256,uint256,uint256)` and
+  `HopPublicInputsHopProofsLengthMismatch(uint256,uint256)`.
+  `MultiHopProofRejected(uint256)` fires when hop `i` fails its Yul
+  verifier; the legacy `WithdrawalProofRejected()` remains for the
+  FinalProof leg. All other pre-existing reverts
+  (`WithdrawIdentityMismatch`, `NullifierAlreadyUsed`, `UnknownAnchor`,
+  `LayerOutOfRange`, `DstChainIdMismatch`, `UnsupportedTokenId`,
+  `RecipientHalfOutOfRange`, `InvalidRecipient`,
+  `WithdrawTreasuryShortfall`) keep their original selectors.
+- **Operator impact.** Existing FinalProof witnesses / calldata
+  produced against the pre-split verifier are rejected on the new
+  contract — the calldata layout changed. Re-prove any in-flight
+  event; the relayer's `withdraw-e2e` binary already emits the new
+  shape. Runbook prose (dry-run traces, cast decoders, revert catalog)
+  has been updated in `live_withdrawByProof_runbook.md`.
+
 ### 2026-08-18 — L2 anchoring code-complete + operator readiness (pre-Deploy #12)
 
 - **Change.** All 8 stages of
@@ -37,11 +136,14 @@ Newest first.
 
 ### 2026-08-18 — Deploy #10 first live `WithdrawalExecuted` + treasury-seeding case
 
-- **Milestone.** First successful on-chain `withdrawByProof` against
-  `AckiNackiBridge 0xa44E35151962684f54Af8aaD2675E726ED848E59` — tx
-  `0x35d7254b430f1e475ef16d7f60b295bd0226c906ec5b019d4b2ca408ca657c85`
+- **Milestone.** First successful on-chain `withdrawByProofBundle`
+  against `AckiNackiBridge 0xa44E35151962684f54Af8aaD2675E726ED848E59` —
+  tx `0x35d7254b430f1e475ef16d7f60b295bd0226c906ec5b019d4b2ca408ca657c85`
   at Sepolia block 11,513,799 (`WithdrawalExecuted` emitted; 1.000000
-  USDC delivered to `0x742d35Cc…f44e`).
+  USDC delivered to `0x742d35Cc…f44e`). Recorded here under its historical
+  `withdrawByProof` name; the entry-point has since been renamed to
+  `withdrawByProofBundle` (see the 2026-09 bundle-split entry above once
+  landed).
 - **Ordering discovery.** After the SHPLONK pipeline fix (commit
   `b22f6c7`, driver.rs now composes `Circuit4ShplonkPipeline`), dry-run
   passed the crypto path (anchor check + verifier both green) but the
@@ -57,10 +159,10 @@ Newest first.
   Case 1 so future fresh-deploy demos do the seed BEFORE firing the
   burn, and added the selector row to Case 3's revert table.
 - **Rule of thumb.** Fresh deploys must seed the treasury or every
-  `withdrawByProof` will revert on the payout leg regardless of proof
-  quality. Faucet + deposit costs ~2 tx (<30s wall), fund enough to cover
-  the demo's burns. Existing deploys inherit their prior treasury; check
-  with `cast call $BRIDGE 'treasuryBalance()(uint256)'`.
+  `withdrawByProofBundle` will revert on the payout leg regardless of
+  proof quality. Faucet + deposit costs ~2 tx (<30s wall), fund enough
+  to cover the demo's burns. Existing deploys inherit their prior
+  treasury; check with `cast call $BRIDGE 'treasuryBalance()(uint256)'`.
 
 ### 2026-08-17 — Deploy #8: tight-lookahead rerun after Deploy #7 mis-timing
 
@@ -103,9 +205,10 @@ Newest first.
   entry point.
 - **First on-chain demo.** Deploy #8, this runbook. Prior E2E validations
   (2026-08-15 seq 8251308 etc.) were daemon-verified via
-  `bridge-verifier-daemon`, NOT via on-chain `withdrawByProof`. Deploy #8
-  is the first time `withdrawByProof` executes against a live proof
-  produced by the Rust relayer.
+  `bridge-verifier-daemon`, NOT via the on-chain withdrawal entry-point.
+  Deploy #8 is the first time the entry-point (then still named
+  `withdrawByProof`; today `withdrawByProofBundle`) executes against a
+  live proof produced by the Rust relayer.
 
 ### 2026-08-13 — Horizontal-chain event proving landed (fire-window dropped)
 

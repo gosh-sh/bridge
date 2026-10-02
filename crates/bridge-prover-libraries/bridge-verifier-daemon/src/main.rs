@@ -1,28 +1,31 @@
 //! Bridge Verifier Daemon — verifies Circuit 1a + Circuit 2 proofs.
 //!
-//! Watches the proofs/ directory for combined proof files from the prover daemon.
-//! Verifies both proofs, cross-references public instances, updates state.
+//! Watches the proofs/ directory for combined proof files from the prover
+//! daemon. Verifies both proofs, cross-references public instances, updates
+//! state.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
-use tracing::{error, info, warn};
-
-use bridge_prover_lib::block_id_tree;
-use bridge_prover_lib::bootstrap::{self, BootstrapSeed};
-use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_event_prover_lib as event_verifier;
-use bridge_prover_lib::ipc;
-use bridge_prover_lib::keys::KeyManager;
 use bridge_poseidon as poseidon;
-use bridge_prover_lib::verifier;
-use bridge_prover_lib::Fr;
-
-use serde::{Deserialize, Serialize};
-
+use bridge_prover_lib::{
+    block_id_tree,
+    bootstrap::{self, BootstrapSeed},
+    bridge_state::{BridgeState, MAX_LAYERS},
+    ipc,
+    keys::KeyManager,
+    verifier, Fr,
+};
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
+use serde::{Deserialize, Serialize};
+use tracing::{error, info, warn};
 
 const PARAMS_DIR: &str = "./params";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -48,8 +51,7 @@ const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
 
 // History window size — must match the prover daemon and the node. Sourced
 // from the vendored poseidon_dense constant so it can never drift.
-const HISTORY_WINDOW_SIZE: usize =
-    bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE;
+const HISTORY_WINDOW_SIZE: usize = bridge_prover_lib::poseidon_dense::HISTORY_PROOF_WINDOW_SIZE;
 
 #[derive(Default)]
 struct Stats {
@@ -88,13 +90,16 @@ async fn main() -> anyhow::Result<()> {
         .to_string_lossy()
         .into_owned();
 
-    let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
-        .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
-    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
-        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
+    let gql_endpoint =
+        std::env::var(ENV_GQL_ENDPOINT).unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
+    let bk_set_config =
+        std::env::var(ENV_BK_SET_CONFIG).unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
 
     info!("=== Bridge Verifier Daemon (Circuit 1a + Circuit 2) ===");
-    info!("GQL endpoint: {} (unused since 2026-07-22 refactor)", gql_endpoint);
+    info!(
+        "GQL endpoint: {} (unused since 2026-07-22 refactor)",
+        gql_endpoint
+    );
     info!("BK-set config: {}", bk_set_config);
     info!("running indefinitely; send SIGINT (Ctrl-C) to shut down cleanly");
 
@@ -126,8 +131,8 @@ async fn main() -> anyhow::Result<()> {
     }
     if key_manager.fallback.vk_opt().is_none() {
         anyhow::bail!(
-            "fallback VK not found in {}. Run the prover first to generate keys \
-             (the fallback VK is materialised alongside the primary VK on cold start).",
+            "fallback VK not found in {}. Run the prover first to generate keys (the fallback VK \
+             is materialised alongside the primary VK on cold start).",
             PARAMS_DIR
         );
     }
@@ -178,13 +183,13 @@ async fn main() -> anyhow::Result<()> {
                     "initialized from seed: seqno={}, height={}",
                     state.stored_last_seen_block_seq_no, state.stored_last_seen_block_height,
                 );
-            }
+            },
             None => {
                 info!(
                     "no bootstrap seed at {} yet — waiting for prover to write it",
                     seed_path,
                 );
-            }
+            },
         }
     }
 
@@ -239,7 +244,9 @@ async fn main() -> anyhow::Result<()> {
         }
         if last_stats_log.elapsed() >= STATS_LOG_INTERVAL {
             info!(
-                "[heartbeat] bundles: total={}, both_ok={}, primary_only={}, layer_only={}, both_failed={} | events: total={}, ok={}, anchor_miss={}, invalid={} | uptime={:?}",
+                "[heartbeat] bundles: total={}, both_ok={}, primary_only={}, layer_only={}, \
+                 both_failed={} | events: total={}, ok={}, anchor_miss={}, invalid={} | \
+                 uptime={:?}",
                 stats.total_proofs,
                 stats.both_verified_ok,
                 stats.primary_only_ok,
@@ -276,11 +283,11 @@ async fn main() -> anyhow::Result<()> {
                     seed.apply(&mut state)?;
                     state.save(&state_file)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
-                }
+                },
                 None => {
                     // Seed file not yet written. Stay idle and try again on the
                     // next tick — sleep below covers the wait.
-                }
+                },
             }
         }
 
@@ -321,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
                     stats.failures.push((next_seqno, e.to_string()));
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
 
             // V4: last_seen is a public input of Circuit 1 that the
@@ -360,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
                     stats.both_failed += 1;
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
 
             let bk_set_hash_fr = match ipc::fr_from_hex(&request.bk_set_poseidon_hash_hex) {
@@ -373,13 +380,14 @@ async fn main() -> anyhow::Result<()> {
                     stats.both_failed += 1;
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
 
             // V3 (two-slot selector): bind `bk_set_hash_fr` to the commitment
             // the on-chain contract would pick for this block's seq_no. The
             // Solidity `_expectedBkSetFor(seqNo)` returns:
-            //   - `storedPrevBkSetCommitment` when seqNo ≤ storedLastBkSetUpdateSeqNo (OLD window)
+            //   - `storedPrevBkSetCommitment` when seqNo ≤ storedLastBkSetUpdateSeqNo (OLD
+            //     window)
             //   - `storedBkSetCommitment` otherwise (NEW window)
             // Without this check, a bundle for an OLD-signed key block ≤ N
             // arriving after the daemon rotates the primary slot would be
@@ -398,7 +406,7 @@ async fn main() -> anyhow::Result<()> {
                     let mut a = [0u8; 32];
                     a.copy_from_slice(&b);
                     a
-                }
+                },
                 _ => {
                     let msg = "bk_set_poseidon_hash_hex: expected 32 bytes".to_string();
                     error!("block {}: {}", next_seqno, msg);
@@ -407,7 +415,7 @@ async fn main() -> anyhow::Result<()> {
                     stats.both_failed += 1;
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
             let expected_bk_set = if (next_seqno as u64) <= state.stored_last_bk_set_update_seq_no {
                 stored_prev_bk_set_commitment
@@ -442,18 +450,14 @@ async fn main() -> anyhow::Result<()> {
                     stats.both_failed += 1;
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
 
             let block_seq_no_fr = Fr::from(request.block_seq_no as u64);
             let last_seen_fr = Fr::from(request.last_seen_block_seqno as u64);
 
-            let primary_instances = vec![
-                block_id_fr,
-                bk_set_hash_fr,
-                block_seq_no_fr,
-                last_seen_fr,
-            ];
+            let primary_instances =
+                vec![block_id_fr, bk_set_hash_fr, block_seq_no_fr, last_seen_fr];
 
             // Pick the verifying key based on which attestation circuit the
             // prover ran. The 4-public-instance layout is identical for 1a
@@ -483,7 +487,11 @@ async fn main() -> anyhow::Result<()> {
                 "block {}: {} {} ({:?})",
                 next_seqno,
                 circuit_label,
-                if primary_verified { "VERIFIED" } else { "FAILED" },
+                if primary_verified {
+                    "VERIFIED"
+                } else {
+                    "FAILED"
+                },
                 primary_time
             );
 
@@ -498,7 +506,7 @@ async fn main() -> anyhow::Result<()> {
                     stats.both_failed += 1;
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
 
             let prev_hash_fr = match ipc::fr_from_hex(&request.prev_max_level_layer_hash_hex) {
@@ -511,7 +519,7 @@ async fn main() -> anyhow::Result<()> {
                     stats.both_failed += 1;
                     last_seen_seqno = next_seqno;
                     continue;
-                }
+                },
             };
 
             // Build Circuit 2 public instances (14 values). Since the
@@ -519,25 +527,22 @@ async fn main() -> anyhow::Result<()> {
             // `block_id_fr = uint256(bytes32(root))` as Circuit 1, so we
             // reuse the `block_id_fr` already parsed above for both proofs.
             let mut layer_instances = Vec::with_capacity(14);
-            layer_instances.push(block_id_fr);           // [0] block_id
-            layer_instances.push(bk_set_hash_fr);        // [1] bk_set_poseidon_hash
+            layer_instances.push(block_id_fr); // [0] block_id
+            layer_instances.push(bk_set_hash_fr); // [1] bk_set_poseidon_hash
             layer_instances.push(Fr::from(request.num_layers as u64)); // [2] num_layers
             for hex_str in &request.layer_hash_frs_hex {
                 let fr = ipc::fr_from_hex(hex_str).unwrap_or(Fr::zero());
-                layer_instances.push(fr);                // [3..12]
+                layer_instances.push(fr); // [3..12]
             }
             // Pad to 10 layer hashes if needed.
             while layer_instances.len() < 13 {
                 layer_instances.push(Fr::zero());
             }
-            layer_instances.push(prev_hash_fr);          // [13]
+            layer_instances.push(prev_hash_fr); // [13]
 
             let t = Instant::now();
-            let layer_verified = verifier::verify_layer_proof(
-                &key_manager,
-                &layer_proof_bytes,
-                &layer_instances,
-            );
+            let layer_verified =
+                verifier::verify_layer_proof(&key_manager, &layer_proof_bytes, &layer_instances);
             let layer_time = t.elapsed();
             info!(
                 "block {}: Circuit 2 {} ({:?})",
@@ -568,23 +573,21 @@ async fn main() -> anyhow::Result<()> {
                 info!("block {}: BOTH VERIFIED OK", next_seqno);
 
                 // ---- Tightened append-bundle semantics ----
-                // 1. Refuse to rewind: only append when this block is strictly
-                //    newer than what's already mirrored. The contract enforces
-                //    the same monotonicity; the verifier daemon mirrors it.
+                // 1. Refuse to rewind: only append when this block is strictly newer than
+                //    what's already mirrored. The contract enforces the same monotonicity; the
+                //    verifier daemon mirrors it.
                 let next_seq_u64 = next_seqno as u64;
-                if state.initialized
-                    && next_seq_u64 <= state.stored_last_seen_block_seq_no
-                {
+                if state.initialized && next_seq_u64 <= state.stored_last_seen_block_seq_no {
                     warn!(
-                        "block {}: refusing to append non-monotone bundle \
-                         (stored_last_seen={}); state left unchanged",
+                        "block {}: refusing to append non-monotone bundle (stored_last_seen={}); \
+                         state left unchanged",
                         next_seqno, state.stored_last_seen_block_seq_no
                     );
                 } else {
-                    // 2. Pull only the first `num_layers` slots from the
-                    //    proof request and drop any all-zero entries — those
-                    //    represent layers the prover left unset.
-                    let new_layer_hashes: Vec<([u8; 32], u8)> = request.layer_hash_frs_hex
+                    // 2. Pull only the first `num_layers` slots from the proof request and drop any
+                    //    all-zero entries — those represent layers the prover left unset.
+                    let new_layer_hashes: Vec<([u8; 32], u8)> = request
+                        .layer_hash_frs_hex
                         .iter()
                         .take(request.num_layers as usize)
                         .enumerate()
@@ -612,11 +615,7 @@ async fn main() -> anyhow::Result<()> {
                     // Solidity `verifyBlock`). Monotonicity is enforced
                     // inside `append_bundle` too — `?` here is defense in
                     // depth atop the outer guard above.
-                    state.append_bundle(
-                        &new_layer_hashes,
-                        request.block_height,
-                        next_seq_u64,
-                    )?;
+                    state.append_bundle(&new_layer_hashes, request.block_height, next_seq_u64)?;
                     state.save(&state_file)?;
                 }
                 // block_id_fr is informational only in v2 state — no longer
@@ -629,13 +628,13 @@ async fn main() -> anyhow::Result<()> {
                 stats.layer_only_ok += 1;
             } else {
                 stats.both_failed += 1;
-                stats.failures.push((next_seqno, "both circuits failed".to_string()));
+                stats
+                    .failures
+                    .push((next_seqno, "both circuits failed".to_string()));
             }
 
             last_seen_seqno = next_seqno;
-        } else if let Some(next_event_seqno) =
-            find_next_event_proof_file(last_seen_event_seqno)
-        {
+        } else if let Some(next_event_seqno) = find_next_event_proof_file(last_seen_event_seqno) {
             info!("found event proof seq_no={}", next_event_seqno);
             process_event_proof(next_event_seqno, &key_manager, &state, &mut stats);
             last_seen_event_seqno = next_event_seqno as i64;
@@ -757,9 +756,7 @@ fn find_next_bk_update_file(last_seen: u32) -> Option<u32> {
                 && name.ends_with(".json")
                 && !name.starts_with("bkupd_result_")
             {
-                let num_str = name
-                    .trim_start_matches("bkupd_")
-                    .trim_end_matches(".json");
+                let num_str = name.trim_start_matches("bkupd_").trim_end_matches(".json");
                 num_str.parse::<u32>().ok()
             } else {
                 None
@@ -781,7 +778,10 @@ fn write_bk_update_failure(seq_no: u32, error: &str) {
         error: Some(error.to_string()),
     };
     if let Err(e) = ipc::write_bk_update_result(&r) {
-        error!("failed to write bk-update result for block {}: {}", seq_no, e);
+        error!(
+            "failed to write bk-update result for block {}: {}",
+            seq_no, e
+        );
     }
 }
 
@@ -805,16 +805,22 @@ fn process_bk_update_bundle(
             write_bk_update_failure(seq_no, &format!("read error: {}", e));
             *last_seen_bk_update_seqno = seq_no;
             return;
-        }
+        },
     };
 
     // Decode the open payload first — it's cheap and the result file is
     // most useful when the parse failure pinpoints which field was malformed.
-    let l2 = match decode_hash32(&req.old_bk_set_poseidon_hash_hex, "old_bk_set_poseidon_hash") {
+    let l2 = match decode_hash32(
+        &req.old_bk_set_poseidon_hash_hex,
+        "old_bk_set_poseidon_hash",
+    ) {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
-    let l3 = match decode_hash32(&req.new_bk_set_poseidon_hash_hex, "new_bk_set_poseidon_hash") {
+    let l3 = match decode_hash32(
+        &req.new_bk_set_poseidon_hash_hex,
+        "new_bk_set_poseidon_hash",
+    ) {
         Ok(b) => b,
         Err(msg) => return finalize_bk_update_failure(seq_no, &msg, last_seen_bk_update_seqno),
     };
@@ -847,7 +853,8 @@ fn process_bk_update_bundle(
     // commitment — this is what authorises the update.
     let attestation_verified = if l2 != state.stored_bk_set_commitment {
         warn!(
-            "bk-update {}: L2 {} != stored commitment {} — attestation rejected without circuit run",
+            "bk-update {}: L2 {} != stored commitment {} — attestation rejected without circuit \
+             run",
             seq_no,
             hex::encode(l2),
             hex::encode(state.stored_bk_set_commitment),
@@ -862,7 +869,7 @@ fn process_bk_update_bundle(
                     &format!("L2 hex not decodable as Fr: {e}"),
                     last_seen_bk_update_seqno,
                 )
-            }
+            },
         };
         let attestation_proof_bytes = match hex::decode(&req.attestation_proof_hex) {
             Ok(b) => b,
@@ -872,7 +879,7 @@ fn process_bk_update_bundle(
                     &format!("invalid attestation_proof_hex: {e}"),
                     last_seen_bk_update_seqno,
                 )
-            }
+            },
         };
         let public_instances = vec![
             block_id_fr,
@@ -957,7 +964,8 @@ fn process_bk_update_bundle(
             error!("bk-update {}: state save failed: {}", seq_no, e);
         } else {
             info!(
-                "bk-update {}: APPLIED — stored_bk_set_commitment now {}, stored_prev_bk_set_commitment now {}, stored_last_bk_set_update_seq_no={}",
+                "bk-update {}: APPLIED — stored_bk_set_commitment now {}, \
+                 stored_prev_bk_set_commitment now {}, stored_last_bk_set_update_seq_no={}",
                 seq_no,
                 hex::encode(state.stored_bk_set_commitment),
                 hex::encode(*stored_prev_bk_set_commitment),
@@ -1028,7 +1036,6 @@ fn finalize_bk_update_failure(seq_no: u32, msg: &str, last_seen: &mut u32) {
 // `final_root`, is the single Poseidon root the prover committed to;
 // slot 10 is the 1-indexed layer whose window the contract scans.
 
-//
 // Acceptance gate: the daemon does an off-circuit membership check —
 // `final_root` must appear in the window named by `anchor_layer`
 // (`1..=MAX_LAYERS`), matching `AckiNackiBridge._isKnownLayerAnchor`.
@@ -1085,8 +1092,7 @@ struct EventProofResult<'a> {
 }
 
 fn event_result_file_path(seq_no: u32) -> std::path::PathBuf {
-    bridge_prover_lib::paths::proofs_dir()
-        .join(format!("proof_event_{:06}.result.json", seq_no))
+    bridge_prover_lib::paths::proofs_dir().join(format!("proof_event_{:06}.result.json", seq_no))
 }
 
 /// Scan `proofs/` for any `proof_event_NNNNNN.json` with seq_no > last_seen.
@@ -1102,7 +1108,8 @@ fn find_next_event_proof_file(last_seen: i64) -> Option<u32> {
             let name = e.file_name().to_string_lossy().to_string();
             // Match `proof_event_NNNNNN.json` exactly — NOT
             // `proof_event_NNNNNN.result.json` (the daemon's own output).
-            if name.starts_with("proof_event_") && name.ends_with(".json")
+            if name.starts_with("proof_event_")
+                && name.ends_with(".json")
                 && !name.ends_with(".result.json")
             {
                 let num_str = name
@@ -1145,7 +1152,7 @@ fn process_event_proof(
             stats.event_proof_invalid += 1;
             stats.event_failures.push((seq_no, msg));
             return;
-        }
+        },
     };
     let file: EventProofFile = match serde_json::from_str(&raw) {
         Ok(f) => f,
@@ -1156,7 +1163,7 @@ fn process_event_proof(
             stats.event_proof_invalid += 1;
             stats.event_failures.push((seq_no, msg));
             return;
-        }
+        },
     };
     if file.schema_version != EVENT_PROOF_INPUT_SCHEMA_VERSION {
         let msg = format!(
@@ -1164,7 +1171,13 @@ fn process_event_proof(
             file.schema_version, EVENT_PROOF_INPUT_SCHEMA_VERSION
         );
         error!("event {}: {}", seq_no, msg);
-        write_event_failure(seq_no, &file.public_instances_hex, file.self_verified, state, &msg);
+        write_event_failure(
+            seq_no,
+            &file.public_instances_hex,
+            file.self_verified,
+            state,
+            &msg,
+        );
         stats.event_proof_invalid += 1;
         stats.event_failures.push((seq_no, msg));
         return;
@@ -1182,11 +1195,17 @@ fn process_event_proof(
         Err(e) => {
             let msg = format!("invalid proof_hex: {}", e);
             error!("event {}: {}", seq_no, msg);
-            write_event_failure(seq_no, &file.public_instances_hex, file.self_verified, state, &msg);
+            write_event_failure(
+                seq_no,
+                &file.public_instances_hex,
+                file.self_verified,
+                state,
+                &msg,
+            );
             stats.event_proof_invalid += 1;
             stats.event_failures.push((seq_no, msg));
             return;
-        }
+        },
     };
 
     // Public instance layout (per `event_verifier.rs`):
@@ -1200,7 +1219,13 @@ fn process_event_proof(
             file.public_instances_hex.len()
         );
         error!("event {}: {}", seq_no, msg);
-        write_event_failure(seq_no, &file.public_instances_hex, file.self_verified, state, &msg);
+        write_event_failure(
+            seq_no,
+            &file.public_instances_hex,
+            file.self_verified,
+            state,
+            &msg,
+        );
         stats.event_proof_invalid += 1;
         stats.event_failures.push((seq_no, msg));
         return;
@@ -1212,11 +1237,17 @@ fn process_event_proof(
             Err(e) => {
                 let msg = format!("instance[{}] decode error: {}", i, e);
                 error!("event {}: {}", seq_no, msg);
-                write_event_failure(seq_no, &file.public_instances_hex, file.self_verified, state, &msg);
+                write_event_failure(
+                    seq_no,
+                    &file.public_instances_hex,
+                    file.self_verified,
+                    state,
+                    &msg,
+                );
                 stats.event_proof_invalid += 1;
                 stats.event_failures.push((seq_no, msg));
                 return;
-            }
+            },
         }
     }
 
@@ -1264,7 +1295,8 @@ fn process_event_proof(
 
     // ---- Cryptographic verification ----
     let t_verify = Instant::now();
-    let proof_valid = event_verifier::verify_event_proof(&key_manager.event, &proof_bytes, &instances);
+    let proof_valid =
+        event_verifier::verify_event_proof(&key_manager.event, &proof_bytes, &instances);
     let verify_elapsed = t_verify.elapsed();
     info!(
         "event {}: Circuit 4 {} ({:?}) | total {:?}",
@@ -1298,7 +1330,9 @@ fn process_event_proof(
         stats.event_verified_ok += 1;
     } else {
         stats.event_proof_invalid += 1;
-        stats.event_failures.push((seq_no, "proof rejected".to_string()));
+        stats
+            .event_failures
+            .push((seq_no, "proof rejected".to_string()));
     }
 }
 

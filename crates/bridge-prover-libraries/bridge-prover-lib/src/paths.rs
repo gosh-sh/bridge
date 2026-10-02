@@ -17,18 +17,17 @@
 //!
 //! Resolution order (per var):
 //!   1. Explicit override `BRIDGE_STATE_DIR` / `BRIDGE_PROOFS_DIR` — win.
-//!   2. Else if `BRIDGE_CONFIG_DIR` is set → derive as
-//!      `<config>/state` / `<config>/proofs`. This is how the
-//!      `L1_config/` / `L2_config/` layout hangs together: sourcing
-//!      `L2_config/env` sets `BRIDGE_CONFIG_DIR=./L2_config`, and both
-//!      the state dir and the proofs dir fall out of that.
-//!   3. Else fall back to legacy `state` / `proofs` — preserves the
-//!      exact old behavior for anyone still running without env vars,
-//!      and is what the ipc.rs unit tests assert literally
-//!      (`"proofs/bkupd_000042.json"`). "Without env setup" is not
-//!      something a test can assume: the environment is process-global
-//!      and a sibling test setting `BRIDGE_PROOFS_DIR` is a write to
-//!      the variable it reads, so those tests take [`ENV_LOCK`] too.
+//!   2. Else if `BRIDGE_CONFIG_DIR` is set → derive as `<config>/state` /
+//!      `<config>/proofs`. This is how the `L1_config/` / `L2_config/` layout
+//!      hangs together: sourcing `L2_config/env` sets
+//!      `BRIDGE_CONFIG_DIR=./L2_config`, and both the state dir and the proofs
+//!      dir fall out of that.
+//!   3. Else fall back to legacy `state` / `proofs` — preserves the exact old
+//!      behavior for anyone still running without env vars, and is what the
+//!      ipc.rs unit tests assert literally (`"proofs/bkupd_000042.json"`).
+//!      "Without env setup" is not something a test can assume: the environment
+//!      is process-global and a sibling test setting `BRIDGE_PROOFS_DIR` is a
+//!      write to the variable it reads, so those tests take [`ENV_LOCK`] too.
 
 use std::path::PathBuf;
 

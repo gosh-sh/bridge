@@ -49,33 +49,39 @@
 //! tail -f params/primary_real_prover.log
 //! ```
 
-use std::env;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::Path;
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::{
+    env,
+    fs::{File, OpenOptions},
+    io::Write,
+    path::Path,
+    sync::{Mutex, OnceLock},
+    time::Instant,
+};
 
 use attestation_bls_checker_circuit::{
     primary_circuit::PrimaryAttestationBlsCheckerCircuit,
-    test_instances::expected_public_instances,
-    K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
+    test_instances::expected_public_instances, K, LOOKUP_BITS, NUM_UNUSABLE_ROWS,
 };
 use bridge_poseidon::{LIMB_BITS, NUM_LIMBS};
-use halo2_base::gates::circuit::BaseCircuitParams;
-use halo2_base::halo2_proofs::{
-    halo2curves::bn256::{Bn256, Fr, G1Affine},
-    plonk::{keygen_pk, keygen_vk, VerifyingKey},
-    poly::kzg::commitment::ParamsKZG,
+use gosh_zk_snark_halo2_utils::{
+    io::{
+        read_vk_from_path, save_bytes, save_config_params, save_pk_to_path, save_vk_to_path,
+        try_read_config_params,
+    },
+    proof::Proof,
 };
-use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
-use halo2_base::utils::fs::gen_srs;
-
-use gosh_zk_snark_halo2_utils::io::{
-    read_vk_from_path, save_bytes, save_config_params, save_pk_to_path, save_vk_to_path,
-    try_read_config_params,
+use halo2_base::{
+    gates::circuit::BaseCircuitParams,
+    halo2_proofs::{
+        halo2curves::{
+            bn256::{Bn256, Fr, G1Affine},
+            ff::PrimeField,
+        },
+        plonk::{keygen_pk, keygen_vk, VerifyingKey},
+        poly::kzg::commitment::ParamsKZG,
+    },
+    utils::fs::gen_srs,
 };
-use gosh_zk_snark_halo2_utils::proof::Proof;
 
 /// Default cases when no CLI args are passed.
 const DEFAULT_MAX_SIGNERS_CASES: &[usize] = &[300, 500, 1000, 2000];
@@ -158,11 +164,8 @@ fn build_circuit_for_bk_set(
     let test_data = bridge_test_data_gen::generator::generate_test_data_all_sign(bk_set_size)
         .expect("generate_test_data_all_sign failed");
 
-    let (last_seen_block_seqno, instances) = expected_public_instances(
-        &test_data.attestation_bytes,
-        &test_data.bk_set,
-        max_signers,
-    );
+    let (last_seen_block_seqno, instances) =
+        expected_public_instances(&test_data.attestation_bytes, &test_data.bk_set, max_signers);
 
     let mut circuit = PrimaryAttestationBlsCheckerCircuit::<Fr>::new(
         test_data.attestation_bytes,
@@ -191,7 +194,10 @@ fn keygen_and_cache(
     pk_path: &str,
     config_path: &str,
 ) -> (VerifyingKey<G1Affine>, BaseCircuitParams) {
-    logln!("  Cache miss — running keygen (bk_set_size = {})", bk_set_size);
+    logln!(
+        "  Cache miss — running keygen (bk_set_size = {})",
+        bk_set_size
+    );
     let t = Instant::now();
     let (ref_circuit, _) = build_circuit_for_bk_set(bk_set_size, max_signers, None);
     let base_params = ref_circuit.params.base_circuit_params.clone();
@@ -224,10 +230,14 @@ fn run_case(max_signers: usize, artifact_dir: &str) {
 
     let vk_path = format!("{}/primary_max{}_vk.bin", artifact_dir, max_signers);
     let pk_path = format!("{}/primary_max{}_pk.bin", artifact_dir, max_signers);
-    let config_path =
-        format!("{}/primary_max{}_config_params.json", artifact_dir, max_signers);
-    let proof_path =
-        format!("{}/primary_max{}_proof_bk{}.bin", artifact_dir, max_signers, bk_set_size);
+    let config_path = format!(
+        "{}/primary_max{}_config_params.json",
+        artifact_dir, max_signers
+    );
+    let proof_path = format!(
+        "{}/primary_max{}_proof_bk{}.bin",
+        artifact_dir, max_signers, bk_set_size
+    );
     let instances_path = format!(
         "{}/primary_max{}_instances_bk{}.bin",
         artifact_dir, max_signers, bk_set_size
@@ -237,7 +247,8 @@ fn run_case(max_signers: usize, artifact_dir: &str) {
     logln!("\n{}", "=".repeat(72));
     logln!(
         "Primary real-prover — max_signers = {}, bk_set_size = {}",
-        max_signers, bk_set_size
+        max_signers,
+        bk_set_size
     );
     logln!("{}", "=".repeat(72));
 
@@ -257,12 +268,22 @@ fn run_case(max_signers: usize, artifact_dir: &str) {
             (vk, cfg)
         } else {
             keygen_and_cache(
-                &params, bk_set_size, max_signers, &vk_path, &pk_path, &config_path,
+                &params,
+                bk_set_size,
+                max_signers,
+                &vk_path,
+                &pk_path,
+                &config_path,
             )
         }
     } else {
         keygen_and_cache(
-            &params, bk_set_size, max_signers, &vk_path, &pk_path, &config_path,
+            &params,
+            bk_set_size,
+            max_signers,
+            &vk_path,
+            &pk_path,
+            &config_path,
         )
     };
 
@@ -336,8 +357,7 @@ fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let cases = parse_cases(&args);
 
-    let artifact_dir =
-        env::var("ARTIFACT_DIR").unwrap_or_else(|_| "params".to_string());
+    let artifact_dir = env::var("ARTIFACT_DIR").unwrap_or_else(|_| "params".to_string());
     std::fs::create_dir_all(&artifact_dir)
         .unwrap_or_else(|e| panic!("Failed to create ARTIFACT_DIR {}: {}", artifact_dir, e));
 

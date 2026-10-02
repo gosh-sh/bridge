@@ -1,4 +1,4 @@
-# Live `withdrawByProof` E2E Runbook — shellnet → Sepolia (Circuit 4)
+# Live `withdrawByProofBundle` E2E Runbook — shellnet → Sepolia (Circuit 4 + MultiHop)
 
 Operational guide for driving a full AN→ETH withdrawal E2E through the
 in-process `relayer withdraw-e2e` orchestrator against a deployed
@@ -6,9 +6,18 @@ in-process `relayer withdraw-e2e` orchestrator against a deployed
 fresh deploy, follow-up withdrawals on an existing deploy, and the failure
 modes we have actually hit.
 
+> **Naming note.** The single-shot entry-point historically called
+> `withdrawByProof` was renamed to `withdrawByProofBundle` when the
+> withdrawal proof was split into a `BridgeEventFinalProof` +
+> `BridgeMultiHopProof` bundle. The filenames of this runbook and the
+> paired changelog keep the legacy `withdrawByProof` string for
+> git-history continuity only. Everywhere below, "withdraw entry-point"
+> means `withdrawByProofBundle`.
+
 **Scope of this runbook.** The event/proof/submit path: capture live
 `WithdrawalInitiated` ExtOut → export partial witness → enrich against
-`prover_state.json` → Circuit 4 SHPLONK aggregate → `withdrawByProof`.
+`prover_state.json` → Circuit 4 FinalProof SHPLONK aggregate (+ optional
+per-hop MultiHop SHPLONK aggregates) → `withdrawByProofBundle`.
 **Assumes** the bundle-only path (Circuits 1A + 2 via `daemon-live`) is
 already running or has just been launched — that lane is covered in
 [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md), which
@@ -73,6 +82,30 @@ this doc extends.
 > With `W=128, P=8`, an **L1** bundle covers `W·P = 1024` seq_nos
 > (~5.7 min chain-time at 3 seq/s). An **L2** bundle covers
 > `W² = 16384` seq_nos (~91 min chain-time). Case 2 covers the L2 flow.
+>
+> **Bundle-shape notation.** `withdrawByProofBundle` accepts a 13-slot
+> `finalPublicInputs` array (11 legacy slots at `[0..10]` + `xBlockId`
+> at `PUB_X_BLOCK_ID = 11` + `yBlockId` at `PUB_Y_BLOCK_ID = 12`;
+> `FINAL_PI_LEN = 13` — `AckiNackiBridge.sol:1347–1355`), a `bytes
+> finalProof`, and matched-length arrays `hopPublicInputs[][]` +
+> `hopProofs[]` where each hop is exactly two PIs
+> `[HOP_START, HOP_END]` (`MULTI_HOP_PI_LEN = 2`) and the total hop
+> count is bounded by `N_BUNDLE_MAX = 20`. "Same-thread claim" = empty
+> `hopPublicInputs`/`hopProofs` slices, contract requires
+> `xBlockId == yBlockId`. "Cross-thread claim" = one or more hops, and
+> the contract folds `xBlockId → hop0.start → hop0.end → hop1.start → …
+> → hopLast.end → yBlockId` (`AckiNackiBridge.sol:1480–1514`). All
+> in-tree callers under `crates/bridge-relayer-daemon/src/bin/relayer.rs`
+> and `crates/ackinacki-bridge/src/orchestrator.rs` now plumb the
+> hop chain through: `PartnerWithdrawalProof::hop_pis()` /
+> `hop_proofs()` decode the `hops_hex` array the driver writes into
+> `proof_event_*.json` (populated by `resolve_cross_thread_chain` +
+> `generate_multi_hop_proof`), and pass it to
+> `submit_withdraw_bundle` alongside the outer Circuit-4 calldata.
+> Same-thread events resolve to empty vecs and take the
+> `xBlockId == yBlockId` fast path; cross-thread events (2- to 4-thread
+> multi-thread node runs) exercise the full hop-fold path with N ≥ 1
+> hops.
 
 ---
 
@@ -88,7 +121,7 @@ this doc extends.
   - [Case 2b — Sequential L2 withdrawals (steady-state / stress loop)](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop)
 - [Case 3 — Incidents & failure modes](#case-3--incidents--failure-modes)
   - [Case 3a — Prover subprocess timeout / OOM](#case-3a--prover-subprocess-timeout--oom)
-  - [Case 3b — On-chain `withdrawByProof` revert](#case-3b--on-chain-withdrawbyproof-revert)
+  - [Case 3b — On-chain `withdrawByProofBundle` revert](#case-3b--on-chain-withdrawbyproofbundle-revert)
   - [Case 3c — USDCBridge key drift (burn side)](#case-3c--usdcbridge-key-drift-burn-side)
   - [Case 3d — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty)
 - [L2 timing model](#l2-timing-model)
@@ -130,18 +163,18 @@ cast logs --address $BRIDGE --rpc-url $RPC \
 | running, current | no | no | start `withdraw-e2e --dry-run`, then fire the burn — [Case 1](#case-1--l1-first-time-e2e-from-a-fresh-deploy-optimal-sequence) Steps 4–5 (L1 one-shot) or [Case 2b](#case-2b--sequential-l2-withdrawals-steady-state--stress-loop) (L2 follow-up) |
 | running, current | yes | no | run `withdraw-e2e --replay-latest` (event already captured; skip baseline) |
 | running, behind | yes | no | [Case 1 Step 6 note](#step-6--watch-dry-run-complete) (L1 catch-up) — enricher retry loop absorbs the wait |
-| running, current | yes | yes, revert | [Case 3b](#case-3b--on-chain-withdrawbyproof-revert) |
+| running, current | yes | yes, revert | [Case 3b](#case-3b--on-chain-withdrawbyproofbundle-revert) |
 | not running | any | any | Fix the bundle lane first — see verifyBlock runbook Case 3–6 |
 
 ---
 
 ## Timing model — why fresh-deploy demos need tight lookahead
 
-The Circuit 4 proof is anchored to `layer_hashes[L]` of the **covering
-bundle** at anchor layer `L` — the first bundle whose layer-`L` key
-seq_no is ≥ `event_seq_no` (stride = 1024 for L1, 16384 for L2).
-`withdrawByProof` reverts until `verifyBlock(covering_bundle)` has
-landed. End-to-end wall time =
+The Circuit 4 FinalProof is anchored to `layer_hashes[L]` of the
+**covering bundle** at anchor layer `L` — the first bundle whose
+layer-`L` key seq_no is ≥ `event_seq_no` (stride = 1024 for L1, 16384
+for L2). `withdrawByProofBundle` reverts until
+`verifyBlock(covering_bundle)` has landed. End-to-end wall time =
 
 ```
 t_e2e = max(0, covering_bundle_seqno − daemon_last_verified) / bundle_stride
@@ -245,6 +278,20 @@ cd ../bridge-evm-aggregator && cargo build --release && cd ../bridge-prover-libr
 # 3. Build the Circuit 4 event prover
 cargo build --release -p bridge-event-halo2-prover
 #   -> ./target/release/bridge-event-halo2-prover
+
+# 4. Provision the Hermez KZG SRS + offline keygen (skip if $BRIDGE_PARAMS_DIR
+#    already contains multi_hop_manifest.json + event_manifest.json).
+#    Both keygen bins are idempotent (warm cache → instant no-op) and
+#    flock-guarded, so re-running while a daemon is up is safe. Doing them
+#    now avoids the ~7-min synchronous stall on first daemon launch (K=19
+#    Circuit-4 keygen spikes RSS >10 GB). See `MULTITHREAD_MIGRATION_PLAN.md`
+#    §8. `$BRIDGE_PARAMS_DIR` needs ≥20 GB free.
+cargo run --release -p bridge-prover-lib --bin bootstrap_hermez_srs -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_final -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
+cargo run --release -p bridge-prover-lib --bin keygen_bridge_multi_hop -- \
+    --params-dir "$BRIDGE_PARAMS_DIR"
 ```
 
 **Env sanity (in addition to bundle-lane vars from parent runbook):**
@@ -272,10 +319,120 @@ via clap `env` attrs; `BRIDGE_GQL_ENDPOINT` must be aliased to
 
 ---
 
+## Local multi-thread devnet (state_v2) — cross-thread source
+
+**When you need this:** you want to exercise the cross-thread hop in
+Circuit 4 end-to-end. Shellnet is single-thread on `v3.0.6.an`, so the
+`is_same_thread` selector always fires the trivial branch there. The
+target-side wire-format probe
+(`bridge-event-witness/src/bin/probe_tvm_decode.rs`) can only reach parity
+verdict against a real state_v2 node.
+
+**Prerequisite: state_v2-compatible tool binaries.** The MT harness spawns
+child threads and generates a new zerostate — it needs `tvm-cli`, `sold`,
+`tvm-debugger`, `zerostate-helper`, `node-helper` all built from a
+tvm-sdk tree compatible with `state_v2`. A `v3.0.6.an`-era `tvm-cli`
+against a state_v2 node fails silently at zerostate generation and leaves
+the docker compose stack un-bootable. Point the env vars below at
+state_v2 builds.
+
+**Prerequisite: Docker Desktop VM ≥ 12 GiB.** Five nodes × ~2 GiB plus
+aerospike; below 8 GiB aerospike hits `stop-writes` and block production
+halts at seq_no ≈ 500 with the symptom looking like a chain hang.
+
+**Bring up 2 threads.** Populate `bridge/multithreading/bins_<OS>/`
+with state_v2-compatible builds of `tvm-cli`, `sold`, `tvm-debugger`,
+`zerostate-helper`, `node-helper` (see
+[`../../../multithreading/bins_macOS/README.md`](../../../multithreading/bins_macOS/README.md)),
+then source the env script and run from an `acki-nacki` checkout on
+branch `feature/node-3953-add-test-slow-block-builder-with-300ms-per-block-build-on`:
+
+```sh
+# From bridge/ root:
+source multithreading/bins_macOS/env.sh    # or bins_linux/env.sh on Linux
+export MESSAGE_ARCHIVE_OTEL_RUN_ID="local-2-thread-$(date +%Y%m%d-%H%M)"
+
+cd "$ACKI_NACKI_ROOT"
+python3 tests/mt/cli.py test-multithread-cross-thread \
+  --threads 2 \
+  --total 20000 \
+  --hold-burst-total 5000 \
+  --hold-quiet-seconds 0 \
+  --batch-size 200 \
+  --deploy-value 12000000000000 \
+  --minimum-balance 8000000000000 \
+  --hold-seconds 1800 \
+  --timeout 2400
+```
+
+`env.sh` exports `CLI_NAME`, `TVM_CLI`, `SOLD`, `TVM_DEBUGGER`,
+`ZEROSTATE_HELPER`, `NODE_HELPER` (all resolved to the binaries in
+that directory) plus `DISABLE_MV=true`. Exporting them ahead of
+`cli.py` also bypasses the auto-discovery bug at
+`tests/mt/cli.py:1050`, which otherwise walks symlinks into
+`tvm-sdk/target/release/` where `zerostate-helper` doesn't exist. If
+binaries live elsewhere, either symlink them into `bins_<OS>/` or
+export the six vars by hand.
+
+The `--hold-*` flags are load-bearing — dropping them lets the child thread
+starve and finalization stalls (the warm-up burst gets no cross-thread
+refills, the child thread's last block never gets a BK quorum of
+attestations, stays *prefinalized*, and `authority_switch` refuses to
+open round 0 → dead thread → cross-thread messages queue up but never
+get delivered → test times out). The cyclic-hold path is gated at
+`tests/mt/cli.py:3046` — both `--hold-seconds` and `--hold-burst-total`
+must be set for it to activate. Full end-to-end reasoning + Pane
+layout for a multi-path research session is in
+[`../../../multithreading/runbooks/run_multipath_session.md`](../../../multithreading/runbooks/run_multipath_session.md).
+
+**Wait for the split.** The harness logs `split thread` when the second
+thread is stable. `BRIDGE_GQL_ENDPOINT` should point at any node's port
+8600 (all nodes serve the merged view).
+
+**Sanity probe before bridge deploy.** Confirm the bridge's `v3.0.6.an`
+tvm-sdk pin still decodes the node's BOCs (see the top of this section):
+
+```sh
+cd crates/bridge-prover-libraries
+cargo run --release -p bridge-event-witness --bin probe-tvm-decode -- \
+    --gql-url http://127.0.0.1:8600/graphql \
+    --account-id <64-hex account emitting ExtOut> \
+    --dapp-id    <64-hex dapp id> \
+    --limit 3 -v
+```
+
+Exit 0 = safe to proceed. Exit 1 = wire format changed, migrate the
+bridge's tvm-sdk pins to `state_v2` before continuing. Exit 2 = cell
+descriptor layout changed, also update `boc_walk::build_cell_repr_data`.
+
+**Firing a real cross-thread `WithdrawalInitiated`.** The paced-workload
+harness spawns two threads and cycles arbitrary messages between them,
+but it does not orchestrate a USDC deposit → cross-thread burn on its
+own. To exercise the Circuit-4 multi-hop path you additionally need to:
+
+1. Deploy the AN bridge (`contracts/an/exchange/eccUSDCBridge`) using
+   the harness's zerostate. The deploy typically lands on thread 0.
+2. Deploy a caller account whose routing places it on thread 1 (the
+   split thread). AN routes by DApp ID at zerostate time — use a
+   distinct DApp ID for the caller.
+3. Fund the caller with ECC[3] USDC via `USDCBridge.mintAndSend` from
+   the giver (`config/USDCBridge.keys.json` is the mint authority).
+4. Call `burn(recipient, amount)` on the caller. The internal
+   cross-thread call to the bridge fires `WithdrawalInitiated` in a
+   block on thread 1 whose parent chain traces back into thread 0 —
+   the daemon's `resolve_cross_thread_chain` walks that Leaf-7 path.
+
+TODO — the exact `tvm-cli` invocations for steps 1-4 are not in this
+runbook yet. Fill in on first successful E2E; the harness spawns the
+threads but the bridge/caller wiring is bespoke per deployment.
+
+---
+
 ## Case 1 — L1: First-time E2E from a fresh deploy (optimal sequence)
 
 **When to use — L1 only, one-shot fresh-deploy demo.** Prove out the
-`withdrawByProof` leg once, in minimum wall time (~17 min best-case).
+`withdrawByProofBundle` leg once, in minimum wall time (~17 min
+best-case).
 This is a **tight sequence**: bridge Ethereum contracts deploy →
 bundle-prover daemon cold-starts → burn fires, all inside one narrow
 window. The L1 daemon is subcritical (see
@@ -322,11 +479,12 @@ PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 
 ### Step 2 — Seed the bridge treasury (fresh deploy only)
 
-`withdrawByProof` pays out from `treasuryBalance` (`AckiNackiBridge.sol:1188`).
-A fresh deploy starts at zero; the crypto path can pass and the tx will
-still revert with `WithdrawTreasuryShortfall(pub.amount, treasuryBalance)`
-(selector `0xbb651fce`). The only path that increments `treasuryBalance`
-is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
+`withdrawByProofBundle` pays out from `treasuryBalance`
+(`AckiNackiBridge.sol:1532–1533`). A fresh deploy starts at zero; the
+crypto path can pass and the tx will still revert with
+`WithdrawTreasuryShortfall(pub.amount, treasuryBalance)` (selector
+`0xbb651fce`). The only path that increments `treasuryBalance` is
+`deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
 Seed it once, then reuse across demos on the same deploy.
 
 Full recipe in [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty).
@@ -459,12 +617,12 @@ INFO enricher attempt        (repeats every 30s until covering bundle lands)
 INFO enricher: witness ready  layer_idx=0
 INFO subprocess_prover: bridge-event-halo2-prover start
 INFO subprocess_prover: aggregate SHPLONK ok, calldata_len=<bytes>
-INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
+INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProofBundle(...)
 ```
 
 Dry-run OK proves the proof is well-formed and the on-chain adapter
 accepts it. If dry-run reverts, jump to
-[Case 3b](#case-3b--on-chain-withdrawbyproof-revert) — **do not**
+[Case 3b](#case-3b--on-chain-withdrawbyproofbundle-revert) — **do not**
 submit for real.
 
 > **Note — L1 only: what if the burn fired late and the enricher is
@@ -506,7 +664,7 @@ youngest matching event):
 
 The prover PK cache is warm from Step 6, so total wall time collapses
 to `submit + confirm` (~30–60s). Look for
-`withdrawByProof confirmed tx=0x...`.
+`withdrawByProofBundle confirmed tx=0x...`.
 
 Verify:
 
@@ -648,7 +806,7 @@ INFO enricher attempt        (repeats every 30s until covering L2 bundle lands)
 INFO resolved anchor: L2 (mode=Explicit(2), auto_escalated=false)
 INFO chain built: anchor_layer=L2, active_links=1, ...
 INFO enricher: witness ready  layer_idx=1                    # 0-indexed → L2
-INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProof(...)
+INFO submit_withdraw: dry-run eth_call OK — would submit withdrawByProofBundle(...)
 ```
 
 `layer_idx=1` is the ground-truth confirmation that the witness is
@@ -730,8 +888,8 @@ MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 
 **Failure isolation.** Because the on-chain anchor path is level-opaque
 (constructor stores a single genesis scalar; `_expectedPrevAnchor` uses
-per-layer picks; `withdrawByProof`'s `_isKnownLayerAnchor` scans only
-the window named by `anchorLayer` — see change log), any revert in
+per-layer picks; `withdrawByProofBundle`'s `_isKnownLayerAnchor` scans
+only the window named by `anchorLayer` — see change log), any revert in
 cycle N ≥ 2 is almost certainly reproducing a Case 3b failure mode,
 not something L2-specific.
 Start with the Case 3b catalog before diagnosing L2.
@@ -746,8 +904,8 @@ surfaces:
 
 - **[Case 3a](#case-3a--prover-subprocess-timeout--oom)** — prover
   subprocess timeout / OOM (host side; before the on-chain call).
-- **[Case 3b](#case-3b--on-chain-withdrawbyproof-revert)** — on-chain
-  `withdrawByProof` revert (proof is well-formed; contract rejects it).
+- **[Case 3b](#case-3b--on-chain-withdrawbyproofbundle-revert)** — on-chain
+  `withdrawByProofBundle` revert (proof is well-formed; contract rejects it).
 - **[Case 3c](#case-3c--usdcbridge-key-drift-burn-side)** — USDCBridge
   key drift (burn side; the AN-side script itself fails before an event
   is ever emitted).
@@ -791,33 +949,78 @@ when the log shows repeated swap.
 
 ---
 
-### Case 3b — On-chain `withdrawByProof` revert
+### Case 3b — On-chain `withdrawByProofBundle` revert
 
 **Symptom.** `withdraw-e2e --dry-run` (or real submit) fails with a
 Sepolia revert. The log prints the selector.
 
-**Decode with `cast 4byte`** or via `withdrawByProof`'s declared errors:
+**Decode with `cast 4byte`** or via `withdrawByProofBundle`'s declared
+errors (`AckiNackiBridge.sol:460–467, 1391–1533`):
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `WithdrawalProofRejected()` | SHPLONK adapter equality prelude failed, or the crypto pairing failed | The 11 inner-instance slots recovered from `proof` calldata (`instances[12..22]`, see `BridgeWithdrawalAggregatorVerifier.sol:30-40`) don't match the `WithdrawalPublicInputs` struct passed alongside — or `_verifyShplonk` returned false. Note that `acc_fr` drift and a missing/mis-selected anchor both revert earlier with the more specific `WithdrawIdentityMismatch` (`AckiNackiBridge.sol:1303`) and `UnknownAnchor` respectively, so if you're seeing `WithdrawalProofRejected` those two are already ruled out. Look for a stale/mis-packed calldata blob or a fresh keygen against the wrong VK. |
-| `WithdrawIdentityMismatch()` | `pub.dappFr`/`pub.accFr` don't match the bridge's stored withdrawal identity | Reverts before crypto (`AckiNackiBridge.sol:1303`). `bridgeWithdrawalAccFr` (and its `dappFr` sibling) are `immutable` on this contract (`AckiNackiBridge.sol:229`), so a witness "regeneration" cannot clear this — the same witness would be rejected on a rerun. The fix is on the ETH side: redeploy `AckiNackiBridge` with `(dappFr, accFr)` set to the AN-side withdrawal identity the prover is aimed at, or point the prover at the identity the currently-deployed bridge was constructed with. **This installation cannot pay out burns that have already been emitted against the "wrong" identity.** The public inputs of a Circuit-4 proof bind `accFr` (slot 7) and `dappFr` (slot 6) at proving time — these are the bridge-withdrawal identity slots, distinct from `senderAccFr` (slot 5), which is the burning account's own Fr-encoded ID and is not what the contract compares. At `withdrawByProof` time `AckiNackiBridge.sol:1302` checks `pub.dappFr == bridgeWithdrawalDappFr` and `pub.accFr == bridgeWithdrawalAccFr` (both `immutable`, `AckiNackiBridge.sol:229`), so a burn whose event carries identity X will never verify against a bridge deployed for identity Y. If the operator switches identities by redeploying, users whose burns were emitted before the switch have to be made whole outside this contract (custodial refund, or a fresh burn against the new identity). See [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet). |
+| — | `WithdrawByProofBundleDisabled()` | Either `bridgeWithdrawalFinalVerifier()` or `bridgeMultiHopVerifier()` is unset on this deploy (`AckiNackiBridge.sol:1391–1394`). Neither getter should ever be `address(0)` on a Sepolia deploy — see the [`bridgeWithdrawalFinalVerifier` / `bridgeMultiHopVerifier` pre-flight](#dry-run-trace-any-revert) below. Anvil is the only chain where `WIRE_WITHDRAW_BY_PROOF=false` is permitted; if you hit this on Sepolia, the deploy is broken. |
+| `WithdrawalProofRejected()` | FinalProof (`BridgeWithdrawalAggregatorVerifier`) SHPLONK adapter equality prelude failed, or the crypto pairing failed | The 13 inner-instance slots recovered from `finalProof` calldata (`instances[…]`, see `contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.sol`) don't match the `WithdrawalFinalPublicInputs` struct assembled from `finalPublicInputs[0..12]` — or `_verifyShplonk` returned false. Note that `acc_fr` drift and a missing/mis-selected anchor both revert earlier with the more specific `WithdrawIdentityMismatch` (`AckiNackiBridge.sol:1437`) and `UnknownAnchor` respectively, so if you're seeing `WithdrawalProofRejected` those two are already ruled out. Look for a stale/mis-packed calldata blob or a fresh keygen against the wrong VK. |
+| `MultiHopProofRejected(uint256 hopIndex)` | Hop `hopIndex`'s SHPLONK proof failed against `BridgeMultiHopAggregatorVerifier` | Only reachable on cross-thread claims (`hopPublicInputs.length > 0`). The failing hop's `(hopStartBlockId, hopEndBlockId)` pair did not verify under the MultiHop VK, or its calldata is stale. Same-thread claims (`hopPublicInputs.length == 0`) cannot fire this. |
+| `SameThreadEndpointsMismatch()` | Empty `hopPublicInputs` / `hopProofs` but `finalPublicInputs[PUB_X_BLOCK_ID] != finalPublicInputs[PUB_Y_BLOCK_ID]` (`AckiNackiBridge.sol:1482–1485`) | The witness claims same-thread by omitting hops, but its `xBlockId` and `yBlockId` slots disagree. Either the witness enrichment failed to identify a same-thread event and should have emitted at least one hop, or the FinalProof PIs are corrupted. Regenerate the witness — same-thread requires `xBlockId == yBlockId` by construction. |
+| `SameThreadRequiresEmptyHopChain(uint256 hopCount)` | `hopPublicInputs.length > 0` but `xBlockId == yBlockId` (`AckiNackiBridge.sol:1492–1494`) | Mirror of the above: hops supplied against a same-thread event. Regenerate. |
+| `HopChainHeadMismatch()` / `HopChainTailMismatch()` / `AdjacentHopBlockIdMismatch(uint256 i)` | The `xBlockId → hop0.start → hop0.end → … → hopLast.end → yBlockId` fold is broken at head, tail, or between hop `i` and `i+1` (`AckiNackiBridge.sol:1503–1513`) | Witness composition dropped or reordered a hop. Regenerate. |
+| `FinalPublicInputsBadLength(uint256 got, uint256 expected)` | `finalPublicInputs.length != FINAL_PI_LEN` (13) (`AckiNackiBridge.sol:1397–1399`) | Client / CLI encoded the wrong-length array. `FINAL_PI_LEN` is a compile-time constant of 13 on this contract. |
+| `HopPublicInputsBadLength(uint256 hopIndex, uint256 got, uint256 expected)` | Hop `hopIndex` did not carry exactly 2 PIs (`MULTI_HOP_PI_LEN`) (`AckiNackiBridge.sol:1409–1413`) | Client passed the wrong shape inside the `uint256[][]`. |
+| `HopPublicInputsHopProofsLengthMismatch(uint256,uint256)` / `HopBundleLengthOverflow(uint256 got, uint256 max)` | `hopPublicInputs.length != hopProofs.length`, or count exceeds `N_BUNDLE_MAX = 20` (`AckiNackiBridge.sol:1400–1407, 89`) | Client bug. `N_BUNDLE_MAX` is a compile-time constant. |
+| `WithdrawIdentityMismatch()` | `pub.dappFr`/`pub.accFr` don't match the bridge's stored withdrawal identity | Reverts before crypto (`AckiNackiBridge.sol:1437`). `bridgeWithdrawalAccFr` (and its `dappFr` sibling) are `immutable` on this contract (`AckiNackiBridge.sol:229`), so a witness "regeneration" cannot clear this — the same witness would be rejected on a rerun. The fix is on the ETH side: redeploy `AckiNackiBridge` with `(dappFr, accFr)` set to the AN-side withdrawal identity the prover is aimed at, or point the prover at the identity the currently-deployed bridge was constructed with. **This installation cannot pay out burns that have already been emitted against the "wrong" identity.** The public inputs of a Circuit-4 FinalProof bind `accFr` (slot 7) and `dappFr` (slot 6) at proving time — these are the bridge-withdrawal identity slots, distinct from `senderAccFr` (slot 5), which is the burning account's own Fr-encoded ID and is not what the contract compares. At `withdrawByProofBundle` time `AckiNackiBridge.sol:1437` checks `pub.dappFr == bridgeWithdrawalDappFr` and `pub.accFr == bridgeWithdrawalAccFr` (both `immutable`, `AckiNackiBridge.sol:229`), so a burn whose event carries identity X will never verify against a bridge deployed for identity Y. If the operator switches identities by redeploying, users whose burns were emitted before the switch have to be made whole outside this contract (custodial refund, or a fresh burn against the new identity). See [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet). |
 | `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender, events_pos)` 7-tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. `events_pos` is bound into the preimage, so two *distinct* `WithdrawalInitiated` events in the same AN block do not collide — this error truly means the same event was replayed. |
 | `UnknownAnchor(uint256 finalRoot)` | `pub.finalRoot` not present in `_layerWindows[pub.anchorLayer]` | Covering bundle not yet on-chain at the given anchor layer, or the proof was built against a stale/mis-selected anchor. Wait for the bundle daemon to submit + confirm the covering bundle, then retry — or fix the anchor selection upstream. |
-| `InvalidNumLayers(uint256 numLayers)` | `pub.anchorLayer` outside `1..=MAX_LAYER_HASHES` | Wrong anchor layer supplied. `MAX_LAYER_HASHES = 10` is a compile-time constant in `AckiNackiBridge.sol:65`; check the witness picked a layer inside that range. |
-| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty). |
+| `LayerOutOfRange(uint8)` | `pub.anchorLayer` outside `1..=MAX_LAYER_HASHES` (`AckiNackiBridge.sol:1471–1475`) | Wrong anchor layer supplied. `MAX_LAYER_HASHES = 10` is a compile-time constant in `AckiNackiBridge.sol:65`; check the witness picked a layer inside that range. |
+| `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (`AckiNackiBridge.sol:1532–1533`) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty). |
+
+Note: `WithdrawByProofDisabled()` from the pre-split contract has been
+renamed to `WithdrawByProofBundleDisabled()`; any older log or trace
+still mentioning the legacy selector is against a pre-bundle deploy and
+does not apply to the current codebase.
 
 **Dry-run trace (any revert):**
 
 ```bash
-# Re-run the exact eth_call with --trace for a decoded reason.
-# withdrawByProof takes a bytes proof plus a WithdrawalPublicInputs
-# struct of 11 uint256s, encoded as a tuple literal on the CLI.
+# 1. Confirm the split-verifier wiring is intact. Either address zero
+#    → the entry-point is disabled and every call reverts with
+#    WithdrawByProofBundleDisabled().
+cast call $BRIDGE 'bridgeWithdrawalFinalVerifier()(address)' --rpc-url $RPC
+cast call $BRIDGE 'bridgeMultiHopVerifier()(address)'        --rpc-url $RPC
+
+# 2. Re-run the exact eth_call with --trace for a decoded reason.
+#    withdrawByProofBundle takes a uint256[13] finalPublicInputs, a
+#    bytes finalProof, a uint256[][] hopPublicInputs (each inner array
+#    is exactly [hopStart, hopEnd]), and a bytes[] hopProofs of the
+#    same outer length. Same-thread claims pass empty [] / [] for the
+#    two hop arrays.
+#
+#    finalPublicInputs slot order (13 total):
+#      [0]  tokenId
+#      [1]  amount
+#      [2]  recipientHi
+#      [3]  recipientLo
+#      [4]  dstChainId
+#      [5]  senderAccFr
+#      [6]  dappFr
+#      [7]  accFr
+#      [8]  nullifier
+#      [9]  finalRoot
+#      [10] anchorLayer
+#      [11] xBlockId  (PUB_X_BLOCK_ID)
+#      [12] yBlockId  (PUB_Y_BLOCK_ID)
 cast call $BRIDGE \
-  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
-  <calldata_hex_from_log> \
-  '(<11 comma-separated pi values from log>)' \
+  'withdrawByProofBundle(uint256[],bytes,uint256[][],bytes[])' \
+  "[<13 comma-separated finalPublicInputs values from log>]" \
+  <final_calldata_hex_from_log> \
+  "[]" \
+  "[]" \
   --rpc-url $RPC --trace
+
+# For a cross-thread claim (not in scope for the current CLI, but the
+# contract accepts it), replace the two trailing "[]" args with, e.g.:
+#   "[[<hop0_start>,<hop0_end>],[<hop1_start>,<hop1_end>]]"  \
+#   "[<hop0_calldata_hex>,<hop1_calldata_hex>]"
 ```
 
 **Do NOT** delete `state/prover_state.json` or the witness JSON — the

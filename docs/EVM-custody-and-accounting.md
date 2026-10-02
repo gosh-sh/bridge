@@ -21,7 +21,7 @@ token balance and is never reconciled against one.
 It moves in exactly two places in the whole contract:
 
 * `+= amount` in `deposit` (`:590`)
-* `-= pub.amount` in `withdrawByProof` (`:1194`)
+* `-= pub.amount` in `withdrawByProofBundle` (`:1194`)
 
 Nothing else writes it. No owner function does, under any condition — including the AAVE routing
 functions, which move tokens between the bridge and the pool without touching the book at all.
@@ -74,10 +74,14 @@ Two consequences worth naming:
 
 ## Payout — effects before interactions
 
-`withdrawByProof` runs the other way round, and the source says so in its own comments
+`withdrawByProofBundle` runs the other way round, and the source says so in its own comments
 (`:1192`, `:1196`):
 
-1. Verify the Circuit-4 proof; reject with `WithdrawalProofRejected` (`:1185`).
+1. Verify the Circuit-4 proof bundle — one `BridgeEventFinalProof` (13 public inputs, ending in
+   `xBlockId`/`yBlockId`) plus zero or more `BridgeMultiHopProof` hops (2 public inputs each) — and
+   the bundle adjacency between them; reject with `WithdrawalProofRejected`, `MultiHopProofRejected`
+   or the `SameThreadEndpointsMismatch` / `HopChainHeadMismatch` / `HopChainTailMismatch` /
+   `AdjacentHopBlockIdMismatch` family (`:1185`).
 2. **Solvency check before touching AAVE**: `pub.amount > treasuryBalance` reverts
    `WithdrawTreasuryShortfall` (`:1188-1190`).
 3. **Effects** — mark the nullifier used, `treasuryBalance -= pub.amount` (`:1193-1194`).
@@ -105,11 +109,11 @@ Quote these, not their earlier versions.
 |---|---|
 | **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
 | **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`. The function is not `payable`. |
-| **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. No other function in the contract increases `treasuryBalance`, and only `withdrawByProof` decreases it. |
+| **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. No other function in the contract increases `treasuryBalance`, and only `withdrawByProofBundle` decreases it. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |
 | **CUST-1** | `treasuryBalance` is book value, not a balance. The solvency invariant is `totalAssets() ≥ treasuryBalance`, never equality. |
 | **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. None of them writes `treasuryBalance`. |
-| **CEI-1** | `withdrawByProof` mutates state before every external call. `deposit` does not, and does not need to — see above. A blanket "all external interactions follow CEI" claim is false for this contract. |
+| **CEI-1** | `withdrawByProofBundle` mutates state before every external call. `deposit` does not, and does not need to — see above. A blanket "all external interactions follow CEI" claim is false for this contract. |
 
 ## What earlier text got wrong
 

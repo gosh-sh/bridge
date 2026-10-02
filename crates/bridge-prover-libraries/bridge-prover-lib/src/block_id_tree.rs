@@ -25,7 +25,8 @@
 //!
 //! Internal nodes: `SHA-256(left_32B || right_32B)`. Leaf values, per the
 //! canonical spec:
-//! - L0 = `Poseidon(layer_hashes_preimage)` (331 bytes split into 31-byte Fr chunks)
+//! - L0 = `Poseidon(layer_hashes_preimage)` (331 bytes split into 31-byte Fr
+//!   chunks)
 //! - L1 = `SHA-256(bincode(CommonSection))`
 //! - L2 = `Poseidon(old_bk_set_hash)` (32 bytes LE) — zero if no BK-set change
 //! - L3 = `Poseidon(new_bk_set_hash)` (32 bytes LE) — zero if no BK-set change
@@ -39,15 +40,13 @@
 //! The prover never recomputes the individual leaves; it fetches all 16 via the
 //! GraphQL `block_merkle_tree_leaves` field and folds them here.
 
-use sha2::{Digest, Sha256};
-
-pub use historical_layer_hashes_movement_checker_circuit::NUM_MERKLE_SIBLINGS;
-
 /// Canonical leaf count of the block-id tree (fixed by the protocol). Sourced
 /// from the circuits repo (`bridge_test_data_gen::layer_hashes`) so any change
 /// to the tree width propagates automatically instead of drifting across
 /// duplicated `= 16` literals.
 pub use bridge_test_data_gen::layer_hashes::BLOCK_ID_TREE_LEAF_COUNT;
+pub use historical_layer_hashes_movement_checker_circuit::NUM_MERKLE_SIBLINGS;
+use sha2::{Digest, Sha256};
 
 /// Number of siblings required to open the L2/L3 pair up to `block_id`.
 /// One less than the tree depth because we start from the L2/L3 pair hash.
@@ -61,8 +60,8 @@ fn sha256_combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// All data for the 16-leaf block-id Merkle tree. Every field is materialised so
-/// callers can pull whichever internal node they need without re-folding.
+/// All data for the 16-leaf block-id Merkle tree. Every field is materialised
+/// so callers can pull whichever internal node they need without re-folding.
 #[derive(Clone, Debug)]
 pub struct BlockIdMerkleTree {
     /// All 16 leaves L0..L15.
@@ -116,9 +115,20 @@ impl BlockIdMerkleTree {
 
         Self {
             leaves,
-            h01, h23, h45, h67, h89, h10_11, h12_13, h14_15,
-            h0_3, h4_7, h8_11, h12_15,
-            h0_7, h8_15,
+            h01,
+            h23,
+            h45,
+            h67,
+            h89,
+            h10_11,
+            h12_13,
+            h14_15,
+            h0_3,
+            h4_7,
+            h8_11,
+            h12_15,
+            h0_7,
+            h8_15,
             root,
         }
     }
@@ -175,10 +185,7 @@ pub fn fold_l2_l3_open(
 /// Build a 331-byte layer hashes preimage from layer root hashes.
 ///
 /// Format: `[num_layers: u8] + 10 * [layer_number: u8, root_hash: [u8; 32]]`.
-pub fn build_layer_hashes_preimage(
-    num_layers: usize,
-    root_hashes: &[[u8; 32]],
-) -> [u8; 331] {
+pub fn build_layer_hashes_preimage(num_layers: usize, root_hashes: &[[u8; 32]]) -> [u8; 331] {
     assert!(num_layers <= 10);
     assert!(root_hashes.len() >= num_layers);
 
@@ -269,15 +276,16 @@ mod tests {
     }
 
     /// Cross-side pin: the exact 32-byte root that
-    /// `AckiNackiBridgeApplyBkSetUpdateTest.test_applyBkSetUpdate_pinnedVector_matchesRustSideFold`
-    /// asserts on the Solidity side.
+    /// `AckiNackiBridgeApplyBkSetUpdateTest.
+    /// test_applyBkSetUpdate_pinnedVector_matchesRustSideFold` asserts on
+    /// the Solidity side.
     ///
-    /// Both sides start from a numeric Fr scalar (`L2 = 1`, `L3 = 2`), serialise
-    /// it as canonical 32-byte little-endian `Fr::to_repr()` bytes, and fold
-    /// via the same SHA-256 pair combinator. If either side changes its
-    /// endianness convention, exactly one of the two tests fails and the drift
-    /// is caught before it ships. Do not update one root without regenerating
-    /// the other from the same numeric inputs.
+    /// Both sides start from a numeric Fr scalar (`L2 = 1`, `L3 = 2`),
+    /// serialise it as canonical 32-byte little-endian `Fr::to_repr()`
+    /// bytes, and fold via the same SHA-256 pair combinator. If either side
+    /// changes its endianness convention, exactly one of the two tests
+    /// fails and the drift is caught before it ships. Do not update one
+    /// root without regenerating the other from the same numeric inputs.
     #[test]
     fn bk_set_l2_l3_pinned_vector_matches_solidity() {
         // Numeric Fr scalars serialised as canonical Fr::to_repr() (LE).
@@ -301,8 +309,7 @@ mod tests {
         let root = sha256_combine(&h0_7, &h8_15);
 
         // Must equal the constant in AckiNackiBridgeApplyBkSetUpdate.t.sol.
-        let expected_hex =
-            "8f698b0396c584252ab3a26b426baeb1349d473c21d81463e3c2552b795de3de";
+        let expected_hex = "8f698b0396c584252ab3a26b426baeb1349d473c21d81463e3c2552b795de3de";
         assert_eq!(hex::encode(root), expected_hex);
     }
 

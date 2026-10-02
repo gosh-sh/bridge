@@ -109,7 +109,7 @@ echo "==> Step 3/3  live submit (spends gas)"
   2>&1 | tee -a "$LOG_SUBMIT"
 
 echo ""
-echo "==> success signal:  grep 'withdrawByProof paid out' $LOG_SUBMIT"
+echo "==> success signal:  grep 'withdrawByProofBundle paid out' $LOG_SUBMIT"
 echo "==> verify on-chain:"
 echo "     cast logs --rpc-url \$RPC_URL --address \$BRIDGE_ADDRESS \\"
 echo "       'WithdrawalExecuted(uint256,address,uint256,uint256)' --from-block -200"

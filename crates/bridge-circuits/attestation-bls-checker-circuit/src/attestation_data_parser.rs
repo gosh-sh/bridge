@@ -81,8 +81,8 @@ pub fn compute_block_seq_no(attestation_bytes: &[u8]) -> u32 {
 /// (`node/libs/node-types/src/{types.rs,u256.rs}` with `ser = bytes`); when
 /// it later publishes the same value externally it does `hex::encode` over
 /// those BE bytes (`u256.rs`). To match:
-/// - the in-circuit fold in `primary_circuit.rs` / `fallback_circuit.rs`
-///   (both `inner_product` a reversed byte iterator);
+/// - the in-circuit fold in `primary_circuit.rs` / `fallback_circuit.rs` (both
+///   `inner_product` a reversed byte iterator);
 /// - Circuit 2's `block_id_fr` (folds `reverse(sha256_root)`);
 /// - Solidity's `uint256(bytes32(blockId))` — the single `blockId` value
 ///   `AckiNackiBridge.verifyBlock` feeds to both SNARK verifiers;

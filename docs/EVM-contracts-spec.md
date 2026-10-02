@@ -39,12 +39,14 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/IPrimaryVerifier.sol` | 36 | Circuit 1A (primary attestation) verifier interface — 4 PIs. |
 | `src/IFallbackVerifier.sol` | 33 | Circuit 1B (fallback attestation) verifier interface — 4 PIs. |
 | `src/ILayerHashesMovementVerifier.sol` | 45 | Circuit 2 (layer-hash movement) interface — 14 PIs. |
-| `src/IBridgeWithdrawalVerifier.sol` | 77 | Circuit 4 (bridge withdrawal event) interface — 11 PIs. |
+| `src/IBridgeWithdrawalFinalVerifier.sol` | 58 | Circuit 4 `BridgeEventFinalProof` interface — 13 PIs (adds `xBlockId`, `yBlockId`). |
+| `src/IBridgeMultiHopVerifier.sol` | 33 | Circuit 4 `BridgeMultiHopProof` interface — 2 PIs (`hopStartBlockId`, `hopEndBlockId`). |
 | `src/ShplonkAggregatorVerifierBase.sol` | 32 | Shared adapter base: instance reader + SHPLONK dispatch. |
 | `src/PrimaryAggregatorVerifier.sol` | 30 | 1A adapter (instances[12..15] ↔ args). |
 | `src/FallbackAggregatorVerifier.sol` | 30 | 1B adapter (instances[12..15] ↔ args). |
 | `src/LayerHashesAggregatorVerifier.sol` | 34 | Circuit-2 adapter (instances[12..25] ↔ args). |
-| `src/BridgeWithdrawalAggregatorVerifier.sol` | 44 | Circuit-4 adapter (instances[12..=22] ↔ `pub`, eleven slots). |
+| `src/BridgeWithdrawalAggregatorVerifier.sol` | 49 | Circuit-4 `BridgeEventFinalProof` adapter (instances[12..=24] ↔ `pub`, thirteen slots). |
+| `src/BridgeMultiHopAggregatorVerifier.sol` | 37 | Circuit-4 `BridgeMultiHopProof` adapter (instances[12..=13] ↔ `pub`, two slots). |
 | `src/ShplonkHalo2Verifier.sol` | 31 | `staticcall` shim onto CREATE-deployed Yul verifier bytecode. |
 | `src/IShplonkHalo2Verifier.sol` | 7 | `verify(bytes) → bool`. |
 | `src/IBlockHeaderOracle.sol` | 27 | Block-hash oracle interface. |
@@ -73,17 +75,18 @@ flowchart TB
         B <-->|"supply / withdraw"| AAVE["AAVE V3 Pool (USDC)"]
         R["relayer (permissionless)"] -->|"verifyBlock"| B
         R -->|"applyBkSetUpdate"| B
-        R -->|"withdrawByProof"| B
+        R -->|"withdrawByProofBundle"| B
         B --> V1["PrimaryAggregatorVerifier (C1A)"]
         B --> V2["FallbackAggregatorVerifier (C1B)"]
         B --> V3["LayerHashesAggregatorVerifier (C2)"]
-        B --> V4["BridgeWithdrawalAggregatorVerifier (C4)"]
-        V1 & V2 & V3 & V4 --> W["ShplonkHalo2Verifier"] --> Y["Yul Halo2Verifier (CREATE from .bin)"]
+        B --> V4a["BridgeWithdrawalAggregatorVerifier (C4 FinalProof)"]
+        B --> V4b["BridgeMultiHopAggregatorVerifier (C4 MultiHopProof)"]
+        V1 & V2 & V3 & V4a & V4b --> W["ShplonkHalo2Verifier"] --> Y["Yul Halo2Verifier (CREATE from .bin)"]
     end
     LOG -->|"MPT receipt proof"| DP["deposit-prover (off-chain Halo2)"]
     DP -->|"SHPLONK proof + 12 PIs"| AN["AN USDCBridge.finalizeDeposit"]
     AN -.->|"WithdrawalInitiated event"| C4P["AN-side prover (Circuit 4)"]
-    C4P -.->|"proof + 11 PIs"| R
+    C4P -.->|"BridgeEventFinalProof (13 PIs) + N BridgeMultiHopProofs (2 PIs each)"| R
 ```
 
 Two independent directions:
@@ -93,12 +96,13 @@ Two independent directions:
   is proven off-chain and consumed natively by the AN `USDCBridge`. The bridge keeps custody of the
   USDC.
 * **AN → ETH (state attestation + payout).** `verifyBlock` (`:739`) advances a rolling commitment to
-  AN state from two cross-bound ZK proofs; `withdrawByProof` (`:1295`) pays out USDC against a
-  Circuit-4 proof anchored into state that `verifyBlock` already recorded. `applyBkSetUpdate`
-  (`:898`) rotates the AN validator-set (BK-set) commitment.
+  AN state from two cross-bound ZK proofs; `withdrawByProofBundle` (`:1385`) pays out USDC against a
+  Circuit-4 proof bundle — one `BridgeEventFinalProof` plus zero or more `BridgeMultiHopProof` hops —
+  anchored into state that `verifyBlock` already recorded. `applyBkSetUpdate` (`:898`) rotates the
+  AN validator-set (BK-set) commitment.
 
 There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface consists solely of
-`withdrawByProof`, described in §7.2.
+`withdrawByProofBundle`, described in §7.2.
 
 ---
 
@@ -130,7 +134,7 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
 | 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
+| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProofBundle` (−) |
 | 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
 | 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
 | 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
@@ -141,7 +145,7 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | 8 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
 | 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 181 | `applyBkSetUpdate` |
 | 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 185 | constructor, `verifyBlock` |
-| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 254 | `withdrawByProof` |
+| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 254 | `withdrawByProofBundle` |
 | 11 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 273 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
@@ -155,7 +159,8 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `aavePool`, `aUSDC` | `IAavePool`, `IERC20` | 120, 123 | Both zero ⇒ AAVE disabled; exactly one zero ⇒ constructor reverts. |
 | `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` | interfaces | 159, 165, 171 | Any zero ⇒ `verifyBlock` disabled. |
 | `storedPrevMaxLevelLayerHash` | `uint256` | 204 | **Genesis seed only** since storage v2.0 (2026-08-04). Read exclusively by `_expectedPrevAnchor` when no layer window is populated (`:1118`). |
-| `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
+| `bridgeWithdrawalFinalVerifier` | `IBridgeWithdrawalFinalVerifier` | 256 | Zero (in either verifier) ⇒ `withdrawByProofBundle` disabled. |
+| `bridgeMultiHopVerifier` | `IBridgeMultiHopVerifier` | 263 | Both verifiers must be set together; a partially wired pair reverts the constructor with `PartialBundleWiring`. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
 | `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId`, `bridgeWithdrawalAltTokenId` | `uint256` | 232, 236, 239 | Shellnet/testnet aliases (§7.2). |
 
@@ -196,8 +201,9 @@ constructor(
 `VerifyBlockConfig` (`:495-516`): `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier`,
 `genesisBkSetCommitment`, `genesisPrevMaxLevelLayerHash`, `genesisLastSeenBlockSeqNo`.
 
-`BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
-`altDstHostChainId`, `altTokenId`.
+`BridgeWithdrawConfig` (`:595-620`): `withdrawalFinalVerifier`, `multiHopVerifier`, `dappFr`, `accFr`,
+`altDstChainId`, `altDstHostChainId`, `altTokenId`. Both verifier addresses are either zero (⇒
+withdrawals disabled) or both non-zero (`PartialBundleWiring`, `:668`).
 
 Validation performed (and *not* performed):
 
@@ -325,36 +331,52 @@ This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
 key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
 `expectedPrevAnchor(numLayers)` (`:1129`) rather than reconstructing the anchor themselves.
 
-### 7.2 `withdrawByProof` — pay out a proven AN withdrawal
+### 7.2 `withdrawByProofBundle` — pay out a proven AN withdrawal
 
 ```solidity
-function withdrawByProof(
-    bytes calldata proof,
-    IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-) external nonReentrant returns (bool success)            // :1295-1383
+function withdrawByProofBundle(
+    uint256[] calldata finalPublicInputs,   // FINAL_PI_LEN = 13
+    bytes calldata finalProof,
+    uint256[][] calldata hopPublicInputs,   // MULTI_HOP_PI_LEN = 2 per hop
+    bytes[] calldata hopProofs
+) external nonReentrant returns (bool success)            // :1385
 ```
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
 
-Public inputs (`src/IBridgeWithdrawalVerifier.sol:33-65`), slots `[0..10]` in circuit order:
-`tokenId, amount, recipientHi, recipientLo, dstChainId, senderAccFr, dappFr, accFr, nullifier,
-finalRoot, anchorLayer`.
+`FINAL_PI_LEN = 13` (`:1347`), `MULTI_HOP_PI_LEN = 2` (`:1349`), `N_BUNDLE_MAX = 20` (`:89`) —
+the hop-chain length cap, mirroring `bridge_event_prove_circuit::multi_hop_witness::N_BUNDLE_MAX`.
+
+Final-proof public inputs (`src/IBridgeWithdrawalFinalVerifier.sol`), slots `[0..12]` in circuit
+order: `tokenId, amount, recipientHi, recipientLo, dstChainId, senderAccFr, dappFr, accFr,
+nullifier, finalRoot, anchorLayer, xBlockId, yBlockId`. Slots 11–12 are the cross-thread endpoints:
+`xBlockId` is the anchor-thread `block_id` the event chain starts from, `yBlockId` the event-thread
+`block_id` it ends at. Same-thread bundles have `xBlockId == yBlockId` and an empty hop chain.
+
+Multi-hop public inputs (`src/IBridgeMultiHopVerifier.sol`), slots `[0..1]`: `hopStartBlockId,
+hopEndBlockId`.
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | C4 verifier wired | 1299 | `WithdrawByProofDisabled` |
-| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1304 | `WithdrawIdentityMismatch` |
-| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1307-1314 | `DstChainIdMismatch` |
-| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1315-1319 | `UnsupportedTokenId` |
-| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1320-1325 | `RecipientHalfOutOfRange` |
-| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1328 | `InvalidRecipient` |
-| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1338 | `NullifierAlreadyUsed` |
-| 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1341-1345 | `LayerOutOfRange` |
-| 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
-| 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
-| 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
+| 1 | Both C4 verifiers wired | 1391-1394 | `WithdrawByProofBundleDisabled` |
+| 2 | `finalPublicInputs.length == 13` | 1397 | `FinalPublicInputsBadLength` |
+| 3 | `hopPublicInputs.length == hopProofs.length` | 1400 | `HopPublicInputsHopProofsLengthMismatch` |
+| 4 | `hopPublicInputs.length ≤ N_BUNDLE_MAX` | 1405 | `HopBundleLengthOverflow` |
+| 5 | every `hopPublicInputs[i].length == 2` | 1408-1414 | `HopPublicInputsBadLength` |
+| 6 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | | `WithdrawIdentityMismatch` |
+| 7 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | | `DstChainIdMismatch` |
+| 8 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | | `UnsupportedTokenId` |
+| 9 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | | `RecipientHalfOutOfRange` |
+| 10 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | | `InvalidRecipient` |
+| 11 | `!_nullifiers[bytes32(pub.nullifier)]` | | `NullifierAlreadyUsed` |
+| 12 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | | `LayerOutOfRange` |
+| 13 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | | `UnknownAnchor` |
+| 14 | `bridgeWithdrawalFinalVerifier.verifyWithdrawalFinal(finalProof, pub)` | 1517 | `WithdrawalProofRejected` |
+| 15 | Bundle continuity: same-thread ⇒ `xBlockId == yBlockId` and `hopCount == 0`; cross-thread ⇒ `hopChain[0].hopStartBlockId == xBlockId`, `hopChain[-1].hopEndBlockId == yBlockId`, and every adjacent `hopEnd[i] == hopStart[i+1]` | 1484-1512 | `SameThreadEndpointsMismatch`, `SameThreadRequiresEmptyHopChain`, `HopChainHeadMismatch`, `HopChainTailMismatch`, `AdjacentHopBlockIdMismatch` |
+| 16 | For every hop: `bridgeMultiHopVerifier.verifyMultiHop(hopProofs[i], hop)` | 1521-1528 | `MultiHopProofRejected(i)` |
+| 17 | `pub.amount ≤ treasuryBalance` | | `WithdrawTreasuryShortfall` |
 
-Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
+Effects then interactions: mark the nullifier used, `treasuryBalance -= amount`;
 then, if liquid USDC < `amount` and `suppliedPrincipal > 0`, pull `min(shortfall, suppliedPrincipal)`
 back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
@@ -441,8 +463,8 @@ permanently.
 |---|---:|---|
 | `expectedPrevAnchor(uint8 numLayers)` | 1129 | The anchor the next `verifyBlock` will require. |
 | `getLatestPerLayer()` | 1156 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
-| `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
-| `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
+| `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProofBundle` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
+| `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProofBundle` uses. |
 | `isNullifierUsed(uint256)` | 1388 | Replay pre-check for relayers. |
 
 ---
@@ -451,7 +473,7 @@ permanently.
 
 ```
 AckiNackiBridge
-  └─ I{Primary,Fallback,LayerHashesMovement,BridgeWithdrawal}Verifier
+  └─ I{Primary,Fallback,LayerHashesMovement,BridgeWithdrawalFinal,BridgeMultiHop}Verifier
        └─ *AggregatorVerifier          (typed adapter: instance ↔ argument equality)
             └─ ShplonkHalo2Verifier    (staticcall shim, code-size checked)
                  └─ Halo2Verifier      (snark-verifier-sdk Yul, CREATE-deployed from .bin)
@@ -479,7 +501,8 @@ adapter:
 |---|---:|---|
 | `PrimaryAggregatorVerifier` / `FallbackAggregatorVerifier` | 4 | 12 `blockId`, 13 `bkSetCommitment`, 14 `blockSeqNo`, 15 `lastSeenBlockSeqNo` |
 | `LayerHashesAggregatorVerifier` | 14 | 12 `blockId`, 13 `bkSetCommitment`, 14 `numLayers`, 15–24 `layerHashes[0..9]`, 25 `prevMaxLevelLayerHash` |
-| `BridgeWithdrawalAggregatorVerifier` | 11 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer` |
+| `BridgeWithdrawalAggregatorVerifier` | 13 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer`, 23 `xBlockId`, 24 `yBlockId` |
+| `BridgeMultiHopAggregatorVerifier` | 2 | 12 `hopStartBlockId`, 13 `hopEndBlockId` |
 
 All four are `view` and return `bool` — reverts inside the Yul verifier surface as `false`
 because `ShplonkHalo2Verifier.verify` captures only the `staticcall` success flag (`:37`).
@@ -498,10 +521,13 @@ contract's fallback entrypoint via `staticcall`.
 | `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 655 | 3 872 |
 | `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 655 | 3 872 |
 | `LayerHashesAggregatorVerifier.bin` | 2 (k_outer=22) | 14 | 19 263 | 3 104 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 | 11 | 21 314 | 3 680 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 `BridgeEventFinalProof` (inner K=20 per `vk.domain`) | 13 | 21 638 | 3 744 |
+| `BridgeMultiHopAggregatorVerifier.bin` | 4 `BridgeMultiHopProof` (cross-thread) | 2 | 23 883 | 4 480 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
-`scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
+`scripts/check_eip170_verifier_bins.sh` enforces in CI. `BridgeMultiHopAggregatorVerifier.bin`
+at 23 883 B is the tightest, with 693 B of EIP-170 headroom (97 %, above the 90 % soft-warn
+line in `scripts/check_shplonk_artefacts.sh`). Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
 output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`). 
 
@@ -567,7 +593,7 @@ Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal`
 
 | Function | Caller |
 |---|---|
-| `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone |
+| `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProofBundle` | anyone |
 | `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
 | everything else | view/pure |
 
@@ -600,7 +626,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0xa41d0229` | `deposit(uint256,int8,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
 | `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
-| `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
+| — | `withdrawByProofBundle(uint256[],bytes,uint256[][],bytes[])` (selector recomputed at deploy time; the legacy `withdrawByProof` selector `0xa9753d18` no longer exists) |
 | `0x6e55e4eb` | `expectedPrevAnchor(uint8)` |
 | `0x22c341e9` | `getLatestPerLayer()` |
 | `0xe57869a8` | `isKnownAnchor(uint256)` |
@@ -626,9 +652,13 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `applyBkSetUpdate`: `BkUpdateDisabled`, `StaleBkSetCommitment`, `BkUpdateSeqNoNotMonotonic`,
 `BkUpdateMerkleMismatch`, `VerifyBlockLagBehindRotation`, `AttestationLastSeenNotBeforeSeqNo`.
 
-`withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
-`DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
-`LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
+`withdrawByProofBundle`: `WithdrawByProofBundleDisabled`, `PartialBundleWiring`,
+`HopBundleLengthOverflow`, `HopPublicInputsHopProofsLengthMismatch`, `FinalPublicInputsBadLength`,
+`HopPublicInputsBadLength`, `SameThreadEndpointsMismatch`, `SameThreadRequiresEmptyHopChain`,
+`HopChainHeadMismatch`, `HopChainTailMismatch`, `AdjacentHopBlockIdMismatch`,
+`WithdrawalProofRejected`, `MultiHopProofRejected`, `NullifierAlreadyUsed`, `DstChainIdMismatch`,
+`RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`, `LayerOutOfRange`,
+`InvalidBridgeWithdrawalIdentity`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
 `WithdrawTreasuryShortfall`.
 
 ---
@@ -661,8 +691,8 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
-| `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
-| `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
+| `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL,MULTI_HOP}` | ShplonkDeployLib | Override `.bin` paths. |
+| `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_FINAL_VERIFIER`, `MULTI_HOP_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. Both C4 addresses are required together — a partial wiring reverts `PartialBundleWiring`. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
 
 When a verification key rotates, deploy the new Yul verifier (and confirm its
@@ -714,10 +744,10 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
-| `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
-| `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
+| `AckiNackiBridgeWithdrawByProofBundle.t.sol` | Full `withdrawByProofBundle` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte final-PI forwarding, bundle-length limits (`FinalPublicInputsBadLength`, `HopPublicInputsBadLength`, `HopPublicInputsHopProofsLengthMismatch`, `HopBundleLengthOverflow`), same-thread and cross-thread continuity (`SameThreadEndpointsMismatch`, `SameThreadRequiresEmptyHopChain`, `HopChainHeadMismatch`, `HopChainTailMismatch`, `AdjacentHopBlockIdMismatch`), multi-hop verifier rejection (`MultiHopProofRejected`). |
+| `AckiNackiBridgeWithdrawByProofBundleOrder2.t.sol` | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
-| `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
+| `AckiNackiBridgeProductionWithdrawByProofBundle.t.sol` | Real C4 final + multi-hop verifiers: isolated verify, tampered proof, mismatched `pub`. |
 | `AckiNackiBridgeRelayerLoop.t.sol` (6) | 10-block mixed-finType walk, restart, replay, fast-forward, verifier-reject leaves state untouched, anchor mismatch. |
 | `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
@@ -732,8 +762,8 @@ Mocks (`test/mocks/`): `MockPrimaryVerifier` / `MockFallbackVerifier` are `shoul
 *additionally* reject any argument `≥ BN254_R`, so they cannot wave through encodings the real
 adapter rejects — that gap is how the raw-vs-`Fr` `blockId` bug in `applyBkSetUpdate` stayed hidden
 (`test/mocks/MockPrimaryVerifier.sol:22-30`). `MockLayerHashesMovementVerifier` is a plain toggle
-with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI modes. Plus `MockERC20`,
-`MockAave`.
+with no range check. `MockBridgeWithdrawalFinalVerifier` and `MockBridgeMultiHopVerifier` have
+loose and strict-PI modes. Plus `MockERC20`, `MockAave`.
 
 ---
 
@@ -741,8 +771,8 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 
 | Component | Uses |
 |---|---|
-| `crates/bridge-relayer-daemon` | `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`, reads `storedLastSeenBlockSeqNo`, `storedBkSetCommitment`, `expectedPrevAnchor(numLayers)`, `storedPrevMaxLevelLayerHash`. Its `MockBridgeClient` mirrors the contract's cheap pre-flight checks exactly (`src/bridge.rs:15-23`). |
-| `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
+| `crates/bridge-relayer-daemon` | `verifyBlock`, `applyBkSetUpdate`, `withdrawByProofBundle`, reads `storedLastSeenBlockSeqNo`, `storedBkSetCommitment`, `expectedPrevAnchor(numLayers)`, `storedPrevMaxLevelLayerHash`. Its `MockBridgeClient` mirrors the contract's cheap pre-flight checks exactly (`src/bridge.rs:15-23`). |
+| `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK bundle (`BridgeEventFinalProof` + zero or more `BridgeMultiHopProof` hops) → optional `withdrawByProofBundle`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
 | `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. |
 | `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:80-128`), emits the 12-PI SHPLONK proof. |
 | `frontend/` (WASM) | Calls `deposit(uint256,int8,bytes32)` = `0xa41d0229` and `depositCounter()` — **current**. |
@@ -750,7 +780,7 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 
 **The contract is the only gate.** Until `a69ba36` the relayer polled a `proof_event_*.result.json`
 ACK written by `bridge-verifier-daemon` — a dev scaffold that imitated this contract — before
-submitting `verifyBlock` / `withdrawByProof`. That gate (`WithdrawalResultGate`, `result_path_for`,
+submitting `verifyBlock` / `withdrawByProofBundle`. That gate (`WithdrawalResultGate`, `result_path_for`,
 and the `skip_verified_gate` opt-out on both proof sources) has been deleted; the relayer submits
 directly and treats the on-chain verifier's success on the real transaction — or its `eth_call`
 dry-run — as the only acceptance signal (`crates/bridge-relayer-daemon/src/withdrawal.rs:20-30`).
@@ -766,8 +796,8 @@ Read off the code, without a formal audit claim.
 **Enforced invariants**
 
 1. Reentrancy: every state-mutating external entrypoint is `nonReentrant` (`:479-484`).
-2. CEI: `withdrawByProof` marks the nullifier and decrements `treasuryBalance` *before* the AAVE pull
-   and the USDC transfer (`:1363-1381`); `verifyBlock` commits state only after both verifiers pass.
+2. CEI: `withdrawByProofBundle` marks the nullifier and decrements `treasuryBalance` *before* the AAVE
+   pull and the USDC transfer; `verifyBlock` commits state only after both verifiers pass.
 3. Monotonicity: `blockSeqNo` strictly increases per `verifyBlock`; the BK-update cursor increases
    strictly and independently; per-layer window heights are non-decreasing.
 4. Cross-circuit binding: shared `blockId` / `bkSetCommitment` are compared instance-by-instance
@@ -779,7 +809,7 @@ Read off the code, without a formal audit claim.
 
 **Deliberate trade-offs and limitations (all flagged in-code)**
 
-1. *Anchor layer is asserted* (`withdrawByProof`). Circuit 4 exposes
+1. *Anchor layer is asserted* (`withdrawByProofBundle`). Circuit 4 exposes
    `anchorLayer` (`1..=10`); the contract scans only that layer's 128-slot
    window. A `finalRoot` that is a known anchor of a *different* layer
    reverts `UnknownAnchor`.
@@ -822,7 +852,7 @@ Read off the code, without a formal audit claim.
    error at `:361`). A fee-on-transfer or rebasing token now fails closed instead of crediting
    book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
-   lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
+   lose value, `withdrawByProofBundle` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
    first-come-first-served.
 8. *Zero `dappFr` is accepted* at construction, so on a shellnet-style deployment the AN-side identity
    is pinned by `accFr` alone.
@@ -862,7 +892,7 @@ code contradicts them on:
 * `verifyBlock`'s anchor check is the per-layer `expectedPrevAnchor(numLayers)` pick, not a flat
   `storedPrevMaxLevelLayerHash` comparison; `storedPrevMaxLevelLayerHash` is now an immutable
   genesis seed.
-* The AN→ETH payout path (`withdrawByProof`, Circuit 4) exists and is mandatory in the production
+* The AN→ETH payout path (`withdrawByProofBundle`, Circuit 4) exists and is mandatory in the production
   deploy script; the README still describes withdrawals as a future milestone.
 * `applyBkSetUpdate` opens a **16-leaf, depth-4** block-id tree (three siblings), not an 8-leaf tree.
 

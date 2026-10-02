@@ -66,6 +66,23 @@ pub const WITHDRAWAL_VERIFIER_NAME: &str = "BridgeWithdrawalAggregatorVerifier";
 /// Aggregator binary that turns a Poseidon inner snark into EVM calldata.
 pub const AGGREGATE_BIN: &str = "aggregate-proof";
 
+/// Convention: cross-thread hop bundles are written next to the witness
+/// with the suffix `_hops.json`, replacing `_witness.json` when present.
+/// If the witness path has no `_witness.json` marker (test fixtures, e.g.
+/// `w.json`) we append `.hops.json` to the file stem — the pipeline still
+/// finds it, and mock tests using plain names stay opt-out by default.
+pub fn sibling_hops_path(witness_path: &Path) -> PathBuf {
+    let fname = witness_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if let Some(stem) = fname.strip_suffix("_witness.json") {
+        return witness_path.with_file_name(format!("{stem}_hops.json"));
+    }
+    let stem = witness_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    witness_path.with_file_name(format!("{stem}.hops.json"))
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Circuit4SnarkProver — witness → Poseidon inner `.snark`
 // ─────────────────────────────────────────────────────────────────────
@@ -197,7 +214,8 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
     ) -> Result<SnarkArtefacts, RelayerError> {
         use bridge_event_prover_lib::{
             prover::generate_event_proof_with_transcript,
-            verifier::verify_event_proof_with_transcript, PrivateWitness,
+            verifier::verify_event_proof_with_transcript, MultiHopBundleWitnessJson,
+            PrivateWitness,
         };
         use bridge_prover_lib::{keys::KeyManager, transcript::TranscriptKind};
 
@@ -232,9 +250,38 @@ impl Circuit4SnarkProver for InProcessCircuit4SnarkProver {
                     RelayerError::other(format!("parse witness {}: {e}", witness_path.display()))
                 })?;
 
+                // Cross-thread claims: the driver writes a sibling
+                // `<witness_stem>_hops.json` next to the witness before
+                // invoking the pipeline. When present, its snarks feed the
+                // final proof's `y_block_id` (first hop's `hop_start`);
+                // absent / empty locks `y_block_id == x_block_id` (the
+                // same-thread short-circuit).
+                let hops_path = sibling_hops_path(&witness_path);
+                let hop_bundle: MultiHopBundleWitnessJson = if hops_path.exists() {
+                    let hops_raw = std::fs::read_to_string(&hops_path).map_err(|e| {
+                        RelayerError::other(format!("read hops {}: {e}", hops_path.display()))
+                    })?;
+                    serde_json::from_str(&hops_raw).map_err(|e| {
+                        RelayerError::other(format!(
+                            "parse hops bundle {}: {e}",
+                            hops_path.display()
+                        ))
+                    })?
+                } else {
+                    MultiHopBundleWitnessJson::default()
+                };
+                if !hop_bundle.snarks.is_empty() {
+                    info!(
+                        "InProcessCircuit4SnarkProver: cross-thread claim, {} hop(s) bound via {}",
+                        hop_bundle.snarks.len(),
+                        hops_path.display(),
+                    );
+                }
+
                 let out = generate_event_proof_with_transcript(
                     &km.event,
                     &witness,
+                    &hop_bundle,
                     TranscriptKind::Poseidon,
                 )
                 .map_err(|e| RelayerError::other(format!("Circuit 4 Poseidon prove: {e:#}")))?;
@@ -555,6 +602,12 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
             proof_hex: hex::encode(&calldata),
             public_instances_hex: instances_hex,
             self_verified: true,
+            // `Circuit4ShplonkPipeline` proves only the outer Circuit-4 SHPLONK
+            // calldata. Per-hop `BridgeMultiHopProof` snarks are proved by the
+            // separate multi-hop leg (see `withdraw_e2e/driver.rs`) and
+            // populated on the persisted JSON — the pipeline returns an empty
+            // vec here for the same-thread path.
+            hops_hex: Vec::new(),
         })
     }
 }

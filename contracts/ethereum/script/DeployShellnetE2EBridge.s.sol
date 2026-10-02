@@ -7,7 +7,8 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
@@ -17,12 +18,12 @@ import "./ShplonkDeployLib.sol";
 ///      `verifiers/FallbackAggregatorVerifier.bin` + `verifiers/LayerHashesAggregatorVerifier.bin`
 ///      (or `SHPLONK_BIN_*` overrides).
 ///
-///      withdrawByProof (Circuit 4) wiring is on by default and MUST stay on for any
-///      chain other than local anvil (chainid 31337). The C4 `.bin` is committed and the
-///      Yul adapter is production-ready — silently shipping with `address(0)` on Sepolia
-///      or any other real chain bricks user withdrawals (NB-Q8). The `WIRE_WITHDRAW_BY_PROOF`
-///      env var is kept only so CI runs against a fresh anvil can opt out; setting it to
-///      `false` off anvil reverts.
+///      withdrawByProofBundle (Circuit 4 + multi-hop) wiring is on by default and MUST stay
+///      on for any chain other than local anvil (chainid 31337). Both `.bin`s are committed
+///      and their Yul adapters are production-ready — silently shipping with `address(0)`
+///      on Sepolia or any other real chain bricks user withdrawals (NB-Q8). The
+///      `WIRE_WITHDRAW_BY_PROOF` env var is kept only so CI runs against a fresh anvil can
+///      opt out; setting it to `false` off anvil reverts.
 contract DeployShellnetE2EBridge is Script {
     // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
     // The previous constant (0x94a9D9AC...) was a Pruvendo-owned mock with
@@ -40,7 +41,8 @@ contract DeployShellnetE2EBridge is Script {
     }
 
     struct WithdrawWiring {
-        IBridgeWithdrawalVerifier verifier;
+        IBridgeWithdrawalFinalVerifier finalVerifier;
+        IBridgeMultiHopVerifier multiHopVerifier;
         uint256 dappFr;
         uint256 accFr;
         uint256 altDstChainId;
@@ -63,7 +65,8 @@ contract DeployShellnetE2EBridge is Script {
             "WIRE_WITHDRAW_BY_PROOF=false only allowed on anvil (chainid 31337)"
         );
         WithdrawWiring memory wd = WithdrawWiring({
-            verifier: IBridgeWithdrawalVerifier(address(0)),
+            finalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0)),
             dappFr: wireWithdraw ? vm.envOr("WITHDRAW_DAPP_FR", uint256(0)) : uint256(0),
             accFr: wireWithdraw ? vm.envUint("WITHDRAW_ACC_FR") : uint256(0),
             altDstChainId: wireWithdraw
@@ -90,11 +93,16 @@ contract DeployShellnetE2EBridge is Script {
         console.log("LayerHashesAggregatorVerifier:", address(vb.layerHashes));
 
         if (wireWithdraw) {
-            wd.verifier =
+            wd.finalVerifier =
                 ShplonkDeployLib.deployWithdrawalAdapter(ShplonkDeployLib.withdrawalBinPath());
-            console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.verifier));
+            console.log("BridgeWithdrawalAggregatorVerifier:", address(wd.finalVerifier));
+            wd.multiHopVerifier =
+                ShplonkDeployLib.deployMultiHopAdapter(ShplonkDeployLib.multiHopBinPath());
+            console.log("BridgeMultiHopAggregatorVerifier:", address(wd.multiHopVerifier));
         } else {
-            console.log("withdrawByProof DISABLED - set WIRE_WITHDRAW_BY_PROOF=true + C4 .bin (M4)");
+            console.log(
+                "withdrawByProofBundle DISABLED - set WIRE_WITHDRAW_BY_PROOF=true + C4/hop .bin (M4)"
+            );
         }
 
         AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
@@ -140,12 +148,13 @@ contract DeployShellnetE2EBridge is Script {
                 )
             }),
             AckiNackiBridge.BridgeWithdrawConfig({
-                bridgeWithdrawalVerifier: wd.verifier,
                 dappFr: wd.dappFr,
                 accFr: wd.accFr,
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
-                altTokenId: wd.altTokenId
+                altTokenId: wd.altTokenId,
+                withdrawalFinalVerifier: wd.finalVerifier,
+                multiHopVerifier: wd.multiHopVerifier
             })
         );
     }

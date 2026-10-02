@@ -39,15 +39,30 @@ path = "src/bin/export.rs"
 name = "bridge-event-witness-builder"
 path = "src/bin/build.rs"
 
+# --- Empirical tvm-sdk wire-format parity probe (offline / GQL) --------
+# One-off diagnostic used before a full multi-thread E2E to answer "does
+# our v3.0.6.an pin still decode ExtOut BOCs the state_v2 node emits?".
+# See src/bin/probe_tvm_decode.rs for interpretation.
+[[bin]]
+name = "probe-tvm-decode"
+path = "src/bin/probe_tvm_decode.rs"
+
 [dependencies]
 # Schema + hermetic exporter
 tvm_block = { workspace = true }
 tvm_types = { workspace = true }
+sha2 = { workspace = true }
 
 # Daemon-side enrichment (only the `build` binary uses these)
 bridge-prover-lib = { workspace = true }
 bridge-gql-fetcher = { workspace = true }
 gosh-dense-balanced-tree = { workspace = true }
+# Native (non-halo2) helpers for the cross-thread L7 walker in
+# `enrich::resolve_cross_thread_chain`: block_merkle_leaf_proof,
+# proof_block_ref_inner_path_native, ref_leaf_hash_native and the pair of
+# `verify_*` re-checks. These live next to the in-circuit versions so the
+# byte layout stays in lock-step.
+bridge-event-prove-circuit = { workspace = true }
 tokio = { workspace = true }
 
 # Shared

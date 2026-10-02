@@ -7,9 +7,8 @@
 //! The constants are pinned and any drift will surface as a field-level
 //! assertion failure.
 
-use bridge_event_witness::schema::SCHEMA_VERSION;
 use bridge_event_witness::{
-    export_from_event_boc_base64, BlockContextInput,
+    export_from_event_boc_base64, schema::SCHEMA_VERSION, BlockContextInput,
 };
 
 /// First record from `withdrawals.txt`, captured by

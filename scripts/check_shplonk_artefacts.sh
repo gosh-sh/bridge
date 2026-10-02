@@ -24,6 +24,8 @@ fi
 required=(
   BridgeWithdrawalAggregatorVerifier.bin
   BridgeWithdrawalAggregatorVerifier_calldata.bin
+  BridgeMultiHopAggregatorVerifier.bin
+  BridgeMultiHopAggregatorVerifier_calldata.bin
   FallbackAggregatorVerifier.bin
   FallbackAggregatorVerifier_calldata.bin
   LayerHashesAggregatorVerifier.bin
@@ -54,6 +56,7 @@ echo "--- EIP-170 (runtime .bin only) ---"
 warn=0
 for f in \
   BridgeWithdrawalAggregatorVerifier.bin \
+  BridgeMultiHopAggregatorVerifier.bin \
   FallbackAggregatorVerifier.bin \
   LayerHashesAggregatorVerifier.bin \
   PrimaryAggregatorVerifier.bin

@@ -7,7 +7,8 @@ import "../src/MockBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
-import "../src/IBridgeWithdrawalVerifier.sol";
+import "../src/IBridgeWithdrawalFinalVerifier.sol";
+import "../src/IBridgeMultiHopVerifier.sol";
 
 /**
  * @title DeployTestBridge
@@ -38,12 +39,13 @@ contract DeployTestBridge is Script {
             genesisLastSeenBlockSeqNo: 0
         });
         AckiNackiBridge.BridgeWithdrawConfig memory bwDisabled = AckiNackiBridge.BridgeWithdrawConfig({
-            bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),
             dappFr: 0,
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            altTokenId: 0,
+            withdrawalFinalVerifier: IBridgeWithdrawalFinalVerifier(address(0)),
+            multiHopVerifier: IBridgeMultiHopVerifier(address(0))
         });
         AckiNackiBridge bridge = new AckiNackiBridge(
             address(oracle), usdc, address(0), address(0), vbDisabled, bwDisabled

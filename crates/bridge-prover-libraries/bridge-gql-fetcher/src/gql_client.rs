@@ -303,6 +303,11 @@ pub struct GqlProofBlock {
     pub tracked_ext_out_messages_root: [u8; 32],
     pub tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>>,
     pub history_proofs: BTreeMap<u8, [u8; 32]>,
+    /// Ordered block references committed by `block_merkle_tree_leaves[7]`.
+    /// Entry 0 = parent block id; entries 1+ = `CommonSection.refs` in
+    /// canonical order. Consumed by cross-thread hop resolution
+    /// (`bridge-event-witness::enrich::resolve_cross_thread_chain`).
+    pub proof_block_refs: Vec<[u8; 32]>,
     /// 16-leaf SHA-256 block-id Merkle leaves (canonical depth-4 tree, see
     /// `bridge-prover-lib::block_id_tree`). May be absent on very old blocks
     /// that predate the node's exposure of this field. Leaf count is pinned
@@ -546,7 +551,11 @@ impl GqlClient {
         let mut blocks = Vec::new();
         for edge in &edges {
             let node = edge.get("node").unwrap_or(&Value::Null);
-            let hash = node.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let hash = node
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let seq_no = node.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
             blocks.push((hash, seq_no));
         }
@@ -600,8 +609,16 @@ impl GqlClient {
         let mut updates = Vec::new();
         for edge in &edges {
             if let Some(node) = edge.get("node") {
-                let block_id = node.get("block_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let bk_set_update_hex = node.get("bk_set_update").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let block_id = node
+                    .get("block_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let bk_set_update_hex = node
+                    .get("bk_set_update")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let height = node.get("height").and_then(|v| v.as_u64());
                 updates.push(BkSetUpdateWithAttestations {
                     block_id,
@@ -684,8 +701,16 @@ impl GqlClient {
             anyhow::bail!("block at seq_no={} not found", seq_no);
         }
         Ok(BlockMetadata {
-            hash: block.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            envelope_hash: block.get("envelope_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            hash: block
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            envelope_hash: block
+                .get("envelope_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             seq_no: block.get("seq_no").and_then(|v| v.as_u64()).unwrap_or(0),
         })
     }
@@ -708,7 +733,7 @@ impl GqlClient {
                         envelope_hash: String::new(),
                         seq_no: seq,
                     });
-                }
+                },
             }
         }
         Ok(results)
@@ -731,9 +756,8 @@ impl GqlClient {
         first: u32,
         after: Option<&str>,
     ) -> anyhow::Result<(Vec<BkSetUpdateWithAttestations>, Option<String>)> {
-        let height_end = i64::try_from(height_end).context(
-            "bkSetUpdates height_end exceeds the live GraphQL signed Int range",
-        )?;
+        let height_end = i64::try_from(height_end)
+            .context("bkSetUpdates height_end exceeds the live GraphQL signed Int range")?;
         let after_arg = match after {
             Some(cur) => format!(r#", after: "{}""#, cur.replace('"', "\\\"")),
             None => String::new(),
@@ -881,7 +905,10 @@ impl GqlAttestation {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let sig_occ_json = v.get("signature_occurrences").cloned().unwrap_or(Value::Null);
+        let sig_occ_json = v
+            .get("signature_occurrences")
+            .cloned()
+            .unwrap_or(Value::Null);
         let mut signature_occurrences = std::collections::HashMap::new();
         if let Some(obj) = sig_occ_json.as_object() {
             for (k, v) in obj {
@@ -933,8 +960,6 @@ impl BkSetUpdateWithAttestations {
     }
 }
 
-
-
 /// Default thread_id used by the single-thread testbed.
 pub const DEFAULT_THREAD_ID_HEX: &str =
     "00000000000000000000000000000000000000000000000000000000000000000000";
@@ -955,6 +980,7 @@ const PROOF_BLOCK_FRAGMENT: &str = r#"
       layer
       root_hash
     }
+    proof_block_refs
     block_merkle_tree_leaves
   }
 "#;
@@ -975,6 +1001,7 @@ impl GqlClient {
                   tracked_ext_out_messages_root
                   tracked_ext_out_message_hashes {{ routing message_hashes }}
                   history_proofs {{ layer root_hash }}
+                  proof_block_refs
                   block_merkle_tree_leaves
                 }}
               }}
@@ -995,7 +1022,42 @@ impl GqlClient {
 
     /// Fetch a `GqlProofBlock` on the default single-thread testbed by seq_no.
     pub async fn query_proof_block_by_seqno(&self, seqno: u64) -> anyhow::Result<GqlProofBlock> {
-        self.query_block_by_height(DEFAULT_THREAD_ID_HEX, seqno).await
+        self.query_block_by_height(DEFAULT_THREAD_ID_HEX, seqno)
+            .await
+    }
+
+    /// Fetch a `GqlProofBlock` by its `block_id` (32-byte hex hash).
+    /// Backs `bridge-event-witness::enrich::resolve_cross_thread_chain`
+    /// which walks `proof_block_refs` across threads and only has the
+    /// referenced block's id — not its (thread_id, height) pair.
+    pub async fn query_proof_block_by_id(
+        &self,
+        block_id_hex: &str,
+    ) -> anyhow::Result<GqlProofBlock> {
+        let q = format!(
+            r#"{{
+              blockchain {{
+                block(hash: "{block_id_hex}") {{
+                  id block_id thread_id height envelope_hash
+                  tracked_ext_out_messages_root
+                  tracked_ext_out_message_hashes {{ routing message_hashes }}
+                  history_proofs {{ layer root_hash }}
+                  proof_block_refs
+                  block_merkle_tree_leaves
+                }}
+              }}
+            }}"#,
+        );
+        let data = self
+            .query_op("proof_block_by_id", &q, &["/blockchain/block"])
+            .await?;
+        let block = data.pointer("/blockchain/block").ok_or_else(|| {
+            anyhow::format_err!("block(hash={block_id_hex}) returned no field")
+        })?;
+        if block.is_null() {
+            anyhow::bail!("block(hash={block_id_hex}) not found");
+        }
+        parse_proof_block(block)
     }
 
     /// Fetch ALL `Block.attestations[]` entries for the block at
@@ -1032,12 +1094,14 @@ impl GqlClient {
         let atts = block
             .get("attestations")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow::format_err!("block {target_seq_no} missing attestations field"))?;
+            .ok_or_else(|| {
+                anyhow::format_err!("block {target_seq_no} missing attestations field")
+            })?;
         if atts.is_empty() {
             anyhow::bail!(
-                "Block.attestations[] is empty for block seq_no={target_seq_no} — \
-                 producer has not yet committed attestations for this block. \
-                 Retry once a few blocks have been produced past it."
+                "Block.attestations[] is empty for block seq_no={target_seq_no} — producer has \
+                 not yet committed attestations for this block. Retry once a few blocks have been \
+                 produced past it."
             );
         }
         atts.iter()
@@ -1091,9 +1155,21 @@ impl GqlClient {
         let mut out = Vec::with_capacity(edges.len());
         for edge in &edges {
             let node = edge.get("node").unwrap_or(&Value::Null);
-            let id = node.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let boc = node.get("boc").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let dst = node.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = node
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let boc = node
+                .get("boc")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let dst = node
+                .get("dst")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let created_at = node.get("created_at").and_then(|v| v.as_u64());
             let src_dapp_id = node
                 .get("src_dapp_id")
@@ -1176,7 +1252,10 @@ impl GqlClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            key_block: block.get("key_block").and_then(|v| v.as_bool()).unwrap_or(false),
+            key_block: block
+                .get("key_block")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
     }
 
@@ -1210,8 +1289,15 @@ impl GqlClient {
             .iter()
             .filter_map(|m| {
                 let id = m.get("id").and_then(|v| v.as_str())?.to_string();
-                let dst = m.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                Some(GqlOutMessageStub { id, dst })
+                let dst = m
+                    .get("dst")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(GqlOutMessageStub {
+                    id,
+                    dst,
+                })
             })
             .collect();
         Ok(Some(out))
@@ -1269,9 +1355,21 @@ impl GqlClient {
         if m.is_null() {
             return Ok(None);
         }
-        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let boc = m.get("boc").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let dst = m.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = m
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let boc = m
+            .get("boc")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let dst = m
+            .get("dst")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let created_at = m.get("created_at").and_then(|v| v.as_u64());
         let src_dapp_id = m
             .get("src_dapp_id")
@@ -1356,7 +1454,8 @@ pub struct GqlBlockByHash {
 /// `block_seq_no` is not exposed on `BlockAttestation`; the caller matches by
 /// `block_id` after walking forward, then this function fills in the u32 from
 /// the matched record. (Here we set it from the AttestationData JSON if the
-/// schema is later extended; for now we record 0 and the caller will replace it.)
+/// schema is later extended; for now we record 0 and the caller will replace
+/// it.)
 fn parse_block_attestation(
     v: &serde_json::Value,
 ) -> anyhow::Result<crate::attestation_fetcher::ParsedAttestation> {
@@ -1366,7 +1465,11 @@ fn parse_block_attestation(
     let envelope_hash =
         decode_hash32(required_string(v, "envelope_hash")?).context("att.envelope_hash")?;
 
-    let target_type = match v.get("target_type").and_then(|x| x.as_str()).unwrap_or("PRIMARY") {
+    let target_type = match v
+        .get("target_type")
+        .and_then(|x| x.as_str())
+        .unwrap_or("PRIMARY")
+    {
         "PRIMARY" | "Primary" => 0u32,
         "FALLBACK" | "Fallback" => 1u32,
         other => anyhow::bail!("unknown target_type: {other}"),
@@ -1439,9 +1542,8 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
     use std::str::FromStr;
     let id = required_string(value, "id")?.to_string();
     let block_id = decode_hash32(required_string(value, "block_id")?).context("block_id")?;
-    let thread_id =
-        ThreadIdentifier::try_from(required_string(value, "thread_id")?.to_string())
-            .context("thread_id")?;
+    let thread_id = ThreadIdentifier::try_from(required_string(value, "thread_id")?.to_string())
+        .context("thread_id")?;
     let height = parse_u64_field(value, "height")?;
     let envelope_hash =
         decode_hash32(required_string(value, "envelope_hash")?).context("envelope_hash")?;
@@ -1451,7 +1553,10 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
 
     // tracked_ext_out_message_hashes -> BTreeMap<AccountRouting, Vec<[u8;32]>>
     let mut tracked_ext_out_messages: BTreeMap<AccountRouting, Vec<[u8; 32]>> = BTreeMap::new();
-    if let Some(arr) = value.get("tracked_ext_out_message_hashes").and_then(|v| v.as_array()) {
+    if let Some(arr) = value
+        .get("tracked_ext_out_message_hashes")
+        .and_then(|v| v.as_array())
+    {
         for entry in arr {
             let routing = AccountRouting::from_str(required_string(entry, "routing")?)
                 .context("tracked_ext_out_messages routing")?;
@@ -1476,9 +1581,23 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
         for entry in arr {
             let layer = parse_u64_field(entry, "layer")?;
             anyhow::ensure!(layer <= u8::MAX as u64, "history proof layer out of range");
-            let root_hash =
-                decode_hash32(required_string(entry, "root_hash")?).context("history proof root_hash")?;
+            let root_hash = decode_hash32(required_string(entry, "root_hash")?)
+                .context("history proof root_hash")?;
             history_proofs.insert(layer as u8, root_hash);
+        }
+    }
+
+    // proof_block_refs -> Vec<[u8;32]> (entry 0 = parent block id;
+    // entries 1+ = CommonSection.refs). Optional on very old blocks that
+    // predate the node exposing this field.
+    let mut proof_block_refs: Vec<[u8; 32]> = Vec::new();
+    if let Some(arr) = value.get("proof_block_refs").and_then(|v| v.as_array()) {
+        for (i, item) in arr.iter().enumerate() {
+            let s = item.as_str().ok_or_else(|| {
+                anyhow::format_err!("proof_block_refs[{i}] is not a string")
+            })?;
+            proof_block_refs
+                .push(decode_hash32(s).with_context(|| format!("proof_block_refs[{i}]"))?);
         }
     }
 
@@ -1496,10 +1615,11 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
                 let s = item.as_str().ok_or_else(|| {
                     anyhow::format_err!("block_merkle_tree_leaves[{i}] is not a string")
                 })?;
-                out[i] = decode_hash32(s).with_context(|| format!("block_merkle_tree_leaves[{i}]"))?;
+                out[i] =
+                    decode_hash32(s).with_context(|| format!("block_merkle_tree_leaves[{i}]"))?;
             }
             Some(out)
-        }
+        },
         _ => None,
     };
 
@@ -1512,6 +1632,7 @@ fn parse_proof_block(value: &serde_json::Value) -> anyhow::Result<GqlProofBlock>
         tracked_ext_out_messages_root,
         tracked_ext_out_messages,
         history_proofs,
+        proof_block_refs,
         block_merkle_tree_leaves,
     })
 }
@@ -1523,7 +1644,9 @@ fn required_string<'a>(v: &'a serde_json::Value, field: &str) -> anyhow::Result<
 }
 
 fn parse_u64_field(v: &serde_json::Value, field: &str) -> anyhow::Result<u64> {
-    let val = v.get(field).ok_or_else(|| anyhow::format_err!("missing field `{field}`"))?;
+    let val = v
+        .get(field)
+        .ok_or_else(|| anyhow::format_err!("missing field `{field}`"))?;
     if let Some(n) = val.as_u64() {
         return Ok(n);
     }
@@ -1531,7 +1654,10 @@ fn parse_u64_field(v: &serde_json::Value, field: &str) -> anyhow::Result<u64> {
         return u64::try_from(n).with_context(|| format!("{field} is negative"));
     }
     if let Some(n) = val.as_f64() {
-        anyhow::ensure!(n.is_finite() && n >= 0.0 && n.fract() == 0.0, "{field} not an integer");
+        anyhow::ensure!(
+            n.is_finite() && n >= 0.0 && n.fract() == 0.0,
+            "{field} not an integer"
+        );
         return Ok(n as u64);
     }
     anyhow::bail!("{field} is not a number")

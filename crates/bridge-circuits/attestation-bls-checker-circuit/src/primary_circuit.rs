@@ -1,8 +1,12 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
-use halo2_base::halo2_proofs::halo2curves::bls12_381::{G1Affine, G2Affine};
-use halo2_base::utils::BigPrimeField;
+use bridge_poseidon::{compute_bk_set_commitment_padded, PADDING_SIGNER_INDEX};
+use gosh_bls_verification::{
+    compute_all_pub_sum,
+    helpers::{deserialize_g1_pubkey, deserialize_g2_signature, DST},
+    load_bk_set_pubkeys, verify_bls_attestation_with_assigned_msghash, ThresholdMode,
+};
+use gosh_sha256_chip::Sha256Chip;
 use halo2_base::{
     gates::{
         circuit::{builder::BaseCircuitBuilder, BaseCircuitParams},
@@ -10,28 +14,23 @@ use halo2_base::{
     },
     halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner},
+        halo2curves::bls12_381::{G1Affine, G2Affine},
         plonk::{Circuit, ConstraintSystem, Error},
     },
+    utils::BigPrimeField,
     AssignedValue, QuantumCell,
 };
-use halo2_ecc::bls12_381::{Fp2Chip, FpChip};
-use halo2_ecc::ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip};
-use gosh_sha256_chip::Sha256Chip;
-use gosh_bls_verification::{
-    compute_all_pub_sum, load_bk_set_pubkeys,
-    verify_bls_attestation_with_assigned_msghash, ThresholdMode,
+use halo2_ecc::{
+    bls12_381::{Fp2Chip, FpChip},
+    ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip},
 };
-use gosh_bls_verification::helpers::{deserialize_g1_pubkey, deserialize_g2_signature, DST};
 
-use crate::attestation_data_parser::{
-    parse_attestation_data_bytes, parse_signature_bytes, parse_signer_entries,
-};
-use bridge_poseidon::{compute_bk_set_commitment_padded, PADDING_SIGNER_INDEX};
 use crate::{
-    constraint_block_seqno_gt_last_seen,
-    AttestationBlsCheckerCircuitParams, AttestationBlsCheckerConfig,
-    ATTESTATION_DATA_LEN, BLOCK_ID_REL_OFFSET,
-    TARGET_TYPE_REL_OFFSET,
+    attestation_data_parser::{
+        parse_attestation_data_bytes, parse_signature_bytes, parse_signer_entries,
+    },
+    constraint_block_seqno_gt_last_seen, AttestationBlsCheckerCircuitParams,
+    AttestationBlsCheckerConfig, ATTESTATION_DATA_LEN, BLOCK_ID_REL_OFFSET, TARGET_TYPE_REL_OFFSET,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,12 +57,17 @@ pub(crate) fn build_primary_constraints<F: BigPrimeField>(
     num_limbs: usize,
     last_seen_block_seqno: u32,
     actual_bk_set_size: usize,
-) -> (AssignedValue<F>, AssignedValue<F>, AssignedValue<F>, AssignedValue<F>) {
+) -> (
+    AssignedValue<F>,
+    AssignedValue<F>,
+    AssignedValue<F>,
+    AssignedValue<F>,
+) {
     let range = builder.range_chip();
 
-    // Load attestation_data bytes as witnesses (exactly ATTESTATION_DATA_LEN bytes).
-    let attestation_data =
-        &parse_attestation_data_bytes(attestation_bytes)[..ATTESTATION_DATA_LEN];
+    // Load attestation_data bytes as witnesses (exactly ATTESTATION_DATA_LEN
+    // bytes).
+    let attestation_data = &parse_attestation_data_bytes(attestation_bytes)[..ATTESTATION_DATA_LEN];
     let assigned_msg: Vec<AssignedValue<F>> = {
         let ctx = builder.main(0);
         attestation_data
@@ -82,22 +86,22 @@ pub(crate) fn build_primary_constraints<F: BigPrimeField>(
     //      (`acki-nacki/node/src/types/ackinacki_block/merkle.rs`):
     //      `hasher.finalize().into()` — raw BE bytes, no reversal.
     //    * AN external emission (`node/libs/node-types/src/u256.rs`):
-    //      `hex::encode(self.0)` on those BE bytes → the hex string the
-    //      relayer sees is `hex(sha256_output)`.
+    //      `hex::encode(self.0)` on those BE bytes → the hex string the relayer
+    //      sees is `hex(sha256_output)`.
     //    * AN bincode of `BlockIdentifier` inside `AttestationData`
-    //      (`node/src/node/associated_types.rs` + `u256.rs` `ser = bytes`):
-    //      the same BE bytes are written verbatim into the attestation
-    //      payload we read here — so `assigned_msg[BLOCK_ID_REL_OFFSET..]`
-    //      contains the SHA-256 digest in its natural BE byte order.
-    //    * On-chain (`AckiNackiBridge.verifyBlock(bytes32 blockId, ...)`):
-    //      the single `blockId` argument is fed to *both*
+    //      (`node/src/node/associated_types.rs` + `u256.rs` `ser = bytes`): the
+    //      same BE bytes are written verbatim into the attestation payload we read
+    //      here — so `assigned_msg[BLOCK_ID_REL_OFFSET..]` contains the SHA-256
+    //      digest in its natural BE byte order.
+    //    * On-chain (`AckiNackiBridge.verifyBlock(bytes32 blockId, ...)`): the
+    //      single `blockId` argument is fed to *both*
     //      `primaryVerifier.verifyPrimaryAttestation` and
     //      `layerHashesVerifier.verifyLayerHashesMovement`. Solidity's
-    //      `uint256(bytes32)` cast is the natural BE-integer reading — the
-    //      same as `Σ byte[i] · 256^(31 - i)`.
+    //      `uint256(bytes32)` cast is the natural BE-integer reading — the same as
+    //      `Σ byte[i] · 256^(31 - i)`.
     //    * Circuit 2 (`historical-layer-hashes-movement-checker`) folds
-    //      `reverse(sha256_root)` with `Σ byte[i] · 256^i`, producing
-    //      exactly that value.
+    //      `reverse(sha256_root)` with `Σ byte[i] · 256^i`, producing exactly that
+    //      value.
     //
     //    Halo2's `inner_product(bytes, [256^i])` is a *little-endian* fold;
     //    to obtain the BE-integer reading of natural-BE payload bytes we
@@ -106,11 +110,13 @@ pub(crate) fn build_primary_constraints<F: BigPrimeField>(
     let block_id_fr = {
         let ctx = builder.main(0);
         let gate = range.gate();
-        let block_id_cells =
-            &assigned_msg[BLOCK_ID_REL_OFFSET..BLOCK_ID_REL_OFFSET + 32];
+        let block_id_cells = &assigned_msg[BLOCK_ID_REL_OFFSET..BLOCK_ID_REL_OFFSET + 32];
         gate.inner_product(
             ctx,
-            block_id_cells.iter().rev().map(|&b| QuantumCell::Existing(b)),
+            block_id_cells
+                .iter()
+                .rev()
+                .map(|&b| QuantumCell::Existing(b)),
             (0..32).map(|i| QuantumCell::Constant(F::from(256u64).pow([i as u64]))),
         )
     };
@@ -132,9 +138,8 @@ pub(crate) fn build_primary_constraints<F: BigPrimeField>(
     }
 
     // A''. Constrain block_seq_no > last_seen_block_seqno.
-    let (block_seq_no_fr, last_seen_seqno) = constraint_block_seqno_gt_last_seen(
-        builder, &range, &assigned_msg, last_seen_block_seqno,
-    );
+    let (block_seq_no_fr, last_seen_seqno) =
+        constraint_block_seqno_gt_last_seen(builder, &range, &assigned_msg, last_seen_block_seqno);
 
     // B. Load BK set pubkeys as assigned cells.
     let assigned_pks = {
@@ -148,8 +153,9 @@ pub(crate) fn build_primary_constraints<F: BigPrimeField>(
         compute_all_pub_sum(ctx, &range, &assigned_pks, limb_bits, num_limbs)
     };
 
-    // C. Poseidon commitment to old BK set (also yields n_real_pubkeys for threshold).
-    //    Must happen before BLS verification so n_real_pubkeys is available.
+    // C. Poseidon commitment to old BK set (also yields n_real_pubkeys for
+    // threshold).    Must happen before BLS verification so n_real_pubkeys is
+    // available.
     let (bk_set_commitment, n_real_pubkeys) = compute_bk_set_commitment_padded(
         builder,
         &range,
@@ -196,7 +202,12 @@ pub(crate) fn build_primary_constraints<F: BigPrimeField>(
         );
     }
 
-    (block_id_fr, bk_set_commitment, block_seq_no_fr, last_seen_seqno)
+    (
+        block_id_fr,
+        bk_set_commitment,
+        block_seq_no_fr,
+        last_seen_seqno,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +317,9 @@ impl<F: BigPrimeField> PrimaryAttestationBlsCheckerCircuit<F> {
     /// Override the base circuit params (e.g., to use a shared vk/pk).
     pub fn override_base_circuit_params(&mut self, base_params: BaseCircuitParams) {
         self.params.base_circuit_params = base_params.clone();
-        self.base_circuit_builder.borrow_mut().set_params(base_params);
+        self.base_circuit_builder
+            .borrow_mut()
+            .set_params(base_params);
     }
 
     fn calculate_base_circuit_params(
@@ -406,11 +419,7 @@ impl<F: BigPrimeField> Circuit<F> for PrimaryAttestationBlsCheckerCircuit<F> {
         unreachable!("Use configure_with_params")
     }
 
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        layouter: impl Layouter<F>,
-    ) -> Result<(), Error> {
+    fn synthesize(&self, config: Self::Config, layouter: impl Layouter<F>) -> Result<(), Error> {
         self.generate_witnesses();
         self.base_circuit_builder
             .borrow()
@@ -426,18 +435,17 @@ impl<F: BigPrimeField> Circuit<F> for PrimaryAttestationBlsCheckerCircuit<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{K, LOOKUP_BITS, NUM_UNUSABLE_ROWS};
+    use std::time::Instant;
+
     use bridge_poseidon::{LIMB_BITS, MAX_SIGNERS, NUM_LIMBS};
+    use bridge_test_data_gen::generator::TestData;
     use gosh_bls_verification::helpers::{
         compute_agg_pubkey, compute_msg_hash, resolve_pubkeys, verify_bls_native,
     };
     use halo2_base::halo2_proofs::{dev::MockProver, halo2curves::bn256::Fr};
 
-    use crate::test_instances::expected_public_instances;
-
-    use bridge_test_data_gen::generator::TestData;
-    use std::time::Instant;
+    use super::*;
+    use crate::{test_instances::expected_public_instances, K, LOOKUP_BITS, NUM_UNUSABLE_ROWS};
 
     /// One "should-pass" mock case for the primary circuit: a label + a
     /// closure that materialises the test data (panicking on failure) +
@@ -632,10 +640,11 @@ mod tests {
         }
     }
 
-    /// Heavy scaling sweep (500 / 700 / 1000 / 2000 signers). Marked `#[ignore]`
-    /// because it takes ~7+ minutes and several GB of RAM.
+    /// Heavy scaling sweep (500 / 700 / 1000 / 2000 signers). Marked
+    /// `#[ignore]` because it takes ~7+ minutes and several GB of RAM.
     /// Run with: `cargo test -p attestation-bls-checker-circuit
-    ///   test_primary_attestation_bls_checker_mock_scaling -- --ignored --nocapture`
+    ///   test_primary_attestation_bls_checker_mock_scaling -- --ignored
+    /// --nocapture`
     #[test]
     #[ignore]
     fn test_primary_attestation_bls_checker_mock_scaling() {
@@ -654,11 +663,8 @@ mod tests {
             bridge_test_data_gen::generator::generate_test_data_primary_below_threshold(10)
                 .expect("generate_test_data_primary_below_threshold failed");
 
-        let (last_seen_block_seqno, instances) = expected_public_instances(
-            &test_data.attestation_bytes,
-            &test_data.bk_set,
-            MAX_SIGNERS,
-        );
+        let (last_seen_block_seqno, instances) =
+            expected_public_instances(&test_data.attestation_bytes, &test_data.bk_set, MAX_SIGNERS);
 
         let circuit = PrimaryAttestationBlsCheckerCircuit::<Fr>::new(
             test_data.attestation_bytes,

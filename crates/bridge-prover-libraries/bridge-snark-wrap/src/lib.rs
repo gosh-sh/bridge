@@ -11,9 +11,9 @@
 //! `real_chain_builder`, and re-proved the same witness — doubling the
 //! GQL fetches, chain builds, and Halo2 proves per key block.
 //!
-//! The double-proving was avoidable: `bridge-prover-lib`'s Halo2 provers already
-//! accept a [`bridge_prover_lib::transcript::TranscriptKind`] parameter, so the
-//! daemon can request Poseidon-transcript bytes directly from
+//! The double-proving was avoidable: `bridge-prover-lib`'s Halo2 provers
+//! already accept a [`bridge_prover_lib::transcript::TranscriptKind`]
+//! parameter, so the daemon can request Poseidon-transcript bytes directly from
 //! [`bridge_prover_lib::live_driver::LiveProverDriver::poll_next_bundle`] by
 //! setting `LiveProverConfig.transcript = TranscriptKind::Poseidon`. What was
 //! missing was an in-process way to wrap those raw proof bytes into a
@@ -26,15 +26,15 @@
 //! that dep to the AN-side `bridge-prover-daemon` (which produces Blake2b
 //! bytes for IPC and never needs the wrap).
 //!
-//! It must live as a member of the `bridge-prover-libraries` cargo workspace (not a
-//! standalone `[workspace]` root like `bridge-evm-aggregator`) so the workspace-
-//! root `[patch]` rewrites for `halo2-base` / `halo2-ecc` in
-//! `bridge-prover-libraries/Cargo.toml` apply. Without those patches, `snark-verifier`
-//! would resolve halo2-base to axiom's crate, which cannot read the partner
-//! `*_vk.bin` VK bytes emitted by `bridge-prover-lib` (`SerdeFormat::RawBytesUnchecked`
-//! against `BaseCircuitBuilder<Fr>` from the gosh fork). Same reason
-//! `halo2_snark.rs` lives inside `bridge-snark-utils` and not
-//! `bridge-evm-aggregator`.
+//! It must live as a member of the `bridge-prover-libraries` cargo workspace
+//! (not a standalone `[workspace]` root like `bridge-evm-aggregator`) so the
+//! workspace- root `[patch]` rewrites for `halo2-base` / `halo2-ecc` in
+//! `bridge-prover-libraries/Cargo.toml` apply. Without those patches,
+//! `snark-verifier` would resolve halo2-base to axiom's crate, which cannot
+//! read the partner `*_vk.bin` VK bytes emitted by `bridge-prover-lib`
+//! (`SerdeFormat::RawBytesUnchecked` against `BaseCircuitBuilder<Fr>` from the
+//! gosh fork). Same reason `halo2_snark.rs` lives inside `bridge-snark-utils`
+//! and not `bridge-evm-aggregator`.
 //!
 //! # API
 //!
@@ -47,11 +47,7 @@
 //!   output to `export_1a1b2_poseidon_snark::finish`, kept so existing CLI
 //!   tooling can migrate off the subprocess incrementally.
 
-use std::{
-    fs::File,
-    io::BufReader,
-    path::Path,
-};
+use std::{fs::File, io::BufReader, path::Path};
 
 use anyhow::Context;
 use halo2_base::{
@@ -74,7 +70,8 @@ const SERDE_FMT: SerdeFormat = SerdeFormat::RawBytesUnchecked;
 /// return the bincode-serialized bytes.
 ///
 /// The caller writes the return value to disk (e.g. a `NamedTempFile`) and
-/// hands the path to `bridge-evm-aggregator::aggregate-proof` as `--inner-snark`.
+/// hands the path to `bridge-evm-aggregator::aggregate-proof` as
+/// `--inner-snark`.
 ///
 /// # Arguments
 ///
@@ -84,9 +81,9 @@ const SERDE_FMT: SerdeFormat = SerdeFormat::RawBytesUnchecked;
 /// * `srs_k_override` — force this SRS degree instead of `config.k`. Required
 ///   for the layer circuit whose VK was keygen'd against the shared K=20
 ///   ceremony SRS while `layer_config_params.json` records `k=17`; without an
-///   override, `snark_verifier::system::halo2::compile` panics with
-///   `assertion left(20) == right(17)`. Pass `Some(20)` for `layer_hashes`;
-///   leave `None` for circuits where `config.k` matches the SRS.
+///   override, `snark_verifier::system::halo2::compile` panics with `assertion
+///   left(20) == right(17)`. Pass `Some(20)` for `layer_hashes`; leave `None`
+///   for circuits where `config.k` matches the SRS.
 /// * `proof_bytes` — raw Poseidon-transcript proof (from
 ///   `bridge_prover_lib::prover` / `layer_prover`).
 /// * `instances` — public instance Fr vector (in the same order the aggregator
@@ -136,8 +133,9 @@ pub fn wrap_poseidon_snark_in_memory(
 }
 
 /// File-oriented variant of [`wrap_poseidon_snark_in_memory`]. Byte-identical
-/// output to the original `bridge-snark-utils::halo2_snark::export_poseidon_snark_with_srs_k`,
-/// kept so existing paths that already have proof + snark on disk can migrate
+/// output to the original
+/// `bridge-snark-utils::halo2_snark::export_poseidon_snark_with_srs_k`, kept so
+/// existing paths that already have proof + snark on disk can migrate
 /// off the subprocess incrementally.
 pub fn wrap_poseidon_snark_from_files(
     vk_path: &Path,
@@ -149,13 +147,8 @@ pub fn wrap_poseidon_snark_from_files(
 ) -> anyhow::Result<()> {
     let proof = std::fs::read(proof_path)
         .with_context(|| format!("read proof {}", proof_path.display()))?;
-    let snark_bytes = wrap_poseidon_snark_in_memory(
-        vk_path,
-        config_path,
-        srs_k_override,
-        &proof,
-        instances,
-    )?;
+    let snark_bytes =
+        wrap_poseidon_snark_in_memory(vk_path, config_path, srs_k_override, &proof, instances)?;
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

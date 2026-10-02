@@ -2800,14 +2800,32 @@ pub(crate) mod tests {
     }
 
     /// The pre-burn window-heights read passes on empty windows (where it
-    /// sends the scan's first `eth_getLogs` as a probe), and a node that
-    /// cannot serve it refuses naming the two knobs to check.
+    /// sends the scan's first `eth_getLogs` as a probe), refuses a deploy
+    /// block above the head, and a node that cannot serve it refuses naming
+    /// the two knobs to check.
     #[tokio::test]
     async fn window_scan_passes_on_empty_windows_and_names_the_knobs_on_failure() {
         let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
         check_window_scan(&url, Address::repeat_byte(1), LogScanConfig::default())
             .await
             .unwrap();
+
+        // A deploy block above the mock's head (0x10): refused before any
+        // scan, even though the bridge has no anchors yet.
+        let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
+        let above_head = LogScanConfig {
+            deploy_block: 100,
+            ..LogScanConfig::default()
+        };
+        let err = check_window_scan(&url, Address::repeat_byte(1), above_head)
+            .await
+            .unwrap_err();
+        match err {
+            CliError::Preflight {
+                reason, ..
+            } => assert!(reason.contains("above the chain head"), "{reason}"),
+            other => panic!("expected a preflight refusal, got {other:?}"),
+        }
 
         let url = mock_rpc(SOME_CODE, std::collections::HashMap::new()).await;
         let err = check_window_scan(&url, Address::repeat_byte(1), LogScanConfig::default())

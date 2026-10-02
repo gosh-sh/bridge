@@ -33,7 +33,7 @@ use anyhow::{Context, Result};
 use bridge_event_witness::AnchorLayerMode;
 use bridge_prover_lib::{bridge_state::BridgeState, AnchorMode};
 use bridge_relayer_daemon::bridge::{EthBridgeClient, HISTORY_PROOF_WINDOW};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Resolve the anchoring stride the CLI should wait against. See module
 /// docstring for the Auto-vs-Explicit-2 caveat.
@@ -89,10 +89,22 @@ pub fn covering_bundle_seq_no(burn_seq_no: u64, stride: u64) -> u64 {
     (burn_seq_no / stride) * stride + stride
 }
 
+/// Rounds [`wait_for_coverage`] may run past its deadline once `latest` has
+/// shown the target, so that a pinned snapshot still behind it can catch
+/// up. A hard bound: it counts every round past the deadline, failed reads
+/// included.
+pub const GRACE_ROUNDS_BEHIND_LATEST: u32 = 5;
+
 /// Poll `AckiNackiBridge` until it has advanced past `target_seq_no`
 /// (the covering bundle for the burn), then return the resurrected
-/// `BridgeState` snapshot at that moment. Errors on RPC failure or
-/// deadline expiry.
+/// `BridgeState` snapshot at that moment. Errors on deadline expiry, or
+/// when the contract's windows cannot be mirrored.
+///
+/// RPC errors inside the budget cost a round, not the run: the burn is
+/// already recorded, so a failed poll or a failed snapshot read is retried
+/// on the next round until the deadline. Once `latest` has shown the
+/// target, a pinned snapshot still behind it is given a few rounds past the
+/// deadline to catch up ([`GRACE_ROUNDS_BEHIND_LATEST`]).
 ///
 /// The returned state is byte-for-byte the contract mirror — safe to
 /// hand straight to
@@ -111,69 +123,113 @@ where
     let deadline = Instant::now() + total_wait;
     let level = anchor_level_for(anchor);
     let mut attempt: u32 = 0;
+    // Rounds in which `latest` showed the target but the pinned snapshot
+    // did not yet (for the messages), whether `latest` has shown the target
+    // at all (what earns the grace), and the rounds spent past the deadline
+    // (what bounds it).
+    let mut rounds_behind_latest: u32 = 0;
+    let mut seen_at_latest = false;
+    let mut rounds_past_deadline: u32 = 0;
+    // What the last successful poll saw, for the messages below.
+    let mut last_seen: Option<u64> = None;
     loop {
         attempt += 1;
         // One `storedLastSeenBlockSeqNo` call per poll. The full snapshot
         // (10 windows plus the `LayerAnchorAppended` scan from the deploy
-        // block) is read once, below, after coverage is reached.
-        let mut observed = client
-            .stored_last_seen_block_seq_no()
-            .await
-            .context("EthBridgeClient::stored_last_seen_block_seq_no")?;
-        info!(
-            attempt,
-            observed_last_seen = observed,
-            target_covering_seq_no = target_seq_no,
-            anchor_level = level,
-            "polled AckiNackiBridge",
-        );
-        if observed >= target_seq_no {
-            let cfs = client
-                .read_full_state()
-                .await
-                .context("EthBridgeClient::read_full_state")?;
-            // The poll read `latest`; the snapshot is pinned to its own
-            // head. Behind a load-balanced RPC that head can still predate
-            // the covering bundle, and a state without the anchor fails
-            // the enricher after the burn. Poll on instead.
-            if cfs.last_seen_block_seq_no < target_seq_no {
+        // block) is read once, below, after coverage is reached. An RPC
+        // error here costs a round, not the run: the burn is already on
+        // the wire, and the deadline bounds the retries.
+        match client.stored_last_seen_block_seq_no().await {
+            Err(e) => {
+                warn!(
+                    attempt,
+                    error = %e,
+                    "storedLastSeenBlockSeqNo poll failed; retrying after the poll interval",
+                );
+            },
+            Ok(observed) => {
+                last_seen = Some(observed);
                 info!(
+                    attempt,
                     observed_last_seen = observed,
-                    snapshot_last_seen = cfs.last_seen_block_seq_no,
                     target_covering_seq_no = target_seq_no,
-                    "snapshot predates coverage seen at latest; polling on",
+                    anchor_level = level,
+                    "polled AckiNackiBridge",
                 );
-                // The snapshot is the authoritative read; the sleep and
-                // deadline messages below report it, not the `latest` poll.
-                observed = cfs.last_seen_block_seq_no;
-            } else {
-                let state = BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level).context(
-                    "BridgeState::from_contract failed — on-chain layer window shape does not \
-                     match HISTORY_PROOF_WINDOW (128)",
-                )?;
-                info!(
-                    observed_last_seen = observed,
-                    stored_last_seen_block_seq_no = state.stored_last_seen_block_seq_no,
-                    num_active_layers = state.num_active_layers(),
-                    "coverage reached — resurrected BridgeState from contract",
-                );
-                return Ok(state);
-            }
+                if observed >= target_seq_no {
+                    seen_at_latest = true;
+                    match client.read_full_state().await {
+                        Err(e) => {
+                            warn!(
+                                attempt,
+                                error = %e,
+                                "read_full_state failed after coverage was seen at latest; \
+                                 retrying after the poll interval",
+                            );
+                        },
+                        // The poll read `latest`; the snapshot is pinned to
+                        // its own head. Behind a load-balanced RPC that head
+                        // can still predate the covering bundle, and a state
+                        // without the anchor fails the enricher after the
+                        // burn. Poll on instead.
+                        Ok(cfs) if cfs.last_seen_block_seq_no < target_seq_no => {
+                            rounds_behind_latest += 1;
+                            info!(
+                                observed_last_seen = observed,
+                                snapshot_last_seen = cfs.last_seen_block_seq_no,
+                                target_covering_seq_no = target_seq_no,
+                                rounds_behind_latest,
+                                "snapshot predates coverage seen at latest; polling on",
+                            );
+                        },
+                        Ok(cfs) => {
+                            let state =
+                                BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level)
+                                    .context(
+                                        "BridgeState::from_contract failed — on-chain layer \
+                                         window shape does not match HISTORY_PROOF_WINDOW (128)",
+                                    )?;
+                            info!(
+                                observed_last_seen = observed,
+                                stored_last_seen_block_seq_no = state.stored_last_seen_block_seq_no,
+                                num_active_layers = state.num_active_layers(),
+                                "coverage reached — resurrected BridgeState from contract",
+                            );
+                            return Ok(state);
+                        },
+                    }
+                }
+            },
         }
         let now = Instant::now();
-        if now >= deadline {
-            anyhow::bail!(
-                "wait_for_coverage: gave up after {attempt} polls — contract at \
-                 last_seen={observed}, need >= {target_seq_no} (stride={}, wait_budget={:?})",
-                stride_for(anchor),
-                total_wait,
-            );
+        let past_deadline = now >= deadline;
+        if past_deadline {
+            rounds_past_deadline += 1;
+            // Once `latest` has shown the target, a snapshot still behind it
+            // is a matter of the next block, not of the budget: allow a few
+            // rounds past the deadline, failed reads included, before
+            // giving up.
+            if !seen_at_latest || rounds_past_deadline > GRACE_ROUNDS_BEHIND_LATEST {
+                anyhow::bail!(
+                    "wait_for_coverage: gave up after {attempt} polls — contract at last_seen={} \
+                     (last successful poll), need >= {target_seq_no}, snapshot behind latest for \
+                     {rounds_behind_latest} rounds, {rounds_past_deadline} rounds past the \
+                     deadline (stride={}, wait_budget={:?})",
+                    last_seen.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+                    stride_for(anchor),
+                    total_wait,
+                );
+            }
         }
-        let remaining = deadline.duration_since(now);
-        let sleep = poll_interval.min(remaining);
+        let remaining = deadline.saturating_duration_since(now);
+        let sleep = if past_deadline {
+            poll_interval
+        } else {
+            poll_interval.min(remaining)
+        };
         info!(
             attempt,
-            observed_last_seen = observed,
+            last_seen = last_seen.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
             target_covering_seq_no = target_seq_no,
             sleep_s = sleep.as_secs(),
             remaining_s = remaining.as_secs(),

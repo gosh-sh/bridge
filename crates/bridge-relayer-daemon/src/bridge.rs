@@ -100,9 +100,14 @@ const GET_LOGS_PROGRESS_EVERY: usize = 200;
 /// [`EthBridgeClient::read_full_state`] pins every read to one block; a
 /// lagging backend behind a load-balanced RPC may answer "header not found"
 /// for it, omit the newest log, or reject the newest span, so the whole
-/// snapshot is read up to this many times (a short log set re-walks the
-/// whole range each time).
+/// snapshot is read up to this many times.
 const READ_FULL_STATE_ATTEMPTS: u32 = 3;
+/// Reads of the snapshot when the failure was a short log set: each
+/// re-read walks the whole range again, so it gets at most one. A backend
+/// still behind on that re-read is left to the callers, which all retry at
+/// a higher level: the CLI's coverage rounds after the burn, an exit-2
+/// re-run in preflight, a container restart for `daemon-live`.
+const SHORT_LOG_SET_ATTEMPTS: u32 = 2;
 const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 2_000;
 
 /// How the `LayerAnchorAppended` scan of [`EthBridgeClient::read_full_state`]
@@ -1348,12 +1353,14 @@ where
     /// lagging backend is reported instead of mis-painted. A failed
     /// snapshot is re-read a few times whenever a fresh one can succeed: a
     /// pinned read the backend cannot serve yet, a slot or `lastHeight`
-    /// mismatch, fewer logs than entries (a backend one block behind; each
-    /// re-read is a full walk), and a rejected newest span, which on a
-    /// deterministic span cap costs two extra short reads before the same
-    /// refusal. A chunk below the newest that the RPC rejected or that ran
-    /// out of its attempts returns at once: re-reading would repeat the
-    /// whole walk.
+    /// mismatch, fewer logs than entries (a backend one block behind; this
+    /// one is re-read at most once, since each re-read is a full walk), and a
+    /// rejected newest span, which on a deterministic span cap costs two
+    /// extra short reads before the same refusal. A deploy block above the
+    /// chain head is refused before any scan (re-read a couple of times,
+    /// since right after a deploy a lagging backend can answer a head below
+    /// it). A chunk below the newest that the RPC rejected or that ran out
+    /// of its attempts returns at once.
     ///
     /// Callers: `daemon-live` once at startup; the withdrawal CLI in
     /// preflight and after each coverage poll (one scalar call per round)
@@ -1364,15 +1371,28 @@ where
             attempt += 1;
             match self.read_full_state_once().await {
                 Ok(state) => return Ok(state),
-                Err(SnapshotError::Transient(e)) if attempt < READ_FULL_STATE_ATTEMPTS => {
+                Err(SnapshotError::Transient {
+                    err,
+                    full_walk,
+                }) if attempt
+                    < if full_walk {
+                        SHORT_LOG_SET_ATTEMPTS
+                    } else {
+                        READ_FULL_STATE_ATTEMPTS
+                    } =>
+                {
                     tracing::warn!(
                         attempt,
-                        error = %e,
+                        full_walk,
+                        error = %err,
                         "read_full_state failed; retrying the pinned snapshot"
                     );
                     tokio::time::sleep(Duration::from_millis(READ_FULL_STATE_RETRY_DELAY_MS)).await;
                 },
-                Err(SnapshotError::Transient(e)) | Err(SnapshotError::Final(e)) => return Err(e),
+                Err(SnapshotError::Transient {
+                    err, ..
+                })
+                | Err(SnapshotError::Final(err)) => return Err(err),
             }
         }
     }
@@ -1386,13 +1406,25 @@ where
             .get_block_number()
             .await
             .map_err(|e| {
-                SnapshotError::Transient(RelayerError::other(format!("get_block_number: {e}")))
+                SnapshotError::transient(RelayerError::other(format!("get_block_number: {e}")))
             })?;
+        // Checked before the scan, which an empty bridge would skip: a
+        // bound above the head collapses the walk to the head block once
+        // anchors exist, and the CLI's preflight must see that now. Cheap
+        // to re-read: right after a deploy a lagging backend can answer a
+        // head below the real deploy block.
+        if self.scan.deploy_block > head {
+            return Err(SnapshotError::transient(RelayerError::other(format!(
+                "{BRIDGE_DEPLOY_BLOCK_ENV}={} is above the chain head {head}: it must be the \
+                 block the bridge was deployed in",
+                self.scan.deploy_block
+            ))));
+        }
         let at = BlockId::from(head);
         let scalars = self
             .read_state_at(at)
             .await
-            .map_err(SnapshotError::Transient)?;
+            .map_err(SnapshotError::transient)?;
 
         // Read all 10 layer windows at `head`.
         // `HistoryWindow` on the sol! side has fixed-size arrays that
@@ -1413,7 +1445,7 @@ where
                 .call()
                 .await
                 .map_err(map_contract_err)
-                .map_err(SnapshotError::Transient)?;
+                .map_err(SnapshotError::transient)?;
             let data: Vec<[u8; 32]> = w
                 .data
                 .iter()
@@ -1536,7 +1568,7 @@ where
                         // lagging backend may not have yet: re-pin and
                         // re-read. Any other chunk fails the same way again.
                         return Err(if end == to {
-                            SnapshotError::Transient(err)
+                            SnapshotError::transient(err)
                         } else {
                             SnapshotError::Final(err)
                         });
@@ -1594,11 +1626,15 @@ where
         );
         paint_heights_from_events(windows, &events).map_err(|e| {
             let transient = e.is_transient();
+            let full_walk = matches!(e, PaintError::Short { .. });
             let err = RelayerError::other(format!(
                 "{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)"
             ));
             if transient {
-                SnapshotError::Transient(err)
+                SnapshotError::Transient {
+                    err,
+                    full_walk,
+                }
             } else {
                 SnapshotError::Final(err)
             }
@@ -1611,13 +1647,24 @@ where
 #[derive(Debug)]
 enum SnapshotError {
     /// A pinned read the backend could not serve yet, logs and window
-    /// snapshot that disagree, fewer logs than entries (re-walked in full),
-    /// or a rejected newest span: re-read.
-    Transient(RelayerError),
+    /// snapshot that disagree, fewer logs than entries, or a rejected
+    /// newest span: re-read. `full_walk` marks the short-log case, whose
+    /// re-read walks the whole range again and is therefore done once.
+    Transient { err: RelayerError, full_walk: bool },
     /// A chunk below the newest that the RPC rejected or that ran out of
     /// its attempts, or a window shape the ring cannot take: re-reading
     /// would repeat the whole walk.
     Final(RelayerError),
+}
+
+impl SnapshotError {
+    /// A transient failure whose re-read is cheap (not a full walk).
+    fn transient(err: RelayerError) -> Self {
+        Self::Transient {
+            err,
+            full_walk: false,
+        }
+    }
 }
 
 /// Outcome of [`EthBridgeClient::submit_withdraw`].

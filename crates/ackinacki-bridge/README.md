@@ -640,9 +640,11 @@ specific reason. Common causes:
   more via Step 2 (bump the amount inside `deploy_msig_and_mint.py`
   if you need more than the 1 USDC default)
 - USDCBridge account_id does not resolve via GQL
-- the window-heights read fails: a wrong `BRIDGE_DEPLOY_BLOCK`, an
-  `eth_getLogs` span your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or
-  an RPC without log history
+- the window-heights read fails: a wrong `BRIDGE_DEPLOY_BLOCK` (above the
+  chain head, or after the oldest anchor the bridge's windows still hold),
+  an `eth_getLogs` span
+  your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or an RPC without log
+  history
 
 **Remediation:** fix the specific issue, re-run. Preflight is
 side-effect-free.

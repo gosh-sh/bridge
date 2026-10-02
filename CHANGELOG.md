@@ -508,16 +508,21 @@ assigns it when the release is tagged.
   retried with backoff, a `-32600` / `-32602` response (how Alchemy rejects
   a span over its cap) is not. The snapshot is pinned to one block and every kept log
   is checked against its window slot (hash and height) and the window's
-  `lastHeight`: a mismatch (an append landing mid-read, a partial log set),
-  fewer logs than entries (a backend one block behind omitting the newest
-  append) or a rejected newest span re-read the snapshot a few times, after
-  which a short log set fails naming `BRIDGE_DEPLOY_BLOCK` and the others
-  surface as they are; on a span the RPC always rejects that is two extra
-  short reads before the same refusal. The scan logs its range,
+  `lastHeight`: a mismatch (an append landing mid-read, a partial log set)
+  or a rejected newest span re-read the snapshot a few times, fewer logs
+  than entries (a backend one block behind omitting the newest append) at
+  most once,
+  after which a short log set fails naming `BRIDGE_DEPLOY_BLOCK` and the
+  others surface as they are; on a span the RPC always rejects that is two
+  extra short reads before the same refusal, and a `BRIDGE_DEPLOY_BLOCK`
+  above the chain head is refused before any scan. The scan logs its range,
   progress and total; an
   unset deploy block is a warning. The CLI's coverage poll reads one scalar
   per round, reads the full snapshot once coverage is observed, and polls on
-  if that snapshot still predates the target.
+  if that snapshot still predates the target; an RPC error in a round is
+  retried on the next one within the wait budget instead of ending the run
+  after the burn, and once `latest` has shown the target the wait allows a
+  few rounds past the deadline for the snapshot to catch up.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
   rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
   deploy from `main` with the owner pause; its deploy block 11828971 is
@@ -525,10 +530,13 @@ assigns it when the release is tagged.
   `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped at seq
   20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq
   20054016), still answer every getter but are no longer advanced:
-  `0x32b9…` has this build's verifier stack, so a withdraw against it burns
-  and then times out at stage 4b; `0x0F4F…` has an older one, so preflight
-  refuses it with exit 2. All three bind the same AN bridge account; nothing
-  else in the profile changes.
+  preflight refuses `0x0F4F…` (an older verifier stack) and, with the
+  profile's `BRIDGE_DEPLOY_BLOCK`, `0x32b9…` too (its anchors predate that
+  block, so the window-heights read comes up short); only a deploy block at
+  or before the oldest anchor its windows still hold (its own deploy block,
+  for one) gets a burn that then times out at stage 4b. All three bind the
+  same AN bridge account; nothing else in the
+  profile changes.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn

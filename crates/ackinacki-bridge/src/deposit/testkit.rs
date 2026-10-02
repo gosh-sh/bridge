@@ -732,6 +732,8 @@ struct MockRelayState {
     backlog: HashMap<String, Vec<(String, u64)>>,
     /// Every publication so far, in order: topic, tag and TTL.
     published: Vec<(String, u64, u64)>,
+    /// Publications with these tags are answered with an error and dropped.
+    refused_tags: HashSet<u64>,
 }
 
 impl MockRelay {
@@ -787,6 +789,16 @@ impl MockRelay {
     /// reconnects included, in the order of their handshakes.
     pub fn request_uris(&self) -> Vec<String> {
         self.uris.lock().unwrap().clone()
+    }
+
+    /// From now on, answers every publication tagged `tag` with an error
+    /// and drops it.
+    pub fn refuse_publishes_tagged(&self, tag: u32) {
+        self.state
+            .lock()
+            .unwrap()
+            .refused_tags
+            .insert(u64::from(tag));
     }
 
     /// Every publication so far, in order: topic, tag and TTL in seconds.
@@ -884,6 +896,12 @@ impl MockRelay {
                         Some("irn_publish") => {
                             let msg = v["params"]["message"].as_str().unwrap().to_string();
                             let tag = v["params"]["tag"].as_u64().unwrap();
+                            if s.refused_tags.contains(&tag) {
+                                let no = serde_json::json!({"id": v["id"], "jsonrpc": "2.0",
+                                    "error": {"code": -32000, "message": "publish refused"}});
+                                MockRelay::push(&out_tx, no);
+                                continue;
+                            }
                             s.backlog.entry(topic.clone()).or_default().push((msg.clone(), tag));
                             let ttl = v["params"]["ttl"].as_u64().unwrap();
                             s.published.push((topic.clone(), tag, ttl));

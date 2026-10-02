@@ -359,7 +359,8 @@ async fn next_on(
 
 /// Proposes a session on the pairing topic of `uri` and waits, no longer
 /// than `timeout`, for the wallet to answer and settle it. The proposal
-/// stays on the relay as long as the URI is valid.
+/// stays on the relay as long as the URI is valid. A settlement that
+/// cannot be acknowledged in that time is ended for the wallet too.
 pub async fn propose_and_settle(
     relay: &mut Relay,
     uri: &PairingUri,
@@ -427,13 +428,29 @@ pub async fn propose_and_settle(
         }
         let ack = json!({ "id": v["id"], "jsonrpc": "2.0", "result": true });
         let sealed = seal_json(&sym, &ack);
-        publish_by(relay, &topic, &sealed, TTL, TAG_SETTLE_RESP, deadline).await?;
-        return Ok(Session {
+        let session = Session {
             topic,
             sym_key: sym,
             accounts: eip155_accounts(&v["params"]).unwrap_or_default(),
             expiry: v["params"]["expiry"].as_u64().unwrap_or(0),
-        });
+        };
+        // The wallet holds the session from its settlement on. One this side
+        // cannot acknowledge is ended for the wallet too, or it lingers
+        // there until it expires; the error is the answer.
+        if let Err(e) = publish_by(
+            relay,
+            &session.topic,
+            &sealed,
+            TTL,
+            TAG_SETTLE_RESP,
+            deadline,
+        )
+        .await
+        {
+            disconnect(relay, &session).await;
+            return Err(e);
+        }
+        return Ok(session);
     }
 }
 
@@ -1006,6 +1023,33 @@ mod tests {
             .await
             .unwrap();
         disconnect(&r, &s).await;
+        wallet.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_settlement_that_cannot_be_acknowledged_is_ended_for_the_wallet() {
+        let relay = MockRelay::start().await;
+        relay.refuse_publishes_tagged(TAG_SETTLE_RESP);
+        let uri = PairingUri::new(1_700_000_000, Duration::from_secs(300));
+        let wallet = scripted_wallet(relay.url(), uri.clone(), |mut w, topic, sym| async move {
+            loop {
+                let (v, tag) = MockWalletPeer::next(&mut w, &topic, &sym, WAIT)
+                    .await
+                    .expect("a session delete");
+                if v["method"] == "wc_sessionDelete" {
+                    assert_eq!(tag, TAG_DELETE);
+                    return;
+                }
+            }
+        });
+        let mut r = Relay::connect(relay.url()).await.unwrap();
+        let e = propose_and_settle(&mut r, &uri, Network::Sepolia, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, WalletError::Disconnected(m) if m.contains("publish refused")),
+            "the acknowledgement's own error: {e:?}"
+        );
         wallet.await.unwrap();
     }
 

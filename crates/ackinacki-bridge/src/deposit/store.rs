@@ -228,79 +228,12 @@ fn preflight(reason: String) -> CliError {
     }
 }
 
-/// The directory that holds `path`'s entry; `None` for a root or an empty
-/// parent (the current directory always exists).
-fn entry_parent(path: &Path) -> Option<&Path> {
-    match path.parent() {
-        Some(p) if p.as_os_str().is_empty() => Some(Path::new(".")),
-        other => other,
-    }
-}
-
-/// Make `path`'s own directory entry durable.
-fn sync_entry_of(path: &Path) -> CliResult<()> {
-    let Some(parent) = entry_parent(path) else {
-        return Ok(());
-    };
-    std::fs::File::open(parent)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| {
-            preflight(format!(
-                "deposit state: could not make {} durable (fsync of {}): {e}",
-                path.display(),
-                parent.display()
-            ))
-        })
-}
-
-/// Create the levels that do not exist yet, sync each new level's entry
-/// (outermost first) and restrict the innermost one to 0700. Does nothing
-/// to a directory that already exists.
-fn create_missing_levels(dir: &Path) -> CliResult<()> {
-    if dir.exists() {
-        return Ok(());
-    }
-    let mut created: Vec<&Path> = Vec::new();
-    let mut probe = dir;
-    while !probe.exists() {
-        created.push(probe);
-        match probe.parent() {
-            Some(p) if !p.as_os_str().is_empty() => probe = p,
-            _ => break,
-        }
-    }
-    std::fs::create_dir_all(dir).map_err(|e| {
-        preflight(format!(
-            "cannot create the deposit state directory {}: {e}",
-            dir.display()
-        ))
-    })?;
-    for level in created.iter().rev() {
-        sync_entry_of(level)?;
-    }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-        preflight(format!(
-            "created {} but could not restrict it to 0700: {e}",
-            dir.display()
-        ))
-    })
-}
-
-/// Say, never fix, a state directory that others can reach: the records
-/// carry amounts and destination addresses.
-fn report_permissive_mode(dir: &Path) {
-    let Ok(md) = std::fs::metadata(dir) else {
-        return;
-    };
-    let mode = md.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        tracing::warn!(
-            state_dir = %dir.display(),
-            mode = format!("{mode:04o}"),
-            "the deposit state directory can be reached by more than its owner; `chmod 700` is the fix if it was not deliberate",
-        );
-    }
-}
+/// The deposit state directory, as its messages name it.
+const DEPOSIT_STATE_DIR: crate::idempotency::StateDirNaming = crate::idempotency::StateDirNaming {
+    refusal: "deposit state",
+    reachable: "the deposit state directory can be reached by more than its owner; `chmod 700` is \
+                the fix if it was not deliberate",
+};
 
 pub struct Store {
     dir: PathBuf,
@@ -318,9 +251,7 @@ impl Store {
                 source: None,
             });
         }
-        create_missing_levels(dir)?;
-        sync_entry_of(dir)?;
-        report_permissive_mode(dir);
+        crate::idempotency::ensure_state_dir_named(dir, &DEPOSIT_STATE_DIR)?;
         // A path that is not a directory, or one this user cannot list,
         // holds no records anybody can find: saying so here keeps a later
         // lookup from taking it for a directory without the operation.
@@ -659,6 +590,54 @@ mod tests {
         let fresh = d.path().join("a").join("b");
         Store::open(&fresh).unwrap();
         assert_eq!(mode(&fresh), 0o700);
+    }
+
+    /// What `f` logged, with a subscriber of its own on this thread.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let out = sink.0.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn what_is_said_about_the_state_directory_names_the_deposit_one() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let e = Store::open(&file.join("state")).err().unwrap().to_string();
+        assert!(e.contains("deposit state"), "{e}");
+        assert!(!e.contains("idempotency") && !e.contains("withdraw"), "{e}");
+        let open = d.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let said = logged(|| {
+            Store::open(&open).unwrap();
+        });
+        assert!(
+            said.contains("the deposit state directory can be reached by more than its owner"),
+            "{said}"
+        );
+        assert!(
+            said.contains("0755") && !said.contains("withdraw"),
+            "{said}"
+        );
     }
 
     fn requested(s: &Store, p: OpParams, from: Address) -> OpRecord {

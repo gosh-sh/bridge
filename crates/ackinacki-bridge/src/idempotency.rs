@@ -704,8 +704,37 @@ fn entry_parent(path: &Path) -> Option<&Path> {
     }
 }
 
+/// How the messages about a state directory name it. Withdrawals and
+/// deposits keep their records in directories of their own, prepared the
+/// same way; what is said about one has to name that one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StateDirNaming {
+    /// What a refusal about the directory starts with, before a colon.
+    pub(crate) refusal: &'static str,
+    /// The warning about a directory that more than its owner can reach.
+    pub(crate) reachable: &'static str,
+}
+
+/// The withdrawal state directory, named as its messages always have.
+const WITHDRAWAL_STATE_DIR: StateDirNaming = StateDirNaming {
+    refusal: "idempotency",
+    reachable: "the withdrawal state directory can be reached by more than its owner. Records \
+                carry no key material, but they do carry amounts and destination addresses. A run \
+                that created this directory and could not restrict it to 0700 refuses — so a mode \
+                like this one outlives that refusal, and `chmod 700` is the fix if it was not \
+                deliberate",
+};
+
+/// Create the withdrawal state directory if it is missing, restrict what
+/// we create to `0700`, and make the new levels durable: see
+/// [`ensure_state_dir_named`].
+pub(crate) fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
+    ensure_state_dir_named(state_dir, &WITHDRAWAL_STATE_DIR)
+}
+
 /// Create the state directory if it is missing, restrict what we create to
-/// `0700`, and make the new levels durable.
+/// `0700`, and make the new levels durable; the messages name the
+/// directory as `naming` says.
 ///
 /// The durability half is easy to miss. `reserve` fsyncs the record and
 /// fsyncs `state_dir`, which makes the record's entry durable *inside*
@@ -730,145 +759,156 @@ fn entry_parent(path: &Path) -> Option<&Path> {
 /// otherwise is how the guard came to cover both:
 ///
 ///  * **Durability** leaves no trace when it is skipped, and redoing it costs
-///    one `open` and one `fsync`. So [`sync_entry_of`] runs unconditionally. It
-///    covers the level the records live in; a deeper level whose sync was
-///    abandoned is not covered, because nothing says it happened.
+///    one `open` and one `fsync`. So [`StateDirNaming::sync_entry_of`] runs
+///    unconditionally. It covers the level the records live in; a deeper level
+///    whose sync was abandoned is not covered, because nothing says it
+///    happened.
 ///  * **Mode** is observable but not attributable: 0755 here may be a directory
 ///    we failed to restrict or one an operator chose.
-///    [`report_permissive_mode`] says what it sees instead of guessing — a
-///    record carries no key material, but it does carry amounts and destination
-///    addresses.
-pub(crate) fn ensure_state_dir(state_dir: &Path) -> CliResult<()> {
-    create_missing_levels(state_dir)?;
-    sync_entry_of(state_dir)?;
-    report_permissive_mode(state_dir);
+///    [`StateDirNaming::report_permissive_mode`] says what it sees instead of
+///    guessing — a record carries no key material, but it does carry amounts
+///    and destination addresses.
+pub(crate) fn ensure_state_dir_named(state_dir: &Path, naming: &StateDirNaming) -> CliResult<()> {
+    naming.create_missing_levels(state_dir)?;
+    naming.sync_entry_of(state_dir)?;
+    naming.report_permissive_mode(state_dir);
     Ok(())
 }
 
-/// Create the levels that do not exist yet, sync each new level's entry,
-/// and restrict the innermost one to 0700 — all of it only when there is
-/// something to create.
+/// [`StateDirNaming::create_missing_levels`] for the withdrawal state
+/// directory.
 fn create_missing_levels(state_dir: &Path) -> CliResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    if !state_dir.exists() {
-        // Which levels are we about to bring into existence? Walk up to
-        // the first ancestor that already exists; everything below it is
-        // ours, and each one needs its parent's directory entry synced.
-        let mut created: Vec<PathBuf> = Vec::new();
-        let mut probe = state_dir;
-        while !probe.exists() {
-            created.push(probe.to_path_buf());
-            match probe.parent() {
-                // The EMPTY path, which is what `parent()` answers for a
-                // one-component relative path: `Path::new("withdraw-state")
-                // .parent()` is `Some("")`, not `Some(".")`. Its parent is
-                // the process's current directory, which always exists, so
-                // there is nothing above this level for us to create. Stop
-                // — walking into `""` would push it onto `created` as a
-                // level we "made".
-                Some(p) if p.as_os_str().is_empty() => break,
-                Some(parent) => probe = parent,
-                // Reached the filesystem root without finding anything
-                // that exists. Nothing sane left to do; let create_dir_all
-                // produce the real error.
-                None => break,
-            }
-        }
-
-        fs::create_dir_all(state_dir).map_err(|e| CliError::Preflight {
-            reason: format!("idempotency: mkdir {}: {e}", state_dir.display()),
-            source: None,
-        })?;
-
-        // Outermost first: `created` was collected innermost-first, so
-        // reverse. Syncing "b" before "a" in a/b would order the entry for
-        // b ahead of the entry for a that contains it.
-        for level in created.iter().rev() {
-            let Some(parent) = entry_parent(level) else {
-                continue;
-            };
-            // NOT best-effort. This runs before the reservation, which runs
-            // before an irreversible burn; a directory entry we cannot make
-            // durable is a reservation we cannot promise to find again.
-            std::fs::File::open(parent)
-                .and_then(|d| d.sync_all())
-                .map_err(|e| CliError::Preflight {
-                    reason: format!(
-                        "idempotency: could not make {} durable (fsync of {}): {e}",
-                        level.display(),
-                        parent.display(),
-                    ),
-                    source: None,
-                })?;
-        }
-
-        // Propagate, do not swallow: if we created the directory for
-        // in-flight money and could not restrict it, the operator needs to
-        // know now, not from a later audit.
-        fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
-            CliError::Preflight {
-                reason: format!(
-                    "idempotency: created {} but could not restrict it to 0700: {e}",
-                    state_dir.display()
-                ),
-                source: None,
-            }
-        })?;
-    }
-    Ok(())
+    WITHDRAWAL_STATE_DIR.create_missing_levels(state_dir)
 }
 
-/// Make `path`'s own directory entry durable.
-///
-/// NOT best-effort, and not conditional. This runs before the reservation,
-/// which runs before an irreversible burn: an entry we cannot make durable
-/// is a reservation we cannot promise to find again, and a run that
-/// created the directory and died before syncing it leaves nothing behind
-/// for a later run to notice.
+/// [`StateDirNaming::sync_entry_of`] for the withdrawal state directory.
+#[cfg(test)]
 fn sync_entry_of(path: &Path) -> CliResult<()> {
-    let Some(parent) = entry_parent(path) else {
-        return Ok(());
-    };
-    std::fs::File::open(parent)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| CliError::Preflight {
-            reason: format!(
-                "idempotency: could not make {} durable (fsync of {}): {e}",
-                path.display(),
-                parent.display(),
-            ),
+    WITHDRAWAL_STATE_DIR.sync_entry_of(path)
+}
+
+/// [`StateDirNaming::report_permissive_mode`] for the withdrawal state
+/// directory.
+#[cfg(test)]
+fn report_permissive_mode(state_dir: &Path) {
+    WITHDRAWAL_STATE_DIR.report_permissive_mode(state_dir)
+}
+
+impl StateDirNaming {
+    /// A refusal about the directory: exit 2, before anything was sent.
+    fn refuse(&self, what: String) -> CliError {
+        CliError::Preflight {
+            reason: format!("{}: {what}", self.refusal),
             source: None,
-        })
+        }
+    }
+
+    /// Create the levels that do not exist yet, sync each new level's
+    /// entry, and restrict the innermost one to 0700 — all of it only when
+    /// there is something to create.
+    fn create_missing_levels(&self, state_dir: &Path) -> CliResult<()> {
+        use std::os::unix::fs::PermissionsExt;
+        if !state_dir.exists() {
+            // Which levels are we about to bring into existence? Walk up to
+            // the first ancestor that already exists; everything below it is
+            // ours, and each one needs its parent's directory entry synced.
+            let mut created: Vec<PathBuf> = Vec::new();
+            let mut probe = state_dir;
+            while !probe.exists() {
+                created.push(probe.to_path_buf());
+                match probe.parent() {
+                    // The EMPTY path, which is what `parent()` answers for a
+                    // one-component relative path: `Path::new("withdraw-state")
+                    // .parent()` is `Some("")`, not `Some(".")`. Its parent is
+                    // the process's current directory, which always exists, so
+                    // there is nothing above this level for us to create. Stop
+                    // — walking into `""` would push it onto `created` as a
+                    // level we "made".
+                    Some(p) if p.as_os_str().is_empty() => break,
+                    Some(parent) => probe = parent,
+                    // Reached the filesystem root without finding anything
+                    // that exists. Nothing sane left to do; let create_dir_all
+                    // produce the real error.
+                    None => break,
+                }
+            }
+
+            fs::create_dir_all(state_dir)
+                .map_err(|e| self.refuse(format!("mkdir {}: {e}", state_dir.display())))?;
+
+            // Outermost first: `created` was collected innermost-first, so
+            // reverse. Syncing "b" before "a" in a/b would order the entry for
+            // b ahead of the entry for a that contains it.
+            for level in created.iter().rev() {
+                // NOT best-effort. This runs before the reservation, which
+                // runs before an irreversible burn; a directory entry we
+                // cannot make durable is a reservation we cannot promise to
+                // find again.
+                self.sync_entry_of(level)?;
+            }
+
+            // Propagate, do not swallow: if we created the directory for
+            // in-flight money and could not restrict it, the operator needs to
+            // know now, not from a later audit.
+            fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                self.refuse(format!(
+                    "created {} but could not restrict it to 0700: {e}",
+                    state_dir.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Make `path`'s own directory entry durable.
+    ///
+    /// NOT best-effort, and not conditional. This runs before the
+    /// reservation, which runs before an irreversible burn: an entry we
+    /// cannot make durable is a reservation we cannot promise to find
+    /// again, and a run that created the directory and died before syncing
+    /// it leaves nothing behind for a later run to notice.
+    fn sync_entry_of(&self, path: &Path) -> CliResult<()> {
+        let Some(parent) = entry_parent(path) else {
+            return Ok(());
+        };
+        std::fs::File::open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| {
+                self.refuse(format!(
+                    "could not make {} durable (fsync of {}): {e}",
+                    path.display(),
+                    parent.display(),
+                ))
+            })
+    }
+
+    /// Report — never correct — a state directory anyone but its owner can
+    /// reach.
+    ///
+    /// Correcting it would override an operator who meant it, and nothing on
+    /// disk distinguishes that from a run that created the directory and could
+    /// not restrict it. Saying what is there costs nothing and is the half
+    /// that was being lost silently.
+    fn report_permissive_mode(&self, state_dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(md) = fs::metadata(state_dir) else {
+            return;
+        };
+        let mode = md.permissions().mode() & 0o777;
+        if mode_is_permissive(mode) {
+            warn!(
+                state_dir = %state_dir.display(),
+                mode = format!("{mode:04o}"),
+                "{}",
+                self.reachable,
+            );
+        }
+    }
 }
 
 /// Is this mode readable, writable or traversable by anyone but the owner?
 fn mode_is_permissive(mode: u32) -> bool {
     mode & 0o077 != 0
-}
-
-/// Report — never correct — a state directory anyone but its owner can
-/// reach.
-///
-/// Correcting it would override an operator who meant it, and nothing on
-/// disk distinguishes that from a run that created the directory and could
-/// not restrict it. Saying what is there costs nothing and is the half
-/// that was being lost silently.
-fn report_permissive_mode(state_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(md) = fs::metadata(state_dir) else {
-        return;
-    };
-    let mode = md.permissions().mode() & 0o777;
-    if mode_is_permissive(mode) {
-        warn!(
-            state_dir = %state_dir.display(),
-            mode = format!("{mode:04o}"),
-            "the withdrawal state directory can be reached by more than its owner. Records carry \
-             no key material, but they do carry amounts and destination addresses. A run that \
-             created this directory and could not restrict it to 0700 refuses — so a mode like \
-             this one outlives that refusal, and `chmod 700` is the fix if it was not deliberate",
-        );
-    }
 }
 
 /// `pub(crate)` so a post-burn failure can name the exact file an operator

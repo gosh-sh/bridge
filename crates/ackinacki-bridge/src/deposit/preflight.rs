@@ -303,10 +303,7 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
             CliError::Deposit {
                 ..
             } => return e,
-            CliError::Preflight {
-                reason, ..
-            } => reason,
-            other => other.to_string(),
+            other => other.into_reason(),
         };
         match signals::exit_for(Some(rec.stage)) {
             // Only a record that never asked the wallet gets here with 2.

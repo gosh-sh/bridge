@@ -114,12 +114,7 @@ pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliResu
     let rec = match Store::open(state_dir).and_then(|s| s.load(&op)) {
         Ok(rec) => rec,
         Err(e) => {
-            let why = match e {
-                CliError::Preflight {
-                    reason, ..
-                } => reason,
-                other => other.to_string(),
-            };
+            let why = e.into_reason();
             return Err(CliError::deposit(
                 ExitCode::CreditUnconfirmed,
                 Stage::Deposit,

@@ -473,15 +473,29 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- The AN→ETH relayer reconstructs per-slot window heights from
-  `LayerAnchorAppended` between `BRIDGE_DEPLOY_BLOCK` and latest, in
+- `read_full_state` (the AN→ETH relayer's `daemon-live` startup, and the
+  `ackinacki-bridge` CLI after coverage) reconstructs per-slot window heights
+  from `LayerAnchorAppended` between `BRIDGE_DEPLOY_BLOCK` and the head, in
   2 000-block `eth_getLogs` chunks (`BRIDGE_GET_LOGS_CHUNK_BLOCKS` overrides
-  the span; Alchemy's free tier caps it at 10; each call is retried with backoff
-  on an RPC error and `BRIDGE_GET_LOGS_PAUSE_MS` spaces the calls on a
-  rate-limited RPC). A scan with no from/to block used
-  to default both ends to `latest` and fail resurrect on any contract
-  that already had history (ETH-31). Set the env var; leaving it unset
-  still scans from genesis.
+  the span; Alchemy's free tier caps it at 10; `BRIDGE_GET_LOGS_PAUSE_MS`
+  spaces the calls on a rate-limited RPC; a call failing with 429 / 5xx / a
+  transport error is retried with backoff, a span-cap rejection is not). A
+  scan with no from/to block used to default both ends to `latest` and fail
+  resurrect on any contract that already had history (ETH-31). `daemon-live`
+  also takes the three as `--bridge-deploy-block`, `--get-logs-chunk-blocks`
+  and `--get-logs-pause-ms`; the CLI reads them from its profile, and
+  `config/bridge_config.shellnet` now pins the 2026-09-29 deploy
+  `0x32b9e87a…` together with its deploy block (the previous `0x0F4F8b7E…`
+  is no longer advanced). Unset means a scan from genesis, logged as a
+  warning; an unparseable value is ignored with a warning instead of
+  silently becoming the default; the scan logs its range, progress and
+  total. The whole snapshot is pinned to one block (`eth_blockNumber`
+  first, every view call and the log scan at it) and the newest kept event
+  per layer is checked against the window's `lastHeight`, so a
+  `verifyBlock` landing mid-read or a short log tail is re-read instead of
+  painting every height one slot off. The CLI's coverage poll reads one
+  scalar per round and the full snapshot once. The compose kit's
+  `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK`.
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
   exponential backoff.** With the aggregator now binding the inner-circuit

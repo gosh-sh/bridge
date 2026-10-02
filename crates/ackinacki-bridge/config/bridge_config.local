@@ -19,6 +19,9 @@
 
 # --- Ethereum side (local Anvil / Hardhat) ------------------------------------
 RPC_URL=http://127.0.0.1:8545
+# Local Anvil / Hardhat: the `LayerAnchorAppended` scan from genesis is
+# cheap, so the deploy block may stay unset. Set it once the chain is long.
+# BRIDGE_DEPLOY_BLOCK=0
 
 # --- Acki Nacki side (local docker-compose devnet) ----------------------------
 NETWORK=http://127.0.0.1:80

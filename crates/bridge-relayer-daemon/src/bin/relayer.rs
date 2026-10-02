@@ -41,11 +41,12 @@ use bridge_relayer_daemon::{
     check_startup_drift, classify_withdraw_revert, discover_event_proofs, run_withdraw_e2e_once,
     BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource,
     BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
-    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
-    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
-    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge, WithdrawE2EConfig,
-    WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
+    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
+    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
+    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
+    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
+    WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
+    GET_LOGS_CHUNK_BLOCKS,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -405,6 +406,25 @@ enum Cmd {
         /// drift check.
         #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
         anchor_level: u8,
+        /// Block `AckiNackiBridge` was deployed in: inclusive lower bound of
+        /// the startup `LayerAnchorAppended` scan that rebuilds the per-slot
+        /// window heights. Unset = genesis, which is thousands of
+        /// `eth_getLogs` calls and is warned about.
+        #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
+        bridge_deploy_block: Option<u64>,
+        /// Inclusive block span of one `eth_getLogs` call in that scan. Set
+        /// it to the RPC's cap (Alchemy free tier: 10).
+        #[arg(
+            long,
+            env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS",
+            default_value_t = GET_LOGS_CHUNK_BLOCKS,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        get_logs_chunk_blocks: u64,
+        /// Milliseconds between two `eth_getLogs` calls of that scan, for a
+        /// rate-limited RPC (Alchemy free tier: ~250).
+        #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
+        get_logs_pause_ms: u64,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -788,7 +808,15 @@ async fn main() -> anyhow::Result<()> {
             anchor_level,
             gql_failover_endpoints,
             metrics_addr,
+            bridge_deploy_block,
+            get_logs_chunk_blocks,
+            get_logs_pause_ms,
         } => {
+            let scan = LogScanConfig {
+                deploy_block: bridge_deploy_block.unwrap_or(0),
+                chunk_blocks: get_logs_chunk_blocks,
+                pause: Duration::from_millis(get_logs_pause_ms),
+            };
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
@@ -828,6 +856,7 @@ async fn main() -> anyhow::Result<()> {
                 backoff,
                 aggregation,
                 anchor_mode,
+                scan,
             )
             .await
             .map_err(|e| {
@@ -2096,6 +2125,7 @@ async fn run_daemon_live(
     backoff: BackoffConfig,
     aggregation: C12AggregationCfg,
     anchor_mode: bridge_prover_lib::AnchorMode,
+    scan: LogScanConfig,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
     use bridge_prover_lib::{
@@ -2218,7 +2248,7 @@ async fn run_daemon_live(
         let provider = ProviderBuilder::new()
             .wallet(wallet)
             .connect_http(rpc_url.parse()?);
-        EthBridgeClient::new(bridge_address, provider)
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
     };
     let chain_full = bridge_probe
         .read_full_state()

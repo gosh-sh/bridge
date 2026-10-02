@@ -216,6 +216,17 @@ has no data` is expected. Alert on `hard aborting`, `BridgeReverted`, startup
 drift, SRS/VK drift, pending nonce, or unequal local/on-chain cursors after a
 receipt.
 
+## Startup scan
+
+On every start `daemon-live` reads the contract's ten layer windows and
+rebuilds their per-slot heights from `LayerAnchorAppended` logs, scanning from
+`BRIDGE_DEPLOY_BLOCK` (the block the bridge was deployed in; `preflight.sh`
+requires it) to the head in `BRIDGE_GET_LOGS_CHUNK_BLOCKS`-block `eth_getLogs`
+calls, `BRIDGE_GET_LOGS_PAUSE_MS` apart. On a capped, rate-limited RPC
+(Alchemy's free tier: 10 blocks, ~4 calls/s) a deploy a few weeks old takes
+minutes; the log shows `scanning LayerAnchorAppended` with the chunk count, a
+progress line every 200 chunks and `LayerAnchorAppended scan done`.
+
 ## GraphQL failover and metrics
 
 `BRIDGE_GQL_ENDPOINT` in the runtime env is the primary Acki Nacki GraphQL

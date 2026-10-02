@@ -110,6 +110,11 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # on Sepolia. The server-side bundle relayer that advances this contract
 # runs L2 only. See README.md Quick start for the default-user flow.
 #
+# Redeployed from `main` on 2026-09-29. The previous deploy,
+# `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, still answers every
+# getter but stopped at seq 20054016: nobody advances it, so a withdraw
+# against it burns and then times out at stage 4b.
+#
 # NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
 # over a new AN-side eccUSDCBridge and rolled back the same day. That
 # deploy still exists and still answers every getter — which is exactly
@@ -143,4 +148,14 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7
+BRIDGE_ADDRESS=0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38
+
+# Block the deploy above was created in: lower bound of the one
+# `LayerAnchorAppended` scan the CLI runs after coverage to rebuild the
+# per-slot window heights. Unset means a scan from genesis, thousands of
+# `eth_getLogs` calls. Changes together with BRIDGE_ADDRESS.
+BRIDGE_DEPLOY_BLOCK=11807209
+# For a capped / rate-limited RPC (Alchemy's free tier: 10-block spans,
+# ~4 calls per second). The public default above needs neither.
+# BRIDGE_GET_LOGS_CHUNK_BLOCKS=10
+# BRIDGE_GET_LOGS_PAUSE_MS=250

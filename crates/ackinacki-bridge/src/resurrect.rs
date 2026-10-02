@@ -113,11 +113,13 @@ where
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
-        let cfs = client
-            .read_full_state()
+        // One `storedLastSeenBlockSeqNo` call per poll. The full snapshot
+        // (10 windows plus the `LayerAnchorAppended` scan from the deploy
+        // block) is read once, below, after coverage is reached.
+        let observed = client
+            .stored_last_seen_block_seq_no()
             .await
-            .context("EthBridgeClient::read_full_state")?;
-        let observed = cfs.last_seen_block_seq_no;
+            .context("EthBridgeClient::stored_last_seen_block_seq_no")?;
         info!(
             attempt,
             observed_last_seen = observed,
@@ -126,6 +128,10 @@ where
             "polled AckiNackiBridge",
         );
         if observed >= target_seq_no {
+            let cfs = client
+                .read_full_state()
+                .await
+                .context("EthBridgeClient::read_full_state")?;
             let state = BridgeState::from_contract(cfs, HISTORY_PROOF_WINDOW, level).context(
                 "BridgeState::from_contract failed — on-chain layer window shape does not match \
                  HISTORY_PROOF_WINDOW (128)",

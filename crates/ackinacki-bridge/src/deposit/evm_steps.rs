@@ -782,7 +782,8 @@ mod tests {
         let mut w = FakeWallet::eoa();
         let h = B256::repeat_byte(1);
         w.send_results.push_back(Ok(h));
-        let receipt_in = |b: crate::deposit::evm::Header| Some(deposit_receipt(h, &b, true, vec![]));
+        let receipt_in =
+            |b: crate::deposit::evm::Header| Some(deposit_receipt(h, &b, true, vec![]));
         // Mined in 10; reorged out for a moment; back in 11.
         evm.script_receipt(h, vec![
             receipt_in(header(10, 1)),
@@ -809,7 +810,10 @@ mod tests {
         ]);
         let e = go(&evm, &mut w).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::ApproveFailed);
-        assert!(e.to_string().contains(&format!("approve {h} reverted")), "{e}");
+        assert!(
+            e.to_string().contains(&format!("approve {h} reverted")),
+            "{e}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -181,10 +181,19 @@ class GqlClient:
 
 # ── tvm-cli body encoding ─────────────────────────────────────────────────────
 
-def encode_initiate_withdrawal_body(dst_chain_id: int, recipient_hex: str) -> str:
+def encode_initiate_withdrawal_body(dst_chain_id: int, recipient_hex: str,
+                                     amount: int, token_id: int) -> str:
+    # Pass amount+tokenId as explicit ABI params instead of reading
+    # msg.currencies on-chain — sold 0.82 miscompiles msg.currencies for
+    # CrossDappMessageHeader-typed inbound messages (it applies IntMsgInfo
+    # offsets after the 9-bit cross-dap header-start, so LDMSGADDR hits raw
+    # src_dapp_id bits and raises TypeCheckError). gosh.burnecc still throws
+    # on insufficient balance, so caller cannot withdraw more than attached.
     params = json.dumps({
         "dstChainId": str(dst_chain_id),
         "recipient":  recipient_hex,
+        "amount":     str(amount),
+        "tokenId":    str(token_id),
     })
     cmd = (f"{common.TVM_CLI} -j body --abi {USDC_BRIDGE_ABI} "
            f"initiateWithdrawal '{params}'")
@@ -194,7 +203,14 @@ def encode_initiate_withdrawal_body(dst_chain_id: int, recipient_hex: str) -> st
 
 def call_initiate_withdrawal(msig_address: str, msig_abi: str, msig_key_path: str,
                              dst_chain_id: int, recipient_hex: str):
-    payload = encode_initiate_withdrawal_body(dst_chain_id, recipient_hex)
+    payload = encode_initiate_withdrawal_body(
+        dst_chain_id, recipient_hex, WITHDRAWAL_AMOUNT, USDC_TOKEN_ID,
+    )
+    # sold 0.82 msig v2 adds a `dapp_id` arg that is piped through to
+    # `dest.transfer({..., dest_dapp_id: dapp_id})`. For an ECC-carrying call
+    # into eccUSDCBridge the recipient DApp is USDC_BRIDGE_DAPP_ID (self-rooted
+    # at 0x1a1a…1a1a) — this is what emits the cross-dap header that the node
+    # needs to accept the ECC-bearing message across DApps.
     params = {
         "dest":    USDC_BRIDGE_ADDRESS_LEGACY,   # ABI `address` field — legacy form
         "value":   "1000000000",
@@ -202,6 +218,7 @@ def call_initiate_withdrawal(msig_address: str, msig_abi: str, msig_key_path: st
         "bounce":  False,
         "flags":   1,
         "payload": payload,
+        "dapp_id": str(int(USDC_BRIDGE_DAPP_ID, 16)),
     }
     return common.call_contract(
         msig_address, msig_abi, msig_key_path,

@@ -24,6 +24,47 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **AN-side `USDCBridge.initiateWithdrawal` ABI gained two trailing
+  parameters** — `uint128 amount` and `uint32 tokenId`. The paired
+  acki-nacki contract (`eccUSDCBridge.sol` v1.4.0) stops reading
+  `msg.currencies` from the inbound message and takes the attached
+  amount and ECC token id as explicit ABI params instead; this is a
+  workaround for a sold-0.82 cross-dap codegen bug that raised
+  `TypeCheckError` (exit code 7) on every cross-DApp
+  `initiateWithdrawal` call. The overlaid bundled ABI
+  `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`
+  reports `"version": "1.4.0"`. Callers that drive a withdraw through
+  tvm-cli from this repo (`helper/bridge_e2e.py::call_initiate_withdrawal`,
+  `test_deploy_and_withdraw_only.py`, the full E2E orchestrator) now
+  pass `amount` and `tokenId` on every call; off-tree callers hitting
+  `initiateWithdrawal` directly with the old two-arg body will revert
+  with the generic ABI mismatch. The on-chain burn safety invariant is
+  preserved — `gosh.burnecc` still throws on insufficient balance, so
+  a caller cannot withdraw more than they attached.
+
+- **AN-side `USDCBridge.mintAndSend` ABI gained a trailing
+  `uint256 recipient_dapp_id`** carrying the recipient's self-rooted
+  DApp id. The paired acki-nacki contract now routes the outbound mint
+  via `recipient.transfer({..., dest_dapp_id: recipient_dapp_id})` — the
+  only way an ECC-carrying transfer can leave the bridge's DApp. Pass
+  the recipient's self-rooted DApp id for a cross-DApp mint (e.g. the
+  self-rooted multisig id for the Phase 1 driver), the bridge's own
+  DApp id for same-DApp. Impacted callers in this tree:
+  `crates/bridge-prover-libraries/python/helper/msig.py::mint_usdc()`
+  (updated to pass the multisig's self-rooted DApp id).
+
+- **AN-side `UpdateCustodianMultisigWallet_v2` now actually routes
+  the `dapp_id` field to the outbound transfer** on both the single-
+  custodian fast path and the quorum execute path, by passing
+  `dest_dapp_id: dapp_id` on `dest.transfer({...})`. Previously the
+  field was stored on the pending transaction and reported in the
+  event but was dropped from the actual send, so every outbound msig
+  transfer landed under the DApp inferred from the destination
+  address. Operators relying on the old "`dapp_id` is report-only"
+  behaviour must now pass `0` on every send to preserve it.
+  Rebuilt artefacts live at
+  `crates/bridge-prover-libraries/python/contracts/UpdateCustodianMultisigWallet.{tvc,abi.json}`.
+
 - **`AckiNackiBridge.withdrawByProofBundle` hop-chain endpoint semantics
   flipped to Direction (b).** The cross-thread hop chain now walks
   `yBlockId → ... → xBlockId` instead of the previous
@@ -419,6 +460,31 @@ assigns it when the release is tagged.
   Parent slot `0` and all cross-thread reference slots are always available to
   both the reverse-index and historical search.
 
+- **Phase 1 deploy-and-fund driver for a self-rooted multisig on an MT
+  Acki Nacki devnet —
+  `crates/bridge-prover-libraries/python/test_phase1_deploy_msig_only.py`.**
+  Short standalone script that drives: `setup → precheck USDCBridge liveness
+  → tvm-cli genaddr msig → cross-DApp giver.sendCurrencyWithFlag fund →
+  deployx msig → verify active + ECC[2] balance`. Honours
+  `MODE=local|shellnet`. Depends on the matching acki-nacki changes
+  (GiverV3 cross-dapp send methods + node-side cross-dapp funded-Uninit
+  fix) — on an unpatched node every cross-DApp fund is dropped and the
+  driver fails after the fund step with "multisig account never
+  materialized". With the paired node fix it completes end-to-end in
+  ~11s on a fresh local MT devnet.
+- **GiverV3 ABI/helpers kept in lockstep with the acki-nacki tree.**
+  `crates/bridge-prover-libraries/python/contracts/GiverV3.abi.json`
+  overlaid with the regenerated ABI (six classic send methods now
+  carry a trailing `uint256 dapp_id`), and
+  `crates/bridge-prover-libraries/python/helper/common.py` grew the same
+  `GIVER_SEND_METHODS` auto-inject that the acki-nacki tree uses so
+  existing bridge python callers that go through the shared
+  `call_contract()` helper keep working without a per-site rewrite.
+  `crates/bridge-prover-libraries/python/helper/msig.py::deploy_multisig()`
+  threads the recipient's DApp into every giver call so a self-rooted
+  multisig can be funded cross-DApp; a sibling
+  `deploy_and_fund_multisig_only()` sticks to Phase 1 scope (no
+  `mint_usdc` call afterwards, no USDC overlay step).
 - **Offline keygen bins for the multi-thread Circuit-4 pair —
   `keygen_bridge_final` and `keygen_bridge_multi_hop` under
   `bridge-prover-lib/src/bin/`.** Both accept `--params-dir <PATH>` (required)
@@ -826,6 +892,13 @@ assigns it when the release is tagged.
   supplied K=21 Hermez ptau when the retired public K=20 object is absent.
   The fallback applies the same `s_g2` head guard used for K=21; the original
   hash-anchored K=20 path remains preferred when that file is available.
+- **`crates/bridge-prover-libraries/python/helper/msig.py::deploy_multisig()`
+  (and the Phase 1 sibling `deploy_and_fund_multisig_only()`) now pass
+  `minBalance: 0` and `targetBalance: 0` to the msig_v2 constructor.**
+  The regenerated `UpdateCustodianMultisigWallet_v2` constructor takes
+  the auto-top-up config as explicit arguments; omitting them trips a
+  deploy-time ABI mismatch. Phase 1 does not use auto-top-up, so both
+  are set to `0`.
 
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on

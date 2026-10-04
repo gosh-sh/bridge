@@ -15,7 +15,8 @@
 			"inputs": [
 				{"name":"dest","type":"address"},
 				{"name":"value","type":"varuint16"},
-				{"name":"bounce","type":"bool"}
+				{"name":"bounce","type":"bool"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -25,7 +26,8 @@
 			"inputs": [
 				{"name":"dest","type":"address"},
 				{"name":"value","type":"varuint16"},
-				{"name":"ecc","type":"map(uint32,varuint32)"}
+				{"name":"ecc","type":"map(uint32,varuint32)"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -37,7 +39,8 @@
 				{"name":"value","type":"varuint16"},
 				{"name":"bounce","type":"bool"},
 				{"name":"flag","type":"uint8"},
-				{"name":"body","type":"cell"}
+				{"name":"body","type":"cell"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -48,7 +51,21 @@
 				{"name":"dest","type":"address"},
 				{"name":"value","type":"varuint16"},
 				{"name":"ecc","type":"map(uint32,varuint32)"},
-				{"name":"flag","type":"uint8"}
+				{"name":"flag","type":"uint8"},
+				{"name":"dapp_id","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "sendCurrencyWithFlagAndDestDapp",
+			"inputs": [
+				{"name":"dest","type":"address"},
+				{"name":"value","type":"varuint16"},
+				{"name":"ecc","type":"map(uint32,varuint32)"},
+				{"name":"flag","type":"uint8"},
+				{"name":"body","type":"cell"},
+				{"name":"dest_dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -60,7 +77,17 @@
 				{"name":"value","type":"varuint16"},
 				{"name":"ecc","type":"map(uint32,varuint32)"},
 				{"name":"flag","type":"uint8"},
-				{"name":"body","type":"cell"}
+				{"name":"body","type":"cell"},
+				{"name":"dapp_id","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "deployWithStateInit",
+			"inputs": [
+				{"name":"stateInit","type":"cell"},
+				{"name":"value","type":"varuint16"}
 			],
 			"outputs": [
 			]
@@ -68,7 +95,8 @@
 		{
 			"name": "sendFreeToken",
 			"inputs": [
-				{"name":"dest","type":"address"}
+				{"name":"dest","type":"address"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]

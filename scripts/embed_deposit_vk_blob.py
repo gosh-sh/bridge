@@ -25,7 +25,7 @@ BLOB = pathlib.Path(__file__).resolve().parents[1] / (
 )
 BYTES_PER_LINE = 60  # 120 hex chars, matching the existing formatting
 LITERAL_RE = re.compile(r'(bytes constant VK_BLOB\s*=\s*)((?:\s*hex"[0-9a-f]*")+)(;)')
-SHA_RE = re.compile(r"(//\s+sha256 )([0-9a-f]{64})")
+SHA_RE = re.compile(r"(//\s+sha256\s*=?\s*)([0-9a-f]{64})")
 
 
 def render(blob: bytes, indent: str = " " * 8) -> str:

@@ -57,14 +57,33 @@ and chain-binding inputs were added later.*
 
 ### Circuit parameters
 
+Code defaults (`CircuitConfig::default`, unit tests) are 128 B of log data and
+3 logs. Those are **not** the production shape. The verifying key is keyed on
+the production rows below.
+
 ```rust
-MAX_DATA_BYTE_LEN: 128     // src/circuit_v2.rs:29 — max event data length
-MAX_LOG_NUM: 3             // :30 — max logs per receipt
-TOPIC_NUM_BOUNDS: (0, 4)   // :31 — min/max topics per log
-RECEIPT_PF_MAX_DEPTH: 10   // :32 — max MPT proof depth
-MAX_TX_CALLDATA_BYTE_LEN: 2048  // enclosing tx calldata (Safe / 4337)
-MAX_TX_ACCESS_LIST_LEN: 512     // RLP-encoded access list
-ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2; type 0 stays off
+// Receipt chip — production (baked into the VK / relayer defaults)
+PRODUCTION_MAX_DATA_BYTE_LEN: 1024  // SafeL2 SafeMultiSigTransaction is ~768 B
+PRODUCTION_MAX_LOG_NUM: 20
+TOPIC_NUM_BOUNDS: (0, 4)
+RECEIPT_PF_MAX_DEPTH: 10
+FIXED_KECCAK_CAPACITY: 128          // part of the VK; over-capacity fails at prove
+
+// Enclosing tx chip — also baked into the VK
+MAX_TX_CALLDATA_BYTE_LEN: 2048      // 1-of-1 Safe execTransaction is 612 B
+MAX_TX_ACCESS_LIST_LEN: 512
+ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2; type 0 and type 4 stay off
+```
+
+A type 0 (legacy) or type 4 (EIP-7702) deposit is neither provable nor
+refundable. Send again as type 1 or 2. EIP-155 `chainId = (v − 35) / 2` would
+make type 0 provable; that is a product decision, not this circuit.
+
+In-circuit synthesis at the production shape lives in
+`tests/circuit_synthesis.rs` (`#[ignore]`, ~2 min each):
+
+```bash
+cargo test --release --test circuit_synthesis -- --ignored --nocapture
 ```
 
 ## On-chain consumption

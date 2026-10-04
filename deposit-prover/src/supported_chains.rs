@@ -4,13 +4,12 @@
 //! the prover and the relayer physically share one definition; this module only
 //! adds the prover's `anyhow`-flavoured accessor.
 
+use anyhow::{bail, Result};
 pub use deposit_chain_ids::{
     is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
     CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET,
     CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN, SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
-
-use anyhow::{bail, Result};
 
 /// Returns `Ok(chain_id)` if `chain_id` is in [`SUPPORTED_DEPOSIT_CHAIN_IDS`].
 pub fn require_supported_deposit_chain(chain_id: u64) -> Result<u64> {

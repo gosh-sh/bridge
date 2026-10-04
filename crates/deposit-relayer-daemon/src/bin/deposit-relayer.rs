@@ -110,7 +110,7 @@ enum Cmd {
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
         degree: u32,
-        #[arg(long, default_value_t = 256)]
+        #[arg(long, default_value_t = 1024)]
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,
@@ -148,7 +148,7 @@ enum Cmd {
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
         degree: u32,
-        #[arg(long, default_value_t = 256)]
+        #[arg(long, default_value_t = 1024)]
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,

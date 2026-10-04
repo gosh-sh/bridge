@@ -94,12 +94,19 @@ use crate::{
 /// No axiom-eth fork change is needed (upstream). See
 /// the VK's witness-independence requirement.
 ///
-/// Must be `>=` every real deposit's `used_capacity` (measured: 1-node = 11,
-/// 3-node = 21, ~5/node; the `max_depth = 10` worst case is ~55-60) and must
-/// match the value used by `examples/export_vk_blob.rs` /
-/// `examples/export_deposit_proof_set.rs`, otherwise generated proofs will not
-/// verify against the embedded VK (over-capacity fails safe at prove time).
-pub const FIXED_KECCAK_CAPACITY: usize = 64;
+/// Must be `>=` every accepted deposit's `used_capacity`. Fixtures use 25–33
+/// of the old pin of 64; a 2 KB-calldata tx leaf adds ~14, and a SafeL2
+/// receipt (Deposit + ~768 B `SafeMultiSigTransaction`) adds more. 128
+/// leaves margin for a modest extra log and is part of the VK — if this
+/// moves, the key rotates. Over-capacity fails safe at prove time
+/// (`mock_fulfill_keccak_promises` panics).
+///
+/// Match this value in `examples/export_vk_blob.rs` /
+/// `examples/export_deposit_proof_set.rs` (they import this constant).
+pub const FIXED_KECCAK_CAPACITY: usize = 128;
+
+/// Production circuit degree (`k`). SRS file is `data/kzg_params_18.srs`.
+pub const PRODUCTION_DEGREE: u32 = 18;
 
 /// Configuration for the deposit proof circuit
 #[derive(Debug, Clone)]
@@ -128,6 +135,21 @@ impl Default for CircuitConfig {
             max_log_num: 3, /* Max logs per receipt (OPTION B+: Ultra-aggressive - most deposit
                              * txs have 1-3 logs) */
             topic_num_bounds: (0, 4), // 0-4 topics per log
+        }
+    }
+}
+
+impl CircuitConfig {
+    /// Shape baked into the production VkBlob: k=18, 1024 B per log, 20 logs.
+    /// Use this (plus [`FIXED_KECCAK_CAPACITY`]) for keygen, prove, and
+    /// synthesis tests. [`CircuitConfig::default`] is the cheap unit-test
+    /// shape and does not match the embedded key.
+    pub fn production() -> Self {
+        Self {
+            degree: PRODUCTION_DEGREE,
+            max_data_byte_len: crate::circuit_v2::PRODUCTION_MAX_DATA_BYTE_LEN,
+            max_log_num: crate::circuit_v2::PRODUCTION_MAX_LOG_NUM,
+            topic_num_bounds: (0, 4),
         }
     }
 }
@@ -184,6 +206,38 @@ pub fn test_circuit_mock(input: DepositProofInput, config: &CircuitConfig) -> Re
     // panics, which makes an unsatisfied circuit indistinguishable from a crash
     // and defeats the point of returning a `Result` — negative tests need to
     // observe the rejection, not unwind through it.
+    MockProver::run(k, &circuit, instances)
+        .map_err(|e| format!("MockProver failed to run: {e:?}"))?
+        .verify()
+        .map_err(|failures| {
+            let mut msg = format!("circuit not satisfied ({} failures)", failures.len());
+            for f in failures.iter().take(5) {
+                msg.push_str(&format!("\n  {f}"));
+            }
+            msg
+        })
+}
+
+/// MockProver against the production keccak pin. Use with
+/// [`CircuitConfig::production`] so the synthesised shape matches the
+/// embedded VkBlob (`export_vk_blob` / the relayer).
+pub fn test_circuit_mock_pinned(
+    input: DepositProofInput,
+    config: &CircuitConfig,
+) -> Result<(), String> {
+    let params = get_default_params();
+    let k = params.base.k as u32;
+    let circuit_input = DepositEventCircuitV2::new(input, config);
+    let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
+    let mut circuit = EthCircuitImpl::<Fr, _>::new_impl(
+        CircuitBuilderStage::Mock,
+        circuit_input,
+        params,
+        fixed_keccak,
+    );
+    circuit.mock_fulfill_keccak_promises(Some(FIXED_KECCAK_CAPACITY));
+    circuit.calculate_params();
+    let instances = circuit.instances();
     MockProver::run(k, &circuit, instances)
         .map_err(|e| format!("MockProver failed to run: {e:?}"))?
         .verify()
@@ -356,8 +410,14 @@ pub fn load_kzg_params_from_trusted_setup(k: u32) -> Result<ParamsKZG<Bn256>, St
 /// Proving key for the circuit
 /// Short hex fingerprint of the circuit shape that determines the verifying key
 /// (and hence whether a cached proving key is reusable): degree, advice/lookup
-/// column counts, RLC columns, and the pinned keccak capacity.
-fn pk_fingerprint(rlc: &RlcCircuitParams, keccak_capacity: usize) -> String {
+/// column counts, RLC columns, the pinned keccak capacity, and the receipt /
+/// tx-chip limits that can move the constraint system without changing
+/// column counts.
+fn pk_fingerprint(
+    rlc: &RlcCircuitParams,
+    keccak_capacity: usize,
+    config: &CircuitConfig,
+) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     rlc.base.k.hash(&mut h);
@@ -368,11 +428,17 @@ fn pk_fingerprint(rlc: &RlcCircuitParams, keccak_capacity: usize) -> String {
     rlc.base.num_instance_columns.hash(&mut h);
     rlc.num_rlc_columns.hash(&mut h);
     keccak_capacity.hash(&mut h);
+    config.max_data_byte_len.hash(&mut h);
+    config.max_log_num.hash(&mut h);
+    crate::circuit_v2::MAX_TX_CALLDATA_BYTE_LEN.hash(&mut h);
+    crate::circuit_v2::MAX_TX_ACCESS_LIST_LEN.hash(&mut h);
+    crate::circuit_v2::ENABLE_TX_TYPES.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
 /// Insert a shape fingerprint before the file extension, e.g.
-/// `data/deposit_prover_k18.pk` + `a1b2…` -> `data/deposit_prover_k18.a1b2….pk`.
+/// `data/deposit_prover_k18.pk` + `a1b2…` ->
+/// `data/deposit_prover_k18.a1b2….pk`.
 fn pk_path_with_fingerprint(pk_path: &Path, fingerprint: &str) -> std::path::PathBuf {
     let stem = pk_path
         .file_stem()
@@ -424,7 +490,7 @@ pub fn get_or_create_proving_key(
     // against the WRONG verifying key, which then fail on-chain
     // (`ZKHALO2VERIFYWITHVK`). Keying the filename on the calculated shape means
     // a shape change produces a fresh keygen instead of a silent mismatch.
-    let shape = pk_fingerprint(&circuit.params().rlc, FIXED_KECCAK_CAPACITY);
+    let shape = pk_fingerprint(&circuit.params().rlc, FIXED_KECCAK_CAPACITY, config);
     let pk_path = pk_path_with_fingerprint(pk_path, &shape);
     let pk_path = pk_path.as_path();
 
@@ -442,8 +508,8 @@ pub fn get_or_create_proving_key(
     // so both the PK and its sidecar are regenerated together, once.
     if pk_path.exists() && !bp_path.exists() {
         println!(
-            "Proving key {:?} present but break-points sidecar missing; \
-             regenerating both (one-time)...",
+            "Proving key {:?} present but break-points sidecar missing; regenerating both \
+             (one-time)...",
             pk_path
         );
         let _ = fs::remove_file(pk_path);
@@ -479,8 +545,8 @@ pub fn get_or_create_proving_key(
         // Generate path: gen_pk synthesised the circuit, so the builder now holds
         // the break points. Persist them next to the PK for future cache hits.
         let bp = circuit.break_points();
-        let bytes = serde_json::to_vec(&bp)
-            .map_err(|e| format!("serialising break points: {e}"))?;
+        let bytes =
+            serde_json::to_vec(&bp).map_err(|e| format!("serialising break points: {e}"))?;
         fs::write(&bp_path, &bytes)
             .map_err(|e| format!("writing break-points sidecar {:?}: {e}", bp_path))?;
         println!("Wrote break-points sidecar -> {:?}", bp_path);
@@ -926,6 +992,20 @@ mod tests {
         assert_eq!(config.max_data_byte_len, 128); // Updated for Option B+ optimization
         assert_eq!(config.max_log_num, 3); // Updated for Option B+ ultra-aggressive optimization
         assert_eq!(config.topic_num_bounds, (0, 4));
+    }
+
+    #[test]
+    fn test_config_production() {
+        let config = CircuitConfig::production();
+        assert_eq!(config.degree, PRODUCTION_DEGREE);
+        assert_eq!(
+            config.max_data_byte_len,
+            crate::circuit_v2::PRODUCTION_MAX_DATA_BYTE_LEN
+        );
+        assert_eq!(
+            config.max_log_num,
+            crate::circuit_v2::PRODUCTION_MAX_LOG_NUM
+        );
     }
 
     #[test]

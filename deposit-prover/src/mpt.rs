@@ -120,8 +120,9 @@ pub async fn generate_receipt_proof(
 ///
 /// Reconstructs the block's transactions trie (same pattern as receipts —
 /// there is no `eth_getProof` for the tx trie) and returns the leaf + path for
-/// `rlp(tx_index)`. The leaf value is the typed-tx wire encoding (EIP-1559
-/// starts with `0x02`), which the circuit RLP-decodes to bind `chain_id`.
+/// `rlp(tx_index)`. The leaf value is the typed-tx wire encoding (type 1
+/// starts with `0x01`, type 2 with `0x02`), which the circuit RLP-decodes
+/// to bind `chain_id`.
 pub async fn generate_transaction_proof(
     provider: Arc<Provider<Http>>,
     block_number: u64,
@@ -166,7 +167,8 @@ pub async fn generate_transaction_proof(
         // mis-handles blob (type 3, sidecar-stripped envelope) and setcode
         // (type 4, `authorization_list`) transactions, which makes the
         // reconstructed root diverge from the header whenever a congested live
-        // block contains one of those — even though our own deposit tx is 1559.
+        // block contains one of those — even though our own deposit tx is
+        // type 1 or type 2.
         let raw: ethers::types::Bytes = provider
             .request("eth_getRawTransactionByHash", [tx.hash])
             .await
@@ -188,18 +190,10 @@ pub async fn generate_transaction_proof(
     }
 
     let tx_bytes = target_tx_bytes.ok_or_else(|| anyhow!("target tx bytes missing"))?;
-    // Reject non-EIP-1559 early so MockProver / prove fail with a clear error
-    // rather than an opaque RLP constraint failure.
-    if tx_bytes.first() != Some(&crate::rlp_utils::EIP1559_TX_TYPE)
-        && tx_bytes.first() != Some(&crate::rlp_utils::EIP2930_TX_TYPE)
-    {
-        return Err(anyhow!(
-            "deposit enclosing tx must be EIP-2930 (type 0x01) or EIP-1559 (type 0x02); \
-             got first byte {:#x}. Legacy type 0 hides chain_id inside v, so this \
-             deposit cannot be proven as-is — resend as type 1 or 2.",
-            tx_bytes.first().copied().unwrap_or(0)
-        ));
-    }
+    // Reject unsupported types and oversized leaves early so MockProver / prove
+    // fail with a clear error rather than an opaque RLP constraint failure
+    // (axiom-eth silently truncates `value` to `value_max_byte_len`).
+    reject_unprovable_enclosing_tx(&tx_bytes)?;
 
     let key = get_tx_key_from_index(tx_index as usize);
     let proof = trie.get_proof(&key)?;
@@ -214,6 +208,56 @@ pub async fn generate_transaction_proof(
         proof_nodes: proof,
         transactions_root,
     })
+}
+
+/// Refuse a deposit whose enclosing tx the circuit cannot prove.
+///
+/// Type 0 (legacy) and type 4 (EIP-7702) are neither provable nor refundable
+/// — the depositor has to send again as type 1 or 2. An oversized leaf is
+/// truncated inside axiom-eth and would otherwise fail after a full prove.
+pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
+    use axiom_eth::transaction::calc_max_val_len;
+
+    use crate::circuit_v2::{ENABLE_TX_TYPES, MAX_TX_ACCESS_LIST_LEN, MAX_TX_CALLDATA_BYTE_LEN};
+
+    let first = tx_bytes.first().copied();
+    if first != Some(crate::rlp_utils::EIP1559_TX_TYPE)
+        && first != Some(crate::rlp_utils::EIP2930_TX_TYPE)
+    {
+        return Err(anyhow!(
+            "deposit enclosing tx must be EIP-2930 (type 0x01) or EIP-1559 (type 0x02); got first \
+             byte {:#x}. Type 0 (legacy) and type 4 (EIP-7702) deposits are neither provable nor \
+             refundable — resend as type 1 or 2.",
+            first.unwrap_or(0)
+        ));
+    }
+    let max_len = calc_max_val_len(
+        MAX_TX_CALLDATA_BYTE_LEN,
+        MAX_TX_ACCESS_LIST_LEN,
+        ENABLE_TX_TYPES,
+    );
+    if tx_bytes.len() > max_len {
+        return Err(anyhow!(
+            "enclosing tx is {} bytes; circuit max is {max_len} (calldata ≤ \
+             {MAX_TX_CALLDATA_BYTE_LEN}, access list ≤ {MAX_TX_ACCESS_LIST_LEN})",
+            tx_bytes.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Single-leaf MPT (key → value) used by synthetic witnesses.
+pub fn proof_for_single_leaf(key: Vec<u8>, value: Vec<u8>) -> Result<([u8; 32], Vec<Vec<u8>>)> {
+    let memdb = Arc::new(MemoryDB::new(true));
+    let hasher = Arc::new(HasherKeccak::new());
+    let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::clone(&hasher));
+    trie.insert(key.clone(), value)
+        .context("insert single-leaf trie")?;
+    let root = trie.root().context("single-leaf trie root")?;
+    let mut root_arr = [0u8; 32];
+    root_arr.copy_from_slice(root.as_slice());
+    let proof = trie.get_proof(&key).context("single-leaf get_proof")?;
+    Ok((root_arr, proof))
 }
 
 /// Build a receipt trie from a list of receipts

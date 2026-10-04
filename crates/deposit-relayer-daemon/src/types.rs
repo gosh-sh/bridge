@@ -29,13 +29,14 @@ use crate::error::RelayerError;
 /// dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow,
 /// promiseCommit]`.
 ///
-/// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559) bound via the enclosing tx MPT
-/// proof (not VK-baked). `anAccount{High,Low}` bind the Acki Nacki destination
-/// account into the proof (an EVM address is not a valid AN recipient).
-/// `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced `anWorkchain`
-/// on 2026-06-02) is a config-supplied tag — it is not bound to event data
-/// in-circuit; `TokenBridge.finalizeDeposit` checks it against its configured
-/// dappId. USDCBridge must also allowlist `(chainId → expected bridge Fr)`.
+/// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559) bound via
+/// the enclosing tx MPT proof (not VK-baked). `anAccount{High,Low}` bind the
+/// Acki Nacki destination account into the proof (an EVM address is not a valid
+/// AN recipient). `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced
+/// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
+/// event data in-circuit; `TokenBridge.finalizeDeposit` checks it against its
+/// configured dappId. USDCBridge must also allowlist `(chainId → expected
+/// bridge Fr)`.
 pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
@@ -93,11 +94,11 @@ pub struct DepositEvent {
 /// re-interpreted as an integer); the submitter forwards these as the
 /// `finalizeDeposit(...)` scalar arguments.
 ///
-/// `chain_id` is the proven EIP-1559 tx `chainId`. `dapp_id_high` /
-/// `dapp_id_low` are the high/low 16-byte halves of the 256-bit AN dApp
-/// identifier (config-supplied tag); `an_account_high` / `an_account_low` are
-/// the high/low halves of the 256-bit AN account, matching the circuit's
-/// split. The AN side reconstructs each as `(high << 128) | low`.
+/// `chain_id` is the proven typed-tx `chainId` (EIP-2930 / EIP-1559).
+/// `dapp_id_high` / `dapp_id_low` are the high/low 16-byte halves of the
+/// 256-bit AN dApp identifier (config-supplied tag); `an_account_high` /
+/// `an_account_low` are the high/low halves of the 256-bit AN account, matching
+/// the circuit's split. The AN side reconstructs each as `(high << 128) | low`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DepositPublicInputs {
     pub deposit_id: U256,

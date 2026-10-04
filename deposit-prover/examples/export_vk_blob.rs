@@ -22,7 +22,7 @@
 //!   cargo run --release --example export_vk_blob -- \
 //!     --input /tmp/deposit_e2e/deposit_proof_input.json \
 //!     --output /tmp/deposit_e2e/deposit_vk_blob.bin \
-//!     --degree 18 --max-data-byte-len 256 --max-log-num 20
+//!     --degree 18 --max-data-byte-len 1024 --max-log-num 20
 
 use std::fs;
 
@@ -37,8 +37,12 @@ use axiom_eth::{
 };
 use clap::Parser;
 use deposit_prover::{
-    circuit_v2::DepositEventCircuitV2,
-    prover::{get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig},
+    circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    halo2_tvm_bundle::{self, CircuitShape, VkBlob},
+    prover::{
+        get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig,
+        FIXED_KECCAK_CAPACITY, PRODUCTION_DEGREE,
+    },
     types::DepositProofInput,
 };
 use halo2_base::{
@@ -50,12 +54,6 @@ use halo2_base::{
         SerdeFormat,
     },
 };
-use deposit_prover::halo2_tvm_bundle::{self, CircuitShape, VkBlob};
-
-/// Pinned keccak promise-loader capacity — makes the deposit VK
-/// witness-independent (one embedded VK verifies every deposit). MUST match the
-/// value used by the prover (`export_deposit_proof_set.rs` / `prover.rs`).
-const FIXED_KECCAK_CAPACITY: usize = 64;
 
 /// Minimal RLC + keccak shape stand-in — identical to the opcode-side reader's
 /// `Noop`. `EthCircuitImpl::configure_with_params` is generic over the inner
@@ -91,15 +89,15 @@ struct Args {
     config_out: String,
 
     /// Circuit degree (must match the proving run).
-    #[arg(long, default_value = "18")]
+    #[arg(long, default_value_t = PRODUCTION_DEGREE)]
     degree: u32,
 
     /// Max data byte length (must match the proving run).
-    #[arg(long, default_value = "256")]
+    #[arg(long, default_value_t = PRODUCTION_MAX_DATA_BYTE_LEN)]
     max_data_byte_len: usize,
 
     /// Max log number (must match the proving run).
-    #[arg(long, default_value = "20")]
+    #[arg(long, default_value_t = PRODUCTION_MAX_LOG_NUM)]
     max_log_num: usize,
 
     /// Source network (not baked into VK; proven chainId is a PI). Must be in
@@ -158,8 +156,7 @@ fn main() -> anyhow::Result<()> {
 
     // 3. Load the SRS and keygen the VK (`data/kzg_params_{k}.srs` from
     // `download_trusted_setup.sh`).
-    let srs = load_kzg_params_from_trusted_setup(k)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let srs = load_kzg_params_from_trusted_setup(k).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     println!("Running keygen_vk (this may take a minute)...");
     let vk = keygen_vk(&srs, &circuit).map_err(|e| anyhow::anyhow!("keygen_vk failed: {e:?}"))?;

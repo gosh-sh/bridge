@@ -107,6 +107,8 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
         "reqConfirms":     1,
         "reqConfirmsData": 1,
         "value":           100_000_000,
+        "minBalance":      0,
+        "targetBalance":   0,
     }
     common.execute_cli_cmd(
         f"deployx --abi {msig_abi_copy} --keys {msig_key_path} "
@@ -215,6 +217,8 @@ def deploy_and_fund_multisig_only(tracer, *, work_dir: str, msig_key_path: str,
         "reqConfirms":     1,
         "reqConfirmsData": 1,
         "value":           100_000_000,
+        "minBalance":      0,
+        "targetBalance":   0,
     }
     common.execute_cli_cmd(
         f"deployx --abi {msig_abi_copy} --keys {msig_key_path} "
@@ -263,13 +267,20 @@ def mint_usdc(tracer, gql, msig_address_legacy: str, amount: int, *,
 
     nonces = common.run_getter(bridge_addr, USDC_BRIDGE_ABI, "getNonces")
     mint_nonce = int(nonces["mintNonce"])
-    tracer.log(f"  USDCBridge.mintAndSend → ECC[{USDC_TOKEN_ID}]={amount}, nonce={mint_nonce + 1}")
+    # The multisig is self-rooted (msig_dapp_id == msig_account_id), so the
+    # outbound ECC transfer must carry it as `dest_dapp_id` for the cross-dap
+    # routing path. Pass the account id as uint256.
+    msig_account_id = msig_address_legacy.split(":", 1)[1]
+    recipient_dapp_id_int = int(msig_account_id, 16)
+    tracer.log(f"  USDCBridge.mintAndSend → ECC[{USDC_TOKEN_ID}]={amount}, nonce={mint_nonce + 1}, "
+               f"recipient_dapp_id=0x{msig_account_id}")
     common.call_contract(
         bridge_addr, USDC_BRIDGE_ABI, usdc_bridge_key_path,
         "mintAndSend",
-        {"recipient": msig_address_legacy,
-         "value":     str(amount),
-         "nonce":     str(mint_nonce + 1)},
+        {"recipient":         msig_address_legacy,
+         "value":             str(amount),
+         "nonce":             str(mint_nonce + 1),
+         "recipient_dapp_id": str(recipient_dapp_id_int)},
         True,
     )
 

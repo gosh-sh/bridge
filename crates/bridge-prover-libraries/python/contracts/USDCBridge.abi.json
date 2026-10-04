@@ -28,7 +28,8 @@
 			"inputs": [
 				{"name":"recipient","type":"address"},
 				{"name":"value","type":"uint128"},
-				{"name":"nonce","type":"uint64"}
+				{"name":"nonce","type":"uint64"},
+				{"name":"recipient_dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -47,9 +48,40 @@
 			"name": "initiateWithdrawal",
 			"inputs": [
 				{"name":"dstChainId","type":"uint256"},
-				{"name":"recipient","type":"bytes"}
+				{"name":"recipient","type":"bytes"},
+				{"name":"amount","type":"uint128"},
+				{"name":"tokenId","type":"uint32"}
 			],
 			"outputs": [
+			]
+		},
+		{
+			"name": "setTrustedL1Bridge",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"l1Bridge","type":"uint256"},
+				{"name":"allowed","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getTrustedL1Bridges",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"map(uint256,bool)"}
+			]
+		},
+		{
+			"name": "isTrustedL1Bridge",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"l1Bridge","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
 			]
 		},
 		{
@@ -67,6 +99,7 @@
 				{"name":"depositId","type":"uint256"},
 				{"name":"contractAddr","type":"uint256"},
 				{"name":"dappId","type":"uint256"},
+				{"name":"chainId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
 				{"name":"anAccount","type":"uint256"}
 			],
@@ -196,6 +229,7 @@
 				{"name":"depositId","type":"uint256"},
 				{"name":"contractAddr","type":"uint256"},
 				{"name":"dappId","type":"uint256"},
+				{"name":"chainId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
 				{"name":"anAccount","type":"uint256"}
 			],
@@ -214,6 +248,7 @@
 		{"init":false,"name":"_mintAccumulatorNonce","type":"uint64"},
 		{"init":false,"name":"_totalMintedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
-		{"init":false,"name":"_depositVoucherCode","type":"cell"}
+		{"init":false,"name":"_depositVoucherCode","type":"cell"},
+		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"}
 	]
 }

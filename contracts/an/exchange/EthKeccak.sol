@@ -1,10 +1,6 @@
 pragma gosh-solidity >=0.80;
 
-/// @notice Keccak-256 over a byte string (Ethereum `keccak256`) and the
-///         parentHash extractor for an execution block-header RLP list.
-///         TVM has no keccak builtin (`tvm.hash` is SHA-256 of a cell).
-///         Vectors: keccak256("") = c5d24601…d85a470, keccak256("abc") =
-///         4e03657a…2d6c45 (same as the relayer's tiny-keccak tests).
+/// @notice The parentHash extractor for an execution block-header RLP list.
 library EthKeccak {
     function rlpParentHash(bytes header) internal pure returns (uint256) {
         TvmSlice s = header.toSlice();

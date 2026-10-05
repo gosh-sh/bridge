@@ -134,7 +134,7 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | 1 | 0 | `treasuryBalance` | `uint256` | 98 | `deposit` (+), `withdrawByProof` (−) |
 | 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 104 | constructor only |
 | 2 | 20 | `aaveEnabled` | `bool` | 120 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 123 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
+| 3 | 0 | `suppliedPrincipal` | `uint256` | 123 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
 | 4 | 0 | `liquidReserveBps` | `uint256` | 128 | constructor (`1_000`), `setLiquidReserveBps` |
 | 5 | 0 | `owner` | `address` | 131 | constructor, `transferOwnership` |
 | 6 | 0 | `yieldRecipient` | `address` | 134 | constructor, `setYieldRecipient` |
@@ -355,8 +355,9 @@ finalRoot`.
 | 10 | `pub.amount ≤ treasuryBalance` | 1188 | `WithdrawTreasuryShortfall` |
 
 Effects then interactions (`:1192-1213`): mark the nullifier used, `treasuryBalance -= amount`;
-then, if liquid USDC < `amount` and `suppliedPrincipal > 0`, pull `min(shortfall, suppliedPrincipal)`
-back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
+then, if liquid USDC < `amount`, pull `min(shortfall, _backedPrincipal())` back from AAVE
+(`InsufficientTreasury` if the backed book cannot cover the shortfall); then
+`usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
 
 Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1227-1231`).
@@ -534,7 +535,7 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 | `supplyToAave(amount)` | 1450 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, books the aUSDC delta (`suppliedPrincipal += credited`). A zero delta reverts `AaveSupplyFailed`. |
 | `withdrawFromAave(amount)` | 1471 | Pull back up to `_backedPrincipal()` (`min(suppliedPrincipal, aUsdcBalance)`). |
 | `emergencyWithdrawAll()` | 1488 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Clear a leftover book with `writeOffUnbackedPrincipal`. Payouts that fit in liquid USDC stay available. |
-| `writeOffUnbackedPrincipal()` | 1510 | Owner-only. Requires `aUsdcBalance() == 0` and `suppliedPrincipal > 0`; zeroes the book and emits `UnbackedPrincipalWrittenOff`. Does not move funds (ETH-28). |
+| `writeOffUnbackedPrincipal()` | 1510 | Owner-only. Requires `suppliedPrincipal > aUsdcBalance()`; clamps the book to the aToken balance (dust does not block) and emits `UnbackedPrincipalWrittenOff` with the written-off amount. Does not move funds (ETH-28). |
 | `harvestYield(amount)` | 1522 | `amount ≤ accruedYield()` — yield still inside AAVE. Transfers the requested `amount` (surplus from an overpaying pool stays liquid). After a successful emergency this is zero and the call reverts `NoYield`. |
 | `skimExcessUsdc(amount)` | 1550 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
 | `setAaveEnabled(bool)` | 1562 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
@@ -607,7 +608,8 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositTooLarge`,
 `InvalidAnAccount`, `InsufficientTreasury`, `InvalidRecipient`, `InvalidOracle`,
 `InvalidAaveAddress`, `NotOwner`, `Reentrancy`, `AaveDisabled`, `ReserveBpsTooHigh`,
-`NothingToSupply`, `AaveWithdrawFailed`, `NoYield`, `NoExcessUsdc`.
+`NothingToSupply`, `AaveWithdrawFailed`, `AaveSupplyFailed`, `NothingToWriteOff`,
+`NoYield`, `NoExcessUsdc`.
 
 `verifyBlock`: `VerifyBlockDisabled`, `AttestationProofRejected`, `LayerHashesProofRejected`,
 `BkSetCommitmentMismatch`, `BlockSeqNoNotMonotonic`, `PrevAnchorMismatch`, `InvalidNumLayers`,
@@ -809,7 +811,8 @@ Read off the code, without a formal audit claim.
    error at `:364`). A fee-on-transfer or rebasing token now fails closed instead of crediting
    book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
-   lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
+   lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or
+   `InsufficientTreasury` when the backed AAVE book cannot cover the shortfall),
    first-come-first-served.
 8. *Zero `dappFr` is accepted* at construction, so on a shellnet-style deployment the AN-side identity
    is pinned by `accFr` alone.

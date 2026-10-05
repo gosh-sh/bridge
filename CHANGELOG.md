@@ -75,11 +75,11 @@ assigns it when the release is tagged.
 
 ### Added
 
-- `writeOffUnbackedPrincipal()` (owner) zeroes `suppliedPrincipal` when
-  `aUsdcBalance() == 0`. Recovers the book state that used to make every
-  AAVE pull revert forever after a haircut or a short emergency drain
-  (ETH-28). Reverts `NothingToWriteOff` otherwise; emits
-  `UnbackedPrincipalWrittenOff`.
+- `writeOffUnbackedPrincipal()` (owner) clamps `suppliedPrincipal` down
+  to `aUsdcBalance()`. Recovers the book after a haircut or a short
+  emergency drain (ETH-28), including when one wei of aUSDC remains.
+  Reverts `NothingToWriteOff` when the book is already backed; emits
+  `UnbackedPrincipalWrittenOff` with the written-off amount.
 - `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
   read-only views of how close an anchor is to eviction from its 128-slot
   window. A return of N means the Nth further append overwrites it; 0 means it
@@ -179,11 +179,13 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- `withdrawByProof` and `_pullFromAave` cap the AAVE pull at
-  `min(suppliedPrincipal, aUsdcBalance)`. A phantom book no longer
-  blocks a payout that already fits in liquid USDC. A zero aToken delta
-  on `supplyToAave` is `AaveSupplyFailed`, not `AaveWithdrawFailed`.
-  `harvestYield` transfers the requested `amount`.
+- AAVE pulls (`withdrawFromAave`, the `withdrawByProof` top-up) cap at
+  `min(suppliedPrincipal, aUsdcBalance)`. `withdrawFromAave(max)` pulls
+  that backed amount; it no longer reverts when the book is larger than
+  the aToken balance. A zero aToken delta on `supplyToAave` is
+  `AaveSupplyFailed`, not `AaveWithdrawFailed`. `harvestYield` transfers
+  the requested `amount`. A payout that already fits in liquid USDC
+  never entered the pull, on this branch or before.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis

@@ -92,8 +92,9 @@ debit before paying.
 
 ## AAVE routing never moves the book
 
-`supplyToAave`, `withdrawFromAave` and `emergencyWithdrawAll` move tokens between the bridge and the
-pool and adjust `suppliedPrincipal` only. `harvestYield` and `skimExcessUsdc` send surplus to
+`supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll` and `writeOffUnbackedPrincipal` move
+tokens between the bridge and the pool (or, for the write-off, only the book) and adjust
+`suppliedPrincipal` only. `harvestYield` and `skimExcessUsdc` send surplus to
 `yieldRecipient` and appear in neither the book nor the principal accounting — that absence is what
 makes them incapable of reaching user principal. Operating detail: [`aave-yield.md`](aave-yield.md).
 

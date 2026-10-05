@@ -292,6 +292,16 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(bridge.aUsdcBalance(), bridge.suppliedPrincipal());
     }
 
+    function test_supplyToAave_zeroDeltaRevertsAaveSupplyFailed() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        uint256 toSupply = 5 * UsdcTestLib.UNIT;
+        pool.setSupplyHaircut(toSupply);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.AaveSupplyFailed.selector, toSupply, 0)
+        );
+        bridge.supplyToAave(toSupply);
+    }
+
     /// @notice After a full aToken drain, keep `principal - received` on the
     ///         books instead of zeroing. Harvest still sees no yield.
     function test_emergencyWithdrawAll_keepsShortfallOnBooks() public {
@@ -308,7 +318,7 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(bridge.accruedYield(), 0, "empty pool is not yield");
         assertEq(usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT - haircut);
 
-        vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
+        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
         bridge.withdrawFromAave(type(uint256).max);
 
         vm.expectEmit(false, false, false, true);
@@ -322,6 +332,33 @@ contract AckiNackiBridgeAaveTest is Test {
         bridge.supplyToAave(type(uint256).max);
         vm.expectRevert(AckiNackiBridge.NothingToWriteOff.selector);
         bridge.writeOffUnbackedPrincipal();
+    }
+
+    function test_withdrawFromAave_maxPullsBackedWhenUnderBooked() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        uint256 lost = 10;
+        vm.prank(address(bridge));
+        aUSDC.transfer(address(0xdead), lost);
+
+        bridge.withdrawFromAave(type(uint256).max);
+        assertEq(bridge.aUsdcBalance(), 0);
+        assertEq(bridge.suppliedPrincipal(), lost);
+    }
+
+    function test_writeOffUnbackedPrincipal_clampsToDust() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        uint256 booked = bridge.suppliedPrincipal();
+        vm.prank(address(bridge));
+        aUSDC.transfer(address(0xdead), booked - 1);
+
+        vm.expectEmit(false, false, false, true);
+        emit UnbackedPrincipalWrittenOff(booked - 1);
+        bridge.writeOffUnbackedPrincipal();
+        assertEq(bridge.suppliedPrincipal(), 1);
+        assertEq(bridge.aUsdcBalance(), 1);
+        assertEq(bridge.accruedYield(), 0);
     }
 
     function test_writeOffUnbackedPrincipal_revertsWhenBooksAreClean() public {

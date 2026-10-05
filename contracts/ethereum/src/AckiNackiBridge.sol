@@ -382,9 +382,9 @@ contract AckiNackiBridge {
     ///         `AaveWithdrawFailed` so an ABI consumer does not read a
     ///         failed supply as a failed withdraw (ETH-28).
     error AaveSupplyFailed(uint256 requested, uint256 received);
-    /// @notice `writeOffUnbackedPrincipal` needs `aUsdcBalance() == 0`
-    ///         and `suppliedPrincipal > 0`. Any aToken left would be
-    ///         user principal looking like yield after a write-off.
+    /// @notice `writeOffUnbackedPrincipal` needs `suppliedPrincipal`
+    ///         above `aUsdcBalance()`. The call clamps the book to the
+    ///         aToken balance; dust does not block it.
     error NothingToWriteOff();
     /// @notice `emergencyWithdrawAll` asked AAVE for `type(uint256).max`
     ///         but aUSDC still remains. Zeroing `suppliedPrincipal` would let
@@ -1467,13 +1467,13 @@ contract AckiNackiBridge {
     }
 
     /// @notice Withdraw USDC from AAVE back into the bridge (preemptively top up liquidity).
-    /// @param amount Amount to withdraw, or `type(uint256).max` for the entire principal.
+    /// @param amount Amount to withdraw, or `type(uint256).max` for the entire backed principal.
     function withdrawFromAave(uint256 amount) external onlyOwner nonReentrant {
-        uint256 principalCap = suppliedPrincipal;
-        if (principalCap == 0) revert InvalidAmount();
+        uint256 cap = _backedPrincipal();
+        if (cap == 0) revert InvalidAmount();
 
-        uint256 target = amount == type(uint256).max ? principalCap : amount;
-        if (target == 0 || target > principalCap) revert InvalidAmount();
+        uint256 target = amount == type(uint256).max ? cap : amount;
+        if (target == 0 || target > cap) revert InvalidAmount();
 
         _pullFromAave(target);
     }
@@ -1503,15 +1503,16 @@ contract AckiNackiBridge {
         emit WithdrawnFromAave(principal, received);
     }
 
-    /// @notice Zero `suppliedPrincipal` when the aToken balance is
-    ///         already empty. Recovers the `aUsdc == 0 && suppliedPrincipal
-    ///         > 0` book state that otherwise makes `_pullFromAave` and
-    ///         `withdrawFromAave` revert forever (ETH-28).
-    function writeOffUnbackedPrincipal() external onlyOwner {
-        if (aUsdcBalance() != 0 || suppliedPrincipal == 0) revert NothingToWriteOff();
-        uint256 amount = suppliedPrincipal;
-        suppliedPrincipal = 0;
-        emit UnbackedPrincipalWrittenOff(amount);
+    /// @notice Drop the unbacked part of `suppliedPrincipal`. Clamps the
+    ///         book to `aUsdcBalance()` so one wei of leftover aToken
+    ///         cannot block the write-off (ETH-28).
+    function writeOffUnbackedPrincipal() external onlyOwner nonReentrant {
+        uint256 booked = suppliedPrincipal;
+        uint256 poolBal = aUsdcBalance();
+        if (booked <= poolBal) revert NothingToWriteOff();
+        uint256 written = booked - poolBal;
+        suppliedPrincipal = poolBal;
+        emit UnbackedPrincipalWrittenOff(written);
     }
 
     /// @notice Harvest yield still inside AAVE (`accruedYield`) to

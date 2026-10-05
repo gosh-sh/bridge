@@ -99,9 +99,10 @@ the emergency exists for — then `excessUsdc()` is zero and the skim reverts. T
 guard doing its job, and it may be telling you there is a shortfall. Check `totalAssets()` against
 `treasuryBalance()` before assuming it just means "nothing to collect".
 
-When `aUsdcBalance() == 0` and `suppliedPrincipal() > 0` (the leftover after that shortfall),
-`withdrawFromAave` keeps reverting `InsufficientTreasury`. Call `writeOffUnbackedPrincipal()` to
-clear the book. Payouts that already fit in liquid USDC do not wait on that call.
+When `suppliedPrincipal() > aUsdcBalance()` (the leftover after that shortfall, including
+one wei of leftover aUSDC), `withdrawFromAave(max)` pulls the backed amount. Call
+`writeOffUnbackedPrincipal()` to drop the rest of the book. Payouts that already fit in
+liquid USDC do not wait on that call.
 
 ## Check the recipient before the first collection
 

@@ -41,6 +41,18 @@
 # BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
 # BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
+# --- Deposit (EVM → Acki Nacki) -----------------------------------------------
+# Mainnet (chain 1) is not a deposit chain: deposits come from L2s; this profile cannot be used for deposit.
+# The deposit prover directory: its tools, configs/circuit_params.json and
+# data/ (the Hermez k=18 SRS and the proving key it builds on first use).
+# In a source checkout, lay it out with scripts/stage_deposit_prover.sh.
+# BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover
+# Deposit operations, their locks and claims. Keep one directory per sender:
+# operations in another directory are invisible to --resume and to the
+# checks that stop a second deposit while the first one's outcome is unknown.
+# BRIDGE_DEPOSIT_STATE_DIR=./deposit-state
+# BRIDGE_DEPOSIT_CONFIRMATIONS=12
+
 # --- Deploy target ------------------------------------------------------------
 # BRIDGE_ADDRESS=0x…                            # AckiNackiBridge on EVM mainnet
 # BRIDGE_DEPLOY_BLOCK=…                         # block that deploy was created in

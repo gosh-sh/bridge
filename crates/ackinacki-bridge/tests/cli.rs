@@ -796,3 +796,131 @@ fn a_control_character_in_an_argument_does_not_reach_the_terminal() {
         "the newline was replayed verbatim: {e:?}"
     );
 }
+
+#[test]
+fn deposit_refuses_an_unknown_network_before_the_network() {
+    let out = run(&[
+        "deposit",
+        "--network",
+        "mainnet",
+        "--amount",
+        "1",
+        "--to",
+        "x::y",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("sepolia"));
+}
+
+#[test]
+fn deposit_tx_hash_needs_resume() {
+    let out = run(&["deposit", "--tx-hash", &format!("0x{}", "ab".repeat(32))]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn deposit_refuses_a_malformed_to_as_exit_2() {
+    let out = run(&[
+        "deposit",
+        "--network",
+        "sepolia",
+        "--amount",
+        "1",
+        "--to",
+        "abc",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--to"));
+}
+
+#[test]
+fn deposit_help_does_not_print_secrets_from_the_environment() {
+    let secrets = [
+        ("RPC_URL", "https://rpc.example/v2/HelpRpcKey-1a2b3c"),
+        (
+            "BRIDGE_GQL_ENDPOINT",
+            "https://gql.example/graphql?token=HelpGqlToken-4d5e6f",
+        ),
+        ("BRIDGE_WC_PROJECT_ID", "HelpProjectId-7a8b9c"),
+    ];
+    let mut c = bin();
+    for (k, v) in secrets {
+        c.env(k, v);
+    }
+    let out = c
+        .args(["deposit", "--help"])
+        .output()
+        .expect("the binary must be runnable");
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let printed = format!("{}{}", stdout(&out), stderr(&out));
+    for (k, v) in secrets {
+        assert!(!printed.contains(v), "{k}'s value is printed: {printed}");
+        assert!(
+            printed.contains(k),
+            "the variable is still named: {printed}"
+        );
+    }
+}
+
+#[test]
+fn deposit_without_home_refuses_to_default_its_directories() {
+    // `bin()` clears the environment, so HOME is unset here, as it often is
+    // under systemd, cron or in a container.
+    let out = run(&["deposit", "--resume", "01J9ZQ4X7T8V5N6M3K2P1R0S9A"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(e.contains("--state-dir (BRIDGE_DEPOSIT_STATE_DIR)"), "{e}");
+    assert!(
+        !e.contains("--work-dir"),
+        "a resumed operation has its own: {e}"
+    );
+    // A new deposit records the work directory it proves in.
+    let account = "1a".repeat(32);
+    let to = format!("{}::{}", "0".repeat(64), "a3".repeat(32));
+    let out = run(&[
+        "deposit",
+        "--network",
+        "sepolia",
+        "--amount",
+        "1",
+        "--to",
+        &to,
+        "--rpc-url",
+        "http://rpc.invalid",
+        "--bridge-address",
+        "0x0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7",
+        "--gql-endpoint",
+        "http://gql.invalid",
+        "--usdc-bridge-account",
+        &account,
+        "--deposit-prover-dir",
+        "/nonexistent/deposit-prover",
+        "--wc-project-id",
+        "p",
+        "--state-dir",
+        "/nonexistent/deposit-state",
+    ]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(e.contains("--work-dir (BRIDGE_WORK_DIR)"), "{e}");
+    assert!(!e.contains("--state-dir"), "it was given: {e}");
+}
+
+#[test]
+fn deposit_resume_looks_its_operation_up_with_only_the_state_dir() {
+    // HOME is unset, and no endpoint, bridge, prover or work directory is
+    // given: none is needed to learn that the state directory has no such
+    // operation.
+    let state = tempfile::TempDir::new().unwrap();
+    let op = "01J9ZQ4X7T8V5N6M3K2P1R0S9A";
+    let out = run(&[
+        "deposit",
+        "--resume",
+        op,
+        "--state-dir",
+        state.path().to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(e.contains(&format!("no deposit operation {op}")), "{e}");
+}

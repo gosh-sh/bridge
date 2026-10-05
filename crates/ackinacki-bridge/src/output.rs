@@ -2,8 +2,10 @@
 //!
 //! Two output modes:
 //! - **Human** — pretty stderr lines (tracing already handles logs; this module
-//!   owns the FINAL summary the user sees after everything is done). Never
-//!   printed to stdout.
+//!   owns the FINAL summary the user sees after everything is done). The
+//!   withdrawal summary is never printed to stdout; the deposit summary is,
+//!   beside the deposit's QR codes, so a script wrapping a human run can
+//!   capture it.
 //! - **`--json`** — one line JSON on stdout, nothing else on stdout, ever.
 //!   Stdout is a machine contract; stderr is the human tap.
 //!
@@ -14,6 +16,16 @@
 use serde_json::json;
 
 use crate::{errors::CliError, orchestrator::WithdrawSuccess};
+
+/// What a successful run of either subcommand returns to `main`.
+#[derive(Debug)]
+pub enum RunSuccess {
+    /// A finished (or dry-run) withdrawal.
+    Withdraw(WithdrawSuccess),
+    /// A finished, dry-run or released deposit; boxed, as it is several
+    /// times the size of a withdrawal's summary.
+    Deposit(Box<crate::deposit::DepositSuccess>),
+}
 
 /// Write a whole block to stdout without panicking on failure.
 ///
@@ -84,7 +96,15 @@ fn emit(s: &str, to_stdout: bool) {
 
 /// Print a successful terminal summary. Chooses stderr-human or
 /// stdout-json based on `json`.
-pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
+pub fn print_success(summary: &RunSuccess, json_mode: bool) {
+    match summary {
+        RunSuccess::Withdraw(w) => print_withdraw(w, json_mode),
+        RunSuccess::Deposit(d) => print_deposit(d, json_mode),
+    }
+}
+
+/// The withdrawal summary, in the sink `json_mode` selects.
+fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     if json_mode {
         // One line to stdout. `WithdrawSuccess` is `Serialize` and holds
         // no key material.
@@ -128,6 +148,157 @@ pub fn print_success(summary: &WithdrawSuccess, json_mode: bool) {
         ),
         false,
     );
+}
+
+/// The deposit summary, in the sink `json_mode` selects.
+fn print_deposit(s: &crate::deposit::DepositSuccess, json_mode: bool) {
+    if json_mode {
+        match serde_json::to_string(s) {
+            Ok(line) => emit(&format!("{line}\n"), true),
+            Err(e) => emit(
+                &format!("output: failed to serialize success as JSON: {e}\n"),
+                false,
+            ),
+        }
+        return;
+    }
+    emit(&deposit_summary(s), DEPOSIT_SUMMARY_TO_STDOUT);
+}
+
+/// Where the human deposit summary goes. Stdout, so a script wrapping a
+/// human run can still capture the one thing it prints; logs and the
+/// checklist stay on stderr.
+const DEPOSIT_SUMMARY_TO_STDOUT: bool = true;
+
+/// The human deposit summary as one block of text.
+fn deposit_summary(s: &crate::deposit::DepositSuccess) -> String {
+    let field = |v: &Option<serde_json::Value>, k: &str| {
+        v.as_ref()
+            .and_then(|x| x.get(k))
+            .filter(|x| !x.is_null())
+            .map(|x| {
+                x.as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| x.to_string())
+            })
+            .unwrap_or_else(|| "-".into())
+    };
+    let head = if s.dry_run {
+        "deposit dry run: nothing was sent"
+    } else if s.abandoned {
+        "deposit operation released"
+    } else {
+        "deposit complete"
+    };
+    // The summary carries the value `--network` takes; people read the
+    // network's name.
+    let network = crate::deposit::args::Network::from_chain_id(s.chain_id)
+        .map_or_else(|| s.network.clone(), |n| n.name().to_string());
+    let mut out = format!(
+        "\n{head}:\n\x20 network:      {network} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
+         {}\n",
+        s.chain_id, s.amount, s.to,
+    );
+    if s.dry_run {
+        out.push_str(&dry_run_lines(s));
+        return out;
+    }
+    out.push_str(&format!(
+        "\x20 operation:    {}\n",
+        s.op_id.as_deref().unwrap_or("-")
+    ));
+    let deposit = format!(
+        "\x20 deposit:      tx {} depositId {}\n",
+        field(&s.deposit, "tx_hash"),
+        field(&s.deposit, "deposit_id"),
+    );
+    if s.abandoned {
+        // Released before it finished: only what is known.
+        if s.deposit.is_some() {
+            out.push_str(&deposit);
+        }
+        return out;
+    }
+    // The anchor line is left out when the writer is unknown, never
+    // printed as "null".
+    let anchor = match s
+        .anchor
+        .as_ref()
+        .and_then(|a| a.get("writer"))
+        .and_then(|w| w.as_str())
+    {
+        Some("owner") => "  anchored by:  bridge owner\n".to_string(),
+        Some("light-client") => "  anchored by:  light client\n".to_string(),
+        _ => String::new(),
+    };
+    out.push_str(&format!(
+        "{deposit}{anchor}\x20 credited:     confirmDeposit {} delivery {}\n\x20 balance:      {} \
+         -> {} (diagnostic only)\n",
+        field(&s.confirmation, "confirm_tx"),
+        field(&s.confirmation, "delivery_tx"),
+        field(&s.balance, "before"),
+        field(&s.balance, "after"),
+    ));
+    out
+}
+
+/// What a dry run adds to the deposit summary: whom the anchor wait would
+/// wait for, and both transactions as calldata and as QR payloads. A value
+/// the summary does not carry is left out, not printed as a dash.
+fn dry_run_lines(s: &crate::deposit::DepositSuccess) -> String {
+    let tx = |k: &str| {
+        s.tx.as_ref()
+            .and_then(|t| t.get(k))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    let codes: Vec<String> =
+        s.tx.as_ref()
+            .and_then(|t| t.get("eip681"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|u| u.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let mut out = String::new();
+    if let Some(d) = anchor_decision(s) {
+        out.push_str(&format!("\x20 anchor:       {d}\n"));
+    }
+    for (i, (name, calldata)) in [
+        ("approve", "approve_calldata"),
+        ("deposit", "deposit_calldata"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(c) = tx(calldata) {
+            out.push_str(&format!("\x20 {name}:      calldata {c}\n"));
+        }
+        if let Some(u) = codes.get(i) {
+            out.push_str(&format!("\x20               EIP-681 QR {u}\n"));
+        }
+    }
+    if let Some(w) = tx("walletconnect") {
+        out.push_str(&format!("\x20 WalletConnect QR: {w}\n"));
+    }
+    out
+}
+
+/// Whom a deposit's anchor wait would wait for, from the dry run's anchor
+/// plan: the light client alone when the owner cannot anchor any more,
+/// otherwise the bridge owner, and the light client too when it is ready.
+/// `None` when the summary does not say.
+fn anchor_decision(s: &crate::deposit::DepositSuccess) -> Option<&'static str> {
+    let a = s.anchor.as_ref()?;
+    let ready = a.get("light_client_ready").and_then(|v| v.as_bool()) == Some(true);
+    match a.get("writer")?.as_str()? {
+        "light-client" => Some("waiting for the light client"),
+        "owner" if ready => Some("waiting for the bridge owner or the light client"),
+        "owner" => Some("waiting for the bridge owner"),
+        _ => None,
+    }
 }
 
 /// Literal scan of argv for `--json`.
@@ -188,15 +359,24 @@ fn cause_chain(err: &CliError) -> Vec<String> {
 /// field, and rewriting it to include the chain would silently change
 /// what their pattern matches. `causes` is `[]` for the many errors that
 /// carry no source.
+///
+/// In a deposit run the message and every cause are redacted: an RPC
+/// provider's key sits in the path or query of its URL, and an HTTP
+/// client's error — or the prover's stderr — quotes that URL whole.
 pub fn error_json(err: &CliError) -> String {
-    let value = json!({
+    let hide = |s: &str| crate::deposit::ui::redact_in_deposit_run(s).into_owned();
+    let causes: Vec<String> = cause_chain(err).iter().map(|c| hide(c)).collect();
+    let mut value = json!({
         "error": {
             "stage": err.stage(),
             "exit_code": err.exit_code().as_i32(),
-            "message": format!("{err}"),
-            "causes": cause_chain(err),
+            "message": hide(&format!("{err}")),
+            "causes": causes,
         }
     });
+    if let Some(op) = err.op_id() {
+        value["error"]["op_id"] = json!(op);
+    }
     // Fall back to a raw string if serde ever fails (it won't for the shape
     // above; belt-and-suspenders).
     serde_json::to_string(&value).unwrap_or_else(|_| {
@@ -217,16 +397,23 @@ pub fn print_error(err: &CliError, json_mode: bool) {
         emit(&format!("{}\n", error_json(err)), true);
         return;
     }
-    let mut block = format!("error: {err}\n");
+    emit(&human_error(err), false);
+}
+
+/// The human error block: the error, then its causes, outermost first,
+/// redacted in a deposit run as the JSON envelope is.
+fn human_error(err: &CliError) -> String {
+    let hide = |s: &str| crate::deposit::ui::redact_in_deposit_run(s).into_owned();
+    let mut block = format!("error: {}\n", hide(&format!("{err}")));
     // The same walk the JSON envelope does, through the same function, so
     // the two modes cannot report different causes for one failure. The
     // underlying anyhow context (aggregator stderr, `RelayerError::other`
     // messages, the keygen-lock timeout) is what makes a stage-5 failure
     // diagnosable without a debug build.
     for (depth, c) in cause_chain(err).iter().enumerate() {
-        block.push_str(&format!("  caused by [{depth}]: {c}\n"));
+        block.push_str(&format!("  caused by [{depth}]: {}\n", hide(c)));
     }
-    emit(&block, false);
+    block
 }
 
 #[cfg(test)]
@@ -238,6 +425,195 @@ mod tests {
     // slice and yields owned Strings.
     fn argv<'a>(items: &'a [&str]) -> impl Iterator<Item = String> + 'a {
         items.iter().map(|s| s.to_string())
+    }
+
+    #[test]
+    fn the_deposit_envelope_names_the_operation() {
+        let e = CliError::deposit(
+            crate::errors::ExitCode::DepositOutcomeUnknown,
+            crate::errors::Stage::Deposit,
+            Some("01J9ZQ4X7T0000000000000000"),
+            "the wallet request went out and no transaction was found",
+        );
+        let v: serde_json::Value = serde_json::from_str(&error_json(&e)).unwrap();
+        assert_eq!(v["error"]["exit_code"], 30);
+        assert_eq!(v["error"]["stage"], "deposit");
+        assert_eq!(v["error"]["op_id"], "01J9ZQ4X7T0000000000000000");
+    }
+
+    #[test]
+    fn a_withdrawal_envelope_has_no_op_id_key() {
+        let e = CliError::Usage {
+            reason: "x".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&error_json(&e)).unwrap();
+        assert!(v["error"].get("op_id").is_none());
+    }
+
+    fn sample() -> crate::deposit::DepositSuccess {
+        crate::deposit::DepositSuccess {
+            op_id: Some("op1".into()),
+            dry_run: false,
+            network: "sepolia".into(),
+            chain_id: 11155111,
+            amount: "5".into(),
+            to: "0:ab".into(),
+            deposit: Some(json!({"tx_hash": "0xt", "deposit_id": 7})),
+            anchor: Some(json!({"writer": "owner"})),
+            tx: None,
+            confirmation: Some(json!({"confirm_tx": "c", "delivery_tx": null})),
+            balance: None,
+            abandoned: false,
+        }
+    }
+
+    #[test]
+    fn the_deposit_summary_goes_to_stdout() {
+        const { assert!(DEPOSIT_SUMMARY_TO_STDOUT) };
+    }
+
+    #[test]
+    fn the_deposit_summary_names_who_anchored() {
+        let mut d = sample();
+        let text = deposit_summary(&d);
+        assert!(
+            text.contains("  network:      Sepolia (11155111)\n"),
+            "{text}"
+        );
+        assert!(text.contains("  anchored by:  bridge owner\n"), "{text}");
+        assert!(text.contains("deposit complete:"), "{text}");
+        assert!(text.contains("tx 0xt depositId 7"), "{text}");
+        assert!(text.contains("delivery -\n"), "{text}");
+        d.anchor = Some(json!({"writer": "light-client"}));
+        assert!(deposit_summary(&d).contains("  anchored by:  light client\n"));
+        d.anchor = Some(json!({"writer": null}));
+        assert!(!deposit_summary(&d).contains("anchored by"));
+        d.anchor = None;
+        let text = deposit_summary(&d);
+        assert!(
+            !text.contains("anchored by") && !text.contains("null"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_dry_run_summary_prints_both_calldatas_the_codes_and_the_anchor_decision() {
+        use crate::deposit::{
+            args::RunMode,
+            locks::DirLock,
+            preflight::{check, dry_run_summary},
+            store::Store,
+            testkit::World,
+        };
+        for (owner, lc_ready, decision) in [
+            (true, false, "waiting for the bridge owner\n"),
+            (
+                true,
+                true,
+                "waiting for the bridge owner or the light client\n",
+            ),
+            (false, true, "waiting for the light client\n"),
+        ] {
+            let world = World::healthy();
+            world.owner_anchors(owner);
+            if lc_ready {
+                world.light_client_ready();
+            }
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
+            let c = check(&p, &world.deps(), &store, None).await.unwrap();
+            let s = dry_run_summary(&p, &c);
+            let text = deposit_summary(&s);
+            assert_eq!(serde_json::to_value(&s).unwrap()["network"], "sepolia");
+            assert!(
+                text.contains("  network:      Sepolia (11155111)\n"),
+                "{text}"
+            );
+            let tx = s.tx.as_ref().unwrap();
+            for k in ["approve_calldata", "deposit_calldata"] {
+                let calldata = tx[k].as_str().unwrap();
+                assert!(
+                    calldata.len() > 10 && text.contains(calldata),
+                    "{k}: {text}"
+                );
+            }
+            let codes = tx["eip681"].as_array().unwrap();
+            assert_eq!(codes.len(), 2);
+            for u in codes {
+                assert!(text.contains(u.as_str().unwrap()), "{text}");
+            }
+            assert!(text.contains("WalletConnect"), "{text}");
+            assert!(
+                text.contains(&format!("  anchor:       {decision}")),
+                "owner={owner} lc={lc_ready}: {text}"
+            );
+            assert!(
+                text.starts_with("\ndeposit dry run: nothing was sent:\n"),
+                "{text}"
+            );
+            // Nothing was sent, so there is nothing to put a dash against.
+            assert!(
+                !text.contains(" -\n") && !text.contains("operation"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_released_summary_prints_no_placeholder_lines() {
+        let mut d = sample();
+        d.abandoned = true;
+        d.deposit = None;
+        d.anchor = None;
+        d.confirmation = None;
+        let text = deposit_summary(&d);
+        assert!(text.contains("deposit operation released:"), "{text}");
+        assert!(text.contains("  operation:    op1\n"), "{text}");
+        assert!(!text.contains(" -"), "{text}");
+    }
+
+    #[test]
+    fn a_deposit_error_prints_the_rpc_url_without_its_key() {
+        const URL: &str = "https://rpc.example.org/v3/InfuraKey-0c9b8a7d?token=TokenKey-e5f4d3c2";
+        crate::deposit::ui::hide_url_secrets([URL]);
+        // The prover's stderr tail: an HTTP client's error as `Debug` prints it.
+        let tail = r#"Error: reqwest::Error { kind: Request, url: Url { scheme: "https", host: Some(Domain("rpc.example.org")), path: "/v3/InfuraKey-0c9b8a7d", query: Some("token=TokenKey-e5f4d3c2") } }"#;
+        let e = CliError::deposit(
+            crate::errors::ExitCode::DepositProofFailed,
+            crate::errors::Stage::Prove,
+            Some("01J9ZQ4X7T0000000000000000"),
+            format!(
+                "fetch_deposit_data failed (exit status: 1). The deposit is on the EVM bridge; \
+                 retry with --resume 01J9ZQ4X7T0000000000000000\nlast lines of its stderr:\n{tail}"
+            ),
+        );
+        let json = error_json(&e);
+        let human = human_error(&e);
+        for s in ["InfuraKey-0c9b8a7d", "TokenKey-e5f4d3c2"] {
+            assert!(!json.contains(s), "{json}");
+            assert!(!human.contains(s), "{human}");
+        }
+        assert!(
+            json.contains("--resume 01J9ZQ4X7T0000000000000000"),
+            "{json}"
+        );
+        assert!(!json.contains('\n'), "{json}");
+        // An RPC error under a refusal: the cause names the provider only.
+        let e = CliError::Preflight {
+            reason: "could not read the chain id".into(),
+            source: Some(anyhow::anyhow!(
+                "error sending request for url (https://RPC.example.org/v3/InfuraKey-0c9b8a7d/)"
+            )),
+        };
+        let v: serde_json::Value = serde_json::from_str(&error_json(&e)).unwrap();
+        assert_eq!(
+            v["error"]["causes"][0],
+            "error sending request for url (https://RPC.example.org)"
+        );
+        let human = human_error(&e);
+        assert!(!human.contains("InfuraKey"), "{human}");
+        assert!(human.contains("https://RPC.example.org)"), "{human}");
     }
 
     #[test]

@@ -113,9 +113,21 @@ BRIDGE_WITHDRAW_STATE_DIR=./withdraw-state
 BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
 BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
+# --- Deposit (EVM → Acki Nacki) -----------------------------------------------
+# The deposit prover directory: its tools, configs/circuit_params.json and
+# data/ (the Hermez k=18 SRS and the proving key it builds on first use).
+# In a source checkout, lay it out with scripts/stage_deposit_prover.sh.
+BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover
+# Deposit operations, their locks and claims. Keep one directory per sender:
+# operations in another directory are invisible to --resume and to the
+# checks that stop a second deposit while the first one's outcome is unknown.
+BRIDGE_DEPOSIT_STATE_DIR=./deposit-state
+BRIDGE_DEPOSIT_CONFIRMATIONS=12
+
 # --- Deploy target ------------------------------------------------------------
 # Currently pinned to the shellnet team's L2-anchored reference deploy
-# on Sepolia. The server-side bundle relayer that advances this contract
+# on Sepolia, deployed 2026-10-02 at block 11828971 (genesis seq_no
+# 20856832). The server-side bundle relayer that advances this contract
 # runs L2 only. See README.md Quick start for the default-user flow.
 #
 # Redeployed from `main` on 2026-10-02 (owner pause, #73). The previous

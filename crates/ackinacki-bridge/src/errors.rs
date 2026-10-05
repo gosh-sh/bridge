@@ -79,6 +79,35 @@ pub enum ExitCode {
     /// on-chain side (unpause, seed treasury) and re-run — the proof is
     /// deterministic and cache-warm.
     EthSubmitFailed = 13,
+    /// Deposit: the wallet did not pair, the user cancelled, the pairing
+    /// expired, or the account is a smart-contract account whose deposit
+    /// the circuit cannot prove. Nothing was sent.
+    WalletFailed = 20,
+    /// Deposit: `approve` reverted or was rejected, or the wallet set a
+    /// spending limit below the amount. No USDC moved.
+    ApproveFailed = 21,
+    /// Deposit: the deposit transaction reverted, or carries no `Deposit`
+    /// event, in a finalized block. USDC was not taken; gas was spent.
+    DepositReverted = 22,
+    /// Deposit: the request reached the wallet and no transaction was found
+    /// in the recovery window. It may still be in flight: `--resume <op-id>`.
+    DepositOutcomeUnknown = 30,
+    /// Deposit confirmed on EVM; waiting for the Acki Nacki side (the block
+    /// anchor or a paused bridge) ran past `--anchor-timeout-s`.
+    AnWaitTimeout = 31,
+    /// Deposit confirmed on EVM; the proof failed or does not match it.
+    DepositProofFailed = 32,
+    /// `finalizeDeposit` was refused by the Acki Nacki bridge.
+    FinalizeRefused = 33,
+    /// `finalizeDeposit` was sent and the credit could not be confirmed in
+    /// time. The outcome is unknown: `--resume`.
+    CreditUnconfirmed = 34,
+    /// The deposit is on chain but cannot be proven, or it is not the
+    /// deposit that was requested. Only the operator can return the USDC.
+    DepositUnprovable = 35,
+    /// The deposit voucher exists and the bridge transaction that should
+    /// have minted the credit aborted. Only the operator can pay it out.
+    CreditAborted = 37,
 }
 
 impl ExitCode {
@@ -100,6 +129,12 @@ pub enum Stage {
     Capture,
     Prove,
     Submit,
+    Wallet,
+    Approve,
+    Deposit,
+    Anchor,
+    Finalize,
+    Credit,
 }
 
 /// The single error type raised out of `main`. Every variant maps to
@@ -269,6 +304,19 @@ pub enum CliError {
         #[source]
         source: Option<anyhow::Error>,
     },
+
+    /// Every deposit outcome other than exit 2. `exit` carries the code,
+    /// `op_id` the operation to resume or to hand to the operator.
+    /// Constructed through [`CliError::deposit`] only.
+    #[error("{reason}")]
+    Deposit {
+        exit: ExitCode,
+        stage: Stage,
+        op_id: Option<String>,
+        reason: String,
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 }
 
 /// Text on its way into a refusal, already made safe to print.
@@ -404,6 +452,9 @@ impl CliError {
             CliError::EthSubmitFailed {
                 ..
             } => ExitCode::EthSubmitFailed,
+            CliError::Deposit {
+                exit, ..
+            } => *exit,
         }
     }
 
@@ -441,6 +492,65 @@ impl CliError {
             CliError::EthSubmitFailed {
                 ..
             } => Stage::Submit,
+            CliError::Deposit {
+                stage, ..
+            } => *stage,
+        }
+    }
+
+    /// The one constructor for [`CliError::Deposit`]. Exit 0 is a success,
+    /// not an error, and a withdrawal code would lie about which pipeline
+    /// failed, so both are refused at construction.
+    pub fn deposit(
+        exit: ExitCode,
+        stage: Stage,
+        op_id: Option<&str>,
+        reason: impl Into<String>,
+    ) -> Self {
+        assert!(
+            matches!(
+                exit,
+                ExitCode::DuplicateRefused
+                    | ExitCode::WalletFailed
+                    | ExitCode::ApproveFailed
+                    | ExitCode::DepositReverted
+                    | ExitCode::DepositOutcomeUnknown
+                    | ExitCode::AnWaitTimeout
+                    | ExitCode::DepositProofFailed
+                    | ExitCode::FinalizeRefused
+                    | ExitCode::CreditUnconfirmed
+                    | ExitCode::DepositUnprovable
+                    | ExitCode::CreditAborted
+            ),
+            "{exit:?} is not a deposit outcome"
+        );
+        CliError::Deposit {
+            exit,
+            stage,
+            op_id: op_id.map(str::to_owned),
+            reason: reason.into(),
+            source: None,
+        }
+    }
+
+    /// What went wrong, for a message that goes on to say more: a refusal's
+    /// reason without its `preflight:` prefix, any other error as it prints.
+    pub fn into_reason(self) -> String {
+        match self {
+            CliError::Preflight {
+                reason, ..
+            } => reason,
+            other => other.to_string(),
+        }
+    }
+
+    /// The deposit operation this error is about, if any.
+    pub fn op_id(&self) -> Option<&str> {
+        match self {
+            CliError::Deposit {
+                op_id, ..
+            } => op_id.as_deref(),
+            _ => None,
         }
     }
 }
@@ -579,6 +689,46 @@ mod tests {
             }
             .exit_code(),
             ExitCode::CaptureTimeout
+        );
+        assert_eq!(
+            CliError::deposit(ExitCode::DepositOutcomeUnknown, Stage::Deposit, None, "x")
+                .exit_code(),
+            ExitCode::DepositOutcomeUnknown
+        );
+    }
+
+    #[test]
+    fn deposit_exit_codes_are_the_published_contract() {
+        // The numbers are a wire contract with scripts, and they sit
+        // next to the withdrawal codes without sharing any of them.
+        let table = [
+            (ExitCode::WalletFailed, 20),
+            (ExitCode::ApproveFailed, 21),
+            (ExitCode::DepositReverted, 22),
+            (ExitCode::DepositOutcomeUnknown, 30),
+            (ExitCode::AnWaitTimeout, 31),
+            (ExitCode::DepositProofFailed, 32),
+            (ExitCode::FinalizeRefused, 33),
+            (ExitCode::CreditUnconfirmed, 34),
+            (ExitCode::DepositUnprovable, 35),
+            (ExitCode::CreditAborted, 37),
+        ];
+        for (code, n) in table {
+            assert_eq!(code.as_i32(), n, "{code:?}");
+            let e = CliError::deposit(code, Stage::Deposit, Some("01J0000000000000000000000"), "x");
+            assert_eq!(e.exit_code(), code);
+            assert_eq!(e.op_id(), Some("01J0000000000000000000000"));
+        }
+    }
+
+    #[test]
+    fn a_deposit_error_never_claims_success() {
+        let caught = std::panic::catch_unwind(|| {
+            CliError::deposit(ExitCode::Success, Stage::Deposit, None, "x")
+        });
+        assert!(
+            caught.is_err(),
+            "exit 0 is not an error and must not be constructible as one"
         );
     }
 

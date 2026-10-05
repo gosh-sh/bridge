@@ -1713,11 +1713,11 @@ pub(crate) const WITHDRAW_VERIFIER_CALLDATA_BIN: &str =
     "BridgeWithdrawalAggregatorVerifier_calldata.bin";
 
 /// Byte offset of the withdrawal-adapter VK digest inside
-/// `WITHDRAW_VERIFIER_CALLDATA_BIN`: 12 KZG accumulator limbs + 11
+/// `WITHDRAW_VERIFIER_CALLDATA_BIN`: 12 KZG accumulator limbs + 13
 /// re-exposed Circuit-4 public inputs, each a 32-byte field element.
 /// Matches `ShplonkAggregatorVerifierBase`'s runtime check position for
-/// the withdrawal adapter (word `12 + N` with N=11).
-const WITHDRAW_VK_DIGEST_OFFSET: usize = (12 + 11) * 32;
+/// the withdrawal adapter (word `12 + N` with N=13).
+const WITHDRAW_VK_DIGEST_OFFSET: usize = (12 + 13) * 32;
 
 /// The verifier source `aggregate-proof` self-checks its output against; it
 /// joins `{name}.sol` onto `--verifiers-dir`.
@@ -1806,12 +1806,12 @@ pub fn expected_verifier_runtime(bin: &[u8]) -> CliResult<&[u8]> {
 }
 
 /// Extract the withdrawal-adapter VK digest from the reference
-/// `_calldata.bin`. Layout is `12 KZG accumulator limbs + 11 re-exposed
+/// `_calldata.bin`. Layout is `12 KZG accumulator limbs + 13 re-exposed
 /// Circuit-4 public inputs + digest + proof`, each field element 32 bytes
-/// (big-endian, Solidity ABI); the digest lives at word 23.
+/// (big-endian, Solidity ABI); the digest lives at word 25.
 ///
 /// A file that is not exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes is a
-/// pre-binding build (3 648 B) or an unrelated blob. Word 23 of a 3 648 B
+/// pre-binding build (3 712 B) or an unrelated blob. Word 25 of a 3 712 B
 /// file is a G1 coordinate and would compare as a digest.
 pub fn expected_withdraw_vk_digest(
     calldata: &[u8],
@@ -1821,7 +1821,7 @@ pub fn expected_withdraw_vk_digest(
         return Err(CliError::Preflight {
             reason: format!(
                 "{} is {} bytes; the withdrawal reference calldata is exactly \
-                 {WITHDRAWAL_CALLDATA_LEN} bytes, with the inner-VK digest at word 23. 3 648 \
+                 {WITHDRAWAL_CALLDATA_LEN} bytes, with the inner-VK digest at word 25. 3 712 \
                  bytes is the pre-binding blob. Upgrade `--verifiers-dir` from the release \
                  `verifiers/` directory.",
                 path.display(),
@@ -2020,7 +2020,7 @@ pub async fn check_bridge_deploy(
             //     constructor takes `(shplonkVerifier, _vkDigest)`. A pin
             //     that doesn't match this build's inner-circuit VK is a
             //     post-burn `WithdrawalProofRejected`. The reference digest
-            //     lives at word 23 of `BridgeWithdrawalAggregatorVerifier_calldata.bin`
+            //     lives at word 25 of `BridgeWithdrawalAggregatorVerifier_calldata.bin`
             //     shipped next to the verifier. The compare is one file read
             //     plus one `eth_call`. It runs in the withdrawal adapter; the
             //     base contract only stores `vkDigest`. The bridge holds the
@@ -2055,7 +2055,7 @@ pub async fn check_bridge_deploy(
                          the burn and the ~91 min anchor wait.\n\x20 Confirm the pin with `cast \
                          call {adapter} \"vkDigest()(bytes32)\"`. The bridge stores the adapter \
                          as an immutable, so a stale pin needs a new adapter and a new bridge. \
-                         The digest is word 23 of {}.",
+                         The digest is word 25 of {}.",
                         WITHDRAW_VERIFIER_CALLDATA_BIN,
                     ),
                     source: None,
@@ -2406,26 +2406,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn expected_withdraw_vk_digest_reads_word_23() {
-        // The offset is `(12 + 11) * 32`. The file must be the production
-        // 3 680 B blob; a 3 648 B pre-binding blob is refused even though
-        // word 23 is inside it.
+    fn expected_withdraw_vk_digest_reads_word_25() {
+        // The offset is `(12 + 13) * 32`. The file must be the production
+        // 3 744 B blob; a 3 712 B pre-binding blob is refused even though
+        // word 25 is inside it.
         let mut ok = vec![0u8; WITHDRAWAL_CALLDATA_LEN];
-        // Distinguishable byte pattern at word 23.
+        // Distinguishable byte pattern at word 25.
         let want = [0xCDu8; 32];
         ok[WITHDRAW_VK_DIGEST_OFFSET..WITHDRAW_VK_DIGEST_OFFSET + 32].copy_from_slice(&want);
         let got =
-            expected_withdraw_vk_digest(&ok, Path::new("test.bin")).expect("word 23 is present");
+            expected_withdraw_vk_digest(&ok, Path::new("test.bin")).expect("word 25 is present");
         assert_eq!(got.as_slice(), &want[..]);
 
-        // Pre-binding length: word 23 exists as a proof coordinate, and must
+        // Pre-binding length: word 25 exists as a proof coordinate, and must
         // still be refused.
-        let stale = vec![0u8; 3_648];
+        let stale = vec![0u8; 3_712];
         let err = expected_withdraw_vk_digest(&stale, Path::new("stale.bin"))
-            .expect_err("a 3648-byte pre-binding calldata must be refused");
+            .expect_err("a 3712-byte pre-binding calldata must be refused");
         let msg = format!("{err}");
         assert!(msg.contains("stale.bin"), "must name the artefact: {msg}");
-        assert!(msg.contains("word 23"), "must say which word: {msg}");
+        assert!(msg.contains("word 25"), "must say which word: {msg}");
     }
 
     #[test]
@@ -3392,7 +3392,7 @@ pub(crate) mod tests {
             &UsdcAmount(1_000_000),
         )
         .await
-        .expect("a non-zero pin that matches word 23 must pass");
+        .expect("a non-zero pin that matches word 25 must pass");
     }
 
     #[tokio::test]
@@ -3406,7 +3406,7 @@ pub(crate) mod tests {
         let mut bin = vec![0u8; 32];
         bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
-        // Reference calldata carries a non-zero digest at word 23; the
+        // Reference calldata carries a non-zero digest at word 25; the
         // mock's default vkDigest answer is ZERO_WORD, so they diverge.
         let mut calldata = vec![0u8; WITHDRAWAL_CALLDATA_LEN];
         calldata[WITHDRAW_VK_DIGEST_OFFSET..WITHDRAW_VK_DIGEST_OFFSET + 32]
@@ -3437,19 +3437,19 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_short_calldata_file_is_refused() {
-        // A 3 648 B pre-binding `_calldata.bin` is refused. That file is
-        // long enough for word 23, and the word is a proof coordinate.
+        // A 3 712 B pre-binding `_calldata.bin` is refused. That file is
+        // long enough for word 25, and the word is a proof coordinate.
         // Treating it as a digest would let a pre-binding build compare
         // against the adapter.
         let dir = tempfile::TempDir::new().unwrap();
         let mut bin = vec![0u8; 32];
         bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
-        // 3 648 B is the pre-binding withdrawal blob. It is long enough for
-        // word 23, and that word is a proof coordinate, not a digest.
+        // 3 712 B is the same-layout pre-binding withdrawal blob. It is long enough for
+        // word 25, and that word is a proof coordinate, not a digest.
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_CALLDATA_BIN), vec![
             0u8;
-            3_648
+            3_712
         ])
         .unwrap();
 
@@ -3462,14 +3462,14 @@ pub(crate) mod tests {
             &UsdcAmount(1_000_000),
         )
         .await
-        .expect_err("a 3648-byte pre-binding `_calldata.bin` must be refused");
+        .expect_err("a 3712-byte pre-binding `_calldata.bin` must be refused");
         let msg = format!("{err}");
         assert!(
             msg.contains(WITHDRAW_VERIFIER_CALLDATA_BIN),
             "must name the artefact: {msg}"
         );
         assert!(
-            msg.contains("3 648"),
+            msg.contains("3 712"),
             "must name the pre-binding size: {msg}"
         );
     }

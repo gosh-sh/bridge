@@ -6,7 +6,7 @@ pragma solidity ^0.8.19;
 ///         (Rust: `bridge_event_prove_circuit::multi_hop_proof`). Each snark
 ///         proves a segment of the L7 cross-thread hop chain; the on-chain
 ///         gate in `withdrawByProofBundle` verifies as many hops as it takes
-///         to walk `xBlockId → yBlockId`.
+///         to walk `yBlockId → xBlockId`.
 ///
 ///         Public-input layout is two field elements:
 ///           `[0] hopStartBlockId` — Fr of the segment's first block_id

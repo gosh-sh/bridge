@@ -14,13 +14,17 @@
 //! non-CLI callers (tests, higher-level loops) that don't have or want
 //! a signing key.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use bridge_block_graph_resolver::{
+    BlockProvider, GraphResolver, GraphqlBlockProvider, HistoricalSearchConfig, ResolutionPolicy,
+    ResolutionRequest, ResolvedBlockProof, ResolverLimits, SqliteStore,
+};
 use bridge_event_witness::{
-    enrich::resolve_cross_thread_chain, enrich_witness, export_from_event_boc_base64,
-    schema::MultiHopBundleWitnessJson, AnchorLayerMode, BlockContextInput, EnrichSummary,
-    EnrichedWitness,
+    enrich_witness_for_resolved_proof, export_from_event_boc_base64,
+    schema::{MultiHopBundleWitnessJson, N_BUNDLE_MAX},
+    AnchorLayerMode, BlockContextInput, EnrichSummary, EnrichedWitness,
 };
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::bridge_state::BridgeState;
@@ -169,6 +173,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
 
     let captured = capture_stage(&gql, &cfg).await?;
     let partial = export_stage(&captured)?;
+    let resolved = resolve_event_route(&cfg, &partial).await?;
 
     // Enricher runs against a live-updated BridgeState — the daemon writes new
     // bundles to prover_state.json as it proves them. On a fresh deploy where
@@ -192,7 +197,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     );
     let deadline = std::time::Instant::now() + ENRICH_TIMEOUT;
     let mut attempt: u32 = 0;
-    let enriched = loop {
+    let (enriched, hop_bundle) = loop {
         attempt += 1;
         // Reload from disk — daemon writes prover_state.json each bundle.
         let bridge_state_now = BridgeState::load(&state_path_str, cfg.window_size)
@@ -203,16 +208,17 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
             num_active_layers = bridge_state_now.num_active_layers(),
             "enricher attempt",
         );
-        match enrich_witness(
+        match enrich_witness_for_resolved_proof(
             &gql,
             &bridge_state_now,
             partial.clone(),
+            &resolved,
             cfg.anchor_mode,
             cfg.i_know_the_wait,
         )
         .await
         {
-            Ok(e) => break e,
+            Ok((enriched, bundle)) => break (enriched, bundle),
             Err(err) => {
                 let now = std::time::Instant::now();
                 if now >= deadline {
@@ -235,7 +241,7 @@ pub async fn run_once(cfg: WithdrawE2EConfig) -> Result<WithdrawE2ESummary> {
     };
     log_enriched_summary(&enriched);
 
-    prove_and_finalize(&cfg, &gql, captured, enriched).await
+    prove_and_finalize(&cfg, captured, enriched, hop_bundle).await
 }
 
 /// State-in-memory entrypoint. Skips the file load, skips the capture
@@ -271,16 +277,18 @@ pub async fn run_once_with_state(
     );
 
     let partial = export_stage(&captured)?;
+    let resolved = resolve_event_route(&cfg, &partial).await?;
 
     info!(
         anchor_mode = ?cfg.anchor_mode,
         i_know_the_wait = cfg.i_know_the_wait,
         "enricher: single-shot against caller-provided state",
     );
-    let enriched = enrich_witness(
+    let (enriched, hop_bundle) = enrich_witness_for_resolved_proof(
         &gql,
         &bridge_state,
         partial,
+        &resolved,
         cfg.anchor_mode,
         cfg.i_know_the_wait,
     )
@@ -288,7 +296,7 @@ pub async fn run_once_with_state(
     .context("enrich_witness failed (caller-provided state did not cover the target burn)")?;
     log_enriched_summary(&enriched);
 
-    prove_and_finalize(&cfg, &gql, captured, enriched).await
+    prove_and_finalize(&cfg, captured, enriched, hop_bundle).await
 }
 
 async fn capture_stage(gql: &GqlClient, cfg: &WithdrawE2EConfig) -> Result<CapturedEvent> {
@@ -346,11 +354,53 @@ fn log_enriched_summary(enriched: &EnrichedWitness) {
     );
 }
 
+async fn resolve_event_route(
+    cfg: &WithdrawE2EConfig,
+    partial: &bridge_event_witness::schema::PrivateWitness,
+) -> Result<ResolvedBlockProof> {
+    let provider = Arc::new(
+        GraphqlBlockProvider::new(&cfg.gql_endpoint).context("create graph resolver provider")?,
+    );
+    let store_path = cfg.work_dir.join("block-graph-resolver.sqlite");
+    let store = Arc::new(
+        SqliteStore::open(&store_path, provider.namespace())
+            .await
+            .with_context(|| format!("open graph resolver store {}", store_path.display()))?,
+    );
+    let resolver = GraphResolver::new(provider, store, 2_048).with_historical_search_config(
+        HistoricalSearchConfig {
+            max_anchor_candidates: 10_000,
+        },
+    );
+    let target = bridge_block_graph_resolver::BlockId::from_bytes(
+        parse_hex32(&partial.block_id_hex).context("PrivateWitness.block_id_hex")?,
+    );
+    let request = ResolutionRequest {
+        target,
+        policy: ResolutionPolicy::FirstValid,
+        limits: ResolverLimits {
+            max_hops: N_BUNDLE_MAX as u32,
+            max_visited_blocks: 10_000,
+        },
+    };
+    let proof = resolver
+        .resolve_proof(request)
+        .await
+        .with_context(|| format!("resolve Y -> X route for event block {target}"))?;
+    info!(
+        target = %proof.path.target,
+        b0 = %proof.path.anchor,
+        hops = proof.path.hops.len(),
+        "graph resolver: nearest thread-0 route ready",
+    );
+    Ok(proof)
+}
+
 async fn prove_and_finalize(
     cfg: &WithdrawE2EConfig,
-    gql: &GqlClient,
     captured: CapturedEvent,
     enriched: EnrichedWitness,
+    hop_bundle: MultiHopBundleWitnessJson,
 ) -> Result<WithdrawE2ESummary> {
     let witness_path = cfg
         .work_dir
@@ -361,17 +411,8 @@ async fn prove_and_finalize(
         .context("serialize PrivateWitness to JSON")?;
     info!("wrote enriched witness: {}", witness_path.display());
 
-    // Cross-thread walker: resolve the L7 chain back to the default
-    // thread. Same-thread events return `snarks = []` and skip both the
-    // sibling `_hops.json` write and the hop prover leg entirely.
-    let event_seq = enriched.witness.block_seq_no;
-    let hop_bundle: MultiHopBundleWitnessJson = resolve_cross_thread_chain(gql, event_seq)
-        .await
-        .with_context(|| {
-            format!("resolve_cross_thread_chain for event block seq={event_seq} failed")
-        })?;
     let (hops_path, hop_blobs) = if hop_bundle.snarks.is_empty() {
-        info!("resolve_cross_thread_chain: same-thread claim (empty bundle)");
+        info!("graph resolver: same-thread claim (empty bundle)");
         (None, Vec::<HopBlob>::new())
     } else {
         // Persist the bundle next to the witness — `InProcessCircuit4SnarkProver`

@@ -61,7 +61,7 @@ history: 2026-09-18 for the `events_pos` nullifier preimage and the per-layer an
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation
 envelopes, so at `K=20` it needs 44 advice columns and the aggregator Yul exceeds EIP-170
-(~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul is 21 655 B. 
+(~28 KB). At `K=21` it auto-configures to 22 advice columns and the Yul is 21 655 B.
 
 ## Generate SHPLONK `.sol` + `.bin` (1A + 1B + 2)
 

@@ -311,7 +311,11 @@ All three tests must fit inside the `bridge-circuits.yaml` fast step (each ≤60
 **Concrete steps.**
 
 1. In `crates/bridge-prover-libraries/bridge-event-witness/src/schema.rs`, add a `MultiHopBundleWitness` struct mirroring `MultiHopProofWitness` from Commit 2 (`Vec<BlockWitness>` per hop; the outer container is `Vec<MultiHopProofWitness>` capped at `N_BUNDLE_MAX`). Match the GQL shape produced by the acki-nacki node's `helpers/proof_helper/src/gql_proof.rs` — the DEX branch's `multi_hop_witness.rs` already documents this mapping and the bridge port is compatible.
-2. In `bridge-event-witness/src/enrich.rs`, add a `resolve_cross_thread_chain(event_block: BlockId, target_thread_0_block: BlockId) -> Result<Vec<HopWitness>>` walker that follows L7 refs from `event_block` toward some thread-0 anchor, one GQL fetch per hop.
+2. Implemented with `bridge-block-graph-resolver`: resolve the exact event
+   block from `PrivateWitness.block_id_hex`, then materialise the forward
+   `Y → … → X` route in `bridge-event-witness/src/enrich.rs`. The resolver
+   persists its graph/index state and supports both parent slot 0 and
+   cross-reference slots, avoiding a fresh one-request-per-hop reverse walk.
 3. In `bridge-event-prover-lib/src/prover.rs`:
    - Add `prove_multi_hop_snark(&MultiHopProofWitness) -> ProofBlob`.
    - Extend the existing `prove_event(&EventWitness) -> ProofBlob` to detect cross-thread events (event block's `thread_id != 0`) and return a `BundleProof { final: ProofBlob, hops: Vec<ProofBlob> }`. Same-thread events keep returning the single-blob variant behind a `BundleProof { final, hops: vec![] }` for API uniformity.

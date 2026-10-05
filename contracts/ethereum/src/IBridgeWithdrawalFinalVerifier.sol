@@ -42,7 +42,7 @@ interface IBridgeWithdrawalFinalVerifier {
         uint256 xBlockId;
         /// @notice Fr-encoding of the Y-block's `block_id` (anchor block).
         ///         For cross-thread claims, the hop chain walks
-        ///         `xBlockId → yBlockId`.
+        ///         `yBlockId → xBlockId`.
         uint256 yBlockId;
     }
 

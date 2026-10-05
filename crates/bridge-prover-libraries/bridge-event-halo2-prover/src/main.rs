@@ -311,9 +311,9 @@ fn run() -> Result<()> {
                 })
                 .collect::<Result<_>>()?
         } else {
-            // Bundle was loaded upfront so the Circuit 4 proof could bind
-            // its `y_block_id` to the last hop's `hop_end_block_id`; here we
-            // just prove each snark in order.
+            // Bundle was loaded upfront so Circuit 4 could bind `y_block_id`
+            // to the first hop's start and validate the last hop ends at the
+            // exact event `x_block_id`; here we prove each snark in order.
             hop_bundle
                 .snarks
                 .iter()

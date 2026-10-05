@@ -79,21 +79,21 @@ assigns it when the release is tagged.
   `HopChainHeadMismatch` / `HopChainTailMismatch` against the new one,
   and vice versa — redeploy the bridge and rotate any hand-crafted
   cross-thread calldata so `hopPublicInputs[0][HOP_START] == yBlockId`
-  and `hopPublicInputs[last][HOP_END] == xBlockId`. **Verification keys
-  are NOT rotated** — the two production SHPLONK Yul verifiers
-  (`BridgeWithdrawalAggregatorVerifier`, `BridgeMultiHopAggregatorVerifier`)
-  and the underlying halo2 circuits are byte-identical: `MULTI_HOP_PI_LEN`,
-  `TOTAL_PUBLIC_INPUTS`, the two slot constants (`PUB_X_BLOCK_ID = 11`,
-  `PUB_Y_BLOCK_ID = 12`), and every circuit constraint stay the same. The
-  pivot is a bundle-composition contract change; only the caller
-  (the witness walker in `bridge-event-witness::resolve_cross_thread_chain`)
-  has to reorder which endpoint feeds which slot — that walker rewrite
-  is not part of this changeset and is tracked as a follow-up on
-  `feature/multithreading`. Until the walker ships, cross-thread
-  bundles produced by the daemon still carry the old
-  `xBlockId → yBlockId` layout and will be rejected by the new
-  contract; the pipeline needs both halves to land before it can
-  round-trip end-to-end. Same-thread claims remain fully functional.
+  and `hopPublicInputs[last][HOP_END] == xBlockId`. Circuit 4 now commits
+  the Y block's own `tracked_ext_out_messages_root` in its history leaf
+  instead of reusing X's event-tree root. `EVENT_CIRCUIT_REVISION` is 6 and
+  witness JSON schema version is 3, so old Circuit-4 proving/verifying keys,
+  cached proofs, and witness JSON are incompatible. Regenerate the Circuit-4
+  keys and `BridgeWithdrawalAggregatorVerifier.{sol,bin}`, then redeploy the
+  verifier and bridge in the same upgrade; the production deployment codehash
+  pin is rotated with the artefact. `BridgeMultiHopAggregatorVerifier`
+  is unaffected by this particular Circuit-4 change. The witness builder and
+  relayer now resolve the exact `PrivateWitness.block_id_hex`, produce the
+  route in `Y → … → X` order, and pass every edge's `ref_index` through to
+  the per-hop proofs. Y is the resolver's nearest reachable thread-0 block;
+  Circuit 4 opens that block directly through its history hierarchy, without
+  scanning newer thread-0 blocks or prepending a parent chain. Same-thread
+  claims remain fully functional.
   Motivation
   and full-length analysis in
   `multithreading/DRAFT_cross_thread_reachability_issue.md` §3
@@ -135,9 +135,9 @@ assigns it when the release is tagged.
   schema impact: `HopWitnessJson.ref_index` is no longer required to be
   `≥ 1`; `bridge_event_witness::enrich::build_hop_witness` accepts
   slot 0 and succeeds the native L7 Poseidon re-check against the
-  parent-tag leaf. The cross-thread walker
-  (`resolve_cross_thread_chain`) still skips slot 0 as a performance
-  choice (same-thread parent cannot progress a cross-thread walk).
+  parent-tag leaf. The graph resolver indexes and traverses slot 0 together
+  with all cross-thread slots, and the witness builder preserves those parent
+  edges in mixed `Y → … → X` routes.
   Consequences:
     - `BridgeMultiHopProof` verifying and proving keys are rotated
       (`MULTI_HOP_CIRCUIT_REVISION` bumped to 5). On-disk
@@ -252,7 +252,7 @@ assigns it when the release is tagged.
     - a self-deployed verifiers directory (`--verifiers-dir` /
       `BRIDGE_VERIFIERS_DIR` with `--allow-verifier-drift`) needs the `.sol`
       that `export-inner-aggregator` wrote next to its `.bin`, and
-      `BridgeWithdrawalAggregatorVerifier_calldata.bin` (word 23 is the
+      `BridgeWithdrawalAggregatorVerifier_calldata.bin` (word 25 is the
       withdrawal adapter's `vkDigest` pin). `scripts/install.sh` treats
       that `_calldata.bin` as part of a complete verifiers directory.
   `BridgeWithdrawalAggregatorVerifier.sol` is regenerated from this release's
@@ -277,8 +277,8 @@ assigns it when the release is tagged.
   `sender`) now nullify to distinct values and can both pay out on the
   ETH side; pre-rotation they would have collided on the second
   withdraw as a replay.
-  The aggregated Yul is 21 314 B / 24 instances; the reference
-  `_calldata.bin` is 3 680 B. Redeploy
+  The current revision-6 aggregated Yul is 21 476 B / 25 instances; the
+  reference `_calldata.bin` is 3 712 B. Redeploy
   `BridgeWithdrawalAggregatorVerifier`; proofs against the old key do not
   verify, and a `WithdrawalPublicInputs` struct without `anchorLayer` will
   not decode. The extra tuple field also **changes the `withdrawByProof`
@@ -379,7 +379,7 @@ assigns it when the release is tagged.
   digest; a chain id is far below `r` and is not what this guard catches —
   it rejects about 81% of random 32-byte values), and exposes `vkDigest()`.
   `verifyPrimaryAttestation` and `verifyFallbackAttestation` compare word
-  16, `verifyLayerHashesMovement` word 26, `verifyWithdrawal` word 23,
+  16, `verifyLayerHashesMovement` word 26, `verifyWithdrawal` word 25,
   then delegate to Yul. A pin is word `12 + N` of the matching
   `<name>_calldata.bin` (big-endian `bytes32`); after deploy check with
   `cast call <adapter> "vkDigest()(bytes32)"`. The library helper
@@ -388,7 +388,7 @@ assigns it when the release is tagged.
   Against 0.2.0 the artefacts are: Primary 21 494 → 21 655 B / calldata
   3 840 → 3 872 B; Fallback 21 493 → 21 655 B / 3 840 → 3 872 B;
   LayerHashes 19 100 → 19 263 B / 3 072 → 3 104 B (`k_outer` stays 22);
-  Withdrawal 20 990 → 21 314 B / 3 616 → 3 680 B. Primary and Fallback are
+  Withdrawal 20 990 → 21 638 B / 3 616 → 3 744 B. Primary and Fallback are
   the tightest at 88% of EIP-170. The aggregator cache stem moved
   `__v2__` → `__v3__`: the first run re-keygens every outer PK; old slots
   stay on disk until deleted. `numLayers` was already 5 at 0.2.0.
@@ -428,6 +428,37 @@ assigns it when the release is tagged.
   needs the second call.
 
 ### Added
+
+- `bridge-block-graph-resolver` can now return canonical proof material in
+  addition to a block path. Rust callers use `GraphResolver::resolve_proof`,
+  and the CLI uses `resolve --proof-material`. The response keeps the anchor/Y
+  and target/X block payloads separate, includes the source block for every
+  hop, and validates each returned `ref_index`, including parent slot `0`,
+  against the node's `proof_block_refs` before returning it. Selection against
+  active verifier history and construction of circuit-specific Merkle openings
+  remain in the witness/prover pipeline; the resolver has no Poseidon or
+  circuit dependency.
+
+- Added the `bridge-block-graph-resolver` CLI for operators to scan a finalized
+  Acki Nacki GraphQL block window and resolve a deterministic minimum-hop path
+  from a thread-0 anchor to an event block. `resolve` emits lowercase block IDs
+  and the parent/cross-reference `ref_index` for every hop; `sync` validates and
+  reports on the rolling window. Use `--gql-url`, `--scan-window`,
+  `--per-thread-window`, `--max-hops`, and `--max-visited-blocks` to bind the
+  endpoint and resource limits. Pass `--database <PATH>` to persist graph and
+  positive-cache state across invocations in SQLite; the database is bound to
+  its normalized GraphQL endpoint and refuses reuse with another endpoint.
+  Targets outside the rolling window are located without a full-history scan:
+  the resolver uses the target timestamp to binary-search thread 0 by height,
+  then walks newer thread-0 candidates and lazily fetches referenced blocks by
+  ID. `--max-anchor-candidates` bounds this historical search.
+  On a reverse-index miss, the resolver incrementally scans historical
+  thread-0 candidates, enters the target thread through ordinary block
+  references, and follows parent references to the exact target. The fallback
+  reuses expanded branches and known path suffixes across anchor candidates;
+  its visited-block limit applies across the complete resolution.
+  Parent slot `0` and all cross-thread reference slots are always available to
+  both the reverse-index and historical search.
 
 - **Phase 1 deploy-and-fund driver for a self-rooted multisig on an MT
   Acki Nacki devnet —
@@ -857,6 +888,10 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `bootstrap_hermez_srs` can derive K≤20 SRS prefixes from an explicitly
+  supplied K=21 Hermez ptau when the retired public K=20 object is absent.
+  The fallback applies the same `s_g2` head guard used for K=21; the original
+  hash-anchored K=20 path remains preferred when that file is available.
 - **`crates/bridge-prover-libraries/python/helper/msig.py::deploy_multisig()`
   (and the Phase 1 sibling `deploy_and_fund_multisig_only()`) now pass
   `minBalance: 0` and `targetBalance: 0` to the msig_v2 constructor.**
@@ -887,7 +922,7 @@ assigns it when the release is tagged.
   message.
 
 - **`ackinacki-bridge withdraw` preflight now reads the withdrawal
-  adapter's `vkDigest()` and compares it with word 23 of the reference
+  adapter's `vkDigest()` and compares it with word 25 of the reference
   `BridgeWithdrawalAggregatorVerifier_calldata.bin`.** A mismatch or an
   adapter that predates the inner-VK binding (`vkDigest()` reverts) is
   refused before the AN-side burn, exit `2` (`PreflightRefused`), with
@@ -897,8 +932,8 @@ assigns it when the release is tagged.
   is passed (which is when the deployed-bytecode compare already runs);
   without it the run still passes the earlier stages and warns that both
   the bytecode check and the digest pin compare were skipped. A
-  `_calldata.bin` that is not exactly 3 680 B is refused. 3 648 B is the
-  pre-binding blob.
+  `_calldata.bin` that is not exactly 3 744 B is refused. 3 712 B is the
+  same 13-input layout without the VK-binding slot.
 
 - The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
   rotation is covered, even if the layer cursor is still behind this N.

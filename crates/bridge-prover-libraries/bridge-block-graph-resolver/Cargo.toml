@@ -1,0 +1,33 @@
+[package]
+name = "bridge-block-graph-resolver"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["graphql", "sqlite", "cli"]
+test-utils = []
+graphql = ["dep:bridge-gql-fetcher"]
+sqlite = ["dep:rusqlite"]
+cli = ["graphql", "sqlite", "dep:clap", "dep:tracing-subscriber"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = "0.1"
+bridge-gql-fetcher = { path = "../bridge-gql-fetcher", optional = true, default-features = false }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+hex = { workspace = true }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "bridge-block-graph-resolver"
+path = "src/bin/bridge-block-graph-resolver.rs"
+required-features = ["cli"]

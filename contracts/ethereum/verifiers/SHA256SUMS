@@ -8,7 +8,7 @@
 # shapes:
 #   - Primary/Fallback: pure vk-binding on top of unchanged 1A/1B circuit.
 #   - LayerHashes: vk-binding on top of k_outer=22 regen.
-#   - Withdrawal: vk-binding on top of rev-3 Circuit 4 (13 inner PIs
+#   - Withdrawal: vk-binding on top of revision 6 Circuit 4 (13 inner PIs
 #     with xBlockId/yBlockId at slots 23/24 for the bundle anchor).
 #   - MultiHop: vk-binding on 2-PI BridgeMultiHopProof (hopStartBlockId
 #     at slot 12, hopEndBlockId at slot 13).

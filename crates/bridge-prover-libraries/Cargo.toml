@@ -2,6 +2,7 @@
 members = [
     "bridge-prover-lib",
     "bridge-gql-fetcher",
+    "bridge-block-graph-resolver",
     "bridge-prover-daemon",
     "bridge-verifier-daemon",
     "bridge-event-witness",

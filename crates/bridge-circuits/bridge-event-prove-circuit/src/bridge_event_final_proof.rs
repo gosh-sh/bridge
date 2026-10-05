@@ -1,7 +1,7 @@
 //! Multi-thread Halo2 circuit proving an Acki Nacki `WithdrawalInitiated`
 //! event was committed into a block on Acki Nacki, with the X-block (event
 //! block) and Y-block (anchor block) *distinguishable* so that a companion
-//! `BridgeMultiHopProof` can chain X → Y across
+//! `BridgeMultiHopProof` can chain Y → X across
 //! threads.
 //!
 //! This is the multi-thread successor of the removed single-thread
@@ -31,7 +31,7 @@
 //!   9  finalRoot      (anchor root the proof binds to)
 //!  10  anchorLayer    (1-indexed layer number, 1..=MAX_ANCHOR_LAYER)
 //!
-//! 
+//!
 //!
 //! Slots `[0..=10]` are **byte-identical** to the legacy single-thread
 //! layout (the same slot constants are re-exported from
@@ -58,11 +58,10 @@
 //!   false, X and Y are permitted to differ; equality of their tail with the
 //!   hop-chain endpoints is enforced *off-circuit* by the `bundle_verifier`
 //!   (Commit 5 of the plan).
-//! - **Y-side `block_leaf`.** Constructed from `y_block_id_fr`,
-//!   `envelope_hash_fr`, and `ext_out_root`. When cross-thread, the
-//!   `ext_out_root` supplied here is the Y-block's L7 root — a semantic
-//!   distinction the L7-walker circuit will enforce, and out of scope for this
-//!   file.
+//! - **Y-side `block_leaf`.** Constructed from `y_block_id_fr`, the Y block's
+//!   envelope hash, and its canonical tracked external-out root. The X-side
+//!   events root remains separate and is used only by the event proof and X
+//!   block-id opening.
 //!
 //! No other constraint changes: SHA-256 cell DAG, ABI event id, d1
 //! refs_count, senderAccFr algebraic decode, events-tree walker,
@@ -172,6 +171,10 @@ pub struct BridgeEventFinalProof {
     /// When `false`, the two are permitted to differ (the off-circuit
     /// `bundle_verifier` binds them to the hop chain's endpoints).
     pub is_same_thread: bool,
+    /// Canonical tracked external-out root of the Y block. It equals the
+    /// events-tree root for a same-thread claim, but is independent from the
+    /// X event root for a cross-thread claim.
+    pub y_tracked_ext_out_messages_root: [u8; 32],
     pub envelope_hash_bytes: [u8; 32],
     pub block_merkle_proof_siblings: Vec<[u8; 32]>,
     pub block_merkle_proof_position: usize,
@@ -197,6 +200,7 @@ impl BridgeEventFinalProof {
         y_block_id: [u8; 32],
         h07_sibling: [u8; 32],
         is_same_thread: bool,
+        y_tracked_ext_out_messages_root: [u8; 32],
         envelope_hash_bytes: [u8; 32],
         block_merkle_proof_siblings: Vec<[u8; 32]>,
         block_merkle_proof_position: usize,
@@ -228,6 +232,7 @@ impl BridgeEventFinalProof {
             y_block_id,
             h07_sibling,
             is_same_thread,
+            y_tracked_ext_out_messages_root,
             envelope_hash_bytes,
             block_merkle_proof_siblings,
             block_merkle_proof_position,
@@ -250,6 +255,7 @@ impl BridgeEventFinalProof {
         y_block_id: [u8; 32],
         h07_sibling: [u8; 32],
         is_same_thread: bool,
+        y_tracked_ext_out_messages_root: [u8; 32],
         envelope_hash_bytes: [u8; 32],
         block_merkle_proof_siblings: Vec<[u8; 32]>,
         block_merkle_proof_position: usize,
@@ -283,6 +289,7 @@ impl BridgeEventFinalProof {
             y_block_id,
             h07_sibling,
             is_same_thread,
+            y_tracked_ext_out_messages_root,
             envelope_hash_bytes,
             block_merkle_proof_siblings,
             block_merkle_proof_position,
@@ -375,6 +382,7 @@ impl Circuit<Fr> for BridgeEventFinalProof {
             [0u8; 32],
             [0u8; 32],
             true,
+            [0u8; 32],
             [0u8; 32],
             self.block_merkle_proof_siblings
                 .iter()
@@ -750,7 +758,9 @@ impl Circuit<Fr> for BridgeEventFinalProof {
                 let zero_const = ctx.load_constant(Fr::zero());
                 ctx.constrain_equal(&gated, &zero_const);
 
-                // === block_leaf = Poseidon96(y_block_id, envelope_hash, ext_out_root) ===
+                // === block_leaf = Poseidon96(y_block_id, Y envelope, Y ext-out root) ===
+                let y_ext_out_root_fr =
+                    ctx.load_witness(bytes_to_fr(&self.y_tracked_ext_out_messages_root));
                 let envelope_hash_fr = ctx.load_witness(bytes_to_fr(&self.envelope_hash_bytes));
                 let block_leaf_fr = poseidon_hash_96_circuit(
                     ctx,
@@ -758,17 +768,17 @@ impl Circuit<Fr> for BridgeEventFinalProof {
                     &hasher,
                     y_block_id_fr,
                     envelope_hash_fr,
-                    ext_out_root,
+                    y_ext_out_root_fr,
                     &self.y_block_id,
                     &self.envelope_hash_bytes,
-                    &ext_out_root_bytes,
+                    &self.y_tracked_ext_out_messages_root,
                 );
 
                 // === block_leaf → history window root (root_1) ===
                 let block_leaf_native = poseidon_hash_96_native(
                     &self.y_block_id,
                     &self.envelope_hash_bytes,
-                    &ext_out_root_bytes,
+                    &self.y_tracked_ext_out_messages_root,
                 );
                 let block_proof = preprocess_dense_proof(
                     block_leaf_native,
@@ -936,6 +946,7 @@ mod tests {
             tw.block_id, // y_block_id (same-thread)
             tw.h07_sibling,
             true,
+            tw.y_tracked_ext_out_messages_root,
             tw.envelope_hash_bytes,
             tw.block_siblings,
             tw.block_pos,
@@ -967,14 +978,9 @@ mod tests {
     }
 
     /// Cross-thread MockProver pass: x_block_id != y_block_id,
-    /// is_same_thread=false. The L8 opening still binds ext_out_root →
-    /// x_block_id; the y_block_id is free-floating (bound off-circuit by
-    /// `bundle_verifier` in a later commit). Skips the block-tree walker
-    /// constraint on the *y* side by keeping `block_leaf_native =
-    /// Poseidon96(y_block_id, envelope, ext_out_root)` consistent with the
-    /// walker's prepared block proof — done by having
-    /// `build_final_proof_two_level_tree` build the block leaf from
-    /// `y_block_id` when passed a distinct value. Here we override y.
+    /// is_same_thread=false. The X-side L8 opening uses the event block's
+    /// external-out root, while the history leaf uses Y's independent root.
+    /// The bundle verifier binds Y to the route head and X to its tail.
     #[test]
     fn cross_thread_mock_prover_pass() {
         let w = load_first_withdrawal();
@@ -1008,6 +1014,7 @@ mod tests {
             y_block_id,
             tw.h07_sibling,
             false,
+            tw.y_tracked_ext_out_messages_root,
             tw.envelope_hash_bytes,
             tw.block_siblings,
             tw.block_pos,
@@ -1059,6 +1066,7 @@ mod tests {
             different_y,
             tw.h07_sibling,
             true,
+            tw.y_tracked_ext_out_messages_root,
             tw.envelope_hash_bytes,
             tw.block_siblings,
             tw.block_pos,

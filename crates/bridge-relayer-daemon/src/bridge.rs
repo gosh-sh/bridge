@@ -591,9 +591,9 @@ mod sol_bindings {
 
             /// Multi-hop bundle withdrawal: `finalProof` is the Circuit 4
             /// SHPLONK proof whose 13 public inputs already commit to
-            /// `xBlockId → yBlockId`; `hopProofs`/`hopPubInputs` are the
+            /// `yBlockId → xBlockId`; `hopProofs`/`hopPubInputs` are the
             /// per-hop BridgeMultiHopProof (2-PI: `hopStart`, `hopEnd`)
-            /// snarks that chain `xBlockId` back to a known layer anchor.
+            /// snarks that chain a known layer anchor forward to `xBlockId`.
             /// Same-thread events pass empty `hopProofs`/`hopPubInputs`
             /// arrays; the contract accepts them when the FinalProof PIs
             /// have `xBlockId == yBlockId`.
@@ -1606,10 +1606,10 @@ fn decode_bundle_revert(e: &AlloyContractError) -> String {
                 v.hopCount
             ),
             E::HopChainHeadMismatch(_) => {
-                "HopChainHeadMismatch: hop[0].hopStart != finalProof.xBlockId — first hop must start at the event thread's block id".to_string()
+                "HopChainHeadMismatch: hop[0].hopStart != finalProof.yBlockId — first hop must start at the anchored thread-0 block id".to_string()
             }
             E::HopChainTailMismatch(_) => {
-                "HopChainTailMismatch: hop[last].hopEnd != finalProof.yBlockId — last hop must land on the anchor thread's block id".to_string()
+                "HopChainTailMismatch: hop[last].hopEnd != finalProof.xBlockId — last hop must land on the exact event block id".to_string()
             }
             E::AdjacentHopBlockIdMismatch(v) => format!(
                 "AdjacentHopBlockIdMismatch at hop boundary {}: hop[{}].hopEnd != hop[{}].hopStart",

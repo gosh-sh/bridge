@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 /// On-disk schema version. Bump whenever the JSON shape changes in a
 /// non-backwards-compatible way.
 ///
+/// v3: `PrivateWitness.y_tracked_ext_out_messages_root_hex` separates the
+/// canonical Y-side history leaf from the X-side event tree root.
+///
 /// v2: `PrivateWitness.h07_sibling_hex` added for the multi-thread
 /// `BridgeEventFinalProof` circuit (13 public inputs). The circuit
 /// reconstructs `x_block_id` from `(ext_out_root, h07_sibling)` via the
@@ -24,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// still use `y_block_id = block_id_hex` (auto-derived by the prover);
 /// cross-thread claims will carry `y_block_id` through the future
 /// `MultiHopBundleWitnessJson` wire.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Top-level export record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +85,11 @@ pub struct PrivateWitness {
     /// enrichment code owns populating the real value.
     #[serde(default)]
     pub h07_sibling_hex: String,
+
+    /// Canonical tracked external-out root of the Y anchor block. For a
+    /// same-thread proof this equals the X event-tree root; for a cross-thread
+    /// proof it is independent and is used only in the Y-side history leaf.
+    pub y_tracked_ext_out_messages_root_hex: String,
 }
 
 /// Mirror of `bridge-event-prove-circuit::boc_helper::BocFlattenData` with
@@ -226,9 +234,10 @@ pub struct HopWitnessJson {
     /// Real-vs-padding flag (`HopWitness::is_active`). Padded hops satisfy
     /// `hop_start_block_id_hex == hop_end_block_id_hex`.
     pub is_active: bool,
-    /// The hop's **start** block (`HopWitness::block`) under Direction (a):
-    /// `block.block_id_hex` == `hop_start_block_id_hex` (current/newer). The
-    /// hop's end (older ref) lives in `block.proof_block_refs_hex[ref_index]`.
+    /// The hop's **start** block (`HopWitness::block`) in the `Y → … → X`
+    /// route: `block.block_id_hex` == `hop_start_block_id_hex` (current/newer).
+    /// The hop's end (older ref) lives in
+    /// `block.proof_block_refs_hex[ref_index]`.
     pub block: BlockWitnessJson,
     /// SHA-256 merkle opening for L7 against `block.block_id_hex`,
     /// `BLOCK_MERKLE_DEPTH = 4` siblings.
@@ -245,11 +254,11 @@ pub struct HopWitnessJson {
     /// `MAX_PROOF_BLOCK_REFS_DEPTH = 8`. Only the first `refs_tree_depth`
     /// entries are used inside the circuit.
     pub proof_block_ref_inner_path_hex: [String; MAX_PROOF_BLOCK_REFS_DEPTH],
-    /// Hop's start endpoint as clear bytes, hex — Direction (a): the current
+    /// Hop's start endpoint as clear bytes, hex: the current
     /// (newer) block whose L7 walk this hop closes. Equal to
     /// `block.block_id_hex` for active hops.
     pub hop_start_block_id_hex: String,
-    /// Hop's end endpoint as clear bytes, hex — Direction (a): the older ref
+    /// Hop's end endpoint as clear bytes, hex: the older ref
     /// extracted from `block.proof_block_refs_hex[ref_index]`. Threads into
     /// the next hop's `hop_start_block_id_hex` as intra-bundle continuity.
     pub hop_end_block_id_hex: String,

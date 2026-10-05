@@ -1059,9 +1059,9 @@ pub async fn run(
                     ),
                     source: Some(anyhow::Error::new(e)),
                 })?;
-        const DIGEST_OFF: usize = (12 + 13) * 32;
+        let digest_off = (12 + 13) * 32;
         let produced = proof_bytes
-            .get(DIGEST_OFF..DIGEST_OFF + 32)
+            .get(digest_off..digest_off + 32)
             .ok_or_else(|| CliError::EthSubmitFailed {
                 reason: format!(
                     "produced withdraw calldata is {} bytes, shorter than word 25. The burn is \

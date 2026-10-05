@@ -68,12 +68,16 @@
 //! Exit 0 on success. One-line JSON summary on the last non-empty stdout
 //! line (dex-tooling style); logging on stderr.
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
 use anyhow::{bail, Context, Result};
+use bridge_block_graph_resolver::{
+    BlockProvider, GraphResolver, GraphqlBlockProvider, HistoricalSearchConfig, ResolutionPolicy,
+    ResolutionRequest, ResolverLimits, SqliteStore,
+};
 use bridge_event_witness::{
-    enrich::{enrich_witness, AnchorLayerMode, HISTORY_WINDOW_SIZE},
-    schema::PrivateWitness,
+    enrich::{enrich_witness_for_resolved_proof, AnchorLayerMode, HISTORY_WINDOW_SIZE},
+    schema::{PrivateWitness, N_BUNDLE_MAX},
 };
 use bridge_gql_fetcher::gql_client;
 use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
@@ -296,6 +300,7 @@ struct OutputSummary<'a> {
     block_tree_depth: usize,
     num_active_chain_steps: u32,
     out: String,
+    hops_out: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -358,16 +363,57 @@ async fn run() -> Result<()> {
     let gql = gql_client::create_client(&args.gql_endpoint)
         .with_context(|| format!("failed to construct GQL client for {}", args.gql_endpoint))?;
 
-    // ---- Enrich (library call) ------------------------------------------
-    let enriched = enrich_witness(
+    // ---- Resolve exact X, then use the resolver's thread-0 B0 as Y ------
+    let provider = Arc::new(
+        GraphqlBlockProvider::new(&args.gql_endpoint)
+            .context("failed to construct graph resolver provider")?,
+    );
+    let store_dir = args
+        .bridge_state
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let store_path = store_dir.join("block-graph-resolver.sqlite");
+    let store = Arc::new(
+        SqliteStore::open(&store_path, provider.namespace())
+            .await
+            .with_context(|| format!("failed to open {}", store_path.display()))?,
+    );
+    let resolver = GraphResolver::new(provider, store, 2_048).with_historical_search_config(
+        HistoricalSearchConfig {
+            max_anchor_candidates: 10_000,
+        },
+    );
+    let target = partial
+        .block_id_hex
+        .parse()
+        .context("PrivateWitness.block_id_hex is not a block id")?;
+    let proof = resolver
+        .resolve_proof(ResolutionRequest {
+            target,
+            policy: ResolutionPolicy::FirstValid,
+            limits: ResolverLimits {
+                max_hops: N_BUNDLE_MAX as u32,
+                max_visited_blocks: 10_000,
+            },
+        })
+        .await
+        .context("failed to resolve Y -> X route")?;
+    let (enriched, hop_bundle) = enrich_witness_for_resolved_proof(
         &gql,
         &bridge_state,
         partial,
+        &proof,
         args.anchor_mode,
         args.i_know_the_wait,
     )
     .await
     .context("witness enrichment failed")?;
+    info!(
+        y = %proof.path.anchor,
+        x = %proof.path.target,
+        hops = proof.path.hops.len(),
+        "resolved witness route",
+    );
 
     // ---- Write enriched witness ----------------------------------------
     if let Some(parent) = args.out.parent() {
@@ -378,6 +424,17 @@ async fn run() -> Result<()> {
     std::fs::write(&args.out, json)
         .with_context(|| format!("failed to write {}", args.out.display()))?;
     info!("wrote enriched witness to {}", args.out.display());
+
+    let hops_out = if hop_bundle.snarks.is_empty() {
+        None
+    } else {
+        let path = sibling_hops_path(&args.out);
+        let json = serde_json::to_string_pretty(&hop_bundle)?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        info!("wrote resolved hop bundle to {}", path.display());
+        Some(path)
+    };
 
     // ---- Stdout summary (last non-empty line, dex-style) ---------------
     let s = &enriched.summary;
@@ -393,7 +450,24 @@ async fn run() -> Result<()> {
         block_tree_depth: s.block_tree_depth,
         num_active_chain_steps: s.num_active_chain_steps,
         out: args.out.to_string_lossy().into_owned(),
+        hops_out: hops_out.map(|path| path.to_string_lossy().into_owned()),
     };
     println!("{}", serde_json::to_string(&summary)?);
     Ok(())
+}
+
+fn sibling_hops_path(witness_path: &std::path::Path) -> PathBuf {
+    let file_name = witness_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("witness.json");
+    if let Some(stem) = file_name.strip_suffix("_witness.json") {
+        witness_path.with_file_name(format!("{stem}_hops.json"))
+    } else {
+        let stem = witness_path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("witness");
+        witness_path.with_file_name(format!("{stem}.hops.json"))
+    }
 }

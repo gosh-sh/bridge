@@ -529,7 +529,7 @@ Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte lim
 at 23 883 B is the tightest, with 693 B of EIP-170 headroom (97 %, above the 90 % soft-warn
 line in `scripts/check_shplonk_artefacts.sh`). Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
-output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`). 
+output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`).
 
 `verifiers/*.sol` are the generated `Halo2Verifier` sources (a single `fallback(bytes) → bytes` with
 inline assembly) kept for reference; deployment always goes through `create` on the `.bin`

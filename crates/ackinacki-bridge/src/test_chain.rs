@@ -579,7 +579,7 @@ impl FakeWorld {
             &verifier,
         )
         .unwrap();
-        // 3 680 B, word 23 zero. `full_walk`'s vkDigest answer is the zero
+        // 3 744 B, word 25 zero. `full_walk`'s vkDigest answer is the zero
         // word, so step 3b matches and the run continues to the ceremony.
         std::fs::write(
             path.join("BridgeWithdrawalAggregatorVerifier_calldata.bin"),

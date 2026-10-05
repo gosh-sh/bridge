@@ -300,4 +300,3 @@ contract ShplonkAggregatorVkBindingTest is Test {
         assertEq(v.vkDigest(), justBelow);
     }
 }
-

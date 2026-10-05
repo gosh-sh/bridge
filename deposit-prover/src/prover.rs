@@ -94,12 +94,13 @@ use crate::{
 /// No axiom-eth fork change is needed (upstream). See
 /// the VK's witness-independence requirement.
 ///
-/// Must be `>=` every accepted deposit's `used_capacity`. Fixtures use 25–33
-/// of the old pin of 64; a 2 KB-calldata tx leaf adds ~14, and a SafeL2
-/// receipt (Deposit + ~768 B `SafeMultiSigTransaction`) adds more. 128
-/// leaves margin for a modest extra log and is part of the VK — if this
-/// moves, the key rotates. Over-capacity fails safe at prove time
-/// (`mock_fulfill_keccak_promises` panics).
+/// Must be `>=` every accepted deposit's `used_capacity`. 128 permutations
+/// cover about 17 KB of keccak preimages (136 B each): header, both MPT
+/// paths, a tx leaf of up to ~2.8 KB, and the receipt. A typical SafeL2 /
+/// 4337 receipt fits. A receipt that fills all
+/// [`crate::circuit_v2::PRODUCTION_MAX_LOG_NUM`] logs at
+/// [`crate::circuit_v2::PRODUCTION_MAX_DATA_BYTE_LEN`] does not; proving
+/// then panics in `mock_fulfill_keccak_promises`. The pin is part of the VK.
 ///
 /// Match this value in `examples/export_vk_blob.rs` /
 /// `examples/export_deposit_proof_set.rs` (they import this constant).
@@ -140,7 +141,7 @@ impl Default for CircuitConfig {
 }
 
 impl CircuitConfig {
-    /// Shape baked into the production VkBlob: k=18, 1024 B per log, 20 logs.
+    /// Shape baked into the production VkBlob: k=18, 2048 B per log, 20 logs.
     /// Use this (plus [`FIXED_KECCAK_CAPACITY`]) for keygen, prove, and
     /// synthesis tests. [`CircuitConfig::default`] is the cheap unit-test
     /// shape and does not match the embedded key.

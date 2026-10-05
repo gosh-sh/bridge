@@ -691,7 +691,7 @@ mod tests {
             "--degree",
             "18",
             "--max-data-byte-len",
-            "256",
+            "2048",
             "--max-log-num",
             "20",
         ]);

@@ -1,12 +1,11 @@
 //! Step 2: is the account one whose deposit can be proven?
 //!
-//! The circuit proves a transaction signed by the account's own key and
-//! sent straight to the bridge. A smart-contract account (Safe, ERC-4337)
-//! sends through its contract or an EntryPoint with calldata beyond the
-//! circuit's limit, and its USDC would be stuck. Code on the account
-//! catches the deployed ones; a `personal_sign` whose signer is not the
-//! account catches the rest, including an ERC-4337 account that is not
-//! deployed yet (it signs with ERC-6492, which recovers to nothing).
+//! The circuit proves a type-1 or type-2 enclosing transaction. A
+//! smart-contract account (Safe, ERC-4337) is allowed when that transaction
+//! and its receipt fit the circuit (2048 B calldata, 2048 B per log). A
+//! `personal_sign` whose signer is not the account still catches an
+//! undeployed ERC-4337 account (ERC-6492 recovers to nothing). Type 4
+//! (EIP-7702 set-code) cannot be proven.
 
 use alloy_primitives::{Address, Signature};
 
@@ -98,8 +97,8 @@ pub fn capability_warnings(caps: &serde_json::Value, chain_id: u64) -> Vec<Strin
         == Some(true)
     {
         out.push(
-            "the wallet can pay gas through a paymaster; keep it off for this deposit: a \
-             sponsored transaction is sent through another contract and cannot be proven"
+            "the wallet can pay gas through a paymaster; a large sponsored batch can exceed the \
+             deposit circuit (2048 B calldata / 2048 B per receipt log)"
                 .into(),
         );
     }
@@ -108,8 +107,8 @@ pub fn capability_warnings(caps: &serde_json::Value, chain_id: u64) -> Vec<Strin
         .is_some_and(|s| s != "unsupported")
     {
         out.push(
-            "the wallet can batch calls; send the deposit as a single plain transaction: a \
-             batched one cannot be proven"
+            "the wallet can batch calls; a MultiSend whose SafeL2 log exceeds 2048 bytes of data \
+             cannot be proven"
                 .into(),
         );
     }
@@ -146,20 +145,16 @@ pub async fn check(
     match classify_code(&code) {
         CodeKind::Contract {
             ..
-        } => {
-            return Err(refuse(
-                op_id,
-                "deposits from a smart-contract account (Safe, ERC-4337) cannot be proven: their \
-                 transactions exceed the circuit's calldata limit"
-                    .into(),
-            ))
-        },
+        } => ui.warn(
+            "this is a smart-contract account (Safe, ERC-4337). The enclosing transaction must be \
+             type 1 or 2, with at most 2048 bytes of calldata and no receipt log over 2048 bytes \
+             of data",
+        ),
         CodeKind::Delegated7702 {
             target,
         } => ui.warn(&format!(
-            "this account delegates to {target} (EIP-7702). Turn off gas sponsoring and batched \
-             calls for this deposit: through a sponsor or a batch the transaction is sent via a \
-             contract and cannot be proven"
+            "this account delegates to {target} (EIP-7702). Send the deposit as type 1 or 2; a \
+             type-4 transaction cannot be proven"
         )),
         CodeKind::Eoa => {},
     }
@@ -246,17 +241,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_safe_is_refused_before_anything_is_asked() {
+    async fn a_safe_warns_instead_of_refusing() {
         let evm = FakeEvm::sepolia();
         let mut w = FakeWallet::eoa();
         evm.codes
             .lock()
             .unwrap()
             .insert(w.account, Bytes::from(vec![0x60; 170]));
-        let (r, _) = run_check(&evm, &mut w).await;
-        let e = r.unwrap_err();
-        assert_eq!(e.exit_code(), ExitCode::WalletFailed);
-        assert!(e.to_string().contains("smart-contract account"));
+        let (r, ui) = run_check(&evm, &mut w).await;
+        r.unwrap();
+        assert!(
+            ui.warnings()
+                .iter()
+                .any(|s| s.contains("smart-contract account")),
+            "{:?}",
+            ui.warnings()
+        );
     }
 
     #[tokio::test]
@@ -293,7 +293,7 @@ mod tests {
         let (r, ui) = run_check(&evm, &mut w).await;
         r.unwrap();
         assert!(
-            ui.warnings().iter().any(|s| s.contains("sponsor")),
+            ui.warnings().iter().any(|s| s.contains("EIP-7702")),
             "{:?}",
             ui.warnings()
         );

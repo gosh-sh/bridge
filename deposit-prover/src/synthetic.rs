@@ -374,6 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn type2_oversize_calldata_is_rejected_even_if_leaf_fits() {
+        let input = build(SyntheticSpec {
+            tx: EnclosingTx::Type2 {
+                data_len: 2300,
+            },
+            extra_log_data: 0,
+        });
+        let err = reject_unprovable_enclosing_tx(&input.tx_proof.tx_bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("calldata"), "{err}");
+    }
+
+    #[test]
     fn type0_witness_is_legacy_and_rejected_early() {
         let input = build(SyntheticSpec::type0_legacy());
         let first = input.tx_proof.tx_bytes[0];

@@ -22,7 +22,7 @@
 //!     --input /tmp/deposit_e2e/deposit_proof_input.json \
 //!     --proof-out /tmp/deposit_e2e/deposit_proof_blake2b.bin \
 //!     --pubin-out /tmp/deposit_e2e/deposit_public_inputs.bin \
-//!     --degree 18 --max-data-byte-len 1024 --max-log-num 20
+//!     --degree 18 --max-data-byte-len 2048 --max-log-num 20
 
 use std::{fs, path::Path};
 

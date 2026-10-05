@@ -213,17 +213,21 @@ pub async fn generate_transaction_proof(
 /// Refuse a deposit whose enclosing tx the circuit cannot prove.
 ///
 /// Type 0 (legacy) and type 4 (EIP-7702) are neither provable nor refundable
-/// — the depositor has to send again as type 1 or 2. An oversized leaf is
-/// truncated inside axiom-eth and would otherwise fail after a full prove.
+/// — the depositor has to send again as type 1 or 2. axiom-eth also enforces
+/// per-field caps (calldata 2048 B; type-2 access list 512 B; type-1 access
+/// list 2048 B, because that slot is merged with type-2 calldata). Checking
+/// only the total leaf length would let a 2300 B calldata / empty-AL type-2
+/// through and fail inside the circuit.
 pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
     use axiom_eth::transaction::calc_max_val_len;
 
-    use crate::circuit_v2::{ENABLE_TX_TYPES, MAX_TX_ACCESS_LIST_LEN, MAX_TX_CALLDATA_BYTE_LEN};
+    use crate::{
+        circuit_v2::{ENABLE_TX_TYPES, MAX_TX_ACCESS_LIST_LEN, MAX_TX_CALLDATA_BYTE_LEN},
+        rlp_utils::{typed_tx_rlp_items, EIP1559_TX_TYPE, EIP2930_TX_TYPE},
+    };
 
     let first = tx_bytes.first().copied();
-    if first != Some(crate::rlp_utils::EIP1559_TX_TYPE)
-        && first != Some(crate::rlp_utils::EIP2930_TX_TYPE)
-    {
+    if first != Some(EIP1559_TX_TYPE) && first != Some(EIP2930_TX_TYPE) {
         return Err(anyhow!(
             "deposit enclosing tx must be EIP-2930 (type 0x01) or EIP-1559 (type 0x02); got first \
              byte {:#x}. Type 0 (legacy) and type 4 (EIP-7702) deposits are neither provable nor \
@@ -238,9 +242,33 @@ pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
     );
     if tx_bytes.len() > max_len {
         return Err(anyhow!(
-            "enclosing tx is {} bytes; circuit max is {max_len} (calldata ≤ \
-             {MAX_TX_CALLDATA_BYTE_LEN}, access list ≤ {MAX_TX_ACCESS_LIST_LEN})",
+            "enclosing tx is {} bytes; circuit max leaf is {max_len}",
             tx_bytes.len()
+        ));
+    }
+    let (tx_type, items) = typed_tx_rlp_items(tx_bytes)?;
+    let (data_idx, al_idx, al_max) = if tx_type == EIP2930_TX_TYPE {
+        // Type-1 access list is field 7, merged with type-2 calldata (2048).
+        (6usize, 7usize, MAX_TX_CALLDATA_BYTE_LEN)
+    } else {
+        (7usize, 8usize, MAX_TX_ACCESS_LIST_LEN)
+    };
+    let data = items
+        .get(data_idx)
+        .ok_or_else(|| anyhow!("typed tx is missing field {data_idx} (calldata)"))?;
+    if data.payload.len() > MAX_TX_CALLDATA_BYTE_LEN {
+        return Err(anyhow!(
+            "enclosing tx calldata is {} bytes; circuit max is {MAX_TX_CALLDATA_BYTE_LEN}",
+            data.payload.len()
+        ));
+    }
+    let al = items
+        .get(al_idx)
+        .ok_or_else(|| anyhow!("typed tx is missing field {al_idx} (access list)"))?;
+    if al.span.len() > al_max {
+        return Err(anyhow!(
+            "enclosing tx type {tx_type:#04x} access-list RLP is {} bytes; circuit max is {al_max}",
+            al.span.len()
         ));
     }
     Ok(())

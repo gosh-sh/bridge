@@ -194,17 +194,11 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
             ev.amount, ev.an_account, ev.sender, exp.amount, exp.account, exp.from
         )));
     }
-    if tx.input != exp.calldata {
-        return Classified::Negative(Negative::Mismatch(format!(
-            "{DIFFERS}: the Deposit event matches, but the transaction to {} carries {} bytes of \
-             calldata that are not the requested deposit call",
-            tx.to
-                .map(|a| a.to_string())
-                .unwrap_or_else(|| "no address".into()),
-            tx.input.len()
-        )));
-    }
-    if let Err(v) = check_receipt_bounds(receipt.logs.len(), log.data.len()) {
+    // A Safe `execTransaction` or 4337 `handleOps` wraps the deposit call.
+    // The event is the identity of the deposit; the enclosing calldata is
+    // only checked for the circuit's length bounds below.
+    let max_log_data = receipt.logs.iter().map(|l| l.data.len()).max().unwrap_or(0);
+    if let Err(v) = check_receipt_bounds(receipt.logs.len(), max_log_data) {
         return Classified::Negative(Negative::Unprovable(v));
     }
     if let Err(v) = check_tx_shape(
@@ -614,13 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn calldata_other_than_requested_is_a_mismatch_even_with_a_matching_log() {
+    fn a_wrapped_call_with_a_matching_log_is_the_requested_deposit() {
         let mut input = exp().calldata.to_vec();
-        input.push(0);
+        input.extend_from_slice(&[0u8; 512]);
         let o = obs(true, good_logs(), 2, Bytes::from(input), 111, Some(100));
         assert!(matches!(
             judge(&o, Some(B256::repeat_byte(1)), &exp()),
-            Verdict::Final(Negative::Mismatch(_))
+            Verdict::Confirmed(_)
         ));
     }
 

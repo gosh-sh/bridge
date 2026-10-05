@@ -34,18 +34,22 @@ pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 
 /// Production per-log data cap, baked into the VK.
 ///
-/// axiom-eth range-checks every log in the receipt, not only the Deposit
-/// event. SafeL2's `SafeMultiSigTransaction` has no indexed params, so the
-/// 11 head words alone are 352 B and a 1-of-1 `execTransaction` that wraps
-/// `deposit()` lands around 768 B. 1024 B covers that with headroom.
-pub const PRODUCTION_MAX_DATA_BYTE_LEN: usize = 1024;
+/// axiom-eth range-checks the encoded size of every log, not only the
+/// Deposit event: `3+21+3+33*4+3+max_data+1` = 163 + max_data. A two-signer
+/// SafeL2 `SafeMultiSigTransaction` that MultiSends `approve` + `deposit`
+/// is ~1152 B of data / ~1213 B encoded. 1024 B of data capped that at
+/// 1187 B encoded and rejected it. 2048 B encoded-cap is 2211 B.
+pub const PRODUCTION_MAX_DATA_BYTE_LEN: usize = 2048;
 /// Production max logs per receipt (relayer / `export_*` default).
+/// The keccak pin does **not** cover 20 full-size logs; see
+/// [`crate::prover::FIXED_KECCAK_CAPACITY`].
 pub const PRODUCTION_MAX_LOG_NUM: usize = 20;
 /// 1-of-1 Safe `execTransaction` with a 100 B inner call:
 /// `4 + 320 + 32 + 128 + 32 + 96 = 612` (not 489).
 pub const SAFE_EXECTX_MIN_CALLDATA: usize = 612;
-/// Typical SafeL2 `SafeMultiSigTransaction` log data with one signature.
-pub const SAFEL2_MULTISIG_LOG_DATA: usize = 768;
+/// Two-signer SafeL2 `SafeMultiSigTransaction` MultiSend of approve+deposit.
+/// (`352+32+448+32+160+128 = 1152`.)
+pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1152;
 
 /// Public-input layout, in slot order. This is the wire contract the AN-side
 /// `USDCBridge._parsePublicInputs` reads by fixed offset, so it must not drift

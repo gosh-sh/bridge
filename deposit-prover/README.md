@@ -63,11 +63,11 @@ the production rows below.
 
 ```rust
 // Receipt chip — production (baked into the VK / relayer defaults)
-PRODUCTION_MAX_DATA_BYTE_LEN: 1024  // SafeL2 SafeMultiSigTransaction is ~768 B
-PRODUCTION_MAX_LOG_NUM: 20
+PRODUCTION_MAX_DATA_BYTE_LEN: 2048  // two-signer SafeL2 MultiSend is ~1152 B
+PRODUCTION_MAX_LOG_NUM: 20          // chip max; keccak 128 does not fill all 20
 TOPIC_NUM_BOUNDS: (0, 4)
 RECEIPT_PF_MAX_DEPTH: 10
-FIXED_KECCAK_CAPACITY: 128          // part of the VK; over-capacity fails at prove
+FIXED_KECCAK_CAPACITY: 128          // ~17 KB of preimages; over-capacity fails at prove
 
 // Enclosing tx chip — also baked into the VK
 MAX_TX_CALLDATA_BYTE_LEN: 2048      // 1-of-1 Safe execTransaction is 612 B

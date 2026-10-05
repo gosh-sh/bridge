@@ -22,7 +22,7 @@
 //!   cargo run --release --example export_vk_blob -- \
 //!     --input /tmp/deposit_e2e/deposit_proof_input.json \
 //!     --output /tmp/deposit_e2e/deposit_vk_blob.bin \
-//!     --degree 18 --max-data-byte-len 1024 --max-log-num 20
+//!     --degree 18 --max-data-byte-len 2048 --max-log-num 20
 
 use std::fs;
 

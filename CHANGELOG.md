@@ -26,24 +26,29 @@ assigns it when the release is tagged.
 
 - **The deposit-prover verification key is rotated.** The enclosing
   transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
-  calldata up to 2048 bytes and an access-list RLP up to 512 bytes.
-  Each receipt log may carry up to 1024 bytes of data (20 logs), which
-  is what makes a SafeL2 `SafeMultiSigTransaction` (~768 B) plus the
-  Deposit event fit. A type 0 (legacy) or type 4 (EIP-7702) deposit is
-  neither provable nor refundable: send again as type 1 or 2. A deposit
-  on chain X from an account whose nonce is N must not be allowed to
-  prove `chainId = N`, which is why type 0 stays off. Proofs made with
-  the previous VkBlob stop verifying.
+  calldata up to 2048 bytes. Type 2 access-list RLP is up to 512
+  bytes; type 1's access list shares a field slot with type 2
+  calldata, so it may be up to 2048 bytes. Each receipt log may
+  carry up to 2048 bytes of data (at most 20 logs). That is what
+  lets a SafeL2 `SafeMultiSigTransaction` through, including a
+  two-signer MultiSend of `approve` + `deposit` (~1152 B of log
+  data). The keccak pin is 128 permutations (~17 KB of preimages):
+  a typical Safe or 4337 receipt fits; a receipt that fills all 20
+  logs does not, and proving then fails on the host. Type 0 and
+  type 4 deposits are neither provable nor refundable: send again
+  as type 1 or 2.
 
-  This commit already embeds the new key in `eccUSDCBridge` and
-  rebuilds `0.80.0_compiled/exchange/eccUSDCBridge.tvc`. Operators:
-  deploy that tvc, and on every relayer host run
-  `cargo build --release --examples` in `deposit-prover` at the same
-  time. The relayer prefers `target/release/examples/<name>` when the
-  file exists and does not check it matches the source; a `git pull`
-  without that rebuild keeps proving the old circuit and every
-  `finalizeDeposit` fails. Cached `data/*.pk` is fine: the fingerprint
-  includes the new column counts and the new limits, so keygen reruns.
+  This commit embeds the new key in `eccUSDCBridge` and rebuilds
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc`. Operators: deploy
+  that tvc. On every relayer host, and anywhere `ackinacki-bridge
+  deposit` proves, rebuild the `deposit-prover` examples
+  (`cargo build --release --examples`) and do **not** pass
+  `--max-data-byte-len 256` — the default is now 2048 and is part
+  of the key. A leftover `--max-data-byte-len 256` produces proofs
+  the embedded key rejects. The relayer prefers
+  `target/release/examples/<name>` when the file exists and does
+  not check it matches the source. Cached `data/*.pk` is fine: the
+  fingerprint includes the new column counts and the new limits.
 
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds

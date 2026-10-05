@@ -77,7 +77,7 @@ cargo run --release --example export_vk_blob -- \
   --input /tmp/deposit_e2e/deposit_proof_input.json \
   --output /tmp/deposit_e2e/deposit_vk_blob.bin \
   --config-out /tmp/deposit_e2e/deposit_eth_circuit_params.json \
-  --degree 18 --max-data-byte-len 1024 --max-log-num 20
+  --degree 18 --max-data-byte-len 2048 --max-log-num 20
 ```
 
 Then regenerate the matching proof + public inputs (`export_blake2b_proof`) and
@@ -99,7 +99,7 @@ fixes), `006cca5d…191dec05`, and the 11-PI chain-ceremony `20cf9018…` supers
 Hermez. Note that only the constraint system moves — PI layout, count and shape are
 stable across the last three rotations. Regenerate the
 whole `deposit_10proofs` regression set in one shot with
-`cargo run --release --example export_deposit_proof_set -- --set-dir fixtures/deposit_10proofs --count 10 --degree 18 --max-data-byte-len 1024 --max-log-num 20`
+`cargo run --release --example export_deposit_proof_set -- --set-dir fixtures/deposit_10proofs --count 10 --degree 18 --max-data-byte-len 2048 --max-log-num 20`
 then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`).
 NB: `get_or_create_proving_key` now writes a **shape-fingerprinted** PK filename so a
 circuit-shape change can never silently load a stale PK.

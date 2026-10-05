@@ -344,6 +344,100 @@ pub fn typed_tx_chain_id(tx_bytes: &[u8]) -> Result<u64> {
         .fold(0u64, |acc, b| (acc << 8) | *b as u64))
 }
 
+/// One RLP item: full span (header + payload) and the payload itself.
+#[derive(Clone, Copy, Debug)]
+pub struct RlpItem<'a> {
+    /// Header plus payload, as stored in the parent list.
+    pub span: &'a [u8],
+    /// Payload only (string bytes, or the inner list body).
+    pub payload: &'a [u8],
+}
+
+fn rlp_item_at(bytes: &[u8]) -> Result<(usize, usize)> {
+    let first = *bytes.first().ok_or_else(|| anyhow!("truncated RLP item"))?;
+    if first <= 0x7f {
+        return Ok((1, 0));
+    }
+    if first <= 0xb7 {
+        let n = (first - 0x80) as usize;
+        if bytes.len() < 1 + n {
+            return Err(anyhow!("truncated RLP string"));
+        }
+        return Ok((1 + n, 1));
+    }
+    if first <= 0xbf {
+        let len_len = (first - 0xb7) as usize;
+        if bytes.len() < 1 + len_len {
+            return Err(anyhow!("truncated RLP long-string header"));
+        }
+        let mut n = 0usize;
+        for b in &bytes[1..1 + len_len] {
+            n = (n << 8) | *b as usize;
+        }
+        if bytes.len() < 1 + len_len + n {
+            return Err(anyhow!("truncated RLP long string"));
+        }
+        return Ok((1 + len_len + n, 1 + len_len));
+    }
+    if first <= 0xf7 {
+        let n = (first - 0xc0) as usize;
+        if bytes.len() < 1 + n {
+            return Err(anyhow!("truncated RLP list"));
+        }
+        return Ok((1 + n, 1));
+    }
+    let len_len = (first - 0xf7) as usize;
+    if bytes.len() < 1 + len_len {
+        return Err(anyhow!("truncated RLP long-list header"));
+    }
+    let mut n = 0usize;
+    for b in &bytes[1..1 + len_len] {
+        n = (n << 8) | *b as usize;
+    }
+    if bytes.len() < 1 + len_len + n {
+        return Err(anyhow!("truncated RLP long list"));
+    }
+    Ok((1 + len_len + n, 1 + len_len))
+}
+
+/// Split a typed (0x01 / 0x02) transaction into its RLP list items.
+pub fn typed_tx_rlp_items(tx_bytes: &[u8]) -> Result<(u8, Vec<RlpItem<'_>>)> {
+    let (&tx_type, rest) = tx_bytes
+        .split_first()
+        .ok_or_else(|| anyhow!("transaction bytes are empty"))?;
+    if tx_type != EIP2930_TX_TYPE && tx_type != EIP1559_TX_TYPE {
+        return Err(anyhow!(
+            "transaction type {tx_type:#04x} is not EIP-2930 (0x01) or EIP-1559 (0x02)"
+        ));
+    }
+    let prefix = *rest
+        .first()
+        .ok_or_else(|| anyhow!("typed transaction has no RLP payload"))?;
+    if prefix < 0xc0 {
+        return Err(anyhow!("typed transaction payload is not an RLP list"));
+    }
+    let body = if prefix <= 0xf7 {
+        rest.get(1..)
+            .ok_or_else(|| anyhow!("truncated typed transaction"))?
+    } else {
+        let len_len = (prefix - 0xf7) as usize;
+        rest.get(1 + len_len..)
+            .ok_or_else(|| anyhow!("truncated RLP list header"))?
+    };
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let (span_len, payload_off) = rlp_item_at(&body[i..])?;
+        let span = &body[i..i + span_len];
+        items.push(RlpItem {
+            span,
+            payload: &span[payload_off..],
+        });
+        i += span_len;
+    }
+    Ok((tx_type, items))
+}
+
 /// Encode `block`'s header and assert it reproduces the hash the RPC reported.
 ///
 /// This is the guard that turns "we silently dropped a header field the local

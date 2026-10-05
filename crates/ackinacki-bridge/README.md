@@ -1034,10 +1034,10 @@ under `--json`:
 | # | Step | What happens |
 |---|------|--------------|
 | 1 | preflight | Every check that can be made before the wallet is asked (below). A refusal is exit 2 and nothing is sent. The run then creates the **operation** and prints its id. |
-| 2 | wallet pairing | You scan the QR code and approve the connection; if the wallet is on another network, the CLI asks it to switch, or to add the network. Then the **account check**: an account holding contract code, other than an EIP-7702 delegation, is refused, and the wallet signs a short message (`personal_sign`) whose signer must be the account itself. A failure is exit 20; nothing is sent. |
+| 2 | wallet pairing | You scan the QR code and approve the connection; if the wallet is on another network, the CLI asks it to switch, or to add the network. Then the **account check**: a Safe, ERC-4337 or other contract account is warned (those deposits are provable when the enclosing type-1 or type-2 transaction and its receipt fit 2048 B of calldata and 2048 B per log), and the wallet signs a short message (`personal_sign`) whose signer must be the account itself. A failure is exit 20; nothing is sent. |
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. The read-back and the deposit's gas estimate are made at the block that holds the approve — looked up again by its receipt, so that an approve a reorg moved is followed, or, for an approve from the QR code, the block where the new allowance was seen — and the nonce the deposit is expected at counts the approve: an RPC node that has not caught up with that block is asked again, not taken for a lowered limit or a deposit that would revert. |
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(amount, 0, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
-| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2, input exactly the 100 bytes requested, an access list of at most 64 bytes RLP, sent straight to the bridge. The wallet session is closed after this step. |
+| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The requested deposit is the one `Deposit` event: same sender, amount and recipient. The enclosing transaction may be type 1 or 2, with at most 2048 bytes of calldata (type-2 access-list RLP at most 512 bytes; type 1 may use 2048) and no receipt log over 2048 bytes of data. The wallet session is closed after this step. |
 | 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
 | 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
@@ -1168,9 +1168,9 @@ time limit, which covers the retries too.
   accept that risk: `--yes` accepts it, `--non-interactive` or `--json`
   without `--yes` declines it (exit 20), and Ctrl-C at the question ends the
   run at once, as anywhere else. There is no signature check in this mode,
-  only the check of the account's code, so an ERC-4337 account that is not
-  deployed yet is not caught: its deposit goes through the account's contract
-  and ends at exit 35.
+  only a warning on contract code, so an ERC-4337 account that is not
+  deployed yet is not caught: a deposit that does not fit the circuit
+  ends at exit 35.
 - **`both`** — WalletConnect first, and the EIP-681 codes only if pairing
   itself fails.
 
@@ -1350,7 +1350,7 @@ without them it is refused with exit 2.
 | 0 | The credit is confirmed by the deposit's identity, by this run or an earlier one; or `--dry-run` passed | on Acki Nacki | — |
 | 2 | Refused before the deposit was requested: preflight, including a paused bridge on either side and a USDC balance below the amount; a filesystem without `flock`; a `--resume` or `--abandon` whose command line contradicts the operation's record. Also the EVM bridge paused, or the deposit's gas estimate reverting, right before the request — by then an `approve` may have been sent | not moved; `approve` gas may be spent | fix what the message names, run again |
 | 3 | Another deposit holds the state directory; an operation with an unknown outcome exists for the same deposit or the same sender; the operation is being run by another process | untouched by this run | wait for the other run, or `--resume` / `--abandon` the operation the message names |
-| 20 | Wallet: not paired, rejected, timed out; a smart-contract account (code, or a signature not made with the account's key); or the wallet replaced the deposit transaction in a finalized block | untouched | pair again, from a plain account |
+| 20 | Wallet: not paired, rejected, timed out; a check signature not made with the account's key (an undeployed ERC-4337 account); or the wallet replaced the deposit transaction in a finalized block | untouched | pair again, from an account that signs with its own key |
 | 21 | `approve` reverted, was rejected, would revert, or did not show on chain within `--pair-timeout-s` — or could not be confirmed within it, the RPC failing, with its last error; or the wallet set a spending limit below the amount | not moved; `approve` gas may be spent | fix the cause, run again |
 | 22 | The deposit transaction reverted on the EVM side, or succeeded without a `Deposit` event of the bridge | not taken; gas spent | read the cause it names, run again |
 | 30 | The wallet was asked; the transaction was not found in the recovery window | possibly in flight | [after exit 30](#operations-resume-and-abandon) |
@@ -1371,10 +1371,12 @@ Exit 35 and exit 37 are final: the CLI cannot move the USDC any further. It
 prints what the operator needs, and `--resume <op-id>` prints it again from the
 record.
 
-- **Exit 35, a shape the circuit cannot prove** — a legacy or type-1
-  transaction (EIP-681 wallets may send one), longer call data, a longer access
-  list, a call routed through another contract. The USDC is in the EVM bridge,
-  which has no refund; only the operator can return it.
+- **Exit 35, a shape the circuit cannot prove** — a legacy or type-4
+  transaction, more than 2048 bytes of calldata, a type-2 access list
+  over 512 bytes, or a receipt log over 2048 bytes of data. Type 1 is
+  provable. A Safe or 4337 call is provable when it fits those bounds.
+  The USDC is in the EVM bridge, which has no refund; only the operator
+  can return it.
 - **Exit 35, not the deposit that was requested** — `the wallet broadcast a
   deposit that differs from the request`, with the actual amount and recipient
   next to the requested ones. You changed the amount in the wallet, the wallet
@@ -1482,7 +1484,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 
 Measured with `export_blake2b_proof` on
 `deposit-prover/fixtures/deposit_10proofs/proof_00` (`--degree 18
---max-data-byte-len 256 --max-log-num 20`, as the CLI runs it) on an Intel Core
+--max-data-byte-len 2048 --max-log-num 20`, as the CLI runs it) on an Intel Core
 i5-14600KF with 20 hardware threads and 46 GB of RAM, Ubuntu 24.04 under WSL2.
 Keygen took 20 s of the cold run. The prover uses every core, so with fewer
 the wall time moves toward the CPU time; `fetch_deposit_data` adds a few RPC

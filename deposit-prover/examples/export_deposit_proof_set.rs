@@ -25,7 +25,7 @@
 //! `fetch_deposit_data`). Run with:
 //!   cargo run --release --example export_deposit_proof_set -- \
 //!     --set-dir fixtures/deposit_10proofs --count 10 \
-//!     --degree 18 --max-data-byte-len 1024 --max-log-num 20
+//!     --degree 18 --max-data-byte-len 2048 --max-log-num 20
 
 use std::{fs, path::Path};
 

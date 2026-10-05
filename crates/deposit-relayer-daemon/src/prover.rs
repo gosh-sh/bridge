@@ -162,7 +162,7 @@ impl SubprocessProverConfig {
             deposit_prover_dir: deposit_prover_dir.into(),
             rpc_url: rpc_url.into(),
             degree: 18,
-            max_data_byte_len: 1024,
+            max_data_byte_len: 2048,
             max_log_num: 20,
             dapp_id: "0".to_string(),
             timeout: Duration::from_secs(900),

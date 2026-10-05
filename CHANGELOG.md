@@ -657,39 +657,43 @@ assigns it when the release is tagged.
   of the message when the wait gives up, and once `latest` has shown the
   target the wait allows a few rounds past the deadline for the snapshot to
   catch up.
-- **The shellnet profile's `RPC_URL` is `https://sepolia.gateway.tenderly.co`**
-  (was `https://ethereum-sepolia-rpc.publicnode.com`), and so is the
-  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common`. The
+- **The shellnet profile's `RPC_URL` is `https://rpc.sepolia.ethpandaops.io`**
+  (was `https://ethereum-sepolia-rpc.publicnode.com`); the relayer-side
+  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common` is
+  `https://sepolia.gateway.tenderly.co` (was publicnode too). The
   window-heights read needs `eth_getLogs` back to the bridge's oldest held
-  anchor; publicnode keeps only the newest ~10 000 blocks of logs and answers
-  an empty set for older ones, so on it the read comes up short about a day
-  and a half after the first anchor and every default-profile withdrawal is
-  refused in preflight. Tenderly's public gateway serves full log history
-  and takes a 10 000-block span. When a short log set is met and the deploy
-  block itself answers with no logs, the error also says the RPC may not
-  serve history that far back, and no re-read is spent on it; with no
-  `BRIDGE_DEPLOY_BLOCK` at all a short log set is final too, since the
+  anchor; publicnode keeps only the newest ~10 000 blocks of logs and
+  answers an empty set for older ones, so on it the read comes up short
+  about a day and a half after the first anchor and every default-profile
+  withdrawal is refused in preflight. `deposit` needs every receipt of a
+  block and `eth_getRawTransactionByHash` from the same `RPC_URL`, and the
+  raw transactions Tenderly's public gateway does not serve (`deposit` is
+  refused in preflight on it, as it is in a shell that sourced
+  `shellnet.common`); the EF DevOps endpoint serves both, with full log
+  history, and takes a 10 000-block span. When a short log set is met and
+  the deploy block itself answers with no logs, the error also says the RPC
+  may not serve history that far back, and no re-read is spent on it; with
+  no `BRIDGE_DEPLOY_BLOCK` at all a short log set is final too, since the
   re-read would walk to genesis again.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
   rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
   deploy from `main` with the owner pause; its deploy block 11828971 is
   pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The previous deploys,
-  `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped at seq
-  20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq
-  20054016), still answer every getter but are no longer advanced:
+  `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, deploy block
+  11807209, stopped at seq 20856832) and
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq 20054016),
+  still answer every getter but are no longer advanced:
   preflight refuses `0x0F4F…` (an older verifier stack) and, with the
   profile's `BRIDGE_DEPLOY_BLOCK`, `0x32b9…` too (its anchors predate that
   block, so the window-heights read comes up short); only a deploy block at
   or before the oldest anchor its windows still hold (its own deploy block,
   for one) gets a burn that then times out at stage 4b. All three bind the
-  same AN bridge account; nothing else in the
-  profile changes. A withdrawal against a deploy nobody advances burns
-  and then times out at stage 4b, and a deposit into it reaches Acki Nacki
-  only while that bridge stays trusted there. A profile installed by
-  `install.sh` from an earlier release, or copied by hand, keeps the old
-  address: change `BRIDGE_ADDRESS` in it and add `BRIDGE_DEPLOY_BLOCK`.
-  Each deploy keeps its own treasury, and nothing moves from the old one to
-  the new one.
+  same AN bridge account; the rotation changes nothing else in the profile.
+  A deposit into a deploy nobody advances reaches Acki Nacki only while that
+  bridge stays trusted there. A profile installed by `install.sh` from an
+  earlier release, or copied by hand, keeps the old `BRIDGE_ADDRESS` and
+  `RPC_URL`: change both and add `BRIDGE_DEPLOY_BLOCK`. Each deploy keeps
+  its own treasury, and nothing moves from the old one to the new one.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn

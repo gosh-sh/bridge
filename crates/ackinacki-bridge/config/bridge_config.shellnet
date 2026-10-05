@@ -34,15 +34,15 @@
 # `crates/ackinacki-bridge/`.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
-# Must serve `eth_getLogs` back to the bridge's oldest held anchor: the
-# window-heights read (preflight, then stage 4b) rebuilds the window
-# heights from `LayerAnchorAppended` logs. Tenderly's public gateway serves
-# full log history and takes a 10 000-block span; publicnode
-# (`https://ethereum-sepolia-rpc.publicnode.com`) keeps only the newest
-# ~10 000 blocks of logs and answers an empty set for older ones, so on it
-# the read comes up short about a day and a half after the first anchor and
-# preflight refuses every withdrawal.
-RPC_URL=https://sepolia.gateway.tenderly.co
+# Must serve `eth_getLogs` back to the bridge's oldest held anchor (the
+# window-heights read of `withdraw`, in preflight and at stage 4b) AND
+# `eth_getRawTransactionByHash` plus every receipt of a block (`deposit`'s
+# prover). The EF DevOps public endpoint serves both with full history.
+# Tenderly's gateway (`https://sepolia.gateway.tenderly.co`) has the history
+# but no raw transactions, so `deposit` is refused on it; publicnode keeps
+# only the newest ~10 000 blocks of logs and receipts, so on it `withdraw`
+# is refused once the bridge's oldest held anchor is older than that.
+RPC_URL=https://rpc.sepolia.ethpandaops.io
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 NETWORK=shellnet.ackinacki.org
@@ -131,9 +131,10 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 # runs L2 only. See README.md Quick start for the default-user flow.
 #
 # Redeployed from `main` on 2026-10-02 (owner pause, #73). The previous
-# deploys, `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, stopped
-# at seq 20856832) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped
-# at seq 20054016), still answer every getter but nobody advances them.
+# deploys, `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, deploy
+# block 11807209, stopped at seq 20856832) and
+# `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq 20054016),
+# still answer every getter but nobody advances them.
 # Preflight refuses `0x0F4F…` (an older verifier stack) and, with the
 # BRIDGE_DEPLOY_BLOCK below, `0x32b9…` too (its anchors predate that block,
 # so the window-heights read comes up short); only a deploy block at or

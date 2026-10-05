@@ -160,7 +160,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
 | `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
-| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile uses Tenderly's public gateway) |
+| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile's endpoint serves full history and the raw transactions `deposit` needs) |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
 | `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Block the bridge was deployed in: where the `LayerAnchorAppended` scan (preflight, then stage 4b) stops when a window is not covered yet; changes together with `BRIDGE_ADDRESS` (unset = genesis). `--get-logs-chunk-blocks` / `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and `--get-logs-pause-ms` / `BRIDGE_GET_LOGS_PAUSE_MS` fit the scan to a capped, rate-limited RPC |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
@@ -1126,7 +1126,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 
 | Flag | Env var / profile key | Default | Purpose |
 |------|-----------------------|---------|---------|
-| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block |
+| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions) |
 | `--bridge-address` | `BRIDGE_ADDRESS` | — | `AckiNackiBridge` on the EVM chain |
 | `--gql-endpoint` | `BRIDGE_GQL_ENDPOINT` | — | The Acki Nacki host. GraphQL for reads; `finalizeDeposit` goes to `POST /v2/messages` on the same host, so it has to serve both |
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID` | — | Account id of the Acki Nacki bridge; its dapp is resolved live |

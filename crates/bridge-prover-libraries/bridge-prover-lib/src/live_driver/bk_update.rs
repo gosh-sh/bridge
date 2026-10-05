@@ -19,7 +19,7 @@
 //!   driver ready to re-emit the same event on the next poll — that's the
 //!   intended retry semantics.
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use tracing::{error, info, warn};
 use std::time::Instant;
 
@@ -187,12 +187,20 @@ pub(super) async fn drive_next_bk_update(
     // the single-PK memory envelope. Pick the Fiat–Shamir flavour from the
     // driver config so a Poseidon-configured driver emits aggregator-ready
     // bytes here — same one-flavour-per-poll discipline as the bundle path.
-    // The attestation `lastSeen` instance is the live layer cursor — the
-    // same word `applyBkSetUpdate` (and `verifyBlock`) pass the adapter.
-    // `stored_last_bk_set_update_seq_no` is monotonicity-only; baking it
-    // here makes every rotation after the first `verifyBlock` fail
-    // `AttestationProofRejected` (QC-A2-2).
+    // The attestation `lastSeen` instance is the layer cursor at prove
+    // time and must stay `< upd_seqno`. `applyBkSetUpdate` forwards this
+    // baked word, not the live cursor after `verifyBlock(N)`. Baking
+    // `stored_last_bk_set_update_seq_no` here is wrong (QC-A2-2).
     let last_seen_for_upd = driver.state().stored_last_seen_block_seq_no as u32;
+    if last_seen_for_upd >= upd_seqno as u32 {
+        return Err(DriverError::proof_gen(
+            upd_seqno,
+            anyhow!(
+                "bk-update {upd_seqno}: layer cursor last_seen={last_seen_for_upd} is not < \
+                 block_seq_no; prove the rotation before acking verifyBlock({upd_seqno})"
+            ),
+        ));
+    }
     let transcript = driver.cfg().transcript;
     let t_upd_proof = Instant::now();
     let (fin_type, upd_proof) = match &upd_evidence {

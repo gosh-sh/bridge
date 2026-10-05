@@ -346,6 +346,14 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
+        if update.block_seq_no > inner.last_seen_block_seq_no {
+            return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                reason: format!(
+                    "VerifyBlockLagBehindRotation(seq={}, last_seen={})",
+                    update.block_seq_no, inner.last_seen_block_seq_no
+                ),
+            });
+        }
         if update.attestation_last_seen >= update.block_seq_no {
             return Ok(BkSetUpdateSubmitOutcome::Reverted {
                 reason: format!(

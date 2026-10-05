@@ -26,13 +26,14 @@ assigns it when the release is tagged.
 
 - **`applyBkSetUpdate` takes a tenth argument, `attestationLastSeen`, after
   `blockSeqNo`.** Selector `0x2a2c14a0` → `0xdcb4c795`. Old 9-argument
-  calldata does not decode. Circuit 1A/1B proves `block_seq_no > last_seen`.
-  After `verifyBlock(N)` the live cursor is N, so passing
-  `storedLastSeenBlockSeqNo` is `last_seen == blockSeqNo` and reverts
-  `AttestationLastSeenNotBeforeSeqNo`. Pass the `last_seen` baked into the
-  proof (the previous key block). BRIDGE-ETH-WD-2 is unchanged: still
-  `verifyBlock(N)` first, then `applyBkSetUpdate(N)`. File-based
-  `bkupd_*.json` without `last_seen_bk_update_seqno` defaults that word to 0.
+  calldata does not decode. The bridge is not upgradeable — redeploy it
+  and upgrade the relayer and prover together. Circuit 1A/1B proves
+  `block_seq_no > last_seen`. After `verifyBlock(N)` the live cursor is N,
+  so passing `storedLastSeenBlockSeqNo` is `last_seen == blockSeqNo` and
+  reverts `AttestationLastSeenNotBeforeSeqNo`. The prover bakes the
+  prove-time cursor (`< N`); the relayer forwards that word and waits
+  for `verifyBlock(N)` before `applyBkSetUpdate(N)` (BRIDGE-ETH-WD-2).
+  A `bkupd_*.json` without `last_seen_bk_update_seqno` is refused.
 
 - **`aggregate-proof` self-checks the verifier source, so every verifiers
   directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile

@@ -715,9 +715,11 @@ impl LiveProverDriver {
             }
         };
 
-        // Guard: if there is an un-drained rotation at height `<= target`,
-        // bundle advance is blocked. Caller must drain via
-        // `poll_next_bk_update` first.
+        // Guard: if there is an un-drained rotation at height `< target`,
+        // bundle advance is blocked. A rotation announced in block N
+        // must not block `verifyBlock(N)` — WD-2 submits that bundle
+        // first, then `applyBkSetUpdate(N)`. Caller drains via
+        // `poll_next_bk_update` after the covering bundle.
         if self.pending_bk_update_below(next_target_seqno).await? {
             return Ok(LiveBundleEvent::Nothing {
                 next_target_seqno,
@@ -904,7 +906,7 @@ impl LiveProverDriver {
     }
 
     /// Query GQL for the next pending bk-set rotation and check whether its
-    /// block-height is `<= max_height`. Cheap enough to call once per
+    /// block-height is `< max_height`. Cheap enough to call once per
     /// bundle poll — sends one GQL request. Transient errors are
     /// swallowed with a warn (returning `false`) because a spurious GQL
     /// hiccup here should not prevent bundle advance; the caller will
@@ -912,7 +914,7 @@ impl LiveProverDriver {
     async fn pending_bk_update_below(&self, max_height: u64) -> DriverResult<bool> {
         let cursor = self.state.stored_last_bk_set_update_seq_no;
         match bridge_gql_fetcher::bk_set_fetcher::next_update_after(&self.gql, cursor).await {
-            Ok(Some(upd)) => Ok(upd.height.map(|h| h <= max_height).unwrap_or(false)),
+            Ok(Some(upd)) => Ok(upd.height.map(|h| h < max_height).unwrap_or(false)),
             Ok(None) => Ok(false),
             Err(e) => {
                 warn!(

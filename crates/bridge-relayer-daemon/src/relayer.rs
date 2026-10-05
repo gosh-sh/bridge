@@ -187,9 +187,18 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         }
 
         // ── Phase 1: drain BK-set updates ────────────────────────────
+        // WD-2: applyBkSetUpdate(N) needs storedLastSeen >= N. A rotation
+        // that is ready while the layer cursor is still behind N waits
+        // for the verifyBlock lane below; do not submit it first.
         let bk_target = on_chain.last_bk_set_update_seq_no.saturating_add(1);
         if let Some(upd) = self.bk_update_source.fetch_bk_update(bk_target).await? {
-            if upd.old_commitment_l2 != on_chain.bk_set_commitment {
+            if upd.block_seq_no > on_chain.last_seen_block_seq_no {
+                info!(
+                    seq_no = upd.block_seq_no,
+                    last_seen = on_chain.last_seen_block_seq_no,
+                    "bk-set update waiting for verifyBlock coverage (WD-2)",
+                );
+            } else if upd.old_commitment_l2 != on_chain.bk_set_commitment {
                 self.state.record_bk_update_attempt(upd.block_seq_no);
                 self.persist_state()?;
                 return Ok(TickOutcome::BkUpdateReverted {
@@ -199,56 +208,57 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         upd.old_commitment_l2, on_chain.bk_set_commitment
                     ),
                 });
-            }
-            match self.bridge.submit_bk_set_update(&upd).await? {
-                BkSetUpdateSubmitOutcome::Applied {
-                    new_state,
-                    tx_hash,
-                } => {
-                    self.bk_update_source
-                        .ack_last_bk_update(upd.block_seq_no)
-                        .await?;
-                    self.after_ack_consistency(upd.block_seq_no, &new_state)
-                        .await?;
-                    self.state.record_bk_update_progress(upd.block_seq_no);
-                    self.state.last_observed_on_chain = Some(new_state.clone());
-                    self.persist_state()?;
-                    info!(
-                        seq_no = upd.block_seq_no,
-                        tx = ?tx_hash,
-                        "bk-set update applied",
-                    );
-                    return Ok(TickOutcome::BkUpdateApplied {
-                        seq_no: upd.block_seq_no,
+            } else {
+                match self.bridge.submit_bk_set_update(&upd).await? {
+                    BkSetUpdateSubmitOutcome::Applied {
                         new_state,
                         tx_hash,
-                    });
-                },
-                BkSetUpdateSubmitOutcome::Reverted {
-                    reason,
-                } => {
-                    // Keep pending so next tick retries the same update.
-                    self.state.record_bk_update_attempt(upd.block_seq_no);
-                    self.persist_state()?;
-                    warn!(
-                        seq_no = upd.block_seq_no,
-                        reason = %reason,
-                        "bk-set update reverted",
-                    );
-                    if self.state.bk_update_attempts_since_progress
-                        >= self.config.max_attempts_abort
-                    {
-                        return Err(RelayerError::Stuck {
+                    } => {
+                        self.bk_update_source
+                            .ack_last_bk_update(upd.block_seq_no)
+                            .await?;
+                        self.after_ack_consistency(upd.block_seq_no, &new_state)
+                            .await?;
+                        self.state.record_bk_update_progress(upd.block_seq_no);
+                        self.state.last_observed_on_chain = Some(new_state.clone());
+                        self.persist_state()?;
+                        info!(
+                            seq_no = upd.block_seq_no,
+                            tx = ?tx_hash,
+                            "bk-set update applied",
+                        );
+                        return Ok(TickOutcome::BkUpdateApplied {
                             seq_no: upd.block_seq_no,
-                            attempts: self.state.bk_update_attempts_since_progress,
-                            reason: format!("applyBkSetUpdate: {reason}"),
+                            new_state,
+                            tx_hash,
                         });
-                    }
-                    return Ok(TickOutcome::BkUpdateReverted {
-                        seq_no: upd.block_seq_no,
+                    },
+                    BkSetUpdateSubmitOutcome::Reverted {
                         reason,
-                    });
-                },
+                    } => {
+                        // Keep pending so next tick retries the same update.
+                        self.state.record_bk_update_attempt(upd.block_seq_no);
+                        self.persist_state()?;
+                        warn!(
+                            seq_no = upd.block_seq_no,
+                            reason = %reason,
+                            "bk-set update reverted",
+                        );
+                        if self.state.bk_update_attempts_since_progress
+                            >= self.config.max_attempts_abort
+                        {
+                            return Err(RelayerError::Stuck {
+                                seq_no: upd.block_seq_no,
+                                attempts: self.state.bk_update_attempts_since_progress,
+                                reason: format!("applyBkSetUpdate: {reason}"),
+                            });
+                        }
+                        return Ok(TickOutcome::BkUpdateReverted {
+                            seq_no: upd.block_seq_no,
+                            reason,
+                        });
+                    },
+                }
             }
         }
 

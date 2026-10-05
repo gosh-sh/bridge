@@ -456,8 +456,8 @@ struct PartnerBkUpdateRequest {
     block_seq_no: u32,
     #[serde(default, rename = "block_height")]
     _block_height: u64,
-    #[serde(default, rename = "last_seen_bk_update_seqno")]
-    last_seen_bk_update_seqno: u32,
+    #[serde(rename = "last_seen_bk_update_seqno")]
+    last_seen_bk_update_seqno: Option<u32>,
     block_id_hex: String,
     #[serde(default = "default_attestation_primary")]
     attestation_circuit: String,
@@ -553,7 +553,13 @@ impl BkUpdateProofsSource {
             // against inside `applyBkSetUpdate`.
             block_id: hash_hex_to_block_id_fr(&req.block_id_hex)?,
             block_seq_no: seq_no,
-            attestation_last_seen: u64::from(req.last_seen_bk_update_seqno),
+            attestation_last_seen: u64::from(req.last_seen_bk_update_seqno.ok_or_else(|| {
+                RelayerError::other(format!(
+                    "{}: missing last_seen_bk_update_seqno (the last_seen baked into the \
+                     attestation, not 0)",
+                    path.display()
+                ))
+            })?),
             old_commitment_l2: fr_hex_to_u256(&req.old_bk_set_poseidon_hash_hex)?,
             new_commitment_l3: fr_hex_to_u256(&req.new_bk_set_poseidon_hash_hex)?,
             sibling_h01: hex32_to_array(&req.merkle_sibling_h01_hex, "merkle_sibling_h01")?,
@@ -780,6 +786,7 @@ mod tests {
         let proof_hex = "0x".to_string() + &"ab".repeat(2048);
         let bkupd = serde_json::json!({
             "block_seq_no": 24,
+            "last_seen_bk_update_seqno": 16,
             "attestation_circuit": "primary",
             "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
             "attestation_proof_hex": proof_hex,
@@ -798,11 +805,37 @@ mod tests {
         let src = BkUpdateProofsSource::new(dir.path());
         let u = src.fetch_bk_update(24).await.unwrap().unwrap();
         assert_eq!(u.block_seq_no, 24);
-        assert_eq!(u.attestation_last_seen, 0);
+        assert_eq!(u.attestation_last_seen, 16);
         assert_eq!(u.fin_type, FinalizationType::Primary);
         assert_eq!(u.attestation_proof.len(), 2048);
         assert_eq!(u.sibling_h01[0], 0xaa);
         assert_eq!(u.sibling_h4_7[0], 0xbb);
         assert_eq!(u.sibling_h8_15[0], 0xcc);
+    }
+
+    #[tokio::test]
+    async fn bkupd_source_refuses_missing_last_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let proof_hex = "0x".to_string() + &"ab".repeat(2048);
+        let bkupd = serde_json::json!({
+            "block_seq_no": 24,
+            "attestation_circuit": "primary",
+            "block_id_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+            "attestation_proof_hex": proof_hex,
+            "old_bk_set_poseidon_hash_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+            "new_bk_set_poseidon_hash_hex": "0300000000000000000000000000000000000000000000000000000000000000",
+            "merkle_sibling_h01_hex": "0x".to_string() + &"aa".repeat(32),
+            "merkle_sibling_h4_7_hex": "0x".to_string() + &"bb".repeat(32),
+            "merkle_sibling_h8_15_hex": "0x".to_string() + &"cc".repeat(32),
+        });
+        std::fs::write(
+            dir.path().join("bkupd_000024.json"),
+            serde_json::to_string(&bkupd).unwrap(),
+        )
+        .unwrap();
+
+        let src = BkUpdateProofsSource::new(dir.path());
+        let err = src.fetch_bk_update(24).await.unwrap_err().to_string();
+        assert!(err.contains("last_seen_bk_update_seqno"), "{err}");
     }
 }

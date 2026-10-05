@@ -220,9 +220,12 @@ where
             )
         })?;
         let seqno = pending.block_seq_no;
+        // `last_seen_bk_update_seq_no` is the baked Circuit 1A/1B lastSeen,
+        // forwarded as `attestationLastSeen`. It is not the live layer cursor
+        // the contract used to pass the adapter.
         let last_seen = u32::try_from(pending.last_seen_bk_update_seq_no).map_err(|_| {
             RelayerError::other(format!(
-                "attestation lastSeen (layer cursor) {} does not fit u32",
+                "attestation lastSeen (baked layer cursor) {} does not fit u32",
                 pending.last_seen_bk_update_seq_no
             ))
         })?;

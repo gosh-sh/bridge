@@ -184,8 +184,6 @@ pub struct BkSetUpdateData {
     pub block_seq_no: u64,
     /// `last_seen` the attestation was proven against (`< block_seq_no`).
     /// Not the live `storedLastSeenBlockSeqNo` after `verifyBlock(N)`.
-    /// File JSON without the field deserializes as 0.
-    #[serde(default)]
     pub attestation_last_seen: u64,
     pub old_commitment_l2: U256,
     pub new_commitment_l3: U256,

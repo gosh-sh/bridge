@@ -388,7 +388,7 @@ function applyBkSetUpdate(
     bytes32 siblingH01,
     bytes32 siblingH4_7,
     bytes32 siblingH8_15
-) external nonReentrant                                   // :905-1010
+) external nonReentrant                                   // :905-1018
 ```
 
 Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:917`, note
@@ -404,7 +404,7 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
    cursor is N and cannot be the instance the rotation proof was baked against.
    The caller supplies that prove-time word; the adapters receive
    `(blockId, oldCommitmentL2, blockSeqNo, attestationLastSeen)` (`:961-978`).
-5. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:981-1004`):
+5. Open the depth-4 / 16-leaf block-id tree at leaves 2 and 3 (`:981-1012`):
 
    ```
    h23   = SHA256( LE32(oldCommitmentL2) ‖ LE32(newCommitmentL3) )

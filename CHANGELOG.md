@@ -254,6 +254,131 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
+  account.** The wallet signs `approve` and `deposit` from a QR code —
+  WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681
+  (`--qr-mode eip681`, or `both`) — and keeps its keys: the CLI takes no EVM
+  private key and no Acki Nacki key. It then waits for the deposit block's
+  anchor on Acki Nacki, proves the deposit on the same machine, sends
+  `finalizeDeposit` and confirms the credit by the deposit's identity
+  `(chainId, EVM bridge, depositId)`, not by the recipient's balance.
+
+  ```
+  ackinacki-bridge deposit --network sepolia --amount <usdc> --to <dapp_id>::<account_id>
+  ```
+
+  - **Network:** `sepolia` only. Ethereum mainnet is not a deposit network;
+    `bridge_config.mainnet` cannot be used for `deposit`.
+  - **Profile keys**, next to the shared `RPC_URL`, `BRIDGE_ADDRESS`,
+    `BRIDGE_GQL_ENDPOINT`, `USDC_BRIDGE_ACCOUNT_ID` and `BRIDGE_WORK_DIR`:
+    `BRIDGE_DEPOSIT_PROVER_DIR` (`--deposit-prover-dir`),
+    `BRIDGE_DEPOSIT_STATE_DIR` (`--state-dir`, default
+    `$HOME/.bridge-deposit-state`), `BRIDGE_DEPOSIT_CONFIRMATIONS`
+    (`--confirmations`, 12) and `BRIDGE_WC_PROJECT_ID` (`--wc-project-id`;
+    a release build compiles one in, a build from source has none).
+    `bridge_config.shellnet` and `bridge_config.local` set the first three
+    to `./deposit-prover`, `./deposit-state` and 12. With `HOME` unset or
+    empty, `--state-dir` and `--work-dir` have no default: every `deposit`
+    run needs `--state-dir`, and a new deposit or a dry run `--work-dir`
+    too, or it is refused with exit 2.
+  - **Other flags:** `--pair-timeout-s` (300), `--recovery-window-s` (600),
+    `--anchor-timeout-s` (0, no limit), `--relayer-grace-s` (120),
+    `--prover-timeout-s` (1800), `--credit-timeout-s` (300), `--qr-out`,
+    `--uri-only`, `--qr-invert`, `--wc-relay-url` (default
+    `wss://relay.walletconnect.org`), `--from-address` (required by
+    `eip681` and `both`) and `--dry-run`. A time limit takes at most ten
+    years, `--pair-timeout-s` at most 30 days; a larger value is exit 2.
+    `--help` does not echo the values of `--rpc-url`, `--gql-endpoint` and
+    `--wc-project-id`, and a deposit run prints configured URLs without their
+    path, query or credentials.
+  - **Operations.** Each deposit gets an operation id and a record,
+    `<state-dir>/<op-id>.json`. `--resume <op-id>` (or `--resume
+    <depositId>` once the deposit is confirmed) continues it; `--tx-hash`
+    binds a transaction when the search for it is ambiguous; `--abandon
+    <op-id>` releases an operation whose EVM outcome is unknown after you
+    have checked the wallet. While an outcome is unknown, a new deposit with
+    the same network, bridge, recipient and amount, or from the same sender,
+    is refused with exit 3. Keep one `--state-dir` per sender: operations in
+    another directory are invisible to these checks.
+  - **Exit codes** `20` wallet (not paired, rejected, timed out, or a
+    smart-contract account), `21` `approve`, `22` the deposit reverted (USDC
+    not taken), `30` the deposit transaction not found yet, `31` the Acki
+    Nacki side timed out, `32` the proof, `33` `finalizeDeposit` refused,
+    `34` the credit not confirmed in time, `35` the deposit is on chain but
+    cannot be proven or is not the one requested, `37` the bridge
+    transaction that should have minted the credit aborted. 30–34 are
+    resumable; for 35 and 37 only the operator can finalize, return or pay
+    out the USDC, and the CLI prints what to give them. `0` is success, `2`
+    a refusal before the deposit was requested (an `approve` may have been
+    sent by then), `3` a run blocked by another run or
+    by an operation whose outcome is unknown. `withdraw`'s `10`–`13` are
+    unchanged.
+  - **Requirements.** `--state-dir` and the prover directory must be on a
+    filesystem with `flock`: unlike `withdraw`, `deposit` refuses without it
+    (exit 2). The prover needs ~4.4 GB of RAM and ~1.3 GB of disk, the
+    proving key it writes on its first proof; a proof takes under a minute
+    on a 20-thread host. The RPC must serve every receipt and raw
+    transaction of a block, and the `--gql-endpoint` host must serve
+    GraphQL and `POST /v2/messages`.
+  - **Refusals before any transaction:** Safe and other smart-contract
+    accounts, and ERC-4337 accounts (their deposits cannot be proven; with
+    `--qr-mode eip681` only those that already have code); a
+    paused EVM bridge (`paused()`) or Acki Nacki bridge (`isPaused()`); an
+    Acki Nacki bridge that does not trust the EVM bridge; a voucher code the
+    CLI does not know; prover tools that do not run on this host (each is
+    started once with `--help` and must exit 0 within 10 s, so a binary
+    built against a newer glibc is refused here); a `--work-dir` that cannot
+    be created or written. A `--resume` whose proof is still to be built
+    checks the last two as well, with the exit code of its stage. An
+    EIP-7702 account passes with a warning to turn off gas sponsoring and
+    batched calls. With owner anchors disabled a deposit
+    is allowed only if the light client demonstrably anchors blocks a
+    deposit can use; ancestry does not run on Acki Nacki today, so such a
+    bridge takes no deposits from the CLI.
+  - `--qr-mode eip681` cannot ask the wallet for a type-2 transaction, and
+    a legacy one makes the deposit unprovable (exit 35). The CLI asks you to
+    accept that risk; `--yes` accepts it, and Ctrl-C at the question ends the
+    run.
+- **`deposit` requires an Acki Nacki bridge at or above
+  `MIN_BRIDGE_VERSION`.** The CLI sends `finalizeDeposit` again when an
+  earlier send's outcome is unknown, which is safe only on a bridge that
+  cannot mint one deposit twice. Preflight reads `getVersion()` and refuses
+  an older bridge (exit 2; on `--resume`, the exit code of the operation's
+  stage). The constant lives in
+  `crates/ackinacki-bridge/src/deposit/an_preflight.rs` and stays unset
+  until such a bridge version exists; a build without it refuses every
+  bridge, and the release pipeline refuses to build a tag. The cargo feature
+  `dev-unfixed-bridge` turns the refusal into a warning for development
+  against an older bridge; a release never enables it.
+- **Release assets for deposits.** `ackinacki-bridge-linux-x86_64.tar.gz`
+  now carries `deposit-prover/`: `fetch_deposit_data`,
+  `export_blake2b_proof` and `export_vk_blob`, built unchanged from
+  `deposit-prover`'s examples on the same commit, `configs/circuit_params.json`
+  and an empty `data/`. A new asset, `kzg_params_18.srs` (33,554,692
+  bytes), is the Hermez ceremony at degree 18. It is not downloaded — the
+  storage `deposit-prover/download_trusted_setup.sh` points at refuses
+  access — but derived in the release pipeline with `deposit-prover`'s
+  `downsize_srs` from the `kzg_bn254_21.srs` carried from release to
+  release. From `v0.2.0`'s `kzg_bn254_21.srs` (sha256
+  `871ae7e7403d2c0eb37263cd05e44220ef9b5fb86884e91021b9106eb22f761c`) it
+  comes out as sha256
+  `ca97cea5566cec45421f7b2a945c462da6cb759fd8d22791b41b4a3d479ffefc`.
+  `SHA256SUMS` lists it, so a release has four assets.
+  `crates/ackinacki-bridge/scripts/stage_deposit_prover.sh <dir>
+  [--no-build]` lays out the same prover directory from a checkout, and
+  `scripts/check_deposit_prover_bundle.sh <prover dir>
+  deposit-prover/fixtures/deposit_10proofs` checks one.
+- **`scripts/install.sh` installs the deposit prover** into
+  `<prefix>/deposit-prover/` and `kzg_params_18.srs` into its `data/`,
+  checks the SRS against `SHA256SUMS` and the Hermez [s]·G2, and runs both
+  prover tools once so that a C library too old for them shows up at
+  install time. The profile it writes gets `BRIDGE_DEPOSIT_PROVER_DIR`,
+  `BRIDGE_DEPOSIT_STATE_DIR` (`<prefix>/deposit-state`) and
+  `BRIDGE_DEPOSIT_CONFIRMATIONS`. Over an installation from before
+  deposits, it downloads the bundle again and appends those three keys to
+  the existing profile, changing nothing else in it; `--check` reports such
+  a profile as missing them. It now wants ~8 GB free instead of ~6 GB.
+
 - **`deposit-relayer daemon` exports Prometheus metrics.** `--metrics-addr`
   (`DEPOSIT_RELAYER_METRICS_ADDR`, e.g. `127.0.0.1:9467`) serves the text
   format at `GET /metrics`, the same facade and histogram buckets as
@@ -490,6 +615,43 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **The shellnet profile points at the current Sepolia bridge.**
+  `crates/ackinacki-bridge/config/bridge_config.shellnet` now sets
+  `BRIDGE_ADDRESS=0x32b9E87aCAA1AD7d61A81f93DD9D525F64Ff4F38`, the deploy of
+  2026-09-29 that the bundle relayer advances. The previous address,
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, is no longer advanced: a
+  withdrawal against it burns and then times out at stage 4b, and a deposit
+  into it reaches Acki Nacki only while that bridge stays trusted there.
+  `USDC_BRIDGE_ACCOUNT_ID` stays the same. A profile installed by
+  `install.sh` from an earlier release, or copied by hand, keeps the old
+  address: change `BRIDGE_ADDRESS` in it. Each deploy keeps its own treasury,
+  and nothing moves from the old one to the new one.
+
+- **`.woodpecker/release.yaml` builds, checks and publishes the deposit
+  prover, and refuses a tag in more cases.**
+  - The `build` step fails at once while `MIN_BRIDGE_VERSION` is unset (see
+    Added), and builds the CLI with no cargo features.
+  - A new first step, `ceremony`, carries `kzg_bn254_21.srs` over from the
+    previous release. A tag whose previous release lacks it now fails,
+    because the deposit SRS is derived from it; before, the release went out
+    without the file. Upload it once by hand (`gh release upload <previous
+    tag> kzg_bn254_21.srs`) and re-run the pipeline.
+  - `build` also builds `deposit-prover`'s examples with that package's own
+    `rust-toolchain.toml` (`nightly-2026-02-03`), which the build image has
+    to be able to install.
+  - A new step, `verify-deposit-prover`, runs before `publish`: it derives
+    `kzg_params_18.srs`, unpacks the tarball outside the source tree, and
+    checks the packaged prover with `scripts/check_deposit_prover_bundle.sh`
+    — the Hermez [s]·G2, the verification key it derives against
+    `deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin` (the one
+    the Acki Nacki bridge embeds), and a proof of the fixture deposit
+    against its public inputs. Nothing is published if it fails. On a
+    20-thread workstation it took about 2 minutes and 4 GB of RAM.
+  - New secret `WC_PROJECT_ID`, with the `tag` event ticked: the
+    WalletConnect Cloud project id compiled in as the default
+    `--wc-project-id`. Without it the release has no default, and a
+    WalletConnect deposit needs the flag or `BRIDGE_WC_PROJECT_ID`.
+
 - **`bridge-relayer-daemon`'s withdraw scan parks a `proof_event_*.json` on
   proof-intrinsic `withdrawByProof` reverts instead of holding the queue on
   exponential backoff.** With the aggregator now binding the inner-circuit
@@ -691,6 +853,11 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `scripts/install.sh` now makes `<prefix>/withdraw-state` and
+  `<prefix>/deposit-state` owner-only (0700), also over an earlier install
+  that left them at the umask's mode, so `withdraw` and `deposit` no longer
+  warn on every run that the state directory can be reached by more than
+  its owner.
 - `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
   cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
   head on every poll, whether the target `depositId` was found or not. A

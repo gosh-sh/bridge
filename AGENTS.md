@@ -115,8 +115,9 @@ crates/
                            GraphQL fetcher, prover and verifier daemons, Circuit 4 event witness
                            and prover, snark wrap
   bridge-relayer-daemon/   AN→ETH relayer, `relayer` CLI — symlinked member of the prover workspace
-  ackinacki-bridge/        end-user withdrawal CLI — symlinked member of the prover workspace;
-                           shipped as a release download, QUICKSTART.md is the operator's entry point
+  ackinacki-bridge/        end-user CLI: `withdraw` and `deposit` — symlinked member of the prover
+                           workspace; shipped as a release download together with the deposit
+                           prover, QUICKSTART.md is the operator's entry point
   bridge-snark-utils/      offline SNARK tools: bound Circuit 1A/1B/2 fixtures, Poseidon snark export
   bridge-evm-aggregator/   SHPLONK aggregator: export-inner-aggregator writes the production
                            verifiers, aggregate-proof is the prover subprocess the CLI shells out to
@@ -210,7 +211,7 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 | `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json`, the slim ABIs `eth-lc-relayer` ships (`scripts/check_lc_relayer_abis.py`) |
 | `verifier_sources.yaml` | PRs, pushes touching `contracts/ethereum/verifiers/` | Every `*AggregatorVerifier.sol` compiles with `solc` 0.8.19 to its `.bin` byte for byte; EIP-170 |
 | `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
-| `release.yaml` | tags `v*` | Builds `ackinacki-bridge` and `aggregate-proof` and publishes the three assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Builds only |
+| `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or the previous release has no `kzg_bn254_21.srs`; builds `ackinacki-bridge`, `aggregate-proof` and `deposit-prover`'s tools; derives `kzg_params_18.srs` from the carried `kzg_bn254_21.srs`; checks the packaged deposit prover outside the tree (`scripts/check_deposit_prover_bundle.sh`: Hermez [s]·G2, the bridge's embedded deposit VK, a fixture proof); publishes the four assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite; needs the `WC_PROJECT_ID` secret for a default `--wc-project-id` |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
 
 Each pipeline's header comment has the detail. A secret reaches only the events ticked on it, and a

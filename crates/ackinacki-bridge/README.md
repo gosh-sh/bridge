@@ -153,6 +153,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
 | `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProof` |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
+| `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Inclusive lower bound for `LayerAnchorAppended` scans while waiting for coverage. Must be at or before the first `verifyBlock`. Unset scans from genesis |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Precomputed inner verifier keys |

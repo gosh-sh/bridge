@@ -32,10 +32,11 @@ pub use aggregator::{
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
-    get_logs_chunks, paint_heights_from_events, resolve_bridge_deploy_block,
-    BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient,
-    MockBridgeClient, SubmitOutcome, WithdrawSubmitOutcome, BRIDGE_DEPLOY_BLOCK_ENV,
-    GET_LOGS_CHUNK_BLOCKS,
+    get_logs_chunks, parse_bridge_deploy_block, parse_get_logs_chunk_blocks,
+    resolve_bridge_deploy_block, resolve_get_logs_chunk_blocks, BkSetUpdateSubmitOutcome,
+    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, MockBridgeClient,
+    SubmitOutcome, WithdrawSubmitOutcome, BRIDGE_DEPLOY_BLOCK_ENV, GET_LOGS_CHUNK_BLOCKS,
+    GET_LOGS_CHUNK_BLOCKS_ENV,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,

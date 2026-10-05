@@ -144,3 +144,8 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
 BRIDGE_ADDRESS=0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7
+
+# Inclusive lower bound for LayerAnchorAppended scans while waiting for
+# coverage. Must be at or before the first verifyBlock on this deploy.
+# Unset (or 0) walks from genesis.
+# BRIDGE_DEPLOY_BLOCK=11025180

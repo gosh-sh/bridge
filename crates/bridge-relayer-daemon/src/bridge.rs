@@ -65,21 +65,83 @@ use crate::{
 
 /// Environment variable read by [`resolve_bridge_deploy_block`]. Same
 /// name as the deposit relayer so one operator env covers both daemons.
+/// For the AN→ETH scan this must be at or before the first
+/// `verifyBlock` (`LayerAnchorAppended`), not merely the first deposit.
 pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
 
 /// Inclusive `eth_getLogs` span per request. Alchemy free-tier is 10;
-/// paid RPC is typically 2_000. Resurrect is a one-shot, so 2_000 keeps
-/// a months-old Sepolia deploy scannable. Operators on a 10-block cap
-/// must set [`BRIDGE_DEPLOY_BLOCK_ENV`] close to the last append.
+/// paid RPC is typically 2_000. Override with
+/// [`GET_LOGS_CHUNK_BLOCKS_ENV`] on a capped endpoint. Setting
+/// [`BRIDGE_DEPLOY_BLOCK_ENV`] close to the last append is **not** a
+/// substitute — the painter needs every event still in the window.
 pub const GET_LOGS_CHUNK_BLOCKS: u64 = 2_000;
 
-/// Lower bound for `LayerAnchorAppended` scans. Unset / unparseable → 0
-/// (genesis). Avoid that on a long-lived chain.
-pub fn resolve_bridge_deploy_block() -> u64 {
-    std::env::var(BRIDGE_DEPLOY_BLOCK_ENV)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0)
+/// Decimal override for [`GET_LOGS_CHUNK_BLOCKS`]. Unset keeps 2_000.
+pub const GET_LOGS_CHUNK_BLOCKS_ENV: &str = "GET_LOGS_CHUNK_BLOCKS";
+
+const GET_LOGS_MAX_ATTEMPTS: u32 = 4;
+const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 250;
+const GET_LOGS_MAX_BACKOFF_MS: u64 = 4_000;
+
+/// Lower bound for `LayerAnchorAppended` scans. Unset / empty → 0
+/// (genesis). A present but unparseable value is an error — do not
+/// silently scan from block 0.
+pub fn resolve_bridge_deploy_block() -> Result<u64, RelayerError> {
+    match std::env::var(BRIDGE_DEPLOY_BLOCK_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(0),
+        Err(e) => Err(RelayerError::other(format!(
+            "reading {BRIDGE_DEPLOY_BLOCK_ENV}: {e}"
+        ))),
+        Ok(raw) => parse_bridge_deploy_block(Some(&raw)),
+    }
+}
+
+/// Parse a decimal deploy-block string. `None` or blank → 0.
+pub fn parse_bridge_deploy_block(raw: Option<&str>) -> Result<u64, RelayerError> {
+    let Some(raw) = raw else {
+        return Ok(0);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse::<u64>().map_err(|_| {
+        RelayerError::other(format!(
+            "{BRIDGE_DEPLOY_BLOCK_ENV}={raw:?} is not a decimal block number"
+        ))
+    })
+}
+
+/// Inclusive `eth_getLogs` chunk. Unset → [`GET_LOGS_CHUNK_BLOCKS`].
+pub fn resolve_get_logs_chunk_blocks() -> Result<u64, RelayerError> {
+    match std::env::var(GET_LOGS_CHUNK_BLOCKS_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(GET_LOGS_CHUNK_BLOCKS),
+        Err(e) => Err(RelayerError::other(format!(
+            "reading {GET_LOGS_CHUNK_BLOCKS_ENV}: {e}"
+        ))),
+        Ok(raw) => parse_get_logs_chunk_blocks(Some(&raw)),
+    }
+}
+
+pub fn parse_get_logs_chunk_blocks(raw: Option<&str>) -> Result<u64, RelayerError> {
+    let Some(raw) = raw else {
+        return Ok(GET_LOGS_CHUNK_BLOCKS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(GET_LOGS_CHUNK_BLOCKS);
+    }
+    let n = trimmed.parse::<u64>().map_err(|_| {
+        RelayerError::other(format!(
+            "{GET_LOGS_CHUNK_BLOCKS_ENV}={raw:?} is not a decimal chunk size"
+        ))
+    })?;
+    if n == 0 {
+        return Err(RelayerError::other(format!(
+            "{GET_LOGS_CHUNK_BLOCKS_ENV} must be ≥ 1"
+        )));
+    }
+    Ok(n)
 }
 
 /// Inclusive `(from, to)` spans covering `from_block..=to_block`.
@@ -103,7 +165,7 @@ pub fn get_logs_chunks(from_block: u64, to_block: u64, chunk: u64) -> Vec<(u64, 
 /// Paint `windows[layer-1].heights` from chronological `(layer, height)`
 /// events (oldest first). Keeps the last `data_len` events per layer,
 /// matching `_appendLayer` ring order. Empty windows are left alone.
-pub fn paint_heights_from_events(
+pub(crate) fn paint_heights_from_events(
     windows: &mut [HistoryWindow],
     events: &[(u8, u64)],
 ) -> Result<(), RelayerError> {
@@ -599,7 +661,10 @@ where
     N: Network,
 {
     pub fn new(address: Address, provider: P) -> Self {
-        Self::with_deploy_block(address, provider, resolve_bridge_deploy_block())
+        let deploy_block = resolve_bridge_deploy_block().unwrap_or_else(|e| {
+            panic!("{e}");
+        });
+        Self::with_deploy_block(address, provider, deploy_block)
     }
 
     pub fn with_deploy_block(address: Address, provider: P, deploy_block: u64) -> Self {
@@ -876,45 +941,61 @@ where
         })
     }
 
+    /// Cheap cursor for coverage polls. Does not scan logs.
+    pub async fn last_seen_block_seq_no(&self) -> Result<u64, RelayerError> {
+        self.contract
+            .storedLastSeenBlockSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
     /// Read every field the daemon needs to reconstruct `BridgeState`
     /// from an already-advanced contract (Case 6 chain-resurrect).
     ///
-    /// Issues 4 scalar view calls + 10 `getLayerWindow` calls. Each
-    /// window returns ~5 KB, so the total off-chain cost is ~50 KB of
-    /// RPC response — well under any provider's per-call cap, but the
-    /// full read is worth pinning to a single block via a follow-up
-    /// `read_full_state_at(BlockId)` if two consecutive `verifyBlock`
-    /// receipts could interleave (not the case at daemon startup, hence
-    /// the "latest block" call here).
-    ///
-    /// Consistency: no lock across calls, so a `verifyBlock` landing
-    /// mid-read could cause the layer windows to be one block ahead of
-    /// the scalar seq_no. That's fine for resurrect because we exit
-    /// this call and let the normal startup drift routing re-observe on
-    /// the next cycle — a one-block skew triggers an immediate re-read,
-    /// not a mis-seed.
+    /// Issues 4 scalar view calls + 10 `getLayerWindow` calls, then
+    /// paints heights from `LayerAnchorAppended` logs. The views and the
+    /// log scan share one block number so a `verifyBlock` landing
+    /// mid-read cannot shift the painted slots.
     pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
+        let to = self
+            .contract
+            .provider()
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
+        if self.deploy_block > to {
+            return Err(RelayerError::other(format!(
+                "{BRIDGE_DEPLOY_BLOCK_ENV}={} is above the chain head {to}",
+                self.deploy_block
+            )));
+        }
+        let at = BlockId::from(to);
         let last = self
             .contract
             .storedLastSeenBlockSeqNo()
+            .block(at)
             .call()
             .await
             .map_err(map_contract_err)?;
         let bk = self
             .contract
             .storedBkSetCommitment()
+            .block(at)
             .call()
             .await
             .map_err(map_contract_err)?;
         let last_bk = self
             .contract
             .storedLastBkSetUpdateSeqNo()
+            .block(at)
             .call()
             .await
             .map_err(map_contract_err)?;
         let anchor = self
             .contract
             .storedPrevMaxLevelLayerHash()
+            .block(at)
             .call()
             .await
             .map_err(map_contract_err)?;
@@ -934,6 +1015,7 @@ where
             let w = self
                 .contract
                 .getLayerWindow(layer)
+                .block(at)
                 .call()
                 .await
                 .map_err(map_contract_err)?;
@@ -959,7 +1041,8 @@ where
                 last_height: w.lastHeight,
             });
         }
-        self.paint_heights_from_appended_logs(&mut windows).await?;
+        self.paint_heights_from_appended_logs(&mut windows, to)
+            .await?;
         let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] =
             windows.try_into().map_err(|_| {
                 RelayerError::Other("read_full_state: expected 10 layer windows".into())
@@ -977,9 +1060,11 @@ where
     /// Fill each window's `heights` from `LayerAnchorAppended` (the contract
     /// no longer SSTOREs them). Logs are oldest-first; we keep the last
     /// `data_len` per layer and paint the ring the same way `append` does.
+    /// `to` is the same block the window reads used.
     async fn paint_heights_from_appended_logs(
         &self,
         windows: &mut [HistoryWindow],
+        to: u64,
     ) -> Result<(), RelayerError> {
         if windows.iter().all(|w| w.data_len == 0) {
             return Ok(());
@@ -987,30 +1072,16 @@ where
         // Without from/to, eth_getLogs defaults both to `latest` and
         // returns one block. Resurrect then fails
         // `data_len=X but only 0 LayerAnchorAppended logs` (ETH-31).
-        let to = self
-            .contract
-            .provider()
-            .get_block_number()
-            .await
-            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
-        let from = self.deploy_block.min(to);
+        let from = self.deploy_block;
+        let chunk = resolve_get_logs_chunk_blocks()?;
         let mut events: Vec<(u8, u64)> = Vec::new();
-        for (start, end) in get_logs_chunks(from, to, GET_LOGS_CHUNK_BLOCKS) {
+        for (start, end) in get_logs_chunks(from, to, chunk) {
             let filter = Filter::new()
                 .address(self.address)
                 .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
                 .from_block(start)
                 .to_block(end);
-            let logs = self
-                .contract
-                .provider()
-                .get_logs(&filter)
-                .await
-                .map_err(|e| {
-                    RelayerError::other(format!(
-                        "LayerAnchorAppended get_logs [{start},{end}]: {e}"
-                    ))
-                })?;
+            let logs = get_logs_with_retry(self.contract.provider(), &filter, start, end).await?;
             for log in logs {
                 let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
                     Ok(d) => d,
@@ -1022,6 +1093,46 @@ where
         }
         paint_heights_from_events(windows, &events)
     }
+}
+
+async fn get_logs_with_retry<P, N>(
+    provider: &P,
+    filter: &Filter,
+    start: u64,
+    end: u64,
+) -> Result<Vec<alloy::rpc::types::Log>, RelayerError>
+where
+    P: Provider<N>,
+    N: Network,
+{
+    let mut attempt = 0u32;
+    let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+    loop {
+        attempt += 1;
+        match provider.get_logs(filter).await {
+            Ok(logs) => return Ok(logs),
+            Err(e) if is_retryable_get_logs(&e) && attempt < GET_LOGS_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+            },
+            Err(e) => {
+                return Err(RelayerError::other(format!(
+                    "LayerAnchorAppended get_logs [{start},{end}] after {attempt} attempt(s): {e}"
+                )));
+            },
+        }
+    }
+}
+
+fn is_retryable_get_logs(err: &impl std::fmt::Display) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("429")
+        || s.contains("rate limit")
+        || s.contains("timeout")
+        || s.contains("timed out")
+        || s.contains("502")
+        || s.contains("503")
+        || s.contains("temporar")
 }
 
 /// Outcome of [`EthBridgeClient::submit_withdraw`].
@@ -1437,6 +1548,37 @@ mod tests {
         assert_eq!(get_logs_chunks(5, 5, 10), vec![(5, 5)]);
         assert_eq!(get_logs_chunks(10, 9, 10), Vec::<(u64, u64)>::new());
         assert_eq!(get_logs_chunks(0, 0, 2_000), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn parse_bridge_deploy_block_rejects_garbage() {
+        assert_eq!(parse_bridge_deploy_block(None).unwrap(), 0);
+        assert_eq!(parse_bridge_deploy_block(Some("")).unwrap(), 0);
+        assert_eq!(
+            parse_bridge_deploy_block(Some(" 11025180 ")).unwrap(),
+            11_025_180
+        );
+        let err = parse_bridge_deploy_block(Some("0xabc"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a decimal"), "{err}");
+        let err = parse_bridge_deploy_block(Some("11_025_180"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a decimal"), "{err}");
+    }
+
+    #[test]
+    fn parse_get_logs_chunk_blocks_rejects_zero() {
+        assert_eq!(
+            parse_get_logs_chunk_blocks(None).unwrap(),
+            GET_LOGS_CHUNK_BLOCKS
+        );
+        assert_eq!(parse_get_logs_chunk_blocks(Some("10")).unwrap(), 10);
+        let err = parse_get_logs_chunk_blocks(Some("0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be"), "{err}");
     }
 
     #[test]

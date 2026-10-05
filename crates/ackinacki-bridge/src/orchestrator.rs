@@ -891,7 +891,11 @@ pub async fn run(
             source: None,
         }
     })?);
-    let ro_bridge_for_wait = EthBridgeClient::new(args.bridge_address, ro_provider);
+    let ro_bridge_for_wait = EthBridgeClient::with_deploy_block(
+        args.bridge_address,
+        ro_provider,
+        args.bridge_deploy_block,
+    );
     let bridge_state = wait_for_coverage(
         &ro_bridge_for_wait,
         anchor_mode,

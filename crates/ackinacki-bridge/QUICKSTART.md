@@ -68,6 +68,11 @@ Everything else — RPC and GraphQL endpoints, the bridge address, the prover
 directories — comes from the profile. Exported shell variables win over it,
 so if you change the profile, open a new shell or re-`export`.
 
+Set `BRIDGE_DEPLOY_BLOCK` (or `--bridge-deploy-block`) to a block at or
+before the first `verifyBlock` on this deploy. After the burn, the CLI
+scans `LayerAnchorAppended` from that block while waiting for coverage.
+Leaving it unset walks from genesis.
+
 ## 4. Dry run
 
 ```bash

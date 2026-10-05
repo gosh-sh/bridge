@@ -205,6 +205,12 @@ pub struct WithdrawArgs {
     #[arg(long, env = "BRIDGE_ADDRESS")]
     pub bridge_address: Address,
 
+    /// Inclusive lower bound for `LayerAnchorAppended` scans while
+    /// waiting for coverage. Must be at or before the first
+    /// `verifyBlock` on this deploy. Unset scans from genesis.
+    #[arg(long, env = "BRIDGE_DEPLOY_BLOCK", default_value_t = 0)]
+    pub bridge_deploy_block: u64,
+
     /// Signer key for the EVM `withdrawByProof` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the USDC is `--to`, not this signer.
@@ -951,6 +957,39 @@ mod tests {
         assert!(args.eth_private_key.is_none());
         assert!(args.params_dir.is_none());
         assert!(args.work_dir.is_none());
+        assert_eq!(args.bridge_deploy_block, 0);
+    }
+
+    #[test]
+    fn bridge_deploy_block_flag_parses() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "ackinacki-bridge",
+            "withdraw",
+            "--from",
+            &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
+            "--from-keys",
+            "/dev/null",
+            "--to",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "--to-chain",
+            "11155111",
+            "--amount",
+            "1.000000",
+            "--gql-endpoint",
+            "https://example.invalid/graphql",
+            "--usdc-bridge-account",
+            &"1a".repeat(32),
+            "--rpc-url",
+            "https://example.invalid/rpc",
+            "--bridge-address",
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+            "--bridge-deploy-block",
+            "11025180",
+        ])
+        .expect("parse");
+        let Command::Withdraw(args) = cli.cmd;
+        assert_eq!(args.bridge_deploy_block, 11_025_180);
     }
 
     #[test]

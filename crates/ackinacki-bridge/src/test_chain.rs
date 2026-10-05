@@ -704,6 +704,7 @@ pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
         i_know_the_wait: false,
         rpc_url: rpc,
         bridge_address: alloy::primitives::Address::repeat_byte(1),
+        bridge_deploy_block: 0,
         eth_private_key: None,
         aggregator_dir: None,
         verifiers_dir: None,

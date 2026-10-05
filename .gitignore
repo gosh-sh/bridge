@@ -314,6 +314,14 @@ crates/bridge-prover-libraries/L2_config/work_dir/
 crates/ackinacki-bridge/work_dir/
 crates/ackinacki-bridge/withdraw-state/
 
+# The deposit prover the source-checkout profiles point at
+# (BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover, laid out by
+# scripts/stage_deposit_prover.sh): its tools, the k=18 SRS and the ~1.3 GB
+# proving key the first proof writes into data/. And the deposit operation
+# records (BRIDGE_DEPOSIT_STATE_DIR=./deposit-state).
+crates/ackinacki-bridge/deposit-prover/
+crates/ackinacki-bridge/deposit-state/
+
 # Per-user output artifacts from scripts/deploy_msig_and_mint.{sh,py}
 # — the eval-able env line + stdout/stderr captures. Contain absolute
 # local paths and per-run multisig addresses; not source-of-truth.

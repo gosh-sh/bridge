@@ -212,9 +212,12 @@ impl TerminalEnv {
                 || var("KONSOLE_VERSION")
                     .and_then(|version| version.parse::<u32>().ok())
                     .is_some_and(|version| version >= 220400),
+            // iTerm2 sets LC_TERMINAL for ssh, which passes it on without
+            // TERM_PROGRAM. Next to a TERM_PROGRAM of another terminal it is
+            // a leftover of an outer iTerm2 that started this one.
             iterm2_env: term_program == "iTerm.app"
                 || term_program == "WezTerm"
-                || var("LC_TERMINAL").as_deref() == Some("iTerm2"),
+                || (term_program.is_empty() && var("LC_TERMINAL").as_deref() == Some("iTerm2")),
         }
     }
 }
@@ -1015,6 +1018,27 @@ mod tests {
         // Over ssh iTerm2 passes on LC_TERMINAL, not TERM_PROGRAM.
         assert!(env_of(&[("LC_TERMINAL", "iTerm2")]).iterm2_env);
         assert!(!env_of(&[("TERM_PROGRAM", "Apple_Terminal")]).iterm2_env);
+    }
+
+    #[test]
+    fn lc_terminal_left_by_an_outer_iterm2_does_not_name_another_terminal() {
+        // `code .` from an iTerm2 shell: the editor's terminal names itself
+        // and inherits the variable iTerm2 sets for ssh.
+        let inner = env_of(&[("TERM_PROGRAM", "vscode"), ("LC_TERMINAL", "iTerm2")]);
+        assert!(!inner.iterm2_env);
+        let answered = probe_with(false, &[1, 2]);
+        assert_eq!(
+            choose_display(
+                &TerminalEnv {
+                    tty: true,
+                    ..inner
+                },
+                &answered
+            ),
+            QrDisplay::Text
+        );
+        // Over ssh only LC_TERMINAL arrives, and it still counts.
+        assert!(env_of(&[("LC_TERMINAL", "iTerm2")]).iterm2_env);
     }
 
     #[test]

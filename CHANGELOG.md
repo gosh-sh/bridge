@@ -372,6 +372,16 @@ assigns it when the release is tagged.
   the existing profile, changing nothing else in it; `--check` reports such
   a profile as missing them. It now wants ~8 GB free instead of ~6 GB.
 
+- **`deposit` draws its QR codes as images on terminals that can show them:**
+  kitty graphics (kitty, Ghostty, Konsole from 22.04), iTerm2 inline images
+  (iTerm2, WezTerm) and sixel. Before the first code the CLI asks the
+  terminal what it shows, for a fraction of a second; keys pressed meanwhile
+  are lost. Other terminals, and tmux, screen, zellij and the terminals of nvim
+  and emacs, keep the text code. `--qr-display auto|text|kitty|iterm2|sixel`
+  (`BRIDGE_QR_DISPLAY`, default `auto`) forces a rendering when detection
+  guesses wrong, and every image is followed by the hint to rerun with
+  `--qr-display text`. `--qr-invert` now changes only the text code;
+  `--uri-only`, `--qr-out` and `--json` are unchanged.
 - `relayer daemon-live` and `ackinacki-bridge withdraw` take the
   `LayerAnchorAppended` scan settings as arguments: `--bridge-deploy-block`
   (`BRIDGE_DEPLOY_BLOCK`), `--get-logs-chunk-blocks`

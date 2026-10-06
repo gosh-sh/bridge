@@ -94,7 +94,7 @@ async fn one_real_deposit_from_sepolia_is_credited_on_shellnet() {
         non_interactive: true,
     };
     let p = args.validate(&g).unwrap_or_else(|e| panic!("{e}"));
-    let d = super::live_deps(&p, ui::pick(&g, true, false), Arc::default())
+    let d = super::live_deps(&p, ui::pick(&g, true, false, None), Arc::default())
         .unwrap_or_else(|e| panic!("{e}"));
     let mut wallet = LocalKeyWallet {
         signer,

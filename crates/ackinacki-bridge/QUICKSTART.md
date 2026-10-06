@@ -254,7 +254,9 @@ echo "exit=$?"
    **Keep the operation id.** It is how an interrupted deposit continues.
 2. A QR code. In the wallet, open WalletConnect, scan it, and approve the
    connection. If the wallet is on another network, it is asked to switch
-   to Sepolia or to add it.
+   to Sepolia or to add it. Terminals that show images (kitty, Ghostty,
+   iTerm2, WezTerm, terminals with sixel) get the code as a picture; if the
+   phone does not read it, run with `--qr-display text`.
 3. **Sign the account check.** The wallet shows a message that starts with
    `Acki Nacki bridge deposit check` and names the operation, the bridge, the
    amount and the network. Signing it sends nothing and costs nothing: it

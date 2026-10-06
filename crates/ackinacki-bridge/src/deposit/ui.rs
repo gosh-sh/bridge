@@ -19,6 +19,8 @@ use std::{
 
 use async_trait::async_trait;
 
+use crate::deposit::qr_display::{QrDisplay, QrTerminal};
+
 /// One stage of a deposit run, in pipeline order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -387,6 +389,8 @@ struct Settings {
     uri_only: bool,
     /// `--qr-invert`: dark and light swapped, for a light-on-dark terminal.
     invert: bool,
+    /// `--qr-display`: the rendering named, or `None` to ask the terminal.
+    qr_display: Option<QrDisplay>,
     /// `--yes`: every question is answered yes.
     yes: bool,
     /// `--non-interactive`: a question `--yes` does not answer is a no.
@@ -451,15 +455,18 @@ struct Codes {
     out: Box<dyn Write + Send>,
     /// The stream is a terminal.
     terminal: bool,
+    /// The terminal a code is drawn on: whether it shows an image.
+    qr: QrTerminal,
 }
 
 impl Codes {
-    /// This process's stdout.
+    /// This process's stdout, with the codes as text.
     #[cfg(test)]
     fn stdout() -> Self {
         Self {
             terminal: std::io::stdout().is_terminal(),
             out: Box::new(std::io::stdout()),
+            qr: QrTerminal::text(),
         }
     }
 }
@@ -475,10 +482,14 @@ fn qr_text(uri: &str, decoded: &[(String, String)]) -> String {
     s
 }
 
-/// The code of `uri` as terminal text, unless `--uri-only`.
-fn picture(uri: &str, s: &Settings) -> Option<String> {
+/// The code of `uri` for the terminal `qr`, unless `--uri-only`: an image
+/// where the terminal shows one, text otherwise.
+fn picture(uri: &str, s: &Settings, qr: &QrTerminal) -> Option<String> {
     if s.uri_only {
         return None;
+    }
+    if let Some(image) = qr.image(uri, s.qr_display) {
+        return Some(image);
     }
     crate::deposit::qr::render_terminal(uri, s.invert).ok()
 }
@@ -608,7 +619,7 @@ impl Ui for PlainLines {
             let mut codes = self.codes.lock().unwrap_or_else(|p| p.into_inner());
             let mut block = String::new();
             if codes.terminal {
-                if let Some(p) = picture(uri, &self.settings) {
+                if let Some(p) = picture(uri, &self.settings, &codes.qr) {
                     block.push_str(&p);
                     block.push('\n');
                 }
@@ -1146,7 +1157,8 @@ impl Ui for TtyBoard {
     fn qr(&self, uri: &str, decoded: &[(String, String)]) {
         let text = qr_text(uri, decoded);
         let mut b = self.lock();
-        let picture = picture(uri, &b.settings);
+        // Drawn on a terminal either way: stdout, or the board's own.
+        let picture = picture(uri, &b.settings, &b.codes.qr);
         // Off the screen first: the code must not land under the cursor's
         // way back up, or the next frame would draw over it.
         b.erase();
@@ -1222,6 +1234,8 @@ struct Terminal {
     /// The process's log lines are written to `stderr` too, and a board
     /// takes them.
     logs: bool,
+    /// What the terminal shows a QR code as.
+    qr: QrTerminal,
 }
 
 impl Terminal {
@@ -1235,15 +1249,21 @@ impl Terminal {
             width: stderr_width,
             tick: Some(TICK),
             logs: true,
+            qr: QrTerminal::process(),
         }
     }
 }
 
 /// The renderer for this run: NDJSON on stdout under `--json`, the step
-/// board when stderr is a terminal, plain lines otherwise. `--uri-only` and
-/// `--qr-invert` shape the QR codes a human run prints.
-pub fn pick(g: &crate::deposit::args::GlobalFlags, uri_only: bool, qr_invert: bool) -> Arc<dyn Ui> {
-    pick_from(g, uri_only, qr_invert, Terminal::process())
+/// board when stderr is a terminal, plain lines otherwise. `--uri-only`,
+/// `--qr-invert` and `--qr-display` shape the QR codes a human run prints.
+pub fn pick(
+    g: &crate::deposit::args::GlobalFlags,
+    uri_only: bool,
+    qr_invert: bool,
+    qr_display: Option<QrDisplay>,
+) -> Arc<dyn Ui> {
+    pick_from(g, uri_only, qr_invert, qr_display, Terminal::process())
 }
 
 /// [`pick`] over the streams in `t`.
@@ -1251,6 +1271,7 @@ fn pick_from(
     g: &crate::deposit::args::GlobalFlags,
     uri_only: bool,
     qr_invert: bool,
+    qr_display: Option<QrDisplay>,
     t: Terminal,
 ) -> Arc<dyn Ui> {
     if g.json {
@@ -1259,10 +1280,12 @@ fn pick_from(
     let codes = Codes {
         out: t.stdout,
         terminal: t.stdout_tty,
+        qr: t.qr,
     };
     let settings = Settings {
         uri_only,
         invert: qr_invert,
+        qr_display,
         yes: g.yes,
         non_interactive: g.non_interactive,
     };
@@ -1456,6 +1479,15 @@ mod tests {
 
     /// A board with its code sink captured, no width and no clock.
     fn board(settings: Settings, stdout_is_a_terminal: bool) -> (Captured, Captured, TtyBoard) {
+        board_on(settings, stdout_is_a_terminal, QrTerminal::text())
+    }
+
+    /// [`board`] on the terminal `qr`.
+    fn board_on(
+        settings: Settings,
+        stdout_is_a_terminal: bool,
+        qr: QrTerminal,
+    ) -> (Captured, Captured, TtyBoard) {
         let (log, out) = capture();
         let (codes, sink) = capture();
         let ui = TtyBoard::build(
@@ -1463,12 +1495,155 @@ mod tests {
             Codes {
                 out: sink,
                 terminal: stdout_is_a_terminal,
+                qr,
             },
             settings,
             || None,
             None,
         );
         (log, codes, ui)
+    }
+
+    /// A window that holds the code at the largest scale.
+    fn roomy() -> crate::deposit::qr_display::TerminalGeometry {
+        crate::deposit::qr_display::TerminalGeometry {
+            rows: 200,
+            cols: 400,
+            cell: Some((8, 16)),
+        }
+    }
+
+    /// A terminal that shows kitty images.
+    fn kitty() -> QrTerminal {
+        QrTerminal {
+            detect: |_| crate::deposit::qr_display::Detection {
+                display: QrDisplay::Kitty,
+                cell_px: None,
+            },
+            geometry: roomy,
+        }
+    }
+
+    /// A terminal that shows what `--qr-display` names, and text when it
+    /// names nothing.
+    fn forced() -> QrTerminal {
+        QrTerminal {
+            detect: |force| crate::deposit::qr_display::Detection {
+                display: force.unwrap_or(QrDisplay::Text),
+                cell_px: None,
+            },
+            geometry: roomy,
+        }
+    }
+
+    /// A terminal that must not be asked.
+    fn never_asked() -> QrTerminal {
+        QrTerminal {
+            detect: |_| panic!("the terminal was asked about a code it does not show"),
+            geometry: roomy,
+        }
+    }
+
+    const KITTY_IMAGE: &str = "\x1b_Ga=T,";
+
+    #[test]
+    fn plain_lines_draw_an_image_on_a_terminal_that_shows_one() {
+        let (log, out) = capture();
+        let (codes, sink) = capture();
+        let ui = PlainLines::build(
+            out,
+            Codes {
+                out: sink,
+                terminal: true,
+                qr: kitty(),
+            },
+            Settings::default(),
+        );
+        ui.qr(PAIRING, &[("function".into(), "deposit".into())]);
+        let c = text(&codes);
+        assert!(c.contains(KITTY_IMAGE), "{c:?}");
+        assert!(c.contains(crate::deposit::qr_display::IMAGE_HINT), "{c:?}");
+        assert!(!c.contains(['▀', '▄', '█']), "no text code as well");
+        assert!(
+            c.contains("function: deposit") && c.contains(PAIRING),
+            "{c:?}"
+        );
+        assert!(!text(&log).contains('\x1b'), "the log stays plain");
+    }
+
+    #[test]
+    fn a_board_draws_the_image_on_stdout_when_stdout_is_a_terminal() {
+        let (log, codes, ui) = board_on(Settings::default(), true, kitty());
+        ui.step(StepId::Pair, StepState::Running, "");
+        ui.qr(PAIRING, &[]);
+        assert!(text(&codes).contains(KITTY_IMAGE));
+        assert!(!text(&log).contains("\x1b_G"));
+    }
+
+    #[test]
+    fn a_board_draws_the_image_above_itself_when_stdout_is_not_a_terminal() {
+        let (log, codes, ui) = board_on(Settings::default(), false, kitty());
+        ui.step(StepId::Pair, StepState::Running, "");
+        ui.qr(PAIRING, &[]);
+        let l = text(&log);
+        let image = l
+            .rfind(KITTY_IMAGE)
+            .expect("the image on the board's terminal");
+        let hint = l
+            .rfind(crate::deposit::qr_display::IMAGE_HINT)
+            .expect("the hint");
+        let row = l.rfind("wallet pairing").expect("the board");
+        assert!(image < hint && hint < row, "{l:?}");
+        assert!(!text(&codes).contains('\x1b'), "stdout gets the words only");
+    }
+
+    #[test]
+    fn a_code_that_is_not_drawn_asks_the_terminal_nothing() {
+        let (_log, _codes, ui) = board_on(
+            Settings {
+                uri_only: true,
+                ..Settings::default()
+            },
+            true,
+            never_asked(),
+        );
+        ui.qr(PAIRING, &[]);
+        let (_log, out) = capture();
+        let (_codes, sink) = capture();
+        let ui = PlainLines::build(
+            out,
+            Codes {
+                out: sink,
+                terminal: false,
+                qr: never_asked(),
+            },
+            Settings::default(),
+        );
+        ui.qr(PAIRING, &[]);
+    }
+
+    #[test]
+    fn qr_display_reaches_the_terminal_through_pick() {
+        let (o, stdout) = capture();
+        let (_e, stderr) = capture();
+        let ui = pick_from(
+            &Default::default(),
+            false,
+            false,
+            Some(QrDisplay::Sixel),
+            Terminal {
+                stdout,
+                stdout_tty: true,
+                stderr,
+                stderr_tty: false,
+                width: || None,
+                tick: None,
+                logs: false,
+                qr: forced(),
+            },
+        );
+        ui.qr(PAIRING, &[]);
+        assert!(text(&o).contains("\x1bPq"), "{:?}", text(&o));
     }
 
     const PAIRING: &str = "wc:c9c71dfb61298046cee15333ff7bd4431d01ac59814cc2783e1e4ba57c033d13@2?\
@@ -1775,6 +1950,7 @@ mod tests {
             Codes {
                 out: sink,
                 terminal: true,
+                qr: QrTerminal::text(),
             },
             Settings::default(),
             || Some(40),
@@ -1940,6 +2116,7 @@ mod tests {
             Codes {
                 out: sink,
                 terminal: true,
+                qr: QrTerminal::text(),
             },
             Settings::default(),
             || Some(40),
@@ -2052,6 +2229,7 @@ mod tests {
             Codes {
                 out: sink,
                 terminal: false,
+                qr: QrTerminal::text(),
             },
             Settings::default(),
         );
@@ -2073,6 +2251,7 @@ mod tests {
             Codes {
                 out: sink,
                 terminal: true,
+                qr: QrTerminal::text(),
             },
             Settings {
                 invert: true,
@@ -2088,7 +2267,7 @@ mod tests {
         let run = |g: crate::deposit::args::GlobalFlags, stderr_tty: bool| {
             let (o, stdout) = capture();
             let (e, stderr) = capture();
-            let ui = pick_from(&g, false, false, Terminal {
+            let ui = pick_from(&g, false, false, None, Terminal {
                 stdout,
                 stdout_tty: false,
                 stderr,
@@ -2096,6 +2275,7 @@ mod tests {
                 width: || None,
                 tick: None,
                 logs: false,
+                qr: QrTerminal::text(),
             });
             ui.status("hello");
             drop(ui);
@@ -2130,6 +2310,7 @@ mod tests {
             Codes {
                 out: sink,
                 terminal: true,
+                qr: QrTerminal::text(),
             },
             Settings::default(),
             || None,

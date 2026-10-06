@@ -1163,7 +1163,8 @@ time limit, which covers the retries too.
 | `--from-address` | `0x…`, the sending account | checked against the wallet session in `walletconnect`; required by `eip681` and `both` |
 | `--qr-out` | a path ending in `.png` or `.svg` | the WalletConnect QR is written there as well |
 | `--uri-only` | flag | print the URI as text, without the QR picture |
-| `--qr-invert` | flag | swap dark and light, for a light-on-dark terminal |
+| `--qr-invert` | flag | swap dark and light in the text code, for a light-on-dark terminal |
+| `--qr-display` | `auto`, `text`, `kitty`, `iterm2` or `sixel`; `BRIDGE_QR_DISPLAY` | `auto`: an image where the terminal shows one, text elsewhere |
 | `--wc-relay-url` | URL | `wss://relay.walletconnect.org` |
 
 - **`walletconnect`** — one QR code, a WalletConnect v2 pairing URI (`wc:…`),
@@ -1184,6 +1185,19 @@ time limit, which covers the retries too.
   and ends at exit 35.
 - **`both`** — WalletConnect first, and the EIP-681 codes only if pairing
   itself fails.
+
+**The code as an image.** Under `--qr-display auto` the CLI asks the terminal,
+before the first code, whether it shows images: kitty graphics (kitty, Ghostty,
+Konsole from 22.04), iTerm2 inline images (iTerm2, WezTerm) or sixel. The
+answers take a fraction of a second, and keys pressed meanwhile are lost. A
+terminal that does not answer is judged by its name (`TERM`, `TERM_PROGRAM`,
+`KITTY_WINDOW_ID` and the like). Inside tmux, screen and zellij, and in the
+terminals of nvim and emacs, the code is always text: a multiplexer accepts an
+image and shows something else. An image is followed by `(QR shown as an
+image; if it does not scan, run with --qr-display text)`; `--qr-display
+kitty`, `iterm2` or `sixel` forces an image where detection gives text. The
+image takes at most two thirds of the window's height, and `--qr-invert`
+changes only the text code.
 
 **Run modes:**
 

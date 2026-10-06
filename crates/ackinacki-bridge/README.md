@@ -1190,6 +1190,7 @@ time limit, which covers the retries too.
 before the first code, whether it shows images: kitty graphics (kitty, Ghostty,
 Konsole from 22.04), iTerm2 inline images (iTerm2, WezTerm) or sixel. The
 answers take a fraction of a second, and keys pressed meanwhile are lost. A
+run in the background (`&`) does not ask: the system would stop it. A
 terminal that does not answer is judged by its name (`TERM`, `TERM_PROGRAM`,
 `KITTY_WINDOW_ID` and the like). Inside tmux, screen and zellij, and in the
 terminals of nvim and emacs, the code is always text: a multiplexer accepts an

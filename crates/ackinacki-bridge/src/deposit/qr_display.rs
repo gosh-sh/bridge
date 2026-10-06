@@ -598,6 +598,12 @@ impl QrTerminal {
     }
 }
 
+/// Whether a process in group `own` may ask its terminal, whose foreground
+/// group is `foreground` (`-1` when it cannot be read).
+fn in_foreground(foreground: libc::pid_t, own: libc::pid_t) -> bool {
+    foreground >= 0 && foreground == own
+}
+
 /// The capability probe.
 mod probe {
     use std::{
@@ -607,7 +613,7 @@ mod probe {
         time::{Duration, Instant},
     };
 
-    use super::{parse_probe_reply, ProbeReply, PROBE_TIMEOUT};
+    use super::{in_foreground, parse_probe_reply, ProbeReply, PROBE_TIMEOUT};
 
     /// Three questions answered in this order: the kitty graphics query
     /// (one dummy pixel, `a=q`), the cell size in pixels, and DA1, which
@@ -668,13 +674,20 @@ mod probe {
     /// within `timeout` for the answers and as long again for what follows
     /// them. The controlling terminal rather than stdin: a buffered stdin
     /// would keep bytes it read ahead where the next question cannot see
-    /// them. Keys pressed during the probe are lost.
+    /// them. Keys pressed during the probe are lost. A background job does
+    /// not ask: the kernel would stop it for setting the terminal's modes.
     fn probe(query: &[u8], timeout: Duration) -> Option<ProbeReply> {
         let mut tty = File::options()
             .read(true)
             .write(true)
             .open("/dev/tty")
             .ok()?;
+        // SAFETY: tcgetpgrp and getpgrp only read; tcgetpgrp answers -1 for
+        // a descriptor that is not a terminal.
+        let (foreground, own) = unsafe { (libc::tcgetpgrp(tty.as_raw_fd()), libc::getpgrp()) };
+        if !in_foreground(foreground, own) {
+            return None;
+        }
         let _raw = RawMode::enter(tty.as_raw_fd())?;
         tty.write_all(query).ok()?;
         let deadline = Instant::now() + timeout;
@@ -784,6 +797,25 @@ mod tests {
     #[test]
     fn parse_reply_without_a_cell_answer_reports_none() {
         assert_eq!(parse_probe_reply(b"\x1b[?1;2c").cell_px, None);
+    }
+
+    // -- in_foreground -------------------------------------------------------
+
+    #[test]
+    fn the_foreground_job_may_ask_its_terminal() {
+        assert!(in_foreground(4242, 4242));
+    }
+
+    #[test]
+    fn a_background_job_may_not_ask_its_terminal() {
+        // The kernel stops a background job that sets the terminal's modes
+        // or reads from it: `deposit ... &` would hang at its first code.
+        assert!(!in_foreground(4241, 4242));
+    }
+
+    #[test]
+    fn a_terminal_whose_foreground_is_unknown_is_not_asked() {
+        assert!(!in_foreground(-1, 4242));
     }
 
     // -- choose_display ------------------------------------------------------

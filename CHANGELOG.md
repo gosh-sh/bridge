@@ -376,7 +376,7 @@ assigns it when the release is tagged.
   kitty graphics (kitty, Ghostty, Konsole from 22.04), iTerm2 inline images
   (iTerm2, WezTerm) and sixel. Before the first code the CLI asks the
   terminal what it shows, for a fraction of a second; keys pressed meanwhile
-  are lost. Other terminals, and tmux, screen, zellij and the terminals of nvim
+  are lost, and a run in the background does not ask. Other terminals, and tmux, screen, zellij and the terminals of nvim
   and emacs, keep the text code. `--qr-display auto|text|kitty|iterm2|sixel`
   (`BRIDGE_QR_DISPLAY`, default `auto`) forces a rendering when detection
   guesses wrong, and every image is followed by the hint to rerun with

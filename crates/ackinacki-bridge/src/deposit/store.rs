@@ -611,7 +611,7 @@ mod tests {
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .finish();
-        tracing::subscriber::with_default(subscriber, f);
+        crate::test_log::with_default(subscriber, f);
         let out = sink.0.lock().unwrap().clone();
         String::from_utf8(out).unwrap()
     }

@@ -271,17 +271,7 @@ contract EthBeaconLightClient {
         // committee (rotate ↔ step join).
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
         require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
-        // Head only moves forward. A slot behind the head is still admitted
-        // when its execution hash is not yet in the proven set (late-register
-        // a skipped checkpoint of the *current* committee). Same-slot replay
-        // and already-proven hashes revert ERR_STALE_UPDATE.
-        bool advancing = pi.finalizedSlot > _finalizedSlot;
-        bool late = pi.finalizedSlot < _finalizedSlot
-            && !_isLive(pi.executionBlockHash);
-        require(advancing || late, ERR_STALE_UPDATE);
-        if (late) {
-            require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
-        }
+        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -294,7 +284,7 @@ contract EthBeaconLightClient {
 
         ensureBalance();
 
-        if (advancing) {
+        {
             _finalizedSlot = pi.finalizedSlot;
             _finalizedBeaconRoot = pi.finalizedBeaconRoot;
             _finalizedExecutionBlockHash = pi.executionBlockHash;
@@ -305,11 +295,6 @@ contract EthBeaconLightClient {
             emit HeadUpdated{dest: addrExtern}(
                 pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
             );
-        } else {
-            _evictExpired();
-            _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
-            address addrExtern = address.makeAddrExtern(CheckpointBackfilledEmit, bitCntAddress);
-            emit CheckpointBackfilled{dest: addrExtern}(pi.finalizedSlot, pi.executionBlockHash);
         }
     }
 
@@ -381,18 +366,13 @@ contract EthBeaconLightClient {
     // Epoch ancestry (31/32 non-checkpoint execution hashes)
     // ========================================================
 
-    /// @notice Pushes a forward chain of execution hashes, starting from an
-    ///         already-proven block, into the one-year window / `USDCBridge`.
-    ///         `headerRlps[0]` must keccak256 to a proven hash; each next
-    ///         header's RLP `parentHash` must equal the previous header's
-    ///         keccak256. At most 32 headers (the proven one + 31 descendants).
-    ///         The walk only goes forward: a block older than the starting one
-    ///         can never be reached, so history cannot be replayed back in.
+    /// @notice Fills in the blocks between two proven anchors.
     ///         Permissionless: the keccak + parent links are the authorization.
     function submitAncestry(bytes[] headerRlps) public {
-        require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
-        require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
+        require(headerRlps.length >= 3, ERR_BAD_ANCESTRY);
+        require(headerRlps.length <= 33, ERR_ANCESTRY_TOO_LONG);
         tvm.accept();
+        uint last = headerRlps.length - 1;
         uint256 prev = gosh.keccak256(headerRlps[0]);
         uint256 anchor = _piForm(prev);
         require(_isLive(anchor), ERR_UNKNOWN_CHECKPOINT);
@@ -400,11 +380,13 @@ contract EthBeaconLightClient {
         _evictExpired();
         uint64 added = 0;
         uint i;
-        for (i = 1; i < headerRlps.length; i++) {
+        for (i = 1; i <= last; i++) {
             require(EthKeccak.rlpParentHash(headerRlps[i]) == prev, ERR_BAD_ANCESTRY);
             prev = gosh.keccak256(headerRlps[i]);
             uint256 key = _piForm(prev);
-            if (!_isLive(key)) {
+            if (i == last) {
+                require(_isLive(key), ERR_UNKNOWN_CHECKPOINT);
+            } else if (!_isLive(key)) {
                 _pushExecHash(key, anchorSlot);
                 added += 1;
             }

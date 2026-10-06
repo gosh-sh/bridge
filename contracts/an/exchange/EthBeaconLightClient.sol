@@ -381,36 +381,37 @@ contract EthBeaconLightClient {
     // Epoch ancestry (31/32 non-checkpoint execution hashes)
     // ========================================================
 
-    /// @notice Pushes the execution parent-hash chain of an already-proven
-    ///         checkpoint into the one-year window / `USDCBridge`.
-    ///         `headerRlps[0]` must keccak256 to a proven checkpoint; each next
-    ///         header's keccak256 must equal the previous header's RLP
-    ///         `parentHash`. At most 32 headers (checkpoint + 31 parents).
+    /// @notice Pushes a forward chain of execution hashes, starting from an
+    ///         already-proven block, into the one-year window / `USDCBridge`.
+    ///         `headerRlps[0]` must keccak256 to a proven hash; each next
+    ///         header's RLP `parentHash` must equal the previous header's
+    ///         keccak256. At most 32 headers (the proven one + 31 descendants).
+    ///         The walk only goes forward: a block older than the starting one
+    ///         can never be reached, so history cannot be replayed back in.
     ///         Permissionless: the keccak + parent links are the authorization.
     function submitAncestry(bytes[] headerRlps) public {
         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 32, ERR_ANCESTRY_TOO_LONG);
         tvm.accept();
-        uint256 checkpoint = _piForm(gosh.keccak256(headerRlps[0]));
-        require(_isLive(checkpoint), ERR_UNKNOWN_CHECKPOINT);
-        uint64 ckptSlot = _provenEthSlot[checkpoint];
+        uint256 prev = gosh.keccak256(headerRlps[0]);
+        uint256 anchor = _piForm(prev);
+        require(_isLive(anchor), ERR_UNKNOWN_CHECKPOINT);
+        uint64 anchorSlot = _provenEthSlot[anchor];
         _evictExpired();
-        uint256 want = EthKeccak.rlpParentHash(headerRlps[0]);
         uint64 added = 0;
         uint i;
         for (i = 1; i < headerRlps.length; i++) {
-            uint256 h = gosh.keccak256(headerRlps[i]);
-            require(h == want, ERR_BAD_ANCESTRY);
-            uint256 key = _piForm(h);
+            require(EthKeccak.rlpParentHash(headerRlps[i]) == prev, ERR_BAD_ANCESTRY);
+            prev = gosh.keccak256(headerRlps[i]);
+            uint256 key = _piForm(prev);
             if (!_isLive(key)) {
-                _pushExecHash(key, ckptSlot);
+                _pushExecHash(key, anchorSlot);
                 added += 1;
             }
-            want = EthKeccak.rlpParentHash(headerRlps[i]);
         }
         ensureBalance();
         address addrExtern = address.makeAddrExtern(AncestryAcceptedEmit, bitCntAddress);
-        emit AncestryAccepted{dest: addrExtern}(checkpoint, added);
+        emit AncestryAccepted{dest: addrExtern}(anchor, added);
     }
 
     function _yearCutoff() private view returns (uint64) {

@@ -24,6 +24,17 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`submitAncestry` walks forward only.** `headerRlps[0]` must hash to an
+  already-proven block and every next header must name the previous one as its
+  `parentHash`, so the walk reaches a block's descendants and never its
+  ancestors. Before, it started from a proven checkpoint and anchored that
+  block's parents, which let anyone chain calls backwards: each run made 31
+  more hashes live, every one of them a fresh starting point for the next run,
+  with the checkpoint's slot attached — so the one-year window never expired
+  them and the client's state grew without bound. Callers must now pass the
+  headers oldest first; a chain in the old order is refused with
+  `ERR_BAD_ANCESTRY` (249).
+
 - **`EthBeaconLightClient` hashes execution headers with the TVM `KECCAK256`
   instruction instead of the `EthKeccak` software implementation, and
   `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
@@ -36,7 +47,7 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `05ff0848`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…` → `67dd98a5…`, so the bridge has to be given the
+  code hash moves `314ac6b8…` → `159f9795…`, so the bridge has to be given the
   new code with `setLightClientCode` and the client redeployed; its ABI is
   unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP reader, which
   is now what the walk spends most of its gas on.

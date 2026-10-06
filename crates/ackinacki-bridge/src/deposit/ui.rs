@@ -1157,11 +1157,13 @@ impl Ui for TtyBoard {
     fn qr(&self, uri: &str, decoded: &[(String, String)]) {
         let text = qr_text(uri, decoded);
         let mut b = self.lock();
+        // Off the screen first: the code must not land under the cursor's
+        // way back up, or the next frame would draw over it. Choosing the
+        // code may log, and a line this thread logs goes out where the
+        // cursor is: where the board stood, not under it.
+        b.erase();
         // Drawn on a terminal either way: stdout, or the board's own.
         let picture = picture(uri, &b.settings, &b.codes.qr);
-        // Off the screen first: the code must not land under the cursor's
-        // way back up, or the next frame would draw over it.
-        b.erase();
         if b.codes.terminal {
             let block = match picture {
                 Some(p) => format!("{p}\n{text}"),
@@ -1545,6 +1547,59 @@ mod tests {
     }
 
     const KITTY_IMAGE: &str = "\x1b_Ga=T,";
+
+    thread_local! {
+        /// The terminal [`logging`]'s line goes to when no board takes it,
+        /// as the log writer does.
+        static LOG_TERMINAL: std::cell::RefCell<Option<Captured>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A text terminal whose detection logs a line, as `detect` does at the
+    /// debug level.
+    fn logging() -> QrTerminal {
+        QrTerminal {
+            detect: |_| {
+                let line = b"DEBUG QR display\n";
+                if !log_above_board(line) {
+                    LOG_TERMINAL.with(|t| {
+                        let t = t.borrow();
+                        let terminal = t.as_ref().expect("the test names the terminal");
+                        terminal.lock().unwrap().extend_from_slice(line);
+                    });
+                }
+                crate::deposit::qr_display::Detection {
+                    display: QrDisplay::Text,
+                    cell_px: None,
+                }
+            },
+            geometry: roomy,
+        }
+    }
+
+    #[test]
+    fn a_line_logged_while_the_code_is_chosen_leaves_no_stale_row() {
+        let (log, _codes, ui) = board_on(Settings::default(), false, logging());
+        LOG_TERMINAL.with(|t| *t.borrow_mut() = Some(log.clone()));
+        ui.step(StepId::Preflight, StepState::Done, "ok");
+        ui.step(StepId::Pair, StepState::Running, "");
+        ui.qr(PAIRING, &[]);
+        let shown = screen(&text(&log));
+        assert_eq!(
+            shown.iter().filter(|l| l.contains("preflight")).count(),
+            1,
+            "no stale row: {shown:#?}"
+        );
+        let logged = shown
+            .iter()
+            .position(|l| l == "DEBUG QR display")
+            .expect("the line stays");
+        let code = shown
+            .iter()
+            .position(|l| l.contains('█'))
+            .expect("the code");
+        assert!(logged < code, "the line above the code: {shown:#?}");
+    }
 
     #[test]
     fn plain_lines_draw_an_image_on_a_terminal_that_shows_one() {

@@ -47,7 +47,10 @@ pipeline:
    must hold code, the withdrawal verifier stack must walk (adapter →
    `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
    pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
-   and `treasuryBalance` must already cover the amount. **So a dry run can
+   `treasuryBalance` must already cover the amount, and the window-heights
+   read stage 4b will need must succeed now (one `LayerAnchorAppended` scan
+   back from the head, plus one probe `eth_getLogs` over the configured
+   span). **So a dry run can
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy, a drained treasury — not only AN-side ones.**
 
@@ -70,13 +73,14 @@ pipeline:
    `USDCBridge.dst_transaction` to the `WithdrawalInitiated` ExtOut
    event, filtering by the specific broadcast tx hash so concurrent
    burns from other operators cannot be mis-selected as ours.
-5. **Resurrect + wait for coverage** — read the deployed
-   `AckiNackiBridge` at `--bridge-address` via
-   `EthBridgeClient::read_full_state` and poll until
-   `storedLastSeenBlockSeqNo` has advanced past the covering L2 bundle
-   boundary (`W² = 16 384` seq_nos) for the burn's block. Once the
-   covering bundle has landed on-chain (fed by the server-side bundle
-   relayer), `BridgeState::from_contract` builds a byte-for-byte mirror.
+5. **Resurrect + wait for coverage** — poll `storedLastSeenBlockSeqNo`
+   on the deployed `AckiNackiBridge` at `--bridge-address` (one call per
+   round) until it has advanced past the covering L2 bundle boundary
+   (`W² = 16 384` seq_nos) for the burn's block, then read the full state
+   via `EthBridgeClient::read_full_state` (ten windows plus the
+   `LayerAnchorAppended` scan). Once the covering bundle has landed
+   on-chain (fed by the server-side bundle relayer),
+   `BridgeState::from_contract` builds a byte-for-byte mirror.
 6. **Prove + submit** — enrich the resurrected `BridgeState`
    (single-shot, no retry), produce a Circuit-4 SHPLONK proof via the
    in-process Circuit-4 prover + `aggregate-proof` subprocess, always
@@ -156,8 +160,9 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
 | `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
-| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used both for polling coverage and submitting `withdrawByProof` |
+| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile's endpoint serves full history and the raw transactions `deposit` needs) |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
+| `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Block the bridge was deployed in: where the `LayerAnchorAppended` scan (preflight, then stage 4b) stops when a window is not covered yet; changes together with `BRIDGE_ADDRESS` (unset = genesis). `--get-logs-chunk-blocks` / `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and `--get-logs-pause-ms` / `BRIDGE_GET_LOGS_PAUSE_MS` fit the scan to a capped, rate-limited RPC |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain), `.sol` (the proof self-check) and `_calldata.bin` (word 23 is the adapter `vkDigest` pin) |
@@ -648,6 +653,12 @@ specific reason. Common causes:
   more via Step 2 (bump the amount inside `deploy_msig_and_mint.py`
   if you need more than the 1 USDC default)
 - USDCBridge account_id does not resolve via GQL
+- the window-heights read fails: a wrong `BRIDGE_DEPLOY_BLOCK` (above the
+  chain head, or after the oldest anchor the bridge's windows still hold),
+  an `eth_getLogs` span your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or
+  an RPC without log history back to the deploy block (publicnode keeps only
+  the newest ~10 000 blocks; the refusal says so when the deploy block
+  itself answers with no logs)
 
 **Remediation:** fix the specific issue, re-run. Preflight is
 side-effect-free.
@@ -1115,7 +1126,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 
 | Flag | Env var / profile key | Default | Purpose |
 |------|-----------------------|---------|---------|
-| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block |
+| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions) |
 | `--bridge-address` | `BRIDGE_ADDRESS` | — | `AckiNackiBridge` on the EVM chain |
 | `--gql-endpoint` | `BRIDGE_GQL_ENDPOINT` | — | The Acki Nacki host. GraphQL for reads; `finalizeDeposit` goes to `POST /v2/messages` on the same host, so it has to serve both |
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID` | — | Account id of the Acki Nacki bridge; its dapp is resolved live |

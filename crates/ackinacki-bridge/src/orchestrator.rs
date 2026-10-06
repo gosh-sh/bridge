@@ -475,6 +475,13 @@ pub async fn run(
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(bridge = %args.bridge_address, "bridge deploy ok");
 
+    // The window-heights read stage 4b performs after the burn, performed
+    // now: a wrong BRIDGE_DEPLOY_BLOCK, an eth_getLogs span the RPC rejects
+    // or an RPC without log history refuses here, before any money moves.
+    crate::preflight::check_window_scan(&args.rpc_url, args.bridge_address, args.log_scan_config())
+        .await
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
+
     // Signer + prover artifacts — real runs only (a dry-run has no
     // plumbing, never submits and never proves).
     //
@@ -891,7 +898,8 @@ pub async fn run(
             source: None,
         }
     })?);
-    let ro_bridge_for_wait = EthBridgeClient::new(args.bridge_address, ro_provider);
+    let ro_bridge_for_wait =
+        EthBridgeClient::with_scan_config(args.bridge_address, ro_provider, args.log_scan_config());
     let bridge_state = wait_for_coverage(
         &ro_bridge_for_wait,
         anchor_mode,
@@ -1008,6 +1016,7 @@ pub async fn run(
                     source: None,
                 }
             })?);
+        // Getters only; no window scan on this client.
         let ro_bridge = EthBridgeClient::new(args.bridge_address, ro_provider);
         let adapter =
             ro_bridge
@@ -1119,6 +1128,7 @@ pub async fn run(
                         source: None,
                     })?,
             );
+    // Dry run and submit only; no window scan on this client.
     let bridge = EthBridgeClient::new(args.bridge_address, provider);
 
     // NB: `Status::Submitted` is written only AFTER `submit_withdraw`

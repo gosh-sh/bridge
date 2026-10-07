@@ -48,6 +48,8 @@ FIELDS = [
     ("excessBlobGas", "num", False),
     ("parentBeaconBlockRoot", "hash", False),
     ("requestsHash", "hash", False),
+    ("blockAccessListHash", "hash", False),
+    ("slotNumber", "num", False),
 ]
 
 

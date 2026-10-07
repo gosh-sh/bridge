@@ -59,7 +59,7 @@ def encode_header(b):
     fields=[rlp_b(hx(b[k])) for k in ("parentHash","sha3Uncles","miner","stateRoot","transactionsRoot","receiptsRoot","logsBloom")]
     fields+=[rlp_b(uint(b[k])) for k in ("difficulty","number","gasLimit","gasUsed","timestamp")]
     fields+=[rlp_b(hx(b.get("extraData") or "0x")), rlp_b(hx(b["mixHash"])), rlp_b(hx(b["nonce"]))]
-    for k in ("baseFeePerGas","withdrawalsRoot","blobGasUsed","excessBlobGas","parentBeaconBlockRoot","requestsHash"):
+    for k in ("baseFeePerGas","withdrawalsRoot","blobGasUsed","excessBlobGas","parentBeaconBlockRoot","requestsHash","blockAccessListHash","slotNumber"):
         v=b.get(k)
         if v in (None,"","0x"): continue
         raw=hx(v)

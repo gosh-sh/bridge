@@ -39,11 +39,11 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 6, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 7, 0);
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 6, 0);
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 7, 0);
 
 /// Refuses a bridge older than the deposit key this build proves for.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
@@ -341,7 +341,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.6.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -382,7 +382,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.6.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -468,11 +468,11 @@ mod tests {
 
     #[test]
     fn a_bridge_older_than_the_deposit_key_is_refused() {
-        let key = BridgeVersion(1, 6, 0);
-        let e = key_verdict(BridgeVersion(1, 5, 0), key).unwrap_err();
+        let key = DEPOSIT_KEY_BRIDGE_VERSION;
+        let e = key_verdict(BridgeVersion(1, 6, 0), key).unwrap_err();
         assert!(e.contains("deposit key"), "{e}");
-        assert!(key_verdict(BridgeVersion(1, 6, 0), key).is_ok());
-        assert!(key_verdict(BridgeVersion(1, 6, 1), key).is_ok());
+        assert!(key_verdict(key, key).is_ok());
+        assert!(key_verdict(BridgeVersion(1, 7, 1), key).is_ok());
     }
 
     #[test]

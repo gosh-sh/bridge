@@ -1199,8 +1199,10 @@ sixel. Inside tmux, screen and zellij, and in the terminals of nvim and
 emacs, the code is always text: a multiplexer accepts an image and shows
 something else. An image is followed by `(QR shown as an image; if it does
 not scan, run with --qr-display text)`; `--qr-display kitty`, `iterm2` or
-`sixel` forces an image where detection gives text. The image takes at most
-two thirds of the window's height, and `--qr-invert` changes only the text
+`sixel` forces an image where detection gives text. The image shrinks until
+it fits in the window together with the hint, the URI and the step board,
+down to two pixels per module; a window too short even for that loses the
+top of the code, so make it taller. `--qr-invert` changes only the text
 code.
 
 **Run modes:**

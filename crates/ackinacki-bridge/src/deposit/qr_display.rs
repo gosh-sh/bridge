@@ -26,9 +26,6 @@ const MODULE_SCALE_MAX: usize = 8;
 /// modules, so a window too small even for this gets an image that
 /// overflows rather than one that cannot be scanned.
 const MODULE_SCALE_MIN: usize = 2;
-/// How much of the window's height the image may take; the rest holds the
-/// decoded fields, the URI and the step board.
-const WINDOW_HEIGHT_PERCENT: usize = 66;
 /// `(width, height)` of the character cell assumed when neither the system
 /// nor the terminal reports one: the common default-font size.
 const ASSUMED_CELL: (usize, usize) = (8, 16);
@@ -267,17 +264,26 @@ pub struct TerminalGeometry {
 }
 
 /// The most whole pixels per module that keep a code `modules` wide, quiet
-/// zone included, inside its share of the window. Whole pixels only: a
-/// scaled image blurs the module edges, and a phone gives up on a blurred
-/// code sooner than on a small one.
-pub fn fit_module_scale(modules: usize, geometry: &TerminalGeometry) -> usize {
+/// zone included, inside the window less the `rows_kept` rows printed
+/// under it: what scrolls off the top takes the finder patterns with it.
+/// Whole pixels only: a scaled image blurs the module edges, and a phone
+/// gives up on a blurred code sooner than on a small one.
+pub fn fit_module_scale(modules: usize, geometry: &TerminalGeometry, rows_kept: usize) -> usize {
     if modules == 0 || geometry.rows == 0 || geometry.cols == 0 {
         return MODULE_SCALE_MAX;
     }
     let (cell_width, cell_height) = geometry.cell.unwrap_or(ASSUMED_CELL);
-    let height = geometry.rows * WINDOW_HEIGHT_PERCENT / 100 * cell_height;
+    let height = geometry.rows.saturating_sub(rows_kept) * cell_height;
     let width = geometry.cols * cell_width;
     (height.min(width) / modules).clamp(MODULE_SCALE_MIN, MODULE_SCALE_MAX)
+}
+
+/// The rows `text` takes in a window `cols` wide, where a longer line goes
+/// on in the next row.
+fn rows_of(text: &str, cols: usize) -> usize {
+    text.lines()
+        .map(|line| line.chars().count().div_ceil(cols.max(1)).max(1))
+        .sum()
 }
 
 /// A QR code as pixels.
@@ -459,14 +465,19 @@ fn sixel_band_pass(out: &mut String, bitmap: &QrBitmap, band_top: usize, dark: b
 
 /// The code of `uri` as the image escape of `display`, at the largest scale
 /// that fits `geometry`.
-pub fn image(uri: &str, display: QrDisplay, geometry: &TerminalGeometry) -> anyhow::Result<String> {
+pub fn image(
+    uri: &str,
+    display: QrDisplay,
+    geometry: &TerminalGeometry,
+    rows_kept: usize,
+) -> anyhow::Result<String> {
     let code = crate::deposit::qr::code(uri)?;
     let modules: Vec<bool> = code
         .to_colors()
         .iter()
         .map(|color| *color == qrcode::Color::Dark)
         .collect();
-    let scale = fit_module_scale(code.width() + 2 * QUIET_ZONE, geometry);
+    let scale = fit_module_scale(code.width() + 2 * QUIET_ZONE, geometry, rows_kept);
     let bitmap = QrBitmap::from_modules(&modules, code.width(), scale, QUIET_ZONE);
     match display {
         QrDisplay::Kitty => Ok(encode_kitty(&bitmap)),
@@ -578,9 +589,17 @@ impl QrTerminal {
     }
 
     /// The image of `uri` with [`IMAGE_HINT`] under it, when this terminal
-    /// shows one; `None` for text. An image that cannot be made is text too,
-    /// with a warning in the log.
-    pub fn image(&self, uri: &str, force: Option<QrDisplay>) -> Option<String> {
+    /// shows one; `None` for text. The image leaves the window room for the
+    /// hint, for `text_below`, printed under the hint and wrapped at the
+    /// window's width, and for `rows_below` rows after that. An image that
+    /// cannot be made is text too, with a warning in the log.
+    pub fn image(
+        &self,
+        uri: &str,
+        force: Option<QrDisplay>,
+        text_below: &str,
+        rows_below: usize,
+    ) -> Option<String> {
         let detected = (self.detect)(force);
         if detected.display == QrDisplay::Text {
             return None;
@@ -591,7 +610,13 @@ impl QrTerminal {
         if detected.cell_px.is_some() {
             geometry.cell = detected.cell_px;
         }
-        match image(uri, detected.display, &geometry) {
+        // Terminals differ on where an image leaves the cursor: on its last
+        // row or under it. One row more, in case it is under.
+        let rows_kept = 1
+            + rows_of(IMAGE_HINT, geometry.cols)
+            + rows_of(text_below, geometry.cols)
+            + rows_below;
+        match image(uri, detected.display, &geometry, rows_kept) {
             Ok(escape) => Some(format!("{escape}\n{IMAGE_HINT}")),
             Err(e) => {
                 tracing::warn!("the QR code could not be drawn as an image, showing text: {e:#}");
@@ -1062,25 +1087,43 @@ mod tests {
 
     #[test]
     fn a_small_code_keeps_the_largest_scale() {
-        assert_eq!(fit_module_scale(33, &window(45, 190)), 8);
+        assert_eq!(fit_module_scale(33, &window(45, 190), 0), 8);
     }
 
     #[test]
-    fn a_large_code_shrinks_to_its_share_of_the_window() {
-        // 45 rows * 66% * 16 px = 464 px: 4 px per module (420 px) fits,
-        // 5 (525 px) does not.
-        assert_eq!(fit_module_scale(105, &window(45, 190)), 4);
+    fn a_large_code_shrinks_to_the_window() {
+        // 45 rows * 16 px = 720 px: 6 px per module (630 px) fits, 7
+        // (735 px) does not.
+        assert_eq!(fit_module_scale(105, &window(45, 190), 0), 6);
+    }
+
+    #[test]
+    fn the_rows_kept_under_the_code_are_not_given_to_it() {
+        // (45 - 20) rows * 16 px = 400 px: 3 px per module (315 px) fits,
+        // 4 (420 px) does not.
+        assert_eq!(fit_module_scale(105, &window(45, 190), 20), 3);
+    }
+
+    #[test]
+    fn a_window_with_no_rows_left_stops_at_the_smallest_scale() {
+        assert_eq!(fit_module_scale(105, &window(10, 190), 12), 2);
+    }
+
+    #[test]
+    fn a_line_wider_than_the_window_takes_the_rows_it_wraps_onto() {
+        let text = format!("ab\n{}\n\n", "x".repeat(161));
+        assert_eq!(rows_of(&text, 80), 1 + 3 + 1);
     }
 
     #[test]
     fn a_short_window_stops_at_the_smallest_scale() {
-        assert_eq!(fit_module_scale(105, &window(10, 190)), 2);
+        assert_eq!(fit_module_scale(105, &window(10, 190), 0), 2);
     }
 
     #[test]
     fn a_narrow_window_binds_before_its_height() {
         // 40 columns * 8 px = 320 px against 464 px of height.
-        assert_eq!(fit_module_scale(105, &window(45, 40)), 3);
+        assert_eq!(fit_module_scale(105, &window(45, 40), 0), 3);
     }
 
     #[test]
@@ -1091,8 +1134,8 @@ mod tests {
             cell: None,
         };
         assert_eq!(
-            fit_module_scale(105, &unknown),
-            fit_module_scale(105, &window(45, 190))
+            fit_module_scale(105, &unknown, 0),
+            fit_module_scale(105, &window(45, 190), 0)
         );
     }
 
@@ -1103,12 +1146,12 @@ mod tests {
             cols: 190,
             cell: Some((16, 32)),
         };
-        assert_eq!(fit_module_scale(105, &hidpi), 8);
+        assert_eq!(fit_module_scale(105, &hidpi, 0), 8);
     }
 
     #[test]
     fn an_unknown_window_keeps_the_largest_scale() {
-        assert_eq!(fit_module_scale(105, &TerminalGeometry::default()), 8);
+        assert_eq!(fit_module_scale(105, &TerminalGeometry::default(), 0), 8);
     }
 
     // -- QrBitmap ------------------------------------------------------------
@@ -1336,7 +1379,7 @@ mod tests {
 
     #[test]
     fn the_kitty_image_of_a_pairing_uri_scans_back() {
-        let escape = image(URI, QrDisplay::Kitty, &roomy()).expect("encode");
+        let escape = image(URI, QrDisplay::Kitty, &roomy(), 0).expect("encode");
         let chunks = kitty_chunks(&escape);
         let keys = &chunks[0].0;
         let side = |k: &str| -> u32 {
@@ -1358,7 +1401,7 @@ mod tests {
 
     #[test]
     fn the_iterm2_image_of_a_pairing_uri_scans_back() {
-        let escape = image(URI, QrDisplay::Iterm2, &roomy()).expect("encode");
+        let escape = image(URI, QrDisplay::Iterm2, &roomy(), 0).expect("encode");
         let img =
             image::load_from_memory_with_format(&iterm2_png(&escape), image::ImageFormat::Png)
                 .expect("a PNG")
@@ -1368,14 +1411,14 @@ mod tests {
 
     #[test]
     fn the_sixel_image_of_a_pairing_uri_scans_back() {
-        let escape = image(URI, QrDisplay::Sixel, &roomy()).expect("encode");
+        let escape = image(URI, QrDisplay::Sixel, &roomy(), 0).expect("encode");
         assert_eq!(scan(decode_sixel(&escape)), URI);
     }
 
     #[test]
     fn the_image_keeps_a_quiet_zone_of_four_modules() {
         // At scale 8 the first 32 pixel rows are white.
-        let escape = image(URI, QrDisplay::Iterm2, &roomy()).expect("encode");
+        let escape = image(URI, QrDisplay::Iterm2, &roomy(), 0).expect("encode");
         let img =
             image::load_from_memory_with_format(&iterm2_png(&escape), image::ImageFormat::Png)
                 .expect("a PNG")
@@ -1389,7 +1432,7 @@ mod tests {
 
     #[test]
     fn text_has_no_image() {
-        assert!(image(URI, QrDisplay::Text, &roomy()).is_err());
+        assert!(image(URI, QrDisplay::Text, &roomy(), 0).is_err());
     }
 
     // -- QrTerminal::image ---------------------------------------------------
@@ -1444,13 +1487,44 @@ mod tests {
             .expect("a number")
     }
 
+    /// The height `v=` of a kitty escape.
+    fn kitty_height(shown: &str) -> usize {
+        kitty_chunks(shown.split_once('\n').expect("escape, then the hint").0)[0]
+            .0
+            .split(',')
+            .find_map(|kv| kv.strip_prefix("v="))
+            .expect("v=")
+            .parse()
+            .expect("a number")
+    }
+
+    /// 30 rows of 80 columns, 8x16 pixels each: a default window, a little
+    /// taller.
+    fn default_window() -> TerminalGeometry {
+        window(30, 80)
+    }
+
+    #[test]
+    fn the_image_leaves_the_window_room_for_what_is_printed_under_it() {
+        let terminal = QrTerminal {
+            detect: shows_kitty,
+            geometry: default_window,
+        };
+        let uri_line = format!("  URI: {URI}\n");
+        let shown = terminal.image(URI, None, &uri_line, 11).expect("an image");
+        let image = kitty_height(&shown).div_ceil(16);
+        // Under the image: a row in case the cursor stops under it, the
+        // hint, the URI line wrapped onto 3 rows, and 11 rows more.
+        assert!(image + 1 + 1 + 3 + 11 <= 30, "{image} rows of image");
+    }
+
     #[test]
     fn a_terminal_that_shows_images_gets_the_image_and_the_hint_under_it() {
         let terminal = QrTerminal {
             detect: shows_kitty,
             geometry: roomy,
         };
-        let shown = terminal.image(URI, None).expect("an image");
+        let shown = terminal.image(URI, None, "", 0).expect("an image");
         let (escape, hint) = shown.split_once('\n').expect("the hint on its own line");
         assert!(escape.starts_with("\x1b_Ga=T,"), "{escape:?}");
         assert_eq!(hint, IMAGE_HINT);
@@ -1462,7 +1536,7 @@ mod tests {
             detect: shows_text,
             geometry: roomy,
         };
-        assert_eq!(terminal.image(URI, None), None);
+        assert_eq!(terminal.image(URI, None, "", 0), None);
     }
 
     #[test]
@@ -1472,10 +1546,10 @@ mod tests {
             geometry: roomy,
         };
         let sixel = terminal
-            .image(URI, Some(QrDisplay::Sixel))
+            .image(URI, Some(QrDisplay::Sixel), "", 0)
             .expect("an image");
         assert!(sixel.starts_with("\x1bPq"), "{sixel:?}");
-        assert_eq!(terminal.image(URI, Some(QrDisplay::Text)), None);
+        assert_eq!(terminal.image(URI, Some(QrDisplay::Text), "", 0), None);
     }
 
     #[test]
@@ -1488,8 +1562,8 @@ mod tests {
             detect: shows_kitty_with_big_cells,
             geometry: short_window,
         };
-        let small = kitty_width(&assumed.image(URI, None).expect("an image"));
-        let large = kitty_width(&reported.image(URI, None).expect("an image"));
+        let small = kitty_width(&assumed.image(URI, None, "", 0).expect("an image"));
+        let large = kitty_width(&reported.image(URI, None, "", 0).expect("an image"));
         assert!(large > small, "{large} > {small}");
     }
 }

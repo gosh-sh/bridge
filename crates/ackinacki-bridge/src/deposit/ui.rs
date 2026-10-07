@@ -483,12 +483,19 @@ fn qr_text(uri: &str, decoded: &[(String, String)]) -> String {
 }
 
 /// The code of `uri` for the terminal `qr`, unless `--uri-only`: an image
-/// where the terminal shows one, text otherwise.
-fn picture(uri: &str, s: &Settings, qr: &QrTerminal) -> Option<String> {
+/// where the terminal shows one, text otherwise. `text_below` and
+/// `rows_below` are what is printed under it; see [`QrTerminal::image`].
+fn picture(
+    uri: &str,
+    s: &Settings,
+    qr: &QrTerminal,
+    text_below: &str,
+    rows_below: usize,
+) -> Option<String> {
     if s.uri_only {
         return None;
     }
-    if let Some(image) = qr.image(uri, s.qr_display) {
+    if let Some(image) = qr.image(uri, s.qr_display, text_below, rows_below) {
         return Some(image);
     }
     crate::deposit::qr::render_terminal(uri, s.invert).ok()
@@ -617,14 +624,16 @@ impl Ui for PlainLines {
     fn qr(&self, uri: &str, decoded: &[(String, String)]) {
         {
             let mut codes = self.codes.lock().unwrap_or_else(|p| p.into_inner());
+            let text = qr_text(uri, decoded);
             let mut block = String::new();
             if codes.terminal {
-                if let Some(p) = picture(uri, &self.settings, &codes.qr) {
+                // Under the code: its words, and the row the cursor rests on.
+                if let Some(p) = picture(uri, &self.settings, &codes.qr, &text, 1) {
                     block.push_str(&p);
                     block.push('\n');
                 }
             }
-            block.push_str(&qr_text(uri, decoded));
+            block.push_str(&text);
             put(codes.out.as_mut(), &block);
         }
         self.line(&format!("URI: {}", printable(uri)));
@@ -899,6 +908,11 @@ impl Board {
         format!("{} {s}", SPINNER[self.spin % SPINNER.len()])
     }
 
+    /// The rows a frame takes: one per step, and the status line.
+    fn height(&self) -> usize {
+        self.rows.len() + 1
+    }
+
     /// Draws the board over its last frame, with `above` printed once
     /// above it, where it stays.
     fn draw(&mut self, above: &str) {
@@ -927,7 +941,7 @@ impl Board {
         s.push_str("\x1b[2K");
         s.push_str(&status);
         s.push('\n');
-        self.drawn = self.rows.len() + 1;
+        self.drawn = self.height();
         self.spin = self.spin.wrapping_add(1);
         put(self.out.as_mut(), &s);
     }
@@ -1162,8 +1176,12 @@ impl Ui for TtyBoard {
         // code may log, and a line this thread logs goes out where the
         // cursor is: where the board stood, not under it.
         b.erase();
-        // Drawn on a terminal either way: stdout, or the board's own.
-        let picture = picture(uri, &b.settings, &b.codes.qr);
+        // Drawn on a terminal either way: stdout, or the board's own. Under
+        // it go its words on stdout, or the URI line over the board; then
+        // the board, and the row the cursor rests on.
+        let uri_line = format!("URI: {}", printable(uri));
+        let words = if b.codes.terminal { &text } else { &uri_line };
+        let picture = picture(uri, &b.settings, &b.codes.qr, words, b.height() + 1);
         if b.codes.terminal {
             let block = match picture {
                 Some(p) => format!("{p}\n{text}"),
@@ -1175,7 +1193,6 @@ impl Ui for TtyBoard {
             // stdout is a file or a pipe: it gets the words, and the code is
             // drawn here, where it can be scanned.
             put(b.codes.out.as_mut(), &text);
-            let uri_line = format!("URI: {}", printable(uri));
             let above = match picture {
                 Some(p) => format!("{p}\n{uri_line}"),
                 None => uri_line,
@@ -1547,6 +1564,58 @@ mod tests {
     }
 
     const KITTY_IMAGE: &str = "\x1b_Ga=T,";
+
+    /// A kitty terminal of 30 rows of 80 columns, 8x16 pixels each: a
+    /// default window, a little taller.
+    fn kitty_80_by_30() -> QrTerminal {
+        QrTerminal {
+            detect: |_| crate::deposit::qr_display::Detection {
+                display: QrDisplay::Kitty,
+                cell_px: None,
+            },
+            geometry: || crate::deposit::qr_display::TerminalGeometry {
+                rows: 30,
+                cols: 80,
+                cell: Some((8, 16)),
+            },
+        }
+    }
+
+    /// The rows `screen` takes from its kitty image down in the window of
+    /// [`kitty_80_by_30`]: the image's, those of every line after it,
+    /// wrapped at 80 columns, and the row the cursor rests on.
+    fn rows_from_the_image_down(screen: &str) -> usize {
+        let (_, from_image) = screen.split_once("\x1b_G").expect("an image");
+        let (image, after) = from_image.split_once('\n').expect("lines under the image");
+        let height: usize = image
+            .split(';')
+            .next()
+            .and_then(|keys| keys.split(',').find_map(|kv| kv.strip_prefix("v=")))
+            .expect("v=")
+            .parse()
+            .expect("a number");
+        let lines: usize = visible(after)
+            .lines()
+            .map(|l| l.chars().count().div_ceil(80).max(1))
+            .sum();
+        height.div_ceil(16) + lines + 1
+    }
+
+    #[test]
+    fn the_image_on_stdout_leaves_the_window_room_for_the_board() {
+        let (log, codes, ui) = board_on(Settings::default(), true, kitty_80_by_30());
+        ui.qr(PAIRING, &[]);
+        let rows = rows_from_the_image_down(&(text(&codes) + &text(&log)));
+        assert!(rows <= 30, "{rows} rows in a window of 30");
+    }
+
+    #[test]
+    fn the_image_above_the_board_leaves_the_window_room_for_it() {
+        let (log, _codes, ui) = board_on(Settings::default(), false, kitty_80_by_30());
+        ui.qr(PAIRING, &[]);
+        let rows = rows_from_the_image_down(&text(&log));
+        assert!(rows <= 30, "{rows} rows in a window of 30");
+    }
 
     thread_local! {
         /// The terminal [`logging`]'s line goes to when no board takes it,

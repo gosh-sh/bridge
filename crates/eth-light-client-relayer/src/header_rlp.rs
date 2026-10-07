@@ -93,6 +93,8 @@ pub fn encode_header_rlp(block: &Value) -> Result<Vec<u8>, RelayerError> {
         hx_opt(block, "excessBlobGas")?,
         hx_opt(block, "parentBeaconBlockRoot")?,
         hx_opt(block, "requestsHash")?,
+        hx_opt(block, "blockAccessListHash")?,
+        hx_opt(block, "slotNumber")?,
     ];
     let n_opt = optionals.iter().filter(|o| o.is_some()).count();
     let mut s = RlpStream::new_list(15 + n_opt);
@@ -246,6 +248,16 @@ mod tests {
     #[test]
     fn mainnet_prague_rlp_keccak_matches_hash() {
         let v: Value = serde_json::from_str(include_str!("fixtures/mainnet_prague.json"))
+            .expect("fixture json");
+        let rlp = encode_header_rlp(&v).unwrap();
+        let got = keccak256(&rlp);
+        let want = hex::decode(v["hash"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+        assert_eq!(hex::encode(got), hex::encode(&want));
+    }
+
+    #[test]
+    fn sepolia_amsterdam_rlp_keccak_matches_hash() {
+        let v: Value = serde_json::from_str(include_str!("fixtures/sepolia_amsterdam.json"))
             .expect("fixture json");
         let rlp = encode_header_rlp(&v).unwrap();
         let got = keccak256(&rlp);

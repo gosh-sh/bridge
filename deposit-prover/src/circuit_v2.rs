@@ -111,14 +111,19 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 /// for every block. The true header length is still bound cryptographically via
 /// the `keccak_var_len` length witness.
 ///
-/// Sized for the Prague/Isthmus 21-field header table: axiom-eth's
-/// Cancun/Ecotone `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the
-/// EIP-7685 `requestsHash`, and with `gasLimit` widened to 8 bytes so Arbitrum
-/// One's 2^50 limit fits. Covers every shape the supported chains emit today:
-/// Arbitrum (16 fields, no `withdrawalsRoot`), post-Shanghai (17), OP Stack
-/// Ecotone (20: + `blobGasUsed` / `excessBlobGas` / `parentBeaconBlockRoot`),
-/// and Prague / OP Isthmus (21: + `requestsHash` — Base, Mantle, World Chain,
-/// OP Mainnet and Sepolia are all here as of 2026-07).
+/// Sized for a 24-slot header table: axiom-eth's Cancun/Ecotone
+/// `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the EIP-7685
+/// `requestsHash`, the Amsterdam tail (EIP-7928 `blockAccessListHash`, EIP-7843
+/// `slotNumber`) and one spare 32-byte slot, with `gasLimit` widened to 8 bytes
+/// so Arbitrum One's 2^50 limit fits. Covers every shape the supported chains
+/// emit: Arbitrum (16 fields, no `withdrawalsRoot`), post-Shanghai (17), OP
+/// Stack Ecotone (20: + `blobGasUsed` / `excessBlobGas` /
+/// `parentBeaconBlockRoot` — Blast), Prague / OP Isthmus (21: + `requestsHash`
+/// — Ethereum mainnet, Base, Mantle, World Chain, OP Mainnet) and Amsterdam
+/// (23 — Sepolia since 2026-10-06). The spare slot absorbs one more appended
+/// hash or integer field, which is how every L1 fork and every OP Stack port of
+/// one has extended the header so far, without another VK rotation; 792 B still
+/// fits the same 6 keccak-f rounds as 717 B did.
 ///
 /// The value is the RLP-encoded worst case implied by
 /// [`BLOCK_HEADER_MAX_FIELD_LENS`]: each field costs `max_len` plus its
@@ -135,12 +140,13 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 ///
 /// The receipt + MPT proof are already fixed-size (axiom-eth pads them to
 /// `value_max_byte_len` / `max_depth`).
-pub const MAX_BLOCK_HEADER_BYTES: usize = 717;
+pub const MAX_BLOCK_HEADER_BYTES: usize = 792;
 
 /// Per-field max byte lengths for `decompose_rlp_array_*`. Slots 0–19 follow
 /// axiom-eth `MAINNET_HEADER_FIELDS_MAX_BYTES` (Cancun/Ecotone) except
-/// `gasLimit`; slot 20 is the Prague / OP Isthmus `requestsHash`.
-pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 21] = [
+/// `gasLimit`; slot 20 is the Prague / OP Isthmus `requestsHash`, slots 21–22
+/// the Amsterdam tail, slot 23 the spare.
+pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 24] = [
     32,  // 0: parentHash
     32,  // 1: ommersHash
     20,  // 2: beneficiary (coinbase)
@@ -162,6 +168,9 @@ pub const BLOCK_HEADER_MAX_FIELD_LENS: [usize; 21] = [
     8,   // 18: excessBlobGas (post-Cancun / Ecotone)
     32,  // 19: parentBeaconBlockRoot (post-Cancun / Ecotone)
     32,  // 20: requestsHash (post-Prague / OP Isthmus, EIP-7685)
+    32,  // 21: blockAccessListHash (post-Amsterdam, EIP-7928)
+    8,   // 22: slotNumber (post-Amsterdam, EIP-7843)
+    32,  // 23: spare for the next appended field
 ];
 
 /// Worst-case RLP length implied by [`BLOCK_HEADER_MAX_FIELD_LENS`], so a
@@ -379,7 +388,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Computed block hash (32 bytes)");
 
         // Parse block header RLP to extract receiptsRoot (field index 5).
-        // 21-slot Prague/Isthmus table (see `BLOCK_HEADER_MAX_FIELD_LENS`).
+        // 24-slot table (see `BLOCK_HEADER_MAX_FIELD_LENS`).
         let rlp_chip = chip.rlp();
         let block_header_max_field_lens = BLOCK_HEADER_MAX_FIELD_LENS.to_vec();
 
@@ -387,7 +396,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             ctx,
             block_header_rlp_bytes,
             &block_header_max_field_lens,
-            true, // variable length (16–21 fields)
+            true, // variable length (16–24 fields)
         );
 
         // BC-D03: the length fed to `keccak_var_len` and the length the RLP

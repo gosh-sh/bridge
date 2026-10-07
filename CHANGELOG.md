@@ -24,6 +24,27 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The deposit-prover verification key is rotated again, for Amsterdam
+  block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
+  353024; Hoodi and mainnet not yet scheduled) execution headers carry 23
+  fields, `blockAccessListHash` and `slotNumber` after `requestsHash`, and
+  the previous key could not prove a deposit in such a block. The circuit
+  now accepts headers of 16 to 24 fields up to 792 bytes, so one key covers
+  mainnet before and after the fork, Sepolia, and the L2s the bridge reads
+  (Arbitrum 16 fields, Blast 20, Base, OP, Mantle and World Chain 21), with
+  one spare slot for the next appended field. A header padded with junk is
+  still rejected. The relayer's header encoder emits the two new fields.
+  No deposit is stuck: no bridge contract on Sepolia has had an event since
+  the fork.
+
+  This commit embeds the new key in `eccUSDCBridge` and rebuilds
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` with `sold` 0.80.0; the ABI
+  is unchanged. Operators: deploy that tvc and, at the same time, rebuild
+  the `deposit-prover` examples (`cargo build --release --examples`) on
+  every relayer host and anywhere `ackinacki-bridge deposit` proves.
+  Proofs made with the previous key stop verifying, and a stale
+  `target/release/examples/<name>` produces proofs the new key rejects.
+
 - **The deposit-prover verification key is rotated.** The enclosing
   transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
   calldata up to 2048 bytes. Type 2 access-list RLP is up to 512

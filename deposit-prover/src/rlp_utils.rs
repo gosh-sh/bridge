@@ -163,44 +163,76 @@ pub fn encode_receipt(receipt: &TransactionReceipt) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Read the Prague / OP Isthmus `requestsHash` (EIP-7685) out of the RPC
-/// response's untyped `other` map.
+/// Header fields appended after `parentBeaconBlockRoot` that ethers-core
+/// 2.0.14 doesn't model, in RLP order, with the width of each: `Some(32)` is a
+/// fixed hash, `None` an integer quantity (RLP drops its leading zeros).
 ///
-/// ethers-core 2.0.14 predates EIP-7685, so `requestsHash` never lands in a
-/// typed `Block` field — dropping it silently is what makes
-/// [`encode_block_header`] produce a non-canonical header on every Prague chain
-/// (Base, Mantle, World Chain, OP Mainnet, Sepolia as of 2026-07).
-fn requests_hash_from_other<T>(block: &Block<T>) -> Result<Option<H256>> {
-    let Some(raw) = block.other.get("requestsHash") else {
-        return Ok(None);
-    };
-    let hex = raw
-        .as_str()
-        .ok_or_else(|| anyhow!("requestsHash is not a string: {raw}"))?;
-    let bytes = hex::decode(hex.trim_start_matches("0x"))
-        .map_err(|e| anyhow!("requestsHash is not hex: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(anyhow!(
-            "requestsHash is {} bytes, expected 32",
-            bytes.len()
-        ));
+/// They never land in a typed `Block` field, only in the untyped `other` map —
+/// dropping them silently is what makes [`encode_block_header`] produce a
+/// non-canonical header on every chain past the fork that added them.
+const HEADER_TAIL_FIELDS: [(&str, Option<usize>); 3] = [
+    ("requestsHash", Some(32)),        // Prague / OP Isthmus, EIP-7685
+    ("blockAccessListHash", Some(32)), // Amsterdam, EIP-7928
+    ("slotNumber", None),              // Amsterdam, EIP-7843
+];
+
+/// Read [`HEADER_TAIL_FIELDS`] out of the RPC response's `other` map, as the
+/// byte strings to append. Each fork only ever appends, so a later field
+/// without an earlier one is a header shape no chain emits and is rejected.
+fn header_tail_from_other<T>(block: &Block<T>) -> Result<Vec<Vec<u8>>> {
+    let mut tail = Vec::new();
+    for (key, width) in HEADER_TAIL_FIELDS {
+        let Some(raw) = block.other.get(key) else {
+            if let Some((later, _)) = HEADER_TAIL_FIELDS[tail.len() + 1..]
+                .iter()
+                .find(|(k, _)| block.other.contains_key(*k))
+            {
+                return Err(anyhow!("header carries {later} but not {key}"));
+            }
+            break;
+        };
+        let hex = raw
+            .as_str()
+            .ok_or_else(|| anyhow!("{key} is not a string: {raw}"))?
+            .trim_start_matches("0x");
+        let mut bytes = if hex.len() % 2 == 1 {
+            hex::decode(format!("0{hex}"))
+        } else {
+            hex::decode(hex)
+        }
+        .map_err(|e| anyhow!("{key} is not hex: {e}"))?;
+        match width {
+            Some(n) if bytes.len() != n => {
+                return Err(anyhow!("{key} is {} bytes, expected {n}", bytes.len()));
+            },
+            Some(_) => {},
+            None => {
+                let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
+                bytes.drain(..start);
+                if bytes.len() > 8 {
+                    return Err(anyhow!("{key} is {} bytes, expected at most 8", bytes.len()));
+                }
+            },
+        }
+        tail.push(bytes);
     }
-    Ok(Some(H256::from_slice(&bytes)))
+    Ok(tail)
 }
 
 /// RLP encode a block header
 ///
-/// Block header structure (through Prague / OP Stack Isthmus):
+/// Block header structure (through Amsterdam):
 /// [parentHash, ommersHash, beneficiary, stateRoot, transactionsRoot,
 /// receiptsRoot, logsBloom, difficulty, number, gasLimit, gasUsed, timestamp,
 /// extraData, mixHash, nonce, baseFeePerGas?, withdrawalsRoot?, blobGasUsed?,
-/// excessBlobGas?, parentBeaconBlockRoot?, requestsHash?]
+/// excessBlobGas?, parentBeaconBlockRoot?, requestsHash?,
+/// blockAccessListHash?, slotNumber?]
 ///
 /// Optional fields are appended only when present so `keccak(header) ==
-/// block.hash` on Arbitrum (no `withdrawalsRoot`), L1 Cancun, OP Stack Ecotone
-/// and Prague / Isthmus alike. Encoding matches axiom-eth
-/// `providers/block.rs::get_block_rlp` (ethers `rlp` crate) plus the EIP-7685
-/// tail ethers-core 2.0.14 doesn't model.
+/// block.hash` on Arbitrum (no `withdrawalsRoot`), L1 Cancun, OP Stack Ecotone,
+/// Prague / Isthmus and Amsterdam alike. Encoding matches axiom-eth
+/// `providers/block.rs::get_block_rlp` (ethers `rlp` crate) plus the
+/// [`HEADER_TAIL_FIELDS`] ethers-core 2.0.14 doesn't model.
 ///
 /// Callers that fetched the block from an RPC should assert
 /// `keccak256(result) == block.hash` — see [`verify_block_header_rlp`].
@@ -212,16 +244,15 @@ pub fn encode_block_header<T>(block: &Block<T>) -> Result<Vec<u8>> {
     let blob_gas_used = block.blob_gas_used;
     let excess_blob_gas = block.excess_blob_gas;
     let parent_beacon_block_root = block.parent_beacon_block_root;
-    let requests_hash = requests_hash_from_other(block)?;
+    let tail = header_tail_from_other(block)?;
 
-    let mut rlp_len = 15;
+    let mut rlp_len = 15 + tail.len();
     for opt in [
         base_fee.is_some(),
         withdrawals_root.is_some(),
         blob_gas_used.is_some(),
         excess_blob_gas.is_some(),
         parent_beacon_block_root.is_some(),
-        requests_hash.is_some(),
     ] {
         rlp_len += opt as usize;
     }
@@ -276,8 +307,8 @@ pub fn encode_block_header<T>(block: &Block<T>) -> Result<Vec<u8>> {
     if let Some(parent_beacon_block_root) = parent_beacon_block_root {
         rlp.append(&parent_beacon_block_root);
     }
-    if let Some(requests_hash) = requests_hash {
-        rlp.append(&requests_hash);
+    for field in &tail {
+        rlp.append(&field.as_slice());
     }
     Ok(rlp.out().into())
 }
@@ -700,9 +731,16 @@ mod tests {
 
     /// Verbatim `eth_getBlockByNumber` responses (minus the tx/withdrawal
     /// lists) for one block per header shape the supported chains emit.
-    const HEADER_SAMPLES: [(&str, &str, usize); 3] = [
-        // Prague / EIP-7685: 21 fields incl. `requestsHash`. Base, Mantle,
-        // World Chain and OP Mainnet have the same shape.
+    const HEADER_SAMPLES: [(&str, &str, usize); 5] = [
+        // Amsterdam: 23 fields, + `blockAccessListHash` / `slotNumber`
+        // (Sepolia since 2026-10-06).
+        (
+            "sepolia_amsterdam",
+            include_str!("../fixtures/headers/sepolia_amsterdam.json"),
+            23,
+        ),
+        // Prague / EIP-7685: 21 fields incl. `requestsHash`. Ethereum mainnet,
+        // Base, Mantle, World Chain and OP Mainnet have the same shape.
         (
             "sepolia_prague",
             include_str!("../fixtures/headers/sepolia_prague.json"),
@@ -713,6 +751,12 @@ mod tests {
             "op_isthmus",
             include_str!("../fixtures/headers/op_isthmus.json"),
             21,
+        ),
+        // OP Stack Ecotone without Isthmus: 20 fields, no `requestsHash` (Blast).
+        (
+            "blast_ecotone",
+            include_str!("../fixtures/headers/blast_ecotone.json"),
+            20,
         ),
         // Arbitrum One: no `withdrawalsRoot`, no Cancun tail, and a 2^50
         // `gasLimit` (7 bytes) — the widest numeric field of any supported chain.
@@ -780,7 +824,7 @@ mod tests {
     /// that hashes to a plausible-looking non-canonical value.
     #[test]
     fn header_without_requests_hash_is_rejected() {
-        let (_, raw, _) = HEADER_SAMPLES[0];
+        let (_, raw, _) = HEADER_SAMPLES[1];
         let mut block: Block<H256> = serde_json::from_str(raw).unwrap();
         assert!(
             block.other.remove("requestsHash").is_some(),
@@ -794,6 +838,49 @@ mod tests {
             err.contains("does not reproduce the block hash"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Same for the Amsterdam tail: dropping it must fail, and so must a header
+    /// that skips an earlier tail field but carries a later one.
+    #[test]
+    fn header_without_amsterdam_tail_is_rejected() {
+        let (_, raw, _) = HEADER_SAMPLES[0];
+        let full: Block<H256> = serde_json::from_str(raw).unwrap();
+
+        let mut block = full.clone();
+        assert!(block.other.remove("slotNumber").is_some());
+        assert_eq!(rlp_field_count(&encode_block_header(&block).unwrap()), 22);
+        assert!(verify_block_header_rlp(&block).is_err());
+
+        let mut block = full.clone();
+        assert!(block.other.remove("blockAccessListHash").is_some());
+        let err = encode_block_header(&block).unwrap_err().to_string();
+        assert!(
+            err.contains("slotNumber but not blockAccessListHash"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The circuit's per-field caps must hold the Amsterdam tail, and the table
+    /// must keep its spare slot so the next appended field needs no VK rotation.
+    #[test]
+    fn header_table_covers_amsterdam_with_a_spare_slot() {
+        use crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS;
+        let (_, raw, fields) = HEADER_SAMPLES[0];
+        assert!(BLOCK_HEADER_MAX_FIELD_LENS.len() > fields);
+        let block: Block<H256> = serde_json::from_str(raw).unwrap();
+        let tail = header_tail_from_other(&block).unwrap();
+        assert_eq!(tail.len(), HEADER_TAIL_FIELDS.len());
+        for (i, field) in tail.iter().enumerate() {
+            let slot = 20 + i;
+            assert!(
+                field.len() <= BLOCK_HEADER_MAX_FIELD_LENS[slot],
+                "{}: {} bytes, slot {slot} caps at {}",
+                HEADER_TAIL_FIELDS[i].0,
+                field.len(),
+                BLOCK_HEADER_MAX_FIELD_LENS[slot]
+            );
+        }
     }
 
     /// The out-of-circuit `chain_id` decode must agree with what the circuit
@@ -885,7 +972,7 @@ mod tests {
     /// it.
     #[test]
     fn arbitrum_gas_limit_fits_the_circuit_field_cap() {
-        let (_, raw, _) = HEADER_SAMPLES[2];
+        let (_, raw, _) = HEADER_SAMPLES[4];
         let block: Block<H256> = serde_json::from_str(raw).unwrap();
         let gas_limit_bytes = (block.gas_limit.bits() + 7) / 8;
         assert!(

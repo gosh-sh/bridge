@@ -55,3 +55,4 @@
 
 # --- Deploy target ------------------------------------------------------------
 # BRIDGE_ADDRESS=0x…                            # AckiNackiBridge on EVM mainnet
+# BRIDGE_DEPLOY_BLOCK=…                         # block that deploy was created in

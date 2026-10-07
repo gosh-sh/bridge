@@ -11,6 +11,10 @@ ok() {
   printf 'OK: %s\n' "$*"
 }
 
+warn() {
+  printf 'WARN: %s\n' "$*" >&2
+}
+
 lower() {
   tr '[:upper:]' '[:lower:]'
 }
@@ -81,7 +85,8 @@ esac
 required=(
   BRIDGE_REPO_DIR EXPECTED_BRIDGE_COMMIT
   RELAYER_BINARY EXPECTED_RELAYER_SHA256
-  RELAYER_STATE_PATH RPC_URL BRIDGE_ADDRESS RELAYER_ADDRESS RELAYER_PRIVATE_KEY
+  RELAYER_STATE_PATH RPC_URL BRIDGE_ADDRESS BRIDGE_DEPLOY_BLOCK
+  RELAYER_ADDRESS RELAYER_PRIVATE_KEY
   MIN_RELAYER_BALANCE_WEI BRIDGE_GQL_ENDPOINT BRIDGE_PARAMS_DIR
   BRIDGE_BOOTSTRAP_SEQNO BRIDGE_CONFIG_DIR BRIDGE_STATE_DIR BRIDGE_BK_SET_CONFIG
   BRIDGE_BK_SET_EXPECTED_SHA256 EXPECTED_BK_SET_COMMITMENT
@@ -107,6 +112,9 @@ done
 [[ "$BRIDGE_ANCHOR_LEVEL" == 2 ]] || die "only L2 anchor level 2 is allowed"
 [[ "$EXPECTED_EVM_CHAIN_ID" == 11155111 ]] || die "expected Sepolia chain id"
 [[ "$BRIDGE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad bridge address"
+[[ "$BRIDGE_DEPLOY_BLOCK" =~ ^[0-9]+$ ]] || die "BRIDGE_DEPLOY_BLOCK must be a block number"
+BRIDGE_DEPLOY_BLOCK=$((10#$BRIDGE_DEPLOY_BLOCK)) # decimal even with leading zeros
+(( BRIDGE_DEPLOY_BLOCK > 0 )) || die "BRIDGE_DEPLOY_BLOCK=0 scans from genesis; set the bridge's deploy block"
 [[ "$RELAYER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad relayer address"
 [[ "$RELAYER_PRIVATE_KEY" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "bad private key shape"
 [[ "$BRIDGE_BOOTSTRAP_SEQNO" =~ ^[0-9]+$ ]] || die "bad bootstrap seqno"
@@ -193,6 +201,34 @@ chain_id=$(cast chain-id --rpc-url "$RPC_URL")
 [[ "$chain_id" == "$EXPECTED_EVM_CHAIN_ID" ]] ||
   die "RPC chain id $chain_id != $EXPECTED_EVM_CHAIN_ID"
 require_code "$BRIDGE_ADDRESS" "bridge"
+
+# The scan accepts any bound at or before the first block with runtime code
+# at the address; a bound after it leaves logs out of the walk. The compare
+# needs an RPC that serves historical state; one that does not is skipped
+# with the RPC's error in a warning, so an archive-less RPC still starts the
+# relayer.
+head_block=$(cast block-number --rpc-url "$RPC_URL")
+(( BRIDGE_DEPLOY_BLOCK <= head_block )) || die "BRIDGE_DEPLOY_BLOCK is above the chain head ($head_block)"
+# stdout only is compared: anything `cast` prints to stderr on success must
+# not end up in the value. The stderr goes to a file for the warning.
+cast_err=$(mktemp)
+trap 'rm -f "$cast_err"' EXIT
+if code_at=$(cast code "$BRIDGE_ADDRESS" --block "$BRIDGE_DEPLOY_BLOCK" --rpc-url "$RPC_URL" 2>"$cast_err") &&
+  code_before=$(cast code "$BRIDGE_ADDRESS" --block "$((BRIDGE_DEPLOY_BLOCK - 1))" --rpc-url "$RPC_URL" 2>>"$cast_err"); then
+  [[ "$code_before" == 0x ]] ||
+    die "bridge code already present at block $((BRIDGE_DEPLOY_BLOCK - 1)): BRIDGE_DEPLOY_BLOCK is after the deploy block"
+  if [[ "$code_at" != 0x && ${#code_at} -gt 100 ]]; then
+    ok "BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK is the bridge's deploy block"
+  else
+    ok "BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK is before the bridge's deploy block (accepted: the scan only needs a bound at or before it)"
+  fi
+else
+  # URLs stripped: a transport error can echo the RPC URL, key included.
+  cast_err_text=$(tr '\n' ' ' <"$cast_err" | sed -E 's#[A-Za-z][A-Za-z0-9+.-]*://[^ )]+#<rpc>#g' | cut -c1-240)
+  warn "RPC does not serve historical code (${cast_err_text:-no error text}); BRIDGE_DEPLOY_BLOCK=$BRIDGE_DEPLOY_BLOCK not verified against the chain"
+fi
+rm -f "$cast_err"
+trap - EXIT
 
 owner=$(call_word "$BRIDGE_ADDRESS" 'owner()(address)')
 [[ "${owner,,}" == "${RELAYER_ADDRESS,,}" ]] || die "bridge owner $owner != expected EOA $RELAYER_ADDRESS"

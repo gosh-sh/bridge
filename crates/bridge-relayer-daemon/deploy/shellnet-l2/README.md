@@ -152,7 +152,9 @@ sha256sum ../bridge-prover-libraries/target/release/relayer target/release/aggre
 
 Update, in the env files kept outside Git: `EXPECTED_BRIDGE_COMMIT` (in `.env`
 and in the runtime env — preflight reads both), `EXPECTED_RELAYER_SHA256`,
-`EXPECTED_AGGREGATE_PROOF_SHA256`, and `RELAYER_IMAGE` for the new tag. Then
+`EXPECTED_AGGREGATE_PROOF_SHA256`, `RELAYER_IMAGE` for the new tag, and
+`BRIDGE_DEPLOY_BLOCK` in the runtime env if it is not there yet (preflight
+requires it; see "Startup scan"). Then
 rebuild and restart with the same verification the first install uses:
 
 ```bash
@@ -215,6 +217,31 @@ Before the next 16,384-block boundary, `NotYetAvailable` / `block source still
 has no data` is expected. Alert on `hard aborting`, `BridgeReverted`, startup
 drift, SRS/VK drift, pending nonce, or unequal local/on-chain cursors after a
 receipt.
+
+## Startup scan
+
+On every start `daemon-live` reads the contract's ten layer windows and
+rebuilds their per-slot heights from `LayerAnchorAppended` logs. The scan
+walks backwards from the head in `BRIDGE_GET_LOGS_CHUNK_BLOCKS`-block
+`eth_getLogs` calls, `BRIDGE_GET_LOGS_PAUSE_MS` apart, and stops as soon as
+every window's entries are covered, or at `BRIDGE_DEPLOY_BLOCK` (the block the
+bridge was deployed in; `preflight.sh` requires it and, when the RPC serves
+historical code, checks it against the chain). The stop point is the oldest
+entry still held by any window: layer N is appended at `128^N` boundaries
+only, so a layer that is not full keeps its very first entry; layer 3 gets
+that entry at the first `128^3` boundary after the seed (hours to days) and
+fills only after about 2.8 years, so for most of a bridge's life the walk
+reaches back to its first layer-3 anchor, nearly to the deploy block.
+Budget about `(head - deploy_block) / span` calls: a few per day of bridge age
+on a 2 000-block span, about 720 per day on a capped, rate-limited RPC
+(Alchemy's free tier: 10 blocks, ~4 calls/s), that is three minutes of scan
+per day of bridge age at every start. The RPC must also serve logs back to
+the oldest anchor the windows hold: publicnode keeps only the newest
+~10 000 blocks, Alchemy and Tenderly serve full history. A cache of the heights the daemon
+already knows from its own state is the planned follow-up. The log shows
+`scanning LayerAnchorAppended backwards from the
+head` with the chunk count, a progress line every 200 chunks and
+`LayerAnchorAppended scan done` with `covered=true` when it stopped early.
 
 ## GraphQL failover and metrics
 

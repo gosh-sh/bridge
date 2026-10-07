@@ -33,8 +33,8 @@ pub use aggregator::{
 };
 pub use bridge::{
     classify_withdraw_revert, BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState,
-    DryRunOutcome, EthBridgeClient, MockBridgeClient, SubmitOutcome, WithdrawBridge,
-    WithdrawRevertKind, WithdrawSubmitOutcome,
+    DryRunOutcome, EthBridgeClient, LogScanConfig, MockBridgeClient, SubmitOutcome, WithdrawBridge,
+    WithdrawRevertKind, WithdrawSubmitOutcome, GET_LOGS_CHUNK_BLOCKS,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,

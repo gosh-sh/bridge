@@ -49,6 +49,7 @@ use alloy::{
     providers::Provider,
     rpc::types::Filter,
     sol_types::SolEvent,
+    transports::TransportError,
 };
 use async_trait::async_trait;
 // `EthBridgeContractState` and `HistoryWindow` are the alloy-neutral shape shared
@@ -62,6 +63,307 @@ use crate::{
     types::{AnBlockData, BkSetUpdateData, MAX_LAYER_HASHES},
     withdrawal::WithdrawalPublicInputs,
 };
+
+/// Environment variable behind `--bridge-deploy-block` on both entry points
+/// (`relayer daemon-live`, `ackinacki-bridge withdraw`); same name as the
+/// deposit relayer so one operator env covers both daemons. Named in the
+/// messages that ask the operator to check it.
+pub const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
+
+/// Inclusive `eth_getLogs` span per request. Alchemy free-tier is 10;
+/// paid RPC is typically 2_000. The scan walks backwards from the head and
+/// stops once every non-empty window's entries are covered, or at
+/// [`BRIDGE_DEPLOY_BLOCK_ENV`]; the stop point is the oldest entry still
+/// held by any window. Layer N is appended at `128^N` boundaries, so at
+/// anchor level 2 layers 1 and 2 fill in about 8 days, while layer 3 gets
+/// its first entry at the first `128^3` boundary after the seed (hours to
+/// days) and is full only after about 2.8 years: for most of a bridge's
+/// life the walk ends at its first layer-3 anchor, in practice near the
+/// deploy block. The cost is about `(head - deploy_block) / span` calls, a
+/// few per day of bridge age on a 2_000 span and about 720 per day (three
+/// minutes a day at 4 calls/s) on a 10-block cap. It runs at `daemon-live`
+/// startup, and in the CLI in preflight and after each coverage poll that
+/// observed the target.
+pub const GET_LOGS_CHUNK_BLOCKS: u64 = 2_000;
+
+/// Attempts for one `eth_getLogs` call of that scan on a retryable RPC
+/// error (429, 5xx, transport), with a doubling delay starting at half a
+/// second between them. A span-cap rejection (`-32600` / `-32602`) is not
+/// retried here: on any chunk but the newest it fails the same way again; on
+/// the newest chunk, whose end is the pinned head a lagging backend may not
+/// have yet, it re-pins and re-reads the snapshot instead.
+const GET_LOGS_MAX_ATTEMPTS: u32 = 8;
+const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 500;
+const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
+/// Log a progress line every this many `eth_getLogs` chunks.
+const GET_LOGS_PROGRESS_EVERY: usize = 200;
+/// [`EthBridgeClient::read_full_state`] pins every read to one block; a
+/// lagging backend behind a load-balanced RPC may answer "header not found"
+/// for it, omit the newest log, or reject the newest span, so the whole
+/// snapshot is read up to this many times for such failures (a failure
+/// found only after the walk adds its own single re-read,
+/// [`FULL_WALK_RE_READS`]), spaced
+/// [`READ_FULL_STATE_RETRY_DELAY_MS`] apart: two delays span a Sepolia
+/// slot, so a backend one block behind has caught up by the last read.
+const READ_FULL_STATE_ATTEMPTS: u32 = 3;
+const READ_FULL_STATE_RETRY_DELAY_MS: u64 = 6_000;
+/// Re-reads of the snapshot after a failure found only once the walk is
+/// complete (a short log set, a slot or `lastHeight` mismatch, a replaced
+/// head block), counted on
+/// their own: each one walks the whole range again, so there is one,
+/// whatever else failed before it. A backend still behind on that re-read
+/// is left to the callers, which all retry at a higher level: the CLI's
+/// coverage rounds after the burn, an exit-2 re-run in preflight, a
+/// container restart for `daemon-live`.
+const FULL_WALK_RE_READS: u32 = 1;
+
+/// How the `LayerAnchorAppended` scan of [`EthBridgeClient::read_full_state`]
+/// walks the chain. Both entry points build it from their clap arguments
+/// (`--bridge-deploy-block`, `--get-logs-chunk-blocks`,
+/// `--get-logs-pause-ms`, each with an `env =` of the same name); a client
+/// from [`EthBridgeClient::new`] carries [`LogScanConfig::default`] and is
+/// not meant to scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogScanConfig {
+    /// Where the backward scan stops when a window is not covered yet: the
+    /// block the bridge was deployed in. `0` means genesis: a successful
+    /// scan still stops at the bridge's oldest held anchor, but a short
+    /// log set then walks back to genesis before failing; warned about
+    /// when it runs.
+    pub deploy_block: u64,
+    /// Inclusive block span of one `eth_getLogs` call. `0` means
+    /// [`GET_LOGS_CHUNK_BLOCKS`].
+    pub chunk_blocks: u64,
+    /// Pause between two `eth_getLogs` calls.
+    pub pause: Duration,
+}
+
+impl LogScanConfig {
+    /// The settings as the scan uses them: a span of 0 means
+    /// [`GET_LOGS_CHUNK_BLOCKS`].
+    pub fn normalized(self) -> Self {
+        Self {
+            chunk_blocks: if self.chunk_blocks == 0 {
+                GET_LOGS_CHUNK_BLOCKS
+            } else {
+                self.chunk_blocks
+            },
+            ..self
+        }
+    }
+}
+
+impl Default for LogScanConfig {
+    /// Genesis, the library span, no pause.
+    fn default() -> Self {
+        Self {
+            deploy_block: 0,
+            chunk_blocks: GET_LOGS_CHUNK_BLOCKS,
+            pause: Duration::ZERO,
+        }
+    }
+}
+
+/// Whether a failed `eth_getLogs` of the scan is worth retrying. A JSON-RPC
+/// error response with code `-32600` (invalid request: how Alchemy rejects
+/// a span over its cap) or `-32602` (invalid params) fails the same way on
+/// every attempt. Everything else (HTTP 429 / 5xx, transport errors,
+/// provider-specific rate-limit codes) is transient.
+pub fn get_logs_error_is_retryable(e: &TransportError) -> bool {
+    match e {
+        TransportError::ErrorResp(payload) => !matches!(payload.code, -32600 | -32602),
+        _ => true,
+    }
+}
+
+/// Inclusive `(from, to)` spans covering `from_block..=to_block`, newest
+/// first, produced on demand: the backward scan normally stops after a few
+/// of them, and a span list from genesis on a 10-block cap would be over a
+/// million tuples.
+pub fn chunks_newest_first(
+    from_block: u64,
+    to_block: u64,
+    chunk: u64,
+) -> impl Iterator<Item = (u64, u64)> {
+    let mut end = if chunk == 0 || from_block > to_block {
+        None
+    } else {
+        Some(to_block)
+    };
+    std::iter::from_fn(move || {
+        let e = end?;
+        let start = e.saturating_sub(chunk - 1).max(from_block);
+        end = if start > from_block {
+            Some(start - 1)
+        } else {
+            None
+        };
+        Some((start, e))
+    })
+}
+
+/// How many spans [`chunks_newest_first`] yields.
+pub fn chunk_count(from_block: u64, to_block: u64, chunk: u64) -> usize {
+    if chunk == 0 || from_block > to_block {
+        return 0;
+    }
+    ((to_block - from_block) / chunk + 1) as usize
+}
+
+/// Whether every window with entries has at least as many logs as entries:
+/// the backward scan's stop condition.
+pub fn windows_covered(found: &[usize], needed: &[usize]) -> bool {
+    needed.iter().zip(found).all(|(&n, &f)| f >= n)
+}
+
+/// Flatten chunks visited newest-first (each chunk oldest-first inside)
+/// into one oldest-first list.
+pub fn chronological(newest_chunk_first: Vec<Vec<AnchorEvent>>) -> Vec<AnchorEvent> {
+    newest_chunk_first.into_iter().rev().flatten().collect()
+}
+
+/// One `LayerAnchorAppended` log: `(layer, blockHeight, hashValue)`, the
+/// hash already in the LE form `BridgeState.layer_windows` stores (see
+/// [`EthBridgeClient::read_full_state`] on endianness).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorEvent {
+    pub layer: u8,
+    pub height: u64,
+    pub hash_le: [u8; 32],
+}
+
+/// Why [`paint_heights_from_events`] refused a set of logs.
+#[derive(Debug, thiserror::Error)]
+pub enum PaintError {
+    /// Fewer logs than window entries: the scan did not reach far enough
+    /// back (the deploy block is wrong), or a backend one block behind
+    /// omitted the newest append on a window that is not full yet. A
+    /// re-read settles which; after the attempts the message names the
+    /// deploy block.
+    #[error(
+        "layer {layer} has data_len={data_len} but only {found} LayerAnchorAppended logs in the \
+         scanned range: is {env} the block the bridge was deployed in?",
+        env = BRIDGE_DEPLOY_BLOCK_ENV
+    )]
+    Short {
+        layer: usize,
+        data_len: usize,
+        found: usize,
+    },
+    /// A kept log and the window slot it should fill disagree: an append
+    /// landed between the two reads, or a backend returned a partial log
+    /// set. A re-read resolves it.
+    #[error(
+        "layer {layer} slot {slot}: LayerAnchorAppended hash {log_hash} (height {height}) != \
+         window slot hash {slot_hash} (logs and window snapshot disagree; re-read)"
+    )]
+    SlotMismatch {
+        layer: usize,
+        slot: usize,
+        height: u64,
+        log_hash: String,
+        slot_hash: String,
+    },
+    /// Every slot agrees but the window's `lastHeight` does not. Same
+    /// causes as [`PaintError::SlotMismatch`]; a re-read resolves it.
+    #[error(
+        "layer {layer}: newest LayerAnchorAppended height {newest} != on-chain lastHeight \
+         {last_height} (logs and window snapshot disagree; re-read)"
+    )]
+    LastHeight {
+        layer: usize,
+        newest: u64,
+        last_height: u64,
+    },
+    /// `HistoryWindow::apply_chronological_heights` refused the slice. Not
+    /// reachable with exactly `data_len` heights; kept so nothing panics.
+    #[error("layer {layer}: {reason}")]
+    Shape { layer: usize, reason: String },
+}
+
+impl PaintError {
+    /// `true` when a fresh snapshot can succeed where this one failed.
+    pub fn is_transient(&self) -> bool {
+        !matches!(self, PaintError::Shape { .. })
+    }
+}
+
+impl From<PaintError> for RelayerError {
+    fn from(e: PaintError) -> Self {
+        RelayerError::other(e.to_string())
+    }
+}
+
+/// Paint `windows[layer-1].heights` from chronological `LayerAnchorAppended`
+/// events (oldest first). Keeps the last `data_len` events per layer,
+/// matching `_appendLayer` ring order, and checks each kept event against
+/// the slot it fills: `_appendLayer` writes `data[writeCursor] = hashValue`
+/// and `lastHeight = blockHeight` from the same values it emits, so a hash
+/// that differs, or a newest height that is not `lastHeight`, means the
+/// logs and the window snapshot are from different blocks (or the log set
+/// is partial) and every height would land one slot off. Empty windows are
+/// left alone.
+pub fn paint_heights_from_events(
+    windows: &mut [HistoryWindow],
+    events: &[AnchorEvent],
+) -> Result<(), PaintError> {
+    let mut by_layer: Vec<Vec<AnchorEvent>> = vec![Vec::new(); MAX_LAYER_HASHES];
+    for ev in events {
+        if ev.layer == 0 || (ev.layer as usize) > MAX_LAYER_HASHES {
+            continue;
+        }
+        by_layer[(ev.layer as usize) - 1].push(*ev);
+    }
+    for (idx, window) in windows.iter_mut().enumerate() {
+        if window.data_len == 0 {
+            continue;
+        }
+        let evs = &by_layer[idx];
+        if evs.len() < window.data_len {
+            return Err(PaintError::Short {
+                layer: idx + 1,
+                data_len: window.data_len,
+                found: evs.len(),
+            });
+        }
+        let oldest_first = &evs[evs.len() - window.data_len..];
+        for (slot, ((slot_hash, _), ev)) in
+            window.iter_chronological().zip(oldest_first).enumerate()
+        {
+            if slot_hash != ev.hash_le {
+                return Err(PaintError::SlotMismatch {
+                    layer: idx + 1,
+                    slot,
+                    height: ev.height,
+                    log_hash: hex_le(&ev.hash_le),
+                    slot_hash: hex_le(&slot_hash),
+                });
+            }
+        }
+        if let Some(newest) = oldest_first.last() {
+            if newest.height != window.last_height {
+                return Err(PaintError::LastHeight {
+                    layer: idx + 1,
+                    newest: newest.height,
+                    last_height: window.last_height,
+                });
+            }
+        }
+        let heights: Vec<u64> = oldest_first.iter().map(|ev| ev.height).collect();
+        window
+            .apply_chronological_heights(&heights)
+            .map_err(|e| PaintError::Shape {
+                layer: idx + 1,
+                reason: e.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
+/// `0x…` rendering of a 32-byte LE slot for messages.
+fn hex_le(bytes: &[u8; 32]) -> String {
+    format!("0x{}", alloy::primitives::hex::encode(bytes))
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Public types
@@ -647,6 +949,11 @@ use sol_bindings::AckiNackiBridge;
 pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     contract: AckiNackiBridge::AckiNackiBridgeInstance<P, N>,
     address: Address,
+    /// How the startup `LayerAnchorAppended` scan walks the chain:
+    /// [`LogScanConfig::default`] from [`Self::new`], explicit in
+    /// [`Self::with_scan_config`]. Set `deploy_block` in production so a
+    /// failed scan does not walk back to genesis.
+    scan: LogScanConfig,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -654,12 +961,150 @@ where
     P: Provider<N> + Clone,
     N: Network,
 {
+    /// A client for calls that never rebuild window heights. It carries
+    /// [`LogScanConfig::default`], so a `read_full_state` on it would walk
+    /// back to genesis (warned about); clients that scan come from
+    /// [`Self::with_scan_config`].
     pub fn new(address: Address, provider: P) -> Self {
+        Self::with_scan_config(address, provider, LogScanConfig::default())
+    }
+
+    /// `scan.chunk_blocks == 0` means [`GET_LOGS_CHUNK_BLOCKS`]
+    /// ([`LogScanConfig::normalized`]).
+    pub fn with_scan_config(address: Address, provider: P, scan: LogScanConfig) -> Self {
         let contract = AckiNackiBridge::new(address, provider);
         Self {
             contract,
             address,
+            scan: scan.normalized(),
         }
+    }
+
+    /// One `storedLastSeenBlockSeqNo` view call at `latest`: the cheap probe
+    /// for "has the covering bundle landed yet" polls.
+    pub async fn stored_last_seen_block_seq_no(&self) -> Result<u64, RelayerError> {
+        self.contract
+            .storedLastSeenBlockSeqNo()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// One `eth_getLogs` for `LayerAnchorAppended` over the newest
+    /// `chunk_blocks` blocks: the call the scan would send first. Lets a
+    /// preflight exercise the RPC's span cap, which the scan itself does not
+    /// on a bridge without anchors (it sends nothing) nor on one younger
+    /// than the span (its only chunk is clamped to the deploy block).
+    /// Same tolerance as the scan's newest chunk: retryable RPC errors are
+    /// retried with backoff, and a rejected span (the head may be one a
+    /// lagging backend does not have yet) is re-pinned a few times before
+    /// the error surfaces. Returns the number of logs in that span.
+    pub async fn probe_log_span(&self) -> Result<usize, RelayerError> {
+        let mut pin = 0u32;
+        loop {
+            pin += 1;
+            let outcome = self.probe_log_span_once().await;
+            match outcome {
+                Ok(n) => return Ok(n),
+                Err(e) if pin < READ_FULL_STATE_ATTEMPTS => {
+                    tracing::warn!(
+                        pin,
+                        error = %e,
+                        "LayerAnchorAppended probe failed; re-pinning the head"
+                    );
+                    tokio::time::sleep(Duration::from_millis(READ_FULL_STATE_RETRY_DELAY_MS)).await;
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn probe_log_span_once(&self) -> Result<usize, RelayerError> {
+        let head = self
+            .contract
+            .provider()
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
+        let from = head.saturating_sub(self.scan.chunk_blocks.saturating_sub(1));
+        let filter = Filter::new()
+            .address(self.address)
+            .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
+            .from_block(from)
+            .to_block(head);
+        let mut attempt = 0u32;
+        let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+        loop {
+            attempt += 1;
+            match self.contract.provider().get_logs(&filter).await {
+                Ok(logs) => return Ok(logs.len()),
+                Err(e) if attempt < GET_LOGS_MAX_ATTEMPTS && get_logs_error_is_retryable(&e) => {
+                    tracing::warn!(
+                        from,
+                        head,
+                        attempt,
+                        backoff_ms,
+                        error = %e,
+                        "LayerAnchorAppended probe failed; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+                },
+                Err(e) => {
+                    return Err(RelayerError::other(format!(
+                        "LayerAnchorAppended get_logs [{from},{head}] after {attempt} attempt(s): \
+                         {e}"
+                    )));
+                },
+            }
+        }
+    }
+
+    /// Whether the RPC serves any log of the bridge in `block`. Asked for
+    /// the deploy block after a short log set: the bridge emits
+    /// `OwnershipTransferred` there, so an empty answer from the block the
+    /// bridge was deployed in means the RPC does not keep logs that far
+    /// back (public endpoints often keep only the newest ~10 000 blocks),
+    /// and re-walking cannot help.
+    async fn bridge_has_logs_in_block(&self, block: u64) -> Result<bool, RelayerError> {
+        let filter = Filter::new()
+            .address(self.address)
+            .from_block(block)
+            .to_block(block);
+        self.contract
+            .provider()
+            .get_logs(&filter)
+            .await
+            .map(|logs| !logs.is_empty())
+            .map_err(|e| RelayerError::other(format!("eth_getLogs for block {block}: {e}")))
+    }
+
+    /// The hash of block `number`, from `eth_getBlockByNumber` as a raw
+    /// request so that only the `hash` field matters. A missing block is a
+    /// lagging backend: transient.
+    async fn block_hash_at(&self, number: u64) -> Result<B256, SnapshotError> {
+        let block: serde_json::Value = self
+            .contract
+            .provider()
+            .raw_request(
+                "eth_getBlockByNumber".into(),
+                (format!("0x{number:x}"), false),
+            )
+            .await
+            .map_err(|e| {
+                SnapshotError::transient(RelayerError::other(format!(
+                    "eth_getBlockByNumber({number}): {e}"
+                )))
+            })?;
+        block
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .and_then(|h| h.parse::<B256>().ok())
+            .ok_or_else(|| {
+                SnapshotError::transient(RelayerError::other(format!(
+                    "eth_getBlockByNumber({number}): no such block yet (a lagging backend?)"
+                )))
+            })
     }
 
     pub fn address(&self) -> Address {
@@ -947,47 +1392,110 @@ where
     /// Read every field the daemon needs to reconstruct `BridgeState`
     /// from an already-advanced contract (Case 6 chain-resurrect).
     ///
-    /// Issues 4 scalar view calls + 10 `getLayerWindow` calls. Each
-    /// window returns ~5 KB, so the total off-chain cost is ~50 KB of
-    /// RPC response — well under any provider's per-call cap, but the
-    /// full read is worth pinning to a single block via a follow-up
-    /// `read_full_state_at(BlockId)` if two consecutive `verifyBlock`
-    /// receipts could interleave (not the case at daemon startup, hence
-    /// the "latest block" call here).
+    /// Issues 5 scalar view calls + 10 `getLayerWindow` calls, all pinned
+    /// to one block, then scans `LayerAnchorAppended` backwards from that
+    /// block to paint the per-slot heights (the contract no longer stores
+    /// them): see `paint_heights_from_appended_logs` for the walk and
+    /// [`GET_LOGS_CHUNK_BLOCKS`] for its cost. Each window returns ~5 KB, so
+    /// the view calls cost ~50 KB of RPC response — well under any
+    /// provider's per-call cap.
     ///
-    /// Consistency: no lock across calls, so a `verifyBlock` landing
-    /// mid-read could cause the layer windows to be one block ahead of
-    /// the scalar seq_no. That's fine for resurrect because we exit
-    /// this call and let the normal startup drift routing re-observe on
-    /// the next cycle — a one-block skew triggers an immediate re-read,
-    /// not a mis-seed.
+    /// Consistency: `eth_blockNumber` is taken first, every read is pinned
+    /// to that number, and the block's hash is compared before and after,
+    /// so a `verifyBlock` landing mid-read cannot leave the windows one
+    /// append ahead of the logs, and a head block replaced mid-read is
+    /// re-read instead of mixing two forks, when the RPC observes the
+    /// replacement (backends on different forks behind one balancer can
+    /// still answer the two hash calls alike). [`paint_heights_from_events`]
+    /// then checks every kept log against its window slot (hash and
+    /// height) and the window's `lastHeight`, so a partial log set from a
+    /// lagging backend is reported instead of mis-painted. A failed
+    /// snapshot is re-read whenever a fresh one can succeed: a pinned read
+    /// the backend cannot serve yet and a rejected newest span are cheap and
+    /// get [`READ_FULL_STATE_ATTEMPTS`] reads, six seconds apart (two delays
+    /// span a Sepolia slot; on a deterministic span cap that is two extra
+    /// short reads before the same refusal); a slot or `lastHeight`
+    /// mismatch, fewer logs than entries and a head block replaced during
+    /// the read are found only once the walk is complete, so each gets one
+    /// re-read, counted on its own. Fewer logs than entries is final when the
+    /// lower bound block holds no log of the bridge at all (pruned history,
+    /// or a bound that is not the deploy block) and when no bound is set
+    /// (the re-read would walk to genesis again). A deploy block above the
+    /// chain head is refused before any scan (re-read a couple of times,
+    /// since right after a deploy a lagging backend can answer a head below
+    /// it). A chunk below the newest that the RPC rejected or that ran out
+    /// of its attempts returns at once.
+    ///
+    /// Callers: `daemon-live` once at startup; the withdrawal CLI in
+    /// preflight and after each coverage poll (one scalar call per round)
+    /// that observed the target.
     pub async fn read_full_state(&self) -> Result<EthBridgeContractState, RelayerError> {
-        let last = self
-            .contract
-            .storedLastSeenBlockSeqNo()
-            .call()
-            .await
-            .map_err(map_contract_err)?;
-        let bk = self
-            .contract
-            .storedBkSetCommitment()
-            .call()
-            .await
-            .map_err(map_contract_err)?;
-        let last_bk = self
-            .contract
-            .storedLastBkSetUpdateSeqNo()
-            .call()
-            .await
-            .map_err(map_contract_err)?;
-        let anchor = self
-            .contract
-            .storedPrevMaxLevelLayerHash()
-            .call()
-            .await
-            .map_err(map_contract_err)?;
+        let mut attempt = 0u32;
+        let mut full_walks = 0u32;
+        loop {
+            attempt += 1;
+            match self.read_full_state_once().await {
+                Ok(state) => return Ok(state),
+                Err(SnapshotError::Transient {
+                    err,
+                    full_walk,
+                }) if (!full_walk && attempt < READ_FULL_STATE_ATTEMPTS)
+                    || (full_walk && full_walks < FULL_WALK_RE_READS) =>
+                {
+                    if full_walk {
+                        full_walks += 1;
+                    }
+                    tracing::warn!(
+                        attempt,
+                        full_walk,
+                        error = %err,
+                        "read_full_state failed; retrying the pinned snapshot"
+                    );
+                    tokio::time::sleep(Duration::from_millis(READ_FULL_STATE_RETRY_DELAY_MS)).await;
+                },
+                Err(SnapshotError::Transient {
+                    err, ..
+                })
+                | Err(SnapshotError::Final(err)) => return Err(err),
+            }
+        }
+    }
 
-        // Read all 10 layer windows.
+    async fn read_full_state_once(&self) -> Result<EthBridgeContractState, SnapshotError> {
+        // Everything up to the scan is one pinned read set: what fails here
+        // is the RPC not serving the pinned block yet, or not answering.
+        let head = self
+            .contract
+            .provider()
+            .get_block_number()
+            .await
+            .map_err(|e| {
+                SnapshotError::transient(RelayerError::other(format!("get_block_number: {e}")))
+            })?;
+        // Checked before the scan, which an empty bridge would skip: a
+        // bound above the head collapses the walk to the head block once
+        // anchors exist, and the CLI's preflight must see that now. Cheap
+        // to re-read: right after a deploy a lagging backend can answer a
+        // head below the real deploy block.
+        if self.scan.deploy_block > head {
+            return Err(SnapshotError::transient(RelayerError::other(format!(
+                "{BRIDGE_DEPLOY_BLOCK_ENV}={} is above the chain head {head}: it must be the \
+                 block the bridge was deployed in",
+                self.scan.deploy_block
+            ))));
+        }
+        // Every read below addresses the head by number, so a head block
+        // replaced mid-read would mix two forks (scalars from one, windows
+        // or logs from the other) without any call failing. Its hash is
+        // taken now and compared after the scan.
+        let head_hash = self.block_hash_at(head).await?;
+        let at = BlockId::from(head);
+        let scalars = self
+            .read_state_at(at)
+            .await
+            .map_err(SnapshotError::transient)?;
+
+        // Read all 10 layer windows at `head`.
         // `HistoryWindow` on the sol! side has fixed-size arrays that
         // alloy exposes as `FixedBytes<32>[128]` / `u64[128]`.
         //
@@ -1002,9 +1510,11 @@ where
             let w = self
                 .contract
                 .getLayerWindow(layer)
+                .block(at)
                 .call()
                 .await
-                .map_err(map_contract_err)?;
+                .map_err(map_contract_err)
+                .map_err(SnapshotError::transient)?;
             let data: Vec<[u8; 32]> = w
                 .data
                 .iter()
@@ -1027,77 +1537,270 @@ where
                 last_height: w.lastHeight,
             });
         }
-        self.paint_heights_from_appended_logs(&mut windows).await?;
+        self.paint_heights_from_appended_logs(&mut windows, head)
+            .await?;
+        // Found only once the walk is complete, so the re-read is a full
+        // walk: one, like a short set.
+        let head_hash_after = match self.block_hash_at(head).await {
+            Ok(hash) => hash,
+            Err(SnapshotError::Transient {
+                err, ..
+            }) => {
+                return Err(SnapshotError::Transient {
+                    err,
+                    full_walk: true,
+                })
+            },
+            Err(e) => return Err(e),
+        };
+        if head_hash_after != head_hash {
+            return Err(SnapshotError::Transient {
+                err: RelayerError::other(format!(
+                    "block {head} was replaced during the read ({head_hash} -> {head_hash_after})"
+                )),
+                full_walk: true,
+            });
+        }
         let layer_windows: [HistoryWindow; MAX_LAYER_HASHES] =
             windows.try_into().map_err(|_| {
-                RelayerError::Other("read_full_state: expected 10 layer windows".into())
+                SnapshotError::Final(RelayerError::Other(
+                    "read_full_state: expected 10 layer windows".into(),
+                ))
             })?;
 
-        let prev_bk = self.fetch_prev_bk_set().await?;
         Ok(EthBridgeContractState {
-            last_seen_block_seq_no: last,
-            bk_set_commitment: bk.to_le_bytes::<32>(),
-            last_bk_set_update_seq_no: last_bk,
-            prev_bk_set_commitment: prev_bk.to_le_bytes::<32>(),
-            genesis_prev_max_level_layer_hash: anchor.to_le_bytes::<32>(),
+            last_seen_block_seq_no: scalars.last_seen_block_seq_no,
+            bk_set_commitment: scalars.bk_set_commitment.to_le_bytes::<32>(),
+            last_bk_set_update_seq_no: scalars.last_bk_set_update_seq_no,
+            prev_bk_set_commitment: scalars.prev_bk_set_commitment.to_le_bytes::<32>(),
+            genesis_prev_max_level_layer_hash: scalars
+                .prev_max_level_layer_hash
+                .to_le_bytes::<32>(),
             layer_windows,
         })
     }
 
-    /// Fill each window's `heights` from `LayerAnchorAppended` (the contract
-    /// no longer SSTOREs them). Logs are oldest-first; we keep the last
-    /// `data_len` per layer and paint the ring the same way `append` does.
+    /// Fill each window's `heights` from `LayerAnchorAppended` logs (the
+    /// contract no longer SSTOREs them). The walk goes backwards from `to`
+    /// in [`LogScanConfig::chunk_blocks`]-block `eth_getLogs` calls and
+    /// stops as soon as every non-empty window has at least `data_len`
+    /// logs, or at the deploy block. The stop point is the oldest entry
+    /// still held by any non-empty window: layer N is appended at `128^N`
+    /// boundaries, so a layer that is not full (layer 3 for about 2.8
+    /// years) keeps its very first entry and the walk reaches back to it,
+    /// in practice near the deploy block; see [`GET_LOGS_CHUNK_BLOCKS`] for
+    /// the cost. The logs are then put back in chronological order and
+    /// [`paint_heights_from_events`] keeps the last `data_len` per layer.
     async fn paint_heights_from_appended_logs(
         &self,
         windows: &mut [HistoryWindow],
-    ) -> Result<(), RelayerError> {
-        if windows.iter().all(|w| w.data_len == 0) {
+        to: u64,
+    ) -> Result<(), SnapshotError> {
+        let needed: Vec<usize> = windows.iter().map(|w| w.data_len).collect();
+        if needed.iter().all(|&n| n == 0) {
             return Ok(());
         }
-        let logs = self
-            .contract
-            .provider()
-            .get_logs(
-                &Filter::new()
-                    .address(self.address)
-                    .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH),
-            )
-            .await
-            .map_err(|e| RelayerError::other(format!("LayerAnchorAppended get_logs: {e}")))?;
-
-        let mut by_layer: Vec<Vec<u64>> = vec![Vec::new(); MAX_LAYER_HASHES];
-        for log in logs {
-            let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
-                Ok(d) => d,
-                Err(_) => continue,
+        // Without from/to, eth_getLogs defaults both to `latest` and
+        // returns one block. Resurrect then fails
+        // `data_len=X but only 0 LayerAnchorAppended logs` (ETH-31).
+        if self.scan.deploy_block == 0 {
+            tracing::warn!(
+                "{BRIDGE_DEPLOY_BLOCK_ENV} is unset: the LayerAnchorAppended scan may walk back \
+                 to genesis; set it to the block the bridge was deployed in"
+            );
+        }
+        let from = self.scan.deploy_block.min(to);
+        let total = chunk_count(from, to, self.scan.chunk_blocks);
+        let started = std::time::Instant::now();
+        tracing::info!(
+            from,
+            to,
+            chunk_blocks = self.scan.chunk_blocks,
+            pause_ms = self.scan.pause.as_millis() as u64,
+            chunks = total,
+            "scanning LayerAnchorAppended backwards from the head"
+        );
+        let mut newest_chunk_first: Vec<Vec<AnchorEvent>> = Vec::new();
+        let mut found = vec![0usize; MAX_LAYER_HASHES];
+        let mut read = 0usize;
+        let mut covered = false;
+        for (start, end) in chunks_newest_first(from, to, self.scan.chunk_blocks) {
+            let filter = Filter::new()
+                .address(self.address)
+                .event_signature(AckiNackiBridge::LayerAnchorAppended::SIGNATURE_HASH)
+                .from_block(start)
+                .to_block(end);
+            let mut attempt = 0u32;
+            let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+            let logs = loop {
+                attempt += 1;
+                match self.contract.provider().get_logs(&filter).await {
+                    Ok(logs) => break logs,
+                    Err(e)
+                        if attempt < GET_LOGS_MAX_ATTEMPTS && get_logs_error_is_retryable(&e) =>
+                    {
+                        tracing::warn!(
+                            start,
+                            end,
+                            attempt,
+                            backoff_ms,
+                            error = %e,
+                            "LayerAnchorAppended get_logs failed; retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+                    },
+                    Err(e) => {
+                        let err = RelayerError::other(format!(
+                            "LayerAnchorAppended get_logs [{start},{end}] after {attempt} \
+                             attempt(s): {e}"
+                        ));
+                        // The newest chunk ends at the pinned head, which a
+                        // lagging backend may not have yet: re-pin and
+                        // re-read. Any other chunk fails the same way again.
+                        return Err(if end == to {
+                            SnapshotError::transient(err)
+                        } else {
+                            SnapshotError::Final(err)
+                        });
+                    },
+                }
             };
-            let ev = decoded.inner.data;
-            let layer = u8::from(ev.layer);
-            if layer == 0 || (layer as usize) > MAX_LAYER_HASHES {
-                continue;
+            read += 1;
+            if !self.scan.pause.is_zero() {
+                tokio::time::sleep(self.scan.pause).await;
             }
-            by_layer[(layer as usize) - 1].push(ev.blockHeight);
+            let mut chunk_events = Vec::new();
+            for log in logs {
+                let decoded = match log.log_decode::<AckiNackiBridge::LayerAnchorAppended>() {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let ev = decoded.inner.data;
+                let mut hash_le = ev.hashValue.to_be_bytes::<32>();
+                hash_le.reverse();
+                if ev.layer != 0 && (ev.layer as usize) <= MAX_LAYER_HASHES {
+                    found[(ev.layer as usize) - 1] += 1;
+                }
+                chunk_events.push(AnchorEvent {
+                    layer: ev.layer,
+                    height: ev.blockHeight,
+                    hash_le,
+                });
+            }
+            if !chunk_events.is_empty() {
+                newest_chunk_first.push(chunk_events);
+            }
+            if windows_covered(&found, &needed) {
+                covered = true;
+                break;
+            }
+            if read.is_multiple_of(GET_LOGS_PROGRESS_EVERY) {
+                tracing::info!(
+                    read,
+                    chunks = total,
+                    down_to_block = start,
+                    events = found.iter().sum::<usize>(),
+                    elapsed_s = started.elapsed().as_secs(),
+                    "LayerAnchorAppended scan progress"
+                );
+            }
         }
+        let events = chronological(newest_chunk_first);
+        tracing::info!(
+            read,
+            chunks = total,
+            covered,
+            events = events.len(),
+            elapsed_s = started.elapsed().as_secs(),
+            "LayerAnchorAppended scan done"
+        );
+        match paint_heights_from_events(windows, &events) {
+            Ok(()) => Ok(()),
+            Err(
+                e @ PaintError::Short {
+                    ..
+                },
+            ) => {
+                let msg =
+                    format!("{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)");
+                if from == 0 {
+                    // Nothing to probe, and a re-read would walk back to
+                    // genesis again: name both causes and stop.
+                    return Err(SnapshotError::Final(RelayerError::other(format!(
+                        "{msg}; {BRIDGE_DEPLOY_BLOCK_ENV} is unset, so the walk went back to \
+                         genesis: set it to the block the bridge was deployed in, and use an RPC \
+                         that serves log history back to it (public endpoints often keep only the \
+                         newest ~10 000 blocks)"
+                    ))));
+                }
+                // A short set from an RPC that prunes old logs looks exactly
+                // like a wrong bound. The deploy block holds the bridge's own
+                // `OwnershipTransferred`, so one more call tells the two
+                // apart when the bound is the deploy block.
+                match self.bridge_has_logs_in_block(from).await {
+                    Ok(false) => Err(SnapshotError::Final(RelayerError::other(format!(
+                        "{msg}; the RPC returned no logs for block {from} either. If that is the \
+                         block the bridge was deployed in (it emits OwnershipTransferred there), \
+                         the RPC does not serve log history that far back (public endpoints often \
+                         keep only the newest ~10 000 blocks): use an RPC with full log history. \
+                         Otherwise set {BRIDGE_DEPLOY_BLOCK_ENV} to the deploy block."
+                    )))),
+                    Err(probe) => Err(SnapshotError::Transient {
+                        err: RelayerError::other(format!(
+                            "{msg}; probing block {from} for the bridge's deploy log failed too: \
+                             {probe}"
+                        )),
+                        full_walk: true,
+                    }),
+                    Ok(true) => Err(SnapshotError::Transient {
+                        err: RelayerError::other(msg),
+                        full_walk: true,
+                    }),
+                }
+            },
+            Err(e) => {
+                let err = RelayerError::other(format!(
+                    "{e} (scanned blocks {from}..={to}; {read} of {total} chunks read)"
+                ));
+                if e.is_transient() {
+                    // Found only once the walk is complete, so the re-read
+                    // is a full walk too: one, like a short set.
+                    Err(SnapshotError::Transient {
+                        err,
+                        full_walk: true,
+                    })
+                } else {
+                    Err(SnapshotError::Final(err))
+                }
+            },
+        }
+    }
+}
 
-        for (idx, window) in windows.iter_mut().enumerate() {
-            if window.data_len == 0 {
-                continue;
-            }
-            let evs = &by_layer[idx];
-            if evs.len() < window.data_len {
-                return Err(RelayerError::other(format!(
-                    "layer {} has data_len={} but only {} LayerAnchorAppended logs",
-                    idx + 1,
-                    window.data_len,
-                    evs.len()
-                )));
-            }
-            let oldest_first = &evs[evs.len() - window.data_len..];
-            window
-                .apply_chronological_heights(oldest_first)
-                .map_err(|e| RelayerError::other(e.to_string()))?;
+/// Classification of a failed [`EthBridgeClient::read_full_state`]: whether
+/// a fresh snapshot can succeed where this one failed.
+#[derive(Debug)]
+enum SnapshotError {
+    /// Logs and window snapshot that disagree, fewer logs than entries, a
+    /// replaced head block (these three are found only once the walk is
+    /// complete, so `full_walk` is set and the re-read, a whole walk
+    /// again, is done once), a pinned read the backend could not serve
+    /// yet, or a rejected newest span: re-read.
+    Transient { err: RelayerError, full_walk: bool },
+    /// A chunk below the newest that the RPC rejected or that ran out of
+    /// its attempts, or a window shape the ring cannot take: re-reading
+    /// would repeat the whole walk.
+    Final(RelayerError),
+}
+
+impl SnapshotError {
+    /// A transient failure whose re-read is cheap (not a full walk).
+    fn transient(err: RelayerError) -> Self {
+        Self::Transient {
+            err,
+            full_walk: false,
         }
-        Ok(())
     }
 }
 
@@ -1726,5 +2429,163 @@ mod tests {
             },
             other => panic!("second rotation must apply after cover, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chunks_newest_first_cover_the_range_backwards() {
+        let spans: Vec<(u64, u64)> = chunks_newest_first(100, 350, 100).collect();
+        assert_eq!(spans, vec![(251, 350), (151, 250), (100, 150)]);
+        assert_eq!(chunk_count(100, 350, 100), 3);
+        assert_eq!(chunks_newest_first(5, 5, 10).collect::<Vec<_>>(), vec![(
+            5, 5
+        )]);
+        assert_eq!(chunks_newest_first(10, 9, 10).count(), 0);
+        assert_eq!(chunk_count(10, 9, 10), 0);
+        assert_eq!(chunks_newest_first(0, 0, 2_000).collect::<Vec<_>>(), vec![
+            (0, 0)
+        ]);
+        assert_eq!(chunks_newest_first(0, 25, 10).collect::<Vec<_>>(), vec![
+            (16, 25),
+            (6, 15),
+            (0, 5)
+        ]);
+        assert_eq!(chunk_count(0, 25, 10), 3);
+    }
+
+    fn ev(layer: u8, height: u64, tag: u8) -> AnchorEvent {
+        AnchorEvent {
+            layer,
+            height,
+            hash_le: [tag; 32],
+        }
+    }
+
+    /// A window whose slots hold `[tag; 32]` hashes with zero heights, the
+    /// way `read_full_state` builds it before painting.
+    fn window_with(tags: &[u8], last_height: u64) -> HistoryWindow {
+        let mut w = HistoryWindow::new(4);
+        for &t in tags {
+            w.append([t; 32], 0);
+        }
+        w.last_height = last_height;
+        w
+    }
+
+    #[test]
+    fn paint_heights_keeps_last_data_len_events() {
+        let mut windows = vec![window_with(&[2, 3], 30)];
+        paint_heights_from_events(&mut windows, &[ev(1, 10, 1), ev(1, 20, 2), ev(1, 30, 3)])
+            .unwrap();
+        let heights: Vec<u64> = windows[0].iter_chronological().map(|(_, h)| h).collect();
+        assert_eq!(heights, vec![20, 30]);
+    }
+
+    #[test]
+    fn paint_heights_errors_when_logs_are_short() {
+        let err = paint_heights_from_events(&mut [window_with(&[1, 2], 10)], &[ev(1, 10, 1)])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaintError::Short {
+                layer: 1,
+                data_len: 2,
+                found: 1
+            }),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert!(err.to_string().contains(BRIDGE_DEPLOY_BLOCK_ENV), "{err}");
+    }
+
+    #[test]
+    fn paint_heights_errors_when_the_snapshot_is_one_append_behind() {
+        // One more event than the window snapshot knows: an append landed
+        // between the two reads. Every hash shifts by one slot, which the
+        // slot check catches first.
+        let err = paint_heights_from_events(&mut [window_with(&[2, 3], 30)], &[
+            ev(1, 10, 1),
+            ev(1, 20, 2),
+            ev(1, 30, 3),
+            ev(1, 40, 4),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(err, PaintError::SlotMismatch {
+                layer: 1,
+                slot: 0,
+                height: 30,
+                ..
+            }),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        // Same hashes, stale lastHeight: the height check catches it.
+        let err = paint_heights_from_events(&mut [window_with(&[2, 3], 20)], &[
+            ev(1, 20, 2),
+            ev(1, 30, 3),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(err, PaintError::LastHeight {
+                layer: 1,
+                newest: 30,
+                last_height: 20
+            }),
+            "{err}"
+        );
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn paint_heights_errors_on_a_gap_in_the_middle() {
+        // Enough logs and the right newest one, but a middle chunk came
+        // back empty: slot 0 would get height 10 instead of 20.
+        let err = paint_heights_from_events(&mut [window_with(&[2, 3], 30)], &[
+            ev(1, 10, 1),
+            ev(1, 30, 3),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(err, PaintError::SlotMismatch {
+                slot: 0,
+                height: 10,
+                ..
+            }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn backward_scan_stops_once_windows_are_covered() {
+        assert!(windows_covered(&[2, 0, 5], &[2, 0, 3]));
+        assert!(!windows_covered(&[1, 0, 5], &[2, 0, 3]));
+        assert!(windows_covered(&[0; 10], &[0; 10]));
+        let chunks = vec![vec![ev(1, 30, 3)], vec![ev(1, 10, 1), ev(1, 20, 2)]];
+        let heights: Vec<u64> = chronological(chunks).iter().map(|e| e.height).collect();
+        assert_eq!(heights, vec![10, 20, 30]);
+    }
+
+    /// A JSON-RPC error response as the provider surfaces it.
+    fn rpc_error_response(code: i64, message: &str) -> TransportError {
+        TransportError::ErrorResp(
+            serde_json::from_value(serde_json::json!({ "code": code, "message": message }))
+                .expect("error payload"),
+        )
+    }
+
+    #[test]
+    fn get_logs_span_cap_is_not_retried() {
+        let cap = rpc_error_response(
+            -32600,
+            "Under the Free tier, up to a 10 block range is supported",
+        );
+        assert!(!get_logs_error_is_retryable(&cap));
+        assert!(!get_logs_error_is_retryable(&rpc_error_response(
+            -32602,
+            "invalid params"
+        )));
+        let rate = rpc_error_response(429, "Too Many Requests");
+        assert!(get_logs_error_is_retryable(&rate));
+        let transport = alloy::transports::TransportErrorKind::custom_str("connection reset");
+        assert!(get_logs_error_is_retryable(&transport));
     }
 }

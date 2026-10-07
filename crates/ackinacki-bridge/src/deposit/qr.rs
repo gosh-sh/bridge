@@ -6,7 +6,7 @@ use std::path::Path;
 use qrcode::{render::unicode::Dense1x2, EcLevel, QrCode};
 
 /// The code for `uri` at error-correction level M.
-fn code(uri: &str) -> anyhow::Result<QrCode> {
+pub(crate) fn code(uri: &str) -> anyhow::Result<QrCode> {
     Ok(QrCode::with_error_correction_level(
         uri.as_bytes(),
         EcLevel::M,

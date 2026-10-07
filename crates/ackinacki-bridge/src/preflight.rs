@@ -34,7 +34,9 @@ use alloy::{
 };
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::keys::{leaked_keygen_temp_files, probe_ceremony, KeyCacheState};
-use bridge_relayer_daemon::{bridge::EthBridgeClient, withdrawal::WITHDRAWAL_CALLDATA_LEN};
+use bridge_relayer_daemon::{
+    bridge::EthBridgeClient, withdrawal::WITHDRAWAL_CALLDATA_LEN, LogScanConfig,
+};
 use serde_json::{json, Value};
 use tvm_block::{Account, AccountStatus, Deserializable};
 use tvm_client::{
@@ -1408,7 +1410,7 @@ fn ensure_writable_dir(flag: &'static str, dir: &Path) -> CliResult<()> {
 /// **One check, not two, because free space is a property of the filesystem
 /// and not of the directory.** The shipped profile puts the pk cache
 /// *inside* params (`BRIDGE_PK_CACHE_DIR=…/params/pk_cache`,
-/// `bridge_config.shellnet:68`), so two independent comparisons against the
+/// `bridge_config.shellnet:95`), so two independent comparisons against the
 /// same `statvfs` both pass at 3.5 GB free while the run needs ~3.65 GB —
 /// and the shortfall lands during aggregation, after the burn. Two checks
 /// that each ask "is there room for my piece?" never notice they are sharing
@@ -2085,7 +2087,7 @@ pub async fn check_bridge_deploy(
                 // last line sends the operator to `USDC_BRIDGE_ACCOUNT_ID`,
                 // which is written in the profile as 64 lowercase hex
                 // characters with the leading zeros kept
-                // (`config/bridge_config.shellnet:65`). Decimal is the one
+                // (`config/bridge_config.shellnet:73`). Decimal is the one
                 // rendering that cannot be compared against it by eye, so
                 // the refusal asked for a check it made impossible — and it
                 // did so next to `preflight ok usdc_bridge=…`, which prints
@@ -2124,6 +2126,72 @@ pub async fn check_bridge_deploy(
             source: None,
         });
     }
+    Ok(())
+}
+
+/// The read stage 4b performs after the burn, performed now: pin a head,
+/// read the ten windows and scan `LayerAnchorAppended` back from it with
+/// the scan settings the run will use. What fails here would otherwise
+/// fail after the burn and the coverage wait, with the same error: a
+/// `BRIDGE_DEPLOY_BLOCK` that is not the deploy block (fewer logs than
+/// entries), an `eth_getLogs` span the RPC rejects, an RPC that serves no
+/// log history. The snapshot itself is discarded; stage 4b re-reads it once
+/// coverage is observed.
+pub async fn check_window_scan(
+    rpc_url: &str,
+    bridge: Address,
+    scan: LogScanConfig,
+) -> CliResult<()> {
+    let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
+        flag: "rpc-url",
+        expected: "an http(s) JSON-RPC URL".into(),
+        got: crate::errors::Redacted::rendered(format!("{} ({e})", crate::args::redact(rpc_url))),
+    })?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    // What the scan will actually use: a span of 0 is the library default.
+    let scan = scan.normalized();
+    let client = EthBridgeClient::with_scan_config(bridge, provider, scan);
+    let state = client
+        .read_full_state()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: the window-heights read that stage 4b runs after the \
+                 burn failed now: {e}.\n\x20 Check BRIDGE_DEPLOY_BLOCK (the block this bridge was \
+                 deployed in; now {}), BRIDGE_GET_LOGS_CHUNK_BLOCKS (your RPC's eth_getLogs span \
+                 cap; now {}) and that --rpc-url serves logs back to the deploy block (public \
+                 endpoints such as publicnode keep only the newest ~10 000 blocks).",
+                scan.deploy_block, scan.chunk_blocks,
+            ),
+            source: Some(anyhow::Error::new(e)),
+        })?;
+    // The read above sends no `eth_getLogs` on a bridge without anchors, and
+    // on one younger than the span its only call is clamped to the deploy
+    // block; a span the RPC rejects would then surface only in stage 4b,
+    // after the burn. Send the scan's first full-span call once.
+    let logs = client
+        .probe_log_span()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: the eth_getLogs call stage 4b will send over the \
+                 configured span failed: {e}.\n\x20 Check BRIDGE_GET_LOGS_CHUNK_BLOCKS (your \
+                 RPC's eth_getLogs span cap; now {}) and that --rpc-url serves logs.",
+                scan.chunk_blocks,
+            ),
+            source: Some(anyhow::Error::new(e)),
+        })?;
+    tracing::info!(
+        chunk_blocks = scan.chunk_blocks,
+        logs,
+        "one eth_getLogs over the newest span answered"
+    );
+    tracing::info!(
+        last_seen = state.last_seen_block_seq_no,
+        deploy_block = scan.deploy_block,
+        chunk_blocks = scan.chunk_blocks,
+        "window-heights scan ok"
+    );
     Ok(())
 }
 
@@ -2469,6 +2537,12 @@ pub(crate) mod tests {
     const SEL_SHPLONK: &str = "66dbcfb5"; // shplonkVerifier()
     const SEL_YUL: &str = "c74e1862"; // yulVerifier()
     const SEL_VK_DIGEST: &str = "648a89ea"; // vkDigest()
+    const SEL_LAST_SEEN: &str = "cc405ea3"; // storedLastSeenBlockSeqNo()
+    const SEL_BK_SET: &str = "c1a41064"; // storedBkSetCommitment()
+    const SEL_PREV_BK_SET: &str = "d0845abb"; // storedPrevBkSetCommitment()
+    const SEL_LAST_BK_UPD: &str = "a91a27ac"; // storedLastBkSetUpdateSeqNo()
+    const SEL_GENESIS_ANCHOR: &str = "6cd06281"; // storedPrevMaxLevelLayerHash()
+    const SEL_LAYER_WINDOW: &str = "a95d2271"; // getLayerWindow(uint8)
 
     /// A 32-byte zero word — what a getter returns when its slot is unset.
     const ZERO_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -2566,40 +2640,51 @@ pub(crate) mod tests {
                         let v: serde_json::Value =
                             serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
                         let id = v.get("id").cloned().unwrap_or(serde_json::json!(1));
-                        let result = match v.get("method").and_then(|m| m.as_str()) {
-                            Some("eth_chainId") => "0xaa36a7".to_string(), // 11155111
-                            Some("eth_getCode") => {
-                                let at = v["params"][0].as_str().unwrap_or("");
-                                code.for_address(at)
-                            },
-                            Some("eth_call") => {
-                                // `input` first. Alloy 2 builds contract calls with
-                                // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
-                                // which sets `TransactionInput::input`
-                                // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
-                                // and leaves `data` unset — so the request carries
-                                // `"input": "0x…"` and no `"data"` at all. Reading
-                                // `data` yields "", the selector is empty, every
-                                // lookup misses, the mock answers `0x`, and every
-                                // test here passes or fails for reasons unrelated
-                                // to what it claims to check.
-                                //
-                                // `data` stays as a fallback: it is still valid
-                                // JSON-RPC, other clients send it, and the cost is
-                                // one `or_else`.
-                                let call = &v["params"][0];
-                                let data = call["input"]
-                                    .as_str()
-                                    .or_else(|| call["data"].as_str())
-                                    .unwrap_or("");
-                                let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
-                                answers
-                                    .get(sel)
-                                    .cloned()
-                                    .unwrap_or_else(|| "0x".to_string())
-                            },
-                            _ => "0x".to_string(),
-                        };
+                        let result: serde_json::Value =
+                            match v.get("method").and_then(|m| m.as_str()) {
+                                Some("eth_chainId") => serde_json::json!("0xaa36a7"), // 11155111
+                                // The head `check_window_scan` pins its reads to.
+                                Some("eth_blockNumber") => serde_json::json!("0x10"),
+                                // Its hash, compared before and after the read.
+                                Some("eth_getBlockByNumber") => serde_json::json!({
+                                    "number": "0x10",
+                                    "hash": format!("0x{}", "11".repeat(32)),
+                                }),
+                                // An empty log set: the window-scan probe on a
+                                // bridge without anchors.
+                                Some("eth_getLogs") => serde_json::json!([]),
+                                Some("eth_getCode") => {
+                                    let at = v["params"][0].as_str().unwrap_or("");
+                                    serde_json::json!(code.for_address(at))
+                                },
+                                Some("eth_call") => {
+                                    // `input` first. Alloy 2 builds contract calls with
+                                    // `with_input` (`alloy-contract-2.4.1/src/call.rs:474`),
+                                    // which sets `TransactionInput::input`
+                                    // (`alloy-network-2.4.1/src/ethereum/builder.rs:34`)
+                                    // and leaves `data` unset — so the request carries
+                                    // `"input": "0x…"` and no `"data"` at all. Reading
+                                    // `data` yields "", the selector is empty, every
+                                    // lookup misses, the mock answers `0x`, and every
+                                    // test here passes or fails for reasons unrelated
+                                    // to what it claims to check.
+                                    //
+                                    // `data` stays as a fallback: it is still valid
+                                    // JSON-RPC, other clients send it, and the cost is
+                                    // one `or_else`.
+                                    let call = &v["params"][0];
+                                    let data = call["input"]
+                                        .as_str()
+                                        .or_else(|| call["data"].as_str())
+                                        .unwrap_or("");
+                                    let sel = data.trim_start_matches("0x").get(..8).unwrap_or("");
+                                    serde_json::json!(answers
+                                        .get(sel)
+                                        .cloned()
+                                        .unwrap_or_else(|| "0x".to_string()))
+                                },
+                                _ => serde_json::json!("0x"),
+                            };
                         let payload = serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})
                             .to_string();
                         let resp = format!(
@@ -2690,6 +2775,14 @@ pub(crate) mod tests {
             // `_calldata.bin` (24 words of `0x00`). Callers overriding
             // this pair must override both sides.
             (SEL_VK_DIGEST, ZERO_WORD.to_string()),
+            // The pinned snapshot `check_window_scan` reads: five scalars
+            // and ten empty windows, so no `eth_getLogs` follows.
+            (SEL_LAST_SEEN, ZERO_WORD.to_string()),
+            (SEL_BK_SET, ZERO_WORD.to_string()),
+            (SEL_PREV_BK_SET, ZERO_WORD.to_string()),
+            (SEL_LAST_BK_UPD, ZERO_WORD.to_string()),
+            (SEL_GENESIS_ANCHOR, ZERO_WORD.to_string()),
+            (SEL_LAYER_WINDOW, empty_window_word()),
         ]);
         for (k, v) in overrides {
             m.insert(k, v.clone());
@@ -2702,6 +2795,56 @@ pub(crate) mod tests {
         (1u8..=4)
             .map(|n| (Address::repeat_byte(n), SOME_CODE))
             .collect()
+    }
+
+    /// An empty `HistoryWindow` as `getLayerWindow` returns it: two 128-slot
+    /// static arrays and three scalars, all zero, encoded inline.
+    fn empty_window_word() -> String {
+        format!("0x{}", "00".repeat(32 * (128 + 128 + 3)))
+    }
+
+    /// The pre-burn window-heights read passes on empty windows (and sends
+    /// the scan's first full-span `eth_getLogs` as a probe), refuses a
+    /// deploy block above the head, and a node that cannot serve it refuses
+    /// naming the two knobs to check.
+    #[tokio::test]
+    async fn window_scan_passes_on_empty_windows_and_names_the_knobs_on_failure() {
+        let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
+        check_window_scan(&url, Address::repeat_byte(1), LogScanConfig::default())
+            .await
+            .unwrap();
+
+        // A deploy block above the mock's head (0x10): refused before any
+        // scan, even though the bridge has no anchors yet.
+        let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
+        let above_head = LogScanConfig {
+            deploy_block: 100,
+            ..LogScanConfig::default()
+        };
+        let err = check_window_scan(&url, Address::repeat_byte(1), above_head)
+            .await
+            .unwrap_err();
+        match err {
+            CliError::Preflight {
+                reason, ..
+            } => assert!(reason.contains("above the chain head"), "{reason}"),
+            other => panic!("expected a preflight refusal, got {other:?}"),
+        }
+
+        let url = mock_rpc(SOME_CODE, std::collections::HashMap::new()).await;
+        let err = check_window_scan(&url, Address::repeat_byte(1), LogScanConfig::default())
+            .await
+            .unwrap_err();
+        match err {
+            CliError::Preflight {
+                reason, ..
+            } => assert!(
+                reason.contains("BRIDGE_DEPLOY_BLOCK")
+                    && reason.contains("BRIDGE_GET_LOGS_CHUNK_BLOCKS"),
+                "{reason}"
+            ),
+            other => panic!("expected a preflight refusal, got {other:?}"),
+        }
     }
 
     // -- Disk headroom ---------------------------------------------------
@@ -3050,7 +3193,7 @@ pub(crate) mod tests {
             .finish();
         // Bound, not discarded: `with_default` hands back what the closure
         // returned, and saying which refusal it was documents the fixture.
-        let outcome = tracing::subscriber::with_default(subscriber, || {
+        let outcome = crate::test_log::with_default(subscriber, || {
             // `Corrupt` so the outcome is a refusal on every host: the
             // point here is what was said on the way, not the verdict.
             check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {

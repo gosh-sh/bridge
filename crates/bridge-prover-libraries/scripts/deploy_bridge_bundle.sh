@@ -88,6 +88,22 @@ BRIDGE_ADDRESS="$(jq -r '
 ' "$BROADCAST" | tail -n 1)"
 : "${BRIDGE_ADDRESS:?failed to extract AckiNackiBridge address from $BROADCAST}"
 echo ">>> Deployed BRIDGE_ADDRESS = $BRIDGE_ADDRESS"
+# The block that CREATE landed in: where the relayer's and the CLI's
+# `LayerAnchorAppended` scan stops (BRIDGE_DEPLOY_BLOCK). Never fatal: the
+# bridge is on-chain by now, and a broadcast record without a matching
+# receipt must not leave the config below unwritten.
+deploy_block_hex="$(jq -r --arg addr "$(printf '%s' "$BRIDGE_ADDRESS" | tr '[:upper:]' '[:lower:]')" '
+  (.receipts // [])[]
+  | select(((.contractAddress // "") | ascii_downcase) == $addr)
+  | .blockNumber // empty
+' "$BROADCAST" 2>/dev/null | tail -n 1 || true)"
+if [[ "$deploy_block_hex" =~ ^0x[0-9a-fA-F]+$ ]]; then
+  deploy_block_line="BRIDGE_DEPLOY_BLOCK=$((deploy_block_hex))"
+  echo ">>> Deployed in block $((deploy_block_hex))"
+else
+  deploy_block_line="# BRIDGE_DEPLOY_BLOCK=<block of the AckiNackiBridge CREATE receipt in $BROADCAST>"
+  echo ">>> WARNING: could not read the deploy block from $BROADCAST; set BRIDGE_DEPLOY_BLOCK in the env by hand" >&2
+fi
 
 # ─── 4. Rewrite non-secret L${LEVEL}_config/env ───────────────────────────────
 CFG_DIR="$PROVER_DIR/L${LEVEL}_config"
@@ -99,6 +115,7 @@ cat > "$CFG_DIR/env" <<EOF
 source "\$(dirname "\${BASH_SOURCE[0]}")/../shellnet.common"
 
 BRIDGE_ADDRESS=$BRIDGE_ADDRESS
+$deploy_block_line
 BRIDGE_BOOTSTRAP_SEQNO=$GENESIS_SEED_SEQNO
 BRIDGE_ANCHOR_LEVEL=$LEVEL
 EOF

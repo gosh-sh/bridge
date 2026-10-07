@@ -34,7 +34,15 @@
 # `crates/ackinacki-bridge/`.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
-RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+# Must serve `eth_getLogs` back to the bridge's oldest held anchor (the
+# window-heights read of `withdraw`, in preflight and at stage 4b) AND
+# `eth_getRawTransactionByHash` plus every receipt of a block (`deposit`'s
+# prover). The EF DevOps public endpoint serves both with full history.
+# Tenderly's gateway (`https://sepolia.gateway.tenderly.co`) has the history
+# but no raw transactions, so `deposit` is refused on it; publicnode keeps
+# only the newest ~10 000 blocks of logs and receipts, so on it `withdraw`
+# is refused once the bridge's oldest held anchor is older than that.
+RPC_URL=https://rpc.sepolia.ethpandaops.io
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 NETWORK=shellnet.ackinacki.org
@@ -118,14 +126,20 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
 # Currently pinned to the shellnet team's L2-anchored reference deploy
-# on Sepolia, deployed 2026-09-29 at block 11807209 (genesis seq_no
-# 20054016). The server-side bundle relayer that advances this contract
+# on Sepolia, deployed 2026-10-02 at block 11828971 (genesis seq_no
+# 20856832). The server-side bundle relayer that advances this contract
 # runs L2 only. See README.md Quick start for the default-user flow.
 #
-# The deploy before it, `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, is
-# no longer advanced: its BlockVerified events stop at seq_no 20054016,
-# where this one starts. It still answers every getter and keeps its own
-# treasury.
+# Redeployed from `main` on 2026-10-02 (owner pause, #73). The previous
+# deploys, `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, deploy
+# block 11807209, stopped at seq 20856832) and
+# `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq 20054016),
+# still answer every getter but nobody advances them.
+# Preflight refuses `0x0F4F…` (an older verifier stack) and, with the
+# BRIDGE_DEPLOY_BLOCK below, `0x32b9…` too (its anchors predate that block,
+# so the window-heights read comes up short); only a deploy block at or
+# before the oldest anchor its windows still hold (its own deploy block,
+# for one) gets a burn that then times out at stage 4b.
 #
 # NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
 # over a new AN-side eccUSDCBridge and rolled back the same day. That
@@ -160,4 +174,15 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 # Comment out to force the CLI to fail loudly ("missing required
 # argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
 # bridge.
-BRIDGE_ADDRESS=0x32b9E87aCAA1AD7d61A81f93DD9D525F64Ff4F38
+BRIDGE_ADDRESS=0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36
+
+# Block the deploy above was created in: where the `LayerAnchorAppended`
+# scan the CLI runs (in preflight, then after coverage) stops when a window
+# is not covered yet. Unset means it may walk back to genesis. Changes
+# together with BRIDGE_ADDRESS; `--bridge-deploy-block` overrides it.
+BRIDGE_DEPLOY_BLOCK=11828971
+# For a capped / rate-limited RPC (Alchemy's free tier: 10-block spans,
+# ~4 calls per second). The public default above needs neither, and it
+# serves the log history the read needs; see RPC_URL.
+# BRIDGE_GET_LOGS_CHUNK_BLOCKS=10
+# BRIDGE_GET_LOGS_PAUSE_MS=250

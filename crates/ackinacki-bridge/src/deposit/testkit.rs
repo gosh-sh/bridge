@@ -1776,6 +1776,7 @@ impl World {
             qr_out: None,
             uri_only: true,
             qr_invert: false,
+            qr_display: None,
             wc_project_id: Some("test".into()),
             wc_relay_url: "ws://relay.invalid".into(),
             from_address: None,
@@ -2595,6 +2596,9 @@ pub fn deposit_args(argv: &[&str]) -> crate::deposit::args::DepositArgs {
     }
     if !given("--confirmations") {
         a.confirmations = 12;
+    }
+    if !given("--qr-display") {
+        a.qr_display = crate::deposit::args::QrDisplayArg::Auto;
     }
     a
 }

@@ -41,11 +41,12 @@ use bridge_relayer_daemon::{
     check_startup_drift, classify_withdraw_revert, discover_event_proofs, run_withdraw_e2e_once,
     BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource,
     BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
-    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
-    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
-    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge, WithdrawE2EConfig,
-    WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
+    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
+    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
+    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
+    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
+    WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
+    GET_LOGS_CHUNK_BLOCKS,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -405,6 +406,19 @@ enum Cmd {
         /// drift check.
         #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
         anchor_level: u8,
+        /// Block `AckiNackiBridge` was deployed in: where the startup
+        /// `LayerAnchorAppended` scan (backwards from the head) stops when a
+        /// window is not covered yet. Unset = genesis, warned about.
+        #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
+        bridge_deploy_block: Option<u64>,
+        /// Inclusive block span of one `eth_getLogs` call in that scan. Set
+        /// it to the RPC's cap (Alchemy free tier: 10); 0 means the default.
+        #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS", default_value_t = GET_LOGS_CHUNK_BLOCKS)]
+        get_logs_chunk_blocks: u64,
+        /// Milliseconds between two `eth_getLogs` calls of that scan, for a
+        /// rate-limited RPC (Alchemy free tier: ~250).
+        #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
+        get_logs_pause_ms: u64,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -788,7 +802,15 @@ async fn main() -> anyhow::Result<()> {
             anchor_level,
             gql_failover_endpoints,
             metrics_addr,
+            bridge_deploy_block,
+            get_logs_chunk_blocks,
+            get_logs_pause_ms,
         } => {
+            let scan = LogScanConfig {
+                deploy_block: bridge_deploy_block.unwrap_or(0),
+                chunk_blocks: get_logs_chunk_blocks,
+                pause: Duration::from_millis(get_logs_pause_ms),
+            };
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
@@ -828,6 +850,7 @@ async fn main() -> anyhow::Result<()> {
                 backoff,
                 aggregation,
                 anchor_mode,
+                scan,
             )
             .await
             .map_err(|e| {
@@ -2096,6 +2119,7 @@ async fn run_daemon_live(
     backoff: BackoffConfig,
     aggregation: C12AggregationCfg,
     anchor_mode: bridge_prover_lib::AnchorMode,
+    scan: LogScanConfig,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
     use bridge_prover_lib::{
@@ -2218,7 +2242,7 @@ async fn run_daemon_live(
         let provider = ProviderBuilder::new()
             .wallet(wallet)
             .connect_http(rpc_url.parse()?);
-        EthBridgeClient::new(bridge_address, provider)
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
     };
     let chain_full = bridge_probe
         .read_full_state()
@@ -2487,20 +2511,23 @@ fn init_tracing() {
 #[cfg(test)]
 mod withdraw_scan_tests {
     //! Park-arm coverage for [`withdraw_scan_once`]. The classifier + counter
-    //! split shipped with the SF-2 change is otherwise only exercised end-to-end
-    //! on shellnet; a mock `WithdrawBridge` lets the dry-run park branch fire
-    //! deterministically without standing up an EVM RPC or a real bridge.
+    //! split shipped with the SF-2 change is otherwise only exercised
+    //! end-to-end on shellnet; a mock `WithdrawBridge` lets the dry-run
+    //! park branch fire deterministically without standing up an EVM RPC or
+    //! a real bridge.
     //!
     //! Kept in the bin file rather than a `tests/` integration target so the
     //! test can call the private `withdraw_scan_once` directly (making its
     //! generic over `WithdrawBridge` the only production-facing change).
-    use super::*;
+    use std::sync::Mutex;
+
     use async_trait::async_trait;
     use bridge_relayer_daemon::{
         withdrawal::{SHPLONK_MIN_WITHDRAWAL_INSTANCES, WITHDRAWAL_PUBLIC_INPUTS},
         WithdrawalPublicInputs,
     };
-    use std::sync::Mutex;
+
+    use super::*;
 
     /// Configurable mock. Every knob defaults to the benign case so a test
     /// only overrides what it wants to observe. `dry_run_reason` steers the
@@ -2575,7 +2602,11 @@ mod withdraw_scan_tests {
             .collect();
         let json = format!(
             r#"{{"proof_hex":"{proof_hex}","public_instances_hex":[{}]}}"#,
-            insts.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(","),
+            insts
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(","),
         );
         let path = dir.join(format!("proof_event_{seq:06}.json"));
         std::fs::write(&path, json).unwrap();
@@ -2616,13 +2647,21 @@ mod withdraw_scan_tests {
         };
         let mut st = WithdrawScanState::default();
 
-        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st).await.unwrap();
+        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st)
+            .await
+            .unwrap();
 
-        assert!(!transient, "permanent revert must not report a transient failure");
+        assert!(
+            !transient,
+            "permanent revert must not report a transient failure"
+        );
         assert_eq!(st.parked_permanent, 1, "one proof parked");
         assert_eq!(st.paid, 0);
         assert_eq!(st.skipped_already_used, 0);
-        assert!(st.done.contains(&proof_path), "proof must be recorded as handled");
+        assert!(
+            st.done.contains(&proof_path),
+            "proof must be recorded as handled"
+        );
 
         let calls = bridge.calls.lock().unwrap();
         assert_eq!(calls.is_used, 1, "nullifier check ran once");
@@ -2644,12 +2683,20 @@ mod withdraw_scan_tests {
         };
         let mut st = WithdrawScanState::default();
 
-        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st).await.unwrap();
+        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st)
+            .await
+            .unwrap();
 
-        assert!(transient, "transient revert must report a transient failure");
+        assert!(
+            transient,
+            "transient revert must report a transient failure"
+        );
         assert_eq!(st.parked_permanent, 0, "transient revert must not park");
         assert_eq!(st.paid, 0);
-        assert!(!st.done.contains(&proof_path), "proof must remain retryable");
+        assert!(
+            !st.done.contains(&proof_path),
+            "proof must remain retryable"
+        );
     }
 
     #[tokio::test]
@@ -2666,7 +2713,9 @@ mod withdraw_scan_tests {
         };
         let mut st = WithdrawScanState::default();
 
-        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st).await.unwrap();
+        let transient = withdraw_scan_once(&bridge, tmp.path(), true, &mut st)
+            .await
+            .unwrap();
 
         assert!(!transient);
         assert_eq!(st.skipped_already_used, 1);
@@ -2675,6 +2724,9 @@ mod withdraw_scan_tests {
         assert!(st.done.contains(&proof_path));
 
         let calls = bridge.calls.lock().unwrap();
-        assert_eq!(calls.dry_run, 0, "already-used proof must short-circuit before dry-run");
+        assert_eq!(
+            calls.dry_run, 0,
+            "already-used proof must short-circuit before dry-run"
+        );
     }
 }

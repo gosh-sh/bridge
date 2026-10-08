@@ -762,7 +762,8 @@ PK cache) or cold-cache slowness beyond the default timeout. An
 `aggregate-proof` that hits `--prover-timeout-s` is killed; if it was
 generating its key, it leaves `<stem>.pk.partial-<pid>-<random>` in the
 pk cache, which the next run removes (preflight names it, since it holds
-space).
+space). The next run generates the key from scratch again, so retry with a
+larger `--prover-timeout-s`, not the same one.
 
 Exit 12 also covers the wait for the covering bundle (stage 4b): a
 refusal that starts `wait_for_coverage:` means the server-side bundle

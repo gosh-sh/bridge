@@ -526,8 +526,8 @@ enum Cmd {
         /// Optional dir to persist `proof_event_{seq:06}.json`.
         #[arg(long)]
         prover_out_dir: Option<PathBuf>,
-        /// Aggregator subprocess timeout, in seconds. Circuit-4 outer
-        /// keygen from a cold PK cache is a few minutes.
+        /// Aggregator subprocess timeout, in seconds. The outer keygen
+        /// from a cold pk cache takes ~15 min.
         #[arg(long, default_value_t = 1800)]
         prover_timeout_s: u64,
         /// Seqno stamped into witness/proof filenames.

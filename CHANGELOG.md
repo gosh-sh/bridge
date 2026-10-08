@@ -970,7 +970,8 @@ assigns it when the release is tagged.
   `ackinacki-bridge withdraw`, the aggregator timeout in the relayer) is
   killed. Before, it kept running after the caller gave up — holding its
   memory and still writing the pk cache — beside the proof the next run
-  started.
+  started. Since a killed keygen starts over on the next run, the error says
+  to raise `--prover-timeout-s` rather than retry with the same budget.
 - `aggregate-proof` writes a new pk-cache slot under
   `<stem>.pk.partial-<pid>-<random>` / `<stem>.meta.json.partial-<pid>-<random>`,
   syncs each file to disk and renames it into place, so neither a keygen

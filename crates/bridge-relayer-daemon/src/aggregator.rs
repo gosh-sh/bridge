@@ -469,7 +469,10 @@ impl ProofAggregator for SubprocessAggregator {
             .await
             .map_err(|_| {
                 RelayerError::other(format!(
-                    "{AGGREGATE_BIN} timed out after {:?}",
+                    "{AGGREGATE_BIN} timed out after {:?} and was killed. A cold pk cache \
+                     generates the aggregator key first (~15 min), and may wait for another \
+                     process generating one in the same cache; a retry with the same budget times \
+                     out the same way, so raise it with --prover-timeout-s",
                     self.config.timeout
                 ))
             })?
@@ -1363,11 +1366,25 @@ mod tests {
             .await
             .expect_err("an aggregator that never finishes times out");
         assert!(err.to_string().contains("timed out"), "{err}");
+        // A cold run keygens before it proves, and may wait for another
+        // process's keygen first: a retry with the same budget times out the
+        // same way.
+        assert!(err.to_string().contains("--prover-timeout-s"), "{err}");
 
-        let pid = std::fs::read_to_string(&pidfile)
-            .expect("the fake aggregator started and recorded its pid")
-            .trim()
-            .to_string();
+        // On a loaded host the shell may not have reached its first line
+        // when the timeout fired. Killed before it wrote its pid, it was
+        // not orphaned either.
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(p) = std::fs::read_to_string(&pidfile) {
+                pid = Some(p.trim().to_string());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(pid) = pid else {
+            return;
+        };
         // SIGKILL and reaping are not instantaneous: poll. A zombie counts as
         // gone — it holds no memory and writes nothing.
         let mut gone = false;

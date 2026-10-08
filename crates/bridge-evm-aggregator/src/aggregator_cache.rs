@@ -13,7 +13,7 @@
 //! (a stable function of the inner VK).
 //!
 //! Cache slot layout under `<cache_dir>`:
-//! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~800 MB @ K=21)
+//! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~6.8 GB for the withdrawal aggregator @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
 //!
 //! Slot stem: `<base_name>__v3__<content_hash:hex[..32]>`. `base_name` is

@@ -940,6 +940,13 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator
+  proving key instead of 1 GiB: the key a cold run writes into the pk cache is
+  ~6.85 GB. A cold run now asks for ~10.7 GB free on the filesystem that holds
+  `--params-dir` and `--pk-cache-dir` (one filesystem in the shipped profile)
+  and refuses with exit 2 below that; before, a host with 4–9 GB free passed
+  preflight and failed in stage 5, after the burn. `scripts/install.sh` now
+  wants 12 GB free.
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had

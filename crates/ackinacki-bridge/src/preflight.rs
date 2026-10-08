@@ -742,10 +742,11 @@ const EVENT_KEYGEN_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 /// Bytes the outer SHPLONK aggregator keygen writes into the pk cache.
 ///
-/// Measured, not guessed: `aggregator_cache.rs:16` documents the slot as
-/// "proving key (SDK's `RawBytes` format, ~800 MB @ K=21)". Rounded up for
-/// the `.meta.json` sibling and slack.
-const OUTER_PK_BYTES: u64 = 1024 * 1024 * 1024;
+/// Measured: a cold run wrote a 6 846 416 031-byte
+/// `BridgeWithdrawalAggregatorVerifier__v3__….pk`, and the slot before it
+/// was the same size. Rounded up to 7 GiB for the `.meta.json` sibling and
+/// slack.
+const OUTER_PK_BYTES: u64 = 7 * 1024 * 1024 * 1024;
 
 /// How long the `--help` probe waits in production.
 pub(crate) const AGGREGATOR_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -834,7 +835,7 @@ pub async fn check_prover_artifacts(
     // Threading the raw `Option` through instead is how the default path
     // would end up unchecked: with a warm cache `params_dir` is not passed
     // to `check_output_dirs` either, so nothing would probe the directory
-    // the aggregator is about to write ~800 MB into.
+    // the aggregator is about to write ~6.8 GB into.
     let effective_pk_cache = pk_cache_dir
         .map(Path::to_path_buf)
         .unwrap_or_else(|| p.params_dir.join("pk_cache"));
@@ -1411,7 +1412,7 @@ fn ensure_writable_dir(flag: &'static str, dir: &Path) -> CliResult<()> {
 /// and not of the directory.** The shipped profile puts the pk cache
 /// *inside* params (`BRIDGE_PK_CACHE_DIR=…/params/pk_cache`,
 /// `bridge_config.shellnet:95`), so two independent comparisons against the
-/// same `statvfs` both pass at 3.5 GB free while the run needs ~3.65 GB —
+/// same `statvfs` both pass at 8 GB free while the run needs ~10.7 GB —
 /// and the shortfall lands during aggregation, after the burn. Two checks
 /// that each ask "is there room for my piece?" never notice they are sharing
 /// a pie.
@@ -1520,7 +1521,7 @@ fn space_requirements<'a>(
 ) -> Vec<SpaceRequirement<'a>> {
     if shared {
         // One comparison against one `statvfs`. Two independent ones both
-        // pass at 3.5 GB free while the run needs ~3.65 GB.
+        // pass at 8 GB free while the run needs ~10.7 GB.
         vec![SpaceRequirement {
             probe: params_dir,
             needed: params_need + pk_need,
@@ -1634,8 +1635,8 @@ fn require_space(probe: &Path, needed: u64, parts: &[(&str, u64)]) -> CliResult<
         return Ok(());
     }
 
-    // Itemise. "needs 4.3 GB" invites the operator to free 4.3 GB and be
-    // surprised; "3.0 for keygen + 0.9 for the aggregator, same filesystem"
+    // Itemise. "needs 10.7 GB" invites the operator to free 10.7 GB and be
+    // surprised; "3.2 for keygen + 7.5 for the aggregator, same filesystem"
     // tells them what is actually happening.
     let breakdown = parts
         .iter()
@@ -1644,7 +1645,7 @@ fn require_space(probe: &Path, needed: u64, parts: &[(&str, u64)]) -> CliResult<
         .collect::<Vec<_>>()
         .join(" + ");
 
-    // "Free 4.0 GB" is the wrong instruction when 2.65 GB of the shortfall
+    // "Free 10.7 GB" is the wrong instruction when 2.65 GB of the shortfall
     // is a temp file the operator cannot see. Name it, and name the tool,
     // before telling them to go find space elsewhere.
     let leaks = leaked_keygen_temp_files(probe);
@@ -3218,8 +3219,8 @@ pub(crate) mod tests {
         // The composition the function exists for, and the one thing the
         // suite could not see before: `require_space` and both helpers
         // were covered, the summing was not. Two independent comparisons
-        // against the same statvfs both pass at 3.5 GB free while the run
-        // needs ~3.65 GB, and the shortfall then lands during aggregation
+        // against the same statvfs both pass at 8 GB free while the run
+        // needs ~10.7 GB, and the shortfall then lands during aggregation
         // — after the burn.
         let plan = space_requirements(
             Path::new("/params"),
@@ -3303,7 +3304,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_shortfall_itemises_what_shares_the_filesystem() {
-        // "needs 4.0 GB" invites the operator to free 4 GB and be
+        // "needs 10.7 GB" invites the operator to free 10.7 GB and be
         // surprised. The sum is the whole reason this is one check.
         let dir = tempfile::TempDir::new().unwrap();
         let absurd = u64::MAX / 4; // ~4.6 exabytes: no test host has this
@@ -3318,7 +3319,7 @@ pub(crate) mod tests {
             "must itemise keygen: {msg}"
         );
         assert!(
-            msg.contains("--pk-cache-dir 1.1 GB"),
+            msg.contains("--pk-cache-dir 7.5 GB"),
             "must itemise the aggregator: {msg}"
         );
         assert!(
@@ -3329,7 +3330,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_shortfall_names_the_space_a_dead_keygen_is_holding() {
-        // "Free 4.0 GB" is the wrong instruction when most of the
+        // "Free 10.7 GB" is the wrong instruction when most of the
         // shortfall is a temp file the operator cannot see: the name
         // starts with a dot, so `ls` does not show it, and a killed
         // keygen is the only thing that produces one.
@@ -3429,6 +3430,20 @@ pub(crate) mod tests {
         assert_eq!(
             pk_cache_requirement(Path::new("/nonexistent")),
             OUTER_PK_BYTES
+        );
+    }
+
+    #[test]
+    fn the_aggregator_reservation_covers_the_slot_a_cold_run_writes() {
+        // Measured on shellnet: the first run after a Circuit 4 key change
+        // wrote a 6 846 416 031-byte `BridgeWithdrawalAggregatorVerifier__v3__….pk`.
+        // With 1 GiB reserved, a host with 4-9 GB free passed preflight and
+        // ran out of disk in stage 5, after the burn.
+        const MEASURED_SLOT: u64 = 6_846_416_031;
+        assert!(
+            OUTER_PK_BYTES >= MEASURED_SLOT,
+            "the reservation ({OUTER_PK_BYTES} B) is smaller than the slot the aggregator writes \
+             ({MEASURED_SLOT} B)",
         );
     }
 

@@ -31,7 +31,7 @@ at degree 18 for deposits — about 350 MB in total, most of it the ceremony.
 Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
 before it is written, and the deposit ceremony also against the Hermez
-[s]·G2. It wants ~8 GB free: withdrawal keys take ~6 GB, and the deposit
+[s]·G2. It wants ~12 GB free: withdrawal keys take ~9.5 GB, and the deposit
 prover writes a ~1.3 GB proving key on its first proof.
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs

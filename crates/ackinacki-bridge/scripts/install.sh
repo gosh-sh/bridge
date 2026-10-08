@@ -42,9 +42,9 @@ readonly BUNDLE="ackinacki-bridge-linux-x86_64.tar.gz"
 readonly CEREMONY="kzg_bn254_21.srs"
 readonly DEPOSIT_CEREMONY="kzg_params_18.srs"
 readonly SUMS="SHA256SUMS"
-# Withdrawals: ceremony, binaries and keygen headroom, ~6 GB. Deposits: the
+# Withdrawals: ceremony, binaries and keygen headroom, ~10.5 GB. Deposits: the
 # prover's data/ after its first proof (SRS and proving key), ~1.3 GB.
-readonly DISK_NEED_KB=$((8 * 1024 * 1024))
+readonly DISK_NEED_KB=$((12 * 1024 * 1024))
 readonly RAM_WARN_GB=48                      # Circuit 4 peaks around 40 GB
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"

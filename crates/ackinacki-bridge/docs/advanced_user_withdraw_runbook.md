@@ -884,13 +884,13 @@ older build.
 **Checks:**
 
 ```bash
-du -sh ../bridge-prover-libraries/params/   # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
+du -sh ../bridge-prover-libraries/params/   # ~9.5 GB withdraw-only after the first run; more if this host also runs the bundle relayer
 # Free space for a cold run, on the ONE filesystem that holds both:
 #   3 GiB  event_pk.bin + vk + config (~2.65 GB measured, rounded up)
-#   1 GiB  outer SHPLONK aggregator PK (~800 MB measured, rounded up;
+#   7 GiB  outer SHPLONK aggregator PK (~6.85 GB measured, rounded up;
 #          pk_cache lives inside params/ in the shipped profile)
 #   -----
-#   4 GiB = ~4.3 GB as df reports it — preflight sums these constants
+#  10 GiB = ~10.7 GB as df reports it — preflight sums these constants
 #          and refuses below the total
 df -h ../bridge-prover-libraries/params/
 # RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host

@@ -258,10 +258,11 @@ cd ../ackinacki-bridge
 > satisfy the CLI. Use the Rust bin above.
 
 The first real withdrawal then generates `event_pk.bin` (~2.65 GB) by
-keygen, and the aggregator populates `params/pk_cache/`. Budget ~4.3 GB for
-a withdraw-only machine, plus headroom — the `~17 GB` figure elsewhere in
-these docs is a `params/` shared with a bundle relayer, which also stores
-the primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
+keygen, and the aggregator writes its ~6.85 GB key into `params/pk_cache/`.
+Budget ~10.7 GB for a withdraw-only machine, plus headroom — the figure
+preflight checks, the two keys rounded up to 3 GiB and 7 GiB. A `params/`
+shared with a bundle relayer needs more: it also stores the
+primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
 during Circuit 4 is ~40 GB.
 
 **Do not wipe `params/` between runs** — keygen and the cold aggregator
@@ -732,8 +733,8 @@ errored. Almost always local resource pressure (disk, RAM, corrupt
 PK cache) or cold-cache slowness beyond the default timeout.
 
 ```bash
-du -sh ../bridge-prover-libraries/params/    # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
-df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run needs ~4.3 GB (see Step 0)
+du -sh ../bridge-prover-libraries/params/    # ~9.5 GB withdraw-only after the first run; more if this host also runs the bundle relayer
+df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run needs ~10.7 GB (see Step 0)
 ```
 
 **Remediation:** free resources, re-run with `--allow-retry`. If the
@@ -984,7 +985,7 @@ $HOME/.bridge-deposit-state/                   ← deposit state dir when BRIDGE
 $HOME/.bridge-deposit-work/                    ← deposit work dir when BRIDGE_WORK_DIR is unset
 
 ../bridge-prover-libraries/                    ← halo2 sub-workspace (shared with the daemon)
-├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~3 GB withdraw-only, ~17 GB shared with the relayer)
+├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~9.5 GB withdraw-only, more shared with the relayer)
 │   └── pk_cache/                              ← Circuit-4 PK cache
 └── target/release/ackinacki-bridge            ← this CLI when pre-built (cargo run --release also caches here)
 
@@ -1507,7 +1508,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
 | Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
-| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~4.3 GB on a withdraw-only host (Step 0) |
+| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host (Step 0) |
 | Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~20 min |
 | Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
 

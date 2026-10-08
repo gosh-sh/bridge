@@ -20,4 +20,5 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_LIGHT_CLIENT_UNSET = 226;
     uint16 constant ERR_ZERO_RECIPIENT = 230;
     uint16 constant ERR_PAUSED = 231;
+    uint16 constant ERR_ZERO_PUBKEY = 232;
 }

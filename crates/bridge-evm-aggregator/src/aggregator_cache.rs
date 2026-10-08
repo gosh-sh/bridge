@@ -248,15 +248,36 @@ fn partial_path(final_path: &Path, pid: u32) -> PathBuf {
 const KEYGEN_LOCK: &str = ".keygen.lock";
 
 /// The cache's keygen lock file, opened (and created) without truncating.
+/// A file another user created and this one may not write is opened
+/// read-only: `flock` needs only an open file, and running unlocked beside
+/// a user who can lock is what this lock exists to prevent.
 fn open_keygen_lock(dir: &Path) -> anyhow::Result<std::fs::File> {
     let path = dir.join(KEYGEN_LOCK);
-    std::fs::OpenOptions::new()
+    let read_write = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
-        .with_context(|| format!("open cache lock {}", path.display()))
+        .open(&path);
+    match read_write {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::fs::File::open(&path)
+            .with_context(|| format!("open cache lock {}", path.display())),
+        Err(e) => Err(e).with_context(|| format!("open cache lock {}", path.display())),
+    }
+}
+
+/// Linux errno values meaning "this filesystem cannot lock at all" —
+/// `ENOLCK`, `ENOSYS`, `EOPNOTSUPP` (the release binary is Linux-only).
+const LOCKING_UNSUPPORTED: [i32; 3] = [37, 38, 95];
+
+/// Whether `e` says the filesystem cannot lock, the one failure a keygen may
+/// run unlocked through. Anything else — a permission, an I/O error — is an
+/// error: the process next door may well be able to lock, and would sweep
+/// this one's partial file.
+fn locking_unsupported(e: &std::io::Error) -> bool {
+    e.raw_os_error()
+        .is_some_and(|n| LOCKING_UNSUPPORTED.contains(&n))
 }
 
 /// The keygen lock if nobody holds it; `None` while a writer is at work.
@@ -272,34 +293,35 @@ fn try_lock_cache(dir: &Path) -> anyhow::Result<Option<std::fs::File>> {
 }
 
 /// Take the keygen lock, waiting while another process generates a key in
-/// this cache. `None` where the filesystem cannot lock: the keygen then runs
-/// unlocked, and nothing is swept.
-fn lock_cache(dir: &Path) -> Option<std::fs::File> {
-    let taken = try_lock_cache(dir).and_then(|held| match held {
-        Some(file) => Ok(file),
-        None => {
+/// this cache. `Ok(None)` only where the filesystem cannot lock: the keygen
+/// then runs unlocked, and nothing is swept. Every other failure is an
+/// error.
+fn lock_cache(dir: &Path) -> anyhow::Result<Option<std::fs::File>> {
+    let file = open_keygen_lock(dir)?;
+    let locked = match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => {
             tracing::info!(
                 target: "bridge_evm_aggregator::cache",
                 cache_dir = %dir.display(),
                 "another aggregate-proof is generating a key in this cache; waiting for it"
             );
-            let file = open_keygen_lock(dir)?;
             file.lock()
-                .with_context(|| format!("lock {}", dir.join(KEYGEN_LOCK).display()))?;
-            Ok(file)
         },
-    });
-    match taken {
-        Ok(file) => Some(file),
-        Err(e) => {
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    };
+    match locked {
+        Ok(()) => Ok(Some(file)),
+        Err(e) if locking_unsupported(&e) => {
             tracing::warn!(
                 target: "bridge_evm_aggregator::cache",
-                error = %format!("{e:#}"),
-                "cannot lock the pk cache; generating the key without the lock and \
-                 leaving partial files alone"
+                error = %e,
+                "this filesystem cannot lock the pk cache; generating the key without the \
+                 lock and leaving partial files alone"
             );
-            None
+            Ok(None)
         },
+        Err(e) => Err(e).with_context(|| format!("lock {}", dir.join(KEYGEN_LOCK).display())),
     }
 }
 
@@ -446,7 +468,7 @@ pub fn keygen_or_load(
     let mut _keygen_lock = None;
     let partial = match (slots.as_ref(), cache_dir) {
         (Some(s), Some(dir)) => {
-            _keygen_lock = lock_cache(dir);
+            _keygen_lock = lock_cache(dir)?;
             if _keygen_lock.is_some() {
                 sweep_and_report(dir);
             }
@@ -660,8 +682,14 @@ mod tests {
             "nobody may sweep while a writer holds the lock"
         );
         drop(writer);
-        assert!(try_lock_cache(&d).unwrap().is_some(), "the lock is free again");
-        assert!(lock_cache(&d).is_some(), "and a waiting writer gets it");
+        assert!(
+            try_lock_cache(&d).unwrap().is_some(),
+            "the lock is free again"
+        );
+        assert!(
+            lock_cache(&d).unwrap().is_some(),
+            "and a waiting writer gets it"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -670,12 +698,64 @@ mod tests {
         let d = scratch("wait");
         let holder = try_lock_cache(&d).unwrap().expect("free");
         let dir = d.clone();
-        let waiter = std::thread::spawn(move || lock_cache(&dir).is_some());
+        let waiter = std::thread::spawn(move || lock_cache(&dir).unwrap().is_some());
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!waiter.is_finished(), "the second writer waits");
         drop(holder);
         assert!(waiter.join().unwrap());
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_lock_file_this_user_cannot_write_still_locks() {
+        // Another user created `.keygen.lock` in a shared cache. `flock`
+        // needs only an open file, so a read-only one has to serve: an
+        // unlocked keygen here would be swept from under it by the other
+        // user, who can lock.
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("ro");
+        let path = d.join(KEYGEN_LOCK);
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let held = lock_cache(&d)
+            .expect("a read-only lock file is still a lock")
+            .expect("and this filesystem locks");
+        assert!(
+            try_lock_cache(&d).unwrap().is_none(),
+            "the read-only open really holds it"
+        );
+        drop(held);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_lock_file_this_user_cannot_open_is_an_error_not_an_unlocked_keygen() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("noperm");
+        let path = d.join(KEYGEN_LOCK);
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root opens anything: nothing to learn here then.
+        if std::fs::File::open(&path).is_ok() {
+            std::fs::remove_dir_all(&d).ok();
+            return;
+        }
+        let err = lock_cache(&d).expect_err("an unopenable lock is not a lockless filesystem");
+        assert!(format!("{err:#}").contains(KEYGEN_LOCK), "{err:#}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn only_a_filesystem_without_locks_runs_keygen_unlocked() {
+        for (errno, unsupported) in [(37, true), (38, true), (95, true), (13, false), (5, false)] {
+            assert_eq!(
+                locking_unsupported(&std::io::Error::from_raw_os_error(errno)),
+                unsupported,
+                "errno {errno}"
+            );
+        }
     }
 
     #[test]

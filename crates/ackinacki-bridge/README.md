@@ -725,16 +725,18 @@ The refusal ends with the AN burn's hash, the path of this withdrawal's
 record, and the command that carries on: the same command with
 `--allow-retry`, which skips the burn and resumes at stage 4 (capture).
 
-The burn's `WithdrawalInitiated` event was not seen within 300 s. The
-error text in the refusal tells the two cases apart:
+The burn's `WithdrawalInitiated` event was not seen within 300 s. Where
+the capture stalled is in the error text:
 
-- the transaction or its event was not visible yet (`not visible via
-  GQL`, `dst_transaction never surfaced`) → re-run with `--allow-retry`
-  once the node catches up; the CLI replays capture and does NOT re-fire
-  the burn.
-- USDCBridge bounced the call, or the multisig transaction sent nothing to
-  it → no event is coming, and the refusal says so. Reconcile on chain
-  first: the advanced runbook, Case 3a.
+- `stalled at stage 1` (`not visible via GQL`) → the node has not shown
+  the multisig transaction yet. Re-run with `--allow-retry` once it does;
+  the CLI replays capture and does NOT re-fire the burn.
+- `stalled at stage 2` (`dst_transaction never surfaced`), or the
+  transaction sent nothing to USDCBridge → USDCBridge may have bounced the
+  call, and then no event is coming however often the run waits. Look for
+  a bounce back to the multisig first — the advanced runbook, Case 3a —
+  and re-run with `--allow-retry` only if the bridge's transaction did
+  emit the event.
 
 ### Prover failed (exit 12)
 

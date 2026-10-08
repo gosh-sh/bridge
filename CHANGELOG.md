@@ -966,6 +966,11 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- An `aggregate-proof` run that hits its timeout (`--prover-timeout-s` in
+  `ackinacki-bridge withdraw`, the aggregator timeout in the relayer) is
+  killed. Before, it kept running after the caller gave up — holding its
+  memory and still writing the pk cache — beside the proof the next run
+  started.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,

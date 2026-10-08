@@ -966,6 +966,14 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
+  `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
+  `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,
+  `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert while paused.
+  It said the bridge had no pause switch. Its storage table is regenerated
+  from `forge inspect`: `pendingOwner` (slot 6), `paused` (slot 7, offset 20)
+  and `storedPrevBkSetCommitment` (slot 11) were missing, and the slots after
+  them were off.
 - Two `ackinacki-bridge withdraw` runs with one `--snark-dir` prove one at a
   time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
   it waits. Before, both wrote the snark directory's fixed-name files at once

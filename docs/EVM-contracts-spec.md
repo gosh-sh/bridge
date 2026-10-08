@@ -124,8 +124,8 @@ split (≥ 2/3 quorum vs > 1/2 split).
 
 ### 4.1 Mutable state (declaration order)
 
-Slots below are derived from Solidity's packing rules by inspection; re-derive with
-`forge inspect AckiNackiBridge storage-layout` before relying on them for a storage-level migration.
+Slots below are the output of `forge inspect AckiNackiBridge storage-layout`; re-run it before
+relying on them for a storage-level migration.
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
@@ -135,14 +135,17 @@ Slots below are derived from Solidity's packing rules by inspection; re-derive w
 | 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
 | 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
 | 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 137 | constructor, `transferOwnership` |
-| 6 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient` |
-| 7 | 0 | `_reentrancyStatus` | `uint256` | 148 | `nonReentrant` |
-| 8 | 0 | `storedBkSetCommitment` | `uint256` | 176 | constructor, `applyBkSetUpdate` |
-| 9 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 181 | `applyBkSetUpdate` |
-| 9 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 185 | constructor, `verifyBlock` |
-| 10 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 254 | `withdrawByProof` |
-| 11 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 273 | `_appendLayer` |
+| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
+| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
+| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient` |
+| 7 | 20 | `paused` | `bool` | 149 | `pause`, `unpause` |
+| 8 | 0 | `_reentrancyStatus` | `uint256` | 154 | `nonReentrant` |
+| 9 | 0 | `storedBkSetCommitment` | `uint256` | 182 | constructor, `applyBkSetUpdate` |
+| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
+| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
+| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
+| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 269 | `withdrawByProof` |
+| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 288 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -220,8 +223,10 @@ emitted (`:637-643`).
 ## 6. ETH → AN: deposits
 
 ```solidity
-function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant  // :672
+function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant whenNotPaused  // :672
 ```
+
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
 
 Sequence (`:673-681`):
 
@@ -269,8 +274,10 @@ function verifyBlock(
     uint8   numLayers,
     uint256[10] calldata layerHashes,
     uint256 prevMaxLevelLayerHash
-) external nonReentrant                                   // :739-857
+) external nonReentrant whenNotPaused                     // :739-857
 ```
+
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
 
 Permissionless. Order of operations is deliberately cheap-checks-first, then crypto, then effects:
 
@@ -331,8 +338,10 @@ key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must re
 function withdrawByProof(
     bytes calldata proof,
     IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-) external nonReentrant returns (bool success)            // :1295-1383
+) external nonReentrant whenNotPaused returns (bool success)  // :1295-1383
 ```
+
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
 
@@ -390,8 +399,10 @@ function applyBkSetUpdate(
     bytes32 siblingH01,
     bytes32 siblingH4_7,
     bytes32 siblingH8_15
-) external nonReentrant                                   // :898-1004
+) external nonReentrant whenNotPaused                     // :898-1004
 ```
+
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
 
 Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:909`, note
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
@@ -567,11 +578,15 @@ Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal`
 
 | Function | Caller |
 |---|---|
-| `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone |
-| `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone, while not `paused` |
+| `pause`, `unpause`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `acceptOwnership` | `pendingOwner` |
 | everything else | view/pure |
 
-There is **no pause switch** (removed in commit `d6bfed4`, "Remove EVM pause") and **no owner path
+The owner can **pause** the bridge (`pause()` / `unpause()`, `:1611`, `:1618`; a call that would not
+change the state reverts `AlreadyInThatPauseState()`). While `paused` is true, `deposit`,
+`verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert `BridgePaused()`; the owner's AAVE
+functions stay available, so funds can be moved out of AAVE during a pause. There is **no owner path
 that can move user principal** — the owner can only route funds between the contract and AAVE, and
 skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-failure escape hatch.
 
@@ -588,6 +603,8 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 | `LayerAnchorAppended(uint8,uint256,uint64)` | `0xa107038a79964f3eb528acbade584d60e11790b79033d6ca561747c916e2522d` | `layer` |
 | `BkSetUpdated(uint256,uint256,uint64)` | `0x3b61abb5642de7c0408ea1d76cdc9a7f26020b2b511a5a0698fc238172674dd1` | `oldCommitment`, `newCommitment`, `blockSeqNo` |
 | `WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)` | `0x88738ab1295650557339cebd9882c9db35ae232be3a8fcb180054213fe0dad92` | `nullifier`, `recipient`, `tokenId` |
+| `Paused(address)` | `0x62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a258` | `by` |
+| `Unpaused(address)` | `0x5db9ee0a495bf2e6ff9c91a7834c1ba4fdd244a5e8aa4e537bd38aeae4b073aa` | `by` |
 
 Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnabledSet`,
 `LiquidReserveBpsSet`, `OwnershipTransferred`, `YieldRecipientSet`, `EmergencyWithdrawAll`,
@@ -608,6 +625,9 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0xc6c0572d` | `isNullifierUsed(uint256)` |
 | `0xecb3dc88` | `depositCounter()` |
 | `0x313dab20` | `treasuryBalance()` |
+| `0x8456cb59` | `pause()` |
+| `0x3f4ba83a` | `unpause()` |
+| `0x5c975abb` | `paused()` |
 
 (Computed from the signatures above; `0xa41d0229` and `0xecb3dc88` cross-check against
 `frontend/src/web3.rs:294,390`.)
@@ -630,6 +650,9 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
 `LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
 `WithdrawTreasuryShortfall`.
+
+Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` while
+`paused`), `AlreadyInThatPauseState` (`pause`, `unpause` that would not change the state).
 
 ---
 
@@ -809,8 +832,9 @@ Read off the code, without a formal audit claim.
    successful `verifyBlock`, with no dedup. If AN started reporting
    `numLayers = 2` on every bundle, the L2 window would fill at the L1
    cadence and the horizon would collapse from days to hours.
-4. *No pause, no upgrade.* Response to a discovered verifier bug is redeployment plus migration; only
-   the AAVE side has an emergency lever.
+4. *Pause, no upgrade.* The owner can pause the four user entry points (§10.1), which stops new
+   deposits, anchoring, BK-set rotation and payouts while it lasts and moves no funds. The response
+   to a discovered verifier bug is a pause, then redeployment plus migration.
 5. ~~*Single-step ownership transfer* — a mistyped owner is unrecoverable.~~ **Closed.**
    Transfer is two-step: `transferOwnership` records `pendingOwner` (`:140`) and only
    `acceptOwnership` (`:1576`), called by that address, moves `owner`. A mistyped address can never

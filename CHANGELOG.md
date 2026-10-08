@@ -961,6 +961,10 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- Two `ackinacki-bridge withdraw` runs with one `--snark-dir` prove one at a
+  time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
+  it waits. Before, both wrote the snark directory's fixed-name files at once
+  and one failed with exit 12 ("calldata instance … != public input …").
 - `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator
   proving key instead of 1 GiB: the key a cold run writes into the pk cache is
   ~6.85 GB. A cold run now asks for ~10.7 GB free on the filesystem that holds

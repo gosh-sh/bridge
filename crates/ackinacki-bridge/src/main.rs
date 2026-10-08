@@ -35,6 +35,7 @@ mod idempotency;
 mod orchestrator;
 mod output;
 mod preflight;
+mod prove_lock;
 mod resurrect;
 mod submit_revert;
 #[cfg(test)]

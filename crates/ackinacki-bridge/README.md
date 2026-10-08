@@ -167,7 +167,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain), `.sol` (the proof self-check) and `_calldata.bin` (word 23 is the adapter `vkDigest` pin) |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
-| `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize) |
+| `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize). Withdrawals sharing it prove one at a time (`.prove.lock` inside) |
 | `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
 | `--pk-cache-dir`        | `BRIDGE_PK_CACHE_DIR`       | Warm-start pk cache (optional; defaults to `$BRIDGE_PARAMS_DIR/pk_cache`) |
 | `--state-dir`           | `BRIDGE_WITHDRAW_STATE_DIR` | Per-withdrawal idempotency state dir (optional; defaults to `$HOME/.bridge-withdraw-state`) |
@@ -836,6 +836,12 @@ Golden vectors, checked against `idempotency.rs::key`
 
 Two withdrawals with identical tuples collide; anything different
 (recipient, amount, or chain) does not.
+
+**One proof per `--snark-dir`.** Withdrawals with different tuples run side
+by side, but two with one `--snark-dir` prove one at a time: stage 5 takes
+`<snark-dir>/.prove.lock`, and a second run logs "another withdrawal is
+proving in this --snark-dir; waiting for it to finish" until the first is
+done. On a filesystem without `flock` it proves unlocked, with a warning.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 

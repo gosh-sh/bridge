@@ -977,12 +977,16 @@ pub async fn run(
         prover_seq_no: u32::try_from(captured.block_seq_no).unwrap_or(u32::MAX),
         replay_latest: true,
     };
+    // One proof per snark directory: its intermediate files have fixed
+    // names. Held for stage 5 only, and released before the submit.
+    let prove_lock = crate::prove_lock::take(&args.snark_dir).await?;
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
         .map_err(|e| CliError::ProofFailed {
             reason: format!("withdraw-e2e pipeline failed: {e}"),
             source: Some(e),
         })?;
+    drop(prove_lock);
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
     let pi_count = e2e.proof.public_instances_hex.len();
     info!(

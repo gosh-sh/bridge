@@ -1079,7 +1079,10 @@ pub async fn run(
                 reason,
             } => {
                 return Err(CliError::EthSubmitFailed {
-                    reason: format!("withdrawByProof dry-run reverted: {reason}"),
+                    reason: format!(
+                        "withdrawByProof dry-run reverted: {}",
+                        crate::submit_revert::explain(&reason)
+                    ),
                     source: None,
                 });
             },
@@ -1210,7 +1213,10 @@ pub async fn run(
                 }
             }
             return Err(CliError::EthSubmitFailed {
-                reason: format!("withdrawByProof reverted: {reason}"),
+                reason: format!(
+                    "withdrawByProof reverted: {}",
+                    crate::submit_revert::explain(&reason)
+                ),
                 source: None,
             });
         },

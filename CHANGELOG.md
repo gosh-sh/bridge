@@ -630,6 +630,13 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `ackinacki-bridge withdraw` exit 13 names the `AckiNackiBridge` custom error
+  a `withdrawByProof` dry run or submit reverted with, with its arguments
+  (`NullifierAlreadyUsed(nullifier: 0x…)`, `BridgePaused()`,
+  `WithdrawTreasuryShortfall(requested: …, available: …)`), and for the common
+  ones what to do next. Before, it printed the node's raw text, which on public
+  Sepolia RPCs reads "tried to decode error from abi but failed" followed by
+  the selector.
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
   per-slot window heights from `LayerAnchorAppended` logs. The scan walks

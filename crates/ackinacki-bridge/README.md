@@ -753,6 +753,13 @@ deterministically against the topped-up state and the resume path
 does NOT re-fire the AN burn (this prevents double-spend on the AN
 side).
 
+The refusal names the bridge's error and its arguments first — for example
+`NullifierAlreadyUsed(nullifier: 0x2f01…)` or
+`WithdrawTreasuryShortfall(requested: 1000000, available: 20)` — and for
+`NullifierAlreadyUsed`, `BridgePaused`, `WithdrawTreasuryShortfall`,
+`UnknownAnchor` and `WithdrawalProofRejected` says what to do. The node's
+own text follows on a `node said:` line.
+
 Other Sepolia reverts (proof PI mismatch, anchor not found,
 withdrawal already executed) are advanced-runbook territory — see the
 selector → error table in

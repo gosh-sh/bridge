@@ -35,6 +35,7 @@ mod orchestrator;
 mod output;
 mod preflight;
 mod resurrect;
+mod submit_revert;
 #[cfg(test)]
 mod source_guard;
 #[cfg(test)]

@@ -980,7 +980,7 @@ assigns it when the release is tagged.
   holds `<pk-cache>/.keygen.lock` (`flock`) until the slot is published, so
   cold keygens on one cache run one at a time, a process that waited loads
   the slot its predecessor published, and partial files are removed only by
-  a holder of that lock — never one another process, on the host or in a
+  a holder of that lock — never a file another process, on the host or in a
   container sharing the cache, is still writing. `ackinacki-bridge withdraw`
   preflight names any leftover in the pk cache before it measures free
   space.

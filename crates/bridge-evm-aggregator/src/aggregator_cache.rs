@@ -2,8 +2,8 @@
 //!
 //! `aggregate_and_prove` / `aggregate_inner` / `generate_yul_verifier` all
 //! previously called `gen_pk(agg_params, &circuit, None)` on every
-//! invocation, forcing a full outer keygen (~3-5 min at K=21 on M1-class
-//! hardware, ~1 GB peak RAM). Every rerun of `export-inner-aggregator` and
+//! invocation, forcing a full outer keygen at K=21 — most of a cold
+//! withdrawal proof's ~20 min. Every rerun of `export-inner-aggregator` and
 //! every runtime call to `aggregate-proof` paid that cost from scratch.
 //!
 //! This module memoises the outer
@@ -17,8 +17,9 @@
 //!   the withdrawal aggregator @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
 //!
-//! Both are written under a `.partial-<pid>` name and renamed into place
-//! when complete, the key first: a slot whose meta exists has a whole key.
+//! Both are written under a `.partial-<writer>` name, synced, and renamed
+//! into place when complete, the key first: a slot whose meta exists has a
+//! whole key, after a crash of the host too.
 //! A writer holds `<cache_dir>/.keygen.lock` meanwhile, which is how a
 //! leftover partial file is told from one being written.
 //!
@@ -52,6 +53,8 @@
 //!   circuit synthesis; the stem tag is the guard.
 
 use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -59,8 +62,9 @@ use halo2_base::{
     gates::circuit::CircuitBuilderStage,
     halo2_proofs::{
         halo2curves::{bn256::{Bn256, G1Affine}, serde::SerdeObject},
-        plonk::ProvingKey,
+        plonk::{Circuit as _, ProvingKey},
         poly::kzg::commitment::ParamsKZG,
+        SerdeFormat,
     },
 };
 use anyhow::Context;
@@ -217,10 +221,10 @@ fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
     }
 }
 
-/// Suffix of a slot file still being written: `<stem>.pk.partial-<pid>`
-/// and `<stem>.meta.json.partial-<pid>`, renamed into place only once
-/// complete. A writer killed mid-way — a caller's timeout, the OOM killer —
-/// leaves one of these and never a truncated `<stem>.pk`: the SDK's
+/// Suffix of a slot file still being written: `<stem>.pk.partial-<writer>`
+/// and `<stem>.meta.json.partial-<writer>`, renamed into place only once
+/// complete and synced. A writer killed mid-way — a caller's timeout, the OOM
+/// killer — leaves one of these and never a truncated `<stem>.pk`: the SDK's
 /// `read_pk` panics on a truncated key instead of regenerating it, so a
 /// truncated slot under the real name failed every later run until someone
 /// deleted it by hand. A leftover is removed by the next process that holds
@@ -228,11 +232,18 @@ fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
 /// name it.
 pub const PARTIAL_SUFFIX: &str = ".partial-";
 
-/// Where `pid` writes `final_path` before publishing it.
-fn partial_path(final_path: &Path, pid: u32) -> PathBuf {
+/// Where `writer` writes `final_path` before publishing it.
+fn partial_path(final_path: &Path, writer: &str) -> PathBuf {
     let mut name = final_path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!("{PARTIAL_SUFFIX}{pid}"));
+    name.push(format!("{PARTIAL_SUFFIX}{writer}"));
     final_path.with_file_name(name)
+}
+
+/// This process's name for its partial files: the pid, for whoever reads
+/// the directory, and a random part, because a pid is unique only inside
+/// its own namespace and a host and a container can share a cache.
+fn writer_tag() -> String {
+    format!("{}-{:08x}", std::process::id(), rand::random::<u32>())
 }
 
 /// `<cache_dir>/.keygen.lock`: an exclusive `flock(2)` a process holds from
@@ -366,7 +377,44 @@ fn clear_unpublished_slot(s: &SlotPaths) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Move a finished `partial` onto `final_path` in one step.
+/// Create `path` — never over an existing file — fill it through
+/// `write`, and sync it.
+fn write_synced(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    fill_and_sync(file, write).with_context(|| format!("write {}", path.display()))
+}
+
+/// Fill `file` through a buffer and sync it. The last buffer is flushed
+/// here, not on drop, which would throw its error away: a key whose tail
+/// never reached the disk is not whole.
+fn fill_and_sync(
+    file: File,
+    write: impl FnOnce(&mut BufWriter<File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut w = BufWriter::with_capacity(IO_BUFFER, file);
+    write(&mut w)?;
+    w.into_inner().map_err(|e| e.into_error())?.sync_all()
+}
+
+/// Sync a directory, so that a rename in it outlives a crash. A filesystem
+/// that cannot sync a directory says `EINVAL`; there is nothing more to do
+/// on it.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    match File::open(dir)?.sync_all() {
+        Err(e) if e.raw_os_error() == Some(22) => Ok(()),
+        other => other,
+    }
+}
+
+/// Move a finished, synced `partial` onto `final_path` in one step, and
+/// make the move durable.
 fn publish(partial: &Path, final_path: &Path) -> anyhow::Result<()> {
     std::fs::rename(partial, final_path).with_context(|| {
         format!(
@@ -374,11 +422,41 @@ fn publish(partial: &Path, final_path: &Path) -> anyhow::Result<()> {
             partial.display(),
             final_path.display()
         )
-    })
+    })?;
+    let dir = final_path.parent().unwrap_or(Path::new("."));
+    sync_dir(dir).with_context(|| format!("sync {}", dir.display()))
 }
 
-/// Read a published slot: the key through `gen_pk`'s file path, the rest
-/// from the meta.
+/// Buffer size for a key's reads and writes, the SDK's own.
+const IO_BUFFER: usize = 1024 * 1024;
+
+/// Read a published key. Not through `gen_pk(.., Some(path))`: that runs a
+/// whole keygen when the file cannot be opened and writes the result over
+/// the published name, without the lock, and it panics on a truncated key.
+fn read_slot_key(
+    path: &Path,
+    params: AggregationConfigParams,
+) -> anyhow::Result<ProvingKey<G1Affine>> {
+    let unreadable = || {
+        format!(
+            "read cached aggregator key {}. Remove it and the .meta.json beside it to have both \
+             generated again",
+            path.display()
+        )
+    };
+    let file = File::open(path).with_context(unreadable)?;
+    let mut r = BufReader::with_capacity(IO_BUFFER, file);
+    ProvingKey::read::<_, AggregationCircuit>(&mut r, SerdeFormat::RawBytesUnchecked, params)
+        .with_context(unreadable)
+}
+
+/// Whether a slot is published: its meta is renamed into place after its
+/// key, so a meta means a whole key.
+fn published(s: &SlotPaths) -> bool {
+    s.pk.exists() && s.meta.exists()
+}
+
+/// Read a published slot: the key, and the rest from the meta.
 fn load_slot(
     agg_params: &ParamsKZG<Bn256>,
     s: &SlotPaths,
@@ -391,12 +469,11 @@ fn load_slot(
         .with_context(|| format!("parse cache meta {}", s.meta.display()))?;
     let calculated: AggregationConfigParams = meta.calculated.into();
 
-    // Build a "post-keygen shape" circuit so `circuit.params()`
-    // returns `calculated`. Only `params()` is consulted by
-    // `gen_pk`'s PK-file read path -- no synthesis runs. We omit
-    // `expose_previous_instances` / `calculate_params` deliberately:
-    // both `num_instance` and `break_points` are recovered from
-    // `meta` so re-deriving them here would be pure overhead.
+    // Build a "post-keygen shape" circuit for the params the key is read
+    // with. No synthesis runs. We omit `expose_previous_instances` /
+    // `calculate_params` deliberately: both `num_instance` and
+    // `break_points` are recovered from `meta` so re-deriving them here
+    // would be pure overhead.
     let circuit = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Keygen,
         calculated,
@@ -404,7 +481,7 @@ fn load_slot(
         vec![inner_snark.clone()],
         universality,
     );
-    let pk = gen_pk(agg_params, &circuit, Some(&s.pk));
+    let pk = read_slot_key(&s.pk, circuit.params())?;
     tracing::info!(
         target: "bridge_evm_aggregator::cache",
         stem = %s.pk.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
@@ -418,13 +495,66 @@ fn load_slot(
     })
 }
 
+/// The cache's protocol, apart from what a slot holds.
+///
+/// A published slot is loaded. Otherwise this process takes the keygen
+/// lock, waiting while another one generates, and looks again: a slot
+/// published meanwhile is loaded, not generated twice. Only then does
+/// `generate` run, still under the lock, writing the key to the partial
+/// path it is given and returning its value and the meta's text; the key
+/// is published first, then the meta, and the lock is let go after both.
+fn load_or_generate<T>(
+    dir: &Path,
+    s: &SlotPaths,
+    load: impl FnOnce(&SlotPaths) -> anyhow::Result<T>,
+    generate: impl FnOnce(&Path) -> anyhow::Result<(T, String)>,
+) -> anyhow::Result<T> {
+    if published(s) {
+        // Nobody writing means every partial file is a leftover; clear them
+        // while here, without waiting for a writer to finish.
+        if let Ok(Some(_lock)) = try_lock_cache(dir) {
+            sweep_and_report(dir);
+        }
+        return load(s);
+    }
+
+    let keygen_lock = lock_cache(dir)?;
+    // Without the lock — a filesystem that cannot lock — another writer's
+    // partial file may be in the directory, and nothing is swept.
+    if keygen_lock.is_some() {
+        sweep_and_report(dir);
+    }
+    // Published by another process while this one waited for the lock.
+    if published(s) {
+        return load(s);
+    }
+    clear_unpublished_slot(s)
+        .with_context(|| format!("clear unpublished cache slot {}", s.pk.display()))?;
+
+    let writer = writer_tag();
+    let key_partial = partial_path(&s.pk, &writer);
+    let (value, meta_text) = generate(&key_partial)?;
+    publish(&key_partial, &s.pk)?;
+    let meta_partial = partial_path(&s.meta, &writer);
+    write_synced(&meta_partial, |w| w.write_all(meta_text.as_bytes()))?;
+    publish(&meta_partial, &s.meta)?;
+    tracing::info!(
+        target: "bridge_evm_aggregator::cache",
+        stem = %s.pk.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+        "aggregator PK cache MISS -> persisted new slot"
+    );
+    drop(keygen_lock);
+    Ok(value)
+}
+
 /// Load `(pk, break_points, calculated, num_instance)` from `cache_dir` if
 /// both slot files exist. On cache miss, run the real outer keygen and
 /// (if `cache_dir` is `Some`) persist everything for subsequent runs.
 ///
-/// Cost:
-/// - cache **miss** (K=21): ~3-5 min wall-clock, ~1 GB peak RAM
-/// - cache **hit** (K=21): ~15-60 s (PK read + circuit construct)
+/// Cost, measured for the withdrawal aggregator at K=21:
+/// - cache **miss**: ~20 min wall-clock with the proof, and a ~6.8 GB key
+///   written to `cache_dir`
+/// - cache **hit**: the key is read back instead (~15-60 s)
 ///
 /// Passing `cache_dir = None` is equivalent to the pre-cache behaviour: full
 /// keygen every call, nothing persisted.
@@ -435,58 +565,38 @@ pub fn keygen_or_load(
     inner_snark: &Snark,
     cache_dir: Option<&Path>,
 ) -> anyhow::Result<CachedKeygen> {
-    let slots = match cache_dir {
-        Some(dir) => {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("create cache dir {}", dir.display()))?;
-            let stem = cache_stem(base_name, &config, agg_params, inner_snark);
-            Some(slot_paths(dir, &stem))
-        }
-        None => None,
+    let Some(dir) = cache_dir else {
+        return Ok(keygen(agg_params, &config, inner_snark));
     };
-
-    // ------------------------------------------------------------------
-    // Cache hit: skip real keygen, just read PK + meta from disk.
-    // ------------------------------------------------------------------
-    if let (Some(s), Some(dir)) = (slots.as_ref(), cache_dir) {
-        if s.pk.exists() && s.meta.exists() {
-            // Nobody writing means every partial file is a leftover; clear
-            // them while here, without waiting for a writer to finish.
-            if let Ok(Some(_lock)) = try_lock_cache(dir) {
-                sweep_and_report(dir);
-            }
-            return load_slot(agg_params, s, inner_snark, config.universality);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Cache miss: real keygen. Persist afterwards if `cache_dir = Some`:
-    // the key goes to a partial file and is renamed into place once it is
-    // complete, then the meta the same way — so the slot is never seen
-    // half-written, and a `.pk` with its meta beside it is always whole.
-    // ------------------------------------------------------------------
-    let mut _keygen_lock = None;
-    let partial = match (slots.as_ref(), cache_dir) {
-        (Some(s), Some(dir)) => {
-            _keygen_lock = lock_cache(dir)?;
-            if _keygen_lock.is_some() {
-                sweep_and_report(dir);
-            }
-            // Published by another process while this one waited for the
-            // lock: load it instead of generating it again.
-            if s.pk.exists() && s.meta.exists() {
-                return load_slot(agg_params, s, inner_snark, config.universality);
-            }
-            clear_unpublished_slot(s)
-                .with_context(|| format!("clear unpublished cache slot {}", s.pk.display()))?;
-            let p = partial_path(&s.pk, std::process::id());
-            // Under the lock nobody else is writing: a file under this name
-            // is a leftover the sweep did not reach.
-            let _ = std::fs::remove_file(&p);
-            Some(p)
+    std::fs::create_dir_all(dir).with_context(|| format!("create cache dir {}", dir.display()))?;
+    let stem = cache_stem(base_name, &config, agg_params, inner_snark);
+    let s = slot_paths(dir, &stem);
+    load_or_generate(
+        dir,
+        &s,
+        |s| load_slot(agg_params, s, inner_snark, config.universality),
+        |key_partial| {
+            let k = keygen(agg_params, &config, inner_snark);
+            write_synced(key_partial, |w| {
+                k.pk.write(w, SerdeFormat::RawBytesUnchecked)
+            })?;
+            let meta = CachedMeta {
+                break_points: k.break_points.clone(),
+                calculated: k.calculated.into(),
+                num_instance: k.num_instance.clone(),
+            };
+            let meta_text = serde_json::to_string_pretty(&meta).context("serialize cache meta")?;
+            Ok((k, meta_text))
         },
-        _ => None,
-    };
+    )
+}
+
+/// The real outer keygen, in memory: the key is written by the caller.
+fn keygen(
+    agg_params: &ParamsKZG<Bn256>,
+    config: &AggregatorConfig,
+    inner_snark: &Snark,
+) -> CachedKeygen {
     let agg_config = AggregationConfigParams {
         degree: config.k_outer,
         lookup_bits: config.lookup_bits_outer,
@@ -507,38 +617,14 @@ pub fn keygen_or_load(
     crate::vk_binding::expose_vk_digest(&mut keygen_circuit);
     let calculated = keygen_circuit.calculate_params(Some(10));
     let num_instance = keygen_circuit.num_instance();
-
-    let pk = gen_pk(agg_params, &keygen_circuit, partial.as_deref());
-
+    let pk = gen_pk(agg_params, &keygen_circuit, None);
     let break_points = keygen_circuit.break_points();
-    drop(keygen_circuit);
-
-    if let (Some(s), Some(p)) = (slots.as_ref(), partial.as_ref()) {
-        publish(p, &s.pk)?;
-        let meta = CachedMeta {
-            break_points: break_points.clone(),
-            calculated: calculated.into(),
-            num_instance: num_instance.clone(),
-        };
-        let meta_text = serde_json::to_string_pretty(&meta)
-            .context("serialize cache meta")?;
-        let meta_partial = partial_path(&s.meta, std::process::id());
-        std::fs::write(&meta_partial, meta_text)
-            .with_context(|| format!("write cache meta {}", meta_partial.display()))?;
-        publish(&meta_partial, &s.meta)?;
-        tracing::info!(
-            target: "bridge_evm_aggregator::cache",
-            stem = %s.pk.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-            "aggregator PK cache MISS -> persisted new slot"
-        );
-    }
-
-    Ok(CachedKeygen {
+    CachedKeygen {
         pk,
         break_points,
         calculated,
         num_instance,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -636,12 +722,12 @@ mod tests {
     #[test]
     fn a_partial_slot_file_is_named_after_its_slot_and_writer() {
         assert_eq!(
-            partial_path(Path::new("/c/X__v3__ab.pk"), 42),
-            PathBuf::from("/c/X__v3__ab.pk.partial-42")
+            partial_path(Path::new("/c/X__v3__ab.pk"), "42-0a1b2c3d"),
+            PathBuf::from("/c/X__v3__ab.pk.partial-42-0a1b2c3d")
         );
         assert_eq!(
-            partial_path(Path::new("/c/X__v3__ab.meta.json"), 7),
-            PathBuf::from("/c/X__v3__ab.meta.json.partial-7")
+            partial_path(Path::new("/c/X__v3__ab.meta.json"), "7-0a1b2c3d"),
+            PathBuf::from("/c/X__v3__ab.meta.json.partial-7-0a1b2c3d")
         );
     }
 
@@ -788,47 +874,214 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// A slot's two files, published by hand.
+    fn publish_by_hand(s: &SlotPaths, key: &[u8]) {
+        std::fs::write(&s.pk, key).unwrap();
+        std::fs::write(&s.meta, b"{}").unwrap();
+    }
+
     #[test]
-    fn keygen_writes_the_key_to_a_partial_and_publishes_it_before_the_meta() {
-        // `gen_pk(.., Some(path))` writes straight to `path`. Given the slot's
-        // own name, a writer killed mid-way leaves a truncated slot every
-        // later run panics on.
+    fn a_published_slot_is_loaded_and_never_generated() {
+        let d = scratch("hit");
+        let s = slot_paths(&d, "S");
+        publish_by_hand(&s, b"key");
+        let got = load_or_generate(
+            &d,
+            &s,
+            |s| Ok(std::fs::read(&s.pk)?),
+            |_| panic!("a published slot is not generated again"),
+        )
+        .unwrap();
+        assert_eq!(got, b"key");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_slot_published_while_waiting_for_the_lock_is_loaded_not_generated_again() {
+        // Two cold runs on one cache: the second waits for the first's lock,
+        // and must find the first's slot once it has it. Generating it again
+        // would write a second ~6.8 GB key beside the first.
+        let d = scratch("raced");
+        let holder = try_lock_cache(&d).unwrap().expect("free");
+        let dir = d.clone();
+        let waiter = std::thread::spawn(move || {
+            let s = slot_paths(&dir, "S");
+            load_or_generate(
+                &dir,
+                &s,
+                |s| Ok(std::fs::read(&s.pk)?),
+                |_| Ok((b"generated twice".to_vec(), "{}".to_string())),
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !waiter.is_finished(),
+            "the second writer waits for the lock"
+        );
+        publish_by_hand(&slot_paths(&d, "S"), b"the first writer's key");
+        drop(holder);
+        assert_eq!(waiter.join().unwrap().unwrap(), b"the first writer's key");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_key_is_generated_under_the_lock_and_published_with_its_meta() {
+        let d = scratch("miss");
+        let s = slot_paths(&d, "S");
+        let got = load_or_generate(
+            &d,
+            &s,
+            |_| panic!("nothing is published yet"),
+            |partial| {
+                assert!(
+                    try_lock_cache(&d).unwrap().is_none(),
+                    "the cache lock is held while the key is generated"
+                );
+                assert!(
+                    partial
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("S.pk.partial-"),
+                    "{}",
+                    partial.display()
+                );
+                write_synced(partial, |w| w.write_all(b"fresh key"))?;
+                Ok((7, "{\"meta\":1}".to_string()))
+            },
+        )
+        .unwrap();
+        assert_eq!(got, 7);
+        assert_eq!(std::fs::read(&s.pk).unwrap(), b"fresh key");
+        assert_eq!(std::fs::read_to_string(&s.meta).unwrap(), "{\"meta\":1}");
+        assert!(
+            sweep_partials(&d).is_empty(),
+            "nothing is left half-written"
+        );
+        assert!(
+            try_lock_cache(&d).unwrap().is_some(),
+            "and the lock is let go once the slot is published"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_failed_keygen_publishes_nothing() {
+        let d = scratch("failed");
+        let s = slot_paths(&d, "S");
+        let err = load_or_generate::<()>(
+            &d,
+            &s,
+            |_| panic!("nothing is published"),
+            |_| anyhow::bail!("keygen failed"),
+        )
+        .expect_err("the failure is the caller's");
+        assert!(format!("{err:#}").contains("keygen failed"));
+        assert!(!s.pk.exists() && !s.meta.exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_write_whose_last_buffer_cannot_be_flushed_is_an_error() {
+        // `BufWriter` flushes its last buffer on drop and throws the error
+        // away. A key whose tail never reached the disk must not be
+        // published as whole.
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full");
+        let err = fill_and_sync(full, |w| w.write_all(b"the tail of a key"))
+            .expect_err("ENOSPC on the final flush is reported");
+        assert_eq!(err.raw_os_error(), Some(28), "{err}");
+    }
+
+    #[test]
+    fn a_partial_file_is_never_written_over() {
+        // Without the lock — a filesystem that cannot lock — two writers in
+        // different PID namespaces can share a pid. Neither may truncate the
+        // other's partial file.
+        let d = scratch("create_new");
+        let p = d.join("S.pk.partial-1");
+        std::fs::write(&p, b"someone else's").unwrap();
+        write_synced(&p, |w| w.write_all(b"mine")).expect_err("the file is not ours");
+        assert_eq!(std::fs::read(&p).unwrap(), b"someone else's");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn two_writers_name_their_partial_files_apart() {
+        assert_ne!(
+            writer_tag(),
+            writer_tag(),
+            "a pid alone is not unique across namespaces"
+        );
+        assert!(writer_tag().starts_with(&format!("{}-", std::process::id())));
+    }
+
+    #[test]
+    fn an_unreadable_published_key_is_an_error_not_a_keygen() {
+        // `gen_pk(.., Some(path))` regenerates a key it cannot open — in
+        // place, under the published name, without the lock — and panics on
+        // a truncated one.
+        let d = scratch("read");
+        let params = AggregationConfigParams {
+            degree: 4,
+            lookup_bits: 3,
+            ..Default::default()
+        };
+        let err = read_slot_key(&d.join("missing.pk"), params).expect_err("missing");
+        assert!(format!("{err:#}").contains("missing.pk"), "{err:#}");
+        let truncated = d.join("truncated.pk");
+        std::fs::write(&truncated, [0x02, 0x01]).unwrap();
+        let err = read_slot_key(&truncated, params).expect_err("truncated");
+        assert!(
+            format!("{err:#}").contains(".meta.json"),
+            "says what to remove: {err:#}"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_key_reaches_the_cache_only_through_a_synced_partial_file() {
+        // `gen_pk(.., Some(path))` writes straight to `path` through a
+        // `BufWriter` whose last flush error it drops, syncs nothing, and
+        // regenerates over a key it cannot open. The behaviour around it is
+        // tested above through `load_or_generate`; this pins that the real
+        // keygen goes through it.
         let src = include_str!("aggregator_cache.rs");
         let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let code: Vec<&str> = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
         assert_eq!(
-            src.matches("Some(&s.pk)").count(),
+            code.iter().filter(|l| l.contains("gen_pk(")).count(),
             1,
-            "only the cache-hit read names the slot's key directly"
+            "one keygen"
         );
-        let keygen = src
-            .find("partial.as_deref()")
-            .expect("keygen writes the partial");
-        let publish_pk = src.find("publish(p, &s.pk)").expect("the key is published");
-        let publish_meta = src
-            .find("publish(&meta_partial, &s.meta)")
-            .expect("the meta is published");
-        assert!(keygen < publish_pk && publish_pk < publish_meta);
+        assert!(
+            src.contains("gen_pk(agg_params, &keygen_circuit, None)"),
+            "and it writes no file of its own"
+        );
+        assert!(
+            src.contains("load_or_generate(\n"),
+            "keygen_or_load goes through the protocol"
+        );
         // Leftovers are told from live writes by the cache lock, never by a
         // pid: a pid means nothing outside its own namespace.
         assert!(!src.contains("/proc/"), "no pid-based liveness");
-        let lock = src
-            .find("lock_cache(dir)")
-            .expect("a writer takes the cache lock");
-        let clear = src
-            .find("clear_unpublished_slot(s)")
-            .expect("unpublished slots are cleared");
-        assert!(
-            lock < clear && clear < keygen,
-            "under the lock, before keygen"
-        );
         // Every sweep happens under the lock: the writer's, or one the
         // cache-hit path takes without waiting.
         assert_eq!(src.matches("sweep_partials(dir)").count(), 1);
         assert_eq!(src.matches("sweep_and_report(dir);").count(), 2);
         assert!(src.contains(
-            "if let Ok(Some(_lock)) = try_lock_cache(dir) {\n                \
-             sweep_and_report(dir);"
+            "if let Ok(Some(_lock)) = try_lock_cache(dir) {\n            sweep_and_report(dir);"
         ));
-        assert!(src.contains("if _keygen_lock.is_some() {\n                sweep_and_report(dir);"));
+        assert!(src.contains("if keygen_lock.is_some() {\n        sweep_and_report(dir);"));
+        // A rename is durable once its directory is.
+        let publish = &src[src.find("fn publish(").unwrap()..];
+        let publish = &publish[..publish.find("\n}\n").unwrap()];
+        assert!(publish.contains("sync_dir("), "{publish}");
     }
 }

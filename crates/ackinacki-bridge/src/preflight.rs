@@ -1527,7 +1527,7 @@ pub fn check_disk_headroom(
     }
 
     // The aggregator's counterpart: a killed `aggregate-proof` leaves its
-    // half-written key under a `.partial-<pid>` name. The next aggregator
+    // half-written key under a `.partial-` name. The next aggregator
     // run removes it, but this measurement comes first.
     for (path, bytes) in aggregator_partials(pk_cache_dir) {
         tracing::warn!(

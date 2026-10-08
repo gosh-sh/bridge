@@ -1525,10 +1525,48 @@ pub fn check_disk_headroom(
         );
     }
 
+    // The aggregator's counterpart: a killed `aggregate-proof` leaves its
+    // half-written key under a `.partial-<pid>` name. The next aggregator
+    // run removes it, but this measurement comes first.
+    for (path, bytes) in aggregator_partials(pk_cache_dir) {
+        tracing::warn!(
+            path = %path.display(),
+            gb = bytes as f64 / 1e9,
+            "an interrupted aggregate-proof left a partial pk-cache file; the next \
+             aggregate-proof run removes it, or remove it by hand while no aggregate-proof is \
+             running",
+        );
+    }
+
     for r in plan_disk_headroom(params_dir, pk_cache_dir, cache)? {
         require_space(r.probe, r.needed, &r.parts)?;
     }
     Ok(())
+}
+
+/// Suffix `aggregate-proof` gives a pk-cache file it is still writing
+/// (`PARTIAL_SUFFIX` in `bridge-evm-aggregator/src/aggregator_cache.rs`,
+/// a separate workspace this crate cannot import).
+const AGGREGATOR_PARTIAL_SUFFIX: &str = ".partial-";
+
+/// The partial files an interrupted `aggregate-proof` left in
+/// `pk_cache_dir`, with their sizes. Unreadable directory: none.
+fn aggregator_partials(pk_cache_dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.contains(AGGREGATOR_PARTIAL_SUFFIX))
+        })
+        .filter_map(|e| {
+            let md = std::fs::symlink_metadata(e.path()).ok()?;
+            md.is_file().then(|| (e.path(), md.len()))
+        })
+        .collect()
 }
 
 /// Everything the check DECIDES, decided — and nothing performed.
@@ -3436,6 +3474,63 @@ pub(crate) mod tests {
         assert!(
             logged.contains("--repair"),
             "and it must say how to remove it: {logged}",
+        );
+    }
+
+    #[test]
+    fn a_partial_aggregator_key_is_reported_before_the_measurement_decides_anything() {
+        // An `aggregate-proof` killed mid-keygen (its timeout, the OOM
+        // killer) leaves `<stem>.pk.partial-<pid>` — up to ~6.85 GB — in the
+        // pk cache. The next aggregate-proof run removes it, but this check
+        // runs first and may refuse for the space it holds.
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<String>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let params = tempfile::TempDir::new().unwrap();
+        let pk_cache = tempfile::TempDir::new().unwrap();
+        let leak = pk_cache
+            .path()
+            .join("BridgeWithdrawalAggregatorVerifier__v3__ab.pk.partial-4242");
+        std::fs::write(&leak, vec![0u8; 4096]).unwrap();
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .finish();
+        let outcome = crate::test_log::with_default(subscriber, || {
+            check_disk_headroom(params.path(), pk_cache.path(), KeyCacheState::Corrupt {
+                why: "digest mismatch".into(),
+            })
+        });
+        outcome.expect_err("a corrupt cache is a refusal");
+
+        let logged = sink.0.lock().unwrap().clone();
+        assert!(
+            logged.contains("pk.partial-4242"),
+            "the leftover must be named before the measurement decides anything: {logged}",
         );
     }
 

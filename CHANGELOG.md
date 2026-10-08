@@ -971,6 +971,14 @@ assigns it when the release is tagged.
   killed. Before, it kept running after the caller gave up — holding its
   memory and still writing the pk cache — beside the proof the next run
   started.
+- `aggregate-proof` writes a new pk-cache slot under
+  `<stem>.pk.partial-<pid>` / `<stem>.meta.json.partial-<pid>` and renames
+  each into place once complete, so a keygen killed mid-write (a timeout, the
+  OOM killer) no longer leaves a truncated `<stem>.pk` that every later run
+  panicked on until it was deleted by hand. A `.pk` without its
+  `.meta.json` is regenerated rather than read, and the next run removes
+  partial files whose writer is gone. `ackinacki-bridge withdraw` preflight
+  names any such leftover in the pk cache before it measures free space.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,

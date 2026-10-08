@@ -809,13 +809,20 @@ pub async fn run(
     // Every exit 11 and 12 from here to the submit carries `resume`: the
     // burn is on the wire, and the operator needs the way back without a
     // second one.
-    let resume = ResumeNote::new(
-        &an_tx_hash,
-        record
-            .as_ref()
-            .map(|r| idempotency::record_path(&state_dir, &r.key))
-            .as_deref(),
-    );
+    // Both branches that send set `record`; without one, `--allow-retry`
+    // would burn again, so there is no way back to offer — exit 10.
+    let record_path = record
+        .as_ref()
+        .map(|r| idempotency::record_path(&state_dir, &r.key))
+        .ok_or_else(|| CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "internal: no record past the burn. The AN burn {an_tx_hash} IS on the wire and \
+                 --allow-retry cannot find it — reconcile it by hand (advanced runbook, Case 3a) \
+                 before re-running."
+            ),
+            source: None,
+        })?;
+    let resume = ResumeNote::new(&an_tx_hash, &record_path);
     let plumbing_ref = plumbing.as_ref().ok_or_else(|| {
         proof_failed_after_burn(
             format!(
@@ -1335,16 +1342,15 @@ pub async fn run(
 struct ResumeNote(String);
 
 impl ResumeNote {
-    /// The note for the burn `an_tx`, kept in `record` when the run has one.
-    fn new(an_tx: &str, record: Option<&Path>) -> Self {
-        let kept = match record {
-            Some(p) => format!("its record is {}", p.display()),
-            None => "no record was kept for it".to_string(),
-        };
+    /// The note for the burn `an_tx`, kept in `record`. A record, not an
+    /// `Option`: `--allow-retry` skips the burn only by reading it, so the
+    /// note has nothing to offer a run without one.
+    fn new(an_tx: &str, record: &Path) -> Self {
         Self(format!(
-            "The AN burn {an_tx} is on the wire and {kept}. Re-run the same command with \
-             --allow-retry: it skips the burn and resumes at stage 4/6 (capture), then waits for \
-             coverage and proves again."
+            "The AN burn {an_tx} is on the wire and its record is {}. Re-run the same command \
+             with --allow-retry: it skips the burn and resumes at stage 4/6 (capture), then waits \
+             for coverage and proves again.",
+            record.display()
         ))
     }
 }
@@ -3753,7 +3759,7 @@ mod tests {
 
     #[test]
     fn a_failed_proof_after_the_burn_says_how_to_carry_on() {
-        let note = ResumeNote::new("0xabc", Some(Path::new("/state/k.json")));
+        let note = ResumeNote::new("0xabc", Path::new("/state/k.json"));
         let msg =
             proof_failed_after_burn("aggregate-proof timed out after 60s".into(), None, &note)
                 .to_string();
@@ -3769,7 +3775,7 @@ mod tests {
 
     #[test]
     fn a_capture_timeout_says_how_to_carry_on_and_when_not_to() {
-        let note = ResumeNote::new("0xabc", Some(Path::new("/state/k.json")));
+        let note = ResumeNote::new("0xabc", Path::new("/state/k.json"));
         let e = capture_timed_out("0xabc", &anyhow::anyhow!("stalled at stage 2"), &note);
         assert_eq!(e.exit_code().as_i32(), 11);
         let msg = e.to_string();
@@ -3782,7 +3788,7 @@ mod tests {
 
     #[test]
     fn the_note_is_added_to_11_and_12_only() {
-        let note = ResumeNote::new("0xabc", None);
+        let note = ResumeNote::new("0xabc", Path::new("/state/k.json"));
         let ten = CliError::BurnOutcomeUnknown {
             reason: "x".into(),
             source: None,

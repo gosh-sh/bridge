@@ -65,9 +65,11 @@ pub enum ExitCode {
     /// `sendTransaction` from this multisig around the record's
     /// `reserved_at`. The advanced runbook's Case 3a is the procedure.
     BurnOutcomeUnknown = 10,
-    /// AN burn confirmed but `WithdrawalInitiated` capture timed out. The
-    /// event is durable in GQL; re-run with `--allow-retry` (v1) or
-    /// `--resume` (v2) to pick up capture.
+    /// AN burn broadcast but no `WithdrawalInitiated` captured in time.
+    /// Either the event is late — once emitted it stays in GQL, and
+    /// `--allow-retry` resumes at capture — or the burn bounced and no
+    /// event will come, which a re-run cannot fix. The message says how to
+    /// tell them apart before re-running.
     CaptureTimeout = 11,
     /// Capture succeeded but the Circuit-4 proof pipeline failed
     /// (aggregator subprocess crash, C4 wall-time exceeded, enricher timed

@@ -800,9 +800,8 @@ The refusal names the bridge's error and its arguments first — for example
 `UnknownAnchor` and `WithdrawalProofRejected` says what to do. The node's
 own text follows on a `node said:` line.
 
-Other Sepolia reverts (proof PI mismatch, anchor not found,
-withdrawal already executed) are advanced-runbook territory — see the
-selector → error table in
+Reverts it cannot name, and what lies behind the ones it can, are
+advanced-runbook territory — see the selector → error table in
 [docs/advanced_user_withdraw_runbook.md](docs/advanced_user_withdraw_runbook.md#case-3c--on-chain-withdrawbyproof-revert).
 
 ### Health check — is the server-side bundle daemon alive?

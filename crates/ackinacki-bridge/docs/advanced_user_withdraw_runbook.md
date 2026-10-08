@@ -537,9 +537,10 @@ the recovery gist; jump here for the diagnostic commands.
 
 ### Case 3a — Capture timeout — advanced diagnostics
 
-**Scenario:** CLI exited 11. Either the event was never observed
-(poll expired) or the enricher blocked waiting for the covering
-bundle. Distinguish via:
+**Scenario:** CLI exited 11 — the event was never observed (the capture
+poll expired) — or exited 12 with a refusal that starts
+`wait_for_coverage:` — the event was captured, and the covering bundle
+did not land within the wait. Distinguish via:
 
 ```bash
 # `--work-dir` is required plumbing with no default, so substitute the
@@ -932,9 +933,13 @@ df -h ../bridge-prover-libraries/params/
 
 - If the log shows swap thrash, the OOM is real — don't just extend
   timeout. Move to a bigger host or shrink another workload.
-- If first-bundle `.pk` write ENOSPC-truncated the file, delete the
-  truncated `pk_cache` entry and re-run. Verify ≥20 GB free in
-  `params_dir` before doing so.
+- An `aggregate-proof` that ran out of disk while writing its key leaves
+  a `<stem>.pk.partial-…` file, never a truncated `<stem>.pk`. The next
+  run removes it, and preflight names it before it measures: free the
+  space preflight asks for and re-run with `--allow-retry`. A published
+  key that cannot be read fails the aggregator with
+  `read cached aggregator key …`, naming the `.pk` to remove together
+  with the `.meta.json` beside it.
 
 ---
 

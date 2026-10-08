@@ -137,7 +137,7 @@ relying on them for a storage-level migration.
 | 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
 | 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
 | 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
-| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient` |
+| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
 | 7 | 20 | `paused` | `bool` | 149 | `pause`, `unpause` |
 | 8 | 0 | `_reentrancyStatus` | `uint256` | 154 | `nonReentrant` |
 | 9 | 0 | `storedBkSetCommitment` | `uint256` | 182 | constructor, `applyBkSetUpdate` |

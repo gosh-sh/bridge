@@ -981,7 +981,9 @@ assigns it when the release is tagged.
   cold keygens on one cache run one at a time, a process that waited loads
   the slot its predecessor published, and partial files are removed only by
   a holder of that lock — never a file another process, on the host or in a
-  container sharing the cache, is still writing. `ackinacki-bridge withdraw`
+  container sharing the cache, is still writing. A lock file another user
+  created is opened read-only; a lock that cannot be taken for any reason but
+  a filesystem without `flock` fails the run instead of generating unlocked. `ackinacki-bridge withdraw`
   preflight names any leftover in the pk cache before it measures free
   space.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
@@ -994,10 +996,13 @@ assigns it when the release is tagged.
   them were off.
 - Two `ackinacki-bridge withdraw` runs with one `--snark-dir` prove one at a
   time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
-  it waits, then reads the bridge's state again before it proves, so the
-  anchor it binds to is still in the window. Before, both wrote the snark
-  directory's fixed-name files at once and one failed with exit 12
-  ("calldata instance … != public input …").
+  it waits, then reads the bridge's state again and re-checks the Circuit-4
+  proving key before it proves, so the anchor it binds to is still in the
+  window and the key is the one preflight verified. Preflight opens the lock
+  file (read-only if another user's file is not writable) and refuses with
+  exit 2 when it cannot, instead of failing with exit 12 after the burn.
+  Before, both runs wrote the snark directory's fixed-name files at once and
+  one failed with exit 12 ("calldata instance … != public input …").
 - `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator
   proving key instead of 1 GiB: the key a cold run writes into the pk cache is
   ~6.85 GB. A cold run now asks for ~10.7 GB free on the filesystem that holds

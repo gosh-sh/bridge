@@ -944,13 +944,6 @@ pub async fn run(
     // ---- 5. Prove ----
     info!("stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)");
 
-    // Before anything reads the key. Stage 1 verified it; the burn and the
-    // anchor wait sit between then and now, and nothing else re-checks —
-    // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
-    // unconditionally, and the refusal it produces is strictly better than
-    // proving against an unvouched-for key and being rejected on submit.
-    crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())
-        .map_err(|e| with_resume_note(e, &resume))?;
     // `prover_state_path` and `window_size` are ignored by
     // `run_once_with_state`, but the config struct still has the fields
     // (the daemon binary uses them on the file path). Fill in stubs
@@ -1021,6 +1014,14 @@ pub async fn run(
     } else {
         bridge_state
     };
+    // Right before the proof reads the key. Stage 1 verified it; the burn,
+    // the anchor wait and the wait for the prove lock — which has no bound
+    // — sit between then and now, and nothing else re-checks:
+    // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
+    // unconditionally, and the refusal it produces is strictly better than
+    // proving against an unvouched-for key and being rejected on submit.
+    crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())
+        .map_err(|e| with_resume_note(e, &resume))?;
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
         .map_err(|e| {

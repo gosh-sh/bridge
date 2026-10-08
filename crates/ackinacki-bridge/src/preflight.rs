@@ -927,6 +927,7 @@ pub async fn check_prover_artifacts(
         params_needs_write.then_some(p.params_dir.as_path()),
     )?;
     check_disk_headroom(&p.params_dir, &effective_pk_cache, cache)?;
+    crate::prove_lock::check_openable(snark_dir)?;
 
     Ok(fingerprint)
 }

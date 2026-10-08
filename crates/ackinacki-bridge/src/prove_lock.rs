@@ -38,6 +38,41 @@ pub(crate) fn lock_path(snark_dir: &Path) -> PathBuf {
     snark_dir.join(".prove.lock")
 }
 
+/// Open the lock file, creating it if needed. Another user's file that
+/// this one may not write is opened read-only: `flock` needs only an open
+/// file.
+fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let read_write = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path);
+    match read_write {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::fs::File::open(path),
+        other => other,
+    }
+}
+
+/// Stage 1's half of [`take`]: open the lock file the way stage 5 will,
+/// without locking it, so a lock file this user cannot open — another
+/// user's, in shared scratch storage — refuses with exit 2 before the burn
+/// instead of with exit 12 after it. The `--snark-dir` itself is already
+/// created and probed by `check_output_dirs`.
+pub(crate) fn check_openable(snark_dir: &Path) -> CliResult<()> {
+    let path = lock_path(snark_dir);
+    open_lock_file(&path)
+        .map(drop)
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--snark-dir: cannot open the prove lock {}: {e}. Stage 5 takes it after the \
+                 burn. Fix its permissions, or point --snark-dir at a directory of your own.",
+                path.display()
+            ),
+            source: None,
+        })
+}
+
 /// Take the lock on `snark_dir`, waiting while another withdrawal proves
 /// there. `Ok(None)`: the filesystem has no file locks and the proof runs
 /// unlocked. Every failure is exit 12 — this runs after the burn.
@@ -53,13 +88,7 @@ pub(crate) async fn take(snark_dir: &Path) -> CliResult<Option<ProveLock>> {
     };
     std::fs::create_dir_all(snark_dir)
         .map_err(|e| refuse(format!("cannot create --snark-dir: {e}")))?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|e| refuse(format!("cannot open: {e}")))?;
+    let file = open_lock_file(&path).map_err(|e| refuse(format!("cannot open: {e}")))?;
     let mut waiting = false;
     loop {
         // SAFETY: `file` outlives the call.
@@ -153,6 +182,80 @@ mod tests {
             "the burn is on the wire: {err}"
         );
         assert!(format!("{err}").contains(".prove.lock"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_lock_file_this_user_cannot_write_is_still_taken() {
+        // Another user's `.prove.lock` in a shared scratch directory:
+        // `flock` needs only an open file, so a read-only one serves.
+        use std::os::unix::fs::PermissionsExt;
+        let _relocking = crate::test_forks::relocking();
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(dir.path());
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        check_openable(dir.path()).expect("a read-only lock file passes preflight");
+        let held = take(dir.path())
+            .await
+            .expect("a read-only lock file is still a lock")
+            .expect("and this filesystem locks");
+        assert!(!held.waited());
+    }
+
+    #[test]
+    fn a_lock_file_this_user_cannot_open_is_refused_before_the_burn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(dir.path());
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root opens anything: nothing to learn here then.
+        if std::fs::File::open(&path).is_ok() {
+            return;
+        }
+        let err = check_openable(dir.path()).expect_err("stage 5 could not take this lock");
+        assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
+        assert!(format!("{err}").contains(".prove.lock"), "{err}");
+    }
+
+    #[test]
+    fn preflight_checks_that_the_prove_lock_opens() {
+        let src =
+            crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
+        let artifacts = src
+            .find("pub async fn check_prover_artifacts(")
+            .expect("the artifact checks");
+        let body = &src[artifacts..];
+        let end = body.find("\n}\n").expect("the function ends");
+        assert!(
+            body[..end].contains("prove_lock::check_openable(snark_dir)"),
+            "the lock stage 5 opens is opened before the burn"
+        );
+    }
+
+    #[test]
+    fn the_proving_key_is_rechecked_after_the_lock_wait() {
+        // The wait for the lock has no bound, and a key replaced during it
+        // would be read by the proof with nothing checking it.
+        let src = crate::source_guard::production_source(
+            "orchestrator.rs",
+            include_str!("orchestrator.rs"),
+        );
+        let lock = src.find("prove_lock::take(").expect("the lock");
+        let after_lock = &src[lock..];
+        let refresh = after_lock
+            .find("wait_for_coverage(")
+            .expect("the snapshot refresh");
+        let recheck = after_lock
+            .find("recheck_proving_key(")
+            .expect("the key is rechecked after the lock");
+        let prove = after_lock.find("run_once_with_state(").expect("the proof");
+        assert!(refresh < recheck && recheck < prove);
+        assert_eq!(
+            src.matches("recheck_proving_key(").count(),
+            1,
+            "once, right before the proof"
+        );
     }
 
     #[test]

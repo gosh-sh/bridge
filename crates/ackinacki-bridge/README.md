@@ -857,9 +857,11 @@ Two withdrawals with identical tuples collide; anything different
 by side, but two with one `--snark-dir` prove one at a time: stage 5 takes
 `<snark-dir>/.prove.lock`, and a second run logs "another withdrawal is
 proving in this --snark-dir; waiting for it to finish" until the first is
-done. A run that waited reads the bridge's state again before it proves, so
-its proof binds to an anchor that is still in the window. On a filesystem
-without `flock` it proves unlocked, with a warning.
+done. A run that waited reads the bridge's state again and re-checks the
+proving key before it proves, so its proof binds to an anchor that is still
+in the window. Preflight opens the lock file first and refuses with exit 2
+if it cannot (another user's lock file this user cannot read). On a
+filesystem without `flock` it proves unlocked, with a warning.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 

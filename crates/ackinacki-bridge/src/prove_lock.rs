@@ -369,16 +369,34 @@ mod tests {
     }
 
     #[test]
-    fn stage_5_proves_under_the_lock() {
+    fn stage_5_holds_the_lock_until_the_proof_is_done() {
+        // The lock is a value: dropped before the proof ends — moved up,
+        // bound to `_`, let go inside a helper — it guards nothing, and no
+        // test that runs stage 5 here could tell.
         let src = crate::source_guard::production_source(
             "orchestrator.rs",
             include_str!("orchestrator.rs"),
         );
         let lock = src
-            .find("prove_lock::take(")
-            .expect("stage 5 takes the lock");
+            .find("let prove_lock = crate::prove_lock::take(")
+            .expect("stage 5 takes the lock into a named binding");
         let prove = src.find("run_once_with_state(").expect("the proof");
-        assert!(lock < prove, "the lock is taken before the proof starts");
+        let proved = prove
+            + src[prove..]
+                .find("})?;")
+                .expect("the proof's statement ends");
+        let released = src
+            .find("drop(prove_lock);")
+            .expect("the lock is let go by name");
+        assert!(
+            lock < prove && proved < released,
+            "taken before the proof starts, let go after it ends"
+        );
+        assert_eq!(
+            src.matches("prove_lock").count() - src.matches("prove_lock::").count(),
+            3,
+            "bound, asked whether it waited, dropped — and used nowhere else"
+        );
     }
 
     #[test]

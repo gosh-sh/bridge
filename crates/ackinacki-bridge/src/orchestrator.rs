@@ -3822,9 +3822,15 @@ mod tests {
         ] {
             let at = stages_4_and_5.find(wrapped).expect(wrapped);
             let rest = &stages_4_and_5[at..];
-            let end = rest.find("?;").expect("the call ends in `?`");
+            // This call's own statement: `let _ = call(..);` followed by
+            // any later `?;` must not pass for it.
+            let statement = &rest[..rest.find(';').expect("the statement ends")];
             assert!(
-                rest[..end].contains("with_resume_note("),
+                statement.trim_end().ends_with('?'),
+                "`{wrapped}` must propagate its error: {statement}"
+            );
+            assert!(
+                statement.contains("with_resume_note("),
                 "`{wrapped}` raises exit 12 after the burn and must carry the resume note"
             );
         }

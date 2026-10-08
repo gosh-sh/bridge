@@ -21,6 +21,16 @@ use crate::errors::{CliError, CliResult};
 #[derive(Debug)]
 pub(crate) struct ProveLock {
     _file: std::fs::File,
+    /// Another withdrawal held the lock when this run asked for it.
+    waited: bool,
+}
+
+impl ProveLock {
+    /// Whether this run queued behind another proof. Its bridge snapshot is
+    /// then as old as the wait, which has no bound.
+    pub(crate) fn waited(&self) -> bool {
+        self.waited
+    }
 }
 
 /// Where the lock lives for `snark_dir`.
@@ -59,6 +69,7 @@ pub(crate) async fn take(snark_dir: &Path) -> CliResult<Option<ProveLock>> {
             }
             return Ok(Some(ProveLock {
                 _file: file,
+                waited: waiting,
             }));
         }
         let e = std::io::Error::last_os_error();
@@ -104,6 +115,7 @@ mod tests {
             .await
             .unwrap()
             .expect("a local filesystem locks");
+        assert!(!first.waited(), "a free lock is taken without waiting");
 
         let path = dir.path().to_path_buf();
         let second = tokio::spawn(async move { take(&path).await });
@@ -119,7 +131,11 @@ mod tests {
             .expect("the wait ends once the holder lets go")
             .unwrap()
             .unwrap();
-        assert!(second.is_some());
+        let second = second.expect("a local filesystem locks");
+        assert!(
+            second.waited(),
+            "a run that queued says so: its bridge snapshot is as old as the wait"
+        );
         assert!(lock_path(dir.path()).exists());
     }
 
@@ -150,5 +166,29 @@ mod tests {
             .expect("stage 5 takes the lock");
         let prove = src.find("run_once_with_state(").expect("the proof");
         assert!(lock < prove, "the lock is taken before the proof starts");
+    }
+
+    #[test]
+    fn a_run_that_waited_for_the_lock_proves_against_a_fresh_snapshot() {
+        // The snapshot stage 4b read is as old as the wait for the lock, and
+        // the wait has no bound: an anchor can leave the window meanwhile,
+        // and the proof would bind to it anyway.
+        let src = crate::source_guard::production_source(
+            "orchestrator.rs",
+            include_str!("orchestrator.rs"),
+        );
+        let lock = src
+            .find("prove_lock::take(")
+            .expect("stage 5 takes the lock");
+        let after_lock = &src[lock..];
+        let reread = after_lock
+            .find("wait_for_coverage(")
+            .expect("the bridge state is read again after the lock");
+        let prove = after_lock.find("run_once_with_state(").expect("the proof");
+        assert!(reread < prove, "the fresh read comes before the proof");
+        assert!(
+            after_lock[..reread].contains(".waited()"),
+            "the re-read is for a run that waited"
+        );
     }
 }

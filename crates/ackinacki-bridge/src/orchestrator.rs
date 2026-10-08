@@ -997,6 +997,30 @@ pub async fn run(
     let prove_lock = crate::prove_lock::take(&args.snark_dir)
         .await
         .map_err(|e| with_resume_note(e, &resume))?;
+    // A run that queued behind another proof holds a snapshot as old as the
+    // wait, and the wait has no bound: an anchor can leave the window
+    // meanwhile, and the proof would bind to it anyway. Read the bridge
+    // again — coverage only grows, so this is one poll and one snapshot.
+    let bridge_state = if prove_lock.as_ref().is_some_and(|l| l.waited()) {
+        info!("waited for the prove lock; reading the bridge state again before proving");
+        wait_for_coverage(
+            &ro_bridge_for_wait,
+            anchor_mode,
+            target_covering_seq_no,
+            COVERAGE_POLL_INTERVAL,
+            COVERAGE_WAIT,
+        )
+        .await
+        .map_err(|e| {
+            proof_failed_after_burn(
+                format!("wait_for_coverage after the prove lock: {e}"),
+                Some(e),
+                &resume,
+            )
+        })?
+    } else {
+        bridge_state
+    };
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
         .map_err(|e| {

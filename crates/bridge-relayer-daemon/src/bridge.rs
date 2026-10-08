@@ -1912,7 +1912,7 @@ fn hex_runs(text: &str) -> impl Iterator<Item = Vec<u8>> + '_ {
             .chars()
             .take_while(char::is_ascii_hexdigit)
             .collect();
-        if digits.len() < 8 || digits.len() % 2 != 0 {
+        if digits.len() < 8 || !digits.len().is_multiple_of(2) {
             return None;
         }
         hex::decode(&digits).ok()

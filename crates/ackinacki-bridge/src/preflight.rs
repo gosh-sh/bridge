@@ -3659,6 +3659,11 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "both sides are constants on purpose: the test pins the reservation against a \
+                  measurement, and fails with both numbers when someone lowers it"
+    )]
     fn the_aggregator_reservation_covers_the_slot_a_cold_run_writes() {
         // Measured on shellnet: the first run after a Circuit 4 key change
         // wrote a 6 846 416 031-byte `BridgeWithdrawalAggregatorVerifier__v3__….pk`.

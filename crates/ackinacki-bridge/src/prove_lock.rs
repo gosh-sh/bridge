@@ -54,25 +54,28 @@ fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
     }
 }
 
-/// Stage 1's half of a lock stage 5 takes — this module's, or the
-/// aggregator's `.keygen.lock` in the pk cache: open `path` the way stage 5
-/// will, try the lock without waiting, and let it go. A lock file this user
-/// cannot open, or one the filesystem will not lock — NFS answers an
-/// exclusive lock on a file opened read-only with `EBADF` — is refused with
-/// exit 2 before the burn instead of exit 12 after it. `flag` names the
-/// directory in the refusal; it is already created and probed by
-/// `check_output_dirs`.
-pub(crate) fn check_lockable(path: &Path, flag: &str) -> CliResult<()> {
+/// What trying a lock without waiting found.
+#[derive(Debug)]
+pub(crate) enum Probe {
+    /// Taken, and let go again.
+    Free,
+    /// Another process holds it.
+    Busy,
+    /// The filesystem has no file locks.
+    Unsupported,
+    /// The file could not be opened, or the filesystem refused the lock.
+    Failed(String),
+}
+
+/// Open `path` the way stage 5 will, try an exclusive lock without waiting,
+/// and let it go.
+pub(crate) fn probe(path: &Path) -> Probe {
     use std::os::unix::io::AsRawFd;
 
-    let file = open_lock_file(path).map_err(|e| CliError::Preflight {
-        reason: format!(
-            "{flag}: cannot open the lock {}: {e}. Stage 5 takes it after the burn. Fix its \
-             permissions, or point {flag} at a directory of your own.",
-            path.display()
-        ),
-        source: None,
-    })?;
+    let file = match open_lock_file(path) {
+        Ok(file) => file,
+        Err(e) => return Probe::Failed(format!("cannot open the lock {}: {e}", path.display())),
+    };
     let tried = loop {
         // SAFETY: `file` outlives the call; closing it below lets go.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -84,33 +87,55 @@ pub(crate) fn check_lockable(path: &Path, flag: &str) -> CliResult<()> {
         }
     };
     drop(file);
-    lock_verdict(tried, path, flag)
+    classify(tried, path)
 }
 
-/// What preflight makes of trying a lock: taken, or held by someone else —
-/// stage 5 will wait — is fine; a filesystem without locks runs unlocked,
-/// as stage 5 will, with a warning; anything else is exit 2.
-fn lock_verdict(tried: std::io::Result<()>, path: &Path, flag: &str) -> CliResult<()> {
+/// What the result of a non-blocking exclusive `flock` on `path` means.
+fn classify(tried: std::io::Result<()>, path: &Path) -> Probe {
     use crate::idempotency::{classify_flock_error, FlockVerdict};
 
     let Err(e) = tried else {
-        return Ok(());
+        return Probe::Free;
     };
     match classify_flock_error(e.raw_os_error()) {
-        FlockVerdict::Contended => Ok(()),
-        FlockVerdict::Unsupported => {
+        FlockVerdict::Contended => Probe::Busy,
+        FlockVerdict::Unsupported => Probe::Unsupported,
+        FlockVerdict::Fatal => Probe::Failed(format!("cannot lock {}: {e}", path.display())),
+    }
+}
+
+/// Stage 1's half of a lock stage 5 waits for and cannot run without — this
+/// module's, or the aggregator's `.keygen.lock` in the pk cache. A lock
+/// file this user cannot open, or one the filesystem will not lock — NFS
+/// answers an exclusive lock on a file opened read-only with `EBADF` — is
+/// refused with exit 2 before the burn instead of exit 12 after it. One
+/// another process holds passes with `busy` as a warning: stage 5 will wait
+/// for it. `flag` names the directory in the refusal; it is already created
+/// and probed by `check_output_dirs`.
+pub(crate) fn check_lockable(path: &Path, flag: &str, busy: &str) -> CliResult<()> {
+    preflight_verdict(probe(path), path, flag, busy)
+}
+
+/// What [`check_lockable`] makes of `probe`.
+fn preflight_verdict(probe: Probe, path: &Path, flag: &str, busy: &str) -> CliResult<()> {
+    match probe {
+        Probe::Free => Ok(()),
+        Probe::Busy => {
+            tracing::warn!(path = %path.display(), "{busy}");
+            Ok(())
+        },
+        Probe::Unsupported => {
             tracing::warn!(
                 path = %path.display(),
                 "this filesystem has no file locks; stage 5 will run without this lock",
             );
             Ok(())
         },
-        FlockVerdict::Fatal => Err(CliError::Preflight {
+        Probe::Failed(why) => Err(CliError::Preflight {
             reason: format!(
-                "{flag}: cannot lock {}: {e}. Stage 5 takes this lock after the burn and would \
-                 fail the same way. A file opened read-only cannot be locked on NFS: make the \
-                 lock file writable for this user, or point {flag} at a directory of your own.",
-                path.display()
+                "{flag}: {why}. Stage 5 takes this lock after the burn and would fail the same \
+                 way. A file opened read-only cannot be locked on NFS: make the lock file \
+                 writable for this user, or point {flag} at a directory of your own."
             ),
             source: None,
         }),
@@ -238,7 +263,8 @@ mod tests {
         let path = lock_path(dir.path());
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        check_lockable(&path, "--snark-dir").expect("a read-only lock file passes preflight");
+        check_lockable(&path, "--snark-dir", "busy")
+            .expect("a read-only lock file passes preflight");
         let held = take(dir.path())
             .await
             .expect("a read-only lock file is still a lock")
@@ -257,8 +283,8 @@ mod tests {
         if std::fs::File::open(&path).is_ok() {
             return;
         }
-        let err =
-            check_lockable(&path, "--snark-dir").expect_err("stage 5 could not take this lock");
+        let err = check_lockable(&path, "--snark-dir", "busy")
+            .expect_err("stage 5 could not take this lock");
         assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
         assert!(format!("{err}").contains(".prove.lock"), "{err}");
     }
@@ -272,7 +298,29 @@ mod tests {
             .await
             .unwrap()
             .expect("this filesystem locks");
-        check_lockable(&lock_path(dir.path()), "--snark-dir").expect("busy is not broken");
+        check_lockable(&lock_path(dir.path()), "--snark-dir", "busy").expect("busy is not broken");
+    }
+
+    #[test]
+    fn preflight_tries_the_lock_exclusively() {
+        // Held shared by someone else: an exclusive try is refused, so
+        // preflight says stage 5 will wait. A probe that took a shared lock,
+        // or tried none, would say the lock is free.
+        let _relocking = crate::test_forks::relocking();
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(dir.path());
+        let holder = open_lock_file(&path).unwrap();
+        // SAFETY: `holder` outlives the call.
+        let shared = unsafe {
+            libc::flock(
+                std::os::unix::io::AsRawFd::as_raw_fd(&holder),
+                libc::LOCK_SH | libc::LOCK_NB,
+            )
+        };
+        assert_eq!(shared, 0);
+        assert!(matches!(probe(&path), Probe::Busy), "{:?}", probe(&path));
+        drop(holder);
+        assert!(matches!(probe(&path), Probe::Free), "{:?}", probe(&path));
     }
 
     #[test]
@@ -280,7 +328,7 @@ mod tests {
         let _relocking = crate::test_forks::relocking();
         let dir = tempfile::tempdir().unwrap();
         let path = lock_path(dir.path());
-        check_lockable(&path, "--snark-dir").unwrap();
+        check_lockable(&path, "--snark-dir", "busy").unwrap();
         let file = open_lock_file(&path).unwrap();
         // SAFETY: `file` outlives the call.
         let free = unsafe {
@@ -298,49 +346,20 @@ mod tests {
         // on a file opened read-only is `EBADF`. Opening the file proves
         // nothing there; only trying the lock does.
         let path = Path::new("/scratch/.prove.lock");
-        let err = lock_verdict(
-            Err(std::io::Error::from_raw_os_error(libc::EBADF)),
-            path,
-            "--snark-dir",
-        )
-        .expect_err("stage 5 would fail the same way, after the burn");
+        let verdict = |errno: Option<i32>| {
+            let tried = errno.map_or(Ok(()), |n| Err(std::io::Error::from_raw_os_error(n)));
+            preflight_verdict(classify(tried, path), path, "--snark-dir", "busy")
+        };
+        let err = verdict(Some(libc::EBADF)).expect_err("stage 5 would fail the same way");
         assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
         let msg = format!("{err}");
         assert!(
             msg.contains("/scratch/.prove.lock") && msg.contains("--snark-dir"),
             "{msg}"
         );
-        lock_verdict(
-            Err(std::io::Error::from_raw_os_error(libc::EWOULDBLOCK)),
-            path,
-            "--snark-dir",
-        )
-        .expect("held by another withdrawal");
-        lock_verdict(
-            Err(std::io::Error::from_raw_os_error(libc::ENOLCK)),
-            path,
-            "--snark-dir",
-        )
-        .expect("a filesystem without locks runs unlocked, with a warning");
-        lock_verdict(Ok(()), path, "--snark-dir").expect("taken");
-    }
-
-    #[test]
-    fn preflight_tries_both_locks_stage_5_takes() {
-        let src =
-            crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
-        let artifacts = src
-            .find("pub async fn check_prover_artifacts(")
-            .expect("the artifact checks");
-        let body = &src[artifacts..];
-        let body = &body[..body.find("\n}\n").expect("the function ends")];
-        for call in [
-            "check_lockable(&crate::prove_lock::lock_path(snark_dir), \"--snark-dir\")?;",
-            "check_lockable(\n        &effective_pk_cache.join(AGGREGATOR_KEYGEN_LOCK),\n        \
-             \"--pk-cache-dir\",\n    )?;",
-        ] {
-            assert!(body.contains(call), "{call}");
-        }
+        verdict(Some(libc::EWOULDBLOCK)).expect("held by another run");
+        verdict(Some(libc::ENOLCK)).expect("a filesystem without locks runs unlocked");
+        verdict(None).expect("taken");
     }
 
     #[test]

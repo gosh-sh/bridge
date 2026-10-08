@@ -490,11 +490,12 @@ pub async fn run(
     // 5 happens after the burn plus up to ~91 minutes of anchor wait — see
     // [`crate::preflight::PkFingerprint`].
     let mut pk_fingerprint: Option<crate::preflight::PkFingerprint> = None;
+    let mut aggregate_proof_sha256: Option<String> = None;
     if let Some(p) = plumbing.as_ref() {
         crate::preflight::parse_eth_signer(&p.eth_private_key)
             .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
         info!("burner key ok");
-        pk_fingerprint = crate::preflight::check_prover_artifacts(
+        let artifacts = crate::preflight::check_prover_artifacts(
             p,
             &args.snark_dir,
             args.pk_cache_dir.as_deref(),
@@ -502,6 +503,8 @@ pub async fn run(
         )
         .await
         .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
+        pk_fingerprint = artifacts.pk_fingerprint;
+        aggregate_proof_sha256 = artifacts.aggregate_proof_sha256;
         info!(params_dir = %p.params_dir.display(), "prover artifacts ok");
     }
 
@@ -794,23 +797,11 @@ pub async fn run(
         });
     }
 
-    // Past the dry-run return, so `plumbing` is `Some` by construction —
-    // it is resolved unconditionally for every non-dry run above.
-    //
-    // And an `ok_or_else`, not an `expect`. This was the last panic left
-    // in production and it sat AFTER the burn: an invariant that holds
-    // today, three hundred lines from where it is established, and if a
-    // future edit ever breaks it the run aborts with exit 101 and a
-    // message no consumer parses, about a withdrawal whose USDC has
-    // already left the multisig. The same reasoning as the line below —
-    // the STAGE picks the code, not the kind of failure — and here the
-    // stage is past the send.
-    //
     // Every exit 11 and 12 from here to the submit carries `resume`: the
     // burn is on the wire, and the operator needs the way back without a
-    // second one.
-    // Both branches that send set `record`; without one, `--allow-retry`
-    // would burn again, so there is no way back to offer — exit 10.
+    // second one. Both branches that send set `record`; without one,
+    // `--allow-retry` would burn again, so there is no way back to offer —
+    // exit 10.
     let record_path = record
         .as_ref()
         .map(|r| idempotency::record_path(&state_dir, &r.key))
@@ -823,6 +814,17 @@ pub async fn run(
             source: None,
         })?;
     let resume = ResumeNote::new(&an_tx_hash, &record_path);
+    // Past the dry-run return, so `plumbing` is `Some` by construction —
+    // it is resolved unconditionally for every non-dry run above.
+    //
+    // And an `ok_or_else`, not an `expect`. This was the last panic left
+    // in production and it sat AFTER the burn: an invariant that holds
+    // today, three hundred lines from where it is established, and if a
+    // future edit ever breaks it the run aborts with exit 101 and a
+    // message no consumer parses, about a withdrawal whose USDC has
+    // already left the multisig. The same reasoning as the line below —
+    // the STAGE picks the code, not the kind of failure — and here the
+    // stage is past the send.
     let plumbing_ref = plumbing.as_ref().ok_or_else(|| {
         proof_failed_after_burn(
             format!(
@@ -1029,6 +1031,12 @@ pub async fn run(
     // proving against an unvouched-for key and being rejected on submit.
     crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())
         .map_err(|e| with_resume_note(e, &resume))?;
+    // The aggregator names the slot its key is in; only this proof's may.
+    let pk_cache_dir = crate::preflight::effective_pk_cache_dir(
+        args.pk_cache_dir.as_deref(),
+        &plumbing_ref.params_dir,
+    );
+    crate::aggregator_slot::forget_reported_slot(&pk_cache_dir);
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
         .map_err(|e| {
@@ -1040,14 +1048,16 @@ pub async fn run(
         })?;
     drop(prove_lock);
     // So that the next withdrawal's preflight reserves no room for the
-    // aggregator key this proof used.
+    // aggregator key this proof used — noted against what preflight
+    // verified, not against whatever is on disk by now.
     crate::aggregator_slot::note_proof(
-        &crate::preflight::effective_pk_cache_dir(
-            args.pk_cache_dir.as_deref(),
+        &pk_cache_dir,
+        crate::aggregator_slot::proof_inputs(
+            pk_fingerprint.as_ref().map(|f| f.sha256()),
             &plumbing_ref.params_dir,
-        ),
-        &plumbing_ref.params_dir,
-        &plumbing_ref.aggregator_dir,
+            aggregate_proof_sha256.as_deref(),
+        )
+        .as_ref(),
     );
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
     let pi_count = e2e.proof.public_instances_hex.len();
@@ -1347,9 +1357,9 @@ impl ResumeNote {
     /// note has nothing to offer a run without one.
     fn new(an_tx: &str, record: &Path) -> Self {
         Self(format!(
-            "The AN burn {an_tx} is on the wire and its record is {}. Re-run the same command \
-             with --allow-retry: it skips the burn and resumes at stage 4/6 (capture), then waits \
-             for coverage and proves again.",
+            "The AN burn {an_tx} is on the wire and its record is {}. Re-run the command with \
+             --allow-retry, changing only what the message above asks for: it skips the burn and \
+             resumes at stage 4/6 (capture), then waits for coverage and proves again.",
             record.display()
         ))
     }
@@ -3770,6 +3780,12 @@ mod tests {
         assert!(
             msg.contains("skips the burn"),
             "and that it does not burn again: {msg}"
+        );
+        // The refusal may ask for a change — a larger --prover-timeout-s —
+        // that "the same command" would contradict.
+        assert!(
+            msg.contains("changing only what the message above asks for"),
+            "{msg}"
         );
     }
 

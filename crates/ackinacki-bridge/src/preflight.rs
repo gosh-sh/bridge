@@ -868,7 +868,7 @@ pub async fn check_prover_artifacts(
     snark_dir: &Path,
     pk_cache_dir: Option<&Path>,
     allow_verifier_drift: bool,
-) -> CliResult<Option<PkFingerprint>> {
+) -> CliResult<ProverArtifacts> {
     check_ceremony(&p.params_dir)?;
     check_verifier_bin(&p.verifiers_dir, allow_verifier_drift)?;
     check_verifier_sol(&p.verifiers_dir, allow_verifier_drift)?;
@@ -924,28 +924,114 @@ pub async fn check_prover_artifacts(
         &effective_pk_cache,
         params_needs_write.then_some(p.params_dir.as_path()),
     )?;
-    // The aggregator's ~6.8 GB key is written once per Circuit-4 key and
+    // A damaged key in the pk cache fails stage 5 when its proof needs that
+    // slot, after the burn: refused now instead.
+    check_aggregator_keys(&effective_pk_cache)?;
+    // The aggregator's ~6.85 GB key is written once per Circuit-4 key and
     // aggregator build; a run whose predecessor already left it needs no
-    // room for it.
-    let aggregator_key = if crate::aggregator_slot::is_cached(
-        &effective_pk_cache,
-        fingerprint.as_ref().map(|f| f.sha256.as_str()),
-        &aggregate_proof_bin(&p.aggregator_dir),
-    ) {
+    // room for it. Hashed once, here: stage 5 notes the slot its proof used
+    // against this digest, not against whatever binary is there by then.
+    let aggregate_proof_sha256 =
+        bridge_prover_lib::keys::sha256_of(&aggregate_proof_bin(&p.aggregator_dir)).ok();
+    let inputs = fingerprint
+        .as_ref()
+        .zip(aggregate_proof_sha256.as_ref())
+        .map(|(f, a)| crate::aggregator_slot::ProofInputs {
+            event_pk_sha256: f.sha256.clone(),
+            aggregate_proof_sha256: a.clone(),
+        });
+    let aggregator_key = aggregator_key(&effective_pk_cache, inputs.as_ref());
+    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
+    // The locks stage 5 waits for, tried now: one that cannot be taken fails
+    // the run before the burn rather than after it.
+    for lock in stage_5_locks(snark_dir, &effective_pk_cache, aggregator_key) {
+        crate::prove_lock::check_lockable(&lock.path, lock.flag, lock.busy)?;
+    }
+
+    Ok(ProverArtifacts {
+        pk_fingerprint: fingerprint,
+        aggregate_proof_sha256,
+    })
+}
+
+/// What preflight verified for stage 5.
+#[derive(Debug)]
+pub struct ProverArtifacts {
+    /// The Circuit-4 proving key as preflight streamed it; `None` when the
+    /// key cache was not warm.
+    pub pk_fingerprint: Option<PkFingerprint>,
+    /// SHA-256 of the `aggregate-proof` binary as preflight read it; `None`
+    /// when it could not be read.
+    pub aggregate_proof_sha256: Option<String>,
+}
+
+/// Whether stage 5 will load the aggregator key the proof needs, by what
+/// the last proof through `pk_cache_dir` noted.
+fn aggregator_key(
+    pk_cache_dir: &Path,
+    inputs: Option<&crate::aggregator_slot::ProofInputs>,
+) -> AggregatorKey {
+    if crate::aggregator_slot::is_cached(pk_cache_dir, inputs) {
         AggregatorKey::Cached
     } else {
         AggregatorKey::ToGenerate
-    };
-    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
-    // Both locks stage 5 takes, tried now: one that cannot be taken fails
-    // the run before the burn rather than after it.
-    crate::prove_lock::check_lockable(&crate::prove_lock::lock_path(snark_dir), "--snark-dir")?;
-    crate::prove_lock::check_lockable(
-        &effective_pk_cache.join(AGGREGATOR_KEYGEN_LOCK),
-        "--pk-cache-dir",
-    )?;
+    }
+}
 
-    Ok(fingerprint)
+/// Refuse a pk cache that holds a withdrawal aggregator key stage 5 would
+/// refuse to read ([`crate::aggregator_slot::damaged_slots`]).
+fn check_aggregator_keys(pk_cache_dir: &Path) -> CliResult<()> {
+    let damaged = crate::aggregator_slot::damaged_slots(pk_cache_dir);
+    if damaged.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<String> = damaged
+        .iter()
+        .map(|d| format!("{} ({})", d.key.display(), d.why))
+        .collect();
+    Err(CliError::Preflight {
+        reason: format!(
+            "--pk-cache-dir: a damaged aggregator key: {}. Stage 5 refuses to read one, after the \
+             burn. Remove each .pk named here and the .meta.json beside it; the next proof that \
+             needs the key generates it again.",
+            list.join("; ")
+        ),
+        source: None,
+    })
+}
+
+/// A lock stage 5 waits for, as preflight tries it.
+#[derive(Debug, PartialEq, Eq)]
+struct Stage5Lock {
+    path: PathBuf,
+    /// The flag that names its directory.
+    flag: &'static str,
+    /// What it means that another process holds it now.
+    busy: &'static str,
+}
+
+/// The locks stage 5 waits for: the prove lock, and the aggregator's keygen
+/// lock when the aggregator generates its key. One that loads the key only
+/// tries that lock, to clear leftovers, and carries on without it.
+fn stage_5_locks(
+    snark_dir: &Path,
+    pk_cache_dir: &Path,
+    aggregator_key: AggregatorKey,
+) -> Vec<Stage5Lock> {
+    let mut locks = vec![Stage5Lock {
+        path: crate::prove_lock::lock_path(snark_dir),
+        flag: "--snark-dir",
+        busy: "another withdrawal is proving in this --snark-dir; stage 5 waits for it",
+    }];
+    if aggregator_key == AggregatorKey::ToGenerate {
+        locks.push(Stage5Lock {
+            path: pk_cache_dir.join(AGGREGATOR_KEYGEN_LOCK),
+            flag: "--pk-cache-dir",
+            busy: "another aggregate-proof is generating a key in this pk cache; stage 5 waits \
+                   for it if it still is, and the wait counts against --prover-timeout-s",
+        });
+    }
+    locks
 }
 
 /// Where the aggregator keeps its pk cache: `--pk-cache-dir`, or
@@ -996,6 +1082,13 @@ pub(crate) fn aggregate_proof_bin(aggregator_dir: &Path) -> PathBuf {
 pub struct PkFingerprint {
     path: PathBuf,
     sha256: String,
+}
+
+impl PkFingerprint {
+    /// The digest preflight streamed.
+    pub(crate) fn sha256(&self) -> &str {
+        &self.sha256
+    }
 }
 
 /// Refuse if the proving key is not the file preflight verified.
@@ -3819,6 +3912,94 @@ pub(crate) mod tests {
         assert!(aggregator.contains(&format!(
             "pub const PARTIAL_SUFFIX: &str = \"{AGGREGATOR_PARTIAL_SUFFIX}\";"
         )));
+        let last_slot = crate::aggregator_slot::LAST_SLOT
+            .strip_prefix("BridgeWithdrawalAggregatorVerifier")
+            .unwrap();
+        assert!(aggregator.contains(&format!(
+            "pub const LAST_SLOT_SUFFIX: &str = \"{last_slot}\";"
+        )));
+        assert!(aggregator.contains(&format!(
+            "    {}: Option<u64>,",
+            crate::aggregator_slot::META_KEY_LENGTH
+        )));
+    }
+
+    #[test]
+    fn the_aggregator_key_counts_as_cached_only_where_the_last_proof_left_it() {
+        let d = tempfile::TempDir::new().unwrap();
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        std::fs::write(d.path().join(format!("{slot}.pk")), b"key").unwrap();
+        std::fs::write(d.path().join(format!("{slot}.meta.json")), b"{}").unwrap();
+        std::fs::write(d.path().join(crate::aggregator_slot::LAST_SLOT), slot).unwrap();
+        let inputs = crate::aggregator_slot::ProofInputs {
+            event_pk_sha256: "aa".to_string(),
+            aggregate_proof_sha256: "bb".to_string(),
+        };
+        assert_eq!(
+            aggregator_key(d.path(), Some(&inputs)),
+            AggregatorKey::ToGenerate
+        );
+        crate::aggregator_slot::record(d.path(), &inputs).unwrap();
+        assert_eq!(
+            aggregator_key(d.path(), Some(&inputs)),
+            AggregatorKey::Cached
+        );
+        assert_eq!(aggregator_key(d.path(), None), AggregatorKey::ToGenerate);
+    }
+
+    #[test]
+    fn preflight_tries_the_keygen_lock_only_when_stage_5_waits_for_it() {
+        // A run that loads the aggregator key only tries that lock, and
+        // carries on without it: refusing it here was stricter than stage 5.
+        let snark = Path::new("/snark");
+        let pk_cache = Path::new("/pk_cache");
+        let paths = |key| -> Vec<(PathBuf, &str)> {
+            stage_5_locks(snark, pk_cache, key)
+                .into_iter()
+                .map(|l| (l.path, l.flag))
+                .collect()
+        };
+        assert_eq!(paths(AggregatorKey::Cached), vec![(
+            PathBuf::from("/snark/.prove.lock"),
+            "--snark-dir"
+        )]);
+        assert_eq!(paths(AggregatorKey::ToGenerate), vec![
+            (PathBuf::from("/snark/.prove.lock"), "--snark-dir"),
+            (PathBuf::from("/pk_cache/.keygen.lock"), "--pk-cache-dir"),
+        ]);
+        let keygen = stage_5_locks(snark, pk_cache, AggregatorKey::ToGenerate).remove(1);
+        assert!(
+            keygen.busy.contains("--prover-timeout-s"),
+            "{}",
+            keygen.busy
+        );
+
+        let src =
+            crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
+        assert!(src.contains(
+            "for lock in stage_5_locks(snark_dir, &effective_pk_cache, aggregator_key) {\n        \
+             crate::prove_lock::check_lockable(&lock.path, lock.flag, lock.busy)?;"
+        ));
+    }
+
+    #[test]
+    fn a_damaged_aggregator_key_is_refused_before_the_burn() {
+        let d = tempfile::TempDir::new().unwrap();
+        check_aggregator_keys(d.path()).expect("an empty cache");
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        std::fs::write(d.path().join(format!("{slot}.pk")), b"half").unwrap();
+        std::fs::write(
+            d.path().join(format!("{slot}.meta.json")),
+            br#"{"pk_bytes": 6846416031}"#,
+        )
+        .unwrap();
+        let err = check_aggregator_keys(d.path()).expect_err("4 bytes of 6846416031");
+        assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&format!("{slot}.pk")) && msg.contains(".meta.json beside it"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -3855,9 +4036,13 @@ pub(crate) mod tests {
             crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
         let artifacts = &src[src.find("pub async fn check_prover_artifacts(").unwrap()..];
         let artifacts = &artifacts[..artifacts.find("\n}\n").unwrap()];
+        let damaged = artifacts
+            .find("check_aggregator_keys(&effective_pk_cache)?;")
+            .expect("preflight refuses a damaged key");
         let asked = artifacts
-            .find("aggregator_slot::is_cached(")
+            .find("aggregator_key(&effective_pk_cache, inputs.as_ref())")
             .expect("preflight asks");
+        assert!(damaged < asked);
         let measured = artifacts
             .find("check_disk_headroom(")
             .expect("and measures");
@@ -3871,12 +4056,15 @@ pub(crate) mod tests {
             "orchestrator.rs",
             include_str!("orchestrator.rs"),
         );
+        let forgot = orchestrator
+            .find("aggregator_slot::forget_reported_slot(")
+            .expect("a proof starts with no slot named");
         let proved = orchestrator.find("run_once_with_state(").unwrap();
         let noted = orchestrator
             .find("aggregator_slot::note_proof(")
             .expect("a proof notes the slot it used");
         let submit = orchestrator.find("info!(\"stage 6/6").unwrap();
-        assert!(proved < noted && noted < submit);
+        assert!(forgot < proved && proved < noted && noted < submit);
     }
 
     #[test]

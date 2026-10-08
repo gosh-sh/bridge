@@ -80,6 +80,14 @@ assigns it when the release is tagged.
   emergency drain (ETH-28), including when one wei of aUSDC remains.
   Reverts `NothingToWriteOff` when the book is already backed; emits
   `UnbackedPrincipalWrittenOff` with the written-off amount.
+- `harvestYield` is gated on a post-call solvency invariant: it reverts
+  `HarvestWouldBreakSolvency(amount, backing, treasuryBalance)` if the
+  requested amount would drop total backing (`liquid + aUSDC`) below
+  `treasuryBalance`. This closes a hole where an accrued yield reading
+  could coexist with a shortfall in the backing (e.g. after a haircut
+  that had already been written off): the owner could still harvest the
+  full accrued amount and widen the hole. Harvests up to the real
+  surplus (`backing - treasuryBalance`) continue to work.
 - `anchorRemainingAppends(layer, anchor)` and `layerWindowWriteCursor(layer)` —
   read-only views of how close an anchor is to eviction from its 128-slot
   window. A return of N means the Nth further append overwrites it; 0 means it
@@ -184,7 +192,8 @@ assigns it when the release is tagged.
   that backed amount; it no longer reverts when the book is larger than
   the aToken balance. A zero aToken delta on `supplyToAave` is
   `AaveSupplyFailed`, not `AaveWithdrawFailed`. `harvestYield` transfers
-  the requested `amount`. A payout that already fits in liquid USDC
+  the requested `amount` and is now bounded by the solvency gate
+  described under Added. A payout that already fits in liquid USDC
   never entered the pull, on this branch or before.
 
 - `docs/EVM-contracts-spec.md` trade-off items 3, 5, 6 and 10 rewritten: items 5

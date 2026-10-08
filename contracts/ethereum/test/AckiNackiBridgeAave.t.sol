@@ -237,6 +237,120 @@ contract AckiNackiBridgeAaveTest is Test {
     }
 
     // -----------------------------------------------------------------
+    // Solvency gate on harvestYield (P0)
+    //
+    // Reviewer scenario: after a socialized AAVE loss, `accruedYield()` is
+    // purely book-side (aUSDC - suppliedPrincipal) and does NOT know whether
+    // user principal (`treasuryBalance`) is still covered by liquid USDC +
+    // aUSDC. If the owner wrote off unbacked principal and then interest
+    // starts accruing, the fresh "yield" belongs to users first (refilling
+    // the hole), not the yieldRecipient. `harvestYield` must bail out when
+    // the transfer would leave backing < treasuryBalance.
+    // -----------------------------------------------------------------
+
+    /// @dev Setup: 10 USDC deposited, fully supplied to AAVE, 2 USDC worth of
+    ///      aUSDC lost (socialized), owner writes off the unbacked book,
+    ///      then AAVE accrues 3 units of interest. Backing is 8 + 3 = 11,
+    ///      treasury is 10, so only 1 unit of yield is honestly harvestable.
+    ///      harvestYield(3) must revert instead of re-opening the hole.
+    function test_harvestYield_revertsWhenWouldBreakSolvency() public {
+        uint256 deposit = 10 * UsdcTestLib.UNIT;
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, deposit);
+        bridge.supplyToAave(type(uint256).max);
+
+        // Socialized loss: 2 USDC of aUSDC disappear from the bridge.
+        uint256 lost = 2 * UsdcTestLib.UNIT;
+        vm.prank(address(bridge));
+        aUSDC.transfer(address(0xdead), lost);
+
+        // Only (deposit - liquidBuffer) was actually supplied to AAVE, so
+        // after the socialized loss the real aUSDC balance is
+        // (deposit - buffer - lost). Owner acknowledges the hole on the books.
+        uint256 liquidBuffer = usdc.balanceOf(address(bridge));
+        uint256 aUsdcAfterLoss = bridge.aUsdcBalance();
+        assertEq(aUsdcAfterLoss, deposit - liquidBuffer - lost, "aUSDC = supplied - lost");
+
+        bridge.writeOffUnbackedPrincipal();
+        assertEq(bridge.suppliedPrincipal(), aUsdcAfterLoss, "book cut to real aUSDC");
+        assertEq(bridge.treasuryBalance(), deposit, "user principal untouched");
+        assertEq(bridge.accruedYield(), 0, "no yield yet");
+
+        // AAVE starts paying interest again. On the books this looks like 3
+        // units of harvestable yield, but 2 of them are needed to refill the
+        // user-principal hole first.
+        uint256 interest = 3 * UsdcTestLib.UNIT;
+        aUSDC.accrueYield(address(bridge), interest);
+        usdc.mint(address(pool), interest); // back the synthetic yield
+        assertEq(bridge.accruedYield(), interest, "book-side yield = interest");
+
+        bridge.setYieldRecipient(yieldSink);
+
+        uint256 backing = usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance();
+        assertEq(backing, liquidBuffer + aUsdcAfterLoss + interest, "backing = liquid + aUSDC");
+        assertLt(
+            backing, bridge.treasuryBalance() + interest, "draining full interest would under-back"
+        );
+
+        // Full harvest would widen the hole: revert.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.HarvestWouldBreakSolvency.selector,
+                interest,
+                backing,
+                bridge.treasuryBalance()
+            )
+        );
+        bridge.harvestYield(interest);
+
+        // Nothing moved to yieldSink.
+        assertEq(usdc.balanceOf(yieldSink), 0, "recipient not paid on revert");
+        assertEq(bridge.aUsdcBalance(), aUsdcAfterLoss + interest, "aUSDC untouched");
+    }
+
+    /// @dev Same hole, but now AAVE accrues enough interest that even after
+    ///      covering the 2-unit shortfall there is a 1-unit honest surplus.
+    ///      `harvestYield(surplus)` must pass; the remaining `backing ==
+    ///      treasuryBalance` is still fully solvent.
+    function test_harvestYield_succeedsOnceInterestRefillsHole() public {
+        uint256 deposit = 10 * UsdcTestLib.UNIT;
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, deposit);
+        bridge.supplyToAave(type(uint256).max);
+
+        uint256 lost = 2 * UsdcTestLib.UNIT;
+        vm.prank(address(bridge));
+        aUSDC.transfer(address(0xdead), lost);
+        bridge.writeOffUnbackedPrincipal();
+
+        // 3 units of interest = 2 refill the hole + 1 honest surplus.
+        uint256 interest = 3 * UsdcTestLib.UNIT;
+        aUSDC.accrueYield(address(bridge), interest);
+        usdc.mint(address(pool), interest);
+
+        bridge.setYieldRecipient(yieldSink);
+
+        uint256 surplus = 1 * UsdcTestLib.UNIT;
+        uint256 backingBefore = usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance();
+        uint256 treasury = bridge.treasuryBalance();
+        assertEq(backingBefore, treasury + surplus, "honest surplus = 1 UNIT");
+
+        vm.expectEmit(true, false, false, true);
+        emit YieldHarvested(yieldSink, surplus);
+        bridge.harvestYield(surplus);
+
+        assertEq(usdc.balanceOf(yieldSink), surplus, "only honest surplus paid");
+        uint256 backingAfter = usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance();
+        assertEq(backingAfter, treasury, "backing exactly covers users after harvest");
+
+        // Any further harvest is blocked (would push backing below treasury).
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.HarvestWouldBreakSolvency.selector, 1, backingAfter, treasury
+            )
+        );
+        bridge.harvestYield(1);
+    }
+
+    // -----------------------------------------------------------------
     // Emergency
     // -----------------------------------------------------------------
 

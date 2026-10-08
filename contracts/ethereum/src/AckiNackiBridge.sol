@@ -409,6 +409,12 @@ contract AckiNackiBridge {
     error LayerHashActiveZero(uint256 index);
     /// @notice No skimable liquid USDC above `treasuryBalance` (QC-A1-3).
     error NoExcessUsdc();
+    /// @notice `harvestYield(amount)` would leave liquid USDC + aUSDC below
+    ///         `treasuryBalance` — the owner cannot drain yield while user
+    ///         principal is under-backed (e.g. after AAVE socialized loss
+    ///         and `writeOffUnbackedPrincipal`). Collect via `skimExcessUsdc`
+    ///         or wait for interest to refill the hole.
+    error HarvestWouldBreakSolvency(uint256 amount, uint256 backing, uint256 treasuryBalance);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -1523,6 +1529,17 @@ contract AckiNackiBridge {
     function harvestYield(uint256 amount) external onlyOwner nonReentrant {
         uint256 yield = accruedYield();
         if (yield == 0 || amount == 0 || amount > yield) revert NoYield();
+
+        // Solvency gate (P0): even if `amount <= accruedYield()`, bail out if
+        // user principal is under-backed and this harvest would widen the
+        // hole. `accruedYield()` is purely book-side (aUSDC - suppliedPrincipal)
+        // and does not know whether `treasuryBalance` is fully covered by
+        // liquid USDC + aUSDC. After `writeOffUnbackedPrincipal` the entire
+        // aUSDC balance can look like yield while backing < treasury.
+        uint256 backing = usdc.balanceOf(address(this)) + aUsdcBalance();
+        if (backing < treasuryBalance + amount) {
+            revert HarvestWouldBreakSolvency(amount, backing, treasuryBalance);
+        }
 
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), amount, address(this));

@@ -1,0 +1,182 @@
+# Изменение `minBK` на шелнете (вкл/выкл ротацию Block Keeper'ов)
+
+Инструкция как на шелнете **включить ротацию BK** (`minBK = 4`) и **выключить её** (`minBK = 5`).
+
+---
+
+## TL;DR
+
+Шелнет работает на **5 активных BK**. Параметр `minBlockKeepers` в контракте `BlockKeeperContractRoot`
+задаёт минимально допустимое число активных BK. BK может выйти из эпохи (освободить слот под нового)
+**только если после выхода активных останется не меньше `minBK`**.
+
+| `minBK` | `activeBK - 1 >= minBK` (при 5 BK) | Поведение | Зачем |
+|--------:|:----------------------------------:|:----------|:------|
+| **4**   | `5 - 1 = 4 >= 4` → **true**        | BK может уйти → слот освобождается → **ротация идёт** | нужна ротация BK |
+| **5**   | `5 - 1 = 4 >= 5` → **false**       | BK держат в эпохе (`cantDelete`) → **ротации нет**    | ротация не нужна |
+
+Меняется одним вызовом метода **`setConfig`** контракта `BlockKeeperContractRoot`
+(адрес `0:7777…7777`, dapp 0), подписанным ключом-владельцем.
+
+---
+
+## Как это работает (механика)
+
+Контракт: [`contracts/bksystem/BlockKeeperContractRoot.sol`](../../contracts/bksystem/BlockKeeperContractRoot.sol).
+
+Поле состояния:
+
+```solidity
+uint128 _minBlockKeepers = 12;   // default в исходнике; на шелнете задан через setConfig
+```
+
+Гейт ротации — в `decreaseActiveBlockKeeper(...)` (вызывается, когда эпоха BK завершилась и BK хочет выйти):
+
+```solidity
+if (_numberOfActiveBlockKeepers - 1 >= _minBlockKeepers) {
+    _numberOfActiveBlockKeepers -= 1;
+    // ... BlockKeeperEpoch(msg.sender).canDelete(...)  → BK удаляется, слот свободен → приходит новый
+} else {
+    BlockKeeperEpoch(msg.sender).cantDelete(...);       // → BK остаётся, ротации нет
+}
+```
+
+Итог: сеть **не даёт** числу активных BK опуститься ниже `minBK`. Поэтому:
+
+- при `minBK = 5` и ровно 5 BK — ни один не может уйти (упали бы до 4) → все запинены, ротации нет;
+- при `minBK = 4` — один BK может уйти (останется 4 ≥ 4) → слот освобождается, кандидат заходит → цикл ротации.
+
+> ⚠️ **Для реальной ротации при `minBK = 4` в очереди должны быть кандидаты** (BK-кошельки,
+> отправившие stake-request). Если кандидатов нет — старый BK уйдёт, а замены не будет, и сеть
+> просто просядет до 4 активных.
+
+---
+
+## ⚠️ Главный подводный камень: `setConfig` перезаписывает ВЕСЬ конфиг
+
+Сигнатура (из скомпилированной ABI `contracts/0.79.3_compiled/bksystem/BlockKeeperContractRoot.abi.json`):
+
+```
+setConfig(
+    uint64  epochDuration,
+    uint128 minBlockKeepers,
+    bool    isNeedNumberOfActiveBlockKeepers,
+    uint128 needNumberOfActiveBlockKeepers,
+    uint8   walletTouch,
+    uint128 nlinit
+)
+```
+
+Метод **не «патчит» одно поле — он затирает все шесть за один вызов**. Плюс из `epochDuration`
+пересчитываются производные:
+
+```solidity
+_epochCliff = epochDuration / 10;   // CONFIG_CLIFF_DENOMINATOR
+_waitStep   = epochDuration / 20;   // CONFIG_WAIT_DENOMINATOR
+```
+
+Значит, чтобы поменять **только** `minBlockKeepers`, надо передать **текущие** значения остальных
+пяти полей. Иначе случайно сбросишь длину эпохи / walletTouch / nlinit.
+
+### Текущие значения, которые надо сохранить
+
+| Поле | Значение на шелнете | Как узнать |
+|:-----|:--------------------|:-----------|
+| `epochDuration` | прочитать вживую | getter **`getConfig`** → `epochDuration` (дефолт деплоя `660`) |
+| `isNeedNumberOfActiveBlockKeepers` | `false` | зашито при генерации зеростейта |
+| `needNumberOfActiveBlockKeepers` | `0` | зашито при генерации зеростейта |
+| `walletTouch` | `200` | **нет геттера** — из деплой-env (`WALLET_TOUCH`, дефолт 200) |
+| `nlinit` | `5000` | **нет геттера** — из деплой-env (`NLINIT`, дефолт 5000) |
+
+> ⚠️ Геттера для `minBlockKeepers`, `walletTouch`, `nlinit`, `needNumber…` **нет** — их значения
+> нельзя прочитать из контракта. `epochDuration` читается через `getConfig`, остальные бери из
+> деплой-конфигурации шелнета. **Если шелнет деплоился с нестандартными env — сверь их перед вызовом.**
+
+Источник дефолтов: [`contracts/scripts/generate_zerostate.py`](../../contracts/scripts/generate_zerostate.py)
+(`EPOCH_LENGTH_AFTER_ZEROSTATE=660`, `MIN_BLOCKKEEPERS=5`, `WALLET_TOUCH=200`, `NLINIT=5000`,
+`isNeed=false`, `needNumber=0`).
+
+---
+
+## Ключи и права
+
+`setConfig` защищён модификатором `onlyOwner`:
+
+```solidity
+modifier onlyOwner { require(msg.pubkey() == tvm.pubkey(), ERR_NOT_OWNER); _; }
+```
+
+→ подписывать **ключом-владельцем `BlockKeeperContractRoot`** — тем keypair'ом, которым деплоили
+зеростейт шелнета (`config/BlockKeeperContractRoot.keys.json` соответствующего деплоя).
+
+> Перед вызовом уточни у SeHor05, какой именно keys-файл владелец BK-root на текущем шелнете.
+
+---
+
+## Пошагово
+
+Параметры окружения:
+
+```bash
+# tvm-cli v3 (нужен для live-ноды нового API; /usr/bin/tvm-cli 2.24.x несовместим)
+CLI=/home/sehor/work/tvm-cli
+ENDPOINT="<shellnet-endpoint>"            # endpoint шелнета
+ROOT=0:7777777777777777777777777777777777777777777777777777777777777777
+ABI=contracts/0.79.3_compiled/bksystem/BlockKeeperContractRoot.abi.json
+KEYS=config/BlockKeeperContractRoot.keys.json   # ← ключ-владелец шелнет-деплоя
+
+$CLI config --url "$ENDPOINT"
+```
+
+### Шаг 1. Прочитать текущий `epochDuration`
+
+```bash
+$CLI -j runx --abi "$ABI" --addr "$ROOT" -m getConfig
+# → {"epochDuration":"660","epochCliff":"66","waitStep":"33"}
+```
+
+Возьми `epochDuration` из вывода (ниже в примерах — `660`).
+
+### Шаг 2а. ВКЛЮЧИТЬ ротацию → `minBK = 4`
+
+```bash
+$CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
+  '{"epochDuration":660,"minBlockKeepers":4,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
+```
+
+### Шаг 2б. ВЫКЛЮЧИТЬ ротацию → `minBK = 5`
+
+```bash
+$CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
+  '{"epochDuration":660,"minBlockKeepers":5,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
+```
+
+> Подставь **свои** `epochDuration` (из Шага 1), `walletTouch`, `nlinit`, если деплой был нестандартным.
+
+### Шаг 3. Проверка
+
+1. **Транзакция прошла** — в выводе `callx` нет ошибок, exit code 0.
+2. **Число активных BK** (геттера для самого `minBK` нет):
+
+   ```bash
+   $CLI -j runx --abi "$ABI" --addr "$ROOT" -m getDetails
+   # → {"minStake":"...","numberOfActiveBlockKeepers":"5"}
+   ```
+
+3. **По факту** — понаблюдать за сетью в течение эпохи (`epochDuration` секунд):
+   - при `minBK = 4` — по завершении эпохи один из BK уходит в cooler, на его место заходит кандидат
+     (число активных ≈ держится, состав меняется);
+   - при `minBK = 5` — состав активных BK не меняется, все досиживают/переизбираются на месте.
+
+---
+
+## Заметки
+
+- `minBK` **не влияет на экономику стейка**: при `isNeedNumberOfActiveBlockKeepers = false`
+  `minStake` считается от `numberOfActiveBlockKeepersAtBlockStart`, а не от `minBK`. Параметр
+  работает **только** как гейт выхода/ротации.
+- `setConfig` можно вызывать сколько угодно раз — переключать 4 ↔ 5 туда-обратно безопасно
+  (главное — каждый раз корректно передавать остальные 5 полей).
+- Порог считается от **текущего числа активных BK**. Формула гейта — `activeBK - 1 >= minBK`.
+  Для другого размера сети (не 5 BK) подбирай `minBK` под желаемое поведение по этой же формуле.
+- Изменение действует со следующего цикла завершения эпохи, не мгновенно.

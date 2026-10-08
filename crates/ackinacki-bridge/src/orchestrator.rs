@@ -805,12 +805,26 @@ pub async fn run(
     // already left the multisig. The same reasoning as the line below —
     // the STAGE picks the code, not the kind of failure — and here the
     // stage is past the send.
-    let plumbing_ref = plumbing.as_ref().ok_or_else(|| CliError::ProofFailed {
-        reason: format!(
-            "internal: submit plumbing is missing on a non-dry run. The AN burn {an_tx_hash} IS \
-             on the wire — reconcile it before re-running.",
-        ),
-        source: None,
+    //
+    // Every exit 11 and 12 from here to the submit carries `resume`: the
+    // burn is on the wire, and the operator needs the way back without a
+    // second one.
+    let resume = ResumeNote::new(
+        &an_tx_hash,
+        record
+            .as_ref()
+            .map(|r| idempotency::record_path(&state_dir, &r.key))
+            .as_deref(),
+    );
+    let plumbing_ref = plumbing.as_ref().ok_or_else(|| {
+        proof_failed_after_burn(
+            format!(
+                "internal: submit plumbing is missing on a non-dry run. The AN burn \
+                 {an_tx_hash} IS on the wire — reconcile it before re-running.",
+            ),
+            None,
+            &resume,
+        )
     })?;
 
     // ---- 4. Capture WithdrawalInitiated ----
@@ -825,21 +839,25 @@ pub async fn run(
     // below this one. `no_refusal_after_the_send_claims_to_be_pre_send`
     // is what keeps it that way.
     let (bridge_dapp_id_hex, bridge_account_id_hex) =
-        split_extended(&preflight.usdc_bridge_extended).ok_or_else(|| CliError::ProofFailed {
-            reason: format!(
-                "internal: usdc_bridge_extended {} is not `dapp_id::account_id`. The AN burn {} \
-                 IS on the wire — reconcile it before re-running.",
-                preflight.usdc_bridge_extended, an_tx_hash,
-            ),
-            source: None,
+        split_extended(&preflight.usdc_bridge_extended).ok_or_else(|| {
+            proof_failed_after_burn(
+                format!(
+                    "internal: usdc_bridge_extended {} is not `dapp_id::account_id`. The AN burn \
+                     {} IS on the wire — reconcile it before re-running.",
+                    preflight.usdc_bridge_extended, an_tx_hash,
+                ),
+                None,
+                &resume,
+            )
         })?;
 
     info!("stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)");
     let gql = bridge_gql_fetcher::gql_client::create_client(&args.gql_endpoint).map_err(|e| {
-        CliError::ProofFailed {
-            reason: format!("failed to build GqlClient for {}: {e}", args.gql_endpoint),
-            source: Some(e),
-        }
+        proof_failed_after_burn(
+            format!("failed to build GqlClient for {}: {e}", args.gql_endpoint),
+            Some(e),
+            &resume,
+        )
     })?;
     // Multi-user-safe capture: chain-walk from the multisig tx hash we
     // just broadcast to the ExtOut USDCBridge emits when it processes the
@@ -862,9 +880,7 @@ pub async fn run(
     // reconcile-and-resume situation, not a prover crash. The prior
     // catch-all `ProofFailed` mapping (exit 12) misled operators into
     // treating this as a Circuit-4 problem.
-    .map_err(|e| CliError::CaptureTimeout {
-        an_tx: format!("{an_tx_hash} ({e})"),
-    })?;
+    .map_err(|e| capture_timed_out(&an_tx_hash, &e, &resume))?;
     // The event has to be THIS withdrawal's before anything is proved from
     // it, and before the record says it was captured: on a resume the hash
     // came off the record, and the record can be wrong. See `event_identity`.
@@ -878,7 +894,8 @@ pub async fn run(
             .as_ref()
             .map(|r| idempotency::record_path(&state_dir, &r.key))
             .as_deref(),
-    )?;
+    )
+    .map_err(|e| with_resume_note(e, &resume))?;
     info!(
         msg_id = %captured.message_id,
         block_seq_no = captured.block_seq_no,
@@ -922,10 +939,7 @@ pub async fn run(
         COVERAGE_WAIT,
     )
     .await
-    .map_err(|e| CliError::ProofFailed {
-        reason: format!("wait_for_coverage: {e}"),
-        source: Some(e),
-    })?;
+    .map_err(|e| proof_failed_after_burn(format!("wait_for_coverage: {e}"), Some(e), &resume))?;
 
     // ---- 5. Prove ----
     info!("stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)");
@@ -935,7 +949,8 @@ pub async fn run(
     // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
     // unconditionally, and the refusal it produces is strictly better than
     // proving against an unvouched-for key and being rejected on submit.
-    crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())?;
+    crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())
+        .map_err(|e| with_resume_note(e, &resume))?;
     // `prover_state_path` and `window_size` are ignored by
     // `run_once_with_state`, but the config struct still has the fields
     // (the daemon binary uses them on the file path). Fill in stubs
@@ -979,12 +994,17 @@ pub async fn run(
     };
     // One proof per snark directory: its intermediate files have fixed
     // names. Held for stage 5 only, and released before the submit.
-    let prove_lock = crate::prove_lock::take(&args.snark_dir).await?;
+    let prove_lock = crate::prove_lock::take(&args.snark_dir)
+        .await
+        .map_err(|e| with_resume_note(e, &resume))?;
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
-        .map_err(|e| CliError::ProofFailed {
-            reason: format!("withdraw-e2e pipeline failed: {e}"),
-            source: Some(e),
+        .map_err(|e| {
+            proof_failed_after_burn(
+                format!("withdraw-e2e pipeline failed: {e}"),
+                Some(e),
+                &resume,
+            )
         })?;
     drop(prove_lock);
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
@@ -1270,6 +1290,113 @@ pub async fn run(
 }
 
 // ---- helpers ----
+
+/// What a refusal after the burn adds so the operator can carry on: the
+/// burn, the record, and the command that resumes without burning again.
+///
+/// Built once the burn is on the wire, and a required argument of every
+/// exit-11 and exit-12 constructor below, so a new refusal in stages 4-5
+/// cannot leave it out.
+struct ResumeNote(String);
+
+impl ResumeNote {
+    /// The note for the burn `an_tx`, kept in `record` when the run has one.
+    fn new(an_tx: &str, record: Option<&Path>) -> Self {
+        let kept = match record {
+            Some(p) => format!("its record is {}", p.display()),
+            None => "no record was kept for it".to_string(),
+        };
+        Self(format!(
+            "The AN burn {an_tx} is on the wire and {kept}. Re-run the same command with \
+             --allow-retry: it skips the burn and resumes at stage 4/6 (capture), then waits for \
+             coverage and proves again."
+        ))
+    }
+}
+
+/// Add `note` to an exit-11 or exit-12 refusal. Every other refusal passes
+/// through as it is: exit 10 and 13 carry their own next steps.
+fn with_resume_note(e: CliError, note: &ResumeNote) -> CliError {
+    match e {
+        CliError::ProofFailed {
+            reason,
+            source,
+        } => CliError::ProofFailed {
+            reason: format!("{reason}\n\x20 {}", note.0),
+            source,
+        },
+        CliError::CaptureTimeout {
+            an_tx,
+            next_steps,
+        } => CliError::CaptureTimeout {
+            an_tx,
+            next_steps: if next_steps.is_empty() {
+                note.0.clone()
+            } else {
+                format!("{next_steps}\n\x20 {}", note.0)
+            },
+        },
+        // Spelled out, like the re-badging helpers below: a new variant has
+        // to be considered here rather than slip through a catch-all.
+        e @ (CliError::ArgInvalid {
+            ..
+        }
+        | CliError::KeyFilePerms {
+            ..
+        }
+        | CliError::Usage {
+            ..
+        }
+        | CliError::Preflight {
+            ..
+        }
+        | CliError::DuplicateInFlight {
+            ..
+        }
+        | CliError::ReservationInFlight {
+            ..
+        }
+        | CliError::BurnOutcomeUnknown {
+            ..
+        }
+        | CliError::EthSubmitFailed {
+            ..
+        }
+        | CliError::Deposit {
+            ..
+        }) => e,
+    }
+}
+
+/// Exit 12 after the burn, with the way back on it.
+fn proof_failed_after_burn(
+    reason: String,
+    source: Option<anyhow::Error>,
+    note: &ResumeNote,
+) -> CliError {
+    with_resume_note(
+        CliError::ProofFailed {
+            reason,
+            source,
+        },
+        note,
+    )
+}
+
+/// Exit 11, with the way back on it — and the case where there is none: a
+/// bounced burn emits no event, however long a re-run waits.
+fn capture_timed_out(an_tx: &str, why: &anyhow::Error, note: &ResumeNote) -> CliError {
+    with_resume_note(
+        CliError::CaptureTimeout {
+            an_tx: format!("{an_tx} ({why:#})"),
+            next_steps: "If the error above says USDCBridge bounced the call, or that the \
+                         transaction sent nothing to it, no event is coming: reconcile on chain \
+                         first — the advanced runbook, Case 3a."
+                .to_string(),
+        },
+        note,
+    )
+}
 
 /// Whether stage 3 must actually broadcast.
 ///
@@ -3586,6 +3713,82 @@ mod tests {
         assert!(matches!(ok.submit.status, SubmitStatus::DryRunOk));
     }
 
+    #[test]
+    fn a_failed_proof_after_the_burn_says_how_to_carry_on() {
+        let note = ResumeNote::new("0xabc", Some(Path::new("/state/k.json")));
+        let msg = proof_failed_after_burn("aggregate-proof timed out after 60s".into(), None, &note)
+            .to_string();
+        assert!(msg.contains("aggregate-proof timed out"), "{msg}");
+        assert!(msg.contains("0xabc"), "the burn's hash: {msg}");
+        assert!(msg.contains("/state/k.json"), "the record: {msg}");
+        assert!(msg.contains("--allow-retry"), "the command: {msg}");
+        assert!(
+            msg.contains("skips the burn"),
+            "and that it does not burn again: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_capture_timeout_says_how_to_carry_on_and_when_not_to() {
+        let note = ResumeNote::new("0xabc", Some(Path::new("/state/k.json")));
+        let e = capture_timed_out("0xabc", &anyhow::anyhow!("stalled at stage 2"), &note);
+        assert_eq!(e.exit_code().as_i32(), 11);
+        let msg = e.to_string();
+        assert!(
+            msg.contains("stalled at stage 2") && msg.contains("--allow-retry"),
+            "{msg}"
+        );
+        assert!(msg.contains("bounced") && msg.contains("Case 3a"), "{msg}");
+    }
+
+    #[test]
+    fn the_note_is_added_to_11_and_12_only() {
+        let note = ResumeNote::new("0xabc", None);
+        let ten = CliError::BurnOutcomeUnknown {
+            reason: "x".into(),
+            source: None,
+        };
+        assert_eq!(with_resume_note(ten, &note).to_string(), "burn: x");
+        let twelve = CliError::ProofFailed {
+            reason: "x".into(),
+            source: None,
+        };
+        assert!(with_resume_note(twelve, &note)
+            .to_string()
+            .contains("--allow-retry"));
+    }
+
+    #[test]
+    fn no_exit_11_or_12_after_the_burn_is_built_without_the_way_back() {
+        let src = crate::source_guard::production_source(
+            "orchestrator.rs",
+            include_str!("orchestrator.rs"),
+        );
+        let from = src.find("let resume = ResumeNote::new(").expect("the note is built");
+        let to = src.find("info!(\"stage 6/6").expect("stage 6");
+        let stages_4_and_5 = &src[from..to];
+        for bare in ["CliError::ProofFailed {", "CliError::CaptureTimeout {"] {
+            assert!(
+                !stages_4_and_5.contains(bare),
+                "`{bare}` in stages 4-5: build it with proof_failed_after_burn / \
+                 capture_timed_out so it carries the resume note"
+            );
+        }
+        for wrapped in [
+            "check_captured_event(",
+            "recheck_proving_key(",
+            "prove_lock::take(",
+        ] {
+            let at = stages_4_and_5.find(wrapped).expect(wrapped);
+            let rest = &stages_4_and_5[at..];
+            let end = rest.find("?;").expect("the call ends in `?`");
+            assert!(
+                rest[..end].contains("with_resume_note("),
+                "`{wrapped}` raises exit 12 after the burn and must carry the resume note"
+            );
+        }
+    }
+
     /// Where a real run actually stops, measured rather than asserted.
     #[tokio::test]
     async fn a_real_run_passes_both_preflights_and_stops_at_the_ceremony() {
@@ -3872,6 +4075,7 @@ mod tests {
         let captured = refusal_before_a_recorded_burn(
             CliError::CaptureTimeout {
                 an_tx: an.clone(),
+                next_steps: String::new(),
             },
             dir.path(),
             &WhatStageOneFound::ARecord(with_hash.clone()),

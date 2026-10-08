@@ -721,26 +721,37 @@ owner pubkey, correct the key file itself.
 
 ### Capture timeout (exit 11)
 
-Two sub-cases, distinguishable by grepping `capture:` in the log:
+The refusal ends with the AN burn's hash, the path of this withdrawal's
+record, and the command that carries on: the same command with
+`--allow-retry`, which skips the burn and resumes at stage 4 (capture).
 
-- `capture: matched dst=…` present → capture succeeded; the enricher
-  is blocked waiting for the covering L2 bundle to land on-chain. The
-  server-side bundle relayer landed no bundle in the CLI's 120 min
-  budget. Wait for the covering bundle (monitor
-  `storedLastSeenBlockSeqNo` with the health-check snippet below);
-  once it advances past your event's `ceil(seq / 16384) * 16384`
-  boundary, re-run with `--allow-retry` (the CLI replays capture, does
-  NOT re-fire the burn).
-- `capture: polling` only, no `matched` → the burn AN tx never
-  produced a `WithdrawalInitiated` (USDCBridge internally rejected
-  the call). Should have surfaced as exit 10, not 11; see § "Burn
-  broadcast, outcome unknown".
+The burn's `WithdrawalInitiated` event was not seen within 300 s. The
+error text in the refusal tells the two cases apart:
+
+- the transaction or its event was not visible yet (`not visible via
+  GQL`, `dst_transaction never surfaced`) → re-run with `--allow-retry`
+  once the node catches up; the CLI replays capture and does NOT re-fire
+  the burn.
+- USDCBridge bounced the call, or the multisig transaction sent nothing to
+  it → no event is coming, and the refusal says so. Reconcile on chain
+  first: the advanced runbook, Case 3a.
 
 ### Prover failed (exit 12)
+
+The refusal ends with the AN burn's hash, the path of this withdrawal's
+record, and the command that carries on: the same command with
+`--allow-retry`, which skips the burn and resumes at stage 4 (capture).
 
 Circuit-4 in-process prover or the `aggregate-proof` subprocess
 errored. Almost always local resource pressure (disk, RAM, corrupt
 PK cache) or cold-cache slowness beyond the default timeout.
+
+Exit 12 also covers the wait for the covering bundle (stage 4b): a
+refusal that starts `wait_for_coverage:` means the server-side bundle
+relayer landed no bundle in the CLI's 120 min budget. Wait for it
+(monitor `storedLastSeenBlockSeqNo` with the health-check snippet below);
+once it advances past your event's `ceil(seq / 16384) * 16384` boundary,
+re-run with `--allow-retry`.
 
 ```bash
 du -sh ../bridge-prover-libraries/params/    # ~9.5 GB withdraw-only after the first run; more if this host also runs the bundle relayer

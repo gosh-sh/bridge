@@ -637,6 +637,11 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `ackinacki-bridge withdraw` exit 11 and exit 12 end with the AN burn's hash,
+  the path of the withdrawal's record and the command that carries on (the same
+  command with `--allow-retry`, which skips the burn and resumes at capture).
+  Exit 11 also says when not to: a bounced burn emits no event, and the
+  advanced runbook's Case 3a applies.
 - `ackinacki-bridge withdraw` checks the `WithdrawalInitiated` event it
   captures against the withdrawal it is running — amount, recipient,
   destination chain, token (USDC) and sender multisig — before proving it. A

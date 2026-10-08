@@ -287,8 +287,13 @@ pub enum CliError {
     },
 
     // -- Capture (exit 11) --
-    #[error("capture: timed out waiting for WithdrawalInitiated event (AN tx {an_tx})")]
-    CaptureTimeout { an_tx: String },
+    /// `next_steps` is what to do now: the burn is on the wire, and the
+    /// operator needs the hash, the record and the command that resumes
+    /// without burning again.
+    #[error(
+        "capture: timed out waiting for WithdrawalInitiated event (AN tx {an_tx})\n\x20 {next_steps}"
+    )]
+    CaptureTimeout { an_tx: String, next_steps: String },
 
     // -- Prove (exit 12) --
     #[error("prove: {reason}")]
@@ -686,7 +691,8 @@ mod tests {
         );
         assert_eq!(
             CliError::CaptureTimeout {
-                an_tx: "0x…".into()
+                an_tx: "0x…".into(),
+                next_steps: String::new(),
             }
             .exit_code(),
             ExitCode::CaptureTimeout

@@ -26,6 +26,7 @@
 //! waiver.
 #![warn(clippy::let_underscore_must_use)]
 
+mod aggregator_slot;
 mod args;
 mod burn;
 mod deposit;

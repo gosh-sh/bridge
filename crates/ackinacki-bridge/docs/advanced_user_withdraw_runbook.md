@@ -898,6 +898,10 @@ du -sh ../bridge-prover-libraries/params/   # ~9.5 GB withdraw-only after the fi
 #   -----
 #  10 GiB = ~10.7 GB as df reports it — preflight sums these constants
 #          and refuses below the total
+# A warm run loads both keys and reserves neither: the aggregator key
+# counts as cached when the last proof (params/pk_cache/.withdraw-slot.json)
+# ran with this Circuit-4 key and this aggregate-proof. The first run after
+# an upgrade reserves the 7 GiB again (README Step 0).
 df -h ../bridge-prover-libraries/params/
 # RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host
 ```

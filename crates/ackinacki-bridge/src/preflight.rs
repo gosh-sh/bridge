@@ -916,9 +916,7 @@ pub async fn check_prover_artifacts(
     // would end up unchecked: with a warm cache `params_dir` is not passed
     // to `check_output_dirs` either, so nothing would probe the directory
     // the aggregator is about to write ~6.8 GB into.
-    let effective_pk_cache = pk_cache_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| p.params_dir.join("pk_cache"));
+    let effective_pk_cache = effective_pk_cache_dir(pk_cache_dir, &p.params_dir);
 
     check_output_dirs(
         &p.work_dir,
@@ -926,10 +924,35 @@ pub async fn check_prover_artifacts(
         &effective_pk_cache,
         params_needs_write.then_some(p.params_dir.as_path()),
     )?;
-    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache)?;
+    // The aggregator's ~6.8 GB key is written once per Circuit-4 key and
+    // aggregator build; a run whose predecessor already left it needs no
+    // room for it.
+    let aggregator_key = if crate::aggregator_slot::is_cached(
+        &effective_pk_cache,
+        fingerprint.as_ref().map(|f| f.sha256.as_str()),
+        &aggregate_proof_bin(&p.aggregator_dir),
+    ) {
+        AggregatorKey::Cached
+    } else {
+        AggregatorKey::ToGenerate
+    };
+    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
     crate::prove_lock::check_openable(snark_dir)?;
 
     Ok(fingerprint)
+}
+
+/// Where the aggregator keeps its pk cache: `--pk-cache-dir`, or
+/// `<params_dir>/pk_cache` without it, the way the runtime resolves it.
+pub(crate) fn effective_pk_cache_dir(pk_cache_dir: Option<&Path>, params_dir: &Path) -> PathBuf {
+    pk_cache_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| params_dir.join("pk_cache"))
+}
+
+/// The `aggregate-proof` binary under `--aggregator-dir`.
+pub(crate) fn aggregate_proof_bin(aggregator_dir: &Path) -> PathBuf {
+    aggregator_dir.join("target/release/aggregate-proof")
 }
 
 /// The proving key as stage 1 verified it, carried to stage 5.
@@ -1233,7 +1256,7 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
     // canonicalises `aggregator_dir` at construction, so by the time
     // `release_bin` joins onto it the path is already absolute. Preflight
     // has no such step, which is why it needs this one.
-    let relative_bin = aggregator_dir.join("target/release/aggregate-proof");
+    let relative_bin = aggregate_proof_bin(aggregator_dir);
     if !relative_bin.is_file() {
         return Err(refuse(format!(
             "--aggregator-dir {}: no target/release/aggregate-proof.\n\x20 Build it first — this \
@@ -1511,6 +1534,7 @@ pub fn check_disk_headroom(
     params_dir: &Path,
     pk_cache_dir: &Path,
     cache: KeyCacheState,
+    aggregator_key: AggregatorKey,
 ) -> CliResult<()> {
     // Report litter before measuring, whether or not the measurement then
     // refuses. A killed keygen leaves its whole partial temp behind
@@ -1539,7 +1563,7 @@ pub fn check_disk_headroom(
         );
     }
 
-    for r in plan_disk_headroom(params_dir, pk_cache_dir, cache)? {
+    for r in plan_disk_headroom(params_dir, pk_cache_dir, cache, aggregator_key)? {
         require_space(r.probe, r.needed, &r.parts)?;
     }
     Ok(())
@@ -1582,10 +1606,11 @@ fn plan_disk_headroom<'a>(
     params_dir: &'a Path,
     pk_cache_dir: &'a Path,
     cache: KeyCacheState,
+    aggregator_key: AggregatorKey,
 ) -> CliResult<Vec<SpaceRequirement<'a>>> {
     // What each path needs, in bytes, on this run.
     let params_need = keygen_requirement(params_dir, cache)?;
-    let pk_need = pk_cache_requirement(pk_cache_dir);
+    let pk_need = pk_cache_requirement(aggregator_key);
 
     // Group by device. `st_dev` is what makes two paths share a pool;
     // comparing the paths themselves would miss a bind mount and a symlink
@@ -1721,16 +1746,29 @@ fn keygen_requirement(params_dir: &Path, cache: KeyCacheState) -> CliResult<u64>
     }
 }
 
+/// Whether stage 5 will find the outer aggregator's key in the pk cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregatorKey {
+    /// The last proof through this cache ran with the same Circuit-4 key and
+    /// the same `aggregate-proof`, and the slots it left are all still there
+    /// (`aggregator_slot`).
+    Cached,
+    /// Anything else: the first withdrawal on a host, the first after a
+    /// Circuit-4 key or an `aggregate-proof` changed, or a slot removed since.
+    ToGenerate,
+}
+
 /// Bytes the outer aggregator keygen may write into the pk cache.
 ///
-/// Always `OUTER_PK_BYTES`, and the argument is deliberately unused: the
-/// slot's name is a content hash over the inner proof, which does not exist
-/// until stage 5, so there is nothing in the directory this function could
-/// match against to narrow the figure. The parameter stays in the signature
-/// because the day the slot name becomes predictable this is where the
-/// narrowing goes.
-fn pk_cache_requirement(_pk_cache_dir: &Path) -> u64 {
-    OUTER_PK_BYTES
+/// The slot's name is a hash over the Circuit-4 verifying key, the SRS and
+/// the aggregator's configuration, which this crate cannot compute before
+/// stage 5; `aggregator_slot` recognises it instead by what the last proof
+/// ran with. Recognised: nothing is written. Otherwise the whole key is.
+fn pk_cache_requirement(aggregator_key: AggregatorKey) -> u64 {
+    match aggregator_key {
+        AggregatorKey::Cached => 0,
+        AggregatorKey::ToGenerate => OUTER_PK_BYTES,
+    }
 }
 
 /// Compare one filesystem's free space against the sum of what will be
@@ -3373,9 +3411,14 @@ pub(crate) mod tests {
         let pk_cache = params.join("pk_cache");
         std::fs::create_dir_all(&pk_cache).unwrap();
 
-        let plan = plan_disk_headroom(&params, &pk_cache, KeyCacheState::Cold {
-            why: "no manifest".into(),
-        })
+        let plan = plan_disk_headroom(
+            &params,
+            &pk_cache,
+            KeyCacheState::Cold {
+                why: "no manifest".into(),
+            },
+            AggregatorKey::ToGenerate,
+        )
         .expect("a cold cache is a requirement, not a refusal");
 
         assert_eq!(
@@ -3400,9 +3443,14 @@ pub(crate) mod tests {
         // This is the one deterministic path through the whole function —
         // it needs no assumption about the host's free space.
         let d = tempfile::TempDir::new().unwrap();
-        let err = check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {
-            why: "digest mismatch".into(),
-        })
+        let err = check_disk_headroom(
+            d.path(),
+            d.path(),
+            KeyCacheState::Corrupt {
+                why: "digest mismatch".into(),
+            },
+            AggregatorKey::ToGenerate,
+        )
         .expect_err("an untrustworthy cache is not something to spend a burn on");
         assert_eq!(err.exit_code().as_i32(), 2, "{err}");
         let msg = format!("{err}");
@@ -3461,9 +3509,14 @@ pub(crate) mod tests {
         let outcome = crate::test_log::with_default(subscriber, || {
             // `Corrupt` so the outcome is a refusal on every host: the
             // point here is what was said on the way, not the verdict.
-            check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {
-                why: "digest mismatch".into(),
-            })
+            check_disk_headroom(
+                d.path(),
+                d.path(),
+                KeyCacheState::Corrupt {
+                    why: "digest mismatch".into(),
+                },
+                AggregatorKey::ToGenerate,
+            )
         });
         outcome.expect_err("a corrupt cache is a refusal");
 
@@ -3522,9 +3575,14 @@ pub(crate) mod tests {
             .with_ansi(false)
             .finish();
         let outcome = crate::test_log::with_default(subscriber, || {
-            check_disk_headroom(params.path(), pk_cache.path(), KeyCacheState::Corrupt {
-                why: "digest mismatch".into(),
-            })
+            check_disk_headroom(
+                params.path(),
+                pk_cache.path(),
+                KeyCacheState::Corrupt {
+                    why: "digest mismatch".into(),
+                },
+                AggregatorKey::ToGenerate,
+            )
         });
         outcome.expect_err("a corrupt cache is a refusal");
 
@@ -3742,16 +3800,61 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_warm_cache_still_reserves_for_the_aggregator() {
-        // The pk-cache requirement is unconditional — its slot name is a
-        // hash over a proof that does not exist until stage 5, so there is
-        // nothing on disk to narrow it against.
-        let dir = tempfile::TempDir::new().unwrap();
-        assert_eq!(pk_cache_requirement(dir.path()), OUTER_PK_BYTES);
+    fn the_aggregator_key_is_reserved_unless_the_cache_already_holds_it() {
         assert_eq!(
-            pk_cache_requirement(Path::new("/nonexistent")),
+            pk_cache_requirement(AggregatorKey::ToGenerate),
             OUTER_PK_BYTES
         );
+        assert_eq!(pk_cache_requirement(AggregatorKey::Cached), 0);
+    }
+
+    #[test]
+    fn a_withdrawal_that_loads_both_keys_needs_no_room_for_them() {
+        // The second withdrawal on a host: the Circuit-4 key is warm and the
+        // aggregator's slot is the one the first proof used. Reserving 7 GiB
+        // for it anyway refused that withdrawal on a host sized for one.
+        let d = tempfile::TempDir::new().unwrap();
+        let params = d.path().join("params");
+        let pk_cache = params.join("pk_cache");
+        std::fs::create_dir_all(&pk_cache).unwrap();
+        let plan = plan_disk_headroom(
+            &params,
+            &pk_cache,
+            KeyCacheState::Warm,
+            AggregatorKey::Cached,
+        )
+        .unwrap();
+        assert!(plan.iter().all(|r| r.needed == 0), "{plan:?}");
+    }
+
+    #[test]
+    fn preflight_asks_whether_the_aggregator_key_is_cached_and_stage_5_says_so() {
+        let src =
+            crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
+        let artifacts = &src[src.find("pub async fn check_prover_artifacts(").unwrap()..];
+        let artifacts = &artifacts[..artifacts.find("\n}\n").unwrap()];
+        let asked = artifacts
+            .find("aggregator_slot::is_cached(")
+            .expect("preflight asks");
+        let measured = artifacts
+            .find("check_disk_headroom(")
+            .expect("and measures");
+        assert!(asked < measured);
+        assert!(
+            artifacts.contains("aggregator_key)?;"),
+            "the answer reaches the measurement"
+        );
+
+        let orchestrator = crate::source_guard::production_source(
+            "orchestrator.rs",
+            include_str!("orchestrator.rs"),
+        );
+        let proved = orchestrator.find("run_once_with_state(").unwrap();
+        let noted = orchestrator
+            .find("aggregator_slot::note_proof(")
+            .expect("a proof notes the slot it used");
+        let submit = orchestrator.find("info!(\"stage 6/6").unwrap();
+        assert!(proved < noted && noted < submit);
     }
 
     #[test]

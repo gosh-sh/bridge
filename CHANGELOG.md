@@ -1012,7 +1012,15 @@ assigns it when the release is tagged.
   `--params-dir` and `--pk-cache-dir` (one filesystem in the shipped profile)
   and refuses with exit 2 below that; before, a host with 4–9 GB free passed
   preflight and failed in stage 5, after the burn. `scripts/install.sh` now
-  wants 12 GB free.
+  wants 12 GB free. A withdrawal whose aggregator key is already in the pk
+  cache reserves nothing for it: after a proof, `withdraw` notes the
+  Circuit-4 key and the `aggregate-proof` it ran with in
+  `<pk-cache>/.withdraw-slot.json`, and a later preflight that finds both
+  unchanged and that key still there skips the 7 GiB. The first withdrawal
+  after an upgrade that brings a new `aggregate-proof` or Circuit-4 key
+  reserves it again while the previous key is still in the pk cache: budget
+  ~17 GB, or remove the previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk`
+  and its `.meta.json` first.
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had

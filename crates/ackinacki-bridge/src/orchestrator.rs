@@ -1032,6 +1032,16 @@ pub async fn run(
             )
         })?;
     drop(prove_lock);
+    // So that the next withdrawal's preflight reserves no room for the
+    // aggregator key this proof used.
+    crate::aggregator_slot::note_proof(
+        &crate::preflight::effective_pk_cache_dir(
+            args.pk_cache_dir.as_deref(),
+            &plumbing_ref.params_dir,
+        ),
+        &plumbing_ref.params_dir,
+        &plumbing_ref.aggregator_dir,
+    );
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
     let pi_count = e2e.proof.public_instances_hex.len();
     info!(
@@ -4444,7 +4454,12 @@ mod tests {
         //   below carries that requirement and the check enforces it —
         //   an allowlist that only asked "is this call known?" let the
         //   `map_err` be deleted again with everything green.
-        let known: &[(&str, bool)] = &[("recheck_proving_key", false), ("parse_eth_signer", true)];
+        //   `effective_pk_cache_dir` returns a path and no error.
+        let known: &[(&str, bool)] = &[
+            ("recheck_proving_key", false),
+            ("parse_eth_signer", true),
+            ("effective_pk_cache_dir", false),
+        ];
         let post_send_lines: Vec<&str> = post_send.lines().collect();
         for (n, line) in post_send_lines.iter().enumerate() {
             if line.trim_start().starts_with("//") || !line.contains("preflight::") {

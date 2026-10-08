@@ -260,8 +260,20 @@ cd ../ackinacki-bridge
 The first real withdrawal then generates `event_pk.bin` (~2.65 GB) by
 keygen, and the aggregator writes its ~6.85 GB key into `params/pk_cache/`.
 Budget ~10.7 GB for a withdraw-only machine, plus headroom — the figure
-preflight checks, the two keys rounded up to 3 GiB and 7 GiB. A `params/`
-shared with a bundle relayer needs more: it also stores the
+preflight checks on the first run, the two keys rounded up to 3 GiB and
+7 GiB. Later withdrawals load both keys and need no room for them: after a
+proof, `withdraw` notes in `params/pk_cache/.withdraw-slot.json` which
+Circuit-4 key and which `aggregate-proof` it ran with, and preflight
+reserves nothing for an aggregator key that matches.
+
+The first withdrawal after an upgrade that brings a new `aggregate-proof`
+or a new Circuit-4 key reserves the 7 GiB again, and the previous
+aggregator key is still in `params/pk_cache/`: budget ~17 GB, or remove the
+previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk` and the
+`.meta.json` beside it before that withdrawal. If it was still the right
+key, the proof generates it again (~15 min).
+
+A `params/` shared with a bundle relayer needs more: it also stores the
 primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
 during Circuit 4 is ~40 GB.
 
@@ -1552,7 +1564,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
 | Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
-| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host (Step 0) |
+| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host, ~7 GB more for the first withdrawal after an upgrade (Step 0) |
 | Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~20 min |
 | Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
 

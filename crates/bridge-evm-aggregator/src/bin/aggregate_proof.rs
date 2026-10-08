@@ -45,8 +45,29 @@ use bridge_evm_aggregator::{
 };
 use snark_verifier_sdk::Snark;
 
+/// Logs go to stderr, at `info` for this tool unless `RUST_LOG` says
+/// otherwise: its callers forward stderr into their own logs, and the pk
+/// cache's notices — waiting for another keygen, a filesystem without
+/// locks, leftovers removed — are for the operator. Into a pipe, no colour
+/// and no time stamp: the caller stamps the lines it forwards.
+fn init_logging() {
+    use std::io::IsTerminal as _;
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("warn,bridge_evm_aggregator=info,aggregate_proof=info")
+    });
+    let logs = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+    if std::io::stderr().is_terminal() {
+        logs.init();
+    } else {
+        logs.with_ansi(false).without_time().init();
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     let mut args = std::env::args().skip(1);
     let mut inner_path: Option<PathBuf> = None;
@@ -77,8 +98,9 @@ fn main() -> anyhow::Result<()> {
             "--allow-source-drift" => allow_source_drift = true,
             // Optional persistent outer PK cache. First run against a new
             // (name, k_outer, lookup_bits, universality, inner-shape) slot
-            // does full keygen (~3-5 min at K=21); subsequent runs load PK
-            // from disk (~15-60 s). See `aggregator_cache.rs` for slot layout.
+            // does full keygen at K=21 — a cold run, keygen and proof, took
+            // ~2 min on the test host; later runs load the key from disk.
+            // See `aggregator_cache.rs` for slot layout.
             "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
             // Side-effect-free probe. `ackinacki-bridge` preflight runs
             // this before an irreversible burn to prove the binary is
@@ -100,6 +122,14 @@ fn main() -> anyhow::Result<()> {
     let inner_path = inner_path.ok_or_else(|| anyhow::anyhow!("--inner-snark required"))?;
     let name = name.ok_or_else(|| anyhow::anyhow!("--name required"))?;
     let out_path = out_path.ok_or_else(|| anyhow::anyhow!("--out required"))?;
+    tracing::info!(
+        verifier = %name,
+        inner_snark = %inner_path.display(),
+        pk_cache_dir = %pk_cache_dir
+            .as_deref()
+            .map_or_else(|| "none".to_string(), |d| d.display().to_string()),
+        "aggregate-proof started"
+    );
 
     let inner_bytes = std::fs::read(&inner_path)
         .with_context(|| format!("read inner snark {}", inner_path.display()))?;

@@ -263,15 +263,18 @@ Budget ~10.7 GB for a withdraw-only machine, plus headroom — the figure
 preflight checks on the first run, the two keys rounded up to 3 GiB and
 7 GiB. Later withdrawals load both keys and need no room for them: after a
 proof, `withdraw` notes in `params/pk_cache/.withdraw-slot.json` which
-Circuit-4 key and which `aggregate-proof` it ran with, and preflight
-reserves nothing for an aggregator key that matches.
+aggregator key the proof used — `aggregate-proof` names it — and which
+Circuit-4 key and `aggregate-proof` it ran with, and preflight reserves
+nothing while all three are unchanged.
 
-The first withdrawal after an upgrade that brings a new `aggregate-proof`
-or a new Circuit-4 key reserves the 7 GiB again, and the previous
-aggregator key is still in `params/pk_cache/`: budget ~17 GB, or remove the
-previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk` and the
-`.meta.json` beside it before that withdrawal. If it was still the right
-key, the proof generates it again (~15 min).
+The first withdrawal after an upgrade reserves room again, while the
+previous keys are still on disk: ~17 GB in all after an upgrade that brings
+a new `aggregate-proof` (the 7 GiB), ~20 GB when it also brings a new
+Circuit-4 key (3 GiB more). Or remove the previous
+`BridgeWithdrawalAggregatorVerifier__v3__*.pk` and the `.meta.json` beside
+it before that withdrawal; if it was still the right key, the proof
+generates it again (a cold `aggregate-proof`, keygen included, took ~2 min
+on the test host).
 
 A `params/` shared with a bundle relayer needs more: it also stores the
 primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
@@ -754,16 +757,24 @@ the capture stalled is in the error text:
 
 The refusal ends with the AN burn's hash, the path of this withdrawal's
 record, and the command that carries on: the same command with
-`--allow-retry`, which skips the burn and resumes at stage 4 (capture).
+`--allow-retry`, changed only where the refusal asks — a larger
+`--prover-timeout-s`, say — which skips the burn and resumes at stage 4
+(capture).
 
 Circuit-4 in-process prover or the `aggregate-proof` subprocess
 errored. Almost always local resource pressure (disk, RAM, corrupt
-PK cache) or cold-cache slowness beyond the default timeout. An
+PK cache) or cold-cache slowness beyond the default timeout. The
+aggregator's own log lines are in the CLI's log, each starting
+`aggregate-proof:`, and the refusal quotes its last 40. An
 `aggregate-proof` that hits `--prover-timeout-s` is killed; if it was
-generating its key, it leaves `<stem>.pk.partial-<pid>-<random>` in the
-pk cache, which the next run removes (preflight names it, since it holds
-space). The next run generates the key from scratch again, so retry with a
-larger `--prover-timeout-s`, not the same one.
+writing its new key by then, it leaves `<stem>.pk.partial-<pid>-<random>`
+in the pk cache, which the next run removes (preflight names it, since it
+holds space) — a write that fails, on a full disk say, removes its own. The
+next run generates the key from scratch again, so retry with a larger
+`--prover-timeout-s`, not the same one. A cached key that is not whole
+fails with `cached aggregator key … is damaged`, naming the `.pk` to remove
+together with the `.meta.json` beside it; preflight refuses with exit 2,
+before the burn, when the length a slot's `.meta.json` records says so.
 
 Exit 12 also covers the wait for the covering bundle (stage 4b): a
 refusal that starts `wait_for_coverage:` means the server-side bundle
@@ -872,12 +883,14 @@ by side, but two with one `--snark-dir` prove one at a time: stage 5 takes
 proving in this --snark-dir; waiting for it to finish" until the first is
 done. A run that waited reads the bridge's state again and re-checks the
 proving key before it proves, so its proof binds to an anchor that is still
-in the window. Preflight tries this lock and the aggregator's
-`<pk-cache>/.keygen.lock` without waiting, and refuses with exit 2 if either
-cannot be taken: another user's lock file this user cannot read, or, on NFS,
-one this user cannot write (NFS will not lock a file opened read-only). A
-lock held by another run passes. On a filesystem without `flock` it proves
-unlocked, with a warning.
+in the window. Preflight tries this lock without waiting — and the
+aggregator's `<pk-cache>/.keygen.lock` too when the aggregator will generate
+its key, which then waits for any other process generating one in that cache
+— and refuses with exit 2 if one cannot be taken: another user's lock file
+this user cannot read, or, on NFS, one this user cannot write (NFS will not
+lock a file opened read-only). A lock held by another run passes with a
+warning; the wait for `.keygen.lock` counts against `--prover-timeout-s`.
+On a filesystem without `flock` it proves unlocked, with a warning.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 
@@ -1567,7 +1580,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
 | Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
-| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host, ~7 GB more for the first withdrawal after an upgrade (Step 0) |
+| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7 GB more, or ~10 GB with a new Circuit-4 key (Step 0) |
 | Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~20 min |
 | Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
 

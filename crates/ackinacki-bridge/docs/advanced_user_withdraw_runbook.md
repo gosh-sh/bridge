@@ -933,13 +933,14 @@ df -h ../bridge-prover-libraries/params/
 
 - If the log shows swap thrash, the OOM is real — don't just extend
   timeout. Move to a bigger host or shrink another workload.
-- An `aggregate-proof` that ran out of disk while writing its key leaves
-  a `<stem>.pk.partial-…` file, never a truncated `<stem>.pk`. The next
-  run removes it, and preflight names it before it measures: free the
-  space preflight asks for and re-run with `--allow-retry`. A published
-  key that cannot be read fails the aggregator with
-  `read cached aggregator key …`, naming the `.pk` to remove together
-  with the `.meta.json` beside it.
+- An `aggregate-proof` that ran out of disk while writing its key removes
+  its `<stem>.pk.partial-…` file and never leaves a truncated `<stem>.pk`;
+  one killed mid-write leaves the partial file, which the next run removes
+  and preflight names before it measures. Free the space preflight asks
+  for and re-run with `--allow-retry`. A published key that is not whole
+  fails the aggregator with `cached aggregator key … is damaged`, naming
+  the `.pk` to remove together with the `.meta.json` beside it; preflight
+  refuses one with exit 2 when its `.meta.json` records another length.
 
 ---
 

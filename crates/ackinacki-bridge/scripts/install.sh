@@ -46,7 +46,8 @@ readonly SUMS="SHA256SUMS"
 # withdrawals reuse the keys. Deposits: the prover's data/ after its first
 # proof (SRS and proving key), ~1.3 GB. Not counted: the first withdrawal after
 # an upgrade that changes aggregate-proof writes a new ~6.85 GB aggregator key
-# beside the old one (README, Step 0).
+# beside the old one, and one that also changes the Circuit-4 key reserves
+# 3 GiB more for that key (README, Step 0).
 readonly DISK_NEED_KB=$((12 * 1024 * 1024))
 readonly RAM_WARN_GB=48                      # Circuit 4 peaks around 40 GB
 

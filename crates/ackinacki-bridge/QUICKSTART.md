@@ -34,8 +34,9 @@ before it is written, and the deposit ceremony also against the Hermez
 [s]·G2. It wants ~12 GB free: withdrawal keys take ~9.5 GB, and the deposit
 prover writes a ~1.3 GB proving key on its first proof. Later withdrawals
 reuse those keys. The first withdrawal after an upgrade may write a new
-~6.85 GB aggregator key beside the old one, so it wants ~7 GB more, or the
-old key removed first (README, Step 0).
+~6.85 GB aggregator key beside the old one, so it wants ~7 GB more — ~10 GB
+when the upgrade also brings a new Circuit-4 key — or the old aggregator key
+removed first (README, Step 0).
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it

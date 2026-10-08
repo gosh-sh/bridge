@@ -564,7 +564,7 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 | `setAaveEnabled(bool)` | 1544 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
 | `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
 | `setYieldRecipient(addr)` | 1557 | Non-zero. |
-| `transferOwnership(addr)` | 1565 | Non-zero; single-step. |
+| `transferOwnership(addr)` | 1565 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
 floored at 0 (`:1593`). `_pullFromAave(amount)` withdraws `min(amount, suppliedPrincipal)`, requires

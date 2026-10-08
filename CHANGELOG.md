@@ -948,6 +948,18 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **A zero owner key can no longer be installed in `eccUSDCBridge` or
+  `EthBeaconLightClient`.** Both gate their admin calls on
+  `msg.pubkey() == _ownerPubkey`, and an unsigned external message carries
+  `msg.pubkey() == 0`, so an owner key of zero let anyone through that gate —
+  on the bridge that is `setPaused`, `setTrustedL1Bridge`,
+  `setLightClientCode`, `setAcceptedBlockHash` and `updateCode`; on the light
+  client the committee and code-upgrade calls. All three ways in now refuse
+  it, each with a new error code — the constructor, `onCodeUpgrade` (so an
+  upgrade whose migration cell carries a zero key aborts instead of opening
+  the contract up) and `setPubkey`: `ERR_ZERO_PUBKEY` 232 on the bridge, 253
+  on the light client. Deployments and upgrades that pass a real key are
+  unaffected; the zerostate already installs one read from a keyfile.
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had

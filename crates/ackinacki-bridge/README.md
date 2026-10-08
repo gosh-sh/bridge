@@ -610,7 +610,7 @@ claiming there is no record — it never opened one to find out.
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
 | 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
-**Exit 10 covers six situations, and only the first two involve this
+**Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went
 out and its outcome is unknown. The second is its mirror — the AN side
 did exactly what it was asked and the run **could not write down that
@@ -627,7 +627,12 @@ because `HOME` is unset and no `--state-dir` was given. None of the four
 broadcasts or writes anything — but in the first three a record for this
 identity is on disk, and in the fourth the run cannot say whether one
 is, which comes to the same instruction: a burn may be on the wire and
-nothing may be deleted. What the six share, and what a script should
+nothing may be deleted. The seventh comes after capture: the event the
+record's `an_tx_hash` leads to is **not this withdrawal's** — its amount,
+recipient, chain, token or sender differs, as a hash from another
+withdrawal of the same multisig written into the record by hand would.
+The refusal lists what differs; nothing is proved or submitted and the
+record is left as it was. What the seven share, and what a script should
 key on, is "do not treat this identity as untouched".
 
 Exit codes 11–13 all leave the AN burn broadcast: the USDC has left

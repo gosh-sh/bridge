@@ -731,6 +731,12 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
       `status` to `burned`, and re-run with `--allow-retry` so the run
       resumes at capture instead of re-burning.
 
+  The CLI checks the hash you wrote: after capture it compares the
+  event's amount, recipient, chain, token and sender with the withdrawal
+  it is running, and refuses with exit 10, naming what differs, before
+  anything is proved. A hash from another withdrawal of the same multisig
+  is caught there rather than paid out under this record.
+
   The ExtOut is the only unambiguous evidence. Stopping one hop earlier
   — at "the multisig transaction succeeded" — is what would let you mark
   a bounced call as `burned`, after which the resumed run waits forever

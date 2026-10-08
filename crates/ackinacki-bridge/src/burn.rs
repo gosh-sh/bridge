@@ -68,7 +68,7 @@ const MULTISIG_ABI_JSON: &str = include_str!("../abi/UpdateCustodianMultisigWall
 
 /// ECC token id for USDC on Acki Nacki (`cc` map key on multisig
 /// sendTransaction). Bare integer per the AN token model.
-const USDC_ECC_ID: u32 = 3;
+pub(crate) const USDC_ECC_ID: u32 = 3;
 
 /// AN base-currency value attached to sendTransaction. Covers forwarding
 /// fees for the two-hop bounce path (multisig → USDCBridge → …). Matches

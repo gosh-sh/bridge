@@ -55,9 +55,10 @@ pub enum ExitCode {
     /// failure inside `burn::send` propagates before the block that
     /// writes `an_tx_hash`, so what an exit 10 leaves is a `Reserved`
     /// record with `an_tx_hash: null` — and the CLI cannot write a hash
-    /// it never learned. The hash is on the record only for the two exit
-    /// 10s raised AFTER the send returned: a failed post-burn `update`,
-    /// and a refusal on the resume path.
+    /// it never learned. The hash is on the record only for the exit 10s
+    /// raised AFTER the send returned: a failed post-burn `update`, a
+    /// refusal on the resume path, and a captured event that is not this
+    /// withdrawal's (the hash on the record leads to another one's burn).
     ///
     /// So reconciliation is the remedy in every case, and where the hash
     /// is not on the record it is not in the CLI either: look for a

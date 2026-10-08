@@ -865,6 +865,20 @@ pub async fn run(
     .map_err(|e| CliError::CaptureTimeout {
         an_tx: format!("{an_tx_hash} ({e})"),
     })?;
+    // The event has to be THIS withdrawal's before anything is proved from
+    // it, and before the record says it was captured: on a resume the hash
+    // came off the record, and the record can be wrong. See `event_identity`.
+    crate::event_identity::check_captured_event(
+        &captured.event_boc_b64,
+        &from,
+        &to,
+        &amount,
+        &an_tx_hash,
+        record
+            .as_ref()
+            .map(|r| idempotency::record_path(&state_dir, &r.key))
+            .as_deref(),
+    )?;
     info!(
         msg_id = %captured.message_id,
         block_seq_no = captured.block_seq_no,

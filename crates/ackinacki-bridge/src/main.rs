@@ -30,6 +30,7 @@ mod args;
 mod burn;
 mod deposit;
 mod errors;
+mod event_identity;
 mod idempotency;
 mod orchestrator;
 mod output;

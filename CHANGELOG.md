@@ -637,6 +637,13 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- `ackinacki-bridge withdraw` checks the `WithdrawalInitiated` event it
+  captures against the withdrawal it is running — amount, recipient,
+  destination chain, token (USDC) and sender multisig — before proving it. A
+  mismatch refuses with exit 10 and lists what differs; the record is left as
+  it was. Before, a resume whose record carried another withdrawal's burn hash
+  (written in by hand during reconciliation) proved and paid out that other
+  withdrawal and marked this record confirmed.
 - `ackinacki-bridge withdraw` exit 13 names the `AckiNackiBridge` custom error
   a `withdrawByProof` dry run or submit reverted with, with its arguments
   (`NullifierAlreadyUsed(nullifier: 0x…)`, `BridgePaused()`,

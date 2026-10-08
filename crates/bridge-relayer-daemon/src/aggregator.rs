@@ -456,9 +456,13 @@ impl ProofAggregator for SubprocessAggregator {
                 .args(&args);
             c
         };
+        // Killed when the wait below is abandoned: a timed-out aggregator
+        // left running keeps its memory and its pk-cache writes, beside
+        // whatever proof the operator starts next.
         cmd.env("PARAMS_DIR", &self.config.params_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         let t_agg = Instant::now();
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
@@ -1323,6 +1327,73 @@ mod tests {
         assert!(
             calldata_binds_instances(&cd, &instances, Some(&wrong_le)).is_err(),
             "mismatched expected digest must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_aggregator_is_killed_not_orphaned() {
+        // The CLI holds its prove lock only while it waits for this
+        // process. A timeout that dropped the child without killing it left
+        // the aggregator running, unlocked, beside the next run's proof.
+        //
+        // The fake publishes its pid and `exec`s, so the pid is the process
+        // that has to be gone; `exec` matters, without it `sh` forks `sleep`
+        // and only the shell would be killed.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin_dir = dir.path().join("target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let bin = bin_dir.join(AGGREGATE_BIN);
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho $$ > {p}.tmp\nmv {p}.tmp {p}\nexec sleep 120\n",
+                p = pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cfg = SubprocessAggregatorConfig::new(dir.path(), dir.path(), dir.path());
+        cfg.timeout = Duration::from_secs(5);
+        let agg = SubprocessAggregator::new(cfg);
+
+        let err = agg
+            .aggregate(&dir.path().join("inner.snark"), WITHDRAWAL_VERIFIER_NAME)
+            .await
+            .expect_err("an aggregator that never finishes times out");
+        assert!(err.to_string().contains("timed out"), "{err}");
+
+        let pid = std::fs::read_to_string(&pidfile)
+            .expect("the fake aggregator started and recorded its pid")
+            .trim()
+            .to_string();
+        // SIGKILL and reaping are not instantaneous: poll. A zombie counts as
+        // gone — it holds no memory and writes nothing.
+        let mut gone = false;
+        for _ in 0..50 {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Err(_) => gone = true,
+                Ok(stat) => {
+                    gone = stat
+                        .rsplit(')')
+                        .next()
+                        .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+                },
+            }
+            if gone {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !gone {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid])
+                .status();
+        }
+        assert!(
+            gone,
+            "pid {pid} survived the timeout: the aggregator outlives the run that started it"
         );
     }
 

@@ -3510,6 +3510,64 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_dry_run_refuses_either_paused_bridge_with_exit_2() {
+        for knobs in [
+            crate::test_chain::WorldKnobs {
+                evm_paused: true,
+                an_paused: false,
+            },
+            crate::test_chain::WorldKnobs {
+                evm_paused: false,
+                an_paused: true,
+            },
+        ] {
+            let mut world =
+                crate::test_chain::fake_world_with(5_000_000, "1.000000", knobs).await;
+            let err = world
+                .run(true)
+                .await
+                .expect_err("a paused bridge refuses the dry run too");
+            assert_eq!(err.exit_code().as_i32(), 2, "{knobs:?}: {err}");
+            assert!(format!("{err}").contains("paused"), "{knobs:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_over_a_recorded_burn_on_a_paused_evm_bridge_is_exit_10() {
+        let knobs = crate::test_chain::WorldKnobs {
+            evm_paused: true,
+            an_paused: false,
+        };
+        let mut world = crate::test_chain::fake_world_with(5_000_000, "1.000000", knobs).await;
+        world.with_allow_retry();
+        world.leave_a_burned_record();
+        let err = world
+            .run(true)
+            .await
+            .expect_err("the payout cannot happen while the EVM bridge is paused");
+        assert_eq!(err.exit_code().as_i32(), 10, "the burn is on the wire: {err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("unpause"), "{msg}");
+        assert!(msg.contains("--allow-retry"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_resume_over_a_recorded_burn_ignores_an_an_pause() {
+        let knobs = crate::test_chain::WorldKnobs {
+            evm_paused: false,
+            an_paused: true,
+        };
+        let mut world = crate::test_chain::fake_world_with(5_000_000, "1.000000", knobs).await;
+        world.with_allow_retry();
+        world.leave_a_burned_record();
+        let ok = world
+            .run(true)
+            .await
+            .expect("the AN pause cannot stop a burn that already happened");
+        assert!(matches!(ok.submit.status, SubmitStatus::DryRunOk));
+    }
+
     /// Where a real run actually stops, measured rather than asserted.
     #[tokio::test]
     async fn a_real_run_passes_both_preflights_and_stops_at_the_ceremony() {

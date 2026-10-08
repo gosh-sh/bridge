@@ -603,7 +603,7 @@ claiming there is no record — it never opened one to find out.
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|
 | 0    | Success (or `--dry-run` returned OK) | — | — |
-| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, etc. | ✓ nothing, **and no record for this identity on disk** | Error scenarios § "Preflight refused" |
+| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, either bridge paused, etc. | ✓ nothing, **and no record for this identity on disk** | Error scenarios § "Preflight refused" |
 | 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing by this run | § Idempotency semantics |
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
@@ -660,6 +660,11 @@ specific reason. Common causes:
   an RPC without log history back to the deploy block (publicnode keeps only
   the newest ~10 000 blocks; the refusal says so when the deploy block
   itself answers with no logs)
+- a bridge is paused: `AckiNackiBridge.paused()` is true, or the Acki
+  Nacki bridge's `isPaused()` is. Nothing is sent; re-run once the owner
+  lifts the pause. A `--dry-run` checks both too. On a resume over a
+  recorded burn only the EVM pause is checked, and it refuses with exit 10
+  (the burn is on the wire): re-run with `--allow-retry` after `unpause()`
 
 **Remediation:** fix the specific issue, re-run. Preflight is
 side-effect-free.

@@ -93,6 +93,10 @@ pub struct PreflightReport {
 pub enum BalanceCheck {
     /// No burn has been broadcast for this identity. The multisig must
     /// hold at least `amount`.
+    ///
+    /// It also gates the AN bridge's pause check: that pause refuses
+    /// `initiateWithdrawal`, so it matters only while the burn is still to
+    /// be sent.
     Require,
     /// A prior run already broadcast the burn (`an_tx_hash` on file). The
     /// balance is expected to be short — that is what success looks like.
@@ -258,6 +262,27 @@ pub async fn run(
     };
     let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
     let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+
+    // 6b. The AN bridge's own pause. While it is set `initiateWithdrawal`
+    //     refuses the burn with 231, the ECC bounces back to the multisig,
+    //     and stage 4 waits for an event that never comes. Asked only while
+    //     the burn is still to be sent: once it is on the wire the pause can
+    //     no longer stop it, and a resume should not gain a way to fail.
+    if matches!(balance_check, BalanceCheck::Require) {
+        let bridge_boc =
+            fetch_account_boc(&context, &usdc_bridge_dapp_id, usdc_bridge_account_id_hex).await?;
+        if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} is paused by its owner \
+                     (isPaused() is true): initiateWithdrawal would refuse the burn with 231 and \
+                     the USDC would bounce back to the multisig. Re-run once the owner lifts the \
+                     pause."
+                ),
+                source: None,
+            });
+        }
+    }
 
     // 7. ECC[3] balance from the parsed account.
     //
@@ -457,6 +482,64 @@ async fn call_get_custodians(
             source: None,
         })?;
     parse_custodians(&decoded)
+}
+
+/// Run the USDCBridge's `isPaused` on its own code, locally — the getter
+/// `deposit` reads too.
+async fn call_is_paused(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+) -> CliResult<bool> {
+    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        address: Some(bridge_legacy.to_string()),
+        call_set: Some(CallSet {
+            function_name: "isPaused".to_string(),
+            header: None,
+            input: Some(json!({})),
+        }),
+        signer: Signer::None,
+        deploy_set: None,
+        processing_try_index: None,
+        signature_id: None,
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!(
+            "encode isPaused call for {bridge_legacy}: {}",
+            e.message()
+        ),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
+        message: encoded.message,
+        account: bridge_boc.to_string(),
+        abi: Some(abi),
+        execution_options: None,
+        boc_cache: None,
+        return_updated_account: Some(false),
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!(
+            "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: {} — a bridge without \
+             isPaused() predates the pause and this CLI",
+            e.message()
+        ),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    run.decoded
+        .and_then(|d| d.output)
+        .and_then(|o| o["value0"].as_bool())
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: no boolean answer \
+                 (ABI mismatch?)"
+            ),
+            source: None,
+        })
 }
 
 /// The custodian list out of a `getCustodians` answer, refusing
@@ -1889,8 +1972,8 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 
 /// Preflight the destination *deploy*: something is there, its withdrawal
 /// verifier stack is real and is the one this build proves against, its
-/// pinned AN-side identity is ours, and its treasury visibly covers this
-/// amount.
+/// pinned AN-side identity is ours, its treasury visibly covers this
+/// amount, and it is not paused.
 ///
 /// Key-free, so `--dry-run` exercises all of it.
 ///
@@ -2127,6 +2210,29 @@ pub async fn check_bridge_deploy(
             source: None,
         });
     }
+
+    // 6. Is it open? While `paused()` is true, `verifyBlock` and
+    //    `withdrawByProof` revert `BridgePaused`: no bundle covers the burn
+    //    and no payout can land until the owner unpauses. A bridge without
+    //    the getter predates the pause and counts as open, as for `deposit`.
+    use crate::deposit::evm::EvmRead as _;
+    let paused = crate::deposit::evm::AlloyEvm::connect(rpc_url)?
+        .bridge_paused(bridge)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("--bridge-address {bridge}: paused() failed: {e:#}"),
+            source: None,
+        })?;
+    if paused == Some(true) {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge} is paused by its owner (paused() is true): \
+                 verifyBlock and withdrawByProof revert BridgePaused until unpause(), so a burn \
+                 made now could not be paid out before then. Re-run once the owner unpauses it."
+            ),
+            source: None,
+        });
+    }
     Ok(())
 }
 
@@ -2218,11 +2324,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn preflight_passes_its_an_side_against_a_fake_node() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
-        let usdc_bridge_account_id = "2b".repeat(32);
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge(false).await;
         let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
             account_id: account_id.clone(),
             account_boc,
             usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
         })
         .await;
 
@@ -2269,6 +2377,123 @@ pub(crate) mod tests {
             seen.contains("POST /graphql"),
             "the USDCBridge was queried: {seen}"
         );
+        assert!(
+            seen.contains(&usdc_bridge_account_id),
+            "the USDCBridge account was fetched for isPaused: {seen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_offline_bridge_answers_is_paused_both_ways() {
+        let ctx = build_client_context("http://127.0.0.1:1/graphql")
+            .expect("a context needs no reachable endpoint to run TVM locally");
+        for paused in [false, true] {
+            let (id, boc) = crate::test_chain::deployed_usdc_bridge(paused).await;
+            assert_eq!(
+                call_is_paused(&ctx, &format!("0:{id}"), &boc)
+                    .await
+                    .unwrap(),
+                paused
+            );
+        }
+    }
+
+    /// A node serving a funded multisig and a USDCBridge, paused or not;
+    /// and the arguments of a withdrawal from that multisig.
+    async fn an_side(
+        paused: bool,
+    ) -> (
+        crate::test_chain::FakeNode,
+        String,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        FromAddress,
+        ToAddress,
+        UsdcAmount,
+    ) {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (bridge, usdc_bridge_boc) = crate::test_chain::deployed_usdc_bridge(paused).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: bridge.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+        (node, bridge, dir, keys, from, to, amount)
+    }
+
+    #[tokio::test]
+    async fn a_paused_an_bridge_is_refused_before_the_burn() {
+        let (node, bridge, _dir, keys, from, to, amount) = an_side(true).await;
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &bridge,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("initiateWithdrawal refuses while the bridge is paused");
+        node.complaint();
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("paused"), "{msg}");
+        assert!(
+            msg.contains("231"),
+            "names the refusal the burn would get: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resume_does_not_ask_the_an_bridge_about_its_pause() {
+        let (node, bridge, _dir, keys, from, to, amount) = an_side(true).await;
+        run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &bridge,
+            BalanceCheck::SkipSpent,
+        )
+        .await
+        .expect("the burn is on the wire; the AN pause cannot stop it any more");
+        node.complaint();
+        let seen = node.seen.lock().await.join("\n");
+        assert!(
+            !seen.contains(&bridge),
+            "the bridge account was not fetched: {seen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paused_evm_bridge_is_refused_before_the_burn() {
+        let paused = format!("0x{:064x}", 1u8);
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_PAUSED, paused)])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("withdrawByProof and verifyBlock revert BridgePaused while it is set");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("paused"), "{msg}");
+        assert!(msg.contains("unpause"), "says what lifts it: {msg}");
     }
 
     /// `check_key_file_perms` wants exactly `0400`, and `write_keys`
@@ -2544,6 +2769,7 @@ pub(crate) mod tests {
     const SEL_LAST_BK_UPD: &str = "a91a27ac"; // storedLastBkSetUpdateSeqNo()
     const SEL_GENESIS_ANCHOR: &str = "6cd06281"; // storedPrevMaxLevelLayerHash()
     const SEL_LAYER_WINDOW: &str = "a95d2271"; // getLayerWindow(uint8)
+    pub(crate) const SEL_PAUSED: &str = "5c975abb"; // paused()
 
     /// A 32-byte zero word — what a getter returns when its slot is unset.
     const ZERO_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -2772,6 +2998,8 @@ pub(crate) mod tests {
             (SEL_DAPP_FR, ZERO_WORD.to_string()),
             (SEL_ACC_FR, ZERO_WORD.to_string()),
             (SEL_TREASURY, MAX_WORD.to_string()),
+            // Not paused: the last check `check_bridge_deploy` makes.
+            (SEL_PAUSED, ZERO_WORD.to_string()),
             // Matches the zero digest tests write into their tempdir's
             // `_calldata.bin` (24 words of `0x00`). Callers overriding
             // this pair must override both sides.

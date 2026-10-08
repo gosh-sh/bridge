@@ -247,6 +247,13 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
+  neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
+  bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
+  Before, a paused Acki Nacki bridge bounced the burn and the run waited out
+  the capture (exit 11); a paused EVM bridge let the burn through and the run
+  failed in stage 4b or 6. A resume over a recorded burn checks only the EVM
+  side and refuses with exit 10, naming `--allow-retry`.
 - **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
   account.** The wallet signs `approve` and `deposit` from a QR code —
   WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681

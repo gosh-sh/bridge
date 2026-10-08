@@ -61,7 +61,7 @@ use crate::{
 
 /// Vendored USDCBridge ABI — embedded at build time so the binary has no
 /// runtime companion directory.
-const USDC_BRIDGE_ABI_JSON: &str = include_str!("../abi/USDCBridge.abi.json");
+pub(crate) const USDC_BRIDGE_ABI_JSON: &str = include_str!("../abi/USDCBridge.abi.json");
 
 /// Vendored multisig ABI (same file preflight uses for `getCustodians`).
 const MULTISIG_ABI_JSON: &str = include_str!("../abi/UpdateCustodianMultisigWallet.abi.json");

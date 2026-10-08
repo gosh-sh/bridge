@@ -82,7 +82,7 @@ _waitStep   = epochDuration / 20;   // CONFIG_WAIT_DENOMINATOR
 
 | Поле | Значение на шелнете | Как узнать |
 |:-----|:--------------------|:-----------|
-| `epochDuration` | прочитать вживую | getter **`getConfig`** → `epochDuration` (дефолт деплоя `660`) |
+| `epochDuration` | **`10800`** (замерено на шелнете 14-07-2026, см. Шаг 1) | getter **`getConfig`** → `epochDuration`. Не равняется python-дефолту `660`! |
 | `isNeedNumberOfActiveBlockKeepers` | `false` | зашито при генерации зеростейта |
 | `needNumberOfActiveBlockKeepers` | `0` | зашито при генерации зеростейта |
 | `walletTouch` | `200` | **нет геттера** — из деплой-env (`WALLET_TOUCH`, дефолт 200) |
@@ -95,6 +95,11 @@ _waitStep   = epochDuration / 20;   // CONFIG_WAIT_DENOMINATOR
 Источник дефолтов: [`contracts/scripts/generate_zerostate.py`](../../contracts/scripts/generate_zerostate.py)
 (`EPOCH_LENGTH_AFTER_ZEROSTATE=660`, `MIN_BLOCKKEEPERS=5`, `WALLET_TOUCH=200`, `NLINIT=5000`,
 `isNeed=false`, `needNumber=0`).
+
+> ⚠️ **Важно:** python-дефолт `EPOCH_LENGTH_AFTER_ZEROSTATE=660` — это НЕ то, что крутится на
+> шелнете. Шелнет 14-07-2026 реально деплоился с `epochDuration=10800` (3 часа). Всегда делай
+> Шаг 1 `getConfig` перед `setConfig` и подставляй именно живое значение, иначе разом ужмёшь
+> эпоху в 16 раз.
 
 ---
 
@@ -152,15 +157,16 @@ test -r "$KEYS"  && echo "KEYS ok"
 
 ```bash
 $CLI -j runx --abi "$ABI" --addr "$ROOT" -m getConfig
-# → {"epochDuration":"660","epochCliff":"66","waitStep":"33"}
+# шелнет 14-07-2026:
+# → {"epochDuration":"10800","epochCliff":"1080","waitStep":"540",...}
 
 $CLI -j runx --abi "$ABI" --addr "$ROOT" -m getDetails
 # → {"minStake":"...","numberOfActiveBlockKeepers":"5",...}
 ```
 
-- Возьми `epochDuration` из первого вывода (ниже в примерах — `660`). Если вернулось другое —
-  подставляй **своё** значение во все `setConfig` вызовы ниже; `_epochCliff/_waitStep`
-  пересчитаются автоматически как `epochDuration/10` и `epochDuration/20`.
+- Возьми `epochDuration` из первого вывода (на шелнете 14-07-2026 — `10800`, т.е. эпоха 3 ч).
+  Если вернулось другое — подставляй **своё** значение во все `setConfig` вызовы ниже;
+  `_epochCliff/_waitStep` пересчитаются автоматически как `epochDuration/10` и `epochDuration/20`.
 - Сохрани `numberOfActiveBlockKeepers` из второго вывода в блокнот — это baseline для Шага 4.
   Для шелнета 14-07-2026 ожидание = `5`.
 
@@ -176,7 +182,7 @@ $CLI -j runx --abi "$ABI" --addr "$ROOT" -m getDetails
 
 ```bash
 $CLI -j runx --abi "$ABI" --addr "$ROOT" -m setConfig \
-  '{"epochDuration":660,"minBlockKeepers":4,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
+  '{"epochDuration":10800,"minBlockKeepers":4,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
 ```
 
 - exit code 0 и пустой `{}` в выводе → payload валиден.
@@ -187,14 +193,14 @@ $CLI -j runx --abi "$ABI" --addr "$ROOT" -m setConfig \
 
 ```bash
 $CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
-  '{"epochDuration":660,"minBlockKeepers":4,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
+  '{"epochDuration":10800,"minBlockKeepers":4,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
 ```
 
 ### Шаг 2б. ВЫКЛЮЧИТЬ ротацию → `minBK = 5`
 
 ```bash
 $CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
-  '{"epochDuration":660,"minBlockKeepers":5,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
+  '{"epochDuration":10800,"minBlockKeepers":5,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
 ```
 
 > Подставь **свои** `epochDuration` (из Шага 1), `walletTouch`, `nlinit`, если деплой был нестандартным.
@@ -209,7 +215,7 @@ $CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
    # → {"minStake":"...","numberOfActiveBlockKeepers":"5"}
    ```
 
-3. **По факту** — понаблюдать за сетью в течение эпохи (`epochDuration` секунд):
+3. **По факту** — понаблюдать за сетью в течение эпохи (`epochDuration` секунд; на шелнете 14-07-2026 это **~3 часа**):
    - при `minBK = 4` — по завершении эпохи один из BK уходит в cooler, на его место заходит кандидат
      (число активных ≈ держится, состав меняется);
    - при `minBK = 5` — состав активных BK не меняется, все досиживают/переизбираются на месте.
@@ -232,7 +238,7 @@ $CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
 
 ```bash
 $CLI callx --abi "$ABI" --addr "$ROOT" --keys "$KEYS" -m setConfig \
-  '{"epochDuration":660,"minBlockKeepers":5,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
+  '{"epochDuration":10800,"minBlockKeepers":5,"isNeedNumberOfActiveBlockKeepers":false,"needNumberOfActiveBlockKeepers":0,"walletTouch":200,"nlinit":5000}'
 ```
 
 Срабатывает мгновенно по контракту, но физически ротация остановится только когда очередной BK

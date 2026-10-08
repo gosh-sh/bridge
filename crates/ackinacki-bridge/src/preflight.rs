@@ -937,7 +937,13 @@ pub async fn check_prover_artifacts(
         AggregatorKey::ToGenerate
     };
     check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
-    crate::prove_lock::check_openable(snark_dir)?;
+    // Both locks stage 5 takes, tried now: one that cannot be taken fails
+    // the run before the burn rather than after it.
+    crate::prove_lock::check_lockable(&crate::prove_lock::lock_path(snark_dir), "--snark-dir")?;
+    crate::prove_lock::check_lockable(
+        &effective_pk_cache.join(AGGREGATOR_KEYGEN_LOCK),
+        "--pk-cache-dir",
+    )?;
 
     Ok(fingerprint)
 }
@@ -1573,6 +1579,10 @@ pub fn check_disk_headroom(
 /// (`PARTIAL_SUFFIX` in `bridge-evm-aggregator/src/aggregator_cache.rs`,
 /// a separate workspace this crate cannot import).
 const AGGREGATOR_PARTIAL_SUFFIX: &str = ".partial-";
+
+/// The lock `aggregate-proof` holds in the pk cache while it generates a
+/// key (`KEYGEN_LOCK` in `bridge-evm-aggregator/src/aggregator_cache.rs`).
+const AGGREGATOR_KEYGEN_LOCK: &str = ".keygen.lock";
 
 /// The partial files an interrupted `aggregate-proof` left in
 /// `pk_cache_dir`, with their sizes. Unreadable directory: none.
@@ -3797,6 +3807,18 @@ pub(crate) mod tests {
             available_bytes(Path::new("/nonexistent/for/this/test")),
             None
         );
+    }
+
+    #[test]
+    fn the_pk_cache_names_are_the_aggregators_own() {
+        // A separate workspace this crate cannot import: read its source.
+        let aggregator = include_str!("../../bridge-evm-aggregator/src/aggregator_cache.rs");
+        assert!(aggregator.contains(&format!(
+            "const KEYGEN_LOCK: &str = \"{AGGREGATOR_KEYGEN_LOCK}\";"
+        )));
+        assert!(aggregator.contains(&format!(
+            "pub const PARTIAL_SUFFIX: &str = \"{AGGREGATOR_PARTIAL_SUFFIX}\";"
+        )));
     }
 
     #[test]

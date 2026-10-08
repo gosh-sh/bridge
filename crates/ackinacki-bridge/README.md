@@ -872,9 +872,12 @@ by side, but two with one `--snark-dir` prove one at a time: stage 5 takes
 proving in this --snark-dir; waiting for it to finish" until the first is
 done. A run that waited reads the bridge's state again and re-checks the
 proving key before it proves, so its proof binds to an anchor that is still
-in the window. Preflight opens the lock file first and refuses with exit 2
-if it cannot (another user's lock file this user cannot read). On a
-filesystem without `flock` it proves unlocked, with a warning.
+in the window. Preflight tries this lock and the aggregator's
+`<pk-cache>/.keygen.lock` without waiting, and refuses with exit 2 if either
+cannot be taken: another user's lock file this user cannot read, or, on NFS,
+one this user cannot write (NFS will not lock a file opened read-only). A
+lock held by another run passes. On a filesystem without `flock` it proves
+unlocked, with a warning.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 

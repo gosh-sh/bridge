@@ -1001,9 +1001,11 @@ assigns it when the release is tagged.
   time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
   it waits, then reads the bridge's state again and re-checks the Circuit-4
   proving key before it proves, so the anchor it binds to is still in the
-  window and the key is the one preflight verified. Preflight opens the lock
-  file (read-only if another user's file is not writable) and refuses with
-  exit 2 when it cannot, instead of failing with exit 12 after the burn.
+  window and the key is the one preflight verified. Preflight tries this
+  lock and the aggregator's `<pk-cache>/.keygen.lock` without waiting (a file
+  another user owns is opened read-only), and refuses with exit 2 when either
+  cannot be opened or locked — on NFS, a read-only lock file — instead of
+  failing with exit 12 after the burn. A lock another run holds passes.
   Before, both runs wrote the snark directory's fixed-name files at once and
   one failed with exit 12 ("calldata instance … != public input …").
 - `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator

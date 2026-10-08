@@ -1349,6 +1349,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reads a real ~6.85 GB slot: AGGREGATOR_SLOT=<cache_dir>/<stem>"]
+    fn a_published_slot_on_this_host_reads_back() {
+        // Slots published before the key was read in the checked format
+        // must read in it too, or every warm run would fail after its burn.
+        let stem = PathBuf::from(std::env::var("AGGREGATOR_SLOT").expect("AGGREGATOR_SLOT"));
+        let meta = read_meta(&stem.with_extension("meta.json")).unwrap();
+        let started = std::time::Instant::now();
+        let pk = read_slot_key::<AggregationCircuit>(
+            &stem.with_extension("pk"),
+            meta.calculated.into(),
+            meta.pk_bytes,
+        )
+        .unwrap();
+        eprintln!(
+            "read in {:?}; {} fixed commitments",
+            started.elapsed(),
+            pk.get_vk().fixed_commitments().len()
+        );
+    }
+
+    #[test]
     fn a_key_this_user_cannot_read_is_not_called_damaged() {
         // Removing it would throw a good key away and cost a keygen.
         use std::os::unix::fs::PermissionsExt;

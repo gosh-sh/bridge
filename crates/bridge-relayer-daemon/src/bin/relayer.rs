@@ -394,9 +394,9 @@ enum Cmd {
         verifiers_dir: PathBuf,
         /// Persistent outer-PK cache directory for the `aggregate-proof`
         /// subprocess (`--pk-cache-dir`). Without this, every bundle re-runs
-        /// the full K=21 outer keygen (~3–5 min); with it, only the first
-        /// bundle pays keygen and subsequent bundles hit the disk cache
-        /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
+        /// the full K=21 outer keygen; with it, only the first bundle pays
+        /// keygen and later bundles load the key from disk. Defaults to
+        /// `<params_dir>/pk_cache`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
         /// Anchor level for the LiveProverDriver step math and bundle
@@ -526,8 +526,8 @@ enum Cmd {
         /// Optional dir to persist `proof_event_{seq:06}.json`.
         #[arg(long)]
         prover_out_dir: Option<PathBuf>,
-        /// Aggregator subprocess timeout, in seconds. The outer keygen
-        /// from a cold pk cache takes ~15 min.
+        /// Aggregator subprocess timeout, in seconds. A cold run — the outer
+        /// keygen and the proof — took ~2 min on the test host.
         #[arg(long, default_value_t = 1800)]
         prover_timeout_s: u64,
         /// Seqno stamped into witness/proof filenames.

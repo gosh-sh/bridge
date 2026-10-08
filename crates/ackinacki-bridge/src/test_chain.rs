@@ -962,10 +962,7 @@ mod tests {
             let (id, boc) = deployed_usdc_bridge(paused).await;
             assert_eq!(id.len(), 64, "{id}");
             let account = Account::construct_from_base64(&boc).expect("the fixture BOC parses");
-            assert_eq!(
-                account.status(),
-                tvm_block::AccountStatus::AccStateActive
-            );
+            assert_eq!(account.status(), tvm_block::AccountStatus::AccStateActive);
         }
     }
 

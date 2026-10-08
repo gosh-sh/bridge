@@ -47,10 +47,11 @@ mod tests {
 
     /// The text a public Sepolia RPC returned for the dry run of a
     /// withdrawal whose nullifier was already spent.
-    const NULLIFIER_REVERT: &str = "server returned an error response: error code 3: execution \
-        reverted: tried to decode error from abi but failed: Error: Failed to slice index \
-        abi_decoded_error_data when getting message from revert data, data: \
-        \"0xdc215c0a2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb\"";
+    const NULLIFIER_REVERT: &str =
+        "server returned an error response: error code 3: execution reverted: tried to decode \
+         error from abi but failed: Error: Failed to slice index abi_decoded_error_data when \
+         getting message from revert data, data: \
+         \"0xdc215c0a2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb\"";
 
     #[test]
     fn a_spent_nullifier_is_named_first_and_explained() {

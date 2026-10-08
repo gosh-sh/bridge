@@ -291,7 +291,8 @@ pub enum CliError {
     /// operator needs the hash, the record and the command that resumes
     /// without burning again.
     #[error(
-        "capture: timed out waiting for WithdrawalInitiated event (AN tx {an_tx})\n\x20 {next_steps}"
+        "capture: timed out waiting for WithdrawalInitiated event (AN tx {an_tx})\n\x20 \
+         {next_steps}"
     )]
     CaptureTimeout { an_tx: String, next_steps: String },
 

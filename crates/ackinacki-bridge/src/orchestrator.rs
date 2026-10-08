@@ -819,8 +819,8 @@ pub async fn run(
     let plumbing_ref = plumbing.as_ref().ok_or_else(|| {
         proof_failed_after_burn(
             format!(
-                "internal: submit plumbing is missing on a non-dry run. The AN burn \
-                 {an_tx_hash} IS on the wire — reconcile it before re-running.",
+                "internal: submit plumbing is missing on a non-dry run. The AN burn {an_tx_hash} \
+                 IS on the wire — reconcile it before re-running.",
             ),
             None,
             &resume,
@@ -3667,8 +3667,7 @@ mod tests {
                 an_paused: true,
             },
         ] {
-            let mut world =
-                crate::test_chain::fake_world_with(5_000_000, "1.000000", knobs).await;
+            let mut world = crate::test_chain::fake_world_with(5_000_000, "1.000000", knobs).await;
             let err = world
                 .run(true)
                 .await
@@ -3691,7 +3690,11 @@ mod tests {
             .run(true)
             .await
             .expect_err("the payout cannot happen while the EVM bridge is paused");
-        assert_eq!(err.exit_code().as_i32(), 10, "the burn is on the wire: {err}");
+        assert_eq!(
+            err.exit_code().as_i32(),
+            10,
+            "the burn is on the wire: {err}"
+        );
         let msg = format!("{err}");
         assert!(msg.contains("unpause"), "{msg}");
         assert!(msg.contains("--allow-retry"), "{msg}");
@@ -3716,8 +3719,9 @@ mod tests {
     #[test]
     fn a_failed_proof_after_the_burn_says_how_to_carry_on() {
         let note = ResumeNote::new("0xabc", Some(Path::new("/state/k.json")));
-        let msg = proof_failed_after_burn("aggregate-proof timed out after 60s".into(), None, &note)
-            .to_string();
+        let msg =
+            proof_failed_after_burn("aggregate-proof timed out after 60s".into(), None, &note)
+                .to_string();
         assert!(msg.contains("aggregate-proof timed out"), "{msg}");
         assert!(msg.contains("0xabc"), "the burn's hash: {msg}");
         assert!(msg.contains("/state/k.json"), "the record: {msg}");
@@ -3764,7 +3768,9 @@ mod tests {
             "orchestrator.rs",
             include_str!("orchestrator.rs"),
         );
-        let from = src.find("let resume = ResumeNote::new(").expect("the note is built");
+        let from = src
+            .find("let resume = ResumeNote::new(")
+            .expect("the note is built");
         let to = src.find("info!(\"stage 6/6").expect("stage 6");
         let stages_4_and_5 = &src[from..to];
         for bare in ["CliError::ProofFailed {", "CliError::CaptureTimeout {"] {

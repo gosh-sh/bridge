@@ -37,9 +37,9 @@ mod output;
 mod preflight;
 mod prove_lock;
 mod resurrect;
-mod submit_revert;
 #[cfg(test)]
 mod source_guard;
+mod submit_revert;
 #[cfg(test)]
 mod test_chain;
 #[cfg(test)]

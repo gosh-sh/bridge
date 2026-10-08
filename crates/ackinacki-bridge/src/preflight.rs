@@ -507,10 +507,7 @@ async fn call_is_paused(
     })
     .await
     .map_err(|e| CliError::Preflight {
-        reason: format!(
-            "encode isPaused call for {bridge_legacy}: {}",
-            e.message()
-        ),
+        reason: format!("encode isPaused call for {bridge_legacy}: {}", e.message()),
         source: Some(anyhow::anyhow!("{e:?}")),
     })?;
     let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
@@ -2211,10 +2208,10 @@ pub async fn check_bridge_deploy(
         });
     }
 
-    // 6. Is it open? While `paused()` is true, `verifyBlock` and
-    //    `withdrawByProof` revert `BridgePaused`: no bundle covers the burn
-    //    and no payout can land until the owner unpauses. A bridge without
-    //    the getter predates the pause and counts as open, as for `deposit`.
+    // 6. Is it open? While `paused()` is true, `verifyBlock` and `withdrawByProof`
+    //    revert `BridgePaused`: no bundle covers the burn and no payout can land
+    //    until the owner unpauses. A bridge without the getter predates the pause
+    //    and counts as open, as for `deposit`.
     use crate::deposit::evm::EvmRead as _;
     let paused = crate::deposit::evm::AlloyEvm::connect(rpc_url)?
         .bridge_paused(bridge)
@@ -2226,9 +2223,9 @@ pub async fn check_bridge_deploy(
     if paused == Some(true) {
         return Err(CliError::Preflight {
             reason: format!(
-                "--bridge-address {bridge} is paused by its owner (paused() is true): \
-                 verifyBlock and withdrawByProof revert BridgePaused until unpause(), so a burn \
-                 made now could not be paid out before then. Re-run once the owner unpauses it."
+                "--bridge-address {bridge} is paused by its owner (paused() is true): verifyBlock \
+                 and withdrawByProof revert BridgePaused until unpause(), so a burn made now \
+                 could not be paid out before then. Re-run once the owner unpauses it."
             ),
             source: None,
         });

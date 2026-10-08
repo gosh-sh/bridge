@@ -1931,19 +1931,24 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
             "NullifierAlreadyUsed",
             format!("nullifier: {}", word(x.nullifier)),
         ),
-        E::FieldElementOutOfRange(x) => {
-            ("FieldElementOutOfRange", format!("value: {}", word(x.value)))
-        },
+        E::FieldElementOutOfRange(x) => (
+            "FieldElementOutOfRange",
+            format!("value: {}", word(x.value)),
+        ),
         E::DstChainIdMismatch(x) => (
             "DstChainIdMismatch",
             format!("supplied: {}, expected: {}", x.supplied, x.expected),
         ),
-        E::RecipientHalfOutOfRange(x) => {
-            ("RecipientHalfOutOfRange", format!("value: {}", word(x.value)))
-        },
+        E::RecipientHalfOutOfRange(x) => (
+            "RecipientHalfOutOfRange",
+            format!("value: {}", word(x.value)),
+        ),
         E::WithdrawIdentityMismatch(_) => ("WithdrawIdentityMismatch", String::new()),
         E::UnknownAnchor(x) => ("UnknownAnchor", format!("finalRoot: {}", word(x.finalRoot))),
-        E::InvalidNumLayers(x) => ("InvalidNumLayers", format!("anchorLayer: {}", x.anchorLayer)),
+        E::InvalidNumLayers(x) => (
+            "InvalidNumLayers",
+            format!("anchorLayer: {}", x.anchorLayer),
+        ),
         E::UnsupportedTokenId(x) => ("UnsupportedTokenId", format!("tokenId: {}", x.tokenId)),
         E::InvalidRecipient(_) => ("InvalidRecipient", String::new()),
         E::WithdrawTreasuryShortfall(x) => (
@@ -2695,10 +2700,11 @@ mod tests {
 
     /// The text a public Sepolia RPC returned for the dry run of a withdrawal
     /// whose nullifier was already spent.
-    const NULLIFIER_REVERT: &str = "server returned an error response: error code 3: execution \
-        reverted: tried to decode error from abi but failed: Error: Failed to slice index \
-        abi_decoded_error_data when getting message from revert data, data: \
-        \"0xdc215c0a2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb\"";
+    const NULLIFIER_REVERT: &str =
+        "server returned an error response: error code 3: execution reverted: tried to decode \
+         error from abi but failed: Error: Failed to slice index abi_decoded_error_data when \
+         getting message from revert data, data: \
+         \"0xdc215c0a2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb\"";
 
     #[test]
     fn a_spent_nullifier_is_named_with_its_argument() {
@@ -2748,8 +2754,9 @@ mod tests {
             None
         );
         // `Error(string)`: a revert raised by something other than the bridge.
-        let foreign = "execution reverted, data: \
-                       \"0x08c379a00000000000000000000000000000000000000000000000000000000000000020\"";
+        let foreign =
+            "execution reverted, data: \
+             \"0x08c379a00000000000000000000000000000000000000000000000000000000000000020\"";
         assert_eq!(decode_withdraw_revert(foreign), None);
     }
 
@@ -2761,8 +2768,14 @@ mod tests {
         let cases: Vec<(Vec<u8>, &str)> = vec![
             (B::BridgePaused {}.abi_encode(), "BridgePaused"),
             (B::Reentrancy {}.abi_encode(), "Reentrancy"),
-            (B::WithdrawByProofDisabled {}.abi_encode(), "WithdrawByProofDisabled"),
-            (B::WithdrawIdentityMismatch {}.abi_encode(), "WithdrawIdentityMismatch"),
+            (
+                B::WithdrawByProofDisabled {}.abi_encode(),
+                "WithdrawByProofDisabled",
+            ),
+            (
+                B::WithdrawIdentityMismatch {}.abi_encode(),
+                "WithdrawIdentityMismatch",
+            ),
             (
                 B::DstChainIdMismatch {
                     supplied: one,
@@ -2771,23 +2784,53 @@ mod tests {
                 .abi_encode(),
                 "DstChainIdMismatch",
             ),
-            (B::UnsupportedTokenId { tokenId: one }.abi_encode(), "UnsupportedTokenId"),
             (
-                B::RecipientHalfOutOfRange { value: one }.abi_encode(),
+                B::UnsupportedTokenId {
+                    tokenId: one,
+                }
+                .abi_encode(),
+                "UnsupportedTokenId",
+            ),
+            (
+                B::RecipientHalfOutOfRange {
+                    value: one,
+                }
+                .abi_encode(),
                 "RecipientHalfOutOfRange",
             ),
             (B::InvalidRecipient {}.abi_encode(), "InvalidRecipient"),
             (
-                B::FieldElementOutOfRange { value: one }.abi_encode(),
+                B::FieldElementOutOfRange {
+                    value: one,
+                }
+                .abi_encode(),
                 "FieldElementOutOfRange",
             ),
             (
-                B::NullifierAlreadyUsed { nullifier: one }.abi_encode(),
+                B::NullifierAlreadyUsed {
+                    nullifier: one,
+                }
+                .abi_encode(),
                 "NullifierAlreadyUsed",
             ),
-            (B::LayerOutOfRange { layer: 11 }.abi_encode(), "LayerOutOfRange"),
-            (B::UnknownAnchor { finalRoot: one }.abi_encode(), "UnknownAnchor"),
-            (B::WithdrawalProofRejected {}.abi_encode(), "WithdrawalProofRejected"),
+            (
+                B::LayerOutOfRange {
+                    layer: 11,
+                }
+                .abi_encode(),
+                "LayerOutOfRange",
+            ),
+            (
+                B::UnknownAnchor {
+                    finalRoot: one,
+                }
+                .abi_encode(),
+                "UnknownAnchor",
+            ),
+            (
+                B::WithdrawalProofRejected {}.abi_encode(),
+                "WithdrawalProofRejected",
+            ),
             (
                 B::WithdrawTreasuryShortfall {
                     requested: one,
@@ -2804,7 +2847,10 @@ mod tests {
                 .abi_encode(),
                 "AaveWithdrawFailed",
             ),
-            (B::InsufficientTreasury {}.abi_encode(), "InsufficientTreasury"),
+            (
+                B::InsufficientTreasury {}.abi_encode(),
+                "InsufficientTreasury",
+            ),
             (
                 B::WithdrawTransferFailed {
                     recipient: Address::repeat_byte(7),

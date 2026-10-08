@@ -72,7 +72,10 @@ pub(crate) fn check_captured_event(
     if event_chain != Some(alloy::primitives::U256::from(to.chain_id)) {
         differ.push(format!(
             "destination chain: the event's {}, this withdrawal's {}",
-            event_chain.map_or_else(|| format!("0x{}", event.dst_chain_id_hex), |c| c.to_string()),
+            event_chain.map_or_else(
+                || format!("0x{}", event.dst_chain_id_hex),
+                |c| c.to_string()
+            ),
             to.chain_id,
         ));
     }
@@ -106,11 +109,11 @@ pub(crate) fn check_captured_event(
     );
     Err(CliError::BurnOutcomeUnknown {
         reason: format!(
-            "the WithdrawalInitiated event behind AN tx {an_tx} is not this withdrawal's — {}.\n\x20 \
-             Nothing was proved or submitted, and {record} was not changed. It names a burn that \
-             belongs to another withdrawal, most likely a hash written into it by hand. Find this \
-             withdrawal's own sendTransaction from 0:{} (the advanced runbook, Case 3a), write \
-             that hash into the record, and re-run with --allow-retry.",
+            "the WithdrawalInitiated event behind AN tx {an_tx} is not this withdrawal's — \
+             {}.\n\x20 Nothing was proved or submitted, and {record} was not changed. It names a \
+             burn that belongs to another withdrawal, most likely a hash written into it by hand. \
+             Find this withdrawal's own sendTransaction from 0:{} (the advanced runbook, Case \
+             3a), write that hash into the record, and re-run with --allow-retry.",
             differ.join("; "),
             from.account_id_hex,
         ),
@@ -221,9 +224,11 @@ mod tests {
 
     #[test]
     fn another_recipient_is_refused() {
-        let other =
-            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11_155_111))
-                .unwrap();
+        let other = crate::args::parse_to(
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            Some(11_155_111),
+        )
+        .unwrap();
         let msg = refusal(EVENT_1_000000, &from(), &other, "1.000000");
         assert!(
             msg.to_lowercase()

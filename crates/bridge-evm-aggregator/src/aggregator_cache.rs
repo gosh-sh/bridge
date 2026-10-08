@@ -13,8 +13,12 @@
 //! (a stable function of the inner VK).
 //!
 //! Cache slot layout under `<cache_dir>`:
-//! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~6.8 GB for the withdrawal aggregator @ K=21)
+//! - `<stem>.pk`         -- proving key (SDK's `RawBytes` format, ~6.8 GB for
+//!   the withdrawal aggregator @ K=21)
 //! - `<stem>.meta.json`  -- break_points + calculated params + num_instance
+//!
+//! Both are written under a `.partial-<pid>` name and renamed into place
+//! when complete, the key first: a slot whose meta exists has a whole key.
 //!
 //! Slot stem: `<base_name>__v3__<content_hash:hex[..32]>`. `base_name` is
 //! a human-readable label only — it is **not** trusted for correctness. Two
@@ -211,6 +215,74 @@ fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
     }
 }
 
+/// Suffix of a slot file still being written: `<stem>.pk.partial-<pid>`
+/// and `<stem>.meta.json.partial-<pid>`, renamed into place only once
+/// complete. A writer killed mid-way — a caller's timeout, the OOM killer —
+/// leaves one of these and never a truncated `<stem>.pk`: the SDK's
+/// `read_pk` panics on a truncated key instead of regenerating it, so a
+/// truncated slot under the real name failed every later run until someone
+/// deleted it by hand. `ackinacki-bridge`'s preflight looks for this suffix
+/// to name the leftovers.
+pub const PARTIAL_SUFFIX: &str = ".partial-";
+
+/// Where `pid` writes `final_path` before publishing it.
+fn partial_path(final_path: &Path, pid: u32) -> PathBuf {
+    let mut name = final_path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!("{PARTIAL_SUFFIX}{pid}"));
+    final_path.with_file_name(name)
+}
+
+/// Remove the partial slot files in `dir` whose writer is no longer
+/// running, and return them. A live writer's file stays: two runs can share
+/// one cache.
+fn sweep_dead_partials(dir: &Path, is_alive: impl Fn(u32) -> bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.rsplit_once(PARTIAL_SUFFIX))
+            .and_then(|(_, pid)| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !is_alive(pid) && std::fs::remove_file(entry.path()).is_ok() {
+            removed.push(entry.path());
+        }
+    }
+    removed
+}
+
+/// Whether `pid` names a running process (Linux: `/proc/<pid>` exists).
+fn process_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Remove a `.pk` that has no `.meta.json` beside it. It was never
+/// published — a writer from before slots were published, killed mid-way,
+/// or one killed between the two renames — and `gen_pk` must not read it.
+/// Removed rather than left, so the keygen that follows has its room.
+fn clear_unpublished_slot(s: &SlotPaths) -> std::io::Result<()> {
+    if s.pk.exists() && !s.meta.exists() {
+        std::fs::remove_file(&s.pk)?;
+    }
+    Ok(())
+}
+
+/// Move a finished `partial` onto `final_path` in one step.
+fn publish(partial: &Path, final_path: &Path) -> anyhow::Result<()> {
+    std::fs::rename(partial, final_path).with_context(|| {
+        format!(
+            "publish cache slot file {} as {}",
+            partial.display(),
+            final_path.display()
+        )
+    })
+}
+
 /// Load `(pk, break_points, calculated, num_instance)` from `cache_dir` if
 /// both slot files exist. On cache miss, run the real outer keygen and
 /// (if `cache_dir` is `Some`) persist everything for subsequent runs.
@@ -232,6 +304,13 @@ pub fn keygen_or_load(
         Some(dir) => {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("create cache dir {}", dir.display()))?;
+            for leftover in sweep_dead_partials(dir, process_is_alive) {
+                tracing::warn!(
+                    target: "bridge_evm_aggregator::cache",
+                    path = %leftover.display(),
+                    "removed a partial cache file an interrupted aggregate-proof left behind"
+                );
+            }
             let stem = cache_stem(base_name, &config, agg_params, inner_snark);
             Some(slot_paths(dir, &stem))
         }
@@ -278,8 +357,22 @@ pub fn keygen_or_load(
     }
 
     // ------------------------------------------------------------------
-    // Cache miss: real keygen. Persist afterwards if `cache_dir = Some`.
+    // Cache miss: real keygen. Persist afterwards if `cache_dir = Some`:
+    // the key goes to a partial file and is renamed into place once it is
+    // complete, then the meta the same way — so the slot is never seen
+    // half-written, and a `.pk` with its meta beside it is always whole.
     // ------------------------------------------------------------------
+    let partial = match slots.as_ref() {
+        Some(s) => {
+            clear_unpublished_slot(s)
+                .with_context(|| format!("clear unpublished cache slot {}", s.pk.display()))?;
+            let p = partial_path(&s.pk, std::process::id());
+            // Only a dead process with this pid could have left a file here.
+            let _ = std::fs::remove_file(&p);
+            Some(p)
+        }
+        None => None,
+    };
     let agg_config = AggregationConfigParams {
         degree: config.k_outer,
         lookup_bits: config.lookup_bits_outer,
@@ -301,16 +394,13 @@ pub fn keygen_or_load(
     let calculated = keygen_circuit.calculate_params(Some(10));
     let num_instance = keygen_circuit.num_instance();
 
-    let pk = gen_pk(
-        agg_params,
-        &keygen_circuit,
-        slots.as_ref().map(|s| s.pk.as_path()),
-    );
+    let pk = gen_pk(agg_params, &keygen_circuit, partial.as_deref());
 
     let break_points = keygen_circuit.break_points();
     drop(keygen_circuit);
 
-    if let Some(s) = slots.as_ref() {
+    if let (Some(s), Some(p)) = (slots.as_ref(), partial.as_ref()) {
+        publish(p, &s.pk)?;
         let meta = CachedMeta {
             break_points: break_points.clone(),
             calculated: calculated.into(),
@@ -318,8 +408,10 @@ pub fn keygen_or_load(
         };
         let meta_text = serde_json::to_string_pretty(&meta)
             .context("serialize cache meta")?;
-        std::fs::write(&s.meta, meta_text)
-            .with_context(|| format!("write cache meta {}", s.meta.display()))?;
+        let meta_partial = partial_path(&s.meta, std::process::id());
+        std::fs::write(&meta_partial, meta_text)
+            .with_context(|| format!("write cache meta {}", meta_partial.display()))?;
+        publish(&meta_partial, &s.meta)?;
         tracing::info!(
             target: "bridge_evm_aggregator::cache",
             stem = %s.pk.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
@@ -411,5 +503,114 @@ mod tests {
         let a = content_hash(&cfg, b"ab", b"cd");
         let b = content_hash(&cfg, b"a", b"bcd");
         assert_ne!(a, b, "field lengths must be encoded to disambiguate boundaries");
+    }
+
+    /// A fresh directory under the system temp dir, removed by the caller.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "agg_cache_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_partial_slot_file_is_named_after_its_slot_and_writer() {
+        assert_eq!(
+            partial_path(Path::new("/c/X__v3__ab.pk"), 42),
+            PathBuf::from("/c/X__v3__ab.pk.partial-42")
+        );
+        assert_eq!(
+            partial_path(Path::new("/c/X__v3__ab.meta.json"), 7),
+            PathBuf::from("/c/X__v3__ab.meta.json.partial-7")
+        );
+    }
+
+    #[test]
+    fn a_dead_writers_partial_is_swept_and_a_live_ones_is_kept() {
+        let d = scratch("sweep");
+        for name in [
+            "A.pk.partial-111",
+            "A.meta.json.partial-111",
+            "B.pk.partial-222",
+            "B.pk",
+            "B.meta.json",
+            "C.pk.partial-notapid",
+        ] {
+            std::fs::write(d.join(name), b"x").unwrap();
+        }
+        let mut removed = sweep_dead_partials(&d, |pid| pid == 222);
+        removed.sort();
+        assert_eq!(removed, vec![
+            d.join("A.meta.json.partial-111"),
+            d.join("A.pk.partial-111")
+        ]);
+        assert!(
+            d.join("B.pk.partial-222").exists(),
+            "a live writer's file stays"
+        );
+        assert!(d.join("B.pk").exists() && d.join("B.meta.json").exists());
+        assert!(
+            d.join("C.pk.partial-notapid").exists(),
+            "not a partial this code wrote"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_key_with_no_meta_beside_it_is_cleared_before_keygen() {
+        // The SDK's `read_pk` panics on a truncated key rather than
+        // regenerating it, so an unpublished `.pk` must never be read.
+        let d = scratch("clear");
+        let s = slot_paths(&d, "S");
+        std::fs::write(&s.pk, b"truncated").unwrap();
+        clear_unpublished_slot(&s).unwrap();
+        assert!(!s.pk.exists(), "a key without its meta was never published");
+
+        std::fs::write(&s.pk, b"pk").unwrap();
+        std::fs::write(&s.meta, b"{}").unwrap();
+        clear_unpublished_slot(&s).unwrap();
+        assert!(s.pk.exists(), "a published slot is left alone");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn publishing_moves_the_finished_file_into_place() {
+        let d = scratch("publish");
+        let finished = d.join("S.pk.partial-1");
+        let slot = d.join("S.pk");
+        std::fs::write(&slot, b"old").unwrap();
+        std::fs::write(&finished, b"new").unwrap();
+        publish(&finished, &slot).unwrap();
+        assert_eq!(std::fs::read(&slot).unwrap(), b"new");
+        assert!(!finished.exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn keygen_writes_the_key_to_a_partial_and_publishes_it_before_the_meta() {
+        // `gen_pk(.., Some(path))` writes straight to `path`. Given the slot's
+        // own name, a writer killed mid-way leaves a truncated slot every
+        // later run panics on.
+        let src = include_str!("aggregator_cache.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert_eq!(
+            src.matches("Some(&s.pk)").count(),
+            1,
+            "only the cache-hit read names the slot's key directly"
+        );
+        let keygen = src
+            .find("partial.as_deref()")
+            .expect("keygen writes the partial");
+        let publish_pk = src.find("publish(p, &s.pk)").expect("the key is published");
+        let publish_meta = src
+            .find("publish(&meta_partial, &s.meta)")
+            .expect("the meta is published");
+        assert!(keygen < publish_pk && publish_pk < publish_meta);
     }
 }

@@ -78,6 +78,26 @@ mod tests {
     }
 
     #[test]
+    fn every_revert_with_advice_gets_it() {
+        // The advice is chosen by matching the name as a string: a typo
+        // there drops it with nothing failing to compile.
+        for (signature, words, advice) in [
+            ("NullifierAlreadyUsed(uint256)", 1, "already been paid out"),
+            ("BridgePaused()", 0, "paused the EVM bridge"),
+            ("WithdrawTreasuryShortfall(uint256,uint256)", 2, "Top it up"),
+            ("UnknownAnchor(uint256)", 1, "not in the bridge's window"),
+            ("WithdrawalProofRejected()", 0, "rejected the proof"),
+        ] {
+            let selector = &alloy::primitives::keccak256(signature)[..4];
+            let data = format!("0x{}{}", hex::encode(selector), "00".repeat(32 * words));
+            let text = explain(&format!("data: \"{data}\""));
+            let name = &signature[..signature.find('(').unwrap()];
+            assert!(text.starts_with(name), "{text}");
+            assert!(text.contains(advice), "{name} lost its advice: {text}");
+        }
+    }
+
+    #[test]
     fn a_revert_it_cannot_name_is_passed_through_unchanged() {
         let raw = "error sending request: connection refused";
         assert_eq!(explain(raw), raw);

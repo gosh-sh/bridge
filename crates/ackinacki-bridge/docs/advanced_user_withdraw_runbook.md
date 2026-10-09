@@ -82,7 +82,7 @@ Key scalars:
 - `W·P` (L1 stride): 1024 seq_nos ≈ 5.7 min chain-time at ~3 seq/s
 - `W²` (L2 stride): 16 384 seq_nos ≈ 91 min chain-time
 - Bundle prover wall-time: ~12 min (warm PK cache)
-- Circuit-4 event proof: ~5 min warm PK, ~20 min cold
+- Circuit-4 event proof: ~5 min warm PK, ~8 min cold (8 min 12 s on the test host)
 - Enricher wait-for-coverage timeout: 120 min
 - Capture (`WithdrawalInitiated` poll) timeout: 300 s
 
@@ -901,8 +901,10 @@ du -sh ../bridge-prover-libraries/params/   # ~9.5 GB withdraw-only after the fi
 #          and refuses below the total
 # A warm run loads both keys and reserves neither: the aggregator key
 # counts as cached when the last proof (params/pk_cache/.withdraw-slot.json)
-# ran with this Circuit-4 key and this aggregate-proof. The first run after
-# an upgrade reserves the 7 GiB again (README Step 0).
+# ran with this Circuit-4 key and this aggregate-proof, and the key it used
+# and its .meta.json are still in pk_cache/. The first run after an upgrade
+# reserves the 7 GiB again, and 3 GiB more when it brings a new Circuit-4
+# key (README Step 0).
 df -h ../bridge-prover-libraries/params/
 # RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host
 ```
@@ -935,12 +937,16 @@ df -h ../bridge-prover-libraries/params/
   timeout. Move to a bigger host or shrink another workload.
 - An `aggregate-proof` that ran out of disk while writing its key removes
   its `<stem>.pk.partial-…` file and never leaves a truncated `<stem>.pk`;
-  one killed mid-write leaves the partial file, which the next run removes
-  and preflight names before it measures. Free the space preflight asks
-  for and re-run with `--allow-retry`. A published key that is not whole
-  fails the aggregator with `cached aggregator key … is damaged`, naming
-  the `.pk` to remove together with the `.meta.json` beside it; preflight
-  refuses one with exit 2 when its `.meta.json` records another length.
+  one killed mid-write leaves the partial file. The next `aggregate-proof`
+  that takes the cache's lock removes it, but preflight names it and
+  counts it as used space first: if preflight refuses for want of room,
+  remove it by hand while no `aggregate-proof` is running. Free the space
+  preflight asks for and re-run with `--allow-retry`. A published key that
+  is not whole fails the aggregator with `cached aggregator key … is
+  damaged`, naming the `.pk` to remove together with the `.meta.json`
+  beside it; preflight refuses one with exit 2 when its `.meta.json`
+  records another length, and one this user cannot read with advice to fix
+  its permissions.
 
 ---
 
@@ -1322,5 +1328,5 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — veri
 
 **Do NOT touch between demos:**
 
-- `params/` and `params/pk_cache/` — cold cache costs ~20 min per
+- `params/` and `params/pk_cache/` — cold cache costs ~8 min per
   proof; warm cache is ~5 min.

@@ -129,7 +129,7 @@ covering L2 bundle:
 |--------------------------------------------|------------------------------|
 | Capture (`WithdrawalInitiated` poll)       | up to 300 s                  |
 | Wait for covering L2 bundle on-chain       | up to ~91 min (typical ~45)  |
-| Enrich + Circuit-4 SHPLONK proof           | ~5 min warm PK, ~20 min cold |
+| Enrich + Circuit-4 SHPLONK proof           | ~5 min warm PK, ~8 min cold  |
 | `withdrawByProof` submit + receipt         | ~30 s                        |
 | **End-to-end (typical / worst case)**      | **~50 min / ~101 min**       |
 
@@ -263,9 +263,13 @@ Budget ~10.7 GB for a withdraw-only machine, plus headroom — the figure
 preflight checks on the first run, the two keys rounded up to 3 GiB and
 7 GiB. Later withdrawals load both keys and need no room for them: after a
 proof, `withdraw` notes in `params/pk_cache/.withdraw-slot.json` which
-aggregator key the proof used — `aggregate-proof` names it — and which
-Circuit-4 key and `aggregate-proof` it ran with, and preflight reserves
-nothing while all three are unchanged.
+aggregator key the proof used — `aggregate-proof` names it in
+`<snark-dir>/aggregator-slot` — and which Circuit-4 key and
+`aggregate-proof` it ran with, and preflight reserves nothing while both are
+unchanged and that key and its `.meta.json` are still there. Stage 5
+re-checks that `aggregate-proof` is the binary preflight hashed, and
+preflight refuses an `aggregate-proof` too old to name its key: build or
+install the two together.
 
 The first withdrawal after an upgrade reserves room again, while the
 previous keys are still on disk: ~17 GB in all after an upgrade that brings
@@ -764,17 +768,26 @@ record, and the command that carries on: the same command with
 Circuit-4 in-process prover or the `aggregate-proof` subprocess
 errored. Almost always local resource pressure (disk, RAM, corrupt
 PK cache) or cold-cache slowness beyond the default timeout. The
-aggregator's own log lines are in the CLI's log, each starting
-`aggregate-proof:`, and the refusal quotes its last 40. An
+aggregator's own log lines are in the CLI's log as they come, each starting
+`aggregate-proof:` and at the level it logged them with, and the refusal
+quotes its error — or, without one, its last 40 lines — on a timeout too. A
+`RUST_LOG` of your own must let `bridge_relayer_daemon=info` through to show
+them; the aggregator itself is not given it and logs at its own default. An
 `aggregate-proof` that hits `--prover-timeout-s` is killed; if it was
 writing its new key by then, it leaves `<stem>.pk.partial-<pid>-<random>`
-in the pk cache, which the next run removes (preflight names it, since it
-holds space) — a write that fails, on a full disk say, removes its own. The
-next run generates the key from scratch again, so retry with a larger
-`--prover-timeout-s`, not the same one. A cached key that is not whole
-fails with `cached aggregator key … is damaged`, naming the `.pk` to remove
-together with the `.meta.json` beside it; preflight refuses with exit 2,
-before the burn, when the length a slot's `.meta.json` records says so.
+in the pk cache — a write that fails, on a full disk say, removes its own.
+The next `aggregate-proof` that takes the cache's lock removes a leftover,
+but preflight measures first and counts it as used space: if it refuses
+for want of room, remove the file by hand while no `aggregate-proof` is
+running. The next run generates the key from scratch again, so retry with a
+larger `--prover-timeout-s`, not the same one. A cached key that is not
+whole fails with `cached aggregator key … is damaged`, naming the `.pk` to
+remove together with the `.meta.json` beside it. Preflight refuses with
+exit 2, before the burn, a withdrawal slot whose `.meta.json` is not whole
+or records another length for its key — a slot published before this
+version records one once its key has read back — and one this user cannot
+read, which wants its permissions fixed rather than removing. A key of the
+right length with wrong bytes is found only by the aggregator.
 
 Exit 12 also covers the wait for the covering bundle (stage 4b): a
 refusal that starts `wait_for_coverage:` means the server-side bundle
@@ -1078,7 +1091,7 @@ question only sometimes, and a shorter version of the rule is how the
 wrong one keeps getting copied.
 
 **Do NOT touch between demos.** `../bridge-prover-libraries/params/`
-and its `pk_cache/` — cold cache costs ~20 min per proof; warm cache
+and its `pk_cache/` — cold cache costs ~8 min per proof; warm cache
 is ~5 min.
 
 ## Not this CLI's job
@@ -1580,8 +1593,8 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
 | Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
-| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7 GB more, or ~10 GB with a new Circuit-4 key (Step 0) |
-| Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~20 min |
+| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7.5 GB more, or ~10.7 GB with a new Circuit-4 key (Step 0) |
+| Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~8 min (8 min 12 s on the test host) |
 | Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
 
 Measured with `export_blake2b_proof` on

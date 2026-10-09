@@ -977,11 +977,16 @@ assigns it when the release is tagged.
   took ~2 min on the test host.
 - `aggregate-proof` logs to stderr, at `info` unless `RUST_LOG` says
   otherwise, and `ackinacki-bridge withdraw` and the relayer put each of its
-  lines into their own log as it comes, prefixed `aggregate-proof:` — among
-  them the pk cache's notices: waiting for another keygen, a filesystem
-  without locks, leftovers removed, a slot loaded or generated. A failed run's
-  error quotes its last 40 lines. Before, it logged only errors, to stdout,
-  which the callers discarded, and a failure quoted the whole of its stderr.
+  lines into their own log as it comes, prefixed `aggregate-proof:` and at
+  the level it was logged with — among them the pk cache's notices: waiting
+  for another keygen, a filesystem without locks, leftovers removed, a slot
+  loaded or generated. They do not pass their own `RUST_LOG` on to it, and a
+  `RUST_LOG` of yours must let `bridge_relayer_daemon=info` through to show
+  its lines — `RUST_LOG=ackinacki_bridge=info` alone, as the 0.2.0 notes
+  suggest, hides them. A failed or timed-out run's error quotes its error
+  message — up to its backtrace — or, without one, its last 40 lines. Before,
+  it logged only errors, to stdout, which the callers discarded, a failure
+  quoted the whole of its stderr, and a timeout quoted nothing.
 - `aggregate-proof` writes a new pk-cache slot under
   `<stem>.pk.partial-<pid>-<random>` / `<stem>.meta.json.partial-<pid>-<random>`,
   syncs each file to disk and renames it into place, so neither a keygen
@@ -989,26 +994,30 @@ assigns it when the release is tagged.
   leaves a truncated `<stem>.pk` that every later run panicked on until it was
   deleted by hand. A write that fails — a full disk — removes its own partial
   file. A `.pk` without its `.meta.json` is regenerated rather than read. The
-  `.meta.json` now records the key's length (`pk_bytes`), and a key is read in
+  `.meta.json` now records the key's length (`pk_bytes`) — a slot published
+  before records it once its key has read back whole — and a key is read in
   halo2's checked `RawBytes` format, which reads the same bytes: a key whose
-  length is not the recorded one, or that ends early, fails the run with
-  `cached aggregator key … is damaged` and the two files to remove, and one
-  that cannot be read for another reason — a permission — says so without
-  telling anyone to remove it. Before, a key that could not be opened was
-  regenerated over the published name without the lock, and a truncated one
-  panicked. A process generating a key holds `<pk-cache>/.keygen.lock`
+  length is not the recorded one, or that ends early, or a `.meta.json` that
+  is not whole, fails the run with `cached aggregator key … is damaged` (or
+  `cache meta … is damaged`) and the two files to remove, and one that cannot
+  be read for another reason — a permission — says so without telling anyone
+  to remove it. A key of the right length with wrong bytes is not caught by
+  this. Before, a key that could not be opened was regenerated over the
+  published name without the lock, and a truncated one panicked. A process generating a key holds `<pk-cache>/.keygen.lock`
   (`flock`) until the slot is published, so cold keygens on one cache run one
   at a time and a process that waited loads the slot its predecessor
   published. Partial files are removed only by a holder of that lock, so never
   one another process, on the host or in a container sharing the cache, is
   still writing. A lock file another user created is opened read-only. Only a
   filesystem without `flock` lets a keygen run unlocked, and it then removes
-  no partial file; any other failure to take the lock fails the run. After a
-  successful load or keygen, `aggregate-proof` names the slot it used in
-  `<pk-cache>/<name>.last-slot`. `ackinacki-bridge withdraw` preflight names
-  any leftover in the pk cache before it measures free space, and refuses with
-  exit 2 a withdrawal slot whose key is not the length its `.meta.json`
-  records, or whose `.meta.json` is not whole.
+  no partial file; any other failure to take the lock fails the run.
+  `aggregate-proof --slot-report <path>` writes the stem of the slot it used
+  to `<path>` once its calldata is written. `ackinacki-bridge withdraw`
+  preflight names any partial file in the pk cache before it measures free
+  space, and refuses with exit 2 a withdrawal slot whose key is not the
+  length its `.meta.json` records, whose `.meta.json` is not whole, or that
+  this user cannot read — the last with advice to fix its permissions, not to
+  remove it.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,
@@ -1039,10 +1048,14 @@ assigns it when the release is tagged.
   wants 12 GB free. A withdrawal whose aggregator key is already in the pk
   cache reserves nothing for it: after a proof, `withdraw` notes in
   `<pk-cache>/.withdraw-slot.json` the aggregator key the proof used, which
-  `aggregate-proof` names, with the Circuit-4 key and the `aggregate-proof`
-  it ran with as preflight verified them, and a later preflight that finds
-  both digests unchanged and that key and its `.meta.json` still there skips
-  the 7 GiB. The first withdrawal after an upgrade reserves room again while
+  `aggregate-proof` names in `<snark-dir>/aggregator-slot`
+  (`--slot-report`), with the Circuit-4 key and the `aggregate-proof` it ran
+  with as preflight verified them, and a later preflight that finds both
+  digests unchanged and that key and its `.meta.json` still there skips the
+  7 GiB. Stage 5 refuses with exit 12 an `aggregate-proof` that is not the
+  binary preflight hashed, and preflight refuses with exit 2 one too old to
+  take `--slot-report`: upgrade `ackinacki-bridge` and `aggregate-proof`
+  together. The first withdrawal after an upgrade reserves room again while
   the previous keys are still on disk: budget ~17 GB for a new
   `aggregate-proof`, ~20 GB when it also brings a new Circuit-4 key, or
   remove the previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk` and its

@@ -30,4 +30,12 @@ fn its_progress_reaches_stderr_without_rust_log() {
         "stderr: {stderr}\nstdout: {stdout}"
     );
     assert!(!stderr.contains('\x1b'), "no colour into a pipe: {stderr}");
+    // The callers log each line at the level it starts with.
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.split_whitespace().next() == Some("INFO")
+                && l.contains("aggregate-proof started")),
+        "a line starts with its level: {stderr}"
+    );
 }

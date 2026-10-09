@@ -115,7 +115,9 @@ fn main() -> anyhow::Result<()> {
             // Where to write the stem of the pk-cache slot this run used,
             // once its calldata is written: `ackinacki-bridge withdraw`
             // notes it, so that its next preflight knows the key is there.
-            // A path of the caller's own, not one in the shared cache.
+            // A path of the caller's own, not one in the shared cache, and
+            // written only with `--pk-cache-dir`: without a cache there is
+            // no slot.
             "--slot-report" => slot_report = args.next().map(PathBuf::from),
             // Side-effect-free probe. `ackinacki-bridge` preflight runs
             // this before an irreversible burn to prove the binary is
@@ -137,6 +139,9 @@ fn main() -> anyhow::Result<()> {
     let inner_path = inner_path.ok_or_else(|| anyhow::anyhow!("--inner-snark required"))?;
     let name = name.ok_or_else(|| anyhow::anyhow!("--name required"))?;
     let out_path = out_path.ok_or_else(|| anyhow::anyhow!("--out required"))?;
+    if slot_report.is_some() && pk_cache_dir.is_none() {
+        tracing::warn!("--slot-report without --pk-cache-dir: there is no slot to report");
+    }
     tracing::info!(
         verifier = %name,
         inner_snark = %inner_path.display(),

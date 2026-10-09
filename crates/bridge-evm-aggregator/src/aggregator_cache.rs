@@ -379,15 +379,18 @@ fn sweep_and_report(dir: &Path) {
 
 /// Remove a `.pk` that has no `.meta.json` beside it. It was never
 /// published — a writer from before slots were published, killed mid-way,
-/// or one killed between the two renames — and nothing reads it. Removed
-/// rather than left, so the keygen that follows has its room. A meta that
-/// cannot be looked at is an error, not an absent one: the key beside it
-/// may be good.
+/// or one killed between the two renames — or it was set aside as damaged,
+/// and nothing reads it. Removed rather than left, so the keygen that
+/// follows has its room, with a set-aside meta. A meta that cannot be looked
+/// at is an error, not an absent one: the key beside it may be good.
 fn clear_unpublished_slot(s: &SlotPaths) -> std::io::Result<()> {
     if s.pk.try_exists()? && !s.meta.try_exists()? {
         std::fs::remove_file(&s.pk)?;
     }
-    Ok(())
+    match std::fs::remove_file(damaged_meta_path(s)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Create `path` — never over an existing file — fill it through
@@ -470,6 +473,25 @@ fn write_key(path: &Path, pk: &ProvingKey<G1Affine>) -> anyhow::Result<u64> {
         .len())
 }
 
+/// Suffix a slot's meta is renamed to when its key or meta turns out
+/// damaged ([`set_aside_damaged`]): the slot is then unpublished, the next
+/// keygen for it clears it, and `ackinacki-bridge`'s preflight refuses a
+/// withdrawal while it is there, naming both files.
+pub const DAMAGED_SUFFIX: &str = ".damaged";
+
+/// The context of a read error that means a slot's bytes are wrong, not
+/// that they could not be read: [`read_slot`] sets such a slot aside.
+#[derive(Debug)]
+struct DamagedSlot(String);
+
+impl std::fmt::Display for DamagedSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DamagedSlot {}
+
 /// What to do about a key whose bytes are wrong.
 const REMOVE_THE_KEY: &str = "remove it and the .meta.json beside it to have both generated again";
 
@@ -491,11 +513,14 @@ fn damaged(e: &std::io::Error) -> bool {
 /// unchecked read unwraps every short read: a key cut short panicked
 /// instead of saying which file to remove. The check it adds — every field
 /// element below its modulus — costs one comparison per element, and read
-/// the real ~6.85 GB key no slower. It is not a check of the content: a
-/// point off the curve reads, and so does a key of the right length with
-/// wrong bytes. Not through `gen_pk(.., Some(path))` either: that runs a
-/// whole keygen when the file cannot be opened and writes the result over
-/// the published name, without the lock.
+/// the real ~6.85 GB key no slower. It is not a check of the content: wrong
+/// bytes that are not field elements are refused as damage, but wrong bytes
+/// that are — and points off the curve — read, and the proof made with
+/// them fails verification on chain (`ackinacki-bridge` stops at its stage
+/// 6 dry run, exit 13); this process does not verify its own proofs. Not
+/// through `gen_pk(.., Some(path))` either: that runs a whole keygen when
+/// the file cannot be opened and writes the result over the published
+/// name, without the lock.
 fn read_slot_key<C: Circuit<Fr>>(
     path: &Path,
     params: C::Params,
@@ -508,24 +533,24 @@ fn read_slot_key<C: Circuit<Fr>>(
             .metadata()
             .with_context(|| format!("stat cached aggregator key {}", path.display()))?
             .len();
-        anyhow::ensure!(
-            got == want,
-            "cached aggregator key {} is damaged: {got} bytes, and its .meta.json records {want}; \
-             {REMOVE_THE_KEY}",
-            path.display()
-        );
+        if got != want {
+            return Err(anyhow::Error::new(DamagedSlot(format!(
+                "cached aggregator key {} is damaged: {got} bytes, and its .meta.json records \
+                 {want}; {REMOVE_THE_KEY}",
+                path.display()
+            ))));
+        }
     }
     let mut r = BufReader::with_capacity(IO_BUFFER, file);
     ProvingKey::read::<_, C>(&mut r, SerdeFormat::RawBytes, params).map_err(|e| {
-        let what = if damaged(&e) {
-            format!(
+        if damaged(&e) {
+            anyhow::Error::new(e).context(DamagedSlot(format!(
                 "cached aggregator key {} is damaged; {REMOVE_THE_KEY}",
                 path.display()
-            )
+            )))
         } else {
-            format!("read cached aggregator key {}", path.display())
-        };
-        anyhow::Error::new(e).context(what)
+            anyhow::Error::new(e).context(format!("read cached aggregator key {}", path.display()))
+        }
     })
 }
 
@@ -534,12 +559,12 @@ fn read_slot_key<C: Circuit<Fr>>(
 fn read_meta(path: &Path) -> anyhow::Result<CachedMeta> {
     let bytes =
         std::fs::read(path).with_context(|| format!("read cache meta {}", path.display()))?;
-    serde_json::from_slice(&bytes).with_context(|| {
-        format!(
+    serde_json::from_slice(&bytes).map_err(|e| {
+        anyhow::Error::new(e).context(DamagedSlot(format!(
             "cache meta {} is damaged; remove it and the .pk beside it to have both generated \
              again",
             path.display()
-        )
+        )))
     })
 }
 
@@ -556,13 +581,20 @@ fn published(s: &SlotPaths) -> anyhow::Result<bool> {
 /// Read a published slot's meta, then its key with the `params` the meta
 /// gives. A slot an older `aggregate-proof` published records no key
 /// length; once its key has read back whole, the length is added
-/// ([`record_key_length`]), so that the next preflight can check it.
+/// ([`record_key_length`]), so that the next preflight can check it. A slot
+/// found damaged is set aside ([`set_aside_damaged`]).
 fn read_slot<C: Circuit<Fr>>(
     s: &SlotPaths,
     params: impl FnOnce(&CachedMeta) -> C::Params,
 ) -> anyhow::Result<(ProvingKey<G1Affine>, CachedMeta)> {
-    let mut meta = read_meta(&s.meta)?;
-    let pk = read_slot_key::<C>(&s.pk, params(&meta), meta.pk_bytes)?;
+    let set_aside = |e: anyhow::Error| {
+        if e.downcast_ref::<DamagedSlot>().is_some() {
+            set_aside_damaged(s);
+        }
+        e
+    };
+    let mut meta = read_meta(&s.meta).map_err(set_aside)?;
+    let pk = read_slot_key::<C>(&s.pk, params(&meta), meta.pk_bytes).map_err(set_aside)?;
     if meta.pk_bytes.is_none() {
         if let Ok(md) = std::fs::metadata(&s.pk) {
             meta.pk_bytes = Some(md.len());
@@ -573,21 +605,39 @@ fn read_slot<C: Circuit<Fr>>(
 }
 
 /// Publish `meta` — the slot's own, with the key's length added — over the
-/// slot's meta. Only under the keygen lock, taken without waiting, like
-/// every write to the cache: with a writer at work, a later run adds it.
-/// Best effort; without it, preflight only cannot check the length.
+/// slot's meta, with the old one's permissions. Only under the keygen lock,
+/// taken without waiting, like every write to the cache: with a writer at
+/// work, a later run adds it. And only over a meta this user owns: a new
+/// file belongs to whoever writes it, and another user's meta rewritten by
+/// a container running as root could become unreadable to that user. Best
+/// effort; without it, preflight only cannot check the length.
 fn record_key_length(s: &SlotPaths, meta: &CachedMeta) {
+    use std::os::unix::fs::MetadataExt as _;
+
     let Some(dir) = s.meta.parent() else {
         return;
     };
     let Ok(Some(_lock)) = try_lock_cache(dir) else {
         return;
     };
+    let Ok(old) = std::fs::metadata(&s.meta) else {
+        return;
+    };
     let partial = partial_path(&s.meta, &writer_tag());
     let recorded = serde_json::to_string_pretty(meta)
         .context("serialize cache meta")
         .and_then(|text| write_synced(&partial, |w| w.write_all(text.as_bytes())))
-        .and_then(|()| publish(&partial, &s.meta));
+        .and_then(|()| {
+            let mine = std::fs::metadata(&partial)
+                .with_context(|| format!("stat {}", partial.display()))?;
+            if mine.uid() != old.uid() {
+                remove_own(&partial);
+                return Ok(());
+            }
+            std::fs::set_permissions(&partial, old.permissions())
+                .with_context(|| format!("chmod {}", partial.display()))?;
+            publish(&partial, &s.meta)
+        });
     if let Err(e) = recorded {
         remove_own(&partial);
         tracing::warn!(
@@ -597,6 +647,38 @@ fn record_key_length(s: &SlotPaths, meta: &CachedMeta) {
             "could not add the key's length to the slot's meta"
         );
     }
+}
+
+/// Rename a damaged slot's meta to `<stem>.meta.json`[`DAMAGED_SUFFIX`],
+/// under the keygen lock taken without waiting. The slot is unpublished
+/// then: a run that needs it generates it again, clearing both files, and
+/// `ackinacki-bridge`'s preflight refuses until then, naming them — instead
+/// of every `--allow-retry` passing preflight and failing here again after
+/// its capture and Circuit-4 proof. Best effort.
+fn set_aside_damaged(s: &SlotPaths) {
+    let Some(dir) = s.meta.parent() else {
+        return;
+    };
+    let Ok(Some(_lock)) = try_lock_cache(dir) else {
+        return;
+    };
+    let aside = damaged_meta_path(s);
+    let moved = std::fs::rename(&s.meta, &aside).and_then(|()| sync_dir(dir));
+    if let Err(e) = moved {
+        tracing::warn!(
+            target: "bridge_evm_aggregator::cache",
+            path = %s.meta.display(),
+            error = %e,
+            "could not set the damaged slot's meta aside"
+        );
+    }
+}
+
+/// Where [`set_aside_damaged`] puts a slot's meta.
+fn damaged_meta_path(s: &SlotPaths) -> PathBuf {
+    let mut name = s.meta.file_name().unwrap_or_default().to_os_string();
+    name.push(DAMAGED_SUFFIX);
+    s.meta.with_file_name(name)
 }
 
 /// Read a published slot: the key, and the rest from the meta.
@@ -631,7 +713,7 @@ fn load_slot(
         break_points: meta.break_points,
         calculated: meta.calculated.into(),
         num_instance: meta.num_instance,
-        slot: Some(s.stem.clone()),
+        slot: None,
     })
 }
 
@@ -747,12 +829,15 @@ pub fn keygen_or_load(
         &s,
         |s| load_slot(agg_params, s, inner_snark, config.universality),
         |key_partial| {
-            let mut k = keygen(agg_params, &config, inner_snark);
-            k.slot = Some(stem.clone());
+            let k = keygen(agg_params, &config, inner_snark);
             let meta_text = write_generated(key_partial, &k)?;
             Ok((k, meta_text))
         },
     )
+    .map(|k| CachedKeygen {
+        slot: Some(stem),
+        ..k
+    })
 }
 
 /// Write a freshly generated key to `key_partial` and return the text of
@@ -1393,6 +1478,104 @@ mod tests {
             started.elapsed(),
             pk.get_vk().fixed_commitments().len()
         );
+    }
+
+    #[test]
+    fn a_key_longer_than_its_meta_records_is_refused_too() {
+        let d = scratch("long");
+        let (pk, params) = small_key();
+        let path = d.join("S.pk");
+        let len = write_key(&path, &pk).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"tail").unwrap();
+        let err = read_slot_key::<BaseCircuitBuilder<Fr>>(&path, params, Some(len))
+            .expect_err("longer than recorded");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!("{} bytes", len + 4)) && msg.contains(&format!("records {len}")),
+            "{msg}"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_damaged_slot_is_set_aside_and_cleared_by_the_next_keygen() {
+        // Every `--allow-retry` would otherwise pass preflight and fail here
+        // again, after its capture and Circuit-4 proof.
+        let d = scratch("aside");
+        let s = slot_paths(&d, "S");
+        let (pk, params) = small_key();
+        let len = write_key(&s.pk, &pk).unwrap();
+        std::fs::write(&s.meta, OLD_META).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&s.pk)
+            .unwrap()
+            .set_len(len / 2)
+            .unwrap();
+        let err = read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params)
+            .err()
+            .expect("cut short");
+        assert!(format!("{err:#}").contains("is damaged"), "{err:#}");
+        let aside = d.join(format!("S.meta.json{DAMAGED_SUFFIX}"));
+        assert!(
+            !s.meta.exists() && aside.exists(),
+            "the slot is unpublished"
+        );
+        assert!(!published(&s).unwrap());
+        clear_unpublished_slot(&s).unwrap();
+        assert!(
+            !s.pk.exists() && !aside.exists(),
+            "and cleared before a keygen"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn an_unreadable_key_is_not_set_aside() {
+        // A permission is not damage: the slot stays published.
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("aside_eacces");
+        let s = slot_paths(&d, "S");
+        std::fs::write(&s.pk, b"key").unwrap();
+        std::fs::write(&s.meta, OLD_META).unwrap();
+        std::fs::set_permissions(&s.pk, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if File::open(&s.pk).is_ok() {
+            std::fs::remove_dir_all(&d).ok();
+            return;
+        }
+        let params = multiply_params_for_test();
+        assert!(
+            read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params).is_err(),
+            "EACCES"
+        );
+        assert!(s.meta.exists(), "still published");
+        std::fs::set_permissions(&s.pk, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The params of [`small_key`], without making one.
+    fn multiply_params_for_test() -> BaseCircuitParams {
+        crate::multiply::multiply_params(8, 7)
+    }
+
+    #[test]
+    fn the_length_is_added_with_the_metas_own_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("mode");
+        let s = slot_paths(&d, "S");
+        let (pk, params) = small_key();
+        write_key(&s.pk, &pk).unwrap();
+        std::fs::write(&s.meta, OLD_META).unwrap();
+        std::fs::set_permissions(&s.meta, std::fs::Permissions::from_mode(0o640)).unwrap();
+        read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params).unwrap();
+        let md = std::fs::metadata(&s.meta).unwrap();
+        assert!(read_meta(&s.meta).unwrap().pk_bytes.is_some());
+        assert_eq!(md.permissions().mode() & 0o777, 0o640);
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

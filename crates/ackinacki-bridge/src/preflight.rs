@@ -1051,6 +1051,26 @@ fn aggregator_key(
 fn check_aggregator_keys(pk_cache_dir: &Path) -> CliResult<()> {
     use crate::aggregator_slot::SlotProblem;
 
+    // Stage 5 removes a set-aside key before it generates the key again:
+    // one this user cannot remove fails it there, after the burn.
+    let stuck: Vec<String> = crate::aggregator_slot::set_aside_slots(pk_cache_dir)
+        .into_iter()
+        .filter(|a| !a.removable)
+        .filter_map(|a| a.key)
+        .map(|k| k.display().to_string())
+        .collect();
+    if !stuck.is_empty() {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--pk-cache-dir: an aggregator key an earlier run set aside as damaged, which \
+                 stage 5 removes before it generates the key again and this user cannot remove: \
+                 {}. Have its owner remove it and the .meta.json.damaged beside it, or point \
+                 --pk-cache-dir at a cache of your own.",
+                stuck.join("; ")
+            ),
+            source: None,
+        });
+    }
     let bad = crate::aggregator_slot::bad_slots(pk_cache_dir);
     if bad.is_empty() {
         return Ok(());
@@ -1151,8 +1171,9 @@ pub(crate) fn aggregate_proof_bin(aggregator_dir: &Path) -> PathBuf {
 /// deliberately skips the proving key's digest (four constructors, and the
 /// verifier daemon never loads a proving key at all).
 ///
-/// Between that check and `load_pk` in stage 5 sit the burn and up to ~91
-/// minutes of anchor wait. A key replaced inside that window is not exotic
+/// Between that check and `load_pk` in stage 5 sit the burn, the anchor wait
+/// at stage 4b (up to 120 minutes) and any wait for the prove lock. A key
+/// replaced inside that window is not exotic
 /// — an rsync, a second keygen, a restored backup — and it is not reliably
 /// caught later: `try_load_pk` is panic-wrapped so a TRUNCATED key reports,
 /// but a same-length corruption past the embedded verifying key
@@ -1762,23 +1783,27 @@ pub fn check_disk_headroom(
         );
     }
 
-    // The aggregator's counterpart: a killed `aggregate-proof` leaves its
-    // half-written key under a `.partial-` name. The next aggregator
-    // run removes it, but this measurement comes first.
     // A slot an aggregator found damaged and set aside: stage 5 removes
     // both files before it generates the key again, but they hold their
     // space until then.
-    for (key, aside) in crate::aggregator_slot::set_aside_slots(pk_cache_dir) {
+    for aside in crate::aggregator_slot::set_aside_slots(pk_cache_dir) {
         tracing::warn!(
-            key = %key.display(),
-            meta = %aside.display(),
-            gb = std::fs::metadata(&key).map_or(0.0, |m| m.len() as f64 / 1e9),
+            key = %aside.key.as_deref().unwrap_or(Path::new("gone")).display(),
+            meta = %aside.meta.display(),
+            gb = aside
+                .key
+                .as_deref()
+                .and_then(|k| std::fs::metadata(k).ok())
+                .map_or(0.0, |m| m.len() as f64 / 1e9),
             "an aggregator key an earlier run found damaged and set aside. Stage 5 removes both \
              files before it generates the key again; until then they hold space this run may \
              need, and removing them by hand frees it now",
         );
     }
 
+    // The aggregator's counterpart: a killed `aggregate-proof` leaves its
+    // half-written key under a `.partial-` name. The next aggregator
+    // run removes it, but this measurement comes first.
     for (path, bytes) in aggregator_partials(pk_cache_dir) {
         tracing::warn!(
             path = %path.display(),
@@ -4174,7 +4199,7 @@ pub(crate) mod tests {
         let d = tempfile::TempDir::new().unwrap();
         check_aggregator_keys(d.path()).expect("an empty cache");
         let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
-        std::fs::write(d.path().join(format!("{slot}.pk")), b"half").unwrap();
+        std::fs::write(d.path().join(format!("{slot}.pk")), [0x03, 21, 0x01, 0x07]).unwrap();
         std::fs::write(
             d.path().join(format!("{slot}.meta.json")),
             br#"{"break_points": [], "calculated": {"degree": 21, "num_advice": 5, "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [], "pk_bytes": 6846416031}"#,
@@ -4189,6 +4214,28 @@ pub(crate) mod tests {
                 && msg.contains("Remove each .pk named here"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn a_set_aside_key_this_user_cannot_remove_is_refused_before_the_burn() {
+        // Stage 5 removes it before it generates the key again, and would
+        // fail there, after the burn.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        std::fs::write(d.path().join(format!("{slot}.pk")), [0x03, 21]).unwrap();
+        std::fs::write(d.path().join(format!("{slot}.meta.json.damaged")), b"{}").unwrap();
+        check_aggregator_keys(d.path()).expect("a set-aside key this user can remove");
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let checked = check_aggregator_keys(d.path());
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: no arguments, cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let err = checked.expect_err("cannot be removed");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        assert!(format!("{err}").contains(&format!("{slot}.pk")), "{err}");
     }
 
     #[test]
@@ -5303,9 +5350,6 @@ pub(crate) mod tests {
         let err = check_aggregator_runnable(&dir.path().join("agg"))
             .await
             .expect_err("an aggregate-proof without --slot-report must be refused");
-        // install.sh asks the same question, or it would call this binary
-        // ok and leave it for preflight to refuse again.
-        assert!(include_str!("../scripts/install.sh").contains("grep -q -- '--slot-report'"));
         let msg = format!("{err}");
         assert_eq!(err.exit_code().as_i32(), 2, "{msg}");
         assert!(

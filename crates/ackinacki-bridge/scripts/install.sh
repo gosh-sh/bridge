@@ -134,10 +134,14 @@ have_cli()       { can_run "$CLI_BIN" --version; }
 # instead of this script calling it ok and preflight refusing it after.
 have_agg() {
   can_run "$AGG_BIN" --help || return 1
-  if ! "$AGG_BIN" --help 2>&1 | grep -q -- '--slot-report'; then
-    LAST_RUN_ERROR="$AGG_BIN predates --slot-report, which this CLI passes it"
-    return 1
-  fi
+  # Matched in the captured text, not through `| grep -q`: grep stops at
+  # the first match, the binary writing the rest of its help gets SIGPIPE,
+  # and under pipefail that reads as "not found".
+  case "$("$AGG_BIN" --help 2>&1)" in
+    *--slot-report*) return 0 ;;
+  esac
+  LAST_RUN_ERROR="$AGG_BIN predates --slot-report, which this CLI passes it"
+  return 1
 }
 have_verifiers() {
   [ -s "$WITHDRAW_VERIFIER" ] && [ -s "$WITHDRAW_VERIFIER_SOL" ] && [ -s "$WITHDRAW_VERIFIER_CALLDATA" ]
@@ -255,6 +259,7 @@ if have_cli && have_agg && have_verifiers && have_deposit_prover; then
 else
   gap "$BUNDLE"
   note "the CLI, the aggregator subprocess, the verifier .bin and .sol files, the deposit prover and a profile"
+  if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
   if confirm "download $BUNDLE (~60 MB) from $RELEASE_BASE?"; then
     if [ -z "$WORK" ]; then WORK=$(mktemp -d); fi
     if fetch_verified "$BUNDLE" "$WORK/bundle.tar.gz"; then

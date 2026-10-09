@@ -487,7 +487,8 @@ pub async fn run(
     //
     // The proving key's identity as of this check travels to stage 5. That
     // is the ONLY place its ~2.65 GB of bytes are ever verified, and stage
-    // 5 happens after the burn plus up to ~91 minutes of anchor wait — see
+    // 5 happens after the burn, the anchor wait at stage 4b (up to 120
+    // minutes) and any wait for the prove lock — see
     // [`crate::preflight::PkFingerprint`].
     let mut prover_artifacts: Option<crate::preflight::ProverArtifacts> = None;
     if let Some(p) = plumbing.as_ref() {

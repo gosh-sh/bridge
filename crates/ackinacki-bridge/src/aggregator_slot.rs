@@ -276,31 +276,77 @@ fn meta_shape_problem(meta: &serde_json::Value) -> Option<String> {
         .map(|f| format!("has no calculated.{f}"))
 }
 
-/// The slots an earlier aggregator found damaged and set aside: each one's
-/// `.pk` and its `.meta.json`[`DAMAGED_SUFFIX`]. Unpublished, so stage 5
-/// removes both before it generates the key again; until then they hold
-/// space.
-pub(crate) fn set_aside_slots(pk_cache_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+/// A slot an earlier aggregator found damaged and set aside.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SetAside {
+    /// Its `.pk`, if it is still there.
+    pub(crate) key: Option<PathBuf>,
+    /// Its `.meta.json`[`DAMAGED_SUFFIX`].
+    pub(crate) meta: PathBuf,
+    /// Whether this user can remove the `.pk`, as stage 5 does before it
+    /// generates the key again.
+    pub(crate) removable: bool,
+}
+
+/// The slots an earlier aggregator found damaged and set aside, and not
+/// published again since: each one's `.pk` and `.meta.json`[`DAMAGED_SUFFIX`].
+/// Unpublished, so stage 5 removes both before it generates the key again;
+/// until then they hold space. A set-aside meta beside a published one is a
+/// leftover the aggregator could not remove, and the key beside it is the
+/// new, good one.
+pub(crate) fn set_aside_slots(pk_cache_dir: &Path) -> Vec<SetAside> {
     let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
         return Vec::new();
     };
-    let mut aside: Vec<(PathBuf, PathBuf)> = entries
+    let mut aside: Vec<SetAside> = entries
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|name| {
             let stem = name
                 .strip_suffix(DAMAGED_SUFFIX)?
                 .strip_suffix(".meta.json")?;
-            stem.starts_with(SLOT_PREFIX).then(|| {
-                (
-                    pk_cache_dir.join(format!("{stem}.pk")),
-                    pk_cache_dir.join(&name),
-                )
+            if !stem.starts_with(SLOT_PREFIX)
+                || pk_cache_dir.join(format!("{stem}.meta.json")).exists()
+            {
+                return None;
+            }
+            let key = pk_cache_dir.join(format!("{stem}.pk"));
+            let key = std::fs::symlink_metadata(&key).is_ok().then_some(key);
+            Some(SetAside {
+                removable: key.as_deref().is_none_or(can_remove),
+                key,
+                meta: pk_cache_dir.join(&name),
             })
         })
         .collect();
-    aside.sort();
+    aside.sort_by(|a, b| a.meta.cmp(&b.meta));
     aside
+}
+
+/// Whether this user can remove `path`: write and search on its directory,
+/// and, in a sticky one, the file or the directory its own.
+fn can_remove(path: &Path) -> bool {
+    use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
+
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    let Ok(c_dir) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c_dir` is a valid C string for the duration of the call.
+    if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
+        return false;
+    }
+    let Ok(dir_md) = std::fs::metadata(dir) else {
+        return false;
+    };
+    if dir_md.mode() & 0o1000 == 0 {
+        return true;
+    }
+    // SAFETY: no arguments, cannot fail.
+    let me = unsafe { libc::geteuid() };
+    me == 0 || dir_md.uid() == me || std::fs::symlink_metadata(path).is_ok_and(|f| f.uid() == me)
 }
 
 /// What stage 5 would fail on in the slot of `key` and `meta`, if anything.
@@ -326,9 +372,9 @@ fn slot_problem(key: &Path, meta: &Path) -> Option<SlotProblem> {
         return Some(SlotProblem::Damaged(format!("its .meta.json {why}")));
     }
     let recorded = match meta.get(META_KEY_LENGTH) {
-        None | Some(serde_json::Value::Null) => return None,
+        None | Some(serde_json::Value::Null) => None,
         Some(v) => match v.as_u64() {
-            Some(n) => n,
+            Some(n) => Some(n),
             None => {
                 return Some(SlotProblem::Damaged(format!(
                     "its .meta.json records a length that is not one: {v}"
@@ -337,9 +383,19 @@ fn slot_problem(key: &Path, meta: &Path) -> Option<SlotProblem> {
         },
     };
     let len = file.metadata().ok()?.len();
-    (len != recorded).then(|| {
-        SlotProblem::Damaged(format!(
+    if let Some(recorded) = recorded.filter(|n| *n != len) {
+        return Some(SlotProblem::Damaged(format!(
             "{len} bytes, and its .meta.json records {recorded}"
+        )));
+    }
+    // The key's second byte is its `k`, and the aggregator sizes its read
+    // by it: checked in a slot that records no length too.
+    let degree = meta["calculated"]["degree"].as_u64()?;
+    let mut header = [0u8; 2];
+    let k = std::io::Read::read_exact(&mut &file, &mut header).map(|()| u64::from(header[1]));
+    (k.ok() != Some(degree)).then(|| {
+        SlotProblem::Damaged(format!(
+            "its header does not give k = {degree}, the degree its .meta.json records"
         ))
     })
 }
@@ -349,6 +405,10 @@ mod tests {
     use super::*;
 
     const SLOT: &str = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+
+    /// The start of a key at k = 21, the degree [`META`] records: version 3,
+    /// then k.
+    const KEY: [u8; 3] = [0x03, 21, 0x01];
 
     /// A meta as an older `aggregate-proof` wrote it: no key length.
     const META: &str = r#"{"break_points": [[1]], "calculated": {"degree": 21, "num_advice": 5, "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [24]}"#;
@@ -372,7 +432,7 @@ mod tests {
     /// whose report names it.
     fn cache() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(format!("{SLOT}.pk")), b"key").unwrap();
+        std::fs::write(dir.path().join(format!("{SLOT}.pk")), KEY).unwrap();
         std::fs::write(dir.path().join(format!("{SLOT}.meta.json")), META).unwrap();
         let snark = dir.path().join("snark");
         std::fs::create_dir(&snark).unwrap();
@@ -539,6 +599,18 @@ mod tests {
                 r#"{"break_points": [["1"]], "calculated": {}, "num_instance": [24]}"#,
                 "its .meta.json has no break_points list",
             ),
+            (
+                r#"{"break_points": [[1]], "calculated": {}, "num_instance": 24}"#,
+                "its .meta.json has no num_instance list",
+            ),
+            (
+                r#"{"break_points": [[1]], "calculated": [], "num_instance": [24]}"#,
+                "its .meta.json has no calculated params",
+            ),
+            (
+                r#"{"break_points": [[1]], "calculated": {"degree": 21, "num_advice": "5", "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [24]}"#,
+                "its .meta.json has no calculated.num_advice",
+            ),
         ] {
             std::fs::write(&meta, text).unwrap();
             assert_eq!(bad_slots(dir.path()), damaged(why), "{text}");
@@ -553,10 +625,58 @@ mod tests {
         let aside = dir.path().join(format!("{SLOT}.meta.json{DAMAGED_SUFFIX}"));
         std::fs::rename(&meta, &aside).unwrap();
         assert!(bad_slots(dir.path()).is_empty());
-        assert_eq!(set_aside_slots(dir.path()), vec![(
-            dir.path().join(format!("{SLOT}.pk")),
-            aside
-        )]);
+        assert_eq!(set_aside_slots(dir.path()), vec![SetAside {
+            key: Some(dir.path().join(format!("{SLOT}.pk"))),
+            meta: aside.clone(),
+            removable: true,
+        }]);
+        // Published again, by a run that could not remove the old meta: the
+        // key is the new one, and nothing is set aside.
+        std::fs::write(&meta, META).unwrap();
+        assert!(set_aside_slots(dir.path()).is_empty());
+        assert!(aside.exists());
+    }
+
+    #[test]
+    fn a_key_whose_header_gives_another_k_is_found_before_the_burn() {
+        let (dir, _) = cache();
+        let key = dir.path().join(format!("{SLOT}.pk"));
+        for (bytes, why) in [
+            (&[0x03, 20, 0x01][..], "header"),
+            (&[0u8; 3][..], "a key of zeros"),
+            (&[0x03][..], "cut short in its header"),
+        ] {
+            std::fs::write(&key, bytes).unwrap();
+            let bad = bad_slots(dir.path());
+            assert!(
+                matches!(&bad[..], [BadSlot { problem: SlotProblem::Damaged(w), .. }] if w.contains("does not give k = 21")),
+                "{why}: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_set_aside_key_this_user_cannot_remove_is_known_before_the_burn() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, _) = cache();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(cache.join(format!("{SLOT}.pk")), KEY).unwrap();
+        std::fs::write(
+            cache.join(format!("{SLOT}.meta.json{DAMAGED_SUFFIX}")),
+            META,
+        )
+        .unwrap();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let aside = set_aside_slots(&cache);
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root removes anything: nothing to learn here then.
+        // SAFETY: no arguments, cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        assert_eq!(aside.len(), 1);
+        assert!(!aside[0].removable, "{aside:?}");
     }
 
     #[test]

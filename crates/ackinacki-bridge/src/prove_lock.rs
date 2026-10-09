@@ -104,14 +104,16 @@ fn classify(tried: std::io::Result<()>, path: &Path) -> Probe {
     }
 }
 
-/// Stage 1's half of a lock stage 5 waits for and cannot run without — this
-/// module's, or the aggregator's `.keygen.lock` in the pk cache. A lock
-/// file this user cannot open, or one the filesystem will not lock — NFS
-/// answers an exclusive lock on a file opened read-only with `EBADF` — is
-/// refused with exit 2 before the burn instead of exit 12 after it. One
-/// another process holds passes with `busy` as a warning: stage 5 will wait
-/// for it. `flag` names the directory in the refusal; it is already created
-/// and probed by `check_output_dirs`.
+/// Stage 1's half of a lock stage 5 may wait for — this module's, or the
+/// aggregator's `.keygen.lock` in the pk cache when the aggregator is
+/// expected to generate its key. A lock file this user cannot open, or one
+/// the filesystem refuses to lock — NFS answers an exclusive lock on a file
+/// opened read-only with `EBADF` — is refused with exit 2 before the burn
+/// instead of exit 12 after it. One another process holds passes with
+/// `busy` as a warning: stage 5 will wait for it. On a filesystem without
+/// locks stage 5 runs unlocked, and this passes with a warning too. `flag`
+/// names the directory in the refusal; it is already created and probed by
+/// `check_output_dirs`.
 pub(crate) fn check_lockable(path: &Path, flag: &str, busy: &str) -> CliResult<()> {
     preflight_verdict(probe(path), path, flag, busy)
 }
@@ -133,8 +135,8 @@ fn preflight_verdict(probe: Probe, path: &Path, flag: &str, busy: &str) -> CliRe
         },
         Probe::Failed(why) => Err(CliError::Preflight {
             reason: format!(
-                "{flag}: {why}. Stage 5 takes this lock after the burn and would fail the same \
-                 way. A file opened read-only cannot be locked on NFS: make the lock file \
+                "{flag}: {why}. Stage 5 may need this lock after the burn, and would fail the \
+                 same way. A file opened read-only cannot be locked on NFS: make the lock file \
                  writable for this user, or point {flag} at a directory of your own."
             ),
             source: None,

@@ -489,22 +489,21 @@ pub async fn run(
     // is the ONLY place its ~2.65 GB of bytes are ever verified, and stage
     // 5 happens after the burn plus up to ~91 minutes of anchor wait — see
     // [`crate::preflight::PkFingerprint`].
-    let mut pk_fingerprint: Option<crate::preflight::PkFingerprint> = None;
-    let mut aggregate_proof_sha256: Option<String> = None;
+    let mut prover_artifacts: Option<crate::preflight::ProverArtifacts> = None;
     if let Some(p) = plumbing.as_ref() {
         crate::preflight::parse_eth_signer(&p.eth_private_key)
             .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
         info!("burner key ok");
-        let artifacts = crate::preflight::check_prover_artifacts(
-            p,
-            &args.snark_dir,
-            args.pk_cache_dir.as_deref(),
-            args.allow_verifier_drift,
-        )
-        .await
-        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
-        pk_fingerprint = artifacts.pk_fingerprint;
-        aggregate_proof_sha256 = artifacts.aggregate_proof_sha256;
+        prover_artifacts = Some(
+            crate::preflight::check_prover_artifacts(
+                p,
+                &args.snark_dir,
+                args.pk_cache_dir.as_deref(),
+                args.allow_verifier_drift,
+            )
+            .await
+            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?,
+        );
         info!(params_dir = %p.params_dir.display(), "prover artifacts ok");
     }
 
@@ -958,7 +957,7 @@ pub async fn run(
     // (the daemon binary uses them on the file path). Fill in stubs
     // that make the intent clear if anything ever accidentally reads
     // them.
-    let e2e_cfg = WithdrawE2EConfig {
+    let mut e2e_cfg = WithdrawE2EConfig {
         gql_endpoint: args.gql_endpoint.clone(),
         prover_state_path: PathBuf::new(),
         window_size: 0,
@@ -977,6 +976,7 @@ pub async fn run(
         pk_cache_dir: args.pk_cache_dir.clone(),
         prover_out_dir: args.prover_out_dir.clone(),
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        // Set under the prove lock, below.
         slot_report: None,
         // The event's own block seq_no, not a constant.
         //
@@ -1030,14 +1030,26 @@ pub async fn run(
     // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
     // unconditionally, and the refusal it produces is strictly better than
     // proving against an unvouched-for key and being rejected on submit.
-    crate::preflight::recheck_proving_key(pk_fingerprint.as_ref())
-        .map_err(|e| with_resume_note(e, &resume))?;
-    // The aggregator names the slot its key is in; only this proof's may.
-    let pk_cache_dir = crate::preflight::effective_pk_cache_dir(
-        args.pk_cache_dir.as_deref(),
-        &plumbing_ref.params_dir,
-    );
-    crate::aggregator_slot::forget_reported_slot(&pk_cache_dir);
+    crate::preflight::recheck_proving_key(
+        prover_artifacts
+            .as_ref()
+            .and_then(|a| a.pk_fingerprint.as_ref()),
+    )
+    .map_err(|e| with_resume_note(e, &resume))?;
+    // The aggregator too, which preflight probed and hashed: its digest is
+    // what the slot it uses is noted against.
+    crate::preflight::recheck_aggregate_proof(
+        prover_artifacts
+            .as_ref()
+            .and_then(|a| a.aggregate_proof_sha256.as_deref()),
+        &crate::preflight::aggregate_proof_bin(&plumbing_ref.aggregator_dir),
+    )
+    .map_err(|e| with_resume_note(e, &resume))?;
+    // The aggregator names the slot its key is in, in the snark directory
+    // this run holds the lock on; what an earlier proof left there goes.
+    let slot_report = crate::aggregator_slot::report_path(&args.snark_dir);
+    let slot_report = crate::aggregator_slot::clear_report(&slot_report).then_some(slot_report);
+    e2e_cfg.slot_report = slot_report.clone();
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
         .map_err(|e| {
@@ -1052,13 +1064,15 @@ pub async fn run(
     // aggregator key this proof used — noted against what preflight
     // verified, not against whatever is on disk by now.
     crate::aggregator_slot::note_proof(
-        &pk_cache_dir,
-        crate::aggregator_slot::proof_inputs(
-            pk_fingerprint.as_ref().map(|f| f.sha256()),
+        &crate::preflight::effective_pk_cache_dir(
+            args.pk_cache_dir.as_deref(),
             &plumbing_ref.params_dir,
-            aggregate_proof_sha256.as_deref(),
-        )
-        .as_ref(),
+        ),
+        slot_report.as_deref(),
+        prover_artifacts
+            .as_ref()
+            .and_then(|a| a.proof_inputs(&plumbing_ref.params_dir))
+            .as_ref(),
     );
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
     let pi_count = e2e.proof.public_instances_hex.len();
@@ -1359,8 +1373,8 @@ impl ResumeNote {
     fn new(an_tx: &str, record: &Path) -> Self {
         Self(format!(
             "The AN burn {an_tx} is on the wire and its record is {}. Re-run the command with \
-             --allow-retry, changing only what the message above asks for: it skips the burn and \
-             resumes at stage 4/6 (capture), then waits for coverage and proves again.",
+             --allow-retry, changing only what this error asks for: it skips the burn and resumes \
+             at stage 4/6 (capture), then waits for coverage and proves again.",
             record.display()
         ))
     }
@@ -3785,7 +3799,7 @@ mod tests {
         // The refusal may ask for a change — a larger --prover-timeout-s —
         // that "the same command" would contradict.
         assert!(
-            msg.contains("changing only what the message above asks for"),
+            msg.contains("changing only what this error asks for"),
             "{msg}"
         );
     }
@@ -4483,11 +4497,16 @@ mod tests {
         //   below carries that requirement and the check enforces it —
         //   an allowlist that only asked "is this call known?" let the
         //   `map_err` be deleted again with everything green.
-        //   `effective_pk_cache_dir` returns a path and no error.
+        //   `effective_pk_cache_dir` and `aggregate_proof_bin` return a path
+        //   and no error.
+        //   `recheck_aggregate_proof` → `ProofFailed`, exit 12, like
+        //   `recheck_proving_key`.
         let known: &[(&str, bool)] = &[
             ("recheck_proving_key", false),
             ("parse_eth_signer", true),
             ("effective_pk_cache_dir", false),
+            ("recheck_aggregate_proof", false),
+            ("aggregate_proof_bin", false),
         ];
         let post_send_lines: Vec<&str> = post_send.lines().collect();
         for (n, line) in post_send_lines.iter().enumerate() {

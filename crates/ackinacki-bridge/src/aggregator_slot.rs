@@ -215,12 +215,12 @@ pub(crate) struct BadSlot {
 
 /// The published withdrawal slots in `pk_cache_dir` stage 5 would fail on
 /// if its proof needed them, after the burn: one this user cannot read; one
-/// whose meta is not one the aggregator wrote, or whose key is not the
-/// length the meta records — a copy cut short, a filesystem that
-/// acknowledged a sync it did not do. A key of the right length with wrong
-/// bytes is not found here. Slots an older `aggregate-proof` published
-/// record no length until a run that may rewrite their meta has read the
-/// key back, and pass.
+/// whose meta is not one the aggregator wrote, whose key is not the length
+/// the meta records — a copy cut short, a filesystem that acknowledged a
+/// sync it did not do — or whose key's header does not give the degree the
+/// meta records. A key of the right length and header with wrong bytes is
+/// not found here. Slots an older `aggregate-proof` published record no
+/// length until a run that may rewrite their meta has read the key back.
 pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
     let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
         return Vec::new();
@@ -283,9 +283,6 @@ pub(crate) struct SetAside {
     pub(crate) key: Option<PathBuf>,
     /// Its `.meta.json`[`DAMAGED_SUFFIX`].
     pub(crate) meta: PathBuf,
-    /// Whether this user can remove the `.pk`, as stage 5 does before it
-    /// generates the key again.
-    pub(crate) removable: bool,
 }
 
 /// The slots an earlier aggregator found damaged and set aside, and not
@@ -311,16 +308,38 @@ pub(crate) fn set_aside_slots(pk_cache_dir: &Path) -> Vec<SetAside> {
                 return None;
             }
             let key = pk_cache_dir.join(format!("{stem}.pk"));
-            let key = std::fs::symlink_metadata(&key).is_ok().then_some(key);
             Some(SetAside {
-                removable: key.as_deref().is_none_or(can_remove),
-                key,
+                key: std::fs::symlink_metadata(&key).is_ok().then_some(key),
                 meta: pk_cache_dir.join(&name),
             })
         })
         .collect();
     aside.sort_by(|a, b| a.meta.cmp(&b.meta));
     aside
+}
+
+/// The withdrawal keys in `pk_cache_dir` with no `.meta.json` beside them —
+/// set aside, or never published — that this user cannot remove. Stage 5
+/// removes the one of the slot it generates before it does, and fails
+/// there, after the burn, on one of these.
+pub(crate) fn stuck_unpublished_keys(pk_cache_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
+        return Vec::new();
+    };
+    let mut stuck: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| {
+            let stem = name.strip_suffix(".pk")?;
+            let key = pk_cache_dir.join(&name);
+            (stem.starts_with(SLOT_PREFIX)
+                && !pk_cache_dir.join(format!("{stem}.meta.json")).exists()
+                && !can_remove(&key))
+            .then_some(key)
+        })
+        .collect();
+    stuck.sort();
+    stuck
 }
 
 /// Whether this user can remove `path`: write and search on its directory,
@@ -334,8 +353,17 @@ fn can_remove(path: &Path) -> bool {
     let Ok(c_dir) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
         return false;
     };
+    // As the effective user, who is the one that removes it.
     // SAFETY: `c_dir` is a valid C string for the duration of the call.
-    if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
+    if unsafe {
+        libc::faccessat(
+            libc::AT_FDCWD,
+            c_dir.as_ptr(),
+            libc::W_OK | libc::X_OK,
+            libc::AT_EACCESS,
+        )
+    } != 0
+    {
         return false;
     }
     let Ok(dir_md) = std::fs::metadata(dir) else {
@@ -388,14 +416,20 @@ fn slot_problem(key: &Path, meta: &Path) -> Option<SlotProblem> {
             "{len} bytes, and its .meta.json records {recorded}"
         )));
     }
-    // The key's second byte is its `k`, and the aggregator sizes its read
-    // by it: checked in a slot that records no length too.
+    // The key's header — halo2's version 3, its `k`, a 0 or 1 for whether
+    // its selectors are compressed — as the aggregator reads it, checked in
+    // a slot that records no length too: the read sizes everything by `k`.
     let degree = meta["calculated"]["degree"].as_u64()?;
-    let mut header = [0u8; 2];
-    let k = std::io::Read::read_exact(&mut &file, &mut header).map(|()| u64::from(header[1]));
-    (k.ok() != Some(degree)).then(|| {
+    let mut header = [0u8; 3];
+    match std::io::Read::read_exact(&mut &file, &mut header) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {},
+        Err(e) => return Some(SlotProblem::Unreadable(format!("it cannot be read: {e}"))),
+    }
+    let whole = header[0] == 3 && u64::from(header[1]) == degree && header[2] <= 1;
+    (!whole).then(|| {
         SlotProblem::Damaged(format!(
-            "its header does not give k = {degree}, the degree its .meta.json records"
+            "its header is not a key's at k = {degree}, the degree its .meta.json records"
         ))
     })
 }
@@ -628,7 +662,6 @@ mod tests {
         assert_eq!(set_aside_slots(dir.path()), vec![SetAside {
             key: Some(dir.path().join(format!("{SLOT}.pk"))),
             meta: aside.clone(),
-            removable: true,
         }]);
         // Published again, by a run that could not remove the old meta: the
         // key is the new one, and nothing is set aside.
@@ -642,41 +675,59 @@ mod tests {
         let (dir, _) = cache();
         let key = dir.path().join(format!("{SLOT}.pk"));
         for (bytes, why) in [
-            (&[0x03, 20, 0x01][..], "header"),
+            (&[0x03, 20, 0x01][..], "another k"),
+            (&[0x02, 21, 0x01][..], "another version"),
+            (&[0x03, 21, 0x07][..], "not a selector flag"),
             (&[0u8; 3][..], "a key of zeros"),
             (&[0x03][..], "cut short in its header"),
         ] {
             std::fs::write(&key, bytes).unwrap();
             let bad = bad_slots(dir.path());
             assert!(
-                matches!(&bad[..], [BadSlot { problem: SlotProblem::Damaged(w), .. }] if w.contains("does not give k = 21")),
+                matches!(&bad[..], [BadSlot { problem: SlotProblem::Damaged(w), .. }] if w.contains("not a key's at k = 21")),
                 "{why}: {bad:?}"
             );
         }
     }
 
     #[test]
-    fn a_set_aside_key_this_user_cannot_remove_is_known_before_the_burn() {
+    fn an_unpublished_key_this_user_cannot_remove_is_known_before_the_burn() {
         use std::os::unix::fs::PermissionsExt;
         let (dir, _) = cache();
         let cache = dir.path().join("cache");
         std::fs::create_dir(&cache).unwrap();
+        // Set aside, and never published: stage 5 removes either.
         std::fs::write(cache.join(format!("{SLOT}.pk")), KEY).unwrap();
         std::fs::write(
             cache.join(format!("{SLOT}.meta.json{DAMAGED_SUFFIX}")),
             META,
         )
         .unwrap();
+        let orphan = "BridgeWithdrawalAggregatorVerifier__v3__ffff";
+        std::fs::write(cache.join(format!("{orphan}.pk")), KEY).unwrap();
+        assert!(stuck_unpublished_keys(&cache).is_empty(), "removable");
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let aside = set_aside_slots(&cache);
+        let stuck = stuck_unpublished_keys(&cache);
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Root removes anything: nothing to learn here then.
         // SAFETY: no arguments, cannot fail.
         if unsafe { libc::geteuid() } == 0 {
             return;
         }
-        assert_eq!(aside.len(), 1);
-        assert!(!aside[0].removable, "{aside:?}");
+        assert_eq!(stuck, vec![
+            cache.join(format!("{SLOT}.pk")),
+            cache.join(format!("{orphan}.pk")),
+        ]);
+    }
+
+    #[test]
+    fn in_a_sticky_directory_of_its_own_this_user_removes_anything() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let key = dir.path().join("k.pk");
+        std::fs::write(&key, b"x").unwrap();
+        assert!(can_remove(&key));
     }
 
     #[test]

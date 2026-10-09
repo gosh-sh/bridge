@@ -924,9 +924,6 @@ pub async fn check_prover_artifacts(
         &effective_pk_cache,
         params_needs_write.then_some(p.params_dir.as_path()),
     )?;
-    // A key in the pk cache stage 5 would fail on, after the burn, if its
-    // proof needed that slot: refused now instead.
-    check_aggregator_keys(&effective_pk_cache)?;
     // The aggregator's ~6.85 GB key is written once per Circuit-4 key and
     // aggregator build; a run whose predecessor already left it needs no
     // room for it. Hashed once, here: stage 5 re-checks the binary against
@@ -936,6 +933,9 @@ pub async fn check_prover_artifacts(
         aggregate_proof_sha256: hash_aggregate_proof(&aggregate_proof_bin(&p.aggregator_dir))?,
     };
     let aggregator_key = aggregator_key(&effective_pk_cache, artifacts.verified_inputs().as_ref());
+    // A key in the pk cache stage 5 would fail on, after the burn, if its
+    // proof needed that slot: refused now instead.
+    check_aggregator_keys(&effective_pk_cache, aggregator_key)?;
     check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
     // The locks stage 5 waits for, tried now: one that cannot be taken fails
     // the run before the burn rather than after it.
@@ -1046,26 +1046,28 @@ fn aggregator_key(
 }
 
 /// Refuse a pk cache that holds a withdrawal aggregator key stage 5 would
-/// fail on ([`crate::aggregator_slot::bad_slots`]): a damaged one is to be
-/// removed, one this user cannot read is to be made readable.
-fn check_aggregator_keys(pk_cache_dir: &Path) -> CliResult<()> {
+/// fail on: a published one that is damaged is to be removed, one this user
+/// cannot read is to be made readable
+/// ([`crate::aggregator_slot::bad_slots`]); and when the aggregator is to
+/// generate its key, an unpublished one this user cannot remove — stage 5
+/// removes it first ([`crate::aggregator_slot::stuck_unpublished_keys`]).
+fn check_aggregator_keys(pk_cache_dir: &Path, aggregator_key: AggregatorKey) -> CliResult<()> {
     use crate::aggregator_slot::SlotProblem;
 
-    // Stage 5 removes a set-aside key before it generates the key again:
-    // one this user cannot remove fails it there, after the burn.
-    let stuck: Vec<String> = crate::aggregator_slot::set_aside_slots(pk_cache_dir)
-        .into_iter()
-        .filter(|a| !a.removable)
-        .filter_map(|a| a.key)
-        .map(|k| k.display().to_string())
-        .collect();
+    let stuck: Vec<String> = match aggregator_key {
+        AggregatorKey::Cached => Vec::new(),
+        AggregatorKey::ToGenerate => crate::aggregator_slot::stuck_unpublished_keys(pk_cache_dir)
+            .iter()
+            .map(|k| k.display().to_string())
+            .collect(),
+    };
     if !stuck.is_empty() {
         return Err(CliError::Preflight {
             reason: format!(
-                "--pk-cache-dir: an aggregator key an earlier run set aside as damaged, which \
-                 stage 5 removes before it generates the key again and this user cannot remove: \
-                 {}. Have its owner remove it and the .meta.json.damaged beside it, or point \
-                 --pk-cache-dir at a cache of your own.",
+                "--pk-cache-dir: an aggregator key with no .meta.json — set aside as damaged, or \
+                 never published — that stage 5 removes before it generates the key, and this \
+                 user cannot remove: {}. Have its owner remove it (and any .meta.json.damaged \
+                 beside it), or point --pk-cache-dir at a cache of your own.",
                 stuck.join("; ")
             ),
             source: None,
@@ -1535,10 +1537,11 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
         {
             Err(refuse(format!(
                 "--aggregator-dir {}: {} predates `--slot-report`, which stage 5 passes it, and \
-                 would refuse it after the burn. On an install made by scripts/install.sh, run it \
-                 again: it replaces an aggregate-proof without `--slot-report` with the latest \
-                 release's. From a checkout, rebuild it:\n\x20   cd {} && cargo build --release \
-                 --bin aggregate-proof",
+                 would refuse it after the burn. On an install made by scripts/install.sh, \
+                 download the script again and run it: it replaces an aggregate-proof without \
+                 `--slot-report` with the latest release's, which an older copy of it does not. \
+                 From a checkout, rebuild it:\n\x20   cd {} && cargo build --release --bin \
+                 aggregate-proof",
                 aggregator_dir.display(),
                 release_bin.display(),
                 aggregator_dir.display(),
@@ -4197,7 +4200,7 @@ pub(crate) mod tests {
     #[test]
     fn a_damaged_aggregator_key_is_refused_before_the_burn() {
         let d = tempfile::TempDir::new().unwrap();
-        check_aggregator_keys(d.path()).expect("an empty cache");
+        check_aggregator_keys(d.path(), AggregatorKey::ToGenerate).expect("an empty cache");
         let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
         std::fs::write(d.path().join(format!("{slot}.pk")), [0x03, 21, 0x01, 0x07]).unwrap();
         std::fs::write(
@@ -4205,7 +4208,8 @@ pub(crate) mod tests {
             br#"{"break_points": [], "calculated": {"degree": 21, "num_advice": 5, "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [], "pk_bytes": 6846416031}"#,
         )
         .unwrap();
-        let err = check_aggregator_keys(d.path()).expect_err("4 bytes of 6846416031");
+        let err = check_aggregator_keys(d.path(), AggregatorKey::ToGenerate)
+            .expect_err("4 bytes of 6846416031");
         assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
         let msg = format!("{err}");
         assert!(
@@ -4225,10 +4229,13 @@ pub(crate) mod tests {
         let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
         std::fs::write(d.path().join(format!("{slot}.pk")), [0x03, 21]).unwrap();
         std::fs::write(d.path().join(format!("{slot}.meta.json.damaged")), b"{}").unwrap();
-        check_aggregator_keys(d.path()).expect("a set-aside key this user can remove");
+        check_aggregator_keys(d.path(), AggregatorKey::ToGenerate)
+            .expect("a set-aside key this user can remove");
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let checked = check_aggregator_keys(d.path());
+        let checked = check_aggregator_keys(d.path(), AggregatorKey::ToGenerate);
+        let loaded = check_aggregator_keys(d.path(), AggregatorKey::Cached);
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        loaded.expect("a run that loads its key does not touch it");
         // SAFETY: no arguments, cannot fail.
         if unsafe { libc::geteuid() } == 0 {
             return;
@@ -4251,7 +4258,8 @@ pub(crate) mod tests {
         if std::fs::File::open(&key).is_ok() {
             return;
         }
-        let err = check_aggregator_keys(d.path()).expect_err("unreadable");
+        let err =
+            check_aggregator_keys(d.path(), AggregatorKey::ToGenerate).expect_err("unreadable");
         assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
         let msg = format!("{err}");
         assert!(
@@ -4296,12 +4304,12 @@ pub(crate) mod tests {
         let artifacts = &src[src.find("pub async fn check_prover_artifacts(").unwrap()..];
         let artifacts = &artifacts[..artifacts.find("\n}\n").unwrap()];
         let damaged = artifacts
-            .find("check_aggregator_keys(&effective_pk_cache)?;")
+            .find("check_aggregator_keys(&effective_pk_cache, aggregator_key)?;")
             .expect("preflight refuses a damaged key");
         let asked = artifacts
             .find("aggregator_key(&effective_pk_cache, artifacts.verified_inputs().as_ref())")
             .expect("preflight asks");
-        assert!(damaged < asked);
+        assert!(asked < damaged, "the refusal depends on the answer");
         let measured = artifacts
             .find("check_disk_headroom(")
             .expect("and measures");

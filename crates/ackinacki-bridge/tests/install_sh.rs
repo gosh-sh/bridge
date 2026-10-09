@@ -15,7 +15,8 @@ fn stub(path: &Path, text: &str) {
 }
 
 /// The parts of an installation `install.sh` looks for, laid out under
-/// `root` the way it lays them out (the bundle's layout, minus `bin/`).
+/// `root` as the release bundle has them: the two binaries at the top, then
+/// `verifiers/`, `deposit-prover/` and `bridge_config`.
 fn installation(root: &Path, aggregator_help: &str) {
     stub(&root.join("ackinacki-bridge"), "ackinacki-bridge 0.0.0");
     stub(&root.join("aggregate-proof"), aggregator_help);
@@ -63,8 +64,7 @@ fn an_aggregate_proof_without_slot_report_is_replaced_from_the_release() {
             .output()
             .map_or(true, |o| !o.status.success())
         {
-            eprintln!("no {tool}: nothing to learn here");
-            return;
+            panic!("install.sh needs {tool}, and this test runs install.sh");
         }
     }
     let dir = tempfile::tempdir().unwrap();

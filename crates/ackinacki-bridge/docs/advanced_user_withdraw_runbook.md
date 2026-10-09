@@ -82,7 +82,8 @@ Key scalars:
 - `W·P` (L1 stride): 1024 seq_nos ≈ 5.7 min chain-time at ~3 seq/s
 - `W²` (L2 stride): 16 384 seq_nos ≈ 91 min chain-time
 - Bundle prover wall-time: ~12 min (warm PK cache)
-- Circuit-4 event proof: ~5 min warm PK, ~8 min cold (8 min 12 s on the test host)
+- Stage 5, Circuit-4 proof and aggregation: ~3 min warm (2 min 37 s and 2 min 41 s on the test
+  host), ~8 min cold (8 min 12 s)
 - Enricher wait-for-coverage timeout: 120 min
 - Capture (`WithdrawalInitiated` poll) timeout: 300 s
 
@@ -866,21 +867,31 @@ submit — a few minutes.
 
 **Symptom (CLI exit 12):** Failure in the CLI's only subprocess —
 `aggregate-proof` (SHPLONK aggregation over the in-process Poseidon
-C4 SNARK). Failures surface via `SubprocessAggregator`
-(`crates/bridge-relayer-daemon/src/aggregator.rs:438-455`):
+C4 SNARK). Its own lines are in the CLI's log as it runs, each starting
+`aggregate-proof:`. Failures surface via `SubprocessAggregator`
+(`crates/bridge-relayer-daemon/src/aggregator.rs`):
 
 ```
-ERROR aggregate-proof timed out after <duration>
+aggregate-proof timed out after <duration> and was killed. … raise it with --prover-timeout-s.
+aggregate-proof said last:
+<its error, or its last 40 lines>
    OR
-ERROR aggregate-proof exited with <status>: <stderr>
+aggregate-proof exited with <status>: <its error, or its last 40 lines>
    OR
-ERROR failed to spawn aggregate-proof: <err>
+failed to spawn aggregate-proof: <err>
+   OR
+<aggregator-dir>/target/release/aggregate-proof is not the aggregate-proof preflight checked: …
 ```
+
+The last one means the binary changed after preflight: re-run with
+`--allow-retry`, and do not rebuild it while a withdrawal waits at stage 4b.
 
 In-process Circuit-4 failures surface a level up as
 `Circuit4ShplonkPipeline::prove failed` (no subprocess involved).
 
-**Trigger conditions:** Out of disk, OOM, RAM swap-thrash.
+**Trigger conditions:** Out of disk, OOM, RAM swap-thrash, a cold keygen
+that waited for another one in the same pk cache, a damaged cached key, an
+`aggregate-proof` rebuilt after preflight.
 
 A missing, truncated or non-Hermez ceremony no longer reaches this stage:
 since the stage-1 prover-artifact checks landed, it is refused before the
@@ -1310,7 +1321,7 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — veri
 
 **Safe to prune between demos:**
 
-- `work_dir/` — regeneration is deterministic; ~5 min per proof with
+- `work_dir/` — regeneration is deterministic; ~3 min per proof with
   warm PK cache.
 - `withdraw-state/<sha256>.json` files with status `Confirmed` —
   keep for audit; `Failed` — safe to prune once reconciled.
@@ -1329,4 +1340,4 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — veri
 **Do NOT touch between demos:**
 
 - `params/` and `params/pk_cache/` — cold cache costs ~8 min per
-  proof; warm cache is ~5 min.
+  proof; warm cache is ~3 min.

@@ -129,7 +129,7 @@ covering L2 bundle:
 |--------------------------------------------|------------------------------|
 | Capture (`WithdrawalInitiated` poll)       | up to 300 s                  |
 | Wait for covering L2 bundle on-chain       | up to ~91 min (typical ~45)  |
-| Enrich + Circuit-4 SHPLONK proof           | ~5 min warm PK, ~8 min cold  |
+| Enrich + Circuit-4 SHPLONK proof           | ~3 min warm PK, ~8 min cold  |
 | `withdrawByProof` submit + receipt         | ~30 s                        |
 | **End-to-end (typical / worst case)**      | **~50 min / ~101 min**       |
 
@@ -785,9 +785,19 @@ whole fails with `cached aggregator key … is damaged`, naming the `.pk` to
 remove together with the `.meta.json` beside it. Preflight refuses with
 exit 2, before the burn, a withdrawal slot whose `.meta.json` is not whole
 or records another length for its key — a slot published before this
-version records one once its key has read back — and one this user cannot
-read, which wants its permissions fixed rather than removing. A key of the
-right length with wrong bytes is found only by the aggregator.
+version gets one once a run that can take the cache's lock, and owns the
+`.meta.json`, has read its key back — one the aggregator found damaged and
+set aside (`<stem>.meta.json.damaged`), and one this user cannot read, which
+wants its permissions fixed rather than removed. Wrong bytes that are not
+field elements fail the aggregator the same way; a key of the right length
+whose wrong bytes are field elements reads, and the proof made with it is
+refused by stage 6's dry run (exit 13).
+
+A refusal that says `… is not the aggregate-proof preflight checked` means
+the binary was rebuilt or replaced after preflight, which stage 5 refuses
+rather than run a binary nothing probed. Do not rebuild `aggregate-proof`
+while a withdrawal waits at stage 4b; re-run with `--allow-retry`, whose
+preflight checks the new one.
 
 Exit 12 also covers the wait for the covering bundle (stage 4b): a
 refusal that starts `wait_for_coverage:` means the server-side bundle
@@ -1081,7 +1091,7 @@ $HOME/.bridge-deposit-work/                    ← deposit work dir when BRIDGE_
 ```
 
 **Safe to prune between demos.** `work_dir/`, `proofs/` — regeneration
-is deterministic; ~5 min per proof with warm PK cache.
+is deterministic; ~3 min per proof with warm PK cache.
 `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
 for audit; `Failed` — safe to prune once reconciled. **`Reserved` with
 no `an_tx_hash`: there is no age at which deleting one is safe, and the
@@ -1092,7 +1102,7 @@ wrong one keeps getting copied.
 
 **Do NOT touch between demos.** `../bridge-prover-libraries/params/`
 and its `pk_cache/` — cold cache costs ~8 min per proof; warm cache
-is ~5 min.
+is ~3 min.
 
 ## Not this CLI's job
 
@@ -1595,7 +1605,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 | Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
 | Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7.5 GB more, or ~10.7 GB with a new Circuit-4 key (Step 0) |
 | Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~8 min (8 min 12 s on the test host) |
-| Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
+| Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~3 min (2 min 37 s and 2 min 41 s on the test host) |
 
 Measured with `export_blake2b_proof` on
 `deposit-prover/fixtures/deposit_10proofs/proof_00` (`--degree 18

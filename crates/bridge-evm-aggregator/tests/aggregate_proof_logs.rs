@@ -1,9 +1,9 @@
 //! Where `aggregate-proof` says what it is doing. Its callers —
-//! `ackinacki-bridge withdraw` and the relayer — forward its stderr into their
+//! `ackinacki-bridge withdraw` and the relayer — forward its output into their
 //! own logs, and the pk cache's notices (waiting for another keygen, a
 //! filesystem without locks, leftovers removed, a slot loaded or generated)
-//! are info and warn lines: a default that showed only errors, on stdout, which
-//! the callers do not forward, left the operator none of them.
+//! are info and warn lines: a default that let through only errors left the
+//! operator none of them. Which targets pass is pinned in `logging.rs`.
 
 use std::process::Command;
 

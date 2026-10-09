@@ -53,16 +53,25 @@ use snark_verifier_sdk::Snark;
 fn init_logging() {
     use std::io::IsTerminal as _;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("warn,bridge_evm_aggregator=info,aggregate_proof=info")
-    });
     let logs = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        .with_env_filter(bridge_evm_aggregator::logging::filter())
         .with_writer(std::io::stderr);
     if std::io::stderr().is_terminal() {
         logs.init();
     } else {
         logs.with_ansi(false).without_time().init();
+    }
+}
+
+/// Write `slot` to `path` through a temporary name beside it, so that a
+/// reader sees the whole name or none. The proof is done by then: a failure
+/// costs the caller only its note of the slot, and is a warning.
+fn report_slot(path: &std::path::Path, slot: &str) {
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let written = std::fs::write(&tmp, slot).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        std::fs::remove_file(&tmp).ok();
+        tracing::warn!(path = %path.display(), error = %e, "could not report the pk-cache slot");
     }
 }
 
@@ -78,6 +87,7 @@ fn main() -> anyhow::Result<()> {
     let mut universality = None;
     let mut allow_source_drift = false;
     let mut pk_cache_dir: Option<PathBuf> = None;
+    let mut slot_report: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -102,6 +112,11 @@ fn main() -> anyhow::Result<()> {
             // ~2 min on the test host; later runs load the key from disk.
             // See `aggregator_cache.rs` for slot layout.
             "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
+            // Where to write the stem of the pk-cache slot this run used,
+            // once its calldata is written: `ackinacki-bridge withdraw`
+            // notes it, so that its next preflight knows the key is there.
+            // A path of the caller's own, not one in the shared cache.
+            "--slot-report" => slot_report = args.next().map(PathBuf::from),
             // Side-effect-free probe. `ackinacki-bridge` preflight runs
             // this before an irreversible burn to prove the binary is
             // present, executable on this architecture, and is actually
@@ -111,7 +126,7 @@ fn main() -> anyhow::Result<()> {
                 println!(
                     "aggregate-proof --inner-snark <path> --name <verifier> --out <path>\n\
                      \x20 [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n\
-                     \x20 [--allow-source-drift] [--pk-cache-dir <dir>]"
+                     \x20 [--allow-source-drift] [--pk-cache-dir <dir>] [--slot-report <path>]"
                 );
                 return Ok(());
             }
@@ -179,6 +194,9 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&out_path, &export.evm_calldata)?;
+    if let (Some(path), Some(slot)) = (slot_report.as_deref(), export.pk_cache_slot.as_deref()) {
+        report_slot(path, slot);
+    }
 
     println!(
         "OK: {} -> {} ({} B calldata, {} instances, K_outer={})",
@@ -189,4 +207,28 @@ fn main() -> anyhow::Result<()> {
         export.k_outer,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_slot_is_reported_whole_where_the_caller_asked() {
+        let dir = std::env::temp_dir().join(format!("agg_report_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aggregator-slot");
+        std::fs::write(&path, "a previous run's slot").unwrap();
+        report_slot(&path, "BridgeWithdrawalAggregatorVerifier__v3__0123abcd");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "BridgeWithdrawalAggregatorVerifier__v3__0123abcd"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "and nothing else is left beside it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

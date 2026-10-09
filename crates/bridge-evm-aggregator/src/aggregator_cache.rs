@@ -20,8 +20,9 @@
 //!
 //! Both are written under a `.partial-<writer>` name and synced, then
 //! renamed into place, the key first: a slot whose meta exists has a whole
-//! key, after a crash of the host too. `<base_name>.last-slot` names the
-//! slot the last run for `base_name` used.
+//! key, after a crash of the host too. The stem of the slot a run used comes
+//! back in [`CachedKeygen::slot`], and `aggregate-proof --slot-report` writes
+//! it where its caller asks.
 //! A writer holds `<cache_dir>/.keygen.lock` meanwhile, which is how a
 //! leftover partial file is told from one being written.
 //!
@@ -91,15 +92,17 @@ pub struct CachedKeygen {
     pub break_points: Vec<Vec<usize>>,
     pub calculated: AggregationConfigParams,
     pub num_instance: Vec<usize>,
+    /// The stem of the pk-cache slot this came from or went to; `None`
+    /// without a cache.
+    pub slot: Option<String>,
 }
 
-/// A slot inside `cache_dir`: its stem, its two files (`.pk` +
-/// `.meta.json`), and where [`report_slot`] names it.
+/// A slot inside `cache_dir`: its stem and its two files (`.pk` +
+/// `.meta.json`).
 struct SlotPaths {
     stem: String,
     pk: PathBuf,
     meta: PathBuf,
-    report: PathBuf,
 }
 
 /// Everything a slot holds beside the key. Uses local mirror structs instead
@@ -116,7 +119,7 @@ struct CachedMeta {
     pk_bytes: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 struct MirrorConfigParams {
     degree: u32,
     num_advice: usize,
@@ -222,19 +225,13 @@ pub fn cache_stem(
     format!("{base_name}__v3__{}", hex::encode(&hash[..16]))
 }
 
-fn slot_paths(cache_dir: &Path, base_name: &str, stem: &str) -> SlotPaths {
+fn slot_paths(cache_dir: &Path, stem: &str) -> SlotPaths {
     SlotPaths {
         stem: stem.to_string(),
         pk: cache_dir.join(format!("{stem}.pk")),
         meta: cache_dir.join(format!("{stem}.meta.json")),
-        report: cache_dir.join(format!("{base_name}{LAST_SLOT_SUFFIX}")),
     }
 }
-
-/// Suffix of `<cache_dir>/<base_name>.last-slot`, which holds the stem of
-/// the slot the last successful run for `base_name` loaded or published
-/// ([`report_slot`]). `ackinacki-bridge` reads it under this name.
-pub const LAST_SLOT_SUFFIX: &str = ".last-slot";
 
 /// Suffix of a slot file still being written: `<stem>.pk.partial-<writer>`
 /// and `<stem>.meta.json.partial-<writer>`, renamed into place only once
@@ -493,10 +490,12 @@ fn damaged(e: &std::io::Error) -> bool {
 /// Read in `RawBytes`, the bytes `RawBytesUnchecked` reads too, because the
 /// unchecked read unwraps every short read: a key cut short panicked
 /// instead of saying which file to remove. The check it adds — every field
-/// element below its modulus — costs one comparison per element. Not
-/// through `gen_pk(.., Some(path))` either: that runs a whole keygen when
-/// the file cannot be opened and writes the result over the published
-/// name, without the lock.
+/// element below its modulus — costs one comparison per element, and read
+/// the real ~6.85 GB key no slower. It is not a check of the content: a
+/// point off the curve reads, and so does a key of the right length with
+/// wrong bytes. Not through `gen_pk(.., Some(path))` either: that runs a
+/// whole keygen when the file cannot be opened and writes the result over
+/// the published name, without the lock.
 fn read_slot_key<C: Circuit<Fr>>(
     path: &Path,
     params: C::Params,
@@ -530,11 +529,12 @@ fn read_slot_key<C: Circuit<Fr>>(
     })
 }
 
-/// Read a slot's meta.
+/// Read a slot's meta. Bytes that are not UTF-8 are as damaged as JSON cut
+/// short, and say so.
 fn read_meta(path: &Path) -> anyhow::Result<CachedMeta> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read cache meta {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read cache meta {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| {
         format!(
             "cache meta {} is damaged; remove it and the .pk beside it to have both generated \
              again",
@@ -553,6 +553,52 @@ fn published(s: &SlotPaths) -> anyhow::Result<bool> {
     Ok(exists(&s.pk)? && exists(&s.meta)?)
 }
 
+/// Read a published slot's meta, then its key with the `params` the meta
+/// gives. A slot an older `aggregate-proof` published records no key
+/// length; once its key has read back whole, the length is added
+/// ([`record_key_length`]), so that the next preflight can check it.
+fn read_slot<C: Circuit<Fr>>(
+    s: &SlotPaths,
+    params: impl FnOnce(&CachedMeta) -> C::Params,
+) -> anyhow::Result<(ProvingKey<G1Affine>, CachedMeta)> {
+    let mut meta = read_meta(&s.meta)?;
+    let pk = read_slot_key::<C>(&s.pk, params(&meta), meta.pk_bytes)?;
+    if meta.pk_bytes.is_none() {
+        if let Ok(md) = std::fs::metadata(&s.pk) {
+            meta.pk_bytes = Some(md.len());
+            record_key_length(s, &meta);
+        }
+    }
+    Ok((pk, meta))
+}
+
+/// Publish `meta` — the slot's own, with the key's length added — over the
+/// slot's meta. Only under the keygen lock, taken without waiting, like
+/// every write to the cache: with a writer at work, a later run adds it.
+/// Best effort; without it, preflight only cannot check the length.
+fn record_key_length(s: &SlotPaths, meta: &CachedMeta) {
+    let Some(dir) = s.meta.parent() else {
+        return;
+    };
+    let Ok(Some(_lock)) = try_lock_cache(dir) else {
+        return;
+    };
+    let partial = partial_path(&s.meta, &writer_tag());
+    let recorded = serde_json::to_string_pretty(meta)
+        .context("serialize cache meta")
+        .and_then(|text| write_synced(&partial, |w| w.write_all(text.as_bytes())))
+        .and_then(|()| publish(&partial, &s.meta));
+    if let Err(e) = recorded {
+        remove_own(&partial);
+        tracing::warn!(
+            target: "bridge_evm_aggregator::cache",
+            path = %s.meta.display(),
+            error = %format!("{e:#}"),
+            "could not add the key's length to the slot's meta"
+        );
+    }
+}
+
 /// Read a published slot: the key, and the rest from the meta.
 fn load_slot(
     agg_params: &ParamsKZG<Bn256>,
@@ -560,22 +606,21 @@ fn load_slot(
     inner_snark: &Snark,
     universality: VerifierUniversality,
 ) -> anyhow::Result<CachedKeygen> {
-    let meta = read_meta(&s.meta)?;
-    let calculated: AggregationConfigParams = meta.calculated.into();
-
     // Build a "post-keygen shape" circuit for the params the key is read
     // with. No synthesis runs. We omit `expose_previous_instances` /
     // `calculate_params` deliberately: both `num_instance` and
     // `break_points` are recovered from `meta` so re-deriving them here
     // would be pure overhead.
-    let circuit = AggregationCircuit::new::<SHPLONK>(
-        CircuitBuilderStage::Keygen,
-        calculated,
-        agg_params,
-        vec![inner_snark.clone()],
-        universality,
-    );
-    let pk = read_slot_key::<AggregationCircuit>(&s.pk, circuit.params(), meta.pk_bytes)?;
+    let (pk, meta) = read_slot::<AggregationCircuit>(s, |meta| {
+        AggregationCircuit::new::<SHPLONK>(
+            CircuitBuilderStage::Keygen,
+            meta.calculated.into(),
+            agg_params,
+            vec![inner_snark.clone()],
+            universality,
+        )
+        .params()
+    })?;
     tracing::info!(
         target: "bridge_evm_aggregator::cache",
         stem = %s.stem,
@@ -584,8 +629,9 @@ fn load_slot(
     Ok(CachedKeygen {
         pk,
         break_points: meta.break_points,
-        calculated,
+        calculated: meta.calculated.into(),
         num_instance: meta.num_instance,
+        slot: Some(s.stem.clone()),
     })
 }
 
@@ -597,8 +643,7 @@ fn load_slot(
 /// `generate` run, still under the lock, writing the key to the partial
 /// path it is given and returning its value and the meta's text; the meta
 /// is written beside it, then the key is published, then the meta, and the
-/// lock is let go after both. Either way the slot is reported by name
-/// ([`report_slot`]).
+/// lock is let go after both.
 fn load_or_generate<T>(
     dir: &Path,
     s: &SlotPaths,
@@ -611,9 +656,7 @@ fn load_or_generate<T>(
         if let Ok(Some(_lock)) = try_lock_cache(dir) {
             sweep_and_report(dir);
         }
-        let value = load(s)?;
-        report_slot(s);
-        return Ok(value);
+        return load(s);
     }
 
     let keygen_lock = lock_cache(dir)?;
@@ -624,9 +667,7 @@ fn load_or_generate<T>(
     }
     // Published by another process while this one waited for the lock.
     if published(s)? {
-        let value = load(s)?;
-        report_slot(s);
-        return Ok(value);
+        return load(s);
     }
     clear_unpublished_slot(s)
         .with_context(|| format!("clear unpublished cache slot {}", s.pk.display()))?;
@@ -641,7 +682,6 @@ fn load_or_generate<T>(
     })?;
     publish_slot(&keygen_lock, s, &key_partial, &meta_partial)?;
     drop(keygen_lock);
-    report_slot(s);
     Ok(value)
 }
 
@@ -677,29 +717,11 @@ fn publish_slot(
     Ok(())
 }
 
-/// Name the slot this run loaded or published in
-/// `<cache_dir>/<base_name>`[`LAST_SLOT_SUFFIX`]. `ackinacki-bridge` notes
-/// it after a proof, so that its next preflight knows this key is there and
-/// reserves no room for it. Without it, that preflight only reserves the
-/// room again; a failure is a warning.
-fn report_slot(s: &SlotPaths) {
-    let partial = partial_path(&s.report, &writer_tag());
-    let reported = write_synced(&partial, |w| w.write_all(s.stem.as_bytes()))
-        .and_then(|()| publish(&partial, &s.report));
-    if let Err(e) = reported {
-        remove_own(&partial);
-        tracing::warn!(
-            target: "bridge_evm_aggregator::cache",
-            path = %s.report.display(),
-            error = %format!("{e:#}"),
-            "could not name the slot this run used"
-        );
-    }
-}
-
 /// Load `(pk, break_points, calculated, num_instance)` from `cache_dir` if
 /// both slot files exist. On cache miss, run the real outer keygen and
 /// (if `cache_dir` is `Some`) persist everything for subsequent runs.
+///
+/// The slot's stem comes back in [`CachedKeygen::slot`].
 ///
 /// Measured for the withdrawal aggregator at K=21: a cold `aggregate-proof`
 /// — this keygen, writing the ~6.85 GB key to `cache_dir`, and the proof —
@@ -719,24 +741,31 @@ pub fn keygen_or_load(
     };
     std::fs::create_dir_all(dir).with_context(|| format!("create cache dir {}", dir.display()))?;
     let stem = cache_stem(base_name, &config, agg_params, inner_snark);
-    let s = slot_paths(dir, base_name, &stem);
+    let s = slot_paths(dir, &stem);
     load_or_generate(
         dir,
         &s,
         |s| load_slot(agg_params, s, inner_snark, config.universality),
         |key_partial| {
-            let k = keygen(agg_params, &config, inner_snark);
-            let pk_bytes = write_key(key_partial, &k.pk)?;
-            let meta = CachedMeta {
-                break_points: k.break_points.clone(),
-                calculated: k.calculated.into(),
-                num_instance: k.num_instance.clone(),
-                pk_bytes: Some(pk_bytes),
-            };
-            let meta_text = serde_json::to_string_pretty(&meta).context("serialize cache meta")?;
+            let mut k = keygen(agg_params, &config, inner_snark);
+            k.slot = Some(stem.clone());
+            let meta_text = write_generated(key_partial, &k)?;
             Ok((k, meta_text))
         },
     )
+}
+
+/// Write a freshly generated key to `key_partial` and return the text of
+/// its meta, which records the key's length.
+fn write_generated(key_partial: &Path, k: &CachedKeygen) -> anyhow::Result<String> {
+    let pk_bytes = write_key(key_partial, &k.pk)?;
+    let meta = CachedMeta {
+        break_points: k.break_points.clone(),
+        calculated: k.calculated.into(),
+        num_instance: k.num_instance.clone(),
+        pk_bytes: Some(pk_bytes),
+    };
+    serde_json::to_string_pretty(&meta).context("serialize cache meta")
 }
 
 /// The real outer keygen, in memory: the key is written by the caller.
@@ -772,6 +801,7 @@ fn keygen(
         break_points,
         calculated,
         num_instance,
+        slot: None,
     }
 }
 
@@ -934,11 +964,17 @@ mod tests {
         let d = scratch("wait");
         let holder = try_lock_cache(&d).unwrap().expect("free");
         let dir = d.clone();
-        let waiter = std::thread::spawn(move || lock_cache(&dir).unwrap().is_some());
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!waiter.is_finished(), "the second writer waits");
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done.send(lock_cache(&dir).unwrap().is_some()));
+        blocked_on(&d.join(KEYGEN_LOCK));
+        assert!(
+            result.try_recv().is_err(),
+            "the second writer waits while the first holds the lock"
+        );
         drop(holder);
-        assert!(waiter.join().unwrap());
+        assert!(result
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the wait ends once the holder lets go"));
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -996,10 +1032,10 @@ mod tests {
 
     #[test]
     fn a_key_with_no_meta_beside_it_is_cleared_before_keygen() {
-        // The SDK's `read_pk` panics on a truncated key rather than
-        // regenerating it, so an unpublished `.pk` must never be read.
+        // An unpublished `.pk` may be cut short anywhere: it is never read,
+        // and its room is wanted for the keygen.
         let d = scratch("clear");
-        let s = slot_paths(&d, "B", "S");
+        let s = slot_paths(&d, "S");
         std::fs::write(&s.pk, b"truncated").unwrap();
         clear_unpublished_slot(&s).unwrap();
         assert!(!s.pk.exists(), "a key without its meta was never published");
@@ -1033,7 +1069,7 @@ mod tests {
     #[test]
     fn a_published_slot_is_loaded_and_never_generated() {
         let d = scratch("hit");
-        let s = slot_paths(&d, "B", "S");
+        let s = slot_paths(&d, "S");
         publish_by_hand(&s, b"key");
         let got = load_or_generate(
             &d,
@@ -1043,11 +1079,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, b"key");
-        assert_eq!(
-            std::fs::read_to_string(d.join("B.last-slot")).unwrap(),
-            "S",
-            "a loaded slot is named too"
-        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1084,7 +1115,7 @@ mod tests {
         let dir = d.clone();
         let (done, result) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let s = slot_paths(&dir, "B", "S");
+            let s = slot_paths(&dir, "S");
             done.send(load_or_generate(
                 &dir,
                 &s,
@@ -1095,7 +1126,7 @@ mod tests {
         // Not a sleep: the waiter is past its first look at the slot only
         // once it is blocked on the lock.
         blocked_on(&d.join(KEYGEN_LOCK));
-        publish_by_hand(&slot_paths(&d, "B", "S"), b"the first writer's key");
+        publish_by_hand(&slot_paths(&d, "S"), b"the first writer's key");
         drop(holder);
         let got = result
             .recv_timeout(std::time::Duration::from_secs(30))
@@ -1107,7 +1138,7 @@ mod tests {
     #[test]
     fn a_key_is_generated_under_the_lock_and_published_with_its_meta() {
         let d = scratch("miss");
-        let s = slot_paths(&d, "B", "S");
+        let s = slot_paths(&d, "S");
         let got = load_or_generate(
             &d,
             &s,
@@ -1135,11 +1166,6 @@ mod tests {
         assert_eq!(got, 7);
         assert_eq!(std::fs::read(&s.pk).unwrap(), b"fresh key");
         assert_eq!(std::fs::read_to_string(&s.meta).unwrap(), "{\"meta\":1}");
-        assert_eq!(
-            std::fs::read_to_string(d.join("B.last-slot")).unwrap(),
-            "S",
-            "the slot is named for whoever proves with it"
-        );
         assert!(
             sweep_partials(&d).is_empty(),
             "nothing is left half-written"
@@ -1154,7 +1180,7 @@ mod tests {
     #[test]
     fn a_failed_keygen_publishes_nothing() {
         let d = scratch("failed");
-        let s = slot_paths(&d, "B", "S");
+        let s = slot_paths(&d, "S");
         let err = load_or_generate::<()>(
             &d,
             &s,
@@ -1248,7 +1274,7 @@ mod tests {
     #[test]
     fn a_keygen_that_fails_after_writing_leaves_no_partial_file() {
         let d = scratch("failed_late");
-        let s = slot_paths(&d, "B", "S");
+        let s = slot_paths(&d, "S");
         load_or_generate::<()>(
             &d,
             &s,
@@ -1275,7 +1301,7 @@ mod tests {
         // — here a symlink to itself, `ELOOP` — would make a good key look
         // unpublished and have it removed.
         let d = scratch("eloop");
-        let s = slot_paths(&d, "B", "S");
+        let s = slot_paths(&d, "S");
         std::fs::write(&s.pk, b"a good key").unwrap();
         std::os::unix::fs::symlink(&s.meta, &s.meta).unwrap();
         clear_unpublished_slot(&s).expect_err("the meta could not be checked");
@@ -1370,6 +1396,75 @@ mod tests {
     }
 
     #[test]
+    fn a_published_slot_that_fails_to_load_is_an_error_not_a_keygen() {
+        // A keygen here would write a second ~6.85 GB key beside the one
+        // that failed, and hide why it failed.
+        let d = scratch("load_err");
+        let s = slot_paths(&d, "S");
+        publish_by_hand(&s, b"key");
+        let err = load_or_generate::<()>(
+            &d,
+            &s,
+            |_| anyhow::bail!("cached aggregator key is damaged"),
+            |_| panic!("a published slot is not generated again"),
+        )
+        .expect_err("the load's error is the caller's");
+        assert!(format!("{err:#}").contains("damaged"), "{err:#}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The meta an older `aggregate-proof` wrote: no key length.
+    const OLD_META: &[u8] = br#"{"break_points":[[1]],"calculated":{"degree":8,"num_advice":1,"num_lookup_advice":0,"num_fixed":1,"lookup_bits":7},"num_instance":[1]}"#;
+
+    #[test]
+    fn a_slot_published_without_a_length_gets_one_once_its_key_reads_back() {
+        // The next preflight can check it then; until then it can only
+        // trust it.
+        let d = scratch("old_meta");
+        let s = slot_paths(&d, "S");
+        let (pk, params) = small_key();
+        let len = write_key(&s.pk, &pk).unwrap();
+        std::fs::write(&s.meta, OLD_META).unwrap();
+        let (_, meta) = read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params.clone()).unwrap();
+        assert_eq!(meta.pk_bytes, Some(len));
+        assert_eq!(
+            read_meta(&s.meta).unwrap().pk_bytes,
+            Some(len),
+            "and it is published"
+        );
+        assert!(
+            sweep_partials(&d).is_empty(),
+            "through a partial file of its own"
+        );
+
+        // With a writer at work nothing is written: only a holder of the
+        // lock writes the cache.
+        std::fs::write(&s.meta, OLD_META).unwrap();
+        let writer = try_lock_cache(&d).unwrap().expect("free");
+        read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params).unwrap();
+        assert_eq!(read_meta(&s.meta).unwrap().pk_bytes, None);
+        drop(writer);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_generated_keys_meta_records_its_length() {
+        let d = scratch("generated");
+        let (pk, _) = small_key();
+        let k = CachedKeygen {
+            pk,
+            break_points: vec![vec![1]],
+            calculated: AggregationConfigParams::default(),
+            num_instance: vec![1],
+            slot: None,
+        };
+        let path = d.join("S.pk.partial-1-0a1b2c3d");
+        let meta: CachedMeta = serde_json::from_str(&write_generated(&path, &k).unwrap()).unwrap();
+        assert_eq!(meta.pk_bytes, Some(write_key_len(&path)));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn a_key_this_user_cannot_read_is_not_called_damaged() {
         // Removing it would throw a good key away and cost a keygen.
         use std::os::unix::fs::PermissionsExt;
@@ -1404,6 +1499,10 @@ mod tests {
             msg.contains("S.meta.json") && msg.contains("remove it and the .pk beside it"),
             "{msg}"
         );
+        // Bytes that are not text are damaged the same way.
+        std::fs::write(&path, [0xff, 0xfe, b'{']).unwrap();
+        let msg = format!("{:#}", read_meta(&path).err().expect("not UTF-8"));
+        assert!(msg.contains("remove it and the .pk beside it"), "{msg}");
         // One an older aggregate-proof wrote has no length, and is read.
         std::fs::write(
             &path,

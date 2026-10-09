@@ -114,6 +114,9 @@ pub struct AggregatorExportResult {
     pub k_outer: u32,
     pub total_instances: usize,
     pub evm_calldata: Vec<u8>,
+    /// The stem of the pk-cache slot the outer key came from or went to;
+    /// `None` without a cache.
+    pub pk_cache_slot: Option<String>,
 }
 
 /// Aggregate `inner_snark` and produce the outer verifier bytecode + EVM
@@ -122,7 +125,7 @@ pub struct AggregatorExportResult {
 /// Back-compat wrapper: delegates to [`aggregate_and_prove_cached`] with no PK
 /// cache directory, i.e. full outer keygen on every call. Existing call sites
 /// (spike, older tests) keep working unchanged. New call sites that want to
-/// skip the ~3-5 min outer keygen on rerun should switch to
+/// skip the outer keygen on rerun should switch to
 /// [`aggregate_and_prove_cached`].
 pub fn aggregate_and_prove(
     base_name: &str,
@@ -165,6 +168,7 @@ pub fn aggregate_and_prove_cached(
         break_points,
         calculated,
         num_instance,
+        slot: pk_cache_slot,
     } = keygen_or_load(&params_outer, base_name, config, &inner_snark, pk_cache_dir)?;
 
     let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
@@ -260,6 +264,7 @@ pub fn aggregate_and_prove_cached(
         k_outer: config.k_outer,
         total_instances: flat.len(),
         evm_calldata,
+        pk_cache_slot,
     })
 }
 

@@ -200,6 +200,7 @@ pub fn aggregate_inner_cached(
         break_points,
         calculated,
         num_instance: _,
+        slot: _,
     } = keygen_or_load(agg_params, base_name, config, &inner_snark, pk_cache_dir)?;
 
     let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
@@ -270,6 +271,7 @@ pub fn generate_yul_verifier_cached(
         break_points: _,
         calculated: _,
         num_instance,
+        slot: _,
     } = keygen_or_load(agg_params, base_name, config, inner_snark, pk_cache_dir)?;
 
     let bytecode = gen_evm_verifier_shplonk::<AggregationCircuit>(

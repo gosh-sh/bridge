@@ -282,8 +282,9 @@ on the test host).
 
 A `params/` shared with a bundle relayer needs more: it also stores the
 primary/fallback/layer proving keys a withdrawal never reads. A cold
-withdrawal peaked at ~19 GB of RAM on the test host, sampled every 5 s: the
-CLI at 9.5 GB RSS during Circuit 4, then `aggregate-proof` at 12.6 GB.
+withdrawal peaked at ~19 GB of RAM on the test host, system-wide and sampled
+every 5 s: the CLI reached 9.5 GB RSS in Circuit 4, and the `aggregate-proof`
+it waits on 12.6 GB while the CLI still held part of its own.
 `install.sh` warns below 24 GB of RAM and swap.
 
 **Do not wipe `params/` between runs** — keygen and the cold aggregator
@@ -783,28 +784,36 @@ The next `aggregate-proof` that takes the cache's lock removes a leftover,
 but preflight measures first and counts it as used space: if it refuses
 for want of room, remove the file by hand while no `aggregate-proof` is
 running. The next run generates the key from scratch again, so retry with a
-larger `--prover-timeout-s`, not the same one. A cached key that is not
-whole fails with `cached aggregator key … is damaged`, and so does one of
-the right length whose wrong bytes still read: the SDK checks every proof it
-makes against the key, and `aggregate-proof` exits 1 — the CLI's exit 12 —
-saying the key read from the cache is damaged in place. Either way the
-aggregator sets the slot aside (`<stem>.meta.json.damaged`) and says so: the
-next run that needs it removes both files and generates the key again. Remove
-the `<stem>.pk` and the set-aside `.meta.json` by hand before
-`--allow-retry` to free its ~6.85 GB at once — preflight reserves room for
-the new key and cannot count the old one's, so a host sized for one key is
-refused for space until then; preflight names a set-aside slot with a
-warning, and refuses one whose `.pk` this user cannot remove. When another
-`aggregate-proof` holds the cache lock the slot stays published, and the
-error names the `.pk` and `.meta.json` to remove. Preflight refuses with
-exit 2, before the burn, a withdrawal slot whose `.meta.json` is not whole,
-is not one the aggregator wrote, or records another length — or another
-degree than its key's header gives — for its key (a slot published before
-this version gets a length once a run that can take the cache's lock, and
-owns the `.meta.json`, has read its key back), and one this user cannot read,
-which wants its permissions fixed rather than removed. A proof that fails
-that check with a key the run generated itself points at a keygen and prover
-that disagree — a bug or a hardware fault — not at the cache.
+larger `--prover-timeout-s`, not the same one.
+
+A cached key that is not whole fails with `cached aggregator key … is
+damaged`. One of the right length whose wrong bytes still read fails the
+check the SDK runs on every proof it makes: `aggregate-proof` exits 1 — the
+CLI's exit 12 — with `making the aggregated proof failed (assertion failed:
+accept)`, saying the key read from the cache is damaged in place, or the
+ceremony file it names is. In both cases the aggregator sets the slot aside
+(`<stem>.meta.json.damaged`) when it can, and says so: the next run that
+needs it removes both files and generates the key again. Remove the
+`<stem>.pk` and the set-aside `.meta.json` by hand before `--allow-retry` to
+free its ~6.85 GB at once — preflight reserves room for the new key and
+cannot count the old one's, so a host sized for one key is refused for space
+until then. With another `aggregate-proof` holding the cache lock, on a
+filesystem without locks, or with the `.meta.json` replaced since it was
+read, the slot stays published, and the error names the `.pk` and
+`.meta.json` to remove. A key the run generated itself that fails the check
+points at the ceremony file or at a keygen and prover that disagree — a bug
+or a hardware fault — and its slot is set aside too.
+
+Preflight refuses — with exit 2, or exit 10 on a run that resumes a recorded
+burn, as `--allow-retry` after an exit 12 does — a withdrawal slot whose
+`.meta.json` is not whole, is not one the aggregator wrote, or records
+another length for its key, or whose key's header is not a key's at the
+degree it records (a slot published before this version gets a length once a
+run that can take the cache's lock, and owns the `.meta.json`, has read its
+key back), and one this user cannot read, which wants its permissions fixed
+rather than removed. It names a set-aside slot with a warning, and, when the
+aggregator is to generate its key, refuses a key without its `.meta.json`
+that this user cannot remove.
 
 A refusal that says `… is not the aggregate-proof preflight checked` means
 the binary was rebuilt or replaced after preflight, which stage 5 refuses

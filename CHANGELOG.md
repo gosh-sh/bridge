@@ -27,19 +27,18 @@ assigns it when the release is tagged.
 - **`ackinacki-bridge withdraw` needs the `aggregate-proof` of its own
   release.** Stage 5 passes `aggregate-proof --slot-report`, which an older
   build refuses, after the burn; preflight now refuses an `aggregate-proof`
-  whose `--help` does not name it, and one it cannot read to hash — with
-  exit 2, or exit 10 on a run that resumes a recorded burn. Upgrade the two
-  together: on an install made by `scripts/install.sh`, download the script
-  again and run it — this one counts an `aggregate-proof` without
-  `--slot-report` as missing and replaces it from the latest release, while
-  an older copy calls it ok; from a checkout, rebuild `aggregate-proof`
-  (`cargo build --release --bin aggregate-proof` in
-  `crates/bridge-evm-aggregator`). Do not rebuild or
-  replace it while a withdrawal is between preflight and its proof — the
-  anchor wait at stage 4b can last up to 120 min, and the wait for the prove
-  lock has no bound: stage 5 refuses with exit 12 an `aggregate-proof` that is
-  not the binary preflight hashed, and the way on is `--allow-retry`, whose
-  preflight checks the new one.
+  whose `--help` does not name it, and one it cannot read to hash — with exit 2,
+  or exit 10 on a run that resumes a recorded burn. Upgrade the two together: on
+  an install made by `scripts/install.sh`, download the script again and run it
+  — this one counts an `aggregate-proof` without `--slot-report` as missing and
+  replaces it from the latest release, while an older copy calls it ok; from a
+  checkout, rebuild `aggregate-proof` (`cargo build --release --bin
+  aggregate-proof` in `crates/bridge-evm-aggregator`). Do not rebuild or replace
+  it while a withdrawal is between preflight and its proof — the anchor wait at
+  stage 4b can last up to 120 min, and the wait for the prove lock has no bound:
+  stage 5 refuses with exit 12 an `aggregate-proof` that is not the binary
+  preflight hashed, and the way on is `--allow-retry`, whose preflight checks
+  the new one.
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the
@@ -655,8 +654,9 @@ assigns it when the release is tagged.
 
 - **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
   the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
-  cold run on the test host, sampled every 5 s (the CLI at 9.5 GB RSS during
-  Circuit 4, then `aggregate-proof` at 12.6 GB). They said ~40 GB, which no
+  cold run on the test host, system-wide and sampled every 5 s; the CLI
+  reached 9.5 GB RSS in Circuit 4, and the `aggregate-proof` it waits on
+  12.6 GB while the CLI still held part of its own. They said ~40 GB, which no
   measurement backed.
 - `ackinacki-bridge withdraw` exit 11 and exit 12 end with the AN burn's hash,
   the path of the withdrawal's record and the command that carries on (the same
@@ -1010,56 +1010,56 @@ assigns it when the release is tagged.
   it logged only errors, to stdout, which the callers discarded, a failure
   quoted the whole of its stderr, and a timeout quoted nothing.
 - `aggregate-proof` writes a new pk-cache slot under
-  `<stem>.pk.partial-<pid>-<random>` / `<stem>.meta.json.partial-<pid>-<random>`,
-  syncs each file to disk and renames it into place, so neither a keygen
-  killed mid-write (a timeout, the OOM killer) nor a host crash just after it
-  leaves a truncated `<stem>.pk` that every later run panicked on until it was
-  deleted by hand. A write that fails — a full disk — removes its own partial
-  file. A `.pk` without its `.meta.json` is regenerated rather than read. The
-  `.meta.json` now records the key's length (`pk_bytes`) — a slot published
-  before gets it once a run that can take the cache's lock, and owns the
-  `.meta.json`, has read its key back whole — and a key is read in
-  halo2's checked `RawBytes` format, which reads the same bytes, after its
-  header's `k` is checked against the degree the `.meta.json` records. A
-  key whose length or `k` is not the recorded one, that ends early, or whose
-  wrong bytes are not field elements, or a `.meta.json` that is not whole,
-  fails the run with `cached aggregator key … is damaged` (or `cache meta …
-  is damaged`); one that cannot be read for another reason — a permission —
-  says so without telling anyone to remove it. A key of the right length
-  whose wrong bytes are field elements still reads, and the proof made with
-  it fails the check the SDK runs on every proof it makes: the run fails
-  saying the key read from the cache is damaged in place (with the panic's
-  own words). Either way the damaged slot is set aside: its `.meta.json` is
-  renamed to `<stem>.meta.json.damaged`, which unpublishes it, the next run
-  that needs it removes both files and generates the key again, and the
-  error says that removing them by hand frees the key's ~6.85 GB at once —
-  preflight reserves room for the new key and cannot count the old one's.
-  When another `aggregate-proof` holds the cache lock the slot stays
-  published, and the error names the two files to remove. A proof that fails
-  that check with a key the run generated itself is said to be a keygen and
-  prover that disagree — a bug or a hardware fault — not a damaged cache.
-  `ackinacki-bridge withdraw` preflight names a set-aside slot with a
-  warning, and refuses with exit 2 one whose `.pk` this user cannot remove,
-  since stage 5 has to. Before, a key that could not be opened was
-  regenerated over the published name without the lock, and a truncated one
-  panicked. A process
-  generating a key holds `<pk-cache>/.keygen.lock`
-  (`flock`) until the slot is published, so cold keygens on one cache run one
-  at a time and a process that waited loads the slot its predecessor
-  published. Partial files are removed only by a holder of that lock, so never
-  one another process, on the host or in a container sharing the cache, is
-  still writing. A lock file another user created is opened read-only. Only a
-  filesystem without `flock` lets a keygen run unlocked, and it then removes
-  no partial file; any other failure to take the lock fails the run.
-  With `--pk-cache-dir`, `aggregate-proof --slot-report <path>` writes the
-  stem of the slot it used to `<path>` once its calldata is written.
-  `ackinacki-bridge withdraw` preflight names any partial file in the pk
-  cache before it measures free space, and refuses with exit 2 a withdrawal
-  slot whose key is not the length its `.meta.json` records or whose header
-  does not give the degree it records, whose `.meta.json` is not whole or not
-  one the aggregator wrote (a field missing or of the wrong type), or that
-  this user cannot read — the last with advice to fix its permissions, not to
-  remove it.
+  `<stem>.pk.partial-<pid>-<random>` /
+  `<stem>.meta.json.partial-<pid>-<random>`, syncs each file to disk and renames
+  it into place, so neither a keygen killed mid-write (a timeout, the OOM
+  killer) nor a host crash just after it leaves a truncated `<stem>.pk` that
+  every later run panicked on until it was deleted by hand. A write that fails —
+  a full disk — removes its own partial file. A `.pk` without its `.meta.json`
+  is regenerated rather than read. The `.meta.json` now records the key's length
+  (`pk_bytes`) — a slot published before gets it once a run that can take the
+  cache's lock, and owns the `.meta.json`, has read its key back whole — and a
+  key is read in halo2's checked `RawBytes` format, which reads the same bytes,
+  after its header's `k` is checked against the degree the `.meta.json` records.
+  A key whose length or `k` is not the recorded one, that ends early, or whose
+  wrong bytes are not field elements, or a `.meta.json` that is not whole, fails
+  the run with `cached aggregator key … is damaged` (or `cache meta … is
+  damaged`); one that cannot be read for another reason — a permission — says so
+  without telling anyone to remove it. A key of the right length whose wrong
+  bytes are field elements still reads, and the proof made with it fails the
+  check the SDK runs on every proof it makes: the run fails with `making the
+  aggregated proof failed (…)`, saying that the key read from the cache, or the
+  ceremony file it names, is damaged — or, for a key the run generated itself,
+  that the ceremony is damaged or keygen and prover disagree. In these cases the
+  slot is set aside when it can be: its `.meta.json` is renamed to
+  `<stem>.meta.json.damaged`, which unpublishes it, the next run that needs it
+  removes both files and generates the key again, and the error says that
+  removing them by hand frees the key's ~6.85 GB at once — preflight reserves
+  room for the new key and cannot count the old one's. With another
+  `aggregate-proof` holding the cache lock, on a filesystem without locks, or
+  with the `.meta.json` replaced since it was read, the slot stays published and
+  the error names the two files to remove. `ackinacki-bridge withdraw` preflight
+  names a set-aside slot with a warning, and, when the aggregator is to generate
+  its key, refuses — with exit 2, or exit 10 on a run that resumes a recorded
+  burn — a key without its `.meta.json` this user cannot remove, since stage 5
+  removes it first. Before, a key that could not be opened was regenerated over
+  the published name without the lock, and a truncated one panicked. A process
+  generating a key holds `<pk-cache>/.keygen.lock` (`flock`) until the slot is
+  published, so cold keygens on one cache run one at a time and a process that
+  waited loads the slot its predecessor published. Partial files are removed
+  only by a holder of that lock, so never one another process, on the host or in
+  a container sharing the cache, is still writing. A lock file another user
+  created is opened read-only. Only a filesystem without `flock` lets a keygen
+  run unlocked, and it then removes no partial file; any other failure to take
+  the lock fails the run. With `--pk-cache-dir`, `aggregate-proof --slot-report
+  <path>` writes the stem of the slot it used to `<path>` once its calldata is
+  written. `ackinacki-bridge withdraw` preflight names any partial file in the
+  pk cache before it measures free space, and refuses with exit 2 (exit 10 on a
+  resume) a withdrawal slot whose key is not the length its `.meta.json` records
+  or whose header is not a key's at the degree it records, whose `.meta.json` is
+  not whole or not one the aggregator wrote (a field missing or of the wrong
+  type), or that this user cannot read — the last with advice to fix its
+  permissions, not to remove it.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,

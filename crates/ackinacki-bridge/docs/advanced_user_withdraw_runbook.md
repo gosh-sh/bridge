@@ -882,11 +882,12 @@ failed to spawn aggregate-proof: <err>
 ```
 
 An `exited with` whose error says `making the aggregated proof failed
-(assertion failed: accept)` and that `the key was read from the pk cache`
-means that key is damaged in place: its slot is set aside, and removing the
+(assertion failed: accept)` and `The key was read from the pk cache` means
+that key, or the ceremony file the error names, is damaged in place. Its
+slot is set aside when it can be — the error says which — and removing the
 `.pk` and the `.meta.json.damaged` it names frees their space before
-`--allow-retry`. If it says the run generated the key itself, the cache is
-not at fault.
+`--allow-retry`; otherwise remove the `.pk` and `.meta.json` it names. If it
+says the run generated the key itself, check the ceremony file it names.
 
 The CLI itself, right before the proof, refuses a binary that changed after
 preflight:
@@ -929,8 +930,9 @@ du -sh ../bridge-prover-libraries/params/   # ~9.5 GB withdraw-only after the fi
 # reserves the 7 GiB again, and 3 GiB more when it brings a new Circuit-4
 # key (README Step 0).
 df -h ../bridge-prover-libraries/params/
-# RAM headroom: a cold run peaked at ~19 GB on the test host (the CLI at 9.5 GB RSS in
-# Circuit 4, then aggregate-proof at 12.6 GB); install.sh warns below 24 GB with swap
+# RAM headroom: a cold run peaked at ~19 GB system-wide on the test host (the CLI reached
+# 9.5 GB RSS in Circuit 4, the aggregate-proof it waits on 12.6 GB); install.sh warns
+# below 24 GB with swap
 ```
 
 **Remediation:**
@@ -967,13 +969,15 @@ df -h ../bridge-prover-libraries/params/
   remove it by hand while no `aggregate-proof` is running. Free the space
   preflight asks for and re-run with `--allow-retry`. A published key that
   is not whole fails the aggregator with `cached aggregator key … is
-  damaged`, and the aggregator sets its slot aside: the `.meta.json` becomes
-  `<stem>.meta.json.damaged`, and the next run that needs the slot removes
-  both files and generates the key again. Remove them by hand first to free
-  the key's ~6.85 GB: preflight reserves room for a new key and does not
-  count the set-aside one. Preflight refuses with exit 2 a key whose
-  `.meta.json` records another length or degree, and one this user cannot
-  read with advice to fix its permissions.
+  damaged`, and the aggregator sets its slot aside when it can take the
+  cache lock: the `.meta.json` becomes `<stem>.meta.json.damaged`, and the
+  next run that needs the slot removes both files and generates the key
+  again. Remove them by hand first to free the key's ~6.85 GB: preflight
+  reserves room for a new key and does not count the set-aside one.
+  Preflight refuses — with exit 2, or exit 10 when it resumes a recorded
+  burn, as `--allow-retry` does — a key whose `.meta.json` records another
+  length or degree, and one this user cannot read with advice to fix its
+  permissions.
 
 ---
 

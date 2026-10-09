@@ -27,16 +27,20 @@ fn a_warm_run_reports_the_slot_it_loaded() {
         params.join("kzg_bn254_21.srs").is_file(),
         "PARAMS_DIR has no kzg_bn254_21.srs"
     );
-    let has_slot = std::fs::read_dir(&cache)
-        .unwrap()
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .any(|n| {
-            n.starts_with("BridgeWithdrawalAggregatorVerifier__") && n.ends_with(".meta.json")
-        });
+    // The slot this snark needs, as the aggregator names it: published
+    // already, or this is no warm run.
+    let name = "BridgeWithdrawalAggregatorVerifier";
+    let inner: snark_verifier_sdk::Snark =
+        bincode::deserialize(&std::fs::read(&snark).unwrap()).unwrap();
+    let config =
+        bridge_evm_aggregator::aggregator::AggregatorConfig::for_verifier_name_with_overrides(
+            name, None, None,
+        );
+    let srs = halo2_base::utils::fs::gen_srs(config.k_outer);
+    let stem = bridge_evm_aggregator::aggregator_cache::cache_stem(name, &config, &srs, &inner);
     assert!(
-        has_slot,
-        "{} holds no published withdrawal slot",
+        cache.join(format!("{stem}.meta.json")).is_file(),
+        "{} holds no published {stem}",
         cache.display()
     );
     let dir = std::env::temp_dir().join(format!("agg_warm_{}", std::process::id()));
@@ -45,7 +49,7 @@ fn a_warm_run_reports_the_slot_it_loaded() {
     let started = std::time::Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_aggregate-proof"))
         .args(["--inner-snark", &snark])
-        .args(["--name", "BridgeWithdrawalAggregatorVerifier", "--out"])
+        .args(["--name", name, "--out"])
         .arg(dir.join("calldata.bin"))
         .args(["--verifiers-dir", "../../contracts/ethereum/verifiers"])
         .arg("--pk-cache-dir")
@@ -61,9 +65,9 @@ fn a_warm_run_reports_the_slot_it_loaded() {
         stderr.contains("aggregator PK cache HIT"),
         "a warm run: {stderr}"
     );
-    let stem = std::fs::read_to_string(&report).expect("the slot is reported");
+    let reported = std::fs::read_to_string(&report).expect("the slot is reported");
+    assert_eq!(reported, stem, "the slot it loaded");
     let key = cache.join(format!("{stem}.pk"));
-    assert!(key.is_file(), "{stem} is the slot it loaded");
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(cache.join(format!("{stem}.meta.json"))).unwrap())
             .unwrap();

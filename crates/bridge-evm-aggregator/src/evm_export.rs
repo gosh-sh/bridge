@@ -25,7 +25,7 @@ use crate::{
         aggregate_inner, prove_inner, AggregatorConfig, K_INNER_SPIKE, LOOKUP_BITS_INNER_SPIKE,
         NUM_ACCUMULATOR_INSTANCES,
     },
-    aggregator_cache::{keygen_or_load, CachedKeygen},
+    aggregator_cache::{keygen_or_load, CachedKeygen, KeySource},
     eip170,
     multiply::build_multiply_circuit,
     srs_guard::assert_hermez_ceremony,
@@ -136,23 +136,75 @@ pub fn aggregate_and_prove(
     aggregate_and_prove_cached(base_name, inner_snark, config, artifacts_dir, None)
 }
 
-/// The error for an aggregated proof that does not verify against the key
-/// it was made with, naming the key's slot when it has one.
-fn self_check_failed(pk_cache_dir: Option<&Path>, slot: Option<&str>) -> anyhow::Error {
-    let (Some(dir), Some(stem)) = (pk_cache_dir, slot) else {
-        return anyhow::anyhow!(
-            "the aggregated proof does not verify against the aggregator key it was made with"
-        );
-    };
-    anyhow::anyhow!(
-        "the aggregated proof does not verify against the aggregator key it was made with, {}. A \
-         key damaged in place does this — the right length, wrong bytes, on a filesystem that \
-         acknowledged a sync it did not do: remove it and {} before retrying, and the next run \
-         generates both again. If this run generated that key itself, the inner snark is what is \
-         wrong.",
-        dir.join(format!("{stem}.pk")).display(),
-        dir.join(format!("{stem}.meta.json")).display(),
-    )
+/// Run `prove`, and turn a panic in it into `explain` of its message.
+fn proof_or<T>(
+    prove: impl FnOnce() -> T,
+    explain: impl FnOnce(&str) -> anyhow::Error,
+) -> anyhow::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(prove)).map_err(|panic| {
+        let text = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic with no message".to_string());
+        explain(&text)
+    })
+}
+
+/// What it means that making the aggregated proof panicked — the SDK checks
+/// every proof it makes against the key, and a failed check is
+/// `assertion failed: accept` — and what is done about it. The inner snark
+/// is not the cause: the aggregation circuit only carries its accumulator,
+/// and a wrong one is caught by the verifier's pairing, on chain.
+///
+/// - A key read from the pk cache is damaged in place (or the ceremony's points
+///   are): its slot is set aside, so that the next run generates it.
+/// - A key this run generated means its keygen and prover disagree — a bug or a
+///   hardware fault — and nothing in the cache is to blame.
+fn self_check_failed(
+    pk_cache_dir: Option<&Path>,
+    slot: Option<&str>,
+    source: KeySource,
+    panic: &str,
+) -> anyhow::Error {
+    let failed = format!(
+        "making the aggregated proof failed ({panic}); the SDK checks every proof it makes \
+         against the key it was made with"
+    );
+    match (pk_cache_dir, slot, source) {
+        (
+            Some(dir),
+            Some(stem),
+            KeySource::Loaded {
+                meta,
+            },
+        ) => {
+            let pk = dir.join(format!("{stem}.pk"));
+            let then = if crate::aggregator_cache::set_aside_loaded_slot(dir, stem, meta) {
+                format!(
+                    "Its slot is set aside as {stem}.meta.json.damaged: the next run that needs \
+                     it removes both files and generates the key again; removing {} and that file \
+                     now frees the key's space at once.",
+                    pk.display()
+                )
+            } else {
+                format!(
+                    "Remove {} and {} to have both generated again.",
+                    pk.display(),
+                    dir.join(format!("{stem}.meta.json")).display()
+                )
+            };
+            anyhow::anyhow!(
+                "{failed}. The key was read from the pk cache, and it is damaged in place — the \
+                 right length, wrong bytes — or the ceremony file's points are. {then}"
+            )
+        },
+        (_, _, KeySource::Generated) => anyhow::anyhow!(
+            "{failed}. This run generated the key itself, so its keygen and its prover disagree: \
+             a bug or a hardware fault, not a damaged cache."
+        ),
+        _ => anyhow::anyhow!("{failed}."),
+    }
 }
 
 /// Same as [`aggregate_and_prove`] but memoises the outer keygen bundle on
@@ -188,6 +240,7 @@ pub fn aggregate_and_prove_cached(
         calculated,
         num_instance,
         slot: pk_cache_slot,
+        source,
     } = keygen_or_load(&params_outer, base_name, config, &inner_snark, pk_cache_dir)?;
 
     let mut prover_circuit = AggregationCircuit::new::<SHPLONK>(
@@ -215,8 +268,8 @@ pub fn aggregate_and_prove_cached(
     // slot (esp. positions 12..NUM_ACCUMULATOR_INSTANCES+N_inner). When
     // BRIDGE_DIAG_INSTANCES_FILE is set, appends `base_name`, column count,
     // and every Fr in column 0 as BE hex (matches Solidity `_readInstance`).
-    // Env var (not env=1) because the daemon's SubprocessAggregator swallows
-    // subprocess stderr on success.
+    // A file of its own, not stderr: the callers forward stderr into their
+    // logs, and this dump would bury everything else there.
     if let Ok(diag_path) = std::env::var("BRIDGE_DIAG_INSTANCES_FILE") {
         use std::io::Write;
         let mut buf = String::new();
@@ -250,12 +303,12 @@ pub fn aggregate_and_prove_cached(
 
     // The SDK verifies the proof it makes against the key and panics when it
     // does not verify. A key from the pk cache that is wrong in place — the
-    // right length, bytes that still read — gets this far: said with the
-    // slot's files, not as a bare assertion.
-    let evm_proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone())
-    }))
-    .map_err(|_| self_check_failed(pk_cache_dir, pk_cache_slot.as_deref()))?;
+    // right length, bytes that still read — gets this far: said, and its
+    // slot set aside, rather than left as a bare assertion.
+    let evm_proof = proof_or(
+        || gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone()),
+        |panic| self_check_failed(pk_cache_dir, pk_cache_slot.as_deref(), source, panic),
+    )?;
 
     let verifier_source = gen_evm_verifier_sol_shplonk::<AggregationCircuit>(
         &params_outer,
@@ -317,16 +370,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_proof_that_does_not_verify_names_the_slot_its_key_came_from() {
-        let msg = self_check_failed(Some(Path::new("/c")), Some("S")).to_string();
+    fn a_panic_while_proving_is_an_error_with_its_message() {
+        let err = proof_or(
+            || -> Vec<u8> { panic!("assertion failed: accept") },
+            |panic| anyhow::anyhow!("explained: {panic}"),
+        )
+        .expect_err("the panic is caught");
+        assert_eq!(err.to_string(), "explained: assertion failed: accept");
+        assert_eq!(proof_or(|| 7, |_| unreachable!()).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_failed_self_check_on_a_loaded_key_sets_its_slot_aside() {
+        let dir = std::env::temp_dir().join(format!("self_check_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = dir.join("S.meta.json");
+        std::fs::write(dir.join("S.pk"), b"key").unwrap();
+        std::fs::write(&meta, b"{}").unwrap();
+        let read = {
+            use std::os::unix::fs::MetadataExt as _;
+            let md = std::fs::metadata(&meta).unwrap();
+            Some((md.dev(), md.ino()))
+        };
+        let msg = self_check_failed(
+            Some(&dir),
+            Some("S"),
+            KeySource::Loaded {
+                meta: read,
+            },
+            "assertion failed: accept",
+        )
+        .to_string();
         assert!(
-            msg.contains("/c/S.pk") && msg.contains("/c/S.meta.json") && msg.contains("remove"),
+            msg.contains("assertion failed: accept") && msg.contains("set aside"),
             "{msg}"
         );
-        let msg = self_check_failed(None, None).to_string();
+        assert!(!meta.exists() && dir.join("S.meta.json.damaged").exists());
+        let msg = self_check_failed(Some(&dir), Some("S"), KeySource::Generated, "x").to_string();
         assert!(
-            msg.contains("does not verify") && !msg.contains("remove"),
+            msg.contains("keygen and its prover disagree") && !msg.contains("emove"),
             "{msg}"
         );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

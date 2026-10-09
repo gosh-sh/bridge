@@ -1659,7 +1659,8 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
         let bin = bin_dir.join(AGGREGATE_BIN);
         let end = if fail {
-            "echo 'Error: the last word' >&2\nexit 1\n"
+            "echo 'Error: the last word' >&2\necho >&2\necho 'Caused by:' >&2\necho '    the \
+             cause' >&2\nexit 1\n"
         } else {
             "while [ \"$1\" != --out ]; do shift; done\nprintf calldata > \"$2\"\n"
         };
@@ -1814,6 +1815,11 @@ mod tests {
             log.contains("ERROR bridge_relayer_daemon::aggregator: aggregate-proof: Error:"),
             "{log}"
         );
+        assert!(
+            log.contains("ERROR bridge_relayer_daemon::aggregator: aggregate-proof: Caused by:"),
+            "the lines under the error are the error too: {log}"
+        );
+        assert!(err.contains("the cause"), "{err}");
     }
 
     #[test]

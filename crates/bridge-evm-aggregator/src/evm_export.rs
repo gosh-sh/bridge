@@ -136,6 +136,25 @@ pub fn aggregate_and_prove(
     aggregate_and_prove_cached(base_name, inner_snark, config, artifacts_dir, None)
 }
 
+/// The error for an aggregated proof that does not verify against the key
+/// it was made with, naming the key's slot when it has one.
+fn self_check_failed(pk_cache_dir: Option<&Path>, slot: Option<&str>) -> anyhow::Error {
+    let (Some(dir), Some(stem)) = (pk_cache_dir, slot) else {
+        return anyhow::anyhow!(
+            "the aggregated proof does not verify against the aggregator key it was made with"
+        );
+    };
+    anyhow::anyhow!(
+        "the aggregated proof does not verify against the aggregator key it was made with, {}. A \
+         key damaged in place does this — the right length, wrong bytes, on a filesystem that \
+         acknowledged a sync it did not do: remove it and {} before retrying, and the next run \
+         generates both again. If this run generated that key itself, the inner snark is what is \
+         wrong.",
+        dir.join(format!("{stem}.pk")).display(),
+        dir.join(format!("{stem}.meta.json")).display(),
+    )
+}
+
 /// Same as [`aggregate_and_prove`] but memoises the outer keygen bundle on
 /// disk when `pk_cache_dir` is `Some`. See
 /// [`crate::aggregator_cache::keygen_or_load`] for slot layout and cache-key
@@ -229,7 +248,14 @@ pub fn aggregate_and_prove_cached(
         }
     }
 
-    let evm_proof = gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone());
+    // The SDK verifies the proof it makes against the key and panics when it
+    // does not verify. A key from the pk cache that is wrong in place — the
+    // right length, bytes that still read — gets this far: said with the
+    // slot's files, not as a bare assertion.
+    let evm_proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone())
+    }))
+    .map_err(|_| self_check_failed(pk_cache_dir, pk_cache_slot.as_deref()))?;
 
     let verifier_source = gen_evm_verifier_sol_shplonk::<AggregationCircuit>(
         &params_outer,
@@ -284,4 +310,23 @@ pub fn prove_multiply_spike(params: &ParamsKZG<Bn256>, a: Fr, b: Fr) -> anyhow::
         build_multiply_circuit(false, K_INNER_SPIKE as usize, LOOKUP_BITS_INNER_SPIKE, a, b);
     let pk = gen_pk(params, &builder, None);
     Ok(gen_snark_shplonk(params, &pk, builder, None::<&Path>))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proof_that_does_not_verify_names_the_slot_its_key_came_from() {
+        let msg = self_check_failed(Some(Path::new("/c")), Some("S")).to_string();
+        assert!(
+            msg.contains("/c/S.pk") && msg.contains("/c/S.meta.json") && msg.contains("remove"),
+            "{msg}"
+        );
+        let msg = self_check_failed(None, None).to_string();
+        assert!(
+            msg.contains("does not verify") && !msg.contains("remove"),
+            "{msg}"
+        );
+    }
 }

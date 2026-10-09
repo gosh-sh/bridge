@@ -222,6 +222,9 @@ pub fn cache_stem(
     // 128 bits of the 256-bit digest keeps filenames short; a full collision
     // there is still infeasible and the byte-drift check in aggregate_proof
     // provides defence in depth.
+    // `v3` here and in the hash's domain tag: bump both whenever what a slot
+    // holds stops matching what this code builds — the outer circuit, its
+    // config, the files' format — so that no older slot is ever loaded.
     format!("{base_name}__v3__{}", hex::encode(&hash[..16]))
 }
 
@@ -387,10 +390,20 @@ fn clear_unpublished_slot(s: &SlotPaths) -> std::io::Result<()> {
     if s.pk.try_exists()? && !s.meta.try_exists()? {
         std::fs::remove_file(&s.pk)?;
     }
-    match std::fs::remove_file(damaged_meta_path(s)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+    // A set-aside meta is a few hundred bytes: one that cannot be removed —
+    // another user's, in a sticky directory — is no reason to stop.
+    let aside = damaged_meta_path(s);
+    if let Err(e) = std::fs::remove_file(&aside) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                target: "bridge_evm_aggregator::cache",
+                path = %aside.display(),
+                error = %e,
+                "could not remove a damaged slot's set-aside meta"
+            );
+        }
     }
+    Ok(())
 }
 
 /// Create `path` — never over an existing file — fill it through
@@ -492,9 +505,6 @@ impl std::fmt::Display for DamagedSlot {
 
 impl std::error::Error for DamagedSlot {}
 
-/// What to do about a key whose bytes are wrong.
-const REMOVE_THE_KEY: &str = "remove it and the .meta.json beside it to have both generated again";
-
 /// Whether a failed key read means the bytes are wrong — short, or not a
 /// key — rather than that they could not be read: a permission, an I/O
 /// error, after which removing the slot would throw a good key away.
@@ -536,7 +546,7 @@ fn read_slot_key<C: Circuit<Fr>>(
         if got != want {
             return Err(anyhow::Error::new(DamagedSlot(format!(
                 "cached aggregator key {} is damaged: {got} bytes, and its .meta.json records \
-                 {want}; {REMOVE_THE_KEY}",
+                 {want}",
                 path.display()
             ))));
         }
@@ -545,7 +555,7 @@ fn read_slot_key<C: Circuit<Fr>>(
     ProvingKey::read::<_, C>(&mut r, SerdeFormat::RawBytes, params).map_err(|e| {
         if damaged(&e) {
             anyhow::Error::new(e).context(DamagedSlot(format!(
-                "cached aggregator key {} is damaged; {REMOVE_THE_KEY}",
+                "cached aggregator key {} is damaged",
                 path.display()
             )))
         } else {
@@ -561,8 +571,7 @@ fn read_meta(path: &Path) -> anyhow::Result<CachedMeta> {
         std::fs::read(path).with_context(|| format!("read cache meta {}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|e| {
         anyhow::Error::new(e).context(DamagedSlot(format!(
-            "cache meta {} is damaged; remove it and the .pk beside it to have both generated \
-             again",
+            "cache meta {} is damaged",
             path.display()
         )))
     })
@@ -579,50 +588,95 @@ fn published(s: &SlotPaths) -> anyhow::Result<bool> {
 }
 
 /// Read a published slot's meta, then its key with the `params` the meta
-/// gives. A slot an older `aggregate-proof` published records no key
-/// length; once its key has read back whole, the length is added
-/// ([`record_key_length`]), so that the next preflight can check it. A slot
-/// found damaged is set aside ([`set_aside_damaged`]).
+/// gives. `held`: this process holds the keygen lock already. A slot an
+/// older `aggregate-proof` published records no key length; once its key
+/// has read back whole, the length is added ([`record_key_length`]), so
+/// that the next preflight can check it. A slot found damaged is set aside
+/// ([`set_aside_damaged`]), and the error says what is left to do.
 fn read_slot<C: Circuit<Fr>>(
     s: &SlotPaths,
+    held: bool,
     params: impl FnOnce(&CachedMeta) -> C::Params,
 ) -> anyhow::Result<(ProvingKey<G1Affine>, CachedMeta)> {
-    let set_aside = |e: anyhow::Error| {
-        if e.downcast_ref::<DamagedSlot>().is_some() {
-            set_aside_damaged(s);
+    // The meta as read: what is rewritten or set aside below has to be it.
+    let read = file_id(&s.meta);
+    let damaged = |e: anyhow::Error| {
+        if e.downcast_ref::<DamagedSlot>().is_none() {
+            e
+        } else if set_aside_damaged(s, held, read) {
+            e.context(format!(
+                "set aside as {}: the next run that needs this slot generates it again, and there \
+                 is nothing to remove",
+                damaged_meta_path(s).display()
+            ))
+        } else {
+            e.context(format!(
+                "remove {} and {} to have both generated again",
+                s.pk.display(),
+                s.meta.display()
+            ))
         }
-        e
     };
-    let mut meta = read_meta(&s.meta).map_err(set_aside)?;
-    let pk = read_slot_key::<C>(&s.pk, params(&meta), meta.pk_bytes).map_err(set_aside)?;
+    let mut meta = read_meta(&s.meta).map_err(damaged)?;
+    let pk = read_slot_key::<C>(&s.pk, params(&meta), meta.pk_bytes).map_err(damaged)?;
     if meta.pk_bytes.is_none() {
         if let Ok(md) = std::fs::metadata(&s.pk) {
             meta.pk_bytes = Some(md.len());
-            record_key_length(s, &meta);
+            record_key_length(s, &meta, held, read);
         }
     }
     Ok((pk, meta))
 }
 
+/// A file's device and inode: which file a path named when it was read.
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// The keygen lock for a write to a published slot, which only a holder of
+/// the lock makes: `Some(None)` when this process already holds it
+/// (`held`), `Some(Some(lock))` when it is taken now, without waiting, and
+/// `None` when another process holds it or it cannot be taken.
+fn write_lock(dir: &Path, held: bool) -> Option<Option<File>> {
+    if held {
+        return Some(None);
+    }
+    match try_lock_cache(dir) {
+        Ok(Some(lock)) => Some(Some(lock)),
+        _ => None,
+    }
+}
+
 /// Publish `meta` — the slot's own, with the key's length added — over the
-/// slot's meta, with the old one's permissions. Only under the keygen lock,
-/// taken without waiting, like every write to the cache: with a writer at
-/// work, a later run adds it. And only over a meta this user owns: a new
-/// file belongs to whoever writes it, and another user's meta rewritten by
-/// a container running as root could become unreadable to that user. Best
-/// effort; without it, preflight only cannot check the length.
-fn record_key_length(s: &SlotPaths, meta: &CachedMeta) {
+/// slot's meta (`read` is the one read), with the old one's permissions.
+/// Only under the keygen lock ([`write_lock`]): with another writer at
+/// work, a later run adds it. And only over a meta this user's uid and gid
+/// own: a new file belongs to whoever writes it, and another user's meta
+/// rewritten by a container running as root could become unreadable to that
+/// user. Best effort; without it, preflight only cannot check the length.
+fn record_key_length(s: &SlotPaths, meta: &CachedMeta, held: bool, read: Option<(u64, u64)>) {
     use std::os::unix::fs::MetadataExt as _;
 
+    let skip = |why: &str| {
+        tracing::info!(
+            target: "bridge_evm_aggregator::cache",
+            path = %s.meta.display(),
+            "not adding the key's length to the slot's meta: {why}"
+        );
+    };
     let Some(dir) = s.meta.parent() else {
         return;
     };
-    let Ok(Some(_lock)) = try_lock_cache(dir) else {
-        return;
+    let Some(_lock) = write_lock(dir, held) else {
+        return skip("another aggregate-proof holds the cache lock; a later run adds it");
     };
     let Ok(old) = std::fs::metadata(&s.meta) else {
         return;
     };
+    if read != Some((old.dev(), old.ino())) {
+        return skip("it changed since it was read");
+    }
     let partial = partial_path(&s.meta, &writer_tag());
     let recorded = serde_json::to_string_pretty(meta)
         .context("serialize cache meta")
@@ -630,8 +684,9 @@ fn record_key_length(s: &SlotPaths, meta: &CachedMeta) {
         .and_then(|()| {
             let mine = std::fs::metadata(&partial)
                 .with_context(|| format!("stat {}", partial.display()))?;
-            if mine.uid() != old.uid() {
+            if (mine.uid(), mine.gid()) != (old.uid(), old.gid()) {
                 remove_own(&partial);
+                skip("it belongs to another user or group");
                 return Ok(());
             }
             std::fs::set_permissions(&partial, old.permissions())
@@ -649,28 +704,35 @@ fn record_key_length(s: &SlotPaths, meta: &CachedMeta) {
     }
 }
 
-/// Rename a damaged slot's meta to `<stem>.meta.json`[`DAMAGED_SUFFIX`],
-/// under the keygen lock taken without waiting. The slot is unpublished
-/// then: a run that needs it generates it again, clearing both files, and
-/// `ackinacki-bridge`'s preflight refuses until then, naming them — instead
-/// of every `--allow-retry` passing preflight and failing here again after
-/// its capture and Circuit-4 proof. Best effort.
-fn set_aside_damaged(s: &SlotPaths) {
-    let Some(dir) = s.meta.parent() else {
-        return;
-    };
-    let Ok(Some(_lock)) = try_lock_cache(dir) else {
-        return;
-    };
-    let aside = damaged_meta_path(s);
-    let moved = std::fs::rename(&s.meta, &aside).and_then(|()| sync_dir(dir));
-    if let Err(e) = moved {
+/// Rename a damaged slot's meta — the one `read`, still there — to
+/// `<stem>.meta.json`[`DAMAGED_SUFFIX`], under the keygen lock
+/// ([`write_lock`]). The slot is unpublished then: the next run that needs
+/// it clears both files and generates it again, instead of every
+/// `--allow-retry` failing here after its capture and Circuit-4 proof.
+/// `false`: it stays published, with a warning.
+fn set_aside_damaged(s: &SlotPaths, held: bool, read: Option<(u64, u64)>) -> bool {
+    let left = |why: String| {
         tracing::warn!(
             target: "bridge_evm_aggregator::cache",
             path = %s.meta.display(),
-            error = %e,
-            "could not set the damaged slot's meta aside"
+            "the damaged slot stays published ({why}): remove {} and {}",
+            s.pk.display(),
+            s.meta.display()
         );
+        false
+    };
+    let Some(dir) = s.meta.parent() else {
+        return false;
+    };
+    let Some(_lock) = write_lock(dir, held) else {
+        return left("another aggregate-proof holds the cache lock".to_string());
+    };
+    if read.is_none() || file_id(&s.meta) != read {
+        return left("its meta changed since it was read".to_string());
+    }
+    match std::fs::rename(&s.meta, damaged_meta_path(s)).and_then(|()| sync_dir(dir)) {
+        Ok(()) => true,
+        Err(e) => left(format!("it could not be renamed: {e}")),
     }
 }
 
@@ -685,6 +747,7 @@ fn damaged_meta_path(s: &SlotPaths) -> PathBuf {
 fn load_slot(
     agg_params: &ParamsKZG<Bn256>,
     s: &SlotPaths,
+    held: bool,
     inner_snark: &Snark,
     universality: VerifierUniversality,
 ) -> anyhow::Result<CachedKeygen> {
@@ -693,7 +756,7 @@ fn load_slot(
     // `calculate_params` deliberately: both `num_instance` and
     // `break_points` are recovered from `meta` so re-deriving them here
     // would be pure overhead.
-    let (pk, meta) = read_slot::<AggregationCircuit>(s, |meta| {
+    let (pk, meta) = read_slot::<AggregationCircuit>(s, held, |meta| {
         AggregationCircuit::new::<SHPLONK>(
             CircuitBuilderStage::Keygen,
             meta.calculated.into(),
@@ -729,7 +792,7 @@ fn load_slot(
 fn load_or_generate<T>(
     dir: &Path,
     s: &SlotPaths,
-    load: impl FnOnce(&SlotPaths) -> anyhow::Result<T>,
+    load: impl FnOnce(&SlotPaths, bool) -> anyhow::Result<T>,
     generate: impl FnOnce(&Path) -> anyhow::Result<(T, String)>,
 ) -> anyhow::Result<T> {
     if published(s)? {
@@ -738,7 +801,7 @@ fn load_or_generate<T>(
         if let Ok(Some(_lock)) = try_lock_cache(dir) {
             sweep_and_report(dir);
         }
-        return load(s);
+        return load(s, false);
     }
 
     let keygen_lock = lock_cache(dir)?;
@@ -749,7 +812,7 @@ fn load_or_generate<T>(
     }
     // Published by another process while this one waited for the lock.
     if published(s)? {
-        return load(s);
+        return load(s, keygen_lock.is_some());
     }
     clear_unpublished_slot(s)
         .with_context(|| format!("clear unpublished cache slot {}", s.pk.display()))?;
@@ -827,7 +890,7 @@ pub fn keygen_or_load(
     load_or_generate(
         dir,
         &s,
-        |s| load_slot(agg_params, s, inner_snark, config.universality),
+        |s, held| load_slot(agg_params, s, held, inner_snark, config.universality),
         |key_partial| {
             let k = keygen(agg_params, &config, inner_snark);
             let meta_text = write_generated(key_partial, &k)?;
@@ -1159,7 +1222,7 @@ mod tests {
         let got = load_or_generate(
             &d,
             &s,
-            |s| Ok(std::fs::read(&s.pk)?),
+            |s, _| Ok(std::fs::read(&s.pk)?),
             |_| panic!("a published slot is not generated again"),
         )
         .unwrap();
@@ -1204,7 +1267,7 @@ mod tests {
             done.send(load_or_generate(
                 &dir,
                 &s,
-                |s| Ok(std::fs::read(&s.pk)?),
+                |s, _| Ok(std::fs::read(&s.pk)?),
                 |_| Ok((b"generated twice".to_vec(), "{}".to_string())),
             ))
         });
@@ -1227,7 +1290,7 @@ mod tests {
         let got = load_or_generate(
             &d,
             &s,
-            |_| panic!("nothing is published yet"),
+            |_, _| panic!("nothing is published yet"),
             |partial| {
                 assert!(
                     try_lock_cache(&d).unwrap().is_none(),
@@ -1269,7 +1332,7 @@ mod tests {
         let err = load_or_generate::<()>(
             &d,
             &s,
-            |_| panic!("nothing is published"),
+            |_, _| panic!("nothing is published"),
             |_| anyhow::bail!("keygen failed"),
         )
         .expect_err("the failure is the caller's");
@@ -1334,8 +1397,8 @@ mod tests {
         let err =
             read_slot_key::<AggregationCircuit>(&truncated, params, None).expect_err("not a key");
         assert!(
-            format!("{err:#}").contains(".meta.json"),
-            "says what to remove: {err:#}"
+            format!("{err:#}").contains("truncated.pk is damaged"),
+            "{err:#}"
         );
         std::fs::remove_dir_all(&d).ok();
     }
@@ -1363,7 +1426,7 @@ mod tests {
         load_or_generate::<()>(
             &d,
             &s,
-            |_| panic!("nothing is published"),
+            |_, _| panic!("nothing is published"),
             |partial| {
                 std::fs::write(partial, b"half a key")?;
                 anyhow::bail!("killed by a failure after the write")
@@ -1439,7 +1502,7 @@ mod tests {
         let err = read_slot_key::<BaseCircuitBuilder<Fr>>(&path, params.clone(), None)
             .expect_err("half a key is not a key");
         let msg = format!("{err:#}");
-        assert!(msg.contains("S.pk") && msg.contains(".meta.json"), "{msg}");
+        assert!(msg.contains("S.pk is damaged"), "{msg}");
         // A slot this version published records the length: refused before
         // the read, by sizes.
         let err = read_slot_key::<BaseCircuitBuilder<Fr>>(&path, params, Some(whole))
@@ -1447,8 +1510,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(
             msg.contains(&format!("{} bytes", whole / 2))
-                && msg.contains(&format!("records {whole}"))
-                && msg.contains(".meta.json"),
+                && msg.contains(&format!("records {whole}")),
             "{msg}"
         );
         std::fs::remove_dir_all(&d).ok();
@@ -1516,7 +1578,7 @@ mod tests {
             .unwrap()
             .set_len(len / 2)
             .unwrap();
-        let err = read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params)
+        let err = read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| params)
             .err()
             .expect("cut short");
         assert!(format!("{err:#}").contains("is damaged"), "{err:#}");
@@ -1535,6 +1597,55 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_is_set_aside_for_a_broken_meta_and_for_a_key_that_is_not_one() {
+        let (_, params) = small_key();
+        for (key, meta) in [
+            (&b"key"[..], &b"{\"break_po"[..]),
+            (&[0x02, 0x01][..], OLD_META),
+        ] {
+            let d = scratch("aside_kinds");
+            let s = slot_paths(&d, "S");
+            std::fs::write(&s.pk, key).unwrap();
+            std::fs::write(&s.meta, meta).unwrap();
+            let err = read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| params.clone())
+                .err()
+                .expect("damaged");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("set aside as") && msg.contains("nothing to remove"),
+                "{msg}"
+            );
+            assert!(!s.meta.exists() && damaged_meta_path(&s).exists());
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
+    #[test]
+    fn a_damaged_slot_another_writer_locks_stays_published_and_says_what_to_remove() {
+        let d = scratch("aside_busy");
+        let s = slot_paths(&d, "S");
+        std::fs::write(&s.pk, [0x02, 0x01]).unwrap();
+        std::fs::write(&s.meta, OLD_META).unwrap();
+        let writer = try_lock_cache(&d).unwrap().expect("free");
+        let err = read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| multiply_params_for_test())
+            .err()
+            .expect("damaged");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("remove") && msg.contains("S.meta.json"),
+            "{msg}"
+        );
+        assert!(s.meta.exists(), "a writer is at work: nothing is renamed");
+        // The process that holds the lock itself sets it aside.
+        read_slot::<BaseCircuitBuilder<Fr>>(&s, true, |_| multiply_params_for_test())
+            .err()
+            .expect("damaged");
+        assert!(!s.meta.exists(), "set aside under its own lock");
+        drop(writer);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn an_unreadable_key_is_not_set_aside() {
         // A permission is not damage: the slot stays published.
         use std::os::unix::fs::PermissionsExt;
@@ -1549,7 +1660,7 @@ mod tests {
         }
         let params = multiply_params_for_test();
         assert!(
-            read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params).is_err(),
+            read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| params).is_err(),
             "EACCES"
         );
         assert!(s.meta.exists(), "still published");
@@ -1570,11 +1681,12 @@ mod tests {
         let (pk, params) = small_key();
         write_key(&s.pk, &pk).unwrap();
         std::fs::write(&s.meta, OLD_META).unwrap();
-        std::fs::set_permissions(&s.meta, std::fs::Permissions::from_mode(0o640)).unwrap();
-        read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params).unwrap();
+        // Not a mode any umask leaves a new file with.
+        std::fs::set_permissions(&s.meta, std::fs::Permissions::from_mode(0o604)).unwrap();
+        read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| params).unwrap();
         let md = std::fs::metadata(&s.meta).unwrap();
         assert!(read_meta(&s.meta).unwrap().pk_bytes.is_some());
-        assert_eq!(md.permissions().mode() & 0o777, 0o640);
+        assert_eq!(md.permissions().mode() & 0o777, 0o604);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1588,7 +1700,7 @@ mod tests {
         let err = load_or_generate::<()>(
             &d,
             &s,
-            |_| anyhow::bail!("cached aggregator key is damaged"),
+            |_, _| anyhow::bail!("cached aggregator key is damaged"),
             |_| panic!("a published slot is not generated again"),
         )
         .expect_err("the load's error is the caller's");
@@ -1608,7 +1720,7 @@ mod tests {
         let (pk, params) = small_key();
         let len = write_key(&s.pk, &pk).unwrap();
         std::fs::write(&s.meta, OLD_META).unwrap();
-        let (_, meta) = read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params.clone()).unwrap();
+        let (_, meta) = read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| params.clone()).unwrap();
         assert_eq!(meta.pk_bytes, Some(len));
         assert_eq!(
             read_meta(&s.meta).unwrap().pk_bytes,
@@ -1624,7 +1736,7 @@ mod tests {
         // lock writes the cache.
         std::fs::write(&s.meta, OLD_META).unwrap();
         let writer = try_lock_cache(&d).unwrap().expect("free");
-        read_slot::<BaseCircuitBuilder<Fr>>(&s, |_| params).unwrap();
+        read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| params).unwrap();
         assert_eq!(read_meta(&s.meta).unwrap().pk_bytes, None);
         drop(writer);
         std::fs::remove_dir_all(&d).ok();
@@ -1673,19 +1785,20 @@ mod tests {
     }
 
     #[test]
-    fn a_damaged_meta_says_to_remove_both_files() {
+    fn a_damaged_meta_is_called_damaged() {
         let d = scratch("meta");
         let path = d.join("S.meta.json");
         std::fs::write(&path, b"{\"break_points\": [[1]], \"calcul").unwrap();
-        let msg = format!("{:#}", read_meta(&path).err().expect("cut short"));
+        let err = read_meta(&path).err().expect("cut short");
+        assert!(err.downcast_ref::<DamagedSlot>().is_some(), "{err:#}");
         assert!(
-            msg.contains("S.meta.json") && msg.contains("remove it and the .pk beside it"),
-            "{msg}"
+            format!("{err:#}").contains("S.meta.json is damaged"),
+            "{err:#}"
         );
         // Bytes that are not text are damaged the same way.
         std::fs::write(&path, [0xff, 0xfe, b'{']).unwrap();
-        let msg = format!("{:#}", read_meta(&path).err().expect("not UTF-8"));
-        assert!(msg.contains("remove it and the .pk beside it"), "{msg}");
+        let err = read_meta(&path).err().expect("not UTF-8");
+        assert!(err.downcast_ref::<DamagedSlot>().is_some(), "{err:#}");
         // One an older aggregate-proof wrote has no length, and is read.
         std::fs::write(
             &path,

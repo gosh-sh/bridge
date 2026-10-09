@@ -20,6 +20,25 @@ fn a_warm_run_reports_the_slot_it_loaded() {
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"));
     let snark = var("AGGREGATE_PROOF_E2E_SNARK");
     let cache = std::path::PathBuf::from(var("AGGREGATE_PROOF_E2E_CACHE"));
+    // Without the ceremony halo2 generates an unsafe SRS of its own, into
+    // this checkout; without a slot this is a full keygen into the cache.
+    let params = std::path::PathBuf::from(var("PARAMS_DIR"));
+    assert!(
+        params.join("kzg_bn254_21.srs").is_file(),
+        "PARAMS_DIR has no kzg_bn254_21.srs"
+    );
+    let has_slot = std::fs::read_dir(&cache)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .any(|n| {
+            n.starts_with("BridgeWithdrawalAggregatorVerifier__") && n.ends_with(".meta.json")
+        });
+    assert!(
+        has_slot,
+        "{} holds no published withdrawal slot",
+        cache.display()
+    );
     let dir = std::env::temp_dir().join(format!("agg_warm_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let report = dir.join("aggregator-slot");

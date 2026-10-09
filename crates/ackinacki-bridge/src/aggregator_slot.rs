@@ -38,6 +38,13 @@ pub(crate) fn report_path(snark_dir: &Path) -> PathBuf {
 /// (`CachedMeta` in `bridge-evm-aggregator/src/aggregator_cache.rs`).
 pub(crate) const META_KEY_LENGTH: &str = "pk_bytes";
 
+/// The fields every `.meta.json` the aggregator wrote has (`CachedMeta`).
+pub(crate) const META_FIELDS: [&str; 3] = ["break_points", "calculated", "num_instance"];
+
+/// Suffix the aggregator gives a slot's `.meta.json` when it finds the slot
+/// damaged, unpublishing it (`DAMAGED_SUFFIX` in `aggregator_cache.rs`).
+pub(crate) const DAMAGED_SUFFIX: &str = ".damaged";
+
 /// What a withdrawal proof runs with, as far as its aggregator slot depends
 /// on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,10 +81,20 @@ fn reported_slot(report: &Path) -> Option<String> {
     (stem.starts_with(SLOT_PREFIX) && !stem.contains('/')).then(|| stem.to_string())
 }
 
-/// Before a proof: remove what an earlier proof left at `report`, so that
-/// only this one's `aggregate-proof` can name a slot there. `false`: it
-/// could not be removed, and this proof must not trust what it finds.
-pub(crate) fn clear_report(report: &Path) -> bool {
+/// Before a proof, under the prove lock: where this proof's
+/// `aggregate-proof` reports its slot — [`report_path`], made absolute, for
+/// the aggregator runs in another directory — with what an earlier proof
+/// left there removed. `None`: no such path can be had, and this proof
+/// notes no slot.
+pub(crate) fn fresh_report(snark_dir: &Path) -> Option<PathBuf> {
+    let report = std::path::absolute(report_path(snark_dir)).ok()?;
+    clear_report(&report).then_some(report)
+}
+
+/// Remove what an earlier proof left at `report`, so that only this one's
+/// `aggregate-proof` can name a slot there. `false`: it could not be
+/// removed, and this proof must not trust what it finds.
+fn clear_report(report: &Path) -> bool {
     match std::fs::remove_file(report) {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
@@ -177,20 +194,35 @@ pub(crate) struct BadSlot {
     pub(crate) problem: SlotProblem,
 }
 
-/// The published withdrawal slots in `pk_cache_dir` stage 5 would fail on
-/// if its proof needed them, after the burn: one this user cannot read, one
-/// whose meta is not JSON, or whose key is not the length the meta records
-/// — a copy cut short, a filesystem that acknowledged a sync it did not do.
-/// A key of the right length with wrong bytes is not found here. Slots an
-/// older `aggregate-proof` published record no length until their key has
-/// read back once, and pass.
+/// The withdrawal slots in `pk_cache_dir` stage 5 would fail on if its
+/// proof needed them, after the burn: one this user cannot read; one whose
+/// meta is not one the aggregator wrote, or whose key is not the length the
+/// meta records — a copy cut short, a filesystem that acknowledged a sync
+/// it did not do; one an earlier aggregator found damaged and set aside. A
+/// key of the right length with wrong bytes is not found here. Slots an
+/// older `aggregate-proof` published record no length until a run that may
+/// rewrite their meta has read the key back, and pass.
 pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
     let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
         return Vec::new();
     };
-    let mut bad: Vec<BadSlot> = entries
+    let names: Vec<String> = entries
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    let set_aside = names.iter().filter_map(|name| {
+        let stem = name
+            .strip_suffix(DAMAGED_SUFFIX)?
+            .strip_suffix(".meta.json")?;
+        stem.starts_with(SLOT_PREFIX).then(|| BadSlot {
+            key: pk_cache_dir.join(format!("{stem}.pk")),
+            problem: SlotProblem::Damaged(format!(
+                "an earlier aggregate-proof found it damaged and renamed its .meta.json to {name}"
+            )),
+        })
+    });
+    let published = names
+        .iter()
         .filter_map(|name| {
             let stem = name.strip_suffix(".pk")?;
             (stem.starts_with(SLOT_PREFIX) && is_published(pk_cache_dir, stem))
@@ -204,8 +236,8 @@ pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
                 key,
                 problem,
             })
-        })
-        .collect();
+        });
+    let mut bad: Vec<BadSlot> = set_aside.chain(published).collect();
     bad.sort_by(|a, b| a.key.cmp(&b.key));
     bad
 }
@@ -229,6 +261,11 @@ fn slot_problem(key: &Path, meta: &Path) -> Option<SlotProblem> {
             "its .meta.json is not whole".to_string(),
         ));
     };
+    if let Some(missing) = META_FIELDS.iter().find(|f| meta.get(**f).is_none()) {
+        return Some(SlotProblem::Damaged(format!(
+            "its .meta.json has no {missing}"
+        )));
+    }
     let recorded = match meta.get(META_KEY_LENGTH) {
         None | Some(serde_json::Value::Null) => return None,
         Some(v) => match v.as_u64() {
@@ -254,6 +291,16 @@ mod tests {
 
     const SLOT: &str = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
 
+    /// A meta as an older `aggregate-proof` wrote it: no key length.
+    const META: &str = r#"{"break_points": [[1]], "calculated": {}, "num_instance": [24]}"#;
+
+    /// [`META`] with a key length.
+    fn meta_with_length(n: u64) -> String {
+        format!(
+            r#"{{"break_points": [[1]], "calculated": {{}}, "num_instance": [24], "{META_KEY_LENGTH}": {n}}}"#
+        )
+    }
+
     fn inputs() -> ProofInputs {
         ProofInputs {
             event_pk_sha256: "aa11".to_string(),
@@ -266,7 +313,7 @@ mod tests {
     fn cache() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(format!("{SLOT}.pk")), b"key").unwrap();
-        std::fs::write(dir.path().join(format!("{SLOT}.meta.json")), b"{}").unwrap();
+        std::fs::write(dir.path().join(format!("{SLOT}.meta.json")), META).unwrap();
         let snark = dir.path().join("snark");
         std::fs::create_dir(&snark).unwrap();
         let report = report_path(&snark);
@@ -392,9 +439,15 @@ mod tests {
                 problem: SlotProblem::Damaged(why.to_string()),
             }]
         };
-        std::fs::write(&meta, format!("{{\"{META_KEY_LENGTH}\": 3}}")).unwrap();
+        std::fs::write(&meta, meta_with_length(3)).unwrap();
         assert!(bad_slots(dir.path()).is_empty(), "3 bytes, as recorded");
-        std::fs::write(&meta, format!("{{\"{META_KEY_LENGTH}\": 6846416031}}")).unwrap();
+        std::fs::write(&meta, meta_with_length(4)).unwrap();
+        assert_eq!(
+            bad_slots(dir.path()),
+            damaged("3 bytes, and its .meta.json records 4"),
+            "longer than the key"
+        );
+        std::fs::write(&meta, meta_with_length(6846416031)).unwrap();
         assert_eq!(
             bad_slots(dir.path()),
             damaged("3 bytes, and its .meta.json records 6846416031")
@@ -410,10 +463,27 @@ mod tests {
             damaged("its .meta.json is not whole"),
             "not UTF-8"
         );
-        std::fs::write(&meta, b"{\"break_points\": []}").unwrap();
+        std::fs::write(&meta, b"{}").unwrap();
+        assert_eq!(
+            bad_slots(dir.path()),
+            damaged("its .meta.json has no break_points"),
+            "not one the aggregator wrote"
+        );
+        std::fs::write(&meta, META).unwrap();
         assert!(
             bad_slots(dir.path()).is_empty(),
             "an older aggregate-proof's slot records no length"
+        );
+        std::fs::rename(
+            &meta,
+            dir.path().join(format!("{SLOT}.meta.json{DAMAGED_SUFFIX}")),
+        )
+        .unwrap();
+        let bad = bad_slots(dir.path());
+        assert_eq!(bad.len(), 1, "set aside by an earlier run: {bad:?}");
+        assert!(
+            matches!(&bad[0].problem, SlotProblem::Damaged(why) if why.contains("found it damaged")),
+            "{bad:?}"
         );
     }
 
@@ -421,19 +491,37 @@ mod tests {
     fn a_slot_this_user_cannot_read_is_found_before_the_burn() {
         // A container that writes the shared cache with umask 077.
         use std::os::unix::fs::PermissionsExt;
-        let (dir, _) = cache();
-        let key = dir.path().join(format!("{SLOT}.pk"));
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
-        // Root opens anything: nothing to learn here then.
-        if std::fs::File::open(&key).is_ok() {
-            return;
+        for (file, said) in [
+            (format!("{SLOT}.pk"), "it cannot be read"),
+            (format!("{SLOT}.meta.json"), "its .meta.json cannot be read"),
+        ] {
+            let (dir, _) = cache();
+            let path = dir.path().join(&file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root opens anything: nothing to learn here then.
+            if std::fs::File::open(&path).is_ok() {
+                return;
+            }
+            let bad = bad_slots(dir.path());
+            assert_eq!(bad.len(), 1, "{file}");
+            assert!(
+                matches!(&bad[0].problem, SlotProblem::Unreadable(why) if why.contains(said)),
+                "{bad:?}"
+            );
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
-        let bad = bad_slots(dir.path());
-        assert_eq!(bad.len(), 1);
-        assert!(
-            matches!(&bad[0].problem, SlotProblem::Unreadable(why) if why.contains("cannot be read")),
-            "{bad:?}"
+    }
+
+    #[test]
+    fn a_relative_snark_dir_reports_to_an_absolute_path() {
+        // The aggregator runs in another directory.
+        let report = fresh_report(Path::new("shplonk-snark")).unwrap();
+        assert!(report.is_absolute(), "{}", report.display());
+        assert_eq!(
+            report,
+            std::env::current_dir()
+                .unwrap()
+                .join("shplonk-snark/aggregator-slot")
         );
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }

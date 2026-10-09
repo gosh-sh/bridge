@@ -1041,14 +1041,13 @@ pub async fn run(
     crate::preflight::recheck_aggregate_proof(
         prover_artifacts
             .as_ref()
-            .and_then(|a| a.aggregate_proof_sha256.as_deref()),
+            .map(|a| a.aggregate_proof_sha256.as_str()),
         &crate::preflight::aggregate_proof_bin(&plumbing_ref.aggregator_dir),
     )
     .map_err(|e| with_resume_note(e, &resume))?;
     // The aggregator names the slot its key is in, in the snark directory
     // this run holds the lock on; what an earlier proof left there goes.
-    let slot_report = crate::aggregator_slot::report_path(&args.snark_dir);
-    let slot_report = crate::aggregator_slot::clear_report(&slot_report).then_some(slot_report);
+    let slot_report = crate::aggregator_slot::fresh_report(&args.snark_dir);
     e2e_cfg.slot_report = slot_report.clone();
     let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
         .await
@@ -1059,10 +1058,10 @@ pub async fn run(
                 &resume,
             )
         })?;
-    drop(prove_lock);
     // So that the next withdrawal's preflight reserves no room for the
     // aggregator key this proof used — noted against what preflight
-    // verified, not against whatever is on disk by now.
+    // verified, not against whatever is on disk by now, and before the
+    // lock goes: the next proof in this snark directory clears the report.
     crate::aggregator_slot::note_proof(
         &crate::preflight::effective_pk_cache_dir(
             args.pk_cache_dir.as_deref(),
@@ -1074,6 +1073,7 @@ pub async fn run(
             .and_then(|a| a.proof_inputs(&plumbing_ref.params_dir))
             .as_ref(),
     );
+    drop(prove_lock);
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
     let pi_count = e2e.proof.public_instances_hex.len();
     info!(
@@ -3855,6 +3855,7 @@ mod tests {
         for wrapped in [
             "check_captured_event(",
             "recheck_proving_key(",
+            "recheck_aggregate_proof(",
             "prove_lock::take(",
         ] {
             let at = stages_4_and_5.find(wrapped).expect(wrapped);

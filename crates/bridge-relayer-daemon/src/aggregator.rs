@@ -382,7 +382,9 @@ struct Said {
 }
 
 impl Said {
-    fn push(&mut self, line: &str) {
+    /// Take `line` in, and say whether it belongs to an error: the
+    /// `Caused by:` lines under an `Error:` are as much the error as it is.
+    fn push(&mut self, line: &str) -> bool {
         if line.starts_with("Error: ") || line.contains("panicked at") {
             self.error.clear();
             self.collecting_error = true;
@@ -400,6 +402,7 @@ impl Said {
             self.tail.pop_front();
         }
         self.tail.push_back(line.to_string());
+        self.collecting_error
     }
 
     /// The lines a failure quotes: the error, or the tail without one.
@@ -426,9 +429,15 @@ fn level_of(line: &str) -> tracing::Level {
     }
 }
 
-/// Log a line the aggregator printed at [`level_of`] it.
-fn forward_line(line: &str) {
-    match level_of(line) {
+/// Log a line the aggregator printed at [`level_of`] it, or at `error`
+/// within an error it printed.
+fn forward_line(line: &str, in_error: bool) {
+    let level = if in_error {
+        tracing::Level::ERROR
+    } else {
+        level_of(line)
+    };
+    match level {
         tracing::Level::ERROR => tracing::error!("{AGGREGATE_BIN}: {line}"),
         tracing::Level::WARN => tracing::warn!("{AGGREGATE_BIN}: {line}"),
         tracing::Level::DEBUG => tracing::debug!("{AGGREGATE_BIN}: {line}"),
@@ -467,8 +476,8 @@ async fn forward_lines<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>, heard
             },
         }
         let line = String::from_utf8_lossy(&buf).trim_end().to_string();
-        forward_line(&line);
-        heard.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+        let in_error = heard.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+        forward_line(&line, in_error);
     }
 }
 
@@ -515,8 +524,14 @@ impl SubprocessAggregator {
         // relative path (a relative `--snark-dir`, the CLI's default) would
         // land there instead of where the caller reads it.
         if let Some(report) = config.slot_report.as_mut() {
-            if let Ok(abs) = std::path::absolute(&*report) {
-                *report = abs;
+            match std::path::absolute(&*report) {
+                Ok(abs) => *report = abs,
+                Err(e) => tracing::warn!(
+                    path = %report.display(),
+                    error = %e,
+                    "cannot make the slot-report path absolute; the aggregator resolves it in \
+                     its own directory",
+                ),
             }
         }
         if let Some(dir) = config.pk_cache_dir.as_mut() {
@@ -1799,6 +1814,16 @@ mod tests {
             log.contains("ERROR bridge_relayer_daemon::aggregator: aggregate-proof: Error:"),
             "{log}"
         );
+    }
+
+    #[test]
+    fn the_lines_under_an_error_belong_to_it() {
+        let mut said = Said::default();
+        assert!(!said.push(" INFO aggregate_proof: started"));
+        assert!(said.push("Error: aggregate + evm-proof"));
+        assert!(said.push("Caused by:"), "logged at error, not info");
+        assert!(said.push("    cached aggregator key /c/S.pk is damaged"));
+        assert!(!said.push("Stack backtrace:"));
     }
 
     #[test]

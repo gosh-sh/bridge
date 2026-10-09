@@ -19,7 +19,8 @@
 # What it puts on disk, skipping whatever is already there:
 #
 #   1. ackinacki-bridge   the CLI, ~50 MB
-#   2. aggregate-proof    the prover subprocess the CLI shells out to, ~7 MB
+#   2. aggregate-proof    the prover subprocess the CLI shells out to, ~7 MB;
+#                         one too old to take `--slot-report` counts as missing
 #   3. verifier files     the bytecode stage 1 compares with the chain, and the
 #                         source the proof is self-checked against, ~400 KB
 #   4. kzg_bn254_21.srs   the Hermez ceremony, ~257 MB
@@ -49,7 +50,7 @@ readonly SUMS="SHA256SUMS"
 # beside the old one, and one that also changes the Circuit-4 key reserves
 # 3 GiB more for that key (README, Step 0).
 readonly DISK_NEED_KB=$((12 * 1024 * 1024))
-readonly RAM_WARN_GB=48                      # Circuit 4 peaks around 40 GB
+readonly RAM_WARN_GB=24                      # a cold withdrawal peaked near 19 GB (README)
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 readonly SELF
@@ -199,7 +200,7 @@ if [ -r /proc/meminfo ]; then
   if [ "${total_gb:-0}" -ge "$RAM_WARN_GB" ]; then
     ok "${total_gb} GB RAM + swap"
   else
-    warn "${total_gb} GB RAM + swap; Circuit 4 peaks near 40 GB, and it runs AFTER the burn"
+    warn "${total_gb} GB RAM + swap; a withdrawal's proof peaked near 19 GB on the test host, and it runs AFTER the burn"
   fi
 fi
 

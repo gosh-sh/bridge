@@ -476,7 +476,10 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Move a finished, synced `partial` onto `final_path` in one step, and
-/// make the move durable.
+/// make the move durable. Once the rename has landed the file is published:
+/// a directory that cannot be synced after it — one this user may write and
+/// enter but not read, an I/O error — is a warning, not a failure that
+/// would throw away what was just published, again on every run.
 fn publish(partial: &Path, final_path: &Path) -> anyhow::Result<()> {
     std::fs::rename(partial, final_path).with_context(|| {
         format!(
@@ -486,7 +489,16 @@ fn publish(partial: &Path, final_path: &Path) -> anyhow::Result<()> {
         )
     })?;
     let dir = final_path.parent().unwrap_or(Path::new("."));
-    sync_dir(dir).with_context(|| format!("sync {}", dir.display()))
+    if let Err(e) = sync_dir(dir) {
+        tracing::warn!(
+            target: "bridge_evm_aggregator::cache",
+            dir = %dir.display(),
+            error = %e,
+            "could not sync the cache directory after publishing a slot file; it is published, \
+             but a crash of the host could still undo the rename"
+        );
+    }
+    Ok(())
 }
 
 /// Buffer size for a key's reads and writes, the SDK's own.
@@ -774,9 +786,12 @@ fn record_key_length(
 }
 
 /// Rename a damaged slot's meta — the one `read`, still there — to
-/// `<stem>.meta.json`[`DAMAGED_SUFFIX`], under the keygen lock
-/// ([`write_lock`]). The slot is unpublished then: the next run that needs
-/// it clears both files and generates it again, instead of every
+/// `<stem>.meta.json`[`DAMAGED_SUFFIX`], under the keygen lock: this
+/// process's (`held`), or one it waits for — the run is failing anyway, and
+/// a slot left published would be taken for a good one by the next
+/// preflight. On a filesystem without locks the identity check alone
+/// guards it. The slot is unpublished then: the next run that needs it
+/// clears both files and generates it again, instead of every
 /// `--allow-retry` failing here after its capture and Circuit-4 proof.
 /// `false`: it stays published, with a warning.
 fn set_aside_damaged(s: &SlotPaths, held: bool, read: Option<FileId>) -> bool {
@@ -793,9 +808,13 @@ fn set_aside_damaged(s: &SlotPaths, held: bool, read: Option<FileId>) -> bool {
     let Some(dir) = s.meta.parent() else {
         return false;
     };
-    let _lock = match write_lock(dir, held) {
-        Ok(lock) => lock,
-        Err(why) => return left(why.to_string()),
+    let _lock = if held {
+        None
+    } else {
+        match lock_cache(dir) {
+            Ok(lock) => lock,
+            Err(e) => return left(format!("{e:#}")),
+        }
     };
     if read.is_none() || file_id(&s.meta) != read {
         return left("its meta changed since it was read".to_string());
@@ -1731,28 +1750,70 @@ mod tests {
     }
 
     #[test]
-    fn a_damaged_slot_another_writer_locks_stays_published_and_says_what_to_remove() {
+    fn a_damaged_slot_is_set_aside_once_another_writer_lets_go_of_the_lock() {
+        // Left published, the next preflight could take it for a good one,
+        // and the next run would fail on it again, after its burn.
         let d = scratch("aside_busy");
         let s = slot_paths(&d, "S");
         std::fs::write(&s.pk, [0x02, 0x01]).unwrap();
         std::fs::write(&s.meta, OLD_META).unwrap();
         let writer = try_lock_cache(&d).unwrap().expect("free");
-        let err = read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| multiply_params_for_test())
-            .err()
-            .expect("damaged");
-        let msg = format!("{err:#}");
+        let dir = d.clone();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let s = slot_paths(&dir, "S");
+            let err =
+                read_slot::<BaseCircuitBuilder<Fr>>(&s, false, |_| multiply_params_for_test())
+                    .err()
+                    .expect("damaged");
+            done.send(format!("{err:#}")).unwrap();
+        });
+        blocked_on(&d.join(KEYGEN_LOCK));
         assert!(
-            msg.contains("remove") && msg.contains("S.meta.json"),
-            "{msg}"
+            s.meta.exists(),
+            "nothing is renamed while a writer is at work"
         );
-        assert!(s.meta.exists(), "a writer is at work: nothing is renamed");
-        // The process that holds the lock itself sets it aside.
-        read_slot::<BaseCircuitBuilder<Fr>>(&s, true, |_| multiply_params_for_test())
-            .err()
-            .expect("damaged");
-        assert!(!s.meta.exists(), "set aside under its own lock");
         drop(writer);
+        let msg = result
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the wait ends once the writer lets go");
+        assert!(msg.contains("set aside as"), "{msg}");
+        assert!(!s.meta.exists() && damaged_meta_path(&s).exists());
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_rename_its_directory_cannot_be_synced_after_still_publishes() {
+        // A cache directory this user may write and enter but not read:
+        // the rename lands, and only the sync after it fails. Failing the
+        // publish then threw away a whole keygen, again on every run.
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("nosync");
+        let cache = d.join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let partial = cache.join("S.pk.partial-1-0a1b2c3d");
+        std::fs::write(&partial, b"key").unwrap();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let published = publish(&partial, &cache.join("S.pk"));
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root reads anything: nothing to learn here then.
+        if is_root() {
+            std::fs::remove_dir_all(&d).ok();
+            return;
+        }
+        published.expect("renamed, if not synced");
+        assert!(cache.join("S.pk").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Whether this process runs as root, which ignores permissions.
+    fn is_root() -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        let probe = std::env::temp_dir().join(format!("root_probe_{}", std::process::id()));
+        std::fs::write(&probe, b"").unwrap();
+        let uid = std::fs::metadata(&probe).unwrap().uid();
+        std::fs::remove_file(&probe).ok();
+        uid == 0
     }
 
     #[test]

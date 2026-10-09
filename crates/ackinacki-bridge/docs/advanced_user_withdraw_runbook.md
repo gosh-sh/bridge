@@ -881,9 +881,12 @@ aggregate-proof exited with <status>: <its error, or its last 40 lines>
 failed to spawn aggregate-proof: <err>
 ```
 
-An `exited with` whose error says `the aggregated proof does not verify
-against the aggregator key it was made with` names a cached key damaged in
-place: remove the `.pk` and `.meta.json` it names before `--allow-retry`.
+An `exited with` whose error says `making the aggregated proof failed
+(assertion failed: accept)` and that `the key was read from the pk cache`
+means that key is damaged in place: its slot is set aside, and removing the
+`.pk` and the `.meta.json.damaged` it names frees their space before
+`--allow-retry`. If it says the run generated the key itself, the cache is
+not at fault.
 
 The CLI itself, right before the proof, refuses a binary that changed after
 preflight:
@@ -964,10 +967,13 @@ df -h ../bridge-prover-libraries/params/
   remove it by hand while no `aggregate-proof` is running. Free the space
   preflight asks for and re-run with `--allow-retry`. A published key that
   is not whole fails the aggregator with `cached aggregator key … is
-  damaged`, naming the `.pk` to remove together with the `.meta.json`
-  beside it; preflight refuses one with exit 2 when its `.meta.json`
-  records another length, and one this user cannot read with advice to fix
-  its permissions.
+  damaged`, and the aggregator sets its slot aside: the `.meta.json` becomes
+  `<stem>.meta.json.damaged`, and the next run that needs the slot removes
+  both files and generates the key again. Remove them by hand first to free
+  the key's ~6.85 GB: preflight reserves room for a new key and does not
+  count the set-aside one. Preflight refuses with exit 2 a key whose
+  `.meta.json` records another length or degree, and one this user cannot
+  read with advice to fix its permissions.
 
 ---
 

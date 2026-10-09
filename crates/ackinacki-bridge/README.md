@@ -771,7 +771,8 @@ Circuit-4 in-process prover or the `aggregate-proof` subprocess
 errored. Almost always local resource pressure (disk, RAM, corrupt
 PK cache) or cold-cache slowness beyond the default timeout. The
 aggregator's own log lines are in the CLI's log as they come, each starting
-`aggregate-proof:` and at the level it logged them with, and the refusal
+`aggregate-proof:` and at the level it logged them with — the lines of an
+error it prints at `error` — and the refusal
 quotes its error — or, without one, its last 40 lines — on a timeout too. A
 `RUST_LOG` of your own must let `bridge_relayer_daemon=info` through to show
 them; the aggregator itself is not given it and logs at its own default. An
@@ -783,23 +784,27 @@ but preflight measures first and counts it as used space: if it refuses
 for want of room, remove the file by hand while no `aggregate-proof` is
 running. The next run generates the key from scratch again, so retry with a
 larger `--prover-timeout-s`, not the same one. A cached key that is not
-whole fails with `cached aggregator key … is damaged`, naming the `.pk` to
-remove together with the `.meta.json` beside it — unless the aggregator has
-set the slot aside already (`<stem>.meta.json.damaged`), and then the next
-run that needs it clears both files and generates the key again; preflight
-names a set-aside slot with a warning, since its files hold space until
-then. Preflight refuses with exit 2, before the burn, a withdrawal slot
-whose `.meta.json` is not whole, is not one the aggregator wrote, or records
-another length for its key — a slot published before this version gets one
-once a run that can take the cache's lock, and owns the `.meta.json`, has
-read its key back — and one this user cannot read, which wants its
-permissions fixed rather than removed. Wrong bytes that are not field
-elements fail the aggregator the same way. A key of the right length whose
-wrong bytes are field elements reads, and the proof made with it fails the
-check the SDK runs on every proof it makes: `aggregate-proof` stops here
-with exit 12, naming the slot's `.pk` and `.meta.json` — remove both before
-`--allow-retry`, or the retry fails the same way. A wrong inner snark fails
-that check too, so this slot is not set aside on its own.
+whole fails with `cached aggregator key … is damaged`, and so does one of
+the right length whose wrong bytes still read: the SDK checks every proof it
+makes against the key, and `aggregate-proof` exits 1 — the CLI's exit 12 —
+saying the key read from the cache is damaged in place. Either way the
+aggregator sets the slot aside (`<stem>.meta.json.damaged`) and says so: the
+next run that needs it removes both files and generates the key again. Remove
+the `<stem>.pk` and the set-aside `.meta.json` by hand before
+`--allow-retry` to free its ~6.85 GB at once — preflight reserves room for
+the new key and cannot count the old one's, so a host sized for one key is
+refused for space until then; preflight names a set-aside slot with a
+warning, and refuses one whose `.pk` this user cannot remove. When another
+`aggregate-proof` holds the cache lock the slot stays published, and the
+error names the `.pk` and `.meta.json` to remove. Preflight refuses with
+exit 2, before the burn, a withdrawal slot whose `.meta.json` is not whole,
+is not one the aggregator wrote, or records another length — or another
+degree than its key's header gives — for its key (a slot published before
+this version gets a length once a run that can take the cache's lock, and
+owns the `.meta.json`, has read its key back), and one this user cannot read,
+which wants its permissions fixed rather than removed. A proof that fails
+that check with a key the run generated itself points at a keygen and prover
+that disagree — a bug or a hardware fault — not at the cache.
 
 A refusal that says `… is not the aggregate-proof preflight checked` means
 the binary was rebuilt or replaced after preflight, which stage 5 refuses

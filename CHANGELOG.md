@@ -26,13 +26,15 @@ assigns it when the release is tagged.
 
 - **`ackinacki-bridge withdraw` needs the `aggregate-proof` of its own
   release.** Stage 5 passes `aggregate-proof --slot-report`, which an older
-  build refuses, after the burn; preflight now refuses with exit 2 an
-  `aggregate-proof` whose `--help` does not name it, and one it cannot read
-  to hash. Upgrade the two together: on an install made by
-  `scripts/install.sh`, run it again — it now counts an `aggregate-proof`
-  without `--slot-report` as missing and replaces it from the latest release;
-  from a checkout, rebuild `aggregate-proof` (`cargo build --release --bin
-  aggregate-proof` in `crates/bridge-evm-aggregator`). Do not rebuild or
+  build refuses, after the burn; preflight now refuses an `aggregate-proof`
+  whose `--help` does not name it, and one it cannot read to hash — with
+  exit 2, or exit 10 on a run that resumes a recorded burn. Upgrade the two
+  together: on an install made by `scripts/install.sh`, download the script
+  again and run it — this one counts an `aggregate-proof` without
+  `--slot-report` as missing and replaces it from the latest release, while
+  an older copy calls it ok; from a checkout, rebuild `aggregate-proof`
+  (`cargo build --release --bin aggregate-proof` in
+  `crates/bridge-evm-aggregator`). Do not rebuild or
   replace it while a withdrawal is between preflight and its proof — the
   anchor wait at stage 4b can last up to 120 min, and the wait for the prove
   lock has no bound: stage 5 refuses with exit 12 an `aggregate-proof` that is
@@ -999,7 +1001,8 @@ assigns it when the release is tagged.
   lines into their own log as it comes, prefixed `aggregate-proof:` and at
   the level it was logged with — among them the pk cache's notices: waiting
   for another keygen, a filesystem without locks, leftovers removed, a slot
-  loaded or generated. They do not pass their own `RUST_LOG` on to it, and a
+  loaded or generated — and the lines of an error it prints, `Caused by:` and
+  all, at `error`. They do not pass their own `RUST_LOG` on to it, and a
   `RUST_LOG` of yours must let `bridge_relayer_daemon=info` through to show
   its lines — `RUST_LOG=ackinacki_bridge=info` alone, as the 0.2.0 notes
   suggest, hides them. A failed or timed-out run's error quotes its error
@@ -1016,22 +1019,30 @@ assigns it when the release is tagged.
   `.meta.json` now records the key's length (`pk_bytes`) — a slot published
   before gets it once a run that can take the cache's lock, and owns the
   `.meta.json`, has read its key back whole — and a key is read in
-  halo2's checked `RawBytes` format, which reads the same bytes: a key whose
-  length is not the recorded one, or that ends early, or a `.meta.json` that
-  is not whole, fails the run with `cached aggregator key … is damaged` (or
-  `cache meta … is damaged`) and the two files to remove, and one that cannot
-  be read for another reason — a permission — says so without telling anyone
-  to remove it. Wrong bytes that are not field elements fail the same way; a
-  key of the right length whose wrong bytes are field elements still reads,
-  and the proof made with it fails the check the SDK runs on every proof it
-  makes: `aggregate-proof` stops (exit 12 in `ackinacki-bridge withdraw`,
-  stage 5) naming the slot's two files, which have to be removed before
-  `--allow-retry`. Before, a key that could not be opened was regenerated
-  over the published name without the lock, and a truncated one panicked. A
-  slot found damaged has its `.meta.json` renamed to
-  `<stem>.meta.json.damaged`: it is unpublished then, the next keygen for it
-  clears both files, and `ackinacki-bridge withdraw` preflight names them
-  with a warning — they hold space until then. A process
+  halo2's checked `RawBytes` format, which reads the same bytes, after its
+  header's `k` is checked against the degree the `.meta.json` records. A
+  key whose length or `k` is not the recorded one, that ends early, or whose
+  wrong bytes are not field elements, or a `.meta.json` that is not whole,
+  fails the run with `cached aggregator key … is damaged` (or `cache meta …
+  is damaged`); one that cannot be read for another reason — a permission —
+  says so without telling anyone to remove it. A key of the right length
+  whose wrong bytes are field elements still reads, and the proof made with
+  it fails the check the SDK runs on every proof it makes: the run fails
+  saying the key read from the cache is damaged in place (with the panic's
+  own words). Either way the damaged slot is set aside: its `.meta.json` is
+  renamed to `<stem>.meta.json.damaged`, which unpublishes it, the next run
+  that needs it removes both files and generates the key again, and the
+  error says that removing them by hand frees the key's ~6.85 GB at once —
+  preflight reserves room for the new key and cannot count the old one's.
+  When another `aggregate-proof` holds the cache lock the slot stays
+  published, and the error names the two files to remove. A proof that fails
+  that check with a key the run generated itself is said to be a keygen and
+  prover that disagree — a bug or a hardware fault — not a damaged cache.
+  `ackinacki-bridge withdraw` preflight names a set-aside slot with a
+  warning, and refuses with exit 2 one whose `.pk` this user cannot remove,
+  since stage 5 has to. Before, a key that could not be opened was
+  regenerated over the published name without the lock, and a truncated one
+  panicked. A process
   generating a key holds `<pk-cache>/.keygen.lock`
   (`flock`) until the slot is published, so cold keygens on one cache run one
   at a time and a process that waited loads the slot its predecessor
@@ -1044,10 +1055,11 @@ assigns it when the release is tagged.
   stem of the slot it used to `<path>` once its calldata is written.
   `ackinacki-bridge withdraw` preflight names any partial file in the pk
   cache before it measures free space, and refuses with exit 2 a withdrawal
-  slot whose key is not the length its `.meta.json` records, whose
-  `.meta.json` is not whole or not one the aggregator wrote (a field missing
-  or of the wrong type), or that this user cannot read — the last with advice
-  to fix its permissions, not to remove it.
+  slot whose key is not the length its `.meta.json` records or whose header
+  does not give the degree it records, whose `.meta.json` is not whole or not
+  one the aggregator wrote (a field missing or of the wrong type), or that
+  this user cannot read — the last with advice to fix its permissions, not to
+  remove it.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,

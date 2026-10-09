@@ -774,8 +774,9 @@ ERROR subprocess_prover: timeout after 1800s
 2. Free disk on `params/` filesystem — if a prior run truncated the C4
    PK due to ENOSPC, remove the partial `.pk` and let the next run
    regenerate (adds ~5 min to that cycle).
-3. RAM headroom — a cold withdrawal proof peaked at ~19 GB on the test host
-   (Circuit 4 at 9.5 GB RSS, then aggregate-proof at 12.6 GB). If host swap-thrashes,
+3. RAM headroom — a cold `ackinacki-bridge withdraw` peaked at ~19 GB on the
+   test host (its own process, Circuit 4 in it, at 9.5 GB RSS, then
+   aggregate-proof at 12.6 GB). If host swap-thrashes,
    the 1800s timeout expires without progress.
 
 **Recovery.** After freeing resources:

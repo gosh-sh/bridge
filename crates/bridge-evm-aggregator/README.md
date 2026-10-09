@@ -31,7 +31,8 @@ regenerate both files of every pair.
 
 `aggregate-proof` logs to stderr, at `info` for this crate unless `RUST_LOG` says otherwise.
 `ackinacki-bridge withdraw` and the relayer do not pass their own `RUST_LOG` on to it: they forward
-each of its lines into their log, prefixed `aggregate-proof:`, at the level it starts with. With
+each of its lines into their log, prefixed `aggregate-proof:`, at the level it starts with — and
+the lines of an error it prints (`Error:`, `Caused by:`, a panic) at `error`. With
 `--pk-cache-dir`, the outer key is cached there (`aggregator_cache.rs` has the layout and the
 locking); `--slot-report <path>` then writes the stem of the slot the run used to `<path>` once the
 calldata is written — without `--pk-cache-dir` there is no slot, and nothing is written.

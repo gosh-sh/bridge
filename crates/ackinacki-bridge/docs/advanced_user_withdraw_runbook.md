@@ -969,10 +969,10 @@ df -h ../bridge-prover-libraries/params/
   remove it by hand while no `aggregate-proof` is running. Free the space
   preflight asks for and re-run with `--allow-retry`. A published key that
   is not whole fails the aggregator with `cached aggregator key … is
-  damaged`, and the aggregator sets its slot aside when it can take the
-  cache lock: the `.meta.json` becomes `<stem>.meta.json.damaged`, and the
-  next run that needs the slot removes both files and generates the key
-  again. Remove them by hand first to free the key's ~6.85 GB: preflight
+  damaged`, and the aggregator sets its slot aside — after any other
+  `aggregate-proof` holding the cache lock has finished: the `.meta.json`
+  becomes `<stem>.meta.json.damaged`, and the next run that needs the slot
+  removes both files and generates the key again. Remove them by hand first to free the key's ~6.85 GB: preflight
   reserves room for a new key and does not count the set-aside one.
   Preflight refuses — with exit 2, or exit 10 when it resumes a recorded
   burn, as `--allow-retry` does — a key whose `.meta.json` records another

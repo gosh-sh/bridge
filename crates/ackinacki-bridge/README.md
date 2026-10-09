@@ -797,10 +797,10 @@ needs it removes both files and generates the key again. Remove the
 `<stem>.pk` and the set-aside `.meta.json` by hand before `--allow-retry` to
 free its ~6.85 GB at once — preflight reserves room for the new key and
 cannot count the old one's, so a host sized for one key is refused for space
-until then. With another `aggregate-proof` holding the cache lock, on a
-filesystem without locks, or with the `.meta.json` replaced since it was
-read, the slot stays published, and the error names the `.pk` and
-`.meta.json` to remove. A key the run generated itself that fails the check
+until then. It waits for another `aggregate-proof` that holds the cache lock
+to finish first; with the `.meta.json` replaced since it was read, or a
+rename that fails, the slot stays published, and the error names the `.pk`
+and `.meta.json` to remove. A key the run generated itself that fails the check
 points at the ceremony file or at a keygen and prover that disagree — a bug
 or a hardware fault — and its slot is set aside too.
 

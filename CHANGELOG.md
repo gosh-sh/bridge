@@ -1035,31 +1035,31 @@ assigns it when the release is tagged.
   `<stem>.meta.json.damaged`, which unpublishes it, the next run that needs it
   removes both files and generates the key again, and the error says that
   removing them by hand frees the key's ~6.85 GB at once — preflight reserves
-  room for the new key and cannot count the old one's. With another
-  `aggregate-proof` holding the cache lock, on a filesystem without locks, or
-  with the `.meta.json` replaced since it was read, the slot stays published and
-  the error names the two files to remove. `ackinacki-bridge withdraw` preflight
-  names a set-aside slot with a warning, and, when the aggregator is to generate
-  its key, refuses — with exit 2, or exit 10 on a run that resumes a recorded
-  burn — a key without its `.meta.json` this user cannot remove, since stage 5
-  removes it first. Before, a key that could not be opened was regenerated over
-  the published name without the lock, and a truncated one panicked. A process
-  generating a key holds `<pk-cache>/.keygen.lock` (`flock`) until the slot is
-  published, so cold keygens on one cache run one at a time and a process that
-  waited loads the slot its predecessor published. Partial files are removed
-  only by a holder of that lock, so never one another process, on the host or in
-  a container sharing the cache, is still writing. A lock file another user
-  created is opened read-only. Only a filesystem without `flock` lets a keygen
-  run unlocked, and it then removes no partial file; any other failure to take
-  the lock fails the run. With `--pk-cache-dir`, `aggregate-proof --slot-report
-  <path>` writes the stem of the slot it used to `<path>` once its calldata is
-  written. `ackinacki-bridge withdraw` preflight names any partial file in the
-  pk cache before it measures free space, and refuses with exit 2 (exit 10 on a
-  resume) a withdrawal slot whose key is not the length its `.meta.json` records
-  or whose header is not a key's at the degree it records, whose `.meta.json` is
-  not whole or not one the aggregator wrote (a field missing or of the wrong
-  type), or that this user cannot read — the last with advice to fix its
-  permissions, not to remove it.
+  room for the new key and cannot count the old one's. It waits for another
+  `aggregate-proof` that holds the cache lock to finish first; with the
+  `.meta.json` replaced since it was read, or a rename that fails, the slot
+  stays published and the error names the two files to remove. `ackinacki-bridge
+  withdraw` preflight names a set-aside slot with a warning, and, when the
+  aggregator is to generate its key, refuses — with exit 2, or exit 10 on a run
+  that resumes a recorded burn — a key without its `.meta.json` this user cannot
+  remove, since stage 5 removes it first. Before, a key that could not be opened
+  was regenerated over the published name without the lock, and a truncated one
+  panicked. A process generating a key holds `<pk-cache>/.keygen.lock` (`flock`)
+  until the slot is published, so cold keygens on one cache run one at a time
+  and a process that waited loads the slot its predecessor published. Partial
+  files are removed only by a holder of that lock, so never one another process,
+  on the host or in a container sharing the cache, is still writing. A lock file
+  another user created is opened read-only. Only a filesystem without `flock`
+  lets a keygen run unlocked, and it then removes no partial file; any other
+  failure to take the lock fails the run. With `--pk-cache-dir`,
+  `aggregate-proof --slot-report <path>` writes the stem of the slot it used to
+  `<path>` once its calldata is written. `ackinacki-bridge withdraw` preflight
+  names any partial file in the pk cache before it measures free space, and
+  refuses with exit 2 (exit 10 on a resume) a withdrawal slot whose key is not
+  the length its `.meta.json` records or whose header is not a key's at the
+  degree it records, whose `.meta.json` is not whole or not one the aggregator
+  wrote (a field missing or of the wrong type), or that this user cannot read —
+  the last with advice to fix its permissions, not to remove it.
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,

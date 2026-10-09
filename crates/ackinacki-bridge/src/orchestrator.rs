@@ -1030,18 +1030,26 @@ pub async fn run(
     // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
     // unconditionally, and the refusal it produces is strictly better than
     // proving against an unvouched-for key and being rejected on submit.
-    crate::preflight::recheck_proving_key(
-        prover_artifacts
-            .as_ref()
-            .and_then(|a| a.pk_fingerprint.as_ref()),
-    )
-    .map_err(|e| with_resume_note(e, &resume))?;
+    //
+    // Preflight checked the prover artifacts on every run that proves — a
+    // dry run returned above — so their absence is an internal invariant
+    // broken, after the burn: exit 12, like the plumbing above.
+    let artifacts = prover_artifacts.as_ref().ok_or_else(|| {
+        proof_failed_after_burn(
+            format!(
+                "internal: preflight left no prover artifacts on a run that proves. The AN burn \
+                 {an_tx_hash} IS on the wire — reconcile it before re-running.",
+            ),
+            None,
+            &resume,
+        )
+    })?;
+    crate::preflight::recheck_proving_key(artifacts.pk_fingerprint.as_ref())
+        .map_err(|e| with_resume_note(e, &resume))?;
     // The aggregator too, which preflight probed and hashed: its digest is
     // what the slot it uses is noted against.
     crate::preflight::recheck_aggregate_proof(
-        prover_artifacts
-            .as_ref()
-            .map(|a| a.aggregate_proof_sha256.as_str()),
+        &artifacts.aggregate_proof_sha256,
         &crate::preflight::aggregate_proof_bin(&plumbing_ref.aggregator_dir),
     )
     .map_err(|e| with_resume_note(e, &resume))?;
@@ -1068,10 +1076,7 @@ pub async fn run(
             &plumbing_ref.params_dir,
         ),
         slot_report.as_deref(),
-        prover_artifacts
-            .as_ref()
-            .and_then(|a| a.proof_inputs(&plumbing_ref.params_dir))
-            .as_ref(),
+        artifacts.proof_inputs(&plumbing_ref.params_dir).as_ref(),
     );
     drop(prove_lock);
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;

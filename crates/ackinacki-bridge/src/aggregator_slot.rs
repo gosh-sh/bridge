@@ -41,6 +41,15 @@ pub(crate) const META_KEY_LENGTH: &str = "pk_bytes";
 /// The fields every `.meta.json` the aggregator wrote has (`CachedMeta`).
 pub(crate) const META_FIELDS: [&str; 3] = ["break_points", "calculated", "num_instance"];
 
+/// The fields of its `calculated` (`MirrorConfigParams` there).
+pub(crate) const META_CALCULATED_FIELDS: [&str; 5] = [
+    "degree",
+    "num_advice",
+    "num_lookup_advice",
+    "num_fixed",
+    "lookup_bits",
+];
+
 /// Suffix the aggregator gives a slot's `.meta.json` when it finds the slot
 /// damaged, unpublishing it (`DAMAGED_SUFFIX` in `aggregator_cache.rs`).
 pub(crate) const DAMAGED_SUFFIX: &str = ".damaged";
@@ -87,7 +96,17 @@ fn reported_slot(report: &Path) -> Option<String> {
 /// left there removed. `None`: no such path can be had, and this proof
 /// notes no slot.
 pub(crate) fn fresh_report(snark_dir: &Path) -> Option<PathBuf> {
-    let report = std::path::absolute(report_path(snark_dir)).ok()?;
+    let report = match std::path::absolute(report_path(snark_dir)) {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!(
+                snark_dir = %snark_dir.display(),
+                error = %e,
+                "cannot make the aggregator's slot report path absolute; this proof notes no slot",
+            );
+            return None;
+        },
+    };
     clear_report(&report).then_some(report)
 }
 
@@ -194,14 +213,14 @@ pub(crate) struct BadSlot {
     pub(crate) problem: SlotProblem,
 }
 
-/// The withdrawal slots in `pk_cache_dir` stage 5 would fail on if its
-/// proof needed them, after the burn: one this user cannot read; one whose
-/// meta is not one the aggregator wrote, or whose key is not the length the
-/// meta records — a copy cut short, a filesystem that acknowledged a sync
-/// it did not do; one an earlier aggregator found damaged and set aside. A
-/// key of the right length with wrong bytes is not found here. Slots an
-/// older `aggregate-proof` published record no length until a run that may
-/// rewrite their meta has read the key back, and pass.
+/// The published withdrawal slots in `pk_cache_dir` stage 5 would fail on
+/// if its proof needed them, after the burn: one this user cannot read; one
+/// whose meta is not one the aggregator wrote, or whose key is not the
+/// length the meta records — a copy cut short, a filesystem that
+/// acknowledged a sync it did not do. A key of the right length with wrong
+/// bytes is not found here. Slots an older `aggregate-proof` published
+/// record no length until a run that may rewrite their meta has read the
+/// key back, and pass.
 pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
     let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
         return Vec::new();
@@ -210,17 +229,6 @@ pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    let set_aside = names.iter().filter_map(|name| {
-        let stem = name
-            .strip_suffix(DAMAGED_SUFFIX)?
-            .strip_suffix(".meta.json")?;
-        stem.starts_with(SLOT_PREFIX).then(|| BadSlot {
-            key: pk_cache_dir.join(format!("{stem}.pk")),
-            problem: SlotProblem::Damaged(format!(
-                "an earlier aggregate-proof found it damaged and renamed its .meta.json to {name}"
-            )),
-        })
-    });
     let published = names
         .iter()
         .filter_map(|name| {
@@ -237,9 +245,62 @@ pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
                 problem,
             })
         });
-    let mut bad: Vec<BadSlot> = set_aside.chain(published).collect();
+    let mut bad: Vec<BadSlot> = published.collect();
     bad.sort_by(|a, b| a.key.cmp(&b.key));
     bad
+}
+
+/// What is wrong with the shape of a slot's meta, as the aggregator reads
+/// it: lists of whole numbers, and the five numbers of `calculated`.
+fn meta_shape_problem(meta: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+
+    let [break_points, calculated, num_instance] = META_FIELDS;
+    let numbers = |v: &Value| v.as_array().is_some_and(|a| a.iter().all(Value::is_u64));
+    if !meta
+        .get(break_points)
+        .and_then(Value::as_array)
+        .is_some_and(|rows| rows.iter().all(numbers))
+    {
+        return Some(format!("has no {break_points} list"));
+    }
+    if !meta.get(num_instance).is_some_and(numbers) {
+        return Some(format!("has no {num_instance} list"));
+    }
+    let Some(calculated) = meta.get(calculated).and_then(Value::as_object) else {
+        return Some(format!("has no {calculated} params"));
+    };
+    META_CALCULATED_FIELDS
+        .iter()
+        .find(|f| !calculated.get(**f).is_some_and(Value::is_u64))
+        .map(|f| format!("has no calculated.{f}"))
+}
+
+/// The slots an earlier aggregator found damaged and set aside: each one's
+/// `.pk` and its `.meta.json`[`DAMAGED_SUFFIX`]. Unpublished, so stage 5
+/// removes both before it generates the key again; until then they hold
+/// space.
+pub(crate) fn set_aside_slots(pk_cache_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
+        return Vec::new();
+    };
+    let mut aside: Vec<(PathBuf, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| {
+            let stem = name
+                .strip_suffix(DAMAGED_SUFFIX)?
+                .strip_suffix(".meta.json")?;
+            stem.starts_with(SLOT_PREFIX).then(|| {
+                (
+                    pk_cache_dir.join(format!("{stem}.pk")),
+                    pk_cache_dir.join(&name),
+                )
+            })
+        })
+        .collect();
+    aside.sort();
+    aside
 }
 
 /// What stage 5 would fail on in the slot of `key` and `meta`, if anything.
@@ -261,10 +322,8 @@ fn slot_problem(key: &Path, meta: &Path) -> Option<SlotProblem> {
             "its .meta.json is not whole".to_string(),
         ));
     };
-    if let Some(missing) = META_FIELDS.iter().find(|f| meta.get(**f).is_none()) {
-        return Some(SlotProblem::Damaged(format!(
-            "its .meta.json has no {missing}"
-        )));
+    if let Some(why) = meta_shape_problem(&meta) {
+        return Some(SlotProblem::Damaged(format!("its .meta.json {why}")));
     }
     let recorded = match meta.get(META_KEY_LENGTH) {
         None | Some(serde_json::Value::Null) => return None,
@@ -292,12 +351,13 @@ mod tests {
     const SLOT: &str = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
 
     /// A meta as an older `aggregate-proof` wrote it: no key length.
-    const META: &str = r#"{"break_points": [[1]], "calculated": {}, "num_instance": [24]}"#;
+    const META: &str = r#"{"break_points": [[1]], "calculated": {"degree": 21, "num_advice": 5, "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [24]}"#;
 
     /// [`META`] with a key length.
     fn meta_with_length(n: u64) -> String {
         format!(
-            r#"{{"break_points": [[1]], "calculated": {{}}, "num_instance": [24], "{META_KEY_LENGTH}": {n}}}"#
+            "{}, \"{META_KEY_LENGTH}\": {n}}}",
+            META.strip_suffix('}').unwrap()
         )
     }
 
@@ -445,7 +505,13 @@ mod tests {
         assert_eq!(
             bad_slots(dir.path()),
             damaged("3 bytes, and its .meta.json records 4"),
-            "longer than the key"
+            "a key shorter than recorded"
+        );
+        std::fs::write(&meta, meta_with_length(2)).unwrap();
+        assert_eq!(
+            bad_slots(dir.path()),
+            damaged("3 bytes, and its .meta.json records 2"),
+            "a key longer than recorded"
         );
         std::fs::write(&meta, meta_with_length(6846416031)).unwrap();
         assert_eq!(
@@ -463,28 +529,34 @@ mod tests {
             damaged("its .meta.json is not whole"),
             "not UTF-8"
         );
-        std::fs::write(&meta, b"{}").unwrap();
-        assert_eq!(
-            bad_slots(dir.path()),
-            damaged("its .meta.json has no break_points"),
-            "not one the aggregator wrote"
-        );
+        for (text, why) in [
+            ("{}", "its .meta.json has no break_points list"),
+            (
+                r#"{"break_points": [[1]], "calculated": {}, "num_instance": [24]}"#,
+                "its .meta.json has no calculated.degree",
+            ),
+            (
+                r#"{"break_points": [["1"]], "calculated": {}, "num_instance": [24]}"#,
+                "its .meta.json has no break_points list",
+            ),
+        ] {
+            std::fs::write(&meta, text).unwrap();
+            assert_eq!(bad_slots(dir.path()), damaged(why), "{text}");
+        }
         std::fs::write(&meta, META).unwrap();
         assert!(
             bad_slots(dir.path()).is_empty(),
             "an older aggregate-proof's slot records no length"
         );
-        std::fs::rename(
-            &meta,
-            dir.path().join(format!("{SLOT}.meta.json{DAMAGED_SUFFIX}")),
-        )
-        .unwrap();
-        let bad = bad_slots(dir.path());
-        assert_eq!(bad.len(), 1, "set aside by an earlier run: {bad:?}");
-        assert!(
-            matches!(&bad[0].problem, SlotProblem::Damaged(why) if why.contains("found it damaged")),
-            "{bad:?}"
-        );
+        // Set aside by an earlier run: unpublished, so stage 5 clears it
+        // and generates the key again — named, not refused.
+        let aside = dir.path().join(format!("{SLOT}.meta.json{DAMAGED_SUFFIX}"));
+        std::fs::rename(&meta, &aside).unwrap();
+        assert!(bad_slots(dir.path()).is_empty());
+        assert_eq!(set_aside_slots(dir.path()), vec![(
+            dir.path().join(format!("{SLOT}.pk")),
+            aside
+        )]);
     }
 
     #[test]

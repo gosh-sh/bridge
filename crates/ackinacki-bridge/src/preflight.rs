@@ -931,19 +931,9 @@ pub async fn check_prover_artifacts(
     // aggregator build; a run whose predecessor already left it needs no
     // room for it. Hashed once, here: stage 5 re-checks the binary against
     // this digest and notes the slot its proof used with it.
-    let bin = aggregate_proof_bin(&p.aggregator_dir);
     let artifacts = ProverArtifacts {
         pk_fingerprint: fingerprint,
-        aggregate_proof_sha256: bridge_prover_lib::keys::sha256_of(&bin).map_err(|e| {
-            CliError::Preflight {
-                reason: format!(
-                    "--aggregator-dir: cannot read {} to hash it: {e}. Stage 5 checks the binary \
-                     it runs against this digest.",
-                    bin.display()
-                ),
-                source: None,
-            }
-        })?,
+        aggregate_proof_sha256: hash_aggregate_proof(&aggregate_proof_bin(&p.aggregator_dir))?,
     };
     let aggregator_key = aggregator_key(&effective_pk_cache, artifacts.verified_inputs().as_ref());
     check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
@@ -954,6 +944,20 @@ pub async fn check_prover_artifacts(
     }
 
     Ok(artifacts)
+}
+
+/// The digest stage 5 checks `aggregate-proof` against. One this user can
+/// run but not read — mode 0711, say — is refused: there is nothing to
+/// check it against later.
+fn hash_aggregate_proof(bin: &Path) -> CliResult<String> {
+    bridge_prover_lib::keys::sha256_of(bin).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "--aggregator-dir: cannot read {} to hash it: {e}. Stage 5 checks the binary it runs \
+             against this digest. Make it readable for this user (chmod a+r).",
+            bin.display()
+        ),
+        source: None,
+    })
 }
 
 /// What preflight verified for stage 5.
@@ -998,16 +1002,13 @@ impl ProverArtifacts {
 
 /// Refuse if `aggregate-proof` is not the binary preflight hashed.
 ///
-/// Called right before the proof, after the burn and up to ~91 minutes of
-/// anchor wait: a binary replaced meanwhile was never probed, and the slot
-/// it names would be noted against the old one's digest. Exit 12; a re-run
-/// with `--allow-retry` checks the new one in its own preflight and resumes
-/// from the recorded burn.
-pub fn recheck_aggregate_proof(before: Option<&str>, bin: &Path) -> CliResult<()> {
-    let Some(before) = before else {
-        // No preflight artifacts: a dry run, which proves nothing.
-        return Ok(());
-    };
+/// Called right before the proof, after the burn, the anchor wait at stage
+/// 4b (up to 120 minutes) and any wait for the prove lock: a binary
+/// replaced meanwhile was never probed, and the slot it names would be noted
+/// against the old one's digest. Exit 12; a re-run with `--allow-retry`
+/// checks the new one in its own preflight and resumes from the recorded
+/// burn.
+pub fn recheck_aggregate_proof(before: &str, bin: &Path) -> CliResult<()> {
     match bridge_prover_lib::keys::sha256_of(bin) {
         Ok(now) if now == before => Ok(()),
         Ok(now) => Err(CliError::ProofFailed {
@@ -1071,8 +1072,8 @@ fn check_aggregator_keys(pk_cache_dir: &Path) -> CliResult<()> {
     let damaged = list(false);
     if !damaged.is_empty() {
         reasons.push(format!(
-            "a damaged aggregator key: {}. Remove each .pk named here and the .meta.json (or \
-             .meta.json.damaged) beside it; the next proof that needs the key generates it again.",
+            "a damaged aggregator key: {}. Remove each .pk named here and the .meta.json beside \
+             it; the next proof that needs the key generates it again.",
             damaged.join("; ")
         ));
     }
@@ -1513,10 +1514,10 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
         {
             Err(refuse(format!(
                 "--aggregator-dir {}: {} predates `--slot-report`, which stage 5 passes it, and \
-                 would refuse it after the burn. On an install from a release, run that release's \
-                 install.sh again: it brings this CLI and its aggregate-proof together. From a \
-                 checkout, rebuild it:\n\x20   cd {} && cargo build --release --bin \
-                 aggregate-proof",
+                 would refuse it after the burn. On an install made by scripts/install.sh, run it \
+                 again: it replaces an aggregate-proof without `--slot-report` with the latest \
+                 release's. From a checkout, rebuild it:\n\x20   cd {} && cargo build --release \
+                 --bin aggregate-proof",
                 aggregator_dir.display(),
                 release_bin.display(),
                 aggregator_dir.display(),
@@ -1764,6 +1765,20 @@ pub fn check_disk_headroom(
     // The aggregator's counterpart: a killed `aggregate-proof` leaves its
     // half-written key under a `.partial-` name. The next aggregator
     // run removes it, but this measurement comes first.
+    // A slot an aggregator found damaged and set aside: stage 5 removes
+    // both files before it generates the key again, but they hold their
+    // space until then.
+    for (key, aside) in crate::aggregator_slot::set_aside_slots(pk_cache_dir) {
+        tracing::warn!(
+            key = %key.display(),
+            meta = %aside.display(),
+            gb = std::fs::metadata(&key).map_or(0.0, |m| m.len() as f64 / 1e9),
+            "an aggregator key an earlier run found damaged and set aside. Stage 5 removes both \
+             files before it generates the key again; until then they hold space this run may \
+             need, and removing them by hand frees it now",
+        );
+    }
+
     for (path, bytes) in aggregator_partials(pk_cache_dir) {
         tracing::warn!(
             path = %path.display(),
@@ -4041,6 +4056,11 @@ pub(crate) mod tests {
         for field in crate::aggregator_slot::META_FIELDS {
             assert!(meta.contains(&format!("    {field}: ")), "{field}");
         }
+        let calculated = &aggregator[aggregator.find("struct MirrorConfigParams {").unwrap()..];
+        let calculated = &calculated[..calculated.find("\n}").unwrap()];
+        for field in crate::aggregator_slot::META_CALCULATED_FIELDS {
+            assert!(calculated.contains(&format!("    {field}: ")), "{field}");
+        }
     }
 
     #[test]
@@ -4082,19 +4102,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_aggregate_proof_this_user_cannot_read_is_refused_before_the_burn() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let bin = d.path().join("aggregate-proof");
+        std::fs::write(&bin, b"v1").unwrap();
+        hash_aggregate_proof(&bin).expect("readable");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o311)).unwrap();
+        // Root reads anything: nothing to learn here then.
+        if std::fs::File::open(&bin).is_ok() {
+            return;
+        }
+        let err = hash_aggregate_proof(&bin).expect_err("run but not read");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        assert!(format!("{err}").contains("chmod a+r"), "{err}");
+    }
+
+    #[test]
     fn a_replaced_aggregate_proof_is_refused_before_the_proof() {
         let d = tempfile::TempDir::new().unwrap();
         let bin = d.path().join("aggregate-proof");
         std::fs::write(&bin, b"v1").unwrap();
         let before = bridge_prover_lib::keys::sha256_of(&bin).unwrap();
-        recheck_aggregate_proof(Some(&before), &bin).expect("unchanged");
-        recheck_aggregate_proof(None, &bin).expect("nothing to compare with");
+        recheck_aggregate_proof(&before, &bin).expect("unchanged");
         std::fs::write(&bin, b"v2").unwrap();
-        let err = recheck_aggregate_proof(Some(&before), &bin).expect_err("replaced");
+        let err = recheck_aggregate_proof(&before, &bin).expect_err("replaced");
         assert_eq!(err.exit_code().as_i32(), 12, "after the burn: {err}");
         assert!(format!("{err}").contains("--allow-retry"), "{err}");
         std::fs::remove_file(&bin).unwrap();
-        let err = recheck_aggregate_proof(Some(&before), &bin).expect_err("gone");
+        let err = recheck_aggregate_proof(&before, &bin).expect_err("gone");
         assert_eq!(err.exit_code().as_i32(), 12, "{err}");
     }
 
@@ -4141,7 +4177,7 @@ pub(crate) mod tests {
         std::fs::write(d.path().join(format!("{slot}.pk")), b"half").unwrap();
         std::fs::write(
             d.path().join(format!("{slot}.meta.json")),
-            br#"{"break_points": [], "calculated": {}, "num_instance": [], "pk_bytes": 6846416031}"#,
+            br#"{"break_points": [], "calculated": {"degree": 21, "num_advice": 5, "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [], "pk_bytes": 6846416031}"#,
         )
         .unwrap();
         let err = check_aggregator_keys(d.path()).expect_err("4 bytes of 6846416031");
@@ -4243,6 +4279,12 @@ pub(crate) mod tests {
         let noted = orchestrator
             .find("aggregator_slot::note_proof(")
             .expect("a proof notes the slot it used");
+        let note = &orchestrator[noted..];
+        let note = &note[..note.find(");").unwrap()];
+        assert!(
+            note.contains("slot_report.as_deref()") && note.contains("proof_inputs("),
+            "noted with the report this proof cleared and the inputs it ran with: {note}"
+        );
         let released = orchestrator.find("drop(prove_lock);").unwrap();
         let reported = orchestrator
             .find("e2e_cfg.slot_report = slot_report.clone();")
@@ -5261,6 +5303,9 @@ pub(crate) mod tests {
         let err = check_aggregator_runnable(&dir.path().join("agg"))
             .await
             .expect_err("an aggregate-proof without --slot-report must be refused");
+        // install.sh asks the same question, or it would call this binary
+        // ok and leave it for preflight to refuse again.
+        assert!(include_str!("../scripts/install.sh").contains("grep -q -- '--slot-report'"));
         let msg = format!("{err}");
         assert_eq!(err.exit_code().as_i32(), 2, "{msg}");
         assert!(

@@ -127,7 +127,17 @@ can_run() {   # can_run <binary> <arg...>
 }
 
 have_cli()       { can_run "$CLI_BIN" --version; }
-have_agg()       { can_run "$AGG_BIN" --help; }
+# The CLI passes the aggregator `--slot-report`, and its preflight refuses an
+# aggregate-proof whose `--help` does not name it (preflight.rs). One that
+# runs but predates the flag counts as missing here, so the bundle replaces it
+# instead of this script calling it ok and preflight refusing it after.
+have_agg() {
+  can_run "$AGG_BIN" --help || return 1
+  if ! "$AGG_BIN" --help 2>&1 | grep -q -- '--slot-report'; then
+    LAST_RUN_ERROR="$AGG_BIN predates --slot-report, which this CLI passes it"
+    return 1
+  fi
+}
 have_verifiers() {
   [ -s "$WITHDRAW_VERIFIER" ] && [ -s "$WITHDRAW_VERIFIER_SOL" ] && [ -s "$WITHDRAW_VERIFIER_CALLDATA" ]
 }

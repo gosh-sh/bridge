@@ -3,7 +3,7 @@
 //! Calldata layout matches snark-verifier-sdk: `encode_calldata(instances,
 //! proof)`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use halo2_base::{
     gates::circuit::CircuitBuilderStage,
@@ -151,60 +151,80 @@ fn proof_or<T>(
     })
 }
 
+/// Where `gen_srs(k)` reads the ceremony from (halo2-base's
+/// `read_or_create_srs`).
+fn srs_path(k: u32) -> PathBuf {
+    PathBuf::from(std::env::var("PARAMS_DIR").unwrap_or_else(|_| "./params".to_string()))
+        .join(format!("kzg_bn254_{k}.srs"))
+}
+
 /// What it means that making the aggregated proof panicked — the SDK checks
 /// every proof it makes against the key, and a failed check is
 /// `assertion failed: accept` — and what is done about it. The inner snark
 /// is not the cause: the aggregation circuit only carries its accumulator,
-/// and a wrong one is caught by the verifier's pairing, on chain.
+/// and a wrong one is caught by the verifier's pairing, on chain. The
+/// ceremony `srs` may be — its loader checks its head, not its points.
 ///
-/// - A key read from the pk cache is damaged in place (or the ceremony's points
-///   are): its slot is set aside, so that the next run generates it.
-/// - A key this run generated means its keygen and prover disagree — a bug or a
-///   hardware fault — and nothing in the cache is to blame.
+/// - A key read from the pk cache is damaged in place, or the ceremony is: the
+///   slot is set aside, so that the next run generates the key.
+/// - A key this run generated means a damaged ceremony, or a keygen and prover
+///   that disagree — a bug or a hardware fault. It is published already, so its
+///   slot is set aside too: the next preflight would otherwise take it for a
+///   good one.
 fn self_check_failed(
     pk_cache_dir: Option<&Path>,
     slot: Option<&str>,
     source: KeySource,
+    srs: &Path,
     panic: &str,
 ) -> anyhow::Error {
     let failed = format!(
         "making the aggregated proof failed ({panic}); the SDK checks every proof it makes \
          against the key it was made with"
     );
-    match (pk_cache_dir, slot, source) {
-        (
-            Some(dir),
-            Some(stem),
-            KeySource::Loaded {
-                meta,
-            },
-        ) => {
-            let pk = dir.join(format!("{stem}.pk"));
-            let then = if crate::aggregator_cache::set_aside_loaded_slot(dir, stem, meta) {
-                format!(
-                    "Its slot is set aside as {stem}.meta.json.damaged: the next run that needs \
-                     it removes both files and generates the key again; removing {} and that file \
-                     now frees the key's space at once.",
-                    pk.display()
-                )
-            } else {
-                format!(
-                    "Remove {} and {} to have both generated again.",
-                    pk.display(),
-                    dir.join(format!("{stem}.meta.json")).display()
-                )
-            };
-            anyhow::anyhow!(
-                "{failed}. The key was read from the pk cache, and it is damaged in place — the \
-                 right length, wrong bytes — or the ceremony file's points are. {then}"
-            )
-        },
-        (_, _, KeySource::Generated) => anyhow::anyhow!(
-            "{failed}. This run generated the key itself, so its keygen and its prover disagree: \
-             a bug or a hardware fault, not a damaged cache."
+    let (why, meta) = match source {
+        KeySource::Loaded {
+            meta,
+        } => (
+            format!(
+                "The key was read from the pk cache: it is damaged in place — the right length, \
+                 wrong bytes — or the points of the ceremony file {} are.",
+                srs.display()
+            ),
+            meta,
         ),
-        _ => anyhow::anyhow!("{failed}."),
-    }
+        KeySource::Generated {
+            meta,
+        } => (
+            format!(
+                "This run generated the key itself: the ceremony file {} is damaged past the head \
+                 its loader checks — then every key made with it fails the same way, and it has \
+                 to be downloaded again — or keygen and prover disagree, a bug or a hardware \
+                 fault.",
+                srs.display()
+            ),
+            meta,
+        ),
+    };
+    let (Some(dir), Some(stem)) = (pk_cache_dir, slot) else {
+        return anyhow::anyhow!("{failed}. {why}");
+    };
+    let pk = dir.join(format!("{stem}.pk"));
+    let then = if crate::aggregator_cache::set_aside_slot(dir, stem, meta) {
+        format!(
+            "Its slot is set aside as {stem}.meta.json.damaged: the next run that needs it \
+             removes both files and generates the key again; removing {} and that file now frees \
+             the key's space at once.",
+            pk.display()
+        )
+    } else {
+        format!(
+            "Its slot could not be set aside: remove {} and {} to have both generated again.",
+            pk.display(),
+            dir.join(format!("{stem}.meta.json")).display()
+        )
+    };
+    anyhow::anyhow!("{failed}. {why} {then}")
 }
 
 /// Same as [`aggregate_and_prove`] but memoises the outer keygen bundle on
@@ -307,7 +327,15 @@ pub fn aggregate_and_prove_cached(
     // slot set aside, rather than left as a bare assertion.
     let evm_proof = proof_or(
         || gen_evm_proof_shplonk(&params_outer, &pk, prover_circuit, instances.clone()),
-        |panic| self_check_failed(pk_cache_dir, pk_cache_slot.as_deref(), source, panic),
+        |panic| {
+            self_check_failed(
+                pk_cache_dir,
+                pk_cache_slot.as_deref(),
+                source,
+                &srs_path(config.k_outer),
+                panic,
+            )
+        },
     )?;
 
     let verifier_source = gen_evm_verifier_sol_shplonk::<AggregationCircuit>(
@@ -380,37 +408,93 @@ mod tests {
         assert_eq!(proof_or(|| 7, |_| unreachable!()).unwrap(), 7);
     }
 
-    #[test]
-    fn a_failed_self_check_on_a_loaded_key_sets_its_slot_aside() {
-        let dir = std::env::temp_dir().join(format!("self_check_{}", std::process::id()));
+    /// A pk cache under the temp dir with slot `S`, and its meta's identity.
+    fn slot(tag: &str) -> (PathBuf, Option<(u64, u64)>) {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = std::env::temp_dir().join(format!("self_check_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let meta = dir.join("S.meta.json");
         std::fs::write(dir.join("S.pk"), b"key").unwrap();
-        std::fs::write(&meta, b"{}").unwrap();
-        let read = {
-            use std::os::unix::fs::MetadataExt as _;
-            let md = std::fs::metadata(&meta).unwrap();
-            Some((md.dev(), md.ino()))
-        };
+        std::fs::write(dir.join("S.meta.json"), b"{}").unwrap();
+        let md = std::fs::metadata(dir.join("S.meta.json")).unwrap();
+        (dir, Some((md.dev(), md.ino())))
+    }
+
+    #[test]
+    fn a_failed_self_check_sets_the_slot_aside_and_names_the_ceremony() {
+        let srs = Path::new("/params/kzg_bn254_21.srs");
+        for (source, why) in [
+            (
+                KeySource::Loaded {
+                    meta: None,
+                },
+                "read from the pk cache",
+            ),
+            (
+                KeySource::Generated {
+                    meta: None,
+                },
+                "This run generated the key itself",
+            ),
+        ] {
+            let (dir, read) = slot("aside");
+            let source = match source {
+                KeySource::Loaded {
+                    ..
+                } => KeySource::Loaded {
+                    meta: read,
+                },
+                KeySource::Generated {
+                    ..
+                } => KeySource::Generated {
+                    meta: read,
+                },
+            };
+            let msg = self_check_failed(
+                Some(&dir),
+                Some("S"),
+                source,
+                srs,
+                "assertion failed: accept",
+            )
+            .to_string();
+            assert!(
+                msg.contains("assertion failed: accept")
+                    && msg.contains(why)
+                    && msg.contains("/params/kzg_bn254_21.srs")
+                    && msg.contains("set aside as S.meta.json.damaged"),
+                "{msg}"
+            );
+            assert!(!dir.join("S.meta.json").exists(), "{why}: set aside");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_slot_that_cannot_be_set_aside_is_named_for_removal() {
+        // Its meta is not the one the run read: someone else's by now.
+        let (dir, _) = slot("not_aside");
         let msg = self_check_failed(
             Some(&dir),
             Some("S"),
             KeySource::Loaded {
-                meta: read,
+                meta: Some((0, 0)),
             },
-            "assertion failed: accept",
+            Path::new("/p/kzg_bn254_21.srs"),
+            "x",
         )
         .to_string();
-        assert!(
-            msg.contains("assertion failed: accept") && msg.contains("set aside"),
-            "{msg}"
-        );
-        assert!(!meta.exists() && dir.join("S.meta.json.damaged").exists());
-        let msg = self_check_failed(Some(&dir), Some("S"), KeySource::Generated, "x").to_string();
-        assert!(
-            msg.contains("keygen and its prover disagree") && !msg.contains("emove"),
-            "{msg}"
-        );
+        assert!(msg.contains("could not be set aside: remove"), "{msg}");
+        assert!(dir.join("S.meta.json").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_panic_with_a_formatted_message_keeps_it() {
+        let err = proof_or(
+            || -> u8 { panic!("{} {}", "formatted", 7) },
+            |panic| anyhow::anyhow!("{panic}"),
+        )
+        .expect_err("caught");
+        assert_eq!(err.to_string(), "formatted 7");
     }
 }

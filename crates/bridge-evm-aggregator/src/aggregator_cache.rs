@@ -525,9 +525,10 @@ fn damaged(e: &std::io::Error) -> bool {
 /// element below its modulus — costs one comparison per element, and read
 /// the real ~6.85 GB key no slower. It is not a check of the content: wrong
 /// bytes that are not field elements are refused as damage, but wrong bytes
-/// that are — and points off the curve — read, and the proof made with
-/// them fails verification on chain (`ackinacki-bridge` stops at its stage
-/// 6 dry run, exit 13); this process does not verify its own proofs. Not
+/// that are — and points off the curve — read. The proof made with such a
+/// key fails the check the SDK runs on every proof it makes, and
+/// `aggregate_and_prove_cached` says so, naming the slot's files; that slot
+/// is not set aside, for a wrong inner snark fails the same check. Not
 /// through `gen_pk(.., Some(path))` either: that runs a whole keygen when
 /// the file cannot be opened and writes the result over the published
 /// name, without the lock.

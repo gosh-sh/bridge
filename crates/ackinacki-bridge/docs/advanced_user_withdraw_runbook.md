@@ -879,12 +879,21 @@ aggregate-proof said last:
 aggregate-proof exited with <status>: <its error, or its last 40 lines>
    OR
 failed to spawn aggregate-proof: <err>
-   OR
+```
+
+An `exited with` whose error says `the aggregated proof does not verify
+against the aggregator key it was made with` names a cached key damaged in
+place: remove the `.pk` and `.meta.json` it names before `--allow-retry`.
+
+The CLI itself, right before the proof, refuses a binary that changed after
+preflight:
+
+```
 <aggregator-dir>/target/release/aggregate-proof is not the aggregate-proof preflight checked: …
 ```
 
-The last one means the binary changed after preflight: re-run with
-`--allow-retry`, and do not rebuild it while a withdrawal waits at stage 4b.
+Re-run with `--allow-retry`, and do not rebuild it while a withdrawal waits
+at stage 4b.
 
 In-process Circuit-4 failures surface a level up as
 `Circuit4ShplonkPipeline::prove failed` (no subprocess involved).
@@ -917,7 +926,8 @@ du -sh ../bridge-prover-libraries/params/   # ~9.5 GB withdraw-only after the fi
 # reserves the 7 GiB again, and 3 GiB more when it brings a new Circuit-4
 # key (README Step 0).
 df -h ../bridge-prover-libraries/params/
-# RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host
+# RAM headroom: a cold run peaked at ~19 GB on the test host (the CLI at 9.5 GB RSS in
+# Circuit 4, then aggregate-proof at 12.6 GB); install.sh warns below 24 GB with swap
 ```
 
 **Remediation:**

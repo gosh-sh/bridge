@@ -281,8 +281,10 @@ generates it again (a cold `aggregate-proof`, keygen included, took ~2 min
 on the test host).
 
 A `params/` shared with a bundle relayer needs more: it also stores the
-primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
-during Circuit 4 is ~40 GB.
+primary/fallback/layer proving keys a withdrawal never reads. A cold
+withdrawal peaked at ~19 GB of RAM on the test host, sampled every 5 s: the
+CLI at 9.5 GB RSS during Circuit 4, then `aggregate-proof` at 12.6 GB.
+`install.sh` warns below 24 GB of RAM and swap.
 
 **Do not wipe `params/` between runs** — keygen and the cold aggregator
 cache cost minutes each time.
@@ -782,16 +784,22 @@ for want of room, remove the file by hand while no `aggregate-proof` is
 running. The next run generates the key from scratch again, so retry with a
 larger `--prover-timeout-s`, not the same one. A cached key that is not
 whole fails with `cached aggregator key … is damaged`, naming the `.pk` to
-remove together with the `.meta.json` beside it. Preflight refuses with
-exit 2, before the burn, a withdrawal slot whose `.meta.json` is not whole
-or records another length for its key — a slot published before this
-version gets one once a run that can take the cache's lock, and owns the
-`.meta.json`, has read its key back — one the aggregator found damaged and
-set aside (`<stem>.meta.json.damaged`), and one this user cannot read, which
-wants its permissions fixed rather than removed. Wrong bytes that are not
-field elements fail the aggregator the same way; a key of the right length
-whose wrong bytes are field elements reads, and the proof made with it is
-refused by stage 6's dry run (exit 13).
+remove together with the `.meta.json` beside it — unless the aggregator has
+set the slot aside already (`<stem>.meta.json.damaged`), and then the next
+run that needs it clears both files and generates the key again; preflight
+names a set-aside slot with a warning, since its files hold space until
+then. Preflight refuses with exit 2, before the burn, a withdrawal slot
+whose `.meta.json` is not whole, is not one the aggregator wrote, or records
+another length for its key — a slot published before this version gets one
+once a run that can take the cache's lock, and owns the `.meta.json`, has
+read its key back — and one this user cannot read, which wants its
+permissions fixed rather than removed. Wrong bytes that are not field
+elements fail the aggregator the same way. A key of the right length whose
+wrong bytes are field elements reads, and the proof made with it fails the
+check the SDK runs on every proof it makes: `aggregate-proof` stops here
+with exit 12, naming the slot's `.pk` and `.meta.json` — remove both before
+`--allow-retry`, or the retry fails the same way. A wrong inner snark fails
+that check too, so this slot is not set aside on its own.
 
 A refusal that says `… is not the aggregate-proof preflight checked` means
 the binary was rebuilt or replaced after preflight, which stage 5 refuses
@@ -1602,7 +1610,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
-| Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
+| Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~19 GB with a cold key cache (sampled every 5 s) |
 | Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7.5 GB more, or ~10.7 GB with a new Circuit-4 key (Step 0) |
 | Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~8 min (8 min 12 s on the test host) |
 | Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~3 min (2 min 37 s and 2 min 41 s on the test host) |

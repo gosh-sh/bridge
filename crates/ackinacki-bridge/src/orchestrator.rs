@@ -977,6 +977,7 @@ pub async fn run(
         pk_cache_dir: args.pk_cache_dir.clone(),
         prover_out_dir: args.prover_out_dir.clone(),
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        slot_report: None,
         // The event's own block seq_no, not a constant.
         //
         // It is stamped into `event_{:06}_witness.json` and

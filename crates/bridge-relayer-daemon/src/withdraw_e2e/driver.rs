@@ -96,6 +96,9 @@ pub struct WithdrawE2EConfig {
     /// Aggregator subprocess timeout (Circuit-4 outer keygen+aggregate
     /// from cold PK can take minutes; default generously).
     pub prover_timeout: Duration,
+    /// Where `aggregate-proof` names the pk-cache slot it used
+    /// (`--slot-report`); `None` for no report.
+    pub slot_report: Option<PathBuf>,
     /// Seqno stamped into the summary + witness/proof filenames.
     pub prover_seq_no: u32,
     /// Replay-mode: skip the baseline snapshot and pick the youngest
@@ -423,6 +426,7 @@ fn aggregator_config(cfg: &WithdrawE2EConfig, pk_cache_dir: &Path) -> Subprocess
             .with_pk_cache_dir(pk_cache_dir);
     agg_cfg.timeout = cfg.prover_timeout;
     agg_cfg.timeout_flag = Some("--prover-timeout-s");
+    agg_cfg.slot_report = cfg.slot_report.clone();
     agg_cfg
 }
 
@@ -452,6 +456,7 @@ mod tests {
             pk_cache_dir: None,
             prover_out_dir: None,
             prover_timeout: super::Duration::from_secs(3600),
+            slot_report: Some(p("/snark/aggregator-slot")),
             prover_seq_no: 0,
             replay_latest: false,
         };
@@ -459,6 +464,7 @@ mod tests {
         assert_eq!(agg.timeout, cfg.prover_timeout);
         assert_eq!(agg.timeout_flag, Some("--prover-timeout-s"));
         assert_eq!(agg.pk_cache_dir, Some(p("/params/pk_cache")));
+        assert_eq!(agg.slot_report, cfg.slot_report);
     }
 
     #[test]

@@ -1967,6 +1967,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         pk_cache_dir: args.pk_cache_dir,
         prover_out_dir: args.prover_out_dir,
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        slot_report: None,
         prover_seq_no: args.prover_seq_no,
         replay_latest: args.replay_latest,
     };

@@ -4079,6 +4079,13 @@ pub(crate) mod tests {
             "pub const DAMAGED_SUFFIX: &str = \"{}\";",
             crate::aggregator_slot::DAMAGED_SUFFIX
         )));
+        let tag = crate::aggregator_slot::CURRENT_SLOT_PREFIX
+            .strip_prefix("BridgeWithdrawalAggregatorVerifier")
+            .unwrap();
+        assert!(
+            aggregator.contains(&format!("format!(\"{{base_name}}{tag}{{}}\"")),
+            "the slot format tag is {tag}"
+        );
         let meta = &aggregator[aggregator.find("struct CachedMeta {").unwrap()..];
         let meta = &meta[..meta.find("\n}").unwrap()];
         for field in crate::aggregator_slot::META_FIELDS {

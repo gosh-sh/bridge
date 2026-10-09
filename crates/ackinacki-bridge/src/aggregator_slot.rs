@@ -27,6 +27,11 @@ const MARKER_VERSION: u32 = 1;
 /// call, then `__v3__<hash>`).
 const SLOT_PREFIX: &str = "BridgeWithdrawalAggregatorVerifier__";
 
+/// Name prefix of a withdrawal slot this build's aggregator reads or writes:
+/// the format tag in `cache_stem` (`aggregator_cache.rs`). A slot of an
+/// older tag is never touched by stage 5.
+pub(crate) const CURRENT_SLOT_PREFIX: &str = "BridgeWithdrawalAggregatorVerifier__v3__";
+
 /// Where stage 5 has `aggregate-proof` name the slot it used: in the
 /// `--snark-dir`, which the prove lock keeps to one proof at a time — never
 /// in the pk cache, which other processes share and sweep.
@@ -221,6 +226,7 @@ pub(crate) struct BadSlot {
 /// meta records. A key of the right length and header with wrong bytes is
 /// not found here. Slots an older `aggregate-proof` published record no
 /// length until a run that may rewrite their meta has read the key back.
+/// Slots of an older format tag are never read, and are not looked at.
 pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
     let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
         return Vec::new();
@@ -233,7 +239,7 @@ pub(crate) fn bad_slots(pk_cache_dir: &Path) -> Vec<BadSlot> {
         .iter()
         .filter_map(|name| {
             let stem = name.strip_suffix(".pk")?;
-            (stem.starts_with(SLOT_PREFIX) && is_published(pk_cache_dir, stem))
+            (stem.starts_with(CURRENT_SLOT_PREFIX) && is_published(pk_cache_dir, stem))
                 .then(|| stem.to_string())
         })
         .filter_map(|stem| {
@@ -332,7 +338,7 @@ pub(crate) fn stuck_unpublished_keys(pk_cache_dir: &Path) -> Vec<PathBuf> {
         .filter_map(|name| {
             let stem = name.strip_suffix(".pk")?;
             let key = pk_cache_dir.join(&name);
-            (stem.starts_with(SLOT_PREFIX)
+            (stem.starts_with(CURRENT_SLOT_PREFIX)
                 && !pk_cache_dir.join(format!("{stem}.meta.json")).exists()
                 && !can_remove(&key))
             .then_some(key)
@@ -718,6 +724,28 @@ mod tests {
             cache.join(format!("{SLOT}.pk")),
             cache.join(format!("{orphan}.pk")),
         ]);
+    }
+
+    #[test]
+    fn slots_of_an_older_format_are_left_alone() {
+        // Stage 5 never reads nor removes a `__v2__` slot.
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, _) = cache();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let old = "BridgeWithdrawalAggregatorVerifier__v2__0123abcd";
+        std::fs::write(cache.join(format!("{old}.pk")), b"short").unwrap();
+        std::fs::write(cache.join(format!("{old}.meta.json")), meta_with_length(1)).unwrap();
+        let orphan = "BridgeWithdrawalAggregatorVerifier__v2__ffff";
+        std::fs::write(cache.join(format!("{orphan}.pk")), KEY).unwrap();
+        assert!(bad_slots(&cache).is_empty(), "a damaged old slot");
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let stuck = stuck_unpublished_keys(&cache);
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            stuck.is_empty(),
+            "an old orphan this user cannot remove: {stuck:?}"
+        );
     }
 
     #[test]

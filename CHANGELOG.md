@@ -32,6 +32,45 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **Anchors only ever move forward, and `submitAncestry` fills the span
+  between two of them.** `submitUpdate` refuses a finalized slot at or behind
+  the head (`ERR_STALE_UPDATE`, 244); the late-registration path that admitted
+  a proven checkpoint behind the head is gone, and with it the
+  `CheckpointBackfilled` event is no longer emitted. `submitAncestry` now takes
+  the headers oldest first and checks both ends: `headerRlps[0]` and the last
+  header must each hash to a block already in the proven set
+  (`ERR_UNKNOWN_CHECKPOINT`, 249), and only the headers between them are
+  anchored. The array holds 3 to 33 entries — two anchors and the 31 blocks of
+  an epoch.
+
+  Before, the walk started from one proven checkpoint and anchored that
+  block's *parents*, with the checkpoint's slot attached. Anyone could chain
+  the calls backwards: each run made 31 more hashes live, every one of them a
+  valid starting point for the next, and the one-year window never expired
+  them because they carried a fresh slot. History could be replayed in
+  indefinitely and the client's state grew with it. A chain in the old order,
+  or one whose far end is not an anchor, is now refused.
+
+  Callers have to be updated: headers oldest first, and the span must end on a
+  proven anchor.
+
+- **`EthBeaconLightClient` hashes execution headers with the TVM `KECCAK256`
+  instruction instead of the `EthKeccak` software implementation, and
+  `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
+  64.68M gas before and costs 4,722 now; a 32-header epoch walk measures
+  469,816 gas against the 10M per-transaction limit, where it used to
+  extrapolate to ~2.07G. On-chain epoch ancestry therefore works, and a
+  deposit in a non-checkpoint block no longer needs `setAcceptedBlockHash`
+  from the owner key.
+
+  This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
+  tvmlabs/tvm-sdk `05ff0848`) and a `sold` built against that SDK; against an
+  older node the light client throws on an unknown opcode. The light client's
+  code hash moves `314ac6b8…` → `e68f2381…`, so the bridge has to be given the
+  new code with `setLightClientCode` and the client redeployed; its ABI is
+  unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP reader, which
+  is now what the walk spends most of its gas on.
+
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the
@@ -42,6 +81,7 @@ assigns it when the release is tagged.
   an RPC without historical state skips the check with its error in a
   warning. `runtime.env.example` and the kit README document it together
   with the two optional scan knobs.
+
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
   `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,

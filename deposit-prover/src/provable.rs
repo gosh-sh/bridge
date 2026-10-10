@@ -3,8 +3,12 @@
 //! Without these checks an oversized receipt panics in
 //! `mock_fulfill_keccak_promises` and an oversized log fails only the
 //! local verify after a full prove, both indistinguishable from a passing
-//! failure. A caller that sees [`UNPROVABLE_EXIT_CODE`] must not retry:
-//! the same deposit gives the same answer every time.
+//! failure. The enclosing-transaction refusal lives in
+//! [`crate::mpt::reject_unprovable_enclosing_tx`] and is also raised from
+//! `fetch_deposit_data` (exit [`UNPROVABLE_EXIT_CODE`]), so a type 0/4 or
+//! oversized tx never reaches these checks as a retryable fetch failure.
+//! A caller that sees [`UNPROVABLE_EXIT_CODE`] must not retry: the same
+//! deposit gives the same answer every time.
 
 use std::{
     panic::{self, AssertUnwindSafe},

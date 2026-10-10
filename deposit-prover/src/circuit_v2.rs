@@ -86,9 +86,11 @@ pub const TX_PF_MAX_DEPTH: usize = 10;
 /// 2048 covers that and a modest ERC-4337 `handleOps`. Larger batches
 /// still cannot be proven.
 pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
-/// Max access-list payload bytes (type 1 field 7 / type 2 field 8), RLP
-/// header excluded. One address with one storage key is 56 B and fits 64;
-/// two keys did not. 512 B covers a short list.
+/// Max access-list payload bytes for type 2 (field 8), RLP header excluded.
+/// Type 1's access list sits at field 7, which axiom-eth merges with type-2
+/// calldata, so that field is capped at [`MAX_TX_CALLDATA_BYTE_LEN`] (2048),
+/// not this constant. One address with one storage key is 56 B and fits 64;
+/// two keys did not. 512 B covers a short type-2 list.
 pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
 /// axiom-eth `enable_types`: legacy / EIP-2930 / EIP-1559.
 /// Type 0 stays off — its RLP field 0 is the nonce, so extracting "chain_id"

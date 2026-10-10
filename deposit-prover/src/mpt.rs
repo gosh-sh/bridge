@@ -192,8 +192,10 @@ pub async fn generate_transaction_proof(
     let tx_bytes = target_tx_bytes.ok_or_else(|| anyhow!("target tx bytes missing"))?;
     // Reject unsupported types and oversized leaves early so MockProver / prove
     // fail with a clear error rather than an opaque RLP constraint failure
-    // (axiom-eth silently truncates `value` to `value_max_byte_len`).
-    reject_unprovable_enclosing_tx(&tx_bytes)?;
+    // (axiom-eth silently truncates `value` to `value_max_byte_len`). The
+    // `UnprovableEnclosingTx` source is what lets `fetch_deposit_data` exit 3
+    // instead of 1, so the relayer parks the deposit.
+    reject_unprovable_enclosing_tx(&tx_bytes).map_err(anyhow::Error::from)?;
 
     let key = get_tx_key_from_index(tx_index as usize);
     let proof = trie.get_proof(&key)?;
@@ -210,6 +212,21 @@ pub async fn generate_transaction_proof(
     })
 }
 
+/// An enclosing transaction the circuit cannot prove. Carried as the
+/// source of the `anyhow` from [`generate_transaction_proof`] so
+/// `fetch_deposit_data` can exit [`crate::provable::UNPROVABLE_EXIT_CODE`]
+/// instead of 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnprovableEnclosingTx(pub String);
+
+impl std::fmt::Display for UnprovableEnclosingTx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UnprovableEnclosingTx {}
+
 /// Refuse a deposit whose enclosing tx the circuit cannot prove.
 ///
 /// Type 0 (legacy) and type 4 (EIP-7702) are neither provable nor refundable
@@ -218,7 +235,9 @@ pub async fn generate_transaction_proof(
 /// list 2048 B, because that slot is merged with type-2 calldata). Checking
 /// only the total leaf length would let a 2300 B calldata / empty-AL type-2
 /// through and fail inside the circuit.
-pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
+pub fn reject_unprovable_enclosing_tx(
+    tx_bytes: &[u8],
+) -> std::result::Result<(), UnprovableEnclosingTx> {
     use axiom_eth::transaction::calc_max_val_len;
 
     use crate::{
@@ -228,12 +247,12 @@ pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
 
     let first = tx_bytes.first().copied();
     if first != Some(EIP1559_TX_TYPE) && first != Some(EIP2930_TX_TYPE) {
-        return Err(anyhow!(
+        return Err(UnprovableEnclosingTx(format!(
             "deposit enclosing tx must be EIP-2930 (type 0x01) or EIP-1559 (type 0x02); got first \
              byte {:#x}. Type 0 (legacy) and type 4 (EIP-7702) deposits are neither provable nor \
              refundable — resend as type 1 or 2.",
             first.unwrap_or(0)
-        ));
+        )));
     }
     let max_len = calc_max_val_len(
         MAX_TX_CALLDATA_BYTE_LEN,
@@ -241,37 +260,39 @@ pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
         ENABLE_TX_TYPES,
     );
     if tx_bytes.len() > max_len {
-        return Err(anyhow!(
+        return Err(UnprovableEnclosingTx(format!(
             "enclosing tx is {} bytes; circuit max leaf is {max_len}",
             tx_bytes.len()
-        ));
+        )));
     }
-    let (tx_type, items) = typed_tx_rlp_items(tx_bytes)?;
+    let (tx_type, items) = typed_tx_rlp_items(tx_bytes).map_err(|e| {
+        UnprovableEnclosingTx(format!("the enclosing tx is not well-formed RLP: {e:#}"))
+    })?;
     let (data_idx, al_idx, al_max) = if tx_type == EIP2930_TX_TYPE {
         // Type-1 access list is field 7, merged with type-2 calldata (2048).
         (6usize, 7usize, MAX_TX_CALLDATA_BYTE_LEN)
     } else {
         (7usize, 8usize, MAX_TX_ACCESS_LIST_LEN)
     };
-    let data = items
-        .get(data_idx)
-        .ok_or_else(|| anyhow!("typed tx is missing field {data_idx} (calldata)"))?;
+    let data = items.get(data_idx).ok_or_else(|| {
+        UnprovableEnclosingTx(format!("typed tx is missing field {data_idx} (calldata)"))
+    })?;
     if data.payload.len() > MAX_TX_CALLDATA_BYTE_LEN {
-        return Err(anyhow!(
+        return Err(UnprovableEnclosingTx(format!(
             "enclosing tx calldata is {} bytes; circuit max is {MAX_TX_CALLDATA_BYTE_LEN}",
             data.payload.len()
-        ));
+        )));
     }
-    let al = items
-        .get(al_idx)
-        .ok_or_else(|| anyhow!("typed tx is missing field {al_idx} (access list)"))?;
+    let al = items.get(al_idx).ok_or_else(|| {
+        UnprovableEnclosingTx(format!("typed tx is missing field {al_idx} (access list)"))
+    })?;
     // axiom-eth caps a field's payload, not its RLP header.
     if al.payload.len() > al_max {
-        return Err(anyhow!(
+        return Err(UnprovableEnclosingTx(format!(
             "enclosing tx type {tx_type:#04x} access list is {} bytes without its RLP header; \
              circuit max is {al_max}",
             al.payload.len()
-        ));
+        )));
     }
     Ok(())
 }
@@ -389,5 +410,18 @@ mod tests {
             let value = trie.get(&key).unwrap();
             assert!(value.is_some(), "Receipt {} not found", i);
         }
+    }
+
+    #[test]
+    fn enclosing_tx_refusal_downcasts_through_anyhow() {
+        // fetch_deposit_data matches this type on the anyhow chain. If the
+        // conversion ever becomes a string-only error, it exits 1 again and
+        // the relayer retries forever.
+        let err = reject_unprovable_enclosing_tx(&[0xf8]).unwrap_err();
+        let any = anyhow::Error::from(err);
+        assert!(
+            any.downcast_ref::<UnprovableEnclosingTx>().is_some(),
+            "{any:#}"
+        );
     }
 }

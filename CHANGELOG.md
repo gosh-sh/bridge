@@ -73,13 +73,16 @@ assigns it when the release is tagged.
   1.6.0, whose key its proofs do not match.
 
   The prover now refuses a deposit it cannot prove before loading
-  the SRS or the key: `export_blake2b_proof` and `export_vk_blob`
-  check the log count, every log's topics and data, the receipt
-  and header length, the MPT depths and the keccak budget, and
-  exit with code 3 and the reason. `deposit` ends such an
-  operation at exit 35 instead of a resumable 32;
-  `deposit-relayer` parks the deposit at once, whatever
-  `--skip-after-attempts` says, instead of retrying it forever.
+  the SRS or the key. `fetch_deposit_data` exits 3 when the
+  enclosing transaction is type 0 or 4, or its leaf, calldata or
+  access list is over the circuit's cap — that refusal used to be
+  exit 1, which the relayer retried forever. `export_blake2b_proof`
+  and `export_vk_blob` check the log count, every log's topics and
+  data, the receipt and header length, the MPT depths and the
+  keccak budget, and also exit 3. `deposit` ends such an operation
+  at exit 35 instead of a resumable 32; `deposit-relayer` parks
+  the deposit at once, whatever `--skip-after-attempts` says,
+  instead of retrying it forever.
 
   The tvm-sdk opcode fixtures and the acki-nacki copy of
   `deposit-prover/fixtures/deposit_10proofs` carry the old blob

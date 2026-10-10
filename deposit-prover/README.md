@@ -84,11 +84,16 @@ combined cap also applies to the enclosing transaction: a type-1 tx's calldata
 and access list may each be up to 2048 B, but together they must fit the
 ~2805 B leaf.
 
-`export_blake2b_proof` and `export_vk_blob` check all of this before loading
-the SRS or the key (`src/provable.rs`). A deposit the circuit cannot prove
-exits with code **3** and the reason on stderr; any other failure is a
-different code. Callers treat 3 as final: the `deposit` CLI ends at its exit
-35, and `deposit-relayer` parks the deposit at once instead of retrying.
+`fetch_deposit_data` exits **3** when the enclosing transaction is type 0
+or 4, or its leaf, calldata or access list is over the cap (that used to
+be exit 1, which the relayer retried). `export_blake2b_proof` and
+`export_vk_blob` then check the rest before loading the SRS or the key
+(`src/provable.rs`): log count, every log's topics and data, receipt and
+header length, MPT depths and the keccak budget. A deposit the circuit
+cannot prove exits with code **3** and the reason on stderr; any other
+failure is a different code. Callers treat 3 as final: the `deposit` CLI
+ends at its exit 35, and `deposit-relayer` parks the deposit at once
+instead of retrying.
 
 A type 0 (legacy) or type 4 (EIP-7702) deposit is neither provable nor
 refundable. Send again as type 1 or 2. EIP-155 `chainId = (v − 35) / 2` would

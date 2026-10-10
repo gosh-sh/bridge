@@ -303,8 +303,6 @@ fn start_retrying<T>(mut start: impl FnMut() -> std::io::Result<T>) -> std::io::
     }
 }
 
-/// Runs one tool to completion by `deadline`, handing it the prover lock
-/// `lock_fd`. `limit` is the whole attempt's budget, for the message.
 /// How a tool that ran to its end ended.
 #[derive(Debug, PartialEq, Eq)]
 enum Ran {
@@ -328,6 +326,8 @@ fn unprovable_reason(stderr: &[u8]) -> String {
         .to_string()
 }
 
+/// Runs one tool to completion by `deadline`, handing it the prover lock
+/// `lock_fd`. `limit` is the whole attempt's budget, for the message.
 async fn run(
     cmd: &mut Command,
     what: &str,

@@ -12,7 +12,9 @@
 use std::str::FromStr;
 
 use clap::Parser;
-use deposit_prover::ethereum_fetcher::EthereumFetcher;
+use deposit_prover::{
+    ethereum_fetcher::EthereumFetcher, mpt::UnprovableEnclosingTx, provable::UNPROVABLE_EXIT_CODE,
+};
 use ethers::types::{H160, H256};
 
 #[derive(Parser, Debug)]
@@ -61,7 +63,10 @@ fn parse_dapp_id(s: &str) -> anyhow::Result<[u8; 32]> {
     };
     let mut out = [0u8; 32];
     if bytes.len() != 32 {
-        anyhow::bail!("--dapp-id must be 32 bytes (64 hex chars), got {}", bytes.len());
+        anyhow::bail!(
+            "--dapp-id must be 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        );
     }
     out.copy_from_slice(&bytes);
     Ok(out)
@@ -97,9 +102,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Fetch deposit proof
     println!("Fetching deposit proof...");
-    let mut proof_input = fetcher
+    let mut proof_input = match fetcher
         .fetch_deposit_proof(tx_hash, contract, args.log_index)
-        .await?;
+        .await
+    {
+        Ok(input) => input,
+        Err(e) => {
+            // generate_transaction_proof refuses type 0/4, an oversized
+            // leaf, calldata or access list as UnprovableEnclosingTx. That
+            // must be exit 3 here: export_* never sees those witnesses, and
+            // the relayer only parks on 3. Exit 1 is retried forever.
+            if let Some(reason) = e.chain().find_map(|c| {
+                c.downcast_ref::<UnprovableEnclosingTx>()
+                    .map(|u| u.0.clone())
+            }) {
+                eprintln!("unprovable: {reason}");
+                std::process::exit(UNPROVABLE_EXIT_CODE);
+            }
+            return Err(e);
+        },
+    };
 
     // dappId is a config tag (not part of the event); set it from the CLI.
     proof_input.dapp_id = parse_dapp_id(&args.dapp_id)?;

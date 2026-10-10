@@ -40,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.5.0";
+    string constant version = "1.6.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -139,25 +139,20 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     bool _paused;
 
     // ZK verifying key (VkBlob) for the ETH-deposit circuit (12 public
-    // inputs, chainId at instance index 4). Keyed on the Hermez Perpetual
-    // Powers of Tau SRS (s_g2 = 928fafb3…). Regenerated from
-    // deposit-prover `export_deposit_proof_set` on this branch (DEP-04:
-    // type 1+2, 2048 B calldata, 2048 B per receipt log, keccak 128).
-    // Canonical fixture:
+    // inputs, chainId at instance index 4): type 1 and 2 enclosing
+    // transactions, 2048 B calldata, 2048 B per receipt log, keccak 128.
+    // Keyed on the Hermez Perpetual Powers of Tau SRS (s_g2 = 928fafb3…).
+    // Canonical fixture, regenerated with deposit-prover's
+    // `export_deposit_proof_set`:
     //   deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin
-    // Magic "VKBLOB\x00\x00" + version 2, shape "Rlc". Size and sha256
-    // below are rewritten by `scripts/embed_deposit_vk_blob.py` on each
-    // rotation — do not edit them by hand.
     // Magic "VKBLOB\x00\x00" + version 2, shape "Rlc". 13071 bytes;
     // sha256 = 4b75cd8351910eec5d9453d33cc3b5920dbe04f5016ef0118bbff23e1ff1b9d6.
-    // To rotate: regenerate the fixture above with deposit-prover's
-    // `export_vk_blob`, then rewrite the constant below with
+    // To rotate: regenerate the fixture above, then rewrite the constant
+    // below and the sha256 above with
     //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol
     // — never by hand; CI runs the same script with --check. The fixtures
     // under tests/exchange/fixtures follow the new blob.
     bytes constant VK_BLOB =
-        
-        
         hex"564b424c4f4200000200010000000000ed0000007b22726c63223a7b2262617365223a7b226b223a31382c226e756d5f6164766963655f7065725f70"
         hex"68617365223a5b34362c34345d2c226e756d5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f7065725f7068617365223a5b31"
         hex"2c312c305d2c226c6f6f6b75705f62697473223a382c226e756d5f696e7374616e63655f636f6c756d6e73223a317d2c226e756d5f726c635f636f6c"

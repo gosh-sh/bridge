@@ -31,8 +31,8 @@ at degree 18 for deposits — about 350 MB in total, most of it the ceremony.
 Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
 before it is written, and the deposit ceremony also against the Hermez
-[s]·G2. It wants ~8 GB free: withdrawal keys take ~6 GB, and the deposit
-prover writes a ~1.3 GB proving key on its first proof.
+[s]·G2. It wants ~10 GB free: withdrawal keys take ~6 GB, and the deposit
+prover writes a ~3.4 GB proving key on its first proof.
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it
@@ -184,7 +184,7 @@ Moves USDC from an EVM wallet to an Acki Nacki account, where it arrives as
 eccUSDC. Your wallet signs; the CLI never sees its key. One deposit should
 take **about 17 minutes** — an estimate from its parts, not a timed run —
 plus however long the bridge owner takes to anchor your block by hand; the
-proof itself takes under a minute.
+proof itself takes one to two minutes.
 
 **Once the deposit transaction is sent, the USDC is in the bridge.**
 Everything before it refuses instead of guessing. Everything after it can
@@ -204,7 +204,7 @@ be resumed, except the two outcomes only the bridge operator can settle
 - **The recipient**, the Acki Nacki account as `dapp_id::account_id`. If the
   account is deployed, the dapp must be the one it lives in; if it does not
   exist yet, the deposit creates it.
-- **About 5 GB of free memory** for the proof.
+- **About 10 GB of free memory** for the proof.
 
 ## 9. Set your values
 
@@ -281,7 +281,7 @@ echo "exit=$?"
 | 4 deposit request | **the USDC goes into the bridge** | a block after you confirm |
 | 5 EVM confirmation | 12 confirmations | ~2.5 min |
 | 6 block anchor | **the bridge owner anchors your block by hand** | **from ~13 min** |
-| 7 proof | on this machine | under a minute |
+| 7 proof | on this machine | 1–2 min |
 | 8 finalizeDeposit | a message to the Acki Nacki bridge; it pays the gas | seconds |
 | 9 credit | the eccUSDC reach the recipient, checked by the deposit's identity | seconds |
 
@@ -300,7 +300,7 @@ recipient's balance before and after.
 | 0 | credited | on Acki Nacki |
 | 2 | refused before the deposit was requested; an `approve` may have been sent | not moved |
 | 3 | another deposit is in the way; the message names it | untouched |
-| 20 | the wallet did not pair; you rejected the connection, the check or the deposit; or the check signature is not the account's own key | untouched |
+| 20 | the wallet did not pair; you rejected the connection, the check or the deposit; or it is a smart-contract account | untouched |
 | 21 | `approve` failed, was rejected, or did not show on chain (or could not be confirmed) in time, or the limit was lowered | untouched |
 | 22 | the deposit transaction reverted | not taken; gas spent |
 | 30 | the deposit transaction has not been found yet | maybe sent |
@@ -338,18 +338,18 @@ operation id.
 
 Refused before any transaction is sent (exit 20):
 
-- **An undeployed ERC-4337 account**, with WalletConnect: the check
-  signature is not made with the account's own key (ERC-6492). `--qr-mode
-  eip681` has no signature check; there that account is not caught, and a
-  deposit that does not fit the circuit ends at exit 35 with the USDC in
-  the bridge.
+- **Safe and other smart-contract accounts, and ERC-4337 accounts.** Their
+  transactions go through a contract or an EntryPoint, and the deposit
+  circuit cannot prove them. The CLI refuses an account that holds code, and,
+  with WalletConnect, one whose signature on the check message is not made
+  with the account's own key — which catches an ERC-4337 account that is not
+  deployed yet. `--qr-mode eip681` has no signature check: there an
+  undeployed ERC-4337 account is not caught, and its deposit ends at exit 35
+  with the USDC in the bridge. Deposit from a plain account.
 
 Accepted, with a warning:
 
-- **Safe and other smart-contract accounts**, and deployed ERC-4337
-  accounts. Send as type 1 or type 2, with at most 2048 bytes of calldata
-  and no receipt log over 2048 bytes of data (a two-signer SafeL2
-  MultiSend of `approve` + `deposit` is about 1152 B and fits).
-- **EIP-7702 accounts**, a plain account delegating to a contract. Send
-  the deposit as type 1 or type 2. A type-4 transaction cannot be proven:
-  the USDC would stay in the bridge (exit 35).
+- **EIP-7702 accounts**, a plain account delegating to a contract. **Turn off
+  gas sponsoring (a paymaster) and batched calls for this deposit.** A
+  sponsored or batched transaction goes through another contract and cannot
+  be proven: the USDC would stay in the bridge (exit 35).

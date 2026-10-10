@@ -28,27 +28,54 @@ assigns it when the release is tagged.
   transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
   calldata up to 2048 bytes. Type 2 access-list RLP is up to 512
   bytes; type 1's access list shares a field slot with type 2
-  calldata, so it may be up to 2048 bytes. Each receipt log may
-  carry up to 2048 bytes of data (at most 20 logs). That is what
-  lets a SafeL2 `SafeMultiSigTransaction` through, including a
-  two-signer MultiSend of `approve` + `deposit` (~1152 B of log
-  data). The keccak pin is 128 permutations (~17 KB of preimages):
-  a typical Safe or 4337 receipt fits; a receipt that fills all 20
-  logs does not, and proving then fails on the host. Type 0 and
+  calldata, so it may be up to 2048 bytes, but a type 1
+  transaction's calldata and access list together must fit its
+  ~2805-byte leaf. Each receipt log may carry up to 2048 bytes of
+  data, at most 20 logs. That is what lets a SafeL2
+  `SafeMultiSigTransaction` through, including a two-signer
+  MultiSend of `approve` + `deposit` (~1152 B of log data). The
+  keccak pin is 128 permutations (~17 KB of preimages, header and
+  both MPT paths included): a receipt of up to about 13.5 KB fits,
+  i.e. about six logs at 2048 bytes, fewer with a large type 1
+  transaction. A typical Safe or 4337 receipt fits. Type 0 and
   type 4 deposits are neither provable nor refundable: send again
   as type 1 or 2.
 
-  This commit embeds the new key in `eccUSDCBridge` and rebuilds
-  `0.80.0_compiled/exchange/eccUSDCBridge.tvc`. Operators: deploy
-  that tvc. On every relayer host, and anywhere `ackinacki-bridge
-  deposit` proves, rebuild the `deposit-prover` examples
-  (`cargo build --release --examples`) and do **not** pass
-  `--max-data-byte-len 256` — the default is now 2048 and is part
-  of the key. A leftover `--max-data-byte-len 256` produces proofs
-  the embedded key rejects. The relayer prefers
-  `target/release/examples/<name>` when the file exists and does
-  not check it matches the source. Cached `data/*.pk` is fine: the
-  fingerprint includes the new column counts and the new limits.
+  Proofs made for the previous key stop verifying. That includes a
+  `proof.bin` / `public_inputs.bin` that `ackinacki-bridge deposit`
+  left in its work directory (`--resume` reuses it, and the bridge
+  refuses it with 220, exit 33) and any `prove-one` bundle made
+  before the upgrade. Relayers must
+  finish or drain such deposits before the bridge is upgraded, or
+  prove them again after.
+
+  `eccUSDCBridge` embeds the new key and reports `version` 1.6.0;
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with
+  sold 0.80.0. Operators: deploy that tvc. On every relayer host
+  rebuild the `deposit-prover` examples (`cargo build --release
+  --examples`) and do **not** pass `--max-data-byte-len 256` — the
+  default is now 2048 and is part of the key. A leftover
+  `--max-data-byte-len 256` produces proofs the embedded key
+  rejects. The relayer prefers `target/release/examples/<name>`
+  when the file exists and does not check it matches the source.
+  Cached `data/*.pk` is fine: the fingerprint includes the new
+  column counts and the new limits. `ackinacki-bridge deposit`
+  installs get the prover tools from a release (`install.sh`), so
+  they need a new release; its CLI refuses a bridge older than
+  1.6.0, whose key its proofs do not match.
+
+  The prover now refuses a deposit it cannot prove before loading
+  the SRS or the key: `export_blake2b_proof` and `export_vk_blob`
+  check the log count, every log's topics and data, the receipt
+  and header length, the MPT depths and the keccak budget, and
+  exit with code 3 and the reason. `deposit` ends such an
+  operation at exit 35 instead of a resumable 32;
+  `deposit-relayer` parks the deposit at once, whatever
+  `--skip-after-attempts` says, instead of retrying it forever.
+
+  The tvm-sdk opcode fixtures and the acki-nacki copy of
+  `deposit-prover/fixtures/deposit_10proofs` carry the old blob
+  and must be refreshed from this repository's fixtures.
 
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
@@ -334,9 +361,9 @@ assigns it when the release is tagged.
     unchanged.
   - **Requirements.** `--state-dir` and the prover directory must be on a
     filesystem with `flock`: unlike `withdraw`, `deposit` refuses without it
-    (exit 2). The prover needs ~4.4 GB of RAM and ~1.3 GB of disk, the
-    proving key it writes on its first proof; a proof takes under a minute
-    on a 20-thread host. The RPC must serve every receipt and raw
+    (exit 2). The prover needs ~10 GB of RAM and ~3.4 GB of disk, the
+    proving key it writes on its first proof; a proof takes one to two
+    minutes on a 20-thread host. The RPC must serve every receipt and raw
     transaction of a block, and the `--gql-endpoint` host must serve
     GraphQL and `POST /v2/messages`.
   - **Refusals before any transaction:** Safe and other smart-contract
@@ -396,7 +423,7 @@ assigns it when the release is tagged.
   `BRIDGE_DEPOSIT_CONFIRMATIONS`. Over an installation from before
   deposits, it downloads the bundle again and appends those three keys to
   the existing profile, changing nothing else in it; `--check` reports such
-  a profile as missing them. It now wants ~8 GB free instead of ~6 GB.
+  a profile as missing them. It now wants ~10 GB free instead of ~6 GB.
 
 - **`deposit` draws its QR codes as images on terminals that can show them:**
   kitty graphics (kitty, Ghostty, Konsole from 22.04), iTerm2 inline images

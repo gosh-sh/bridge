@@ -22,6 +22,14 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Documentation
+
+- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
+  is part of replay protection, and that an upgrade changing it has to ship a
+  block cutoff in the same code so past deposits stop going through. The
+  current contracts need no such restriction — the voucher's code is installed
+  by the zerostate and `updateCode` is called with an empty `userCell`.
+
 ### Breaking Changes
 
 - **The deposit-prover verification key is rotated.** The enclosing

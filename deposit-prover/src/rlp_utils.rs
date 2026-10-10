@@ -358,46 +358,62 @@ fn rlp_item_at(bytes: &[u8]) -> Result<(usize, usize)> {
     if first <= 0x7f {
         return Ok((1, 0));
     }
-    if first <= 0xb7 {
-        let n = (first - 0x80) as usize;
-        if bytes.len() < 1 + n {
-            return Err(anyhow!("truncated RLP string"));
-        }
-        return Ok((1 + n, 1));
+    let (header, n) = match first {
+        0x80..=0xb7 => (1, (first - 0x80) as usize),
+        0xc0..=0xf7 => (1, (first - 0xc0) as usize),
+        _ => {
+            let len_len = if first <= 0xbf {
+                first - 0xb7
+            } else {
+                first - 0xf7
+            } as usize;
+            let len_bytes = bytes
+                .get(1..1 + len_len)
+                .ok_or_else(|| anyhow!("truncated RLP length header"))?;
+            if len_len > std::mem::size_of::<usize>() {
+                return Err(anyhow!("RLP length of {len_len} bytes does not fit"));
+            }
+            let n = len_bytes
+                .iter()
+                .fold(0usize, |acc, b| (acc << 8) | *b as usize);
+            (1 + len_len, n)
+        },
+    };
+    match header.checked_add(n) {
+        Some(span) if span <= bytes.len() => Ok((span, header)),
+        _ => Err(anyhow!("truncated RLP item")),
     }
-    if first <= 0xbf {
-        let len_len = (first - 0xb7) as usize;
-        if bytes.len() < 1 + len_len {
-            return Err(anyhow!("truncated RLP long-string header"));
-        }
-        let mut n = 0usize;
-        for b in &bytes[1..1 + len_len] {
-            n = (n << 8) | *b as usize;
-        }
-        if bytes.len() < 1 + len_len + n {
-            return Err(anyhow!("truncated RLP long string"));
-        }
-        return Ok((1 + len_len + n, 1 + len_len));
+}
+
+/// The items of `body`, the payload of an RLP list.
+fn rlp_items(body: &[u8]) -> Result<Vec<RlpItem<'_>>> {
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let (span_len, payload_off) = rlp_item_at(&body[i..])?;
+        let span = &body[i..i + span_len];
+        items.push(RlpItem {
+            span,
+            payload: &span[payload_off..],
+        });
+        i += span_len;
     }
-    if first <= 0xf7 {
-        let n = (first - 0xc0) as usize;
-        if bytes.len() < 1 + n {
-            return Err(anyhow!("truncated RLP list"));
-        }
-        return Ok((1 + n, 1));
+    Ok(items)
+}
+
+/// The items of the RLP list that is all of `bytes`.
+pub fn rlp_list_items(bytes: &[u8]) -> Result<Vec<RlpItem<'_>>> {
+    if bytes.first().is_none_or(|b| *b < 0xc0) {
+        return Err(anyhow!("not an RLP list"));
     }
-    let len_len = (first - 0xf7) as usize;
-    if bytes.len() < 1 + len_len {
-        return Err(anyhow!("truncated RLP long-list header"));
+    let (span_len, payload_off) = rlp_item_at(bytes)?;
+    if span_len != bytes.len() {
+        return Err(anyhow!(
+            "{} bytes after the RLP list",
+            bytes.len() - span_len
+        ));
     }
-    let mut n = 0usize;
-    for b in &bytes[1..1 + len_len] {
-        n = (n << 8) | *b as usize;
-    }
-    if bytes.len() < 1 + len_len + n {
-        return Err(anyhow!("truncated RLP long list"));
-    }
-    Ok((1 + len_len + n, 1 + len_len))
+    rlp_items(&bytes[payload_off..])
 }
 
 /// Split a typed (0x01 / 0x02) transaction into its RLP list items.
@@ -424,18 +440,7 @@ pub fn typed_tx_rlp_items(tx_bytes: &[u8]) -> Result<(u8, Vec<RlpItem<'_>>)> {
         rest.get(1 + len_len..)
             .ok_or_else(|| anyhow!("truncated RLP list header"))?
     };
-    let mut items = Vec::new();
-    let mut i = 0;
-    while i < body.len() {
-        let (span_len, payload_off) = rlp_item_at(&body[i..])?;
-        let span = &body[i..i + span_len];
-        items.push(RlpItem {
-            span,
-            payload: &span[payload_off..],
-        });
-        i += span_len;
-    }
-    Ok((tx_type, items))
+    Ok((tx_type, rlp_items(body)?))
 }
 
 /// Encode `block`'s header and assert it reproduces the hash the RPC reported.

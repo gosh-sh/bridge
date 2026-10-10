@@ -86,9 +86,9 @@ pub const TX_PF_MAX_DEPTH: usize = 10;
 /// 2048 covers that and a modest ERC-4337 `handleOps`. Larger batches
 /// still cannot be proven.
 pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
-/// Max RLP-encoded access-list bytes (type 1 field 7 / type 2 field 8).
-/// One address + one storage key is 56 B and did not fit in 64; 512 B
-/// covers a short list.
+/// Max access-list payload bytes (type 1 field 7 / type 2 field 8), RLP
+/// header excluded. One address with one storage key is 56 B and fits 64;
+/// two keys did not. 512 B covers a short list.
 pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
 /// axiom-eth `enable_types`: legacy / EIP-2930 / EIP-1559.
 /// Type 0 stays off — its RLP field 0 is the nonce, so extracting "chain_id"
@@ -1006,6 +1006,14 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
     }
 }
 
+/// The longest RLP receipt the receipt MPT leaf holds: axiom-eth's
+/// `receipt::calc_max_val_len` with [`TOPIC_NUM_BOUNDS`]'s maximum.
+pub fn receipt_max_byte_len(max_data_byte_len: usize, max_log_num: usize) -> usize {
+    let max_topic_num = TOPIC_NUM_BOUNDS.1;
+    let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
+    4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len
+}
+
 /// Helper trait for converting ReceiptProof to MPTInput
 trait ToMPTInput {
     fn to_mpt_input(
@@ -1030,12 +1038,7 @@ impl ToMPTInput for ReceiptProof {
         let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
 
-        // Calculate value_max_byte_len using axiom-eth's formula
-        // This is the maximum size of the RLP-encoded receipt
-        // Formula from axiom-eth/src/receipt/mod.rs:calc_max_val_len
-        let max_topic_num = TOPIC_NUM_BOUNDS.1; // max topics = 4
-        let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
-        let value_max_byte_len = 4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len;
+        let value_max_byte_len = receipt_max_byte_len(max_data_byte_len, max_log_num);
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
@@ -1226,7 +1229,7 @@ mod tests {
         );
     }
 
-    /// DEP-04: Safe/4337 need more than 256 B of calldata; SafeL2 needs more
+    /// Safe/4337 need more than 256 B of calldata; SafeL2 needs more
     /// than 256 B of receipt-log data; type 1 shares field-0 chain_id with
     /// type 2; type 0 must stay off.
     #[test]

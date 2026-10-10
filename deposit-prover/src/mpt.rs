@@ -265,10 +265,12 @@ pub fn reject_unprovable_enclosing_tx(tx_bytes: &[u8]) -> Result<()> {
     let al = items
         .get(al_idx)
         .ok_or_else(|| anyhow!("typed tx is missing field {al_idx} (access list)"))?;
-    if al.span.len() > al_max {
+    // axiom-eth caps a field's payload, not its RLP header.
+    if al.payload.len() > al_max {
         return Err(anyhow!(
-            "enclosing tx type {tx_type:#04x} access-list RLP is {} bytes; circuit max is {al_max}",
-            al.span.len()
+            "enclosing tx type {tx_type:#04x} access list is {} bytes without its RLP header; \
+             circuit max is {al_max}",
+            al.payload.len()
         ));
     }
     Ok(())

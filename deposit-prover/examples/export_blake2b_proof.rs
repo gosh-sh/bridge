@@ -32,6 +32,7 @@ use axiom_eth::utils::{
 use clap::Parser;
 use deposit_prover::{
     circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    provable::exit_if_unprovable,
     prover::{
         get_or_create_proving_key, load_kzg_params_from_trusted_setup, CircuitConfig,
         FIXED_KECCAK_CAPACITY, PRODUCTION_DEGREE,
@@ -96,6 +97,9 @@ fn main() -> anyhow::Result<()> {
         max_log_num: args.max_log_num,
         topic_num_bounds: (0, 4),
     };
+    // Before the SRS and the key: a deposit the circuit cannot prove exits
+    // with UNPROVABLE_EXIT_CODE, which callers do not retry.
+    exit_if_unprovable(&input, &config);
 
     // SRS (`data/kzg_params_{k}.srs` from `download_trusted_setup.sh`).
     let k = config.degree;

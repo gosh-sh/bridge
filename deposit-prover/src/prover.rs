@@ -95,12 +95,17 @@ use crate::{
 /// the VK's witness-independence requirement.
 ///
 /// Must be `>=` every accepted deposit's `used_capacity`. 128 permutations
-/// cover about 17 KB of keccak preimages (136 B each): header, both MPT
-/// paths, a tx leaf of up to ~2.8 KB, and the receipt. A typical SafeL2 /
-/// 4337 receipt fits. A receipt that fills all
-/// [`crate::circuit_v2::PRODUCTION_MAX_LOG_NUM`] logs at
-/// [`crate::circuit_v2::PRODUCTION_MAX_DATA_BYTE_LEN`] does not; proving
-/// then panics in `mock_fulfill_keccak_promises`. The pin is part of the VK.
+/// cover about 17 KB of keccak preimages (136 B each): the header, both MPT
+/// paths with their leaves (a tx leaf of up to ~2.8 KB, the receipt), each
+/// node hashed once. On a real trie with a small transaction that leaves
+/// room for a receipt of about 13.5 KB: six logs at
+/// [`crate::circuit_v2::PRODUCTION_MAX_DATA_BYTE_LEN`] fit, seven do not,
+/// and a large type-1 transaction costs about one more. The per-log bounds
+/// alone are therefore far from sufficient: a receipt can have up to
+/// [`crate::circuit_v2::PRODUCTION_MAX_LOG_NUM`] logs only if they are
+/// small. A typical SafeL2 / 4337 receipt fits. [`crate::provable`] refuses
+/// a deposit over the budget before any key work; proving it would panic
+/// in `mock_fulfill_keccak_promises`. The pin is part of the VK.
 ///
 /// Match this value in `examples/export_vk_blob.rs` /
 /// `examples/export_deposit_proof_set.rs` (they import this constant).

@@ -204,6 +204,23 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         timer.finish();
         let bundle = match generated {
             Ok(b) => b,
+            // The same deposit gets the same answer every time: no retry
+            // holds the queue behind it.
+            Err(RelayerError::Unprovable(reason)) => {
+                self.state.record_skip(target);
+                self.persist_state()?;
+                error!(
+                    deposit_id = target,
+                    reason = %reason,
+                    parked = ?self.state.parked_deposit_ids,
+                    "deposit cannot be proven; parked at once. Only the EVM bridge operator can \
+                     return its funds",
+                );
+                return Ok(TickOutcome::Skipped {
+                    deposit_id: target,
+                    reason: format!("unprovable: {reason}"),
+                });
+            },
             Err(e) => {
                 if let Some(outcome) =
                     self.record_failure(target, &format!("proof generation: {e}"))?
@@ -784,6 +801,42 @@ mod tests {
             TickOutcome::Skipped {
                 deposit_id, ..
             } => assert_eq!(deposit_id, 0),
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 1,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unprovable_deposit_is_parked_at_once_even_without_a_skip_limit() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        source.insert(deposit(1));
+        let mut relayer = Relayer::new(
+            RelayerConfig {
+                poll_interval: Duration::from_millis(0),
+                ..RelayerConfig::new(dir.path().join("state.json"))
+            },
+            source,
+            Arc::new(MockProofGenerator::unprovable_on(0)),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Skipped {
+                deposit_id,
+                reason,
+            } => {
+                assert_eq!(deposit_id, 0);
+                assert!(reason.starts_with("unprovable: "), "{reason}");
+            },
             other => panic!("expected Skipped, got {other:?}"),
         }
         assert_eq!(relayer.state().parked_deposit_ids, vec![0]);

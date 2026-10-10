@@ -9,9 +9,11 @@ pub mod circuit_v2;
 pub mod ethereum_fetcher;
 pub mod halo2_tvm_bundle;
 pub mod mpt;
+pub mod provable;
 pub mod prover;
 pub mod rlp_utils;
 pub mod supported_chains;
+pub mod synthetic;
 pub mod types;
 
 pub use aggregation::{aggregate_proof, generate_aggregation_verifier, AggregationConfig};
@@ -19,7 +21,7 @@ pub use circuit_v2::DepositEventCircuitV2;
 pub use ethereum_fetcher::EthereumFetcher;
 pub use prover::{
     generate_proof, generate_solidity_verifier, load_kzg_params_from_trusted_setup,
-    test_circuit_mock, verify_proof, CircuitConfig,
+    test_circuit_mock, test_circuit_mock_pinned, verify_proof, CircuitConfig,
 };
 pub use supported_chains::{
     require_supported_deposit_chain, supported_deposit_chain_name, SUPPORTED_DEPOSIT_CHAIN_IDS,

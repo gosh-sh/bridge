@@ -22,7 +22,7 @@
 //!     --input /tmp/deposit_e2e/deposit_proof_input.json \
 //!     --proof-out /tmp/deposit_e2e/deposit_proof_blake2b.bin \
 //!     --pubin-out /tmp/deposit_e2e/deposit_public_inputs.bin \
-//!     --degree 18 --max-data-byte-len 256 --max-log-num 20
+//!     --degree 18 --max-data-byte-len 2048 --max-log-num 20
 
 use std::{fs, path::Path};
 
@@ -31,10 +31,11 @@ use axiom_eth::utils::{
 };
 use clap::Parser;
 use deposit_prover::{
-    circuit_v2::DepositEventCircuitV2,
+    circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    provable::exit_if_unprovable,
     prover::{
         get_or_create_proving_key, load_kzg_params_from_trusted_setup, CircuitConfig,
-        FIXED_KECCAK_CAPACITY,
+        FIXED_KECCAK_CAPACITY, PRODUCTION_DEGREE,
     },
     types::DepositProofInput,
 };
@@ -68,11 +69,11 @@ struct Args {
     proof_out: String,
     #[arg(long, default_value = "deposit_public_inputs.bin")]
     pubin_out: String,
-    #[arg(long, default_value = "18")]
+    #[arg(long, default_value_t = PRODUCTION_DEGREE)]
     degree: u32,
-    #[arg(long, default_value = "256")]
+    #[arg(long, default_value_t = PRODUCTION_MAX_DATA_BYTE_LEN)]
     max_data_byte_len: usize,
-    #[arg(long, default_value = "20")]
+    #[arg(long, default_value_t = PRODUCTION_MAX_LOG_NUM)]
     max_log_num: usize,
 
     /// Source network (not baked into VK; proven chainId is a PI). Must be in
@@ -96,6 +97,9 @@ fn main() -> anyhow::Result<()> {
         max_log_num: args.max_log_num,
         topic_num_bounds: (0, 4),
     };
+    // Before the SRS and the key: a deposit the circuit cannot prove exits
+    // with UNPROVABLE_EXIT_CODE, which callers do not retry.
+    exit_if_unprovable(&input, &config);
 
     // SRS (`data/kzg_params_{k}.srs` from `download_trusted_setup.sh`).
     let k = config.degree;

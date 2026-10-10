@@ -24,12 +24,32 @@ use halo2_base::{
 
 use crate::types::{DepositProofInput, ReceiptProof, TransactionProof};
 
-/// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
-/// verifier size)
-pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from 256)
-pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: ultra-aggressive)
+/// Code-default receipt limits (`CircuitConfig::default`, unit tests).
+/// Production is [`PRODUCTION_MAX_DATA_BYTE_LEN`] / [`PRODUCTION_MAX_LOG_NUM`]
+/// — those are what `export_*` and the relayer bake into the VK.
+pub const MAX_DATA_BYTE_LEN: usize = 128;
+pub const MAX_LOG_NUM: usize = 3;
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
+
+/// Production per-log data cap, baked into the VK.
+///
+/// axiom-eth range-checks the encoded size of every log, not only the
+/// Deposit event: `3+21+3+33*4+3+max_data+1` = 163 + max_data. A two-signer
+/// SafeL2 `SafeMultiSigTransaction` that MultiSends `approve` + `deposit`
+/// is ~1152 B of data / ~1213 B encoded. 1024 B of data capped that at
+/// 1187 B encoded and rejected it. 2048 B encoded-cap is 2211 B.
+pub const PRODUCTION_MAX_DATA_BYTE_LEN: usize = 2048;
+/// Production max logs per receipt (relayer / `export_*` default).
+/// The keccak pin does **not** cover 20 full-size logs; see
+/// [`crate::prover::FIXED_KECCAK_CAPACITY`].
+pub const PRODUCTION_MAX_LOG_NUM: usize = 20;
+/// 1-of-1 Safe `execTransaction` with a 100 B inner call:
+/// `4 + 320 + 32 + 128 + 32 + 96 = 612` (not 489).
+pub const SAFE_EXECTX_MIN_CALLDATA: usize = 612;
+/// Two-signer SafeL2 `SafeMultiSigTransaction` MultiSend of approve+deposit.
+/// (`352+32+448+32+160+128 = 1152`.)
+pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1152;
 
 /// Public-input layout, in slot order. This is the wire contract the AN-side
 /// `USDCBridge._parsePublicInputs` reads by fixed offset, so it must not drift
@@ -61,10 +81,23 @@ pub const DEPOSIT_NUM_PUBLIC_INPUTS: usize = DEPOSIT_PUBLIC_INPUT_LAYOUT.len();
 pub const PI_CHAIN_ID: usize = 4;
 /// Max depth of the transactions-trie MPT proof (mirrors receipt path).
 pub const TX_PF_MAX_DEPTH: usize = 10;
-/// Max calldata bytes for the enclosing EIP-1559 tx (deposit ABI is small).
-pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 256;
-/// Max RLP-encoded access-list length (deposit txs typically have none).
-pub const MAX_TX_ACCESS_LIST_LEN: usize = 64;
+/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is ~100 B;
+/// a 1-of-1 Safe `execTransaction` is [`SAFE_EXECTX_MIN_CALLDATA`] (612 B).
+/// 2048 covers that and a modest ERC-4337 `handleOps`. Larger batches
+/// still cannot be proven.
+pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
+/// Max access-list payload bytes for type 2 (field 8), RLP header excluded.
+/// Type 1's access list sits at field 7, which axiom-eth merges with type-2
+/// calldata, so that field is capped at [`MAX_TX_CALLDATA_BYTE_LEN`] (2048),
+/// not this constant. One address with one storage key is 56 B and fits 64;
+/// two keys did not. 512 B covers a short type-2 list.
+pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
+/// axiom-eth `enable_types`: legacy / EIP-2930 / EIP-1559.
+/// Type 0 stays off — its RLP field 0 is the nonce, so extracting "chain_id"
+/// from it would publish nonce as the public `chainId`.
+pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
+/// EIP-2930 type byte / circuit `transaction_type` value.
+pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
 pub const EIP1559_TX_TYPE: u64 = 2;
 
@@ -72,13 +105,13 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 ///
 /// UNIVERSAL-VK INVARIANT: the block header is the only input the circuit loads
 /// at its *natural* length. Different blocks have different header lengths (the
-/// `number` / `gasUsed` / `baseFeePerGas` fields use a variable number of bytes),
-/// so loading it raw made the constraint system — and therefore the verifying
-/// key — witness-dependent. We instead load a FIXED-size, zero-padded witness
-/// vector of this length so `keccak_var_len` and `decompose_rlp_array_*` emit an
-/// identical number of cells / copy-constraints for every block. The true header
-/// length is still bound cryptographically via the `keccak_var_len` length
-/// witness.
+/// `number` / `gasUsed` / `baseFeePerGas` fields use a variable number of
+/// bytes), so loading it raw made the constraint system — and therefore the
+/// verifying key — witness-dependent. We instead load a FIXED-size, zero-padded
+/// witness vector of this length so `keccak_var_len` and
+/// `decompose_rlp_array_*` emit an identical number of cells / copy-constraints
+/// for every block. The true header length is still bound cryptographically via
+/// the `keccak_var_len` length witness.
 ///
 /// Sized for the Prague/Isthmus 21-field header table: axiom-eth's
 /// Cancun/Ecotone `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the
@@ -380,7 +413,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Extracted transactionsRoot from block header (32 bytes)");
 
         // ====================================================================
-        // Track 2: bind enclosing EIP-1559 tx (chain_id + to + same tx_index)
+        // Track 2: bind enclosing typed tx (chain_id + same tx_index)
         // ====================================================================
         // `from` is NOT in the typed-tx RLP (ECDSA-only); binding the Deposit
         // `sender` topic to the same `tx_index` as this MPT proof closes that
@@ -394,7 +427,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let tx_chip_params = EthTransactionChipParams {
             max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
             max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
-            enable_types: [false, false, true], // EIP-1559 only
+            enable_types: ENABLE_TX_TYPES,
             network: self.params.network,
         };
         let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
@@ -422,17 +455,23 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Constrained tx MPT root == transactionsRoot");
 
-        // transaction_type == 2 (EIP-1559)
-        let eip1559 = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
-        ctx.constrain_equal(&tx_witness.transaction_type, &eip1559);
-        println!("   ✓ Constrained tx type == EIP-1559 (0x02)");
+        // Type ∈ {1, 2}. Field 0 is chain_id for both EIP-2930 and EIP-1559.
+        // (type − 1)(type − 2) == 0 also refuses type 0, whose field 0 is nonce.
+        let gate = tx_chip.gate();
+        let one = ctx.load_constant(Fr::from(EIP2930_TX_TYPE));
+        let two = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
+        let d1 = gate.sub(ctx, tx_witness.transaction_type, one);
+        let d2 = gate.sub(ctx, tx_witness.transaction_type, two);
+        let prod = gate.mul(ctx, d1, d2);
+        let zero = ctx.load_constant(Fr::from(0u64));
+        ctx.constrain_equal(&prod, &zero);
+        println!("   ✓ Constrained tx type ∈ {{EIP-2930, EIP-1559}}");
 
-        // Extract EIP-1559 chain_id (RLP field 0) and expose as a public input.
+        // Extract typed-tx chain_id (RLP field 0) and expose as a public input.
         // Not constrained to a VK-baked constant — AN allowlists (chainId →
         // expected bridge Fr); the relayer sanity-checks against eth_chainId.
         let chain_id_idx = ctx.load_constant(Fr::from(0u64));
-        let chain_id_field =
-            tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
+        let chain_id_field = tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
         let chain_id_val = evaluate_byte_array(
             ctx,
             tx_chip.gate(),
@@ -529,18 +568,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
-        // 5. chainId - extracted EIP-1559 RLP field 0 (already computed above).
-        //    Exposed as a public input so USDCBridge can allowlist
+        // 5. chainId - extracted typed-tx RLP field 0 (EIP-2930 / EIP-1559, already
+        //    computed above). Exposed as a public input so USDCBridge can allowlist
         //    (chainId → expected bridge Fr). Not constrained to a constant.
 
-        // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
-        //    from the bridge config (NOT from the Ethereum event). It replaced
-        //    `anWorkchain` on 2026-06-02. A full UInt256 dappId can exceed the
-        //    BN254 scalar modulus, so it is split into high/low 16-byte halves
-        //    (mirrors the anAccount/block-hash split). These are witness values
-        //    promoted to public instances; they are NOT constrained against
-        //    event data — the AN-side `TokenBridge` checks them against its
-        //    configured dappId, which is what binds the proof to a dApp.
+        // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied from
+        //    the bridge config (NOT from the Ethereum event). It replaced `anWorkchain`
+        //    on 2026-06-02. A full UInt256 dappId can exceed the BN254 scalar modulus,
+        //    so it is split into high/low 16-byte halves (mirrors the
+        //    anAccount/block-hash split). These are witness values promoted to public
+        //    instances; they are NOT constrained against event data — the AN-side
+        //    `TokenBridge` checks them against its configured dappId, which is what
+        //    binds the proof to a dApp.
         //
         //    BC-D05: unlike every other 32-byte input here, `dappId` has no
         //    Phase-1 counterpart to be constrained against, so these witnesses
@@ -590,7 +629,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         //    blockHashHigh, blockHashLow, (promiseCommit)]
         // All except dappId{High,Low} and chainId are verified in Phase 1
         // against the RLP-parsed event data; chainId is bound via tx MPT +
-        // EIP-1559 decode; dappId is a config-supplied tag (see above).
+        // typed-tx (EIP-2930 / EIP-1559) decode; dappId is a config-supplied
+        // tag (see above).
         let public_instances = vec![
             deposit_id_field,
             sender_field,
@@ -608,7 +648,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         builder.base.assigned_instances[0] = public_instances;
 
         println!("   ✓ Set 11 explicit public instances in Phase 0 (chainId at PI[4])");
-        println!("   (promise_commit is appended automatically → 12 total, matches num_instance())");
+        println!(
+            "   (promise_commit is appended automatically → 12 total, matches num_instance())"
+        );
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
         Phase0Output {
@@ -661,7 +703,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let tx_chip_params = EthTransactionChipParams {
             max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
             max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
-            enable_types: [false, false, true],
+            enable_types: ENABLE_TX_TYPES,
             network: self.params.network,
         };
         let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
@@ -966,6 +1008,14 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
     }
 }
 
+/// The longest RLP receipt the receipt MPT leaf holds: axiom-eth's
+/// `receipt::calc_max_val_len` with [`TOPIC_NUM_BOUNDS`]'s maximum.
+pub fn receipt_max_byte_len(max_data_byte_len: usize, max_log_num: usize) -> usize {
+    let max_topic_num = TOPIC_NUM_BOUNDS.1;
+    let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
+    4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len
+}
+
 /// Helper trait for converting ReceiptProof to MPTInput
 trait ToMPTInput {
     fn to_mpt_input(
@@ -990,12 +1040,7 @@ impl ToMPTInput for ReceiptProof {
         let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
 
-        // Calculate value_max_byte_len using axiom-eth's formula
-        // This is the maximum size of the RLP-encoded receipt
-        // Formula from axiom-eth/src/receipt/mod.rs:calc_max_val_len
-        let max_topic_num = TOPIC_NUM_BOUNDS.1; // max topics = 4
-        let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
-        let value_max_byte_len = 4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len;
+        let value_max_byte_len = receipt_max_byte_len(max_data_byte_len, max_log_num);
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
@@ -1035,7 +1080,7 @@ impl TransactionProof {
         let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
         let value_max_byte_len =
-            calc_max_val_len(max_data_byte_len, max_access_list_len, [false, false, true]);
+            calc_max_val_len(max_data_byte_len, max_access_list_len, ENABLE_TX_TYPES);
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
@@ -1064,17 +1109,19 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     ///  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
     ///  blockHashHigh, blockHashLow, promiseCommit]
     ///
-    /// `chainId` is the EIP-1559 RLP field-0 value extracted from the enclosing
-    /// tx (MPT-bound under `transactionsRoot`). It is **not** VK-baked — the
+    /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559)
+    /// extracted from the enclosing tx (MPT-bound under `transactionsRoot`).
+    /// It is **not** VK-baked — the
     /// AN-side `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
-    /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier) replaced
-    /// the single `anWorkchain` slot on 2026-06-02. dappId is a config-supplied
-    /// tag — it is not bound to event data in-circuit; the AN-side
-    /// `TokenBridge.finalizeDeposit` checks it against its configured dappId.
-    /// `anAccountHigh`/`anAccountLow` remain the event-bound AN recipient account.
-    /// The `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
-    /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the public-inputs
-    /// cell from the same 12-scalar layout.
+    /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier)
+    /// replaced the single `anWorkchain` slot on 2026-06-02. dappId is a
+    /// config-supplied tag — it is not bound to event data in-circuit; the
+    /// AN-side `TokenBridge.finalizeDeposit` checks it against its
+    /// configured dappId. `anAccountHigh`/`anAccountLow` remain the
+    /// event-bound AN recipient account. The `ZKHALO2VERIFYWITHVK` consumer
+    /// is VK-driven (it reads this count from the VkBlob), and
+    /// `TokenBridge.finalizeDeposit` builds the public-inputs cell from the
+    /// same 12-scalar layout.
     fn num_instance(&self) -> Vec<usize> {
         vec![DEPOSIT_NUM_PUBLIC_INPUTS] // 11 user values + 1 promise_commit
     }
@@ -1182,6 +1229,25 @@ mod tests {
             vec![DEPOSIT_NUM_PUBLIC_INPUTS],
             "num_instance() drifted from DEPOSIT_PUBLIC_INPUT_LAYOUT"
         );
+    }
+
+    /// Safe/4337 need more than 256 B of calldata; SafeL2 needs more
+    /// than 256 B of receipt-log data; type 1 shares field-0 chain_id with
+    /// type 2; type 0 must stay off.
+    #[test]
+    fn enclosing_tx_limits_admit_safe_and_type1() {
+        assert_eq!(ENABLE_TX_TYPES, [false, true, true]);
+        assert!(
+            MAX_TX_CALLDATA_BYTE_LEN >= SAFE_EXECTX_MIN_CALLDATA,
+            "1-of-1 Safe execTransaction with a 100 B inner call is {SAFE_EXECTX_MIN_CALLDATA} B"
+        );
+        assert!(
+            PRODUCTION_MAX_DATA_BYTE_LEN >= SAFEL2_MULTISIG_LOG_DATA,
+            "SafeL2 SafeMultiSigTransaction log data is ~{SAFEL2_MULTISIG_LOG_DATA} B"
+        );
+        assert!(MAX_TX_ACCESS_LIST_LEN >= 56);
+        assert_eq!(EIP2930_TX_TYPE, 1);
+        assert_eq!(EIP1559_TX_TYPE, 2);
     }
 
     /// Shape-only `DepositProofInput` — enough to construct the circuit struct

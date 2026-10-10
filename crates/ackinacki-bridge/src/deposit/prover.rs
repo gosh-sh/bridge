@@ -22,7 +22,10 @@ use tokio::{process::Command, time::Instant};
 
 use crate::{
     deposit::{
-        limits::{MAX_LOG_DATA_BYTE_LEN, MAX_RECEIPT_LOGS, PROVER_DEGREE},
+        limits::{
+            ShapeViolation, MAX_LOG_DATA_BYTE_LEN, MAX_RECEIPT_LOGS, PROVER_DEGREE,
+            PROVER_UNPROVABLE_EXIT,
+        },
         locks::{after_send, ProverLock},
         pi::{verify, DepositPublicInputs, ExpectedInputs},
         prover_files::{ProverDir, FETCH_BIN, PROVE_BIN},
@@ -300,6 +303,29 @@ fn start_retrying<T>(mut start: impl FnMut() -> std::io::Result<T>) -> std::io::
     }
 }
 
+/// How a tool that ran to its end ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ran {
+    /// It exited 0.
+    Done,
+    /// It exited [`PROVER_UNPROVABLE_EXIT`]: the deposit cannot be proven,
+    /// for the reason it gave.
+    Unprovable(String),
+}
+
+/// The reason a tool gave on its way out with [`PROVER_UNPROVABLE_EXIT`]:
+/// its `unprovable: ` line, else its last line of stderr.
+fn unprovable_reason(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    text.lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("unprovable: "))
+        .or_else(|| text.lines().next_back())
+        .unwrap_or("no reason given")
+        .trim()
+        .to_string()
+}
+
 /// Runs one tool to completion by `deadline`, handing it the prover lock
 /// `lock_fd`. `limit` is the whole attempt's budget, for the message.
 async fn run(
@@ -309,7 +335,7 @@ async fn run(
     deadline: Instant,
     limit: Duration,
     op_id: &str,
-) -> CliResult<()> {
+) -> CliResult<Ran> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -336,6 +362,9 @@ async fn run(
             ))
         },
     };
+    if out.status.code() == Some(PROVER_UNPROVABLE_EXIT) {
+        return Ok(Ran::Unprovable(unprovable_reason(&out.stderr)));
+    }
     if !out.status.success() {
         return Err(failed_with_output(
             op_id,
@@ -343,7 +372,7 @@ async fn run(
             &last_lines(&out.stderr, STDERR_TAIL_LINES),
         ));
     }
-    Ok(())
+    Ok(Ran::Done)
 }
 
 /// Step 7: builds the proof of the deposit in `req` in the prover
@@ -358,8 +387,10 @@ async fn run(
 /// The prover lock is taken before the fetcher starts and held until the
 /// prover exits; a held lock is waited for, and the status says why.
 /// `timeout` bounds both tools together, from the moment the lock is
-/// taken. Every failure is exit 32. The empty path is a resume given no
-/// prover directory, and the refusal names the flag.
+/// taken. Every failure is exit 32, and a resume tries again. A tool that
+/// finds the deposit unprovable is not a failure: that answer is final,
+/// and it comes back as the inner `Err`. The empty path is a resume given
+/// no prover directory, and the refusal names the flag.
 pub async fn prove(
     dir: &ProverDir,
     req: &ProveRequest,
@@ -367,7 +398,7 @@ pub async fn prove(
     timeout: Duration,
     ui: &dyn Ui,
     op_id: &str,
-) -> CliResult<ProofFiles> {
+) -> CliResult<Result<ProofFiles, ShapeViolation>> {
     if dir.root.as_os_str().is_empty() {
         return Err(failed(
             op_id,
@@ -411,7 +442,7 @@ pub async fn prove(
     let deadline = deadline_after(timeout);
     let input = work.join(INPUT_FILE);
     ui.status("fetching the deposit's receipt and transaction proofs");
-    run(
+    let fetched = run(
         Command::new(dir.bin(FETCH_BIN))
             .current_dir(&dir.root)
             .env("ETH_RPC_URL", &req.rpc_url)
@@ -428,8 +459,13 @@ pub async fn prove(
         op_id,
     )
     .await?;
+    if let Ran::Unprovable(reason) = fetched {
+        return Ok(Err(ShapeViolation::ProverRefused {
+            reason,
+        }));
+    }
     ui.status("building the proof (minutes; the first run also builds the proving key)");
-    run(
+    let proved = run(
         Command::new(dir.bin(PROVE_BIN))
             .current_dir(&dir.root)
             .args(["--chain-id", &req.chain_id.to_string()])
@@ -450,6 +486,11 @@ pub async fn prove(
     )
     .await?;
     drop(lock);
+    if let Ran::Unprovable(reason) = proved {
+        return Ok(Err(ShapeViolation::ProverRefused {
+            reason,
+        }));
+    }
     // The proof first: a crash between the two leaves no pair to load.
     for name in [PROOF_FILE, PUBIN_FILE] {
         let from = partial(&work, name);
@@ -476,7 +517,7 @@ pub async fn prove(
     })?;
     verify(&pi, want)
         .map_err(|m| failed(op_id, format!("the proof does not match the deposit: {m}")))?;
-    Ok(files)
+    Ok(Ok(files))
 }
 
 #[cfg(test)]
@@ -550,6 +591,7 @@ mod tests {
             "OP",
         )
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(p.public_inputs, PI);
         assert_eq!(load(w.path()).unwrap(), p);
@@ -585,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn a_new_proof_starts_without_the_files_an_earlier_one_left() {
         // Dies before it writes anything, as a killed prover may.
-        let (_d, dir) = fake_prover_dir("exit 3");
+        let (_d, dir) = fake_prover_dir("exit 1");
         let w = tempfile::tempdir().unwrap();
         std::fs::write(w.path().join(PROOF_FILE), b"old proof").unwrap();
         std::fs::write(w.path().join(PUBIN_FILE), PI).unwrap();
@@ -660,6 +702,7 @@ mod tests {
             "OP",
         )
         .await
+        .unwrap()
         .unwrap();
         let read = |f: String| std::fs::read_to_string(dir.data_dir().join(f)).unwrap();
         let at = |f: &str| w.path().join(f).to_string_lossy().into_owned();
@@ -691,7 +734,7 @@ mod tests {
             "--degree",
             "18",
             "--max-data-byte-len",
-            "256",
+            "2048",
             "--max-log-num",
             "20",
         ]);
@@ -720,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_prover_is_exit_32_with_its_stderr() {
-        let (_d, dir) = fake_prover_dir("echo 'keygen: out of memory' >&2; exit 3");
+        let (_d, dir) = fake_prover_dir("echo 'keygen: out of memory' >&2; exit 1");
         let w = tempfile::tempdir().unwrap();
         let e = prove(
             &dir,
@@ -735,6 +778,38 @@ mod tests {
         assert_eq!(e.exit_code(), ExitCode::DepositProofFailed);
         assert!(e.to_string().contains("out of memory"), "{e}");
         assert!(e.to_string().contains("--resume OP"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_deposit_the_prover_finds_unprovable_is_not_a_failure_to_resume() {
+        let (_d, dir) = fake_prover_dir(
+            "echo 'loading input' >&2; echo 'unprovable: the receipt has 9 logs; the circuit \
+             parses at most 1' >&2; exit 3",
+        );
+        let w = tempfile::tempdir().unwrap();
+        let got = prove(
+            &dir,
+            &req(w.path()),
+            &want(),
+            Duration::from_secs(10),
+            &RecordingUi::new(true),
+            "OP",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            got,
+            Err(ShapeViolation::ProverRefused {
+                reason: "the receipt has 9 logs; the circuit parses at most 1".into()
+            })
+        );
+        assert_eq!(load(w.path()), None);
+    }
+
+    #[test]
+    fn an_unprovable_exit_without_its_line_gives_the_last_line() {
+        assert_eq!(unprovable_reason(b"a\nb\n"), "b");
+        assert_eq!(unprovable_reason(b""), "no reason given");
     }
 
     #[tokio::test]
@@ -816,6 +891,7 @@ mod tests {
             "OP",
         )
         .await
+        .unwrap()
         .unwrap();
         let fds = std::fs::read_to_string(dir.data_dir().join("fds")).unwrap();
         let lock = std::fs::canonicalize(dir.lock_path()).unwrap();
@@ -853,6 +929,7 @@ mod tests {
             "OP",
         )
         .await
+        .unwrap()
         .unwrap();
         assert!(w.path().join("proof.bin").exists());
     }
@@ -879,7 +956,7 @@ mod tests {
         assert!(ui.statuses().iter().any(|s| s.contains("busy")));
         assert!(!task.is_finished());
         drop(held);
-        task.await.unwrap().unwrap();
+        task.await.unwrap().unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -911,6 +988,7 @@ mod tests {
             "OP",
         )
         .await
+        .unwrap()
         .unwrap();
         closer.await.unwrap();
     }
@@ -1005,8 +1083,8 @@ mod tests {
             )
             .await
         });
-        a.await.unwrap().unwrap();
-        b.await.unwrap().unwrap();
+        a.await.unwrap().unwrap().unwrap();
+        b.await.unwrap().unwrap().unwrap();
         let lines = |f: &str| {
             std::fs::read_to_string(dir.data_dir().join(f))
                 .unwrap()

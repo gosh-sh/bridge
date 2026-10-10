@@ -204,7 +204,8 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
             tx.input.len()
         )));
     }
-    if let Err(v) = check_receipt_bounds(receipt.logs.len(), log.data.len()) {
+    let max_log_data = receipt.logs.iter().map(|l| l.data.len()).max().unwrap_or(0);
+    if let Err(v) = check_receipt_bounds(receipt.logs.len(), max_log_data) {
         return Classified::Negative(Negative::Unprovable(v));
     }
     if let Err(v) = check_tx_shape(

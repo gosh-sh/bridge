@@ -962,7 +962,7 @@ crates/ackinacki-bridge/                       ← run cwd
 │   │                                             scripts/stage_deposit_prover.sh; see § Deposit
 │   ├── fetch_deposit_data, export_blake2b_proof, export_vk_blob
 │   ├── configs/circuit_params.json
-│   └── data/                                  ← kzg_params_18.srs, and the ~1.3 GB proving key
+│   └── data/                                  ← kzg_params_18.srs, and the ~3.4 GB proving key
 │                                                 the first proof writes
 ├── deposit-state/                             ← BRIDGE_DEPOSIT_STATE_DIR: <op-id>.json, deposit.lock,
 │                                                 <op-id>.lock — never delete or move while an
@@ -1048,9 +1048,9 @@ under `--json`:
 | 2 | wallet pairing | You scan the QR code and approve the connection; if the wallet is on another network, the CLI asks it to switch, or to add the network. Then the **account check**: an account holding contract code, other than an EIP-7702 delegation, is refused, and the wallet signs a short message (`personal_sign`) whose signer must be the account itself. A failure is exit 20; nothing is sent. |
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. The read-back and the deposit's gas estimate are made at the block that holds the approve — looked up again by its receipt, so that an approve a reorg moved is followed, or, for an approve from the QR code, the block where the new allowance was seen — and the nonce the deposit is expected at counts the approve: an RPC node that has not caught up with that block is asked again, not taken for a lowered limit or a deposit that would revert. |
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(amount, 0, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
-| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2, input exactly the 100 bytes requested, an access list of at most 64 bytes RLP, sent straight to the bridge. The wallet session is closed after this step. |
+| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2 or type 1, input exactly the 100 bytes requested, an access list of at most 512 bytes RLP (2048 on type 1), sent straight to the bridge; no receipt log over 2048 bytes of data. The receipt must also fit the prover's keccak budget (about six logs at the 2048-byte cap; a plain deposit uses a fraction of it), which the prover checks at step 7. The wallet session is closed after this step. |
 | 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
-| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. |
+| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: a type 0 or 4 enclosing transaction, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
 | 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
 
@@ -1402,10 +1402,12 @@ Exit 35 and exit 37 are final: the CLI cannot move the USDC any further. It
 prints what the operator needs, and `--resume <op-id>` prints it again from the
 record.
 
-- **Exit 35, a shape the circuit cannot prove** — a legacy or type-1
-  transaction (EIP-681 wallets may send one), longer call data, a longer access
-  list, a call routed through another contract. The USDC is in the EVM bridge,
-  which has no refund; only the operator can return it.
+- **Exit 35, a shape the circuit cannot prove** — a legacy or type-4
+  transaction (EIP-681 wallets may send a legacy one), longer call data, a
+  longer access list, a call routed through another contract, a receipt log
+  over 2048 bytes of data, or, found by the prover at step 7, a receipt over
+  its keccak budget or a type-1 transaction over its leaf. The USDC is in
+  the EVM bridge, which has no refund; only the operator can return it.
 - **Exit 35, not the deposit that was requested** — `the wallet broadcast a
   deposit that differs from the request`, with the actual amount and recipient
   next to the requested ones. You changed the amount in the wallet, the wallet
@@ -1476,7 +1478,7 @@ runs, built from `deposit-prover/` as it is:
 ├── configs/circuit_params.json        read on every run, even with a cached key
 └── data/
     ├── kzg_params_18.srs              the Hermez ceremony at degree 18, ~33 MB
-    ├── deposit_prover_k18.<fingerprint>.pk       the proving key, ~1.27 GB,
+    ├── deposit_prover_k18.<fingerprint>.pk       the proving key, ~3.4 GB,
     ├── deposit_prover_k18.<fingerprint>.pk.bp.json   written by the first proof
     └── .prove.lock
 ```
@@ -1506,16 +1508,16 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
-| Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
-| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~4.3 GB on a withdraw-only host (Step 0) |
-| Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~20 min |
-| Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
+| Peak RAM | ~9.6 GB with a cold key cache, ~8.8 GB warm | ~40 GB |
+| Disk | ~3.4 GB in `data/` after the first proof, plus ~26 MB of tools | ~4.3 GB on a withdraw-only host (Step 0) |
+| Proof, cold key cache (keygen included) | 2 min 7 s wall, 16 min CPU | ~20 min |
+| Proof, warm key cache | 56 s wall, 11 min CPU | ~5 min |
 
 Measured with `export_blake2b_proof` on
 `deposit-prover/fixtures/deposit_10proofs/proof_00` (`--degree 18
---max-data-byte-len 256 --max-log-num 20`, as the CLI runs it) on an Intel Core
+--max-data-byte-len 2048 --max-log-num 20`, as the CLI runs it) on an Intel Core
 i5-14600KF with 20 hardware threads and 46 GB of RAM, Ubuntu 24.04 under WSL2.
-Keygen took 20 s of the cold run. The prover uses every core, so with fewer
+The prover uses every core, so with fewer
 the wall time moves toward the CPU time; `fetch_deposit_data` adds a few RPC
 calls. The default `--prover-timeout-s 1800` leaves a wide margin.
 

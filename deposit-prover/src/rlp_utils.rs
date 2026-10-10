@@ -74,9 +74,9 @@ impl<'a> From<&'a Log> for RlpLog<'a> {
 /// RLP([status, cumulativeGasUsed, logsBloom, logs, depositNonce,
 /// depositReceiptVersion]) — matching axiom-eth `get_receipt_rlp`. Pre-Canyon
 /// deposit receipts omit those two trailing fields even if `depositNonce` is
-/// present in the RPC response. User bridge deposits remain EIP-1559 `0x02`;
-/// this path exists so blocks that also contain sequencer deposit txs still
-/// rebuild `receiptsRoot`.
+/// present in the RPC response. User bridge deposits remain typed
+/// EIP-2930 / EIP-1559; this path exists so blocks that also contain
+/// sequencer deposit txs still rebuild `receiptsRoot`.
 pub fn encode_receipt(receipt: &TransactionReceipt) -> Result<Vec<u8>> {
     // Status (1 for success, 0 for failure) — prefer status; fall back to
     // pre-EIP-658 state root (same as axiom-eth).
@@ -180,7 +180,10 @@ fn requests_hash_from_other<T>(block: &Block<T>) -> Result<Option<H256>> {
     let bytes = hex::decode(hex.trim_start_matches("0x"))
         .map_err(|e| anyhow!("requestsHash is not hex: {e}"))?;
     if bytes.len() != 32 {
-        return Err(anyhow!("requestsHash is {} bytes, expected 32", bytes.len()));
+        return Err(anyhow!(
+            "requestsHash is {} bytes, expected 32",
+            bytes.len()
+        ));
     }
     Ok(Some(H256::from_slice(&bytes)))
 }
@@ -279,11 +282,13 @@ pub fn encode_block_header<T>(block: &Block<T>) -> Result<Vec<u8>> {
     Ok(rlp.out().into())
 }
 
-/// EIP-1559 (`0x02`) is the only transaction type the circuit can bind, since
-/// `chain_id` must be a top-level RLP field (legacy txs hide it inside `v`).
+/// EIP-2930 (`0x01`) and EIP-1559 (`0x02`) are the transaction types whose
+/// RLP field 0 is `chain_id`. Legacy (type 0) hides it inside `v`; enabling
+/// that type without an EIP-155 extract would publish nonce as `chainId`.
+pub const EIP2930_TX_TYPE: u8 = 0x01;
 pub const EIP1559_TX_TYPE: u8 = 0x02;
 
-/// Read `chain_id` out of an EIP-1559 transaction's wire encoding.
+/// Read `chain_id` out of a typed transaction's wire encoding (type 1 or 2).
 ///
 /// This is the same field the circuit extracts (typed-tx RLP field 0); decoding
 /// it out-of-circuit lets callers reject a witness/flag mismatch before paying
@@ -292,10 +297,10 @@ pub fn typed_tx_chain_id(tx_bytes: &[u8]) -> Result<u64> {
     let (&tx_type, rest) = tx_bytes
         .split_first()
         .ok_or_else(|| anyhow!("transaction bytes are empty"))?;
-    if tx_type != EIP1559_TX_TYPE {
+    if tx_type != EIP2930_TX_TYPE && tx_type != EIP1559_TX_TYPE {
         return Err(anyhow!(
-            "transaction type {tx_type:#04x} is not EIP-1559 (0x02); the deposit circuit \
-             cannot bind chain_id for this type"
+            "transaction type {tx_type:#04x} is not EIP-2930 (0x01) or EIP-1559 (0x02); the \
+             deposit circuit cannot bind chain_id for this type"
         ));
     }
     let prefix = *rest
@@ -325,13 +330,117 @@ pub fn typed_tx_chain_id(tx_bytes: &[u8]) -> Result<u64> {
             let n = (first - 0x80) as usize;
             body.get(1..1 + n)
                 .ok_or_else(|| anyhow!("truncated chain_id field"))?
-        }
+        },
         _ => return Err(anyhow!("chain_id field is not a short RLP string")),
     };
     if chain_id_bytes.len() > 8 {
-        return Err(anyhow!("chain_id is {} bytes, too wide", chain_id_bytes.len()));
+        return Err(anyhow!(
+            "chain_id is {} bytes, too wide",
+            chain_id_bytes.len()
+        ));
     }
-    Ok(chain_id_bytes.iter().fold(0u64, |acc, b| (acc << 8) | *b as u64))
+    Ok(chain_id_bytes
+        .iter()
+        .fold(0u64, |acc, b| (acc << 8) | *b as u64))
+}
+
+/// One RLP item: full span (header + payload) and the payload itself.
+#[derive(Clone, Copy, Debug)]
+pub struct RlpItem<'a> {
+    /// Header plus payload, as stored in the parent list.
+    pub span: &'a [u8],
+    /// Payload only (string bytes, or the inner list body).
+    pub payload: &'a [u8],
+}
+
+fn rlp_item_at(bytes: &[u8]) -> Result<(usize, usize)> {
+    let first = *bytes.first().ok_or_else(|| anyhow!("truncated RLP item"))?;
+    if first <= 0x7f {
+        return Ok((1, 0));
+    }
+    let (header, n) = match first {
+        0x80..=0xb7 => (1, (first - 0x80) as usize),
+        0xc0..=0xf7 => (1, (first - 0xc0) as usize),
+        _ => {
+            let len_len = if first <= 0xbf {
+                first - 0xb7
+            } else {
+                first - 0xf7
+            } as usize;
+            let len_bytes = bytes
+                .get(1..1 + len_len)
+                .ok_or_else(|| anyhow!("truncated RLP length header"))?;
+            if len_len > std::mem::size_of::<usize>() {
+                return Err(anyhow!("RLP length of {len_len} bytes does not fit"));
+            }
+            let n = len_bytes
+                .iter()
+                .fold(0usize, |acc, b| (acc << 8) | *b as usize);
+            (1 + len_len, n)
+        },
+    };
+    match header.checked_add(n) {
+        Some(span) if span <= bytes.len() => Ok((span, header)),
+        _ => Err(anyhow!("truncated RLP item")),
+    }
+}
+
+/// The items of `body`, the payload of an RLP list.
+fn rlp_items(body: &[u8]) -> Result<Vec<RlpItem<'_>>> {
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let (span_len, payload_off) = rlp_item_at(&body[i..])?;
+        let span = &body[i..i + span_len];
+        items.push(RlpItem {
+            span,
+            payload: &span[payload_off..],
+        });
+        i += span_len;
+    }
+    Ok(items)
+}
+
+/// The items of the RLP list that is all of `bytes`.
+pub fn rlp_list_items(bytes: &[u8]) -> Result<Vec<RlpItem<'_>>> {
+    if bytes.first().is_none_or(|b| *b < 0xc0) {
+        return Err(anyhow!("not an RLP list"));
+    }
+    let (span_len, payload_off) = rlp_item_at(bytes)?;
+    if span_len != bytes.len() {
+        return Err(anyhow!(
+            "{} bytes after the RLP list",
+            bytes.len() - span_len
+        ));
+    }
+    rlp_items(&bytes[payload_off..])
+}
+
+/// Split a typed (0x01 / 0x02) transaction into its RLP list items.
+pub fn typed_tx_rlp_items(tx_bytes: &[u8]) -> Result<(u8, Vec<RlpItem<'_>>)> {
+    let (&tx_type, rest) = tx_bytes
+        .split_first()
+        .ok_or_else(|| anyhow!("transaction bytes are empty"))?;
+    if tx_type != EIP2930_TX_TYPE && tx_type != EIP1559_TX_TYPE {
+        return Err(anyhow!(
+            "transaction type {tx_type:#04x} is not EIP-2930 (0x01) or EIP-1559 (0x02)"
+        ));
+    }
+    let prefix = *rest
+        .first()
+        .ok_or_else(|| anyhow!("typed transaction has no RLP payload"))?;
+    if prefix < 0xc0 {
+        return Err(anyhow!("typed transaction payload is not an RLP list"));
+    }
+    let body = if prefix <= 0xf7 {
+        rest.get(1..)
+            .ok_or_else(|| anyhow!("truncated typed transaction"))?
+    } else {
+        let len_len = (prefix - 0xf7) as usize;
+        rest.get(1 + len_len..)
+            .ok_or_else(|| anyhow!("truncated RLP list header"))?
+    };
+    Ok((tx_type, rlp_items(body)?))
 }
 
 /// Encode `block`'s header and assert it reproduces the hash the RPC reported.
@@ -349,9 +458,9 @@ pub fn verify_block_header_rlp<T>(block: &Block<T>) -> Result<Vec<u8>> {
     let actual = H256::from(ethers::utils::keccak256(&rlp));
     if actual != expected {
         return Err(anyhow!(
-            "encoded block header does not reproduce the block hash: got {actual:#x}, \
-             RPC reported {expected:#x} (block {:?}, {} RLP bytes). The header shape is \
-             unsupported — a consensus upgrade most likely added a field.",
+            "encoded block header does not reproduce the block hash: got {actual:#x}, RPC \
+             reported {expected:#x} (block {:?}, {} RLP bytes). The header shape is unsupported — \
+             a consensus upgrade most likely added a field.",
             block.number,
             rlp.len(),
         ));
@@ -370,8 +479,10 @@ pub fn encode_tx_index(index: u64) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use ethers::types::{Address, Bloom, Bytes, OtherFields, H256, H64};
-    use ethers::utils::keccak256;
+    use ethers::{
+        types::{Address, Bloom, Bytes, OtherFields, H256, H64},
+        utils::keccak256,
+    };
 
     use super::*;
 
@@ -485,9 +596,9 @@ mod tests {
         assert_eq!(buf[0] & 0xc0, 0xc0); // List marker
     }
 
-    /// Cancun/Ecotone: when blob fields are present they must be appended so the
-    /// header RLP commits to them (otherwise `keccak(header) ≠ block.hash` on
-    /// OP Stack Ecotone / L1 Cancun).
+    /// Cancun/Ecotone: when blob fields are present they must be appended so
+    /// the header RLP commits to them (otherwise `keccak(header) ≠
+    /// block.hash` on OP Stack Ecotone / L1 Cancun).
     #[test]
     fn test_encode_block_header_includes_blob_fields() {
         let mut block = sample_block();
@@ -655,8 +766,7 @@ mod tests {
         for (name, raw, expected_fields) in HEADER_SAMPLES {
             let block: Block<H256> =
                 serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}: deserialize: {e}"));
-            let rlp = verify_block_header_rlp(&block)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let rlp = verify_block_header_rlp(&block).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(
                 rlp_field_count(&rlp),
                 expected_fields,
@@ -712,15 +822,43 @@ mod tests {
     }
 
     #[test]
-    fn typed_tx_chain_id_rejects_non_1559() {
-        let err = typed_tx_chain_id(&[0x00, 0xc0]).unwrap_err().to_string();
-        assert!(err.contains("not EIP-1559"), "unexpected error: {err}");
+    fn typed_tx_chain_id_rejects_legacy_and_blob() {
+        // Legacy txs start with an RLP list header (`0xf8`/`0xf9`), not `0x00`.
+        let err = typed_tx_chain_id(&[0xf8, 0x6a]).unwrap_err().to_string();
+        assert!(
+            err.contains("not EIP-2930 (0x01) or EIP-1559 (0x02)"),
+            "unexpected error: {err}"
+        );
+        let err3 = typed_tx_chain_id(&[0x03, 0xc0]).unwrap_err().to_string();
+        assert!(err3.contains("0x03"), "unexpected error: {err3}");
         assert!(typed_tx_chain_id(&[]).is_err());
     }
 
-    /// BC-D09: a truncated typed-tx must error, never panic. Both inputs are the
-    /// audit's fuzz reproducers — `0xff` claims an 8-byte list-length header that
-    /// isn't there, and `0x85` claims a 5-byte chain_id string that isn't there.
+    #[test]
+    fn typed_tx_chain_id_accepts_eip2930_chain_id() {
+        // 0x01 || RLP([11155111]) — field 0 only; the rest of the tx is unused.
+        let sepolia: u64 = crate::supported_chains::CHAIN_ID_SEPOLIA;
+        let body = {
+            let mut n = sepolia.to_be_bytes().to_vec();
+            while n.first() == Some(&0) && n.len() > 1 {
+                n.remove(0);
+            }
+            let mut payload = Vec::new();
+            payload.push(0x80 + n.len() as u8);
+            payload.extend_from_slice(&n);
+            let mut out = vec![0xc0 + payload.len() as u8];
+            out.extend_from_slice(&payload);
+            out
+        };
+        let mut bytes = vec![0x01];
+        bytes.extend_from_slice(&body);
+        assert_eq!(typed_tx_chain_id(&bytes).unwrap(), sepolia);
+    }
+
+    /// BC-D09: a truncated typed-tx must error, never panic. Both inputs are
+    /// the audit's fuzz reproducers — `0xff` claims an 8-byte list-length
+    /// header that isn't there, and `0x85` claims a 5-byte chain_id string
+    /// that isn't there.
     #[test]
     fn typed_tx_chain_id_errors_on_truncated_input() {
         for bytes in [
@@ -748,13 +886,17 @@ mod tests {
         }
     }
 
-    /// Arbitrum's `gasLimit` is 2^50; the circuit's per-field cap must cover it.
+    /// Arbitrum's `gasLimit` is 2^50; the circuit's per-field cap must cover
+    /// it.
     #[test]
     fn arbitrum_gas_limit_fits_the_circuit_field_cap() {
         let (_, raw, _) = HEADER_SAMPLES[2];
         let block: Block<H256> = serde_json::from_str(raw).unwrap();
         let gas_limit_bytes = (block.gas_limit.bits() + 7) / 8;
-        assert!(gas_limit_bytes > 4, "sample no longer exercises the wide case");
+        assert!(
+            gas_limit_bytes > 4,
+            "sample no longer exercises the wide case"
+        );
         assert!(
             gas_limit_bytes <= crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS[9],
             "gasLimit needs {gas_limit_bytes} bytes, field cap is {}",
@@ -764,22 +906,22 @@ mod tests {
 
     /// BC-D06: every integer header slot must be able to hold the widest value
     /// its own `gasLimit` permits, not merely the widest value observed. A slot
-    /// that is too narrow makes the RLP decode fail, so deposits in such a block
-    /// become permanently unprovable — and unrefundable, since `withdraw()` was
-    /// retired in Phase 4.3.
+    /// that is too narrow makes the RLP decode fail, so deposits in such a
+    /// block become permanently unprovable — and unrefundable, since
+    /// `withdraw()` was retired in Phase 4.3.
     ///
     /// Empirical context for the sizing (sampled 2026-08-03, 32 blocks spread
-    /// across Arbitrum One's history): max `gasUsed` 2 719 399 (3 bytes) against
-    /// a `gasLimit` of 2^50. The 8-byte slot leaves the protocol no way to
-    /// overflow it at all, which is the property worth having.
+    /// across Arbitrum One's history): max `gasUsed` 2 719 399 (3 bytes)
+    /// against a `gasLimit` of 2^50. The 8-byte slot leaves the protocol no
+    /// way to overflow it at all, which is the property worth having.
     #[test]
     fn integer_header_slots_cover_their_own_gas_limit() {
         use crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS;
         for (slot, name) in [(8, "number"), (10, "gasUsed"), (11, "timestamp")] {
             assert!(
                 BLOCK_HEADER_MAX_FIELD_LENS[slot] >= BLOCK_HEADER_MAX_FIELD_LENS[9],
-                "slot {slot} ({name}) caps at {} bytes while gasLimit (slot 9) allows {} — \
-                 a chain may emit a value the circuit cannot decode",
+                "slot {slot} ({name}) caps at {} bytes while gasLimit (slot 9) allows {} — a \
+                 chain may emit a value the circuit cannot decode",
                 BLOCK_HEADER_MAX_FIELD_LENS[slot],
                 BLOCK_HEADER_MAX_FIELD_LENS[9],
             );

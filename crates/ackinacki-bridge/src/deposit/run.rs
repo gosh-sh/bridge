@@ -1406,10 +1406,25 @@ async fn walk(
                         work,
                     };
                     // A failure — Ctrl-C reaching the prover too — leaves the
-                    // operation where it is: a resume proves again.
-                    prover::prove(&cx.prover, &req, &want, p.prover_timeout, ui, &op)
+                    // operation where it is: a resume proves again. An
+                    // unprovable deposit closes it, as step 5 would have.
+                    let proved = prover::prove(&cx.prover, &req, &want, p.prover_timeout, ui, &op)
                         .await
                         .map_err(|e| in_doubt(rec, e))?;
+                    if let Err(v) = proved {
+                        if rec.stage == OpStage::Finalizing {
+                            return Err(in_doubt(
+                                rec,
+                                err(
+                                    ExitCode::DepositProofFailed,
+                                    Stage::Prove,
+                                    &op,
+                                    v.to_string(),
+                                ),
+                            ));
+                        }
+                        return Err(negative(d, store, rec, Negative::Unprovable(v)).await);
+                    }
                 }
                 if rec.stage != OpStage::Finalizing {
                     rec.stage = OpStage::Proved;
@@ -2897,7 +2912,7 @@ mod tests {
         let mut w = World::healthy();
         // As when Ctrl-C reaches the prover too: it dies, the run does not
         // close the operation.
-        w.prover = fake_prover_dir("exit 3");
+        w.prover = fake_prover_dir("exit 1");
         let h = w.mined_deposit(7);
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
@@ -2910,6 +2925,38 @@ mod tests {
             .load(e.op_id().unwrap())
             .unwrap();
         assert_eq!(rec.stage, OpStage::Anchored);
+    }
+
+    #[tokio::test]
+    async fn a_deposit_the_prover_finds_unprovable_closes_at_exit_35() {
+        let mut w = World::healthy();
+        w.prover = fake_prover_dir(
+            "echo 'unprovable: the header, MPT paths, transaction and receipt need more than 128 \
+             keccak permutations' >&2; exit 3",
+        );
+        let h = w.mined_deposit(7);
+        let a = w.approve_hash();
+        w.wallet.send_results.extend([Ok(a), Ok(h)]);
+        w.anchor_after(0);
+        let (p, d) = on_the_real_clock(&w);
+        let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositUnprovable, "{e}");
+        let m = e.to_string();
+        assert!(m.contains("keccak permutations"), "{m}");
+        assert!(m.contains("Give the bridge operator:"), "{m}");
+        assert!(!m.contains("--resume"), "{m}");
+        assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was finalized");
+        let rec = Store::open(&p.state_dir)
+            .unwrap()
+            .load(e.op_id().unwrap())
+            .unwrap();
+        assert_eq!(rec.stage, OpStage::Failed);
+        // A resume answers from the record and proves nothing again.
+        let target = OpRef::Op(e.op_id().unwrap().to_string());
+        let (p, d) = resuming_on_the_real_clock(&w, &target);
+        let again = resume(&p, &d, &target, None).await.unwrap_err();
+        assert_eq!(again.exit_code(), ExitCode::DepositUnprovable, "{again}");
+        assert_eq!(w.prover_runs(), 0);
     }
 
     #[tokio::test]

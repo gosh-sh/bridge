@@ -21,10 +21,11 @@ excluded from the root workspace and built standalone.
 The Halo2 circuit (`src/circuit_v2.rs`) proves:
 
 1. **Receipt trie inclusion** — the transaction receipt exists in Ethereum's receipt trie (MPT
-   proof), with `max_key_byte_len: 3` (`src/circuit_v2.rs:1018`; the bound is derived at `:1011`).
+   proof), with `max_key_byte_len: 3` (`impl ToMPTInput for ReceiptProof` in `src/circuit_v2.rs`;
+   the leaf bound is `receipt_max_byte_len`).
 2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
 3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")`
-   (`src/circuit_v2.rs:170-171`). Six fields: the event carries the Acki Nacki destination.
+   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Six fields: the event carries the Acki Nacki destination.
 4. **Contract address** — the event was emitted by the expected bridge contract.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
    as public inputs.
@@ -57,11 +58,52 @@ and chain-binding inputs were added later.*
 
 ### Circuit parameters
 
+Code defaults (`CircuitConfig::default`, unit tests) are 128 B of log data and
+3 logs. Those are **not** the production shape. The verifying key is keyed on
+the production rows below.
+
 ```rust
-MAX_DATA_BYTE_LEN: 128     // src/circuit_v2.rs:29 — max event data length
-MAX_LOG_NUM: 3             // :30 — max logs per receipt
-TOPIC_NUM_BOUNDS: (0, 4)   // :31 — min/max topics per log
-RECEIPT_PF_MAX_DEPTH: 10   // :32 — max MPT proof depth
+// Receipt chip — production (baked into the VK / relayer defaults)
+PRODUCTION_MAX_DATA_BYTE_LEN: 2048  // two-signer SafeL2 MultiSend is ~1152 B
+PRODUCTION_MAX_LOG_NUM: 20          // chip max; the keccak budget allows ~6 logs at 2048 B
+TOPIC_NUM_BOUNDS: (0, 4)
+RECEIPT_PF_MAX_DEPTH: 10
+FIXED_KECCAK_CAPACITY: 128          // ~17 KB of preimages: a receipt up to ~13.5 KB
+
+// Enclosing tx chip — also baked into the VK
+MAX_TX_CALLDATA_BYTE_LEN: 2048      // 1-of-1 Safe execTransaction is 612 B
+MAX_TX_ACCESS_LIST_LEN: 512
+ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2; type 0 and type 4 stay off
+```
+
+Fitting every bound above is necessary, not sufficient: the header, both MPT
+paths and the receipt must also fit the 128 keccak permutations. On a real
+trie with a small transaction, six logs of 2048 B fit and seven do not; a
+type-1 transaction near its ~2.8 KB leaf costs about one log more. The
+combined cap also applies to the enclosing transaction: a type-1 tx's calldata
+and access list may each be up to 2048 B, but together they must fit the
+~2805 B leaf.
+
+`fetch_deposit_data` exits **3** when the enclosing transaction is type 0
+or 4, or its leaf, calldata or access list is over the cap (that used to
+be exit 1, which the relayer retried). `export_blake2b_proof` and
+`export_vk_blob` then check the rest before loading the SRS or the key
+(`src/provable.rs`): log count, every log's topics and data, receipt and
+header length, MPT depths and the keccak budget. A deposit the circuit
+cannot prove exits with code **3** and the reason on stderr; any other
+failure is a different code. Callers treat 3 as final: the `deposit` CLI
+ends at its exit 35, and `deposit-relayer` parks the deposit at once
+instead of retrying.
+
+A type 0 (legacy) or type 4 (EIP-7702) deposit is neither provable nor
+refundable. Send again as type 1 or 2. EIP-155 `chainId = (v − 35) / 2` would
+make type 0 provable; that is a product decision, not this circuit.
+
+In-circuit synthesis at the production shape lives in
+`tests/circuit_synthesis.rs` (`#[ignore]`, ~2 min each):
+
+```bash
+cargo test --release --test circuit_synthesis -- --ignored --nocapture
 ```
 
 ## On-chain consumption

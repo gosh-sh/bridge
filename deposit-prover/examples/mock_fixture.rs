@@ -20,7 +20,7 @@ use std::{env, fs};
 
 use anyhow::{bail, Context, Result};
 use deposit_prover::{
-    prover::{test_circuit_mock, CircuitConfig},
+    prover::{test_circuit_mock_pinned, CircuitConfig},
     types::DepositProofInput,
 };
 
@@ -57,25 +57,25 @@ fn main() -> Result<()> {
                 input.receipt_proof.block_header_rlp.len()
             );
             true
-        }
+        },
         Some(other) => bail!("unknown mutation {other:?}; known: header-pad"),
     };
 
-    let outcome = test_circuit_mock(input, &CircuitConfig::default());
+    let outcome = test_circuit_mock_pinned(input, &CircuitConfig::production());
 
     match (expect_reject, outcome) {
         (false, Ok(())) => {
             println!("\n✓ all constraints satisfied");
             Ok(())
-        }
+        },
         (false, Err(e)) => bail!("MockProver rejected an unmutated witness: {e}"),
         (true, Err(e)) => {
             let head = e.lines().take(4).collect::<Vec<_>>().join("\n");
             println!("\n✓ rejected as expected:\n{head}");
             Ok(())
-        }
+        },
         (true, Ok(())) => {
             bail!("MockProver ACCEPTED the mutated witness — the constraint is not doing its job")
-        }
+        },
     }
 }

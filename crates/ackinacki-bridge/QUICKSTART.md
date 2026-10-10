@@ -31,8 +31,8 @@ at degree 18 for deposits — about 350 MB in total, most of it the ceremony.
 Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
 before it is written, and the deposit ceremony also against the Hermez
-[s]·G2. It wants ~8 GB free: withdrawal keys take ~6 GB, and the deposit
-prover writes a ~1.3 GB proving key on its first proof.
+[s]·G2. It wants ~10 GB free: withdrawal keys take ~6 GB, and the deposit
+prover writes a ~3.4 GB proving key on its first proof.
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it
@@ -184,7 +184,7 @@ Moves USDC from an EVM wallet to an Acki Nacki account, where it arrives as
 eccUSDC. Your wallet signs; the CLI never sees its key. One deposit should
 take **about 17 minutes** — an estimate from its parts, not a timed run —
 plus however long the bridge owner takes to anchor your block by hand; the
-proof itself takes under a minute.
+proof itself takes one to two minutes.
 
 **Once the deposit transaction is sent, the USDC is in the bridge.**
 Everything before it refuses instead of guessing. Everything after it can
@@ -204,7 +204,7 @@ be resumed, except the two outcomes only the bridge operator can settle
 - **The recipient**, the Acki Nacki account as `dapp_id::account_id`. If the
   account is deployed, the dapp must be the one it lives in; if it does not
   exist yet, the deposit creates it.
-- **About 5 GB of free memory** for the proof.
+- **About 10 GB of free memory** for the proof.
 
 ## 9. Set your values
 
@@ -281,7 +281,7 @@ echo "exit=$?"
 | 4 deposit request | **the USDC goes into the bridge** | a block after you confirm |
 | 5 EVM confirmation | 12 confirmations | ~2.5 min |
 | 6 block anchor | **the bridge owner anchors your block by hand** | **from ~13 min** |
-| 7 proof | on this machine | under a minute |
+| 7 proof | on this machine | 1–2 min |
 | 8 finalizeDeposit | a message to the Acki Nacki bridge; it pays the gas | seconds |
 | 9 credit | the eccUSDC reach the recipient, checked by the deposit's identity | seconds |
 

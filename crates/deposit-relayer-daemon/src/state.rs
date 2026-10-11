@@ -12,7 +12,7 @@
 //! - `attempts_since_progress` increments on every failed attempt at the
 //!   current target and resets on a finalize; it caps the relayer's willingness
 //!   to spin on one deposit. Waiting for a deposit that is not made yet is not
-//!   an attempt.
+//!   an attempt, and neither is a submit still pending on AN.
 //!
 //! Concurrency note: like the AN→ETH relayer, this is a single-process
 //! daemon. The file is overwritten atomically (write-temp-then-rename + fsync).
@@ -180,11 +180,17 @@ impl RelayerState {
         self.attempts_since_progress = 0;
     }
 
-    /// Mark an attempt that did not finalize the deposit (proof failure, AN
-    /// rejection, or a submit still pending).
+    /// Mark an attempt that failed the deposit (proof failure, AN rejection).
     pub fn record_attempt(&mut self, deposit_id: u64) {
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = self.attempts_since_progress.saturating_add(1);
+    }
+
+    /// Mark a submit whose outcome is not known yet (confirmation timed out,
+    /// or the lane is paused). It says nothing against the deposit, so it does
+    /// not count toward `--skip-after-attempts`.
+    pub fn record_pending(&mut self, deposit_id: u64) {
+        self.last_attempt_deposit_id = Some(deposit_id);
     }
 
     /// Park a stuck deposit and advance the cursor past it. The id is recorded

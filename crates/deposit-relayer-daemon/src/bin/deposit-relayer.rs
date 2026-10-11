@@ -48,7 +48,11 @@ use tvm_client::crypto::KeyPair;
 )]
 struct Args {
     /// Where to persist `state.json` (used by `daemon`).
-    #[arg(long, default_value = "./deposit-relayer-state.json")]
+    #[arg(
+        long,
+        env = "DEPOSIT_RELAYER_STATE",
+        default_value = "./deposit-relayer-state.json"
+    )]
     state: PathBuf,
 
     #[command(subcommand)]

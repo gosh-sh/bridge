@@ -704,6 +704,14 @@ assigns it when the release is tagged.
   waiting for a finalize, so a restarted daemon finds it again in a single
   10-block chunk. `deposit_relayer_eth_scan_from_block` reflects that. Nothing
   to configure (QC-OFF-10).
+- `deposit-relayer` reads `--state` from `DEPOSIT_RELAYER_STATE`.
+  `scripts/ursus/deposit-relayer.env.example` has always set that variable,
+  but nothing read it, so a daemon started by the unit kept `state.json` in
+  its working directory (`/home/ubuntu/bridge-e2e/deposit-relayer-state.json`
+  on the Ursus host). **Before upgrading**, if your env file sets
+  `DEPOSIT_RELAYER_STATE`, move the existing file there. Otherwise the daemon
+  starts over at `--start-deposit-id` and forgets its parked ids
+  (QC-OFF-08).
 
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
@@ -1015,6 +1023,12 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- A `finalizeDeposit` the daemon reports as pending no longer counts toward
+  `--skip-after-attempts`. This covers a confirmation that outlasted the
+  60-second timeout, and a paused lane (`ERR_PAUSED`, 231). Every pending tick
+  used to raise `attempts_since_progress`, so after a long pause the first real
+  failure parked a healthy deposit. Pending ticks are now logged at `info`
+  (QC-OFF-11).
 - `deposit-relayer daemon --force-state` now starts `state.json` over when the
   file was stamped for another deployment (chain id, EVM bridge address or
   `AN_DAPP_ID`). It used to re-stamp the binding and keep the old

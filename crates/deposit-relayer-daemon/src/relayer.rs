@@ -291,9 +291,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Pending {
                 reason,
             } => {
-                self.state.record_attempt(target);
+                self.state.record_pending(target);
                 self.persist_state()?;
-                debug!(
+                info!(
                     deposit_id = target,
                     reason = %reason,
                     "finalizeDeposit still pending; will retry",
@@ -409,7 +409,7 @@ mod tests {
         prover::MockProofGenerator,
         source::{EthLogSource, InMemoryDepositSource},
         submitter::MockAnSubmitter,
-        types::DepositEvent,
+        types::{DepositEvent, DepositProofBundle},
     };
 
     fn deposit(id: u64) -> DepositEvent {
@@ -821,6 +821,76 @@ mod tests {
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap()
+    }
+
+    /// Answers each submit with the next outcome from its script.
+    struct ScriptedSubmitter(Mutex<Vec<SubmitOutcome>>);
+
+    #[async_trait::async_trait]
+    impl AnSubmitter for ScriptedSubmitter {
+        async fn is_finalized(&self, _: &DepositEvent) -> Result<bool, RelayerError> {
+            Ok(false)
+        }
+
+        async fn submit(
+            &self,
+            _: &DepositEvent,
+            _: &DepositProofBundle,
+        ) -> Result<SubmitOutcome, RelayerError> {
+            Ok(self.0.lock().unwrap().remove(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_submit_does_not_count_toward_parking() {
+        // A long pause of the lane (exit 231) or slow confirmations must not
+        // leave a healthy deposit one failure away from being parked.
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let pending = || SubmitOutcome::Pending {
+            reason: "paused".into(),
+        };
+        let rejected = || SubmitOutcome::Rejected {
+            reason: "anchor".into(),
+        };
+        let script = vec![pending(), pending(), pending(), rejected(), rejected()];
+        let cfg = RelayerConfig {
+            skip_after_attempts: Some(2),
+            ..RelayerConfig::new(dir.path().join("state.json"))
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(ScriptedSubmitter(Mutex::new(script))),
+        )
+        .unwrap();
+
+        for _ in 0..3 {
+            assert!(matches!(
+                relayer.tick().await.unwrap(),
+                TickOutcome::AnPending {
+                    deposit_id: 0,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(relayer.state().attempts_since_progress, 0);
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Skipped {
+                deposit_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

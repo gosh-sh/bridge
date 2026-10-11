@@ -107,20 +107,27 @@ impl RelayerState {
 
     /// Validate or stamp deployment binding. Legacy state files without
     /// `deployment` are upgraded on first save.
+    ///
+    /// With `force`, a mismatched file is started over for the new deployment
+    /// and the discarded state is returned: its cursor counts deposits of
+    /// another bridge, and keeping it would skip the new bridge's first ids.
     pub fn ensure_deployment(
         &mut self,
         expected: &DeploymentIdentity,
         force: bool,
-    ) -> Result<(), RelayerError> {
+    ) -> Result<Option<RelayerState>, RelayerError> {
         match &self.deployment {
             None => {
                 self.deployment = Some(expected.clone());
-                Ok(())
+                Ok(None)
             },
-            Some(stored) if stored == expected => Ok(()),
+            Some(stored) if stored == expected => Ok(None),
             Some(_) if force => {
-                self.deployment = Some(expected.clone());
-                Ok(())
+                let fresh = RelayerState {
+                    deployment: Some(expected.clone()),
+                    ..RelayerState::default()
+                };
+                Ok(Some(std::mem::replace(self, fresh)))
             },
             Some(stored) => Err(RelayerError::other(format!(
                 "state.json deployment mismatch (stored chain={} bridge={} dapp_id={}; expected \
@@ -281,6 +288,28 @@ mod tests {
         };
         let err = s.ensure_deployment(&deployment(2), false).unwrap_err();
         assert!(err.to_string().contains("deployment mismatch"));
+    }
+
+    #[test]
+    fn forced_deployment_change_starts_the_state_over() {
+        let mut s = RelayerState {
+            deployment: Some(deployment(1)),
+            scan_done_through_block: Some(500),
+            parked_deposit_ids: vec![4],
+            ..RelayerState::default()
+        };
+        s.record_progress(100);
+
+        let dropped = s.ensure_deployment(&deployment(2), true).unwrap().unwrap();
+        assert_eq!(dropped.last_processed_deposit_id, Some(100));
+        assert_eq!(dropped.parked_deposit_ids, vec![4]);
+        assert_eq!(s, RelayerState {
+            deployment: Some(deployment(2)),
+            ..RelayerState::default()
+        });
+        assert_eq!(s.next_target(0), 0);
+
+        assert_eq!(s.ensure_deployment(&deployment(2), true).unwrap(), None);
     }
 
     #[test]

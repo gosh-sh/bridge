@@ -186,7 +186,9 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Override a mismatched deployment binding in an existing state file.
+        /// Accept a state file stamped for another deployment (chain, bridge
+        /// or dappId) by starting it over: progress, scan cursor and parked
+        /// ids are discarded and the daemon begins at `--start-deposit-id`.
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in

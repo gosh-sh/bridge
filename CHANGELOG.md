@@ -1015,6 +1015,16 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-relayer daemon --force-state` now starts `state.json` over when the
+  file was stamped for another deployment (chain id, EVM bridge address or
+  `AN_DAPP_ID`). It used to re-stamp the binding and keep the old
+  `last_processed_deposit_id`, `scan_done_through_block` and
+  `parked_deposit_ids`. After a bridge redeploy, that silently skipped the
+  new bridge's deposits up to the old cursor. The daemon now logs the discarded
+  values (record the parked ids before you run it) and begins at
+  `--start-deposit-id`. If the AN bridge did not change, the replay is cheap:
+  deposits that are already finalized are recognised by their voucher and are
+  not proven again (QC-OFF-08).
 - An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
   to bring it down: `accruedYield()` stayed zero for good, and
   `withdrawFromAave` kept reverting once the pool was empty. The book can now

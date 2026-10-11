@@ -135,7 +135,20 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     ) -> Result<Self, RelayerError> {
         let mut state = RelayerState::load(&config.state_path)?.unwrap_or_default();
         if let Some(deployment) = &config.deployment {
-            state.ensure_deployment(deployment, config.force_state)?;
+            if let Some(dropped) = state.ensure_deployment(deployment, config.force_state)? {
+                warn!(
+                    old_deployment = ?dropped.deployment,
+                    old_last_processed_deposit_id = ?dropped.last_processed_deposit_id,
+                    old_parked_deposit_ids = ?dropped.parked_deposit_ids,
+                    start_deposit_id = config.start_deposit_id,
+                    "--force-state: state.json belonged to another deployment; starting over",
+                );
+                if let Some(cursor) = &config.scan_cursor {
+                    *cursor
+                        .lock()
+                        .map_err(|e| RelayerError::other(e.to_string()))? = None;
+                }
+            }
         }
         Ok(Self {
             config,
@@ -434,6 +447,49 @@ mod tests {
             scan_cursor: None,
         };
         Relayer::new(cfg, source, prover, submitter).unwrap()
+    }
+
+    #[tokio::test]
+    async fn force_state_onto_another_bridge_starts_from_its_first_deposit() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let old_bridge = DeploymentIdentity::new(1, Address::repeat_byte(0x01), "0x0");
+        let mut old = RelayerState {
+            deployment: Some(old_bridge),
+            scan_done_through_block: Some(900),
+            ..RelayerState::default()
+        };
+        old.record_progress(100);
+        old.save(&state_path).unwrap();
+
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let cursor = Arc::new(Mutex::new(old.scan_done_through_block));
+        let cfg = RelayerConfig {
+            deployment: Some(DeploymentIdentity::new(
+                1,
+                Address::repeat_byte(0x02),
+                "0x0",
+            )),
+            force_state: true,
+            scan_cursor: Some(cursor.clone()),
+            ..RelayerConfig::new(&state_path)
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        assert_eq!(*cursor.lock().unwrap(), None);
+
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Finalized {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
+            other => panic!("expected Finalized(0), got {other:?}"),
+        }
     }
 
     #[tokio::test]

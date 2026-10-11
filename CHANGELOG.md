@@ -29,6 +29,15 @@ assigns it when the release is tagged.
   block cutoff in the same code so past deposits stop going through. The
   current contracts need no such restriction — the voucher's code is installed
   by the zerostate and `updateCode` is called with an empty `userCell`.
+- `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
+  row told operators to re-prove `applyBkSetUpdate` against the live
+  `storedLastSeenBlockSeqNo`. That value reverts
+  `AttestationLastSeenNotBeforeSeqNo`; pass the `last_seen` the attestation
+  was proven against.
+- `docs/aave-yield.md` gains *If AAVE lost money*: what still pays out when
+  `suppliedPrincipal()` is above `aUsdcBalance()`, and when to call
+  `writeOffUnbackedPrincipal()`. It no longer says `harvestYield` accepts
+  `type(uint256).max` — it never did.
 
 ### Breaking Changes
 
@@ -254,6 +263,17 @@ assigns it when the release is tagged.
   needs the second call.
 
 ### Added
+
+- `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
+  cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
+  `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
+  `NothingToWriteOff` when the book is already covered. Use it once the loss
+  is accepted, so `accruedYield()` reflects interest again (ETH-28).
+  Available only on a bridge deployed from this release.
+- `harvestYield(amount)` reverts
+  `HarvestWouldBreakSolvency(amount, backing, treasuryBalance)` when liquid
+  USDC + aUSDC minus `amount` would fall below `treasuryBalance`. After a
+  loss, interest goes to users first.
 
 - **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
   account.** The wallet signs `approve` and `deposit` from a QR code —
@@ -638,6 +658,22 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- AAVE pulls are exact and bounded by the aToken balance (ETH-28):
+  - `withdrawByProof` tops up the missing part of a payout from all of
+    `aUsdcBalance()`, interest included, instead of stopping at
+    `suppliedPrincipal`. When liquid USDC + aUSDC cannot cover the payout it
+    reverts `InsufficientTreasury`; a bridge without an AAVE position used to
+    fail later, inside the USDC transfer.
+  - `withdrawFromAave(amount)` accepts at most
+    `min(suppliedPrincipal, aUsdcBalance)`; `type(uint256).max` pulls exactly
+    that. A larger explicit amount reverts `InvalidAmount` rather than being
+    trimmed to a partial pull, so `WithdrawnFromAave` always reports a pull
+    that was paid in full.
+  - `supplyToAave` reverts `AaveSupplyFailed(requested, 0)` when AAVE mints
+    no aUSDC (was `AaveWithdrawFailed`).
+  - `harvestYield` sends exactly `amount` to `yieldRecipient`; anything a
+    pool pays above it stays on the bridge.
+
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
   per-slot window heights from `LayerAnchorAppended` logs. The scan walks
@@ -947,6 +983,14 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
+  to bring it down: `accruedYield()` stayed zero for good, and
+  `withdrawFromAave` kept reverting once the pool was empty. The book can now
+  be written off (see Added), and payouts no longer depend on it. A pool that
+  redeemed more than asked could also make `withdrawFromAave` and the
+  `withdrawByProof` top-up revert with an arithmetic panic; the book now drops
+  by the requested amount, floored at zero (ETH-28).
 
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted

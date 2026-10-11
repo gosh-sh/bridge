@@ -30,10 +30,11 @@ reconciled against real assets, so a loss in AAVE does not shrink it — it surf
 
 | Yield is… | Command | Fails with |
 |---|---|---|
-| in AAVE | `harvestYield(amount)` (`:1287`) | `NoYield` if `accruedYield() == 0` |
+| in AAVE | `harvestYield(amount)` (`:1287`) | `NoYield` if `amount` is 0 or above `accruedYield()`; `HarvestWouldBreakSolvency` if liquid + aUSDC − `amount` would fall below `treasuryBalance()` |
 | on the contract | `skimExcessUsdc(amount)` (`:1315`) | `NoExcessUsdc` if `excessUsdc() == 0` |
 
-Both send to `yieldRecipient`, never to the caller. Both accept `type(uint256).max` for "all of it".
+Both send to `yieldRecipient`, never to the caller. `skimExcessUsdc` accepts `type(uint256).max` for
+"all of it"; `harvestYield` does not — pass the exact amount, at most `accruedYield()`.
 Neither can touch user principal — neither function appears in the accounting of what we supplied to
 AAVE, and that absence is the guarantee.
 
@@ -59,7 +60,7 @@ Yield can be back in AAVE after an emergency in three ways: the module was re-en
 book says we supplied nothing; or rounding dust survived the `withdraw(max)`. In all three
 `harvestYield` works — note it has **no** `aaveEnabled` guard (`:1287-1289`), so a disabled module
 does not block collection. `withdrawFromAave`, by contrast, reverts `InvalidAmount` while
-`suppliedPrincipal` is zero (`:1259-1260`).
+`min(suppliedPrincipal(), aUsdcBalance())` is zero, and for any explicit amount above it.
 
 This is why the rule above is stated over pockets rather than over history: it answers all three
 cases without anyone having to remember what was called last.
@@ -84,15 +85,31 @@ aUSDC on the bridge (reserve cap / pause). The whole call reverts, so `aaveEnabl
 is what would have made leftover shares look like yield, which is why the revert exists.
 
 ```
-withdrawFromAave(amount)   # repeat until principal is 0 or AAVE stops paying
+withdrawFromAave(amount)   # repeat until aUsdcBalance() is 0 or AAVE stops paying
 setAaveEnabled(false)
-harvestYield(max)          # only if accruedYield() > 0 — yield still in AAVE
+harvestYield(amount)       # only if accruedYield() > 0 — yield still in AAVE
 skimExcessUsdc(max)        # liquid surplus, if any
 ```
 
 `withdrawFromAave` pulls booked principal only, so leftover yield stays in AAVE and
 `harvestYield` is the right collector for that pocket. `skimExcessUsdc` is for whatever
 already sits on the contract.
+
+**If AAVE lost money: `suppliedPrincipal() > aUsdcBalance()`.** A haircut, or the shortfall that
+`emergencyWithdrawAll` keeps on the books when AAVE redeemed less than it was given. The position is
+worth less than the book; users are owed the same. What still works and what does not:
+
+* Payouts keep drawing on whatever aUSDC is there — `withdrawByProof` pulls the shortfall up to
+  `aUsdcBalance()`, interest included. Once liquid USDC plus aUSDC no longer covers a payout it
+  reverts `InsufficientTreasury`; that is a real shortfall, and only fresh USDC sent to the bridge
+  closes it.
+* `withdrawFromAave(max)` pulls `min(suppliedPrincipal, aUsdcBalance)`, not the whole book.
+* `accruedYield()` stays zero until interest catches up with the book.
+
+`writeOffUnbackedPrincipal()` cuts the book down to `aUsdcBalance()`. Call it once the loss is
+accepted — for example after the gap has been refilled in liquid USDC — so `accruedYield()` again
+reflects the interest. It cannot be used to take yield from users: `harvestYield` refuses any amount
+that would leave liquid + aUSDC below `treasuryBalance()`, whatever the book says.
 
 **2. Reading a skim revert as "no yield".** If AAVE returned less than the principal — the depeg case
 the emergency exists for — then `excessUsdc()` is zero and the skim reverts. That is the principal
@@ -119,7 +136,7 @@ cast call $BRIDGE 'yieldRecipient()(address)' --rpc-url $RPC   # is this still t
 cast call $BRIDGE 'treasuryBalance()(uint256)'   --rpc-url $RPC   # owed to users (book)
 cast call $BRIDGE 'suppliedPrincipal()(uint256)' --rpc-url $RPC   # supplied to AAVE (book)
 cast call $BRIDGE 'aUsdcBalance()(uint256)'      --rpc-url $RPC   # position value now
-cast call $BRIDGE 'accruedYield()(uint256)'      --rpc-url $RPC   # harvestable, in AAVE
+cast call $BRIDGE 'accruedYield()(uint256)'      --rpc-url $RPC   # in AAVE above the book
 cast call $BRIDGE 'excessUsdc()(uint256)'        --rpc-url $RPC   # skimmable, on contract
 cast call $BRIDGE 'totalAssets()(uint256)'       --rpc-url $RPC   # liquid + aUSDC
 cast call $BRIDGE 'aaveEnabled()(bool)'          --rpc-url $RPC
@@ -129,7 +146,7 @@ Alert a keeper on any of these:
 
 ```
 totalAssets() < treasuryBalance()                 # solvency breach
-suppliedPrincipal() > aUsdcBalance()              # book ahead of AAVE; should never happen
+suppliedPrincipal() > aUsdcBalance()              # AAVE lost value; see "If AAVE lost money"
 aaveEnabled() == false AND suppliedPrincipal > 0  # stuck position, needs a manual unwind
 excessUsdc() > 0 across a collection cycle        # uncollected surplus; the next supply absorbs it
 ```

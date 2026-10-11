@@ -24,6 +24,15 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
+  deposit relayer. It covers one daemon per AN bridge and backing up
+  `state.json`, the strict `depositId` queue, parking with
+  `--skip-after-attempts` and finishing parked deposits with
+  `prove-one` + `finalize-one`, which outcomes are retried automatically
+  (pending, paused lane) and which need a person, a fix for each exit code,
+  the `--force-state` checklist after a redeploy, alert rules over the
+  Prometheus metrics, and failing over to a cold standby (QC-OFF-01, -02, -08,
+  -11).
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
   is part of replay protection, and that an upgrade changing it has to ship a
   block cutoff in the same code so past deposits stop going through. The

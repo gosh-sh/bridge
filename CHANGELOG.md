@@ -673,6 +673,12 @@ assigns it when the release is tagged.
     no aUSDC (was `AaveWithdrawFailed`).
   - `harvestYield` sends exactly `amount` to `yieldRecipient`; anything a
     pool pays above it stays on the bridge.
+- `deposit-relayer daemon` accepts `AN_DAPP_ID=0` / `--dapp-id 0` without
+  `--dry-run`; it used to refuse to start. Zero is the right value:
+  `eccUSDCBridge` pins every deposit's dappId to 0 and ignores the proof's
+  dappId inputs. `scripts/ursus/deposit-relayer.env.example` now ships
+  `AN_DAPP_ID=0`; an existing env with another value keeps working, the value
+  just has no effect on-chain (QC-OFF-09).
 
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the

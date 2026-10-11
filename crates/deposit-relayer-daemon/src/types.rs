@@ -189,9 +189,9 @@ impl DepositPublicInputs {
 /// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
 /// `0x`-prefixed hex form used in proofs and `state.json`.
 ///
-/// When `allow_zero` is false, a zero dappId is rejected — live daemon paths
-/// must set an explicit non-zero tag (QC-OFF-09).
-pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String, RelayerError> {
+/// Zero is valid: `eccUSDCBridge._parsePublicInputs` pins the deposit's
+/// dappId to 0 and does not read the proof's dappId halves (QC-OFF-09).
+pub fn parse_and_validate_dapp_id(raw: &str) -> Result<String, RelayerError> {
     let s = raw.trim();
     if s.is_empty() {
         return Err(RelayerError::other(
@@ -212,12 +212,6 @@ pub fn parse_and_validate_dapp_id(raw: &str, allow_zero: bool) -> Result<String,
     }
     let value = U256::from_str_radix(hex, 16)
         .map_err(|e| RelayerError::other(format!("AN_DAPP_ID '{raw}' parse failed: {e}")))?;
-    if value.is_zero() && !allow_zero {
-        return Err(RelayerError::other(
-            "AN_DAPP_ID must be non-zero for live submit (silent default '0' is rejected; set \
-             AN_DAPP_ID explicitly, e.g. 0x1a1a1a1a1a). Use --dry-run to allow zero.",
-        ));
-    }
     Ok(format!("{value:#x}"))
 }
 
@@ -453,26 +447,25 @@ mod tests {
     #[test]
     fn dapp_id_validation_accepts_hex() {
         assert_eq!(
-            parse_and_validate_dapp_id("0x1a1a1a1a1a", true).unwrap(),
+            parse_and_validate_dapp_id("0x1a1a1a1a1a").unwrap(),
             "0x1a1a1a1a1a"
         );
         assert_eq!(
-            parse_and_validate_dapp_id("1A1A1A1A1A", true).unwrap(),
+            parse_and_validate_dapp_id("1A1A1A1A1A").unwrap(),
             "0x1a1a1a1a1a"
         );
     }
 
     #[test]
     fn dapp_id_validation_rejects_garbage_and_overwidth() {
-        assert!(parse_and_validate_dapp_id("", true).is_err());
-        assert!(parse_and_validate_dapp_id("zz", true).is_err());
-        assert!(parse_and_validate_dapp_id(&"ab".repeat(33), true).is_err());
+        assert!(parse_and_validate_dapp_id("").is_err());
+        assert!(parse_and_validate_dapp_id("zz").is_err());
+        assert!(parse_and_validate_dapp_id(&"ab".repeat(33)).is_err());
     }
 
     #[test]
-    fn dapp_id_zero_rejected_unless_allowed() {
-        assert!(parse_and_validate_dapp_id("0", false).is_err());
-        assert!(parse_and_validate_dapp_id("0x0", false).is_err());
-        assert_eq!(parse_and_validate_dapp_id("0", true).unwrap(), "0x0");
+    fn dapp_id_zero_is_accepted() {
+        assert_eq!(parse_and_validate_dapp_id("0").unwrap(), "0x0");
+        assert_eq!(parse_and_validate_dapp_id("0x0").unwrap(), "0x0");
     }
 }

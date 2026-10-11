@@ -116,8 +116,8 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        /// Required non-zero for live `daemon` (QC-OFF-09); `"0"` only allowed
-        /// with `--dry-run` / offline `prove-one`.
+        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
+        /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
@@ -154,7 +154,8 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        /// Must be non-zero unless `--dry-run` (QC-OFF-09).
+        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
+        /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
@@ -289,8 +290,7 @@ async fn main() -> anyhow::Result<()> {
             out_dir,
             expect_chain_id,
         } => {
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ true)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
@@ -361,8 +361,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(addr) = metrics_addr {
                 install_metrics_exporter(addr)?;
             }
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,

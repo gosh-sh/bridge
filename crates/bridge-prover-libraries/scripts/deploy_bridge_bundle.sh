@@ -52,12 +52,22 @@ GENESIS_ENV="$(mktemp -t genesis.XXXXXX.env)"
 trap 'rm -f "$GENESIS_ENV"' EXIT
 
 # ─── 1. Derive genesis anchors from live shellnet chain head ──────────────────
-echo ">>> Computing genesis anchors (level=$LEVEL) against $BRIDGE_GQL_ENDPOINT"
+# Optional override: BRIDGE_SEED_SEQNO pins the seed to an explicit level-aligned
+# key-block seq_no (must be a multiple of 1024 for L1 or 16384 for L2). Useful
+# when replaying a previous test setup — otherwise --at-head picks the latest
+# already-produced boundary at or below chain head.
+if [[ -n "${BRIDGE_SEED_SEQNO:-}" ]]; then
+  SEED_FLAG=(--seed-seqno "$BRIDGE_SEED_SEQNO")
+  echo ">>> Computing genesis anchors (level=$LEVEL seed=$BRIDGE_SEED_SEQNO) against $BRIDGE_GQL_ENDPOINT"
+else
+  SEED_FLAG=(--at-head)
+  echo ">>> Computing genesis anchors (level=$LEVEL at-head) against $BRIDGE_GQL_ENDPOINT"
+fi
 cd "$PROVER_DIR/bridge-prover-lib"
 BRIDGE_GQL_ENDPOINT="$BRIDGE_GQL_ENDPOINT" \
 BRIDGE_BK_SET_CONFIG="$PROVER_DIR/${BRIDGE_BK_SET_CONFIG#./}" \
 cargo run --release --quiet --bin compute_bridge_anchors -- \
-  --at-head --level "$LEVEL" \
+  "${SEED_FLAG[@]}" --level "$LEVEL" \
   > "$GENESIS_ENV"
 
 echo ">>> Derived anchors:"

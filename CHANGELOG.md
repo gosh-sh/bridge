@@ -697,6 +697,13 @@ assigns it when the release is tagged.
   dappId inputs. `scripts/ursus/deposit-relayer.env.example` now ships
   `AN_DAPP_ID=0`; an existing env with another value keeps working, the value
   just has no effect on-chain (QC-OFF-09).
+- `deposit-relayer daemon` no longer re-scans Ethereum logs while it retries a
+  deposit that AN keeps refusing. Once a deposit is found, retries reuse it
+  with no `eth_getLogs` or `depositCounter()` call, and `scan_done_through_block`
+  in `state.json` moves to the block before the deposit right away instead of
+  waiting for a finalize, so a restarted daemon finds it again in a single
+  10-block chunk. `deposit_relayer_eth_scan_from_block` reflects that. Nothing
+  to configure (QC-OFF-10).
 
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the

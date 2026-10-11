@@ -566,7 +566,14 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(*cursor.lock().unwrap(), None);
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
+        assert_eq!(
+            RelayerState::load(&state_path)
+                .unwrap()
+                .unwrap()
+                .scan_done_through_block,
+            Some(104)
+        );
 
         for (id, cursor_after) in [(0, 104), (1, 104), (2, 106)] {
             match relayer.tick().await.unwrap() {

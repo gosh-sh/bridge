@@ -22,8 +22,8 @@ use halo2_base::{gates::circuit::CircuitBuilderStage, halo2_proofs::halo2curves:
 
 use crate::{
     circuit_v2::{
-        receipt_max_byte_len, DepositEventCircuitV2, MAX_BLOCK_HEADER_BYTES, RECEIPT_PF_MAX_DEPTH,
-        TX_PF_MAX_DEPTH,
+        max_encoded_log_len, receipt_max_byte_len, DepositEventCircuitV2, MAX_BLOCK_HEADER_BYTES,
+        RECEIPT_PF_MAX_DEPTH, TX_PF_MAX_DEPTH,
     },
     mpt::reject_unprovable_enclosing_tx,
     prover::{get_default_params, CircuitConfig, FIXED_KECCAK_CAPACITY},
@@ -102,8 +102,10 @@ pub fn check_witness_bounds(
 }
 
 /// The receipt fits the circuit's receipt leaf: at most `max_log_num`
-/// logs, each with at most `topic_num_bounds.1` topics and
-/// `max_data_byte_len` data bytes. Every log counts, not only `Deposit`.
+/// logs, each with at most `topic_num_bounds.1` topics and an encoded
+/// length of at most [`max_encoded_log_len`] (axiom-eth's per-log bound;
+/// a log with fewer topics can carry more than `max_data_byte_len` data
+/// bytes and still fit). Every log counts, not only `Deposit`.
 pub fn check_receipt(receipt_rlp: &[u8], config: &CircuitConfig) -> Result<(), Unprovable> {
     let max_len = receipt_max_byte_len(config.max_data_byte_len, config.max_log_num);
     if receipt_rlp.len() > max_len {
@@ -130,18 +132,19 @@ pub fn check_receipt(receipt_rlp: &[u8], config: &CircuitConfig) -> Result<(), U
             config.max_log_num
         ));
     }
+    let max_log = max_encoded_log_len(config.max_data_byte_len, config.topic_num_bounds.1);
     for (i, log) in logs.iter().enumerate() {
-        let (topics, data) = log_parts(log).map_err(|e| unprovable!("log {i}: {e:#}"))?;
+        let (topics, _data) = log_parts(log).map_err(|e| unprovable!("log {i}: {e:#}"))?;
         if topics > config.topic_num_bounds.1 {
             return Err(unprovable!(
                 "log {i} has {topics} topics; the circuit takes at most {}",
                 config.topic_num_bounds.1
             ));
         }
-        if data > config.max_data_byte_len {
+        if log.span.len() > max_log {
             return Err(unprovable!(
-                "log {i} has {data} data bytes; the circuit reads at most {} per log",
-                config.max_data_byte_len
+                "log {i} encodes to {} bytes; the circuit reads at most {max_log} per log",
+                log.span.len()
             ));
         }
     }
@@ -285,10 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn any_log_over_the_data_bound_is_unprovable_not_only_deposit() {
-        let logs = vec![log(3, 96), log(1, 2049)];
-        let e = check_receipt(&receipt(&logs), &config()).unwrap_err();
-        assert!(e.0.contains("log 1 has 2049 data bytes"), "{e}");
+    fn a_log_over_the_encoded_bound_is_unprovable_not_only_deposit() {
+        // 2049 B of data with one topic still encodes under 2211; the
+        // circuit accepts it. Four topics and 2051 B of data encode to
+        // 2212 and do not.
+        let under = log(1, 2049);
+        check_receipt(&receipt(&[log(3, 96), under]), &config()).unwrap();
+        let over = log(4, 2051);
+        let e = check_receipt(&receipt(&[log(3, 96), over]), &config()).unwrap_err();
+        assert!(e.0.contains("log 1 encodes to"), "{e}");
+        assert!(e.0.contains("2211"), "{e}");
     }
 
     #[test]

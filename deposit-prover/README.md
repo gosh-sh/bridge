@@ -65,6 +65,7 @@ the production rows below.
 ```rust
 // Receipt chip — production (baked into the VK / relayer defaults)
 PRODUCTION_MAX_DATA_BYTE_LEN: 2048  // two-signer SafeL2 MultiSend is ~1152 B
+PRODUCTION_MAX_ENCODED_LOG_LEN: 2211 // axiom-eth per-log bound; more data if fewer topics
 PRODUCTION_MAX_LOG_NUM: 20          // chip max; the keccak budget allows ~6 logs at 2048 B
 TOPIC_NUM_BOUNDS: (0, 4)
 RECEIPT_PF_MAX_DEPTH: 10

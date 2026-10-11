@@ -1,18 +1,19 @@
 //! What the deposit circuit can prove, copied from its source.
 //!
 //! The circuit proves an EIP-2930 or EIP-1559 transaction with calldata of
-//! at most 2048 bytes. Type 2 access-list RLP is at most 512 bytes; type 1
-//! access list sits in the same field slot as type 2 calldata, so it may be
-//! 2048 bytes. The receipt parser reads at most 20 logs with at most 2048
-//! bytes of data each. `limits_match_the_circuit_source` holds these
-//! numbers to the circuit. Fitting these bounds is necessary, not
-//! sufficient: the receipt must also fit the prover's keccak budget (about
-//! six logs at 2048 bytes), and a type-1 transaction's calldata and access
-//! list together must fit its ~2805-byte leaf. The prover checks those
-//! before proving and exits with [`PROVER_UNPROVABLE_EXIT`]. The circuit
-//! does not constrain `to`; requiring the bridge there is this CLI's own
-//! rule, so a call routed through another contract is caught here rather
-//! than after the proof.
+//! at most 2048 bytes. Type 2 access-list payload is at most 512 bytes;
+//! type 1 access list sits in the same field slot as type 2 calldata, so
+//! it may be 2048 bytes. The receipt parser reads at most 20 logs; each
+//! log's encoded size is at most 2211 bytes (2048 of data with four
+//! topics; more data if there are fewer topics).
+//! `limits_match_the_circuit_source` holds these numbers to the circuit.
+//! Fitting these bounds is necessary, not sufficient: the receipt must
+//! also fit the prover's keccak budget (about six logs at 2048 bytes),
+//! and a type-1 transaction's calldata and access list together must fit
+//! its ~2805-byte leaf. The prover checks those before proving and exits
+//! with [`PROVER_UNPROVABLE_EXIT`]. The circuit does not constrain `to`;
+//! requiring the bridge there is this CLI's own rule, so a call routed
+//! through another contract is caught here rather than after the proof.
 
 use alloy_primitives::Address;
 
@@ -22,13 +23,19 @@ pub const EIP2930_TX_TYPE: u8 = 1;
 pub const EIP1559_TX_TYPE: u8 = 2;
 /// The most calldata bytes the circuit reads.
 pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
-/// Type-2 access-list RLP (header included). Type 1 may use
+/// Type-2 access-list payload (RLP header excluded). Type 1 may use
 /// [`MAX_TX_CALLDATA_BYTE_LEN`] at the merged field slot.
 pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
 /// The most receipt logs the prover parses.
 pub const MAX_RECEIPT_LOGS: usize = 20;
-/// The most data bytes per log the prover parses (every log, not only Deposit).
+/// The circuit config's `--max-data-byte-len`; also the data field of a
+/// four-topic log at [`MAX_ENCODED_LOG_LEN`].
 pub const MAX_LOG_DATA_BYTE_LEN: usize = 2048;
+/// Topics axiom-eth allows on each receipt log.
+pub const MAX_LOG_TOPICS: usize = 4;
+/// Encoded size of one receipt log, axiom-eth `calc_max_log_len`.
+pub const MAX_ENCODED_LOG_LEN: usize =
+    3 + 21 + 3 + 33 * MAX_LOG_TOPICS + 3 + MAX_LOG_DATA_BYTE_LEN + 1;
 /// The exit code of the prover tools for a deposit the circuit cannot
 /// prove (`deposit-prover/src/provable.rs`). Final: the same deposit gives
 /// the same answer every time.
@@ -78,9 +85,9 @@ pub enum ShapeViolation {
         /// The log count found.
         count: usize,
     },
-    /// Some receipt log's data exceeds the prover's bound.
-    LogDataTooLong {
-        /// The data length found.
+    /// Some receipt log's encoding exceeds the prover's bound.
+    EncodedLogTooLong {
+        /// The encoded length found.
         len: usize,
     },
     /// The prover found it unprovable: the keccak budget, a type-1 leaf
@@ -112,7 +119,7 @@ impl std::fmt::Display for ShapeViolation {
                 len,
             } => write!(
                 f,
-                "the access list encodes to {len} bytes; the circuit reads at most \
+                "the access list payload is {len} bytes; the circuit reads at most \
                  {MAX_TX_ACCESS_LIST_LEN} for type 2 (2048 for type 1)"
             ),
             Self::NotToBridge {
@@ -130,12 +137,12 @@ impl std::fmt::Display for ShapeViolation {
                 f,
                 "the receipt has {count} logs; the prover reads at most {MAX_RECEIPT_LOGS}"
             ),
-            Self::LogDataTooLong {
+            Self::EncodedLogTooLong {
                 len,
             } => write!(
                 f,
-                "a receipt log carries {len} bytes of data; the prover reads at most \
-                 {MAX_LOG_DATA_BYTE_LEN}"
+                "a receipt log encodes to {len} bytes; the circuit reads at most \
+                 {MAX_ENCODED_LOG_LEN}"
             ),
             Self::ProverRefused {
                 reason,
@@ -152,6 +159,49 @@ fn access_list_max(tx_type: u8) -> usize {
     }
 }
 
+/// Payload of an RLP list given its encoded length, header excluded.
+/// axiom-eth caps the payload; alloy's `Encodable::length` includes the header.
+fn rlp_list_payload_len(encoded_len: usize) -> usize {
+    match encoded_len {
+        0 => 0,
+        1..=56 => encoded_len - 1,
+        57..=257 => encoded_len - 2,
+        _ => encoded_len.saturating_sub(3),
+    }
+}
+
+/// Encoded size of an Ethereum log `[address, topics[], data]`.
+pub fn encoded_log_len(topic_count: usize, data: &[u8]) -> usize {
+    let address = 21;
+    let topics_payload = 33 * topic_count;
+    let topics = rlp_list_encoded_len(topics_payload);
+    let data_enc = rlp_bytes_encoded_len(data);
+    rlp_list_encoded_len(address + topics + data_enc)
+}
+
+fn rlp_list_encoded_len(payload: usize) -> usize {
+    if payload <= 55 {
+        1 + payload
+    } else if payload <= 255 {
+        2 + payload
+    } else if payload <= 65535 {
+        3 + payload
+    } else {
+        4 + payload
+    }
+}
+
+fn rlp_bytes_encoded_len(b: &[u8]) -> usize {
+    match b {
+        [] => 1,
+        [x] if *x < 0x80 => 1,
+        x if x.len() <= 55 => 1 + x.len(),
+        x if x.len() <= 255 => 2 + x.len(),
+        x if x.len() <= 65535 => 3 + x.len(),
+        x => 4 + x.len(),
+    }
+}
+
 /// Checks a transaction against the circuit's limits and the CLI's own
 /// rule that it goes straight to `bridge`.
 pub fn check_tx_shape(shape: &TxShape, bridge: Address) -> Result<(), ShapeViolation> {
@@ -165,9 +215,10 @@ pub fn check_tx_shape(shape: &TxShape, bridge: Address) -> Result<(), ShapeViola
             len: shape.input_len,
         });
     }
-    if shape.access_list_rlp_len > access_list_max(shape.tx_type) {
+    let al_payload = rlp_list_payload_len(shape.access_list_rlp_len);
+    if al_payload > access_list_max(shape.tx_type) {
         return Err(ShapeViolation::AccessListTooLong {
-            len: shape.access_list_rlp_len,
+            len: al_payload,
         });
     }
     if shape.to != Some(bridge) {
@@ -180,20 +231,20 @@ pub fn check_tx_shape(shape: &TxShape, bridge: Address) -> Result<(), ShapeViola
 
 /// Checks a receipt against the prover parser's bounds.
 ///
-/// `max_log_data_len` is the longest data field of **any** log, not only
-/// the Deposit event: axiom-eth range-checks every log.
+/// `max_encoded_log_len` is the longest **encoded** log of any log, not
+/// only the Deposit event: axiom-eth range-checks every log's encoding.
 pub fn check_receipt_bounds(
     log_count: usize,
-    max_log_data_len: usize,
+    max_encoded_log_len: usize,
 ) -> Result<(), ShapeViolation> {
     if log_count > MAX_RECEIPT_LOGS {
         return Err(ShapeViolation::TooManyLogs {
             count: log_count,
         });
     }
-    if max_log_data_len > MAX_LOG_DATA_BYTE_LEN {
-        return Err(ShapeViolation::LogDataTooLong {
-            len: max_log_data_len,
+    if max_encoded_log_len > MAX_ENCODED_LOG_LEN {
+        return Err(ShapeViolation::EncodedLogTooLong {
+            len: max_encoded_log_len,
         });
     }
     Ok(())
@@ -232,7 +283,9 @@ mod tests {
 
     #[test]
     fn calldata_and_access_list_bounds_are_inclusive() {
-        assert_eq!(check_tx_shape(&shape(2, 2048, 512), BRIDGE), Ok(()));
+        // alloy reports encoded length (header included). Payload 512 is
+        // over 255 B, so the header is 3 bytes and the encoding is 515.
+        assert_eq!(check_tx_shape(&shape(2, 2048, 515), BRIDGE), Ok(()));
         assert_eq!(
             check_tx_shape(&shape(2, 2049, 1), BRIDGE),
             Err(ShapeViolation::CalldataTooLong {
@@ -240,14 +293,15 @@ mod tests {
             })
         );
         assert_eq!(
-            check_tx_shape(&shape(2, 100, 513), BRIDGE),
+            check_tx_shape(&shape(2, 100, 516), BRIDGE),
             Err(ShapeViolation::AccessListTooLong {
                 len: 513
             })
         );
-        assert_eq!(check_tx_shape(&shape(1, 100, 2048), BRIDGE), Ok(()));
+        // Type 1: 2051 = 3-byte header + 2048 B payload.
+        assert_eq!(check_tx_shape(&shape(1, 100, 2051), BRIDGE), Ok(()));
         assert_eq!(
-            check_tx_shape(&shape(1, 100, 2049), BRIDGE),
+            check_tx_shape(&shape(1, 100, 2052), BRIDGE),
             Err(ShapeViolation::AccessListTooLong {
                 len: 2049
             })
@@ -269,7 +323,7 @@ mod tests {
 
     #[test]
     fn receipt_bounds_match_the_prover_parser() {
-        assert_eq!(check_receipt_bounds(20, 2048), Ok(()));
+        assert_eq!(check_receipt_bounds(20, MAX_ENCODED_LOG_LEN), Ok(()));
         assert_eq!(
             check_receipt_bounds(21, 128),
             Err(ShapeViolation::TooManyLogs {
@@ -277,9 +331,9 @@ mod tests {
             })
         );
         assert_eq!(
-            check_receipt_bounds(2, 2049),
-            Err(ShapeViolation::LogDataTooLong {
-                len: 2049
+            check_receipt_bounds(2, MAX_ENCODED_LOG_LEN + 1),
+            Err(ShapeViolation::EncodedLogTooLong {
+                len: MAX_ENCODED_LOG_LEN + 1
             })
         );
     }
@@ -317,6 +371,14 @@ mod tests {
         assert_eq!(
             konst(circuit, "PRODUCTION_MAX_DATA_BYTE_LEN"),
             MAX_LOG_DATA_BYTE_LEN as u64
+        );
+        assert!(
+            circuit.contains("pub const fn max_encoded_log_len"),
+            "the encoded-log formula moved"
+        );
+        assert_eq!(
+            MAX_ENCODED_LOG_LEN,
+            3 + 21 + 3 + 33 * MAX_LOG_TOPICS + 3 + MAX_LOG_DATA_BYTE_LEN + 1
         );
         assert_eq!(
             konst(circuit, "PRODUCTION_MAX_LOG_NUM"),

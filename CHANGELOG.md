@@ -34,12 +34,13 @@ assigns it when the release is tagged.
 
 - **The deposit-prover verification key is rotated.** The enclosing
   transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
-  calldata up to 2048 bytes. Type 2 access-list RLP is up to 512
-  bytes; type 1's access list shares a field slot with type 2
-  calldata, so it may be up to 2048 bytes, but a type 1
-  transaction's calldata and access list together must fit its
-  ~2805-byte leaf. Each receipt log may carry up to 2048 bytes of
-  data, at most 20 logs. That is what lets a SafeL2
+  calldata up to 2048 bytes. Type 2 access-list payload is up to
+  512 bytes (RLP header excluded); type 1's access list shares a
+  field slot with type 2 calldata, so it may be up to 2048 bytes,
+  but a type 1 transaction's calldata and access list together
+  must fit its ~2805-byte leaf. Each receipt log may encode to at
+  most 2211 bytes (2048 of data with four topics; more data if
+  there are fewer topics), at most 20 logs. That is what lets a SafeL2
   `SafeMultiSigTransaction` through, including a two-signer
   MultiSend of `approve` + `deposit` (~1152 B of log data). The
   keccak pin is 128 permutations (~17 KB of preimages, header and
@@ -82,7 +83,10 @@ assigns it when the release is tagged.
   keccak budget, and also exit 3. `deposit` ends such an operation
   at exit 35 instead of a resumable 32; `deposit-relayer` parks
   the deposit at once, whatever `--skip-after-attempts` says,
-  instead of retrying it forever.
+  instead of retrying it forever. Deposits parked or closed as
+  unprovable under the previous key (the 256-byte log shape)
+  should be re-driven after this deploy: the new key can prove
+  the Safe and 4337 receipts that the old one refused.
 
   The tvm-sdk opcode fixtures and the acki-nacki copy of
   `deposit-prover/fixtures/deposit_10proofs` carry the old blob

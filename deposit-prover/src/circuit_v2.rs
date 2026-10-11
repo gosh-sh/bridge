@@ -44,6 +44,12 @@ pub const PRODUCTION_MAX_DATA_BYTE_LEN: usize = 2048;
 /// The keccak pin does **not** cover 20 full-size logs; see
 /// [`crate::prover::FIXED_KECCAK_CAPACITY`].
 pub const PRODUCTION_MAX_LOG_NUM: usize = 20;
+/// Encoded size of one receipt log at the production data and topic caps.
+/// axiom-eth range-checks this, not the data field alone: a log with fewer
+/// than four topics can carry more than [`PRODUCTION_MAX_DATA_BYTE_LEN`]
+/// data bytes and still fit.
+pub const PRODUCTION_MAX_ENCODED_LOG_LEN: usize =
+    max_encoded_log_len(PRODUCTION_MAX_DATA_BYTE_LEN, TOPIC_NUM_BOUNDS.1);
 /// 1-of-1 Safe `execTransaction` with a 100 B inner call:
 /// `4 + 320 + 32 + 128 + 32 + 96 = 612` (not 489).
 pub const SAFE_EXECTX_MIN_CALLDATA: usize = 612;
@@ -1008,11 +1014,15 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
     }
 }
 
+/// axiom-eth `calc_max_log_len`: encoded size of one receipt log.
+pub const fn max_encoded_log_len(max_data_byte_len: usize, max_topic_num: usize) -> usize {
+    3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1
+}
+
 /// The longest RLP receipt the receipt MPT leaf holds: axiom-eth's
 /// `receipt::calc_max_val_len` with [`TOPIC_NUM_BOUNDS`]'s maximum.
 pub fn receipt_max_byte_len(max_data_byte_len: usize, max_log_num: usize) -> usize {
-    let max_topic_num = TOPIC_NUM_BOUNDS.1;
-    let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
+    let max_log_len = max_encoded_log_len(max_data_byte_len, TOPIC_NUM_BOUNDS.1);
     4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len
 }
 

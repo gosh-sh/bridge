@@ -16,7 +16,7 @@ use alloy_primitives::{Address, Bytes, B256, U256};
 
 use crate::deposit::{
     evm::{parse_deposit_log, BlockTag, EvmRead, LogLite, ReceiptLite, TxLite, DEPOSIT_TOPIC0},
-    limits::{check_receipt_bounds, check_tx_shape, ShapeViolation, TxShape},
+    limits::{check_receipt_bounds, check_tx_shape, encoded_log_len, ShapeViolation, TxShape},
     log_index::receipt_log_index,
     retry,
     ui::Ui,
@@ -204,8 +204,13 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
             tx.input.len()
         )));
     }
-    let max_log_data = receipt.logs.iter().map(|l| l.data.len()).max().unwrap_or(0);
-    if let Err(v) = check_receipt_bounds(receipt.logs.len(), max_log_data) {
+    let max_encoded_log = receipt
+        .logs
+        .iter()
+        .map(|l| encoded_log_len(l.topics.len(), &l.data))
+        .max()
+        .unwrap_or(0);
+    if let Err(v) = check_receipt_bounds(receipt.logs.len(), max_encoded_log) {
         return Classified::Negative(Negative::Unprovable(v));
     }
     if let Err(v) = check_tx_shape(

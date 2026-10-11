@@ -23,10 +23,12 @@ use tvm_client::{
 
 use crate::{
     address::ExtendedAddress,
+    children::{parse_internal_children, parse_message_dst_transaction},
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AckiNackiTransaction, ChildTransaction, ContractCallRequest, TransactionReceipt,
+        TransactionStatus, TxHash,
     },
 };
 
@@ -312,6 +314,38 @@ impl IAckiNacki for TvmAckiNacki {
         run.decoded.and_then(|d| d.output).ok_or_else(|| {
             AckiNackiError::NetworkError(format!("run_tvm {function}: no decoded output"))
         })
+    }
+
+    async fn get_internal_children(&self, tx_hash: &TxHash) -> Result<Vec<ChildTransaction>> {
+        let gql = format!(
+            "{{ blockchain {{ transaction(hash:\"{}\") {{ out_messages {{ id dst msg_type_name \
+             dst_transaction {{ id aborted compute {{ exit_code }} }} }} }} }} }}",
+            hex::encode(tx_hash)
+        );
+        let mut children = parse_internal_children(&self.gql(gql).await?);
+        // Nested under `out_messages` the link can come back null (shellnet
+        // does this) while the same message queried on its own carries it.
+        for child in children.iter_mut().filter(|c| c.outcome.is_none()) {
+            let gql = format!(
+                "{{ blockchain {{ message(hash:\"{}\") {{ dst_transaction {{ id aborted compute \
+                 {{ exit_code }} }} }} }} }}",
+                child.message_id
+            );
+            child.outcome = parse_message_dst_transaction(&self.gql(gql).await?);
+        }
+        Ok(children)
+    }
+}
+
+impl TvmAckiNacki {
+    async fn gql(&self, query_text: String) -> Result<Value> {
+        let res = query(self.context.clone(), ParamsOfQuery {
+            query: query_text,
+            variables: None,
+        })
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        Ok(res.result)
     }
 }
 

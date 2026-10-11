@@ -5,6 +5,8 @@
 //! Nacki team.
 
 pub mod address;
+#[cfg_attr(not(feature = "tvm-sdk"), allow(dead_code))]
+mod children;
 pub mod error;
 pub mod mock;
 pub mod traits;
@@ -21,7 +23,10 @@ pub use tvm_client::{
     parse_exit_code_from_message, TvmAckiNacki, TvmClientConfig, EXIT_CONSTRUCTOR_ALREADY_CALLED,
     EXIT_INVALID_ZKPROOF, HD_PATH_V3,
 };
-pub use types::{AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus};
+pub use types::{
+    AckiNackiTransaction, ChildOutcome, ChildTransaction, ContractCallRequest, TransactionReceipt,
+    TransactionStatus,
+};
 
 #[cfg(test)]
 mod tests;

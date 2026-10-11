@@ -37,12 +37,17 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
-use acki_nacki_interface::{ContractCallRequest, ExtendedAddress, IAckiNacki, TransactionStatus};
+use acki_nacki_interface::{
+    types::TxHash, AckiNackiError, ContractCallRequest, ExtendedAddress, IAckiNacki,
+    TransactionStatus,
+};
 use alloy::primitives::U256;
 use async_trait::async_trait;
 use serde_json::json;
+use tracing::warn;
 
 use crate::{
     error::RelayerError,
@@ -307,12 +312,10 @@ pub fn build_finalize_deposit_params(bundle: &DepositProofBundle) -> serde_json:
 /// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
 /// [`IAckiNacki`] client.
 ///
-/// `is_finalized` returns `Ok(false)` because the current [`IAckiNacki`]
-/// surface has no contract-read primitive to query `usedDepositIds`. This is
-/// safe: the AN-side nullifier rejects a duplicate `finalizeDeposit`, which
-/// surfaces here as [`SubmitOutcome::Rejected`] and is handled idempotently
-/// by the relayer. When the AN team ships a read API, override this to skip
-/// re-proving replays.
+/// `is_finalized` returns `Ok(false)`: the bridge exposes no getter for a
+/// consumed deposit. This is safe: a duplicate `finalizeDeposit` still exits
+/// 0, but its voucher deploy fails with exit 51, which [`settle_finalize`]
+/// reports as [`SubmitOutcome::AlreadyFinalized`].
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
@@ -355,11 +358,7 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             .await?;
 
         match receipt.status {
-            TransactionStatus::Confirmed | TransactionStatus::Included => {
-                Ok(SubmitOutcome::Finalized {
-                    tx_hash: Some(sent),
-                })
-            },
+            TransactionStatus::Confirmed | TransactionStatus::Included => self.settle(&sent).await,
             TransactionStatus::Reverted | TransactionStatus::Failed => Ok(classify_reverted(
                 receipt.exit_code,
                 &format!("{:?}", receipt.status),
@@ -369,53 +368,105 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             }),
         }
     }
+
+    /// Waits up to `confirm_timeout_secs` for [`settle_finalize`] to reach a
+    /// verdict.
+    async fn settle(&self, root: &TxHash) -> Result<SubmitOutcome, RelayerError> {
+        let deadline =
+            Instant::now() + Duration::from_secs(self.config.confirm_timeout_secs.max(1));
+        let mut last_error = None;
+        loop {
+            match settle_finalize(self.client.as_ref(), root).await {
+                Ok(Some(outcome)) => return Ok(outcome),
+                Ok(None) => {},
+                Err(AckiNackiError::NotImplemented) => {
+                    warn!(
+                        tx = %hex::encode(root),
+                        "AN client cannot read child transactions; finalizeDeposit counted as \
+                         finalized without checking the voucher"
+                    );
+                    return Ok(SubmitOutcome::Finalized {
+                        tx_hash: Some(*root),
+                    });
+                },
+                Err(e) => last_error = Some(e.to_string()),
+            }
+            if Instant::now() >= deadline {
+                let why = last_error.map(|e| format!(": {e}")).unwrap_or_default();
+                return Ok(SubmitOutcome::Pending {
+                    reason: format!(
+                        "finalizeDeposit {} exited 0 but its voucher deploy and confirmDeposit \
+                         are not both visible yet{why}",
+                        hex::encode(root)
+                    ),
+                });
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
+    }
 }
 
-/// StdContractError: DepositVoucher already deployed → deposit already
-/// finalized.
+/// TVM: the constructor of an already deployed contract was called again — a
+/// `DepositVoucher` for this deposit exists, so it was finalized before.
 const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
-/// USDCBridge `ERR_INVALID_ZKPROOF`.
-const EXIT_INVALID_ZKPROOF: i32 = 220;
-/// USDCBridge `ERR_UNKNOWN_SOURCE`.
-const EXIT_UNKNOWN_SOURCE: i32 = 222;
-/// USDCBridge `ERR_WRONG_DAPP`.
-const EXIT_WRONG_DAPP: i32 = 223;
-/// USDCBridge `ERR_UNKNOWN_BLOCK`.
-const EXIT_UNKNOWN_BLOCK: i32 = 224;
-/// USDCBridge `ERR_MINT_CAP_EXCEEDED`.
-const EXIT_MINT_CAP_EXCEEDED: i32 = 229;
+/// TVM: cell underflow. From a voucher constructor, the signature of a bridge
+/// whose `_depositVoucherCode` predates the voucher's constructor ABI.
+const EXIT_CELL_UNDERFLOW: i32 = 9;
 
-/// Names the USDCBridge revert and, where the cause is bridge configuration
-/// rather than a bad deposit, says which call fixes it. The fail-closed
-/// settings must be re-set by hand after every deploy or code upgrade (they are
-/// not threaded through `onCodeUpgrade`), so without this the first deposit
-/// after a redeploy reads as a broken bridge.
+// eccUSDCBridge `modifiers/errors.sol`.
+const EXIT_ZERO_AMOUNT: i32 = 204;
+const EXIT_INVALID_SENDER: i32 = 207;
+const EXIT_HASH_MISMATCH: i32 = 219;
+const EXIT_INVALID_ZKPROOF: i32 = 220;
+const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
+const EXIT_UNKNOWN_BLOCK: i32 = 224;
+const EXIT_ZERO_RECIPIENT: i32 = 230;
+const EXIT_PAUSED: i32 = 231;
+
+/// Names the `finalizeDeposit` revert and, where the cause is bridge
+/// configuration rather than a bad deposit, says which call fixes it. The
+/// fail-closed settings must be re-set by hand after every deploy or code
+/// upgrade (they are not threaded through `onCodeUpgrade`), so without this the
+/// first deposit after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
+        EXIT_ZERO_AMOUNT => Some("ERR_ZERO_AMOUNT — the proven deposit amount is zero"),
         EXIT_INVALID_ZKPROOF => Some(
             "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
              this prover's VkBlob",
         ),
-        EXIT_UNKNOWN_SOURCE => Some(
-            "ERR_UNKNOWN_SOURCE — source chain/bridge not allowlisted; owner must call \
-             setExpectedBridge(chainId, bridgeFr)",
-        ),
-        EXIT_WRONG_DAPP => Some(
-            "ERR_WRONG_DAPP — proof-bound dappId is not this deployment's; owner must call \
-             setExpectedAnDappId(dappId)",
+        EXIT_UNSUPPORTED_SRC_CHAIN => Some(
+            "ERR_UNSUPPORTED_SRC_CHAIN — the proven (chainId, source contract) pair is not \
+             allowlisted; owner must call setTrustedL1Bridge(chainId, l1Bridge, true)",
         ),
         EXIT_UNKNOWN_BLOCK => Some(
             "ERR_UNKNOWN_BLOCK — the deposit's block is not in the canonical-chain anchor set; \
              confirm canonicality with `scripts/deposit_anchor_params.py --verify`, then the \
-             anchor writer must admit it — setAcceptedBlockHash(chainId, blockHash, true) on the \
-             owner path, or attestBlockHash(chainId, blockHash) from a threshold of attesters",
+             anchor writer must admit it — setAcceptedBlockHash(chainId, blockHash, true) while \
+             owner anchors are enabled, otherwise the light client",
         ),
-        EXIT_MINT_CAP_EXCEEDED => Some(
-            "ERR_MINT_CAP_EXCEEDED — this chain's cumulative mint cap is reached; the deposit \
-             stays retryable, so read getMintCap(chainId) and decide whether to raise it via \
-             setMintCap or leave the bound in place",
-        ),
+        EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
         _ => None,
+    }
+}
+
+/// Explains a failed `DepositVoucher` constructor. It runs in its own
+/// transaction after `finalizeDeposit` has already exited 0, so nothing was
+/// minted and nothing upstream reports it.
+fn describe_voucher_exit(code: Option<i32>) -> &'static str {
+    match code {
+        Some(EXIT_CELL_UNDERFLOW) => {
+            "cell underflow in the voucher constructor — the bridge's _depositVoucherCode does not \
+             match the DepositVoucher constructor it calls; compare getDepositVoucherCodeHash() \
+             with the compiled DepositVoucher and redeploy the pair"
+        },
+        Some(EXIT_INVALID_SENDER) => {
+            "ERR_INVALID_SENDER — the voucher's USDC_BRIDGE_ADDRESS is not this bridge"
+        },
+        Some(EXIT_HASH_MISMATCH) => {
+            "ERR_HASH_MISMATCH — the voucher's deposit hash disagrees with the bridge's"
+        },
+        _ => "DepositVoucher deploy failed",
     }
 }
 
@@ -429,10 +480,24 @@ fn rejected(code: i32, context: &str, detail: &str) -> SubmitOutcome {
     }
 }
 
+fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
+    match code {
+        EXIT_CONSTRUCTOR_ALREADY_CALLED => SubmitOutcome::AlreadyFinalized,
+        // A paused lane rejects every deposit; counting that against the
+        // deposit would park healthy deposits for the length of the pause.
+        EXIT_PAUSED => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_PAUSED — the bridge lane is paused (setPaused); retrying until it resumes \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        code => rejected(code, context, detail),
+    }
+}
+
 fn classify_reverted(exit_code: Option<i32>, detail: &str) -> SubmitOutcome {
     match exit_code {
-        Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) => SubmitOutcome::AlreadyFinalized,
-        Some(code) => rejected(code, "finalizeDeposit reverted", detail),
+        Some(code) => classify_exit(code, "finalizeDeposit reverted", detail),
         None => SubmitOutcome::Rejected {
             reason: format!("finalizeDeposit tx status = {detail}"),
         },
@@ -442,15 +507,73 @@ fn classify_reverted(exit_code: Option<i32>, detail: &str) -> SubmitOutcome {
 fn classify_call_error(msg: &str) -> SubmitOutcome {
     // Prefer acki_nacki_interface parser when the tvm-sdk feature is on; fall
     // back to a local regex-free scan so this module still builds without it.
-    let code = parse_exit_code_loose(msg);
-    match code {
-        Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) => SubmitOutcome::AlreadyFinalized,
-        Some(code) => rejected(code, "finalizeDeposit failed", msg),
+    match parse_exit_code_loose(msg) {
+        Some(code) => classify_exit(code, "finalizeDeposit failed", msg),
         None => SubmitOutcome::Rejected {
             reason: format!("finalizeDeposit call failed: {msg}"),
         },
     }
 }
+
+/// Verdict on a `finalizeDeposit` that exited 0, from the two transactions
+/// it sets off: the `DepositVoucher` deploy, then the voucher's
+/// `confirmDeposit` call back into the bridge, which is where the mint
+/// happens. `None` while either is not yet visible.
+async fn settle_finalize<C: IAckiNacki>(
+    client: &C,
+    root: &TxHash,
+) -> Result<Option<SubmitOutcome>, AckiNackiError> {
+    let children = client.get_internal_children(root).await?;
+    let Some(voucher) = children.first() else {
+        return Ok(Some(SubmitOutcome::Rejected {
+            reason: "finalizeDeposit exited 0 but sent no DepositVoucher deploy".to_string(),
+        }));
+    };
+    let Some(deploy) = &voucher.outcome else {
+        return Ok(None);
+    };
+    if deploy.exit_code == Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) {
+        return Ok(Some(SubmitOutcome::AlreadyFinalized));
+    }
+    if !deploy.is_success() {
+        return Ok(Some(SubmitOutcome::Rejected {
+            reason: format!(
+                "{} (voucher {}, exit_code={:?}, aborted={}); nothing was minted",
+                describe_voucher_exit(deploy.exit_code),
+                voucher.dst,
+                deploy.exit_code,
+                deploy.aborted,
+            ),
+        }));
+    }
+
+    let confirms = client.get_internal_children(&deploy.tx_hash).await?;
+    let Some(confirm) = confirms.first() else {
+        return Ok(Some(SubmitOutcome::Rejected {
+            reason: format!(
+                "voucher {} deployed but sent no confirmDeposit",
+                voucher.dst
+            ),
+        }));
+    };
+    match &confirm.outcome {
+        None => Ok(None),
+        Some(c) if c.is_success() => Ok(Some(SubmitOutcome::Finalized {
+            tx_hash: Some(*root),
+        })),
+        Some(c) => Ok(Some(SubmitOutcome::Rejected {
+            reason: format!(
+                "confirmDeposit failed (exit_code={:?}, aborted={}) after voucher {} was \
+                 deployed; nothing was minted and the voucher now makes every resubmission report \
+                 already-finalized, so this deposit needs the bridge owner",
+                c.exit_code, c.aborted, voucher.dst,
+            ),
+        })),
+    }
+}
+
+/// Interval between looks at the voucher and `confirmDeposit` transactions.
+const SETTLE_POLL: Duration = Duration::from_secs(2);
 
 fn parse_exit_code_loose(msg: &str) -> Option<i32> {
     if let Some(c) = acki_nacki_interface::parse_exit_code_from_message(msg) {
@@ -489,6 +612,7 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
 
 #[cfg(test)]
 mod tests {
+    use acki_nacki_interface::{ChildOutcome, ChildTransaction};
     use alloy::primitives::{Address, B256};
 
     use super::*;
@@ -601,28 +725,118 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn interface_submitter_sends_through_mock_client() {
+    const VOUCHER_TX: TxHash = [0x11; 32];
+    const CONFIRM_TX: TxHash = [0x22; 32];
+
+    fn child(dst: &str, outcome: Option<(TxHash, i32)>) -> ChildTransaction {
+        ChildTransaction {
+            message_id: format!("msg-to-{dst}"),
+            dst: dst.to_string(),
+            outcome: outcome.map(|(tx_hash, code)| ChildOutcome {
+                tx_hash,
+                exit_code: Some(code),
+                aborted: code != 0,
+            }),
+        }
+    }
+
+    /// `finalizeDeposit` confirmed on a mock chain whose voucher deploy ends
+    /// with `voucher` and, when that succeeds, whose `confirmDeposit` ends
+    /// with `confirm` (`None` = not executed yet).
+    async fn submit_with_chain(voucher: Option<i32>, confirm: Option<i32>) -> SubmitOutcome {
         use acki_nacki_interface::MockAckiNacki;
 
         let client = Arc::new(MockAckiNacki::new());
+        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![child(
+            "0:voucher",
+            voucher.map(|c| (VOUCHER_TX, c)),
+        )]);
+        client.set_children(VOUCHER_TX, vec![child(
+            "0:bridge",
+            confirm.map(|c| (CONFIRM_TX, c)),
+        )]);
         let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         let cfg = AnSubmitConfig {
             from: format!(
                 "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
             ),
             token_bridge: format!("{dapp}::{dapp}"),
-            confirm_timeout_secs: 5,
+            confirm_timeout_secs: 1,
         };
         let sub = AnInterfaceSubmitter::new(client, cfg);
         let ev = event(3);
-        let b = bundle(&ev);
-        // MockAckiNacki confirms transactions, so this should finalize.
-        match sub.submit(&ev, &b).await.unwrap() {
+        sub.submit(&ev, &bundle(&ev)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn finalized_only_once_confirm_deposit_succeeds() {
+        match submit_with_chain(Some(0), Some(0)).await {
             SubmitOutcome::Finalized {
                 tx_hash,
             } => assert!(tx_hash.is_some()),
             other => panic!("expected Finalized, got {other:?}"),
+        }
+    }
+
+    /// A duplicate `finalizeDeposit` exits 0 itself; only the voucher deploy
+    /// it sends fails, with 51.
+    #[tokio::test]
+    async fn duplicate_is_read_from_the_voucher_deploy() {
+        assert!(matches!(
+            submit_with_chain(Some(51), None).await,
+            SubmitOutcome::AlreadyFinalized
+        ));
+    }
+
+    /// The 2026-07-02 outage: the bridge exited 0, the voucher constructor hit
+    /// a cell underflow and nothing was minted.
+    #[tokio::test]
+    async fn failed_voucher_deploy_is_rejected_not_finalized() {
+        match submit_with_chain(Some(9), None).await {
+            SubmitOutcome::Rejected {
+                reason,
+            } => {
+                assert!(reason.contains("_depositVoucherCode"), "{reason}");
+                assert!(reason.contains("nothing was minted"), "{reason}");
+            },
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_confirm_deposit_is_rejected_not_finalized() {
+        match submit_with_chain(Some(0), Some(214)).await {
+            SubmitOutcome::Rejected {
+                reason,
+            } => assert!(reason.contains("confirmDeposit failed"), "{reason}"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unexecuted_children_leave_the_deposit_pending() {
+        for (voucher, confirm) in [(None, None), (Some(0), None)] {
+            match submit_with_chain(voucher, confirm).await {
+                SubmitOutcome::Pending {
+                    reason,
+                } => assert!(reason.contains("not both visible"), "{reason}"),
+                other => panic!("expected Pending for {voucher:?}/{confirm:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn paused_bridge_is_pending_not_rejected() {
+        for outcome in [
+            classify_call_error("contract call aborted (exit_code=231)"),
+            classify_reverted(Some(231), "Reverted"),
+        ] {
+            match outcome {
+                SubmitOutcome::Pending {
+                    reason,
+                } => assert!(reason.contains("ERR_PAUSED"), "{reason}"),
+                other => panic!("expected Pending, got {other:?}"),
+            }
         }
     }
 
@@ -656,10 +870,8 @@ mod tests {
     #[test]
     fn config_reverts_name_the_setter_that_fixes_them() {
         for (code, err_name, setter) in [
-            (222, "ERR_UNKNOWN_SOURCE", "setExpectedBridge"),
-            (223, "ERR_WRONG_DAPP", "setExpectedAnDappId"),
+            (222, "ERR_UNSUPPORTED_SRC_CHAIN", "setTrustedL1Bridge"),
             (224, "ERR_UNKNOWN_BLOCK", "setAcceptedBlockHash"),
-            (229, "ERR_MINT_CAP_EXCEEDED", "setMintCap"),
         ] {
             for outcome in [
                 classify_call_error(&format!("contract call aborted (exit_code={code})")),

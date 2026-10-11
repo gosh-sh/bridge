@@ -961,6 +961,30 @@ assigns it when the release is tagged.
   that left them at the umask's mode, so `withdraw` and `deposit` no longer
   warn on every run that the state directory can be reached by more than
   its owner.
+- `deposit-relayer` reported a deposit as finalized as soon as the bridge's
+  own `finalizeDeposit` transaction exited 0. That transaction always exits 0
+  once the proof verifies: the voucher deploy and the `confirmDeposit` mint
+  run afterwards, in transactions of their own. A failed voucher deploy (the
+  2026-07-02 outage, exit 9, when the bridge carried outdated voucher code)
+  therefore counted as a success, and the relayer moved on with nothing
+  minted. A resubmitted deposit also counted as a fresh finalization,
+  because exit 51 surfaces in the voucher's transaction, never in the
+  bridge's. The relayer now follows both hops and reports the outcome there:
+  - voucher deploy exits 51: already finalized;
+  - voucher deploy or `confirmDeposit` fails: rejected, with the reason;
+  - either hop not executed within the 60-second confirm timeout: pending;
+  - both hops succeed: finalized.
+
+  The AN GraphQL endpoint must serve `blockchain { message(hash) }`, which
+  shellnet does (bridge-audit#27).
+- `deposit-relayer` named `finalizeDeposit` errors after an older bridge.
+  Exit 222 now reads `ERR_UNSUPPORTED_SRC_CHAIN`, and the fix it names is
+  `setTrustedL1Bridge(chainId, l1Bridge, true)`. The 223 and 229 hints,
+  for `setExpectedAnDappId` and `setMintCap`, are gone, because the
+  deployed bridge has neither. Exits 204 (`ERR_ZERO_AMOUNT`) and 230
+  (`ERR_ZERO_RECIPIENT`) are now named. Exit 231 (`ERR_PAUSED`) now counts
+  as pending, not rejected, so pausing the bridge no longer runs deposits
+  into `--skip-after-attempts` and parks them.
 - `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
   cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
   head on every poll, whether the target `depositId` was found or not. A

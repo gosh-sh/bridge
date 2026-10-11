@@ -537,6 +537,14 @@ struct MockBridgeInner {
     bk_set_commitment: U256,
     prev_bk_set_commitment: U256,
     last_bk_set_update_seq_no: u64,
+    /// Mirrors the on-chain `immutable bundleStride`. Consumed by the
+    /// bundle-aware `PrevSlotStillOwedForBundle` gate in
+    /// [`BridgeClient::submit_bk_set_update`]. Must be strictly positive
+    /// — the ordering suites that need a non-trivial window exercise it
+    /// explicitly; the default of `1` keeps every other suite's
+    /// consecutive-seqno semantics intact (each `verifyBlock` covers the
+    /// previous rotation).
+    bundle_stride: u64,
     /// Storage v2.0 (2026-08-04): immutable genesis seed set by
     /// [`MockBridgeClient::with_genesis`]. Corresponds to the on-chain
     /// `immutable storedPrevMaxLevelLayerHash`.
@@ -555,9 +563,24 @@ struct MockBridgeInner {
 
 impl MockBridgeClient {
     /// Construct with the genesis anchors set by the bridge constructor.
+    /// Uses `bundle_stride = 1` — matches the test-helper default in
+    /// `VerifyBlockConfigLib.with(...)`. Suites that need a non-trivial
+    /// window (ordering tests exercising `PrevSlotStillOwedForBundle`)
+    /// call [`MockBridgeClient::with_genesis_stride`].
     pub fn with_genesis(
         bk_set_commitment: U256,
         prev_max_level_layer_hash: U256,
+        verifier: VerifierDecision,
+    ) -> Self {
+        Self::with_genesis_stride(bk_set_commitment, prev_max_level_layer_hash, 1, verifier)
+    }
+
+    /// Construct with an explicit bundle stride. Only the bk-update
+    /// ordering suites need a non-trivial stride.
+    pub fn with_genesis_stride(
+        bk_set_commitment: U256,
+        prev_max_level_layer_hash: U256,
+        bundle_stride: u64,
         verifier: VerifierDecision,
     ) -> Self {
         Self {
@@ -566,6 +589,7 @@ impl MockBridgeClient {
                 bk_set_commitment,
                 prev_bk_set_commitment: U256::ZERO,
                 last_bk_set_update_seq_no: 0,
+                bundle_stride,
                 genesis_prev_max_level_layer_hash: prev_max_level_layer_hash,
                 latest_per_layer: [U256::ZERO; MAX_LAYER_HASHES],
                 highest_active_layer: 0,
@@ -735,13 +759,17 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
-        if inner.last_bk_set_update_seq_no > inner.last_seen_block_seq_no {
-            return Ok(BkSetUpdateSubmitOutcome::Reverted {
-                reason: format!(
-                    "VerifyBlockLagBehindRotation(rotation={}, last_seen={})",
-                    inner.last_bk_set_update_seq_no, inner.last_seen_block_seq_no
-                ),
-            });
+        if inner.last_bk_set_update_seq_no != 0 {
+            let stride = inner.bundle_stride.max(1);
+            let next_owed_boundary = ((inner.last_seen_block_seq_no / stride) + 1) * stride;
+            if next_owed_boundary <= inner.last_bk_set_update_seq_no {
+                return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!(
+                        "PrevSlotStillOwedForBundle(last_bk_set_update={}, next_owed_boundary={})",
+                        inner.last_bk_set_update_seq_no, next_owed_boundary
+                    ),
+                });
+            }
         }
         if update.attestation_last_seen >= update.block_seq_no {
             return Ok(BkSetUpdateSubmitOutcome::Reverted {
@@ -2401,7 +2429,7 @@ mod tests {
             BkSetUpdateSubmitOutcome::Reverted {
                 reason,
             } => {
-                assert!(reason.contains("VerifyBlockLagBehindRotation"), "{reason}");
+                assert!(reason.contains("PrevSlotStillOwedForBundle"), "{reason}");
             },
             other => panic!("second rotation must revert while N1 is uncovered, got {other:?}"),
         }

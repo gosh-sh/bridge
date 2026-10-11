@@ -245,12 +245,16 @@ async fn main() -> anyhow::Result<()> {
     // Single-slot deferred bk-update ack.
     //
     // The contract caps in-flight rotations at 1 via
-    // `VerifyBlockLagBehindRotation`, so this slot is bounded by
-    // construction. It holds the already-verified rotation artifacts
-    // returned by the verifier daemon when `driver.ack_bk_update` refused
-    // to rotate `prover_bk_set` because the bundle lane hasn't yet
-    // covered the last OLD-signed key block ≤ N. The main loop keeps
-    // retrying the ack after every successful bundle ack until it takes.
+    // `PrevSlotStillOwedForBundle`, which only reverts a new rotation
+    // when its application would cross an unverified bundle boundary.
+    // Within a single bundle window the contract applies back-to-back
+    // rotations; across windows the second rotation defers until
+    // verifyBlock advances the cursor past the next owed boundary.
+    // This slot holds the already-verified rotation artifacts returned
+    // by the verifier daemon when `driver.ack_bk_update` refused to
+    // rotate `prover_bk_set` because the bundle lane hasn't yet covered
+    // the last OLD-signed key block ≤ N. The main loop keeps retrying
+    // the ack after every successful bundle ack until it takes.
     let mut deferred_bk_ack: Option<BkUpdateProofArtifacts> = None;
 
     // ---- Main loop ---------------------------------------------------------

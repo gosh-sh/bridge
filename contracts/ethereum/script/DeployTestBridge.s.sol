@@ -35,7 +35,8 @@ contract DeployTestBridge is Script {
             layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
             genesisBkSetCommitment: 0,
             genesisPrevMaxLevelLayerHash: 0,
-            genesisLastSeenBlockSeqNo: 0
+            genesisLastSeenBlockSeqNo: 0,
+            bundleStride: 0
         });
         AckiNackiBridge.BridgeWithdrawConfig memory bwDisabled = AckiNackiBridge.BridgeWithdrawConfig({
             bridgeWithdrawalVerifier: IBridgeWithdrawalVerifier(address(0)),

@@ -163,7 +163,10 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     // -----------------------------------------------------------------
 
     /// @notice A second rotation while the layer cursor is still behind the
-    ///         first N reverts and leaves the first rotation in place.
+    ///         first N reverts and leaves the first rotation in place. With
+    ///         `bundleStride == 1` the "next owed boundary" is
+    ///         `storedLastSeenBlockSeqNo + 1`, so a fresh cursor at `0`
+    ///         reports `nextOwedBoundary == 1` against `storedLastBkSetUpdateSeqNo == N`.
     function test_applyBkSetUpdate_secondRotation_revertsUntilPreviousCovered() public {
         uint256 root = _merkleRoot(L2, L3);
         _applyPrimary(root, N, L2, L3);
@@ -172,7 +175,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         uint256 root2 = _merkleRoot(L3, l4);
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, N, uint64(0)
+                AckiNackiBridge.PrevSlotStillOwedForBundle.selector, N, uint64(1)
             )
         );
         _applyPrimary(root2, N + 3, L3, l4);
@@ -189,7 +192,11 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     }
 
     /// @notice Lower edge of the second-rotation guard: cursor = N1 − 1
-    ///         still reverts, and the first field is the previous N.
+    ///         still reverts. With `bundleStride == 1` the next owed
+    ///         boundary from `last_seen = N − 1` is `N`, which is exactly
+    ///         `storedLastBkSetUpdateSeqNo` and therefore still trips the
+    ///         `<=` check. The first field is the previous N, the second
+    ///         is that owed boundary.
     function test_applyBkSetUpdate_secondRotation_revertsAtCursorN1MinusOne() public {
         _applyPrimary(_merkleRoot(L2, L3), N, L2, L3);
         _primeLayerCursor(N - 1, L2);
@@ -200,7 +207,7 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         uint256 root2 = _merkleRoot(L3, l4);
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.VerifyBlockLagBehindRotation.selector, uint64(N), uint64(N - 1)
+                AckiNackiBridge.PrevSlotStillOwedForBundle.selector, uint64(N), uint64(N)
             )
         );
         bridge.applyBkSetUpdate(
@@ -236,6 +243,100 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         assertEq(bridge.storedLastSeenBlockSeqNo(), N);
         _primeLayerCursor(N + 1, L3);
         assertEq(bridge.storedLastSeenBlockSeqNo(), N + 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Case 4-B — bundle-aware burst (shellnet BK-rotation pattern)
+    // -----------------------------------------------------------------
+    //
+    // The default `bundleStride == 1` suite above exercises the degenerate
+    // case where every seqno is a bundle boundary. Shellnet rotates in
+    // bursts of several key-blocks within one bundle window (`W² = 16384`
+    // seq_nos under L2). These tests stand up a fresh bridge with a
+    // production-ish stride and verify that:
+    //  * Two rotations landing inside the same window apply back-to-back
+    //    without an intervening verifyBlock (the deadlock from
+    //    `feature/bk-set-updates-flow-test-fixes`).
+    //  * A rotation that would cross an unverified bundle boundary is
+    //    deferred with `PrevSlotStillOwedForBundle`, lifted after
+    //    `verifyBlock` covers that boundary.
+
+    uint64 internal constant STRIDE = 16384;
+
+    function _rebuildBridgeWithStride(uint64 stride) internal {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        MockLayerHashesMovementVerifier layer = new MockLayerHashesMovementVerifier();
+        layer.setShouldAccept(true);
+        AckiNackiBridge.VerifyBlockConfig memory vb = VerifyBlockConfigLib.withStride(
+            IPrimaryVerifier(address(primary)),
+            IFallbackVerifier(address(fallbackVerifier)),
+            ILayerHashesMovementVerifier(address(layer)),
+            L2,
+            0,
+            stride
+        );
+        bridge = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            vb,
+            VerifyBlockConfigLib.disabledWithdraw()
+        );
+    }
+
+    /// @notice Two rotations in the same bundle window apply without an
+    ///         intervening verifyBlock. Mirrors the shellnet 2026-10-08
+    ///         burst that previously deadlocked.
+    function test_applyBkSetUpdate_sameBundleWindow_appliesBackToBack() public {
+        _rebuildBridgeWithStride(STRIDE);
+        uint64 n1 = STRIDE + 10;
+        uint64 n2 = n1 + 3;
+
+        _applyPrimary(_merkleRoot(L2, L3), n1, L2, L3);
+        _primeLayerCursor(STRIDE, L2);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), STRIDE);
+
+        uint256 l4 = 0xC0DE;
+        _applyPrimary(_merkleRoot(L3, l4), n2, L3, l4);
+        assertEq(bridge.storedBkSetCommitment(), l4);
+        assertEq(bridge.storedPrevBkSetCommitment(), L3);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), n2);
+    }
+
+    /// @notice A rotation crossing an unverified bundle boundary is
+    ///         deferred with `PrevSlotStillOwedForBundle`. After
+    ///         `verifyBlock` covers that boundary, the apply proceeds.
+    function test_applyBkSetUpdate_crossBoundary_defersThenApplies() public {
+        _rebuildBridgeWithStride(STRIDE);
+        uint64 n1 = STRIDE + 10;
+        uint64 n2 = 3 * STRIDE + 5;
+
+        _applyPrimary(_merkleRoot(L2, L3), n1, L2, L3);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 0);
+
+        uint256 l4 = 0xC0DE;
+        uint256 root2 = _merkleRoot(L3, l4);
+
+        // Still owes verifyBlock(STRIDE): nextOwedBoundary = STRIDE,
+        // n1 > STRIDE, so STRIDE <= n1 trips the gate.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.PrevSlotStillOwedForBundle.selector, n1, uint64(STRIDE)
+            )
+        );
+        _applyPrimary(root2, n2, L3, l4);
+
+        // verifyBlock(2*STRIDE) is past N1 so `_expectedBkSetFor` resolves
+        // to the current (post-rotation) commitment L3.
+        _primeLayerCursor(2 * STRIDE, L3);
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 2 * STRIDE);
+
+        _applyPrimary(root2, n2, L3, l4);
+        assertEq(bridge.storedBkSetCommitment(), l4);
+        assertEq(bridge.storedPrevBkSetCommitment(), L3);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), n2);
     }
 
     // -----------------------------------------------------------------

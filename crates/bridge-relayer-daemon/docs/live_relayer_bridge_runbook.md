@@ -156,7 +156,7 @@ Any drift is a Case 5 revert waiting to happen.
 - [Case 6b — State loss / re-bootstrap from mid-chain](#case-6b--state-loss--re-bootstrap-from-mid-chain)
 - [Case 7 — L2-anchored cold-start (`BRIDGE_CONFIG_DIR=./L2_config`)](#case-7--l2-anchored-cold-start-bridge_config_dirl2_config)
 - [Case 8 — Observed BK-set rotation (routine, no action required)](#case-8--observed-bk-set-rotation-routine-no-action-required)
-- [Case 9 — Phase 1 Stuck: two rotations with no bundle target between them](#case-9--phase-1-stuck-two-rotations-with-no-bundle-target-between-them)
+- [Case 9 — Rotation deferred: second rotation crosses an unverified bundle boundary](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary)
 - [Case 10 — `bk_set.shellnet.json` has gone stale after the first rotation](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation)
 - [Health checks (run any time)](#health-checks-run-any-time)
 - [File & state reference](#file--state-reference)
@@ -878,7 +878,7 @@ problem, not a transport blip:
 | `0x...BkSetCommitmentMismatch` | `BkSetCommitmentMismatch(supplied, stored)` | verifyBlock | Proof baked against the wrong BK-set slot. Common causes: (a) `prover_bk_set.json` stale after a rotation we missed; (b) prover was acked onto the incoming set too early (deferred-ack bug); (c) another actor applied a rotation we don't know about. See [Case 10](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation). |
 | `0x...BlockSeqNoNotMonotonic` | `BlockSeqNoNotMonotonic(supplied, stored)` | verifyBlock | Submitting `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |
 | `0x...BkUpdateSeqNoNotMonotonic` | `BkUpdateSeqNoNotMonotonic(supplied, stored)` | applyBkSetUpdate | Submitting a rotation at `block_seq_no ≤ storedLastBkSetUpdateSeqNo`. Means another actor applied this rotation already, or the off-chain `BkUpdateSource` returned a stale `block_seq_no`. |
-| `0x...BkUpdatePrevUncovered` (name may differ — contract line AckiNackiBridge.sol:979-981) | `BkUpdate second rotation while previous uncovered` | applyBkSetUpdate | Attempt to apply a second rotation while `storedLastBkSetUpdateSeqNo > storedLastSeenBlockSeqNo`. **Should never leave Phase 1** — the relayer defers in-process (see [Case 9](#case-9--phase-1-stuck-two-rotations-with-no-bundle-target-between-them)). If this fires on-chain, another actor is bypassing the deferral. |
+| `0x...PrevSlotStillOwedForBundle(uint64,uint64)` (contract line AckiNackiBridge.sol — see §7.3 of `docs/EVM-contracts-spec.md`) | `BkUpdate second rotation crosses an unverified bundle boundary` | applyBkSetUpdate | Attempt to apply a rotation when `nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. **Should never leave Phase 1** — the relayer defers in-process (see [Case 9](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary)). If this fires on-chain, another actor is bypassing the deferral. The two revert fields are `last_bk_set_update_seq_no` and `next_owed_boundary`. |
 | `0x...BkUpdateProofRejected` | adapter equality check failed on Circuit 3 PI | applyBkSetUpdate | Proof baked against wrong `old_commitment` / `new_commitment` / `block_seq_no`. Compare the dumped submission to the chain state. |
 
 Decode via `cast 4byte $SELECTOR` or dry-run the failing submission:
@@ -1083,15 +1083,20 @@ and "stale BK-set file"
 1. **Pre-check.** `bk_target = on_chain.last_bk_set_update_seq_no + 1`.
    Ask `BkUpdateSource::fetch_bk_update(bk_target)` whether a candidate
    rotation exists at or after that seq_no.
-2. **Deferral guard.** If `on_chain.last_bk_set_update_seq_no >
-   on_chain.last_seen_block_seq_no` (previous rotation not yet covered
-   by `verifyBlock`), the daemon computes the next bundle target
-   `next = next_bundle_boundary(last_seen, bundle_stride)`:
-   - `upd.block_seq_no >= next` → **log + defer** (`"deferring
-     applyBkSetUpdate until verifyBlock covers the previous rotation"`),
-     fall through to Phase 2.
-   - `upd.block_seq_no < next` → **Stuck** (see
-     [Case 9](#case-9--phase-1-stuck-two-rotations-with-no-bundle-target-between-them)).
+2. **Deferral guard.** If `on_chain.last_bk_set_update_seq_no != 0` and
+   `!prover_rotation_may_ack(&on_chain, bundle_stride)` — i.e. the
+   bundle-aware boundary check would revert — the daemon computes
+   `next = next_bundle_boundary(last_seen, bundle_stride)` and logs
+   `"deferring applyBkSetUpdate until verifyBlock covers the next owed
+   bundle boundary"` (fields: `last_bk_set_update_seq_no`,
+   `last_seen_block_seq_no`, `bundle_stride`, `next_owed_boundary`,
+   `pending_seq_no`), then falls through to Phase 2. The pending
+   rotation stays in the single-slot queue and is retried on every
+   subsequent tick. See [Case 9](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary)
+   for the operational view. No hard-abort path: the pre-2026-10
+   "two rotations with no bundle target in `[N1, N2]`" classification
+   is gone, because rotations inside the same bundle window apply
+   back-to-back and cross-window rotations simply wait.
 3. **Cold-start sanity.** `upd.old_commitment_l2 ==
    on_chain.bk_set_commitment` is checked locally. Mismatch → emit
    `TickOutcome::BkUpdateReverted` without broadcasting; bump
@@ -1159,79 +1164,66 @@ Expected counters move: `bk_update_submits_total`,
 
 ---
 
-## Case 9 — Phase 1 Stuck: two rotations with no bundle target between them
+## Case 9 — Rotation deferred: second rotation crosses an unverified bundle boundary
 
-**Symptoms.** Daemon exits via hard-abort immediately after a Phase 1
-pre-check — before any submit — with:
+**Symptoms.** The daemon keeps running. On a tick where a second
+rotation is pending, Phase 1 logs:
 
 ```
-ERROR bridge_relayer_daemon::daemon: daemon: stuck — hard aborting
-   error=Stuck {
-     seq_no: <N2>,
-     attempts: 0,
-     reason: "two rotations with no bundle target in [<N1>, <N2>]: next target <next> is after N2; verifyBlock cannot move and this stall is permanent"
-   }
+INFO bridge_relayer_daemon::relayer: deferring applyBkSetUpdate until
+  verifyBlock covers the next owed bundle boundary
+    last_bk_set_update_seq_no=<N1> last_seen_block_seq_no=<last_seen>
+    bundle_stride=<stride> next_owed_boundary=<next>
+    pending_seq_no=<N2>
 ```
 
 Here `N1 = storedLastBkSetUpdateSeqNo` on chain (the already-applied
-but still-uncovered rotation) and `N2 = upd.block_seq_no` from
-`BkUpdateSource` (the next pending rotation). The relayer computed
-`next_bundle_boundary(last_seen, bundle_stride) = next`, found that
-`next > N2`, and concluded that `verifyBlock` has no way to advance
-past `N1` before Phase 1 is forced to apply a second (not permitted)
-rotation.
+but still-uncovered rotation), `N2 = upd.block_seq_no` from
+`BkUpdateSource` (the next pending rotation), and
+`next = ((last_seen / stride) + 1) * stride` is the next bundle target
+the chain still owes. The daemon mirrors the contract's
+`PrevSlotStillOwedForBundle` guard: when `next <= N1` applying `N2`
+would leave an unverified boundary straddling the prev slot, so the
+rotation is held and retried on each subsequent tick.
 
-**Why it's "permanent".** The ETH-36 two-slot model only holds one
-outgoing commitment. Applying `N2` while `N1 > last_seen` would delete
-the pre-`N1` commitment that `verifyBlock` still needs to verify
-blocks in `(last_seen, N1]`. The relayer refuses rather than causing
-an on-chain `BkUpdatePrevUncovered` revert later.
+**Why no hard-abort.** The pre-2026-10 behaviour aborted here, because
+the old invariant required `storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo`
+and would have reverted on-chain. The bundle-aware invariant only
+reverts when the rotation would actually cross an unverified boundary,
+so a burst of rotations landing in the same bundle window applies
+back-to-back and a cross-window pair simply waits for one bundle to
+land. The daemon tracks the pending rotation in its single-slot queue;
+no state editing is required to recover.
 
-**Can this happen on shellnet?** Only if the chain publishes two
-rotations within the same bundle stride **and** `last_seen` is
-positioned such that neither bundle target lands in `[N1, N2]`. With
-`BUNDLE_STRIDE_L1 = 1024` (~5 min chain-time) and the shellnet rotation
-cadence of one per epoch (660 s baseline + cliff/wait + candidate
-availability), this requires either:
-- A very narrow bundle alignment window where `next < N1` and `next +
-  stride > N2`, i.e. one bundle target just before `N1` and the next
-  jumping over both rotations, **or**
-- The daemon falling behind the chain so far that two rotations have
-  already piled up by the time it looks (restart after long outage).
+**What to do.**
 
-L2 (`stride = 16384`) is more vulnerable to this because the stride is
-wider than any realistic rotation gap.
+1. **Confirm the deferral is progressing.** On each tick the daemon
+   should also be publishing bundles — look for
+   `verifyBlock confirmed seq_no=<T>` with `T >= next` within one
+   bundle cadence. If `verifyBlock` is submitting but the layer cursor
+   is not advancing, that is a verifyBlock-side problem (see
+   [Case 4 — Restart after RPC-induced hard-abort](#case-4--restart-after-rpc-induced-hard-abort)),
+   not a Phase 1 issue.
+2. **Expect the apply to retry automatically.** Once
+   `storedLastSeenBlockSeqNo >= next`, the next tick evaluates
+   `nextOwedBoundary = ((last_seen / stride) + 1) * stride > N1` and
+   Phase 1 proceeds to `applyBkSetUpdate`. The log line to watch for
+   is `applyBkSetUpdate confirmed seq_no=<N2>`.
 
-**Recovery.**
+**When this is actually a problem.** Only when `verifyBlock` is also
+stalled for an independent reason — e.g. a prover crash, an RPC
+nonce-mismatch loop, or a Case-10 stale `bk_set.shellnet.json` on cold
+start. In those situations the deferral persists because the bundle
+boundary never lands. Resolve the underlying `verifyBlock` fault; the
+Phase 1 deferral clears itself.
 
-1. **Confirm the stall is real.**
-   ```bash
-   N1=$(cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
-   LAST_SEEN=$(cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC --json | jq -r '.[0]')
-   # The upd.block_seq_no (N2) comes from the daemon log — grep for `Stuck`.
-   echo "N1=$N1  last_seen=$LAST_SEEN  stride=$BUNDLE_STRIDE"
-   # If LAST_SEEN >= N1, the deferral is no longer needed; the stall
-   # has cleared itself — go to step 4 directly.
-   ```
-2. **Wait for `verifyBlock` to advance `last_seen >= N1`.** The
-   relayer is already producing a `verifyBlock` proof covering the
-   next bundle target `next`. Confirm by `tail -f logs/live_*.log` and
-   watch for `verifyBlock confirmed seq_no=<T>` with `T >= N1`.
-3. **Once covered, the "permanent" classification is reversed** — the
-   daemon can now apply `N2` normally. The hard-abort just forced
-   operator attention.
-4. **Reset Phase 1 counters and relaunch** (identical to
-   [Case 4c + 4d](#4c-reset-both-attempt-counters)).
+**Prevention / notes.**
 
-**Prevention.**
-
-- Keep `last_seen` within one bundle of chain head. A long outage that
-  misses two rotations is the easiest way to construct this stall.
-- If you deliberately stop the daemon through a rotation (e.g. for a
-  rebuild), prefer stopping it *after* `last_seen >= N1` so no
-  `N2`-pile-up can race the restart.
-- Do **not** reduce `BUNDLE_STRIDE` to avoid this — stride is a
-  circuit parameter.
+- Keep `last_seen` within one bundle of chain head. The deferral is
+  cheap but a long outage can stretch to multiple pending rotations.
+- Switching `BUNDLE_STRIDE` requires a bridge redeploy — the field is
+  immutable in the constructor and both the contract and the daemon
+  divide by it.
 
 ---
 

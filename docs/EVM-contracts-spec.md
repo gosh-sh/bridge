@@ -154,6 +154,7 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `usdc` | `IERC20` | 117 | Deposit/payout token. Must be non-zero. |
 | `aavePool`, `aUSDC` | `IAavePool`, `IERC20` | 120, 123 | Both zero ⇒ AAVE disabled; exactly one zero ⇒ constructor reverts. |
 | `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` | interfaces | 159, 165, 171 | Any zero ⇒ `verifyBlock` disabled. |
+| `bundleStride` | `uint64` | — | Prover bundle width in block seq-nos (L1 = 1024, L2 = 16384); divisor in the `applyBkSetUpdate` boundary invariant. Mandatory when the verifier triple is wired; may be zero when `verifyBlock` is disabled. L1↔L2 switch requires a redeploy. |
 | `storedPrevMaxLevelLayerHash` | `uint256` | 204 | **Genesis seed only** since storage v2.0 (2026-08-04). Read exclusively by `_expectedPrevAnchor` when no layer window is populated (`:1118`). |
 | `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
@@ -194,7 +195,12 @@ constructor(
 ```
 
 `VerifyBlockConfig` (`:495-516`): `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier`,
-`genesisBkSetCommitment`, `genesisPrevMaxLevelLayerHash`, `genesisLastSeenBlockSeqNo`.
+`genesisBkSetCommitment`, `genesisPrevMaxLevelLayerHash`, `genesisLastSeenBlockSeqNo`,
+`bundleStride`. `bundleStride` is the prover's bundle width in block seq-nos (W·P = 1024 for L1,
+W² = 16384 for L2) and is immutable after construction; `applyBkSetUpdate` divides by it to detect
+whether a second rotation would cross an unverified bundle boundary. When the verifier triple is
+wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:598`); when the triple is
+unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
 `altDstHostChainId`, `altTokenId`.
@@ -420,6 +426,17 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
 5. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
    `emit BkSetUpdated(old, new, blockSeqNo)` (`:1000-1003`).
 
+Before step 5, the contract enforces the **bundle-boundary invariant**: if
+`storedLastBkSetUpdateSeqNo != 0`, compute
+`nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride`
+and revert `PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary)` when
+`nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. The guard only trips when the previous
+rotation's seq-no sits at or past the next bundle target the chain still owes, i.e. when
+applying this rotation would leave an unverified bundle boundary straddling the stored prev
+slot. Multiple rotations whose seq-nos share the same bundle window
+`[k·bundleStride, (k+1)·bundleStride)` apply back-to-back; rotations that cross a boundary
+defer until `verifyBlock` advances `storedLastSeenBlockSeqNo` past that boundary.
+
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
 **Operator rule.** Attestation `lastSeen` is the word the Circuit 1A/1B
@@ -431,9 +448,10 @@ the set and gates the next rotation. Relayers apply a rotation as soon
 as the previous one is covered; `verifyBlock` accepts the outgoing set
 for `seqNo <= N`. AN must announce a rotation at bundle target N
 *before* that bundle is proven: a proof that already baked
-`last_seen = N` cannot satisfy `attestationLastSeen < N`. Two
-rotations with no bundle target in `[N1, N2]` (inclusive) stall
-permanently.
+`last_seen = N` cannot satisfy `attestationLastSeen < N`. Rotation
+bursts within one bundle window apply in order with no on-chain stall;
+cross-window pairs defer the second rotation until the owed
+`verifyBlock(k·bundleStride)` lands.
 
 ### 7.4 Read surface for AN state
 
@@ -624,7 +642,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `LayerHashTailNonZero`, `LayerHashActiveZero`, `LayerOutOfRange`, `NonMonotonicLayerHeight`.
 
 `applyBkSetUpdate`: `BkUpdateDisabled`, `StaleBkSetCommitment`, `BkUpdateSeqNoNotMonotonic`,
-`BkUpdateMerkleMismatch`, `VerifyBlockLagBehindRotation`, `AttestationLastSeenNotBeforeSeqNo`.
+`BkUpdateMerkleMismatch`, `PrevSlotStillOwedForBundle`, `AttestationLastSeenNotBeforeSeqNo`.
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,

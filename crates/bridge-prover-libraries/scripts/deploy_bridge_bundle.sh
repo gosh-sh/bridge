@@ -69,6 +69,17 @@ set -a && source "$GENESIS_ENV" && set +a
 # vm.envOr(..., 0) — without this alias the constructor silently pins 0.
 export GENESIS_LAST_SEEN_BLOCK_SEQNO="$GENESIS_SEED_SEQNO"
 
+# BUNDLE_STRIDE is immutable at deploy time and must match the daemon's
+# AnchorMode::stride() for this LEVEL — L1 (W·P) = 1024, L2 (W²) = 16384,
+# with W=128 and P=8 (see bridge-prover-lib::BUNDLE_STRIDE_L{1,2}).
+# applyBkSetUpdate uses it to compute the next owed bundle boundary;
+# switching anchor level requires a redeploy.
+if [[ "$LEVEL" == 1 ]]; then
+  export BUNDLE_STRIDE=1024
+else
+  export BUNDLE_STRIDE=16384
+fi
+
 # ─── 2. Deploy the bundle (14 CREATEs across 6 logical components) ────────────
 cd "$CONTRACTS_DIR"
 export PRIVATE_KEY
@@ -77,7 +88,8 @@ export WITHDRAW_ACC_FR
 
 echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
-  --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow
+  --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow --gas-estimate-multiplier 1200 \
+  --legacy --with-gas-price 2000000000
 
 # ─── 3. Extract BRIDGE_ADDRESS from the broadcast record ──────────────────────
 BROADCAST="$CONTRACTS_DIR/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json"

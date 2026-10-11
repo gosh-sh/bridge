@@ -59,7 +59,8 @@ contract DeployGenesisCursorBridge is Script {
             ),
             genesisBkSetCommitment: vm.envUint("GENESIS_BK_SET_COMMITMENT"),
             genesisPrevMaxLevelLayerHash: vm.envUint("GENESIS_PREV_MAX_LEVEL_LAYER_HASH"),
-            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
+            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0))),
+            bundleStride: uint64(vm.envUint("BUNDLE_STRIDE"))
         });
 
         AckiNackiBridge.BridgeWithdrawConfig memory bw = AckiNackiBridge.BridgeWithdrawConfig({

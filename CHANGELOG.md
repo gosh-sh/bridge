@@ -55,11 +55,30 @@ assigns it when the release is tagged.
 - `applyBkSetUpdate(N)` no longer waits for `verifyBlock` to cover N.
   It stores the outgoing set in `storedPrevBkSetCommitment` and
   `verifyBlock` accepts that set for `blockSeqNo <= N`. A second
-  rotation is blocked until the layer cursor covers the previous N
-  (`VerifyBlockLagBehindRotation`; the first field is that previous N,
-  not the seq being applied). Off-boundary rotations can apply as soon
-  as they are discovered. Two rotations with no bundle target in
-  `[N1, N2]` (inclusive) stall permanently and stop `verifyBlock` too.
+  rotation is blocked only when applying it would cross an unverified
+  bundle boundary — the contract computes
+  `nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride`
+  and reverts `PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary)`
+  when `nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. Rotation bursts
+  that land inside the same bundle window apply back-to-back; a rotation
+  that crosses a boundary defers until `verifyBlock` advances the layer
+  cursor past that boundary, at which point the relayer retries and the
+  apply succeeds. No permanent stall. The relayer surfaces the deferral
+  as `info!("deferring applyBkSetUpdate until verifyBlock covers the
+  next owed bundle boundary")` and keeps the pending rotation in its
+  single-slot queue.
+
+- **`AckiNackiBridge` constructor adds `bundleStride` to
+  `VerifyBlockConfig`.** The field is the prover's bundle width in block
+  seq-nos — L1 (W·P) = 1024, L2 (W²) = 16384 (with W=128, P=8) — and is
+  immutable after construction; it feeds the `applyBkSetUpdate`
+  boundary invariant above. When the verifier triple is wired a zero
+  `bundleStride` is rejected (`InvalidBundleStride`); when
+  `verifyBlock` is disabled the field is unused and may be zero.
+  Switching anchor level (L1 ↔ L2) requires a redeploy. Deploy scripts
+  read `BUNDLE_STRIDE` from the env; the shellnet-E2E deploy script
+  (`scripts/deploy_bridge_bundle.sh`) sets it from `LEVEL=1|2`
+  automatically.
 
 - **`aggregate-proof` self-checks the verifier source, so every verifiers
   directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile

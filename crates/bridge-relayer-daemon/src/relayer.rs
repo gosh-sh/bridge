@@ -201,36 +201,33 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             }
         }
 
-        // ── Phase 1: apply a rotation when the previous one is already
-        // covered. `applyBkSetUpdate` keeps one outgoing set, so a second
-        // rotation while `lastBk > lastSeen` reverts. The first rotation
-        // (and any later one after the cursor passed the last N) may
-        // land ahead of the layer cursor — `verifyBlock` accepts the
-        // previous commitment for `seqNo <= N`. Defer only the
-        // previous-uncovered case; do not abort the tick.
+        // ── Phase 1: apply a rotation when overwriting
+        // `storedPrevBkSetCommitment` will not strand an unverified bundle
+        // boundary. The contract's `PrevSlotStillOwedForBundle` gate is
+        // bundle-aware: a second rotation that would cross a bundle
+        // boundary the current prev-slot is still responsible for signing
+        // is deferred (the daemon then runs `verifyBlock` for that
+        // boundary and retries). Rotations landing inside the same
+        // `bundleStride` window as the previous one are allowed — AN
+        // emits bursts of rotations between bundles on shellnet, and
+        // nothing else can sign the boundary past them. No permanent
+        // stall: `verifyBlock` always drains the window, so a deferred
+        // apply retries on a later tick.
         let bk_target = on_chain.last_bk_set_update_seq_no.saturating_add(1);
         if let Some(upd) = self.bk_update_source.fetch_bk_update(bk_target).await? {
-            if on_chain.last_bk_set_update_seq_no > on_chain.last_seen_block_seq_no {
+            let prev_slot_still_owed = on_chain.last_bk_set_update_seq_no != 0
+                && !Self::prover_rotation_may_ack(&on_chain, self.config.bundle_stride);
+            if prev_slot_still_owed {
                 let next = Self::next_bundle_boundary(
                     on_chain.last_seen_block_seq_no,
                     self.config.bundle_stride,
                 );
-                if upd.block_seq_no < next {
-                    return Err(RelayerError::Stuck {
-                        seq_no: upd.block_seq_no,
-                        attempts: 0,
-                        reason: format!(
-                            "two rotations with no bundle target in [{}, {}]: next target {} is \
-                             after N2; verifyBlock cannot move and this stall is permanent",
-                            on_chain.last_bk_set_update_seq_no, upd.block_seq_no, next
-                        ),
-                    });
-                }
                 info!(
                     rotation = upd.block_seq_no,
                     last_bk = on_chain.last_bk_set_update_seq_no,
                     last_seen = on_chain.last_seen_block_seq_no,
-                    "deferring applyBkSetUpdate until verifyBlock covers the previous rotation",
+                    next_owed_boundary = next,
+                    "deferring applyBkSetUpdate until verifyBlock covers the next owed bundle boundary",
                 );
             } else if upd.old_commitment_l2 != on_chain.bk_set_commitment {
                 self.state.record_bk_update_attempt(upd.block_seq_no);
@@ -1036,15 +1033,21 @@ mod tests {
 
     #[tokio::test]
     async fn tick_keeps_pending_n2_when_acking_already_applied_n1() {
+        // N1 lives in the second bundle window and the layer cursor has
+        // not covered the first boundary yet, so the bundle-aware guard
+        // defers N2. The daemon logs the deferral, falls through to the
+        // verifyBlock lane (no blocks available → NotYetAvailable) and
+        // leaves N2 in the prover's pending slot for the next tick.
         let dir = tempdir().unwrap();
-        let bridge = Arc::new(MockBridgeClient::with_genesis(
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
             U256::from(BK),
             U256::ZERO,
+            1024,
             Arc::new(|_| true),
         ));
         let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
-        prover.queue_update(dummy_update(500, 0));
-        let mut n2 = dummy_update(2000, 0);
+        prover.queue_update(dummy_update(1500, 0));
+        let mut n2 = dummy_update(3000, 0);
         n2.old_commitment_l2 = U256::from(0xC0FFEEu64);
         n2.new_commitment_l3 = U256::from(0xD00Du64);
         prover.queue_update(n2);
@@ -1059,12 +1062,21 @@ mod tests {
         assert!(matches!(
             r.tick().await.unwrap(),
             TickOutcome::BkUpdateApplied {
-                seq_no: 500,
+                seq_no: 1500,
                 ..
             }
         ));
+        // N1 sits in the second bundle window and `last_seen` is still
+        // 0, so the submit-site may_ack guard refuses the ack — the live
+        // prover must keep signing against the outgoing set until
+        // `verifyBlock` crosses the next owed boundary. Simulate the
+        // asynchronous ack that would eventually land once `verifyBlock`
+        // catches up (`maybe_ack_prover_rotation` on a later tick) so
+        // that `pending` is clear for N2 on the next tick.
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        prover.ack_last_bk_update(1500).await.unwrap();
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
-        // N2 is discovered and deferred (bundle 1024 sits between 500 and 2000).
+        // N2 is discovered and deferred (bundle 1024 is owed by N1).
         let out = r.tick().await.unwrap();
         assert!(
             matches!(out, TickOutcome::NotYetAvailable { .. }),
@@ -1076,22 +1088,35 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|u| u.block_seq_no == 2000),
+                .is_some_and(|u| u.block_seq_no == 3000),
             "N2 must stay pending"
         );
     }
 
     #[tokio::test]
-    async fn tick_fails_loud_when_n2_has_no_bundle_target_in_range() {
+    async fn tick_defers_second_rotation_when_prev_slot_still_owes_a_bundle() {
+        // Prev-slot-owed path (bundle-aware `PrevSlotStillOwedForBundle`):
+        // N1 lands past the first bundle boundary, so overwriting
+        // `storedPrevBkSetCommitment` with N2 would strand the
+        // seqno-≤-1024 boundary still signed by the outgoing set. The
+        // daemon must defer N2 (log, keep pending) rather than hard-abort
+        // — `verifyBlock` eventually crosses `nextOwedBoundary`, and the
+        // next tick retries the apply.
         let dir = tempdir().unwrap();
-        let bridge = Arc::new(MockBridgeClient::with_genesis(
+        // Mock must agree with the daemon on `bundle_stride` or the two
+        // sides disagree about whether the gate is tripped.
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
             U256::from(BK),
             U256::ZERO,
+            1024,
             Arc::new(|_| true),
         ));
         let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
-        prover.queue_update(dummy_update(500, 0));
-        let mut n2 = dummy_update(800, 0);
+        // N1 = 2000 lies in bundle window [1024, 2048); next owed
+        // boundary from `last_seen = 0` is 1024, which is `<= 2000`
+        // and trips the gate.
+        prover.queue_update(dummy_update(2000, 0));
+        let mut n2 = dummy_update(2500, 0);
         n2.old_commitment_l2 = U256::from(0xC0FFEEu64);
         n2.new_commitment_l3 = U256::from(0xD00Du64);
         prover.queue_update(n2);
@@ -1106,11 +1131,18 @@ mod tests {
         assert!(matches!(
             r.tick().await.unwrap(),
             TickOutcome::BkUpdateApplied {
-                seq_no: 500,
+                seq_no: 2000,
                 ..
             }
         ));
-        let err = r.tick().await.expect_err("two rotations without a target");
-        assert!(err.to_string().contains("no bundle target"), "{err}");
+        // Second tick: N2 is fetched but the pre-check sees prev-slot
+        // still owes `verifyBlock(1024)`. The daemon logs a deferral and
+        // falls through to the verifyBlock lane — no block is queued so
+        // the tick finishes idle without error.
+        let outcome = r.tick().await.expect("deferral path must not error");
+        assert!(
+            !matches!(outcome, TickOutcome::BkUpdateApplied { .. }),
+            "N2 must not apply while prev slot is owed, got {outcome:?}"
+        );
     }
 }

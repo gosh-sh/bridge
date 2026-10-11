@@ -9,10 +9,12 @@ use async_trait::async_trait;
 use tokio::time::{sleep, Duration};
 
 use crate::{
+    address::ExtendedAddress,
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ContractCallRequest, TransactionReceipt,
+        TransactionStatus, TxHash,
     },
 };
 
@@ -29,6 +31,8 @@ pub struct MockAckiNacki {
     fail_mode: Arc<Mutex<bool>>,
     /// What `run_getter` returns; `None` makes it fail.
     getter_response: Arc<Mutex<Option<serde_json::Value>>>,
+    /// Accounts `get_account_info` knows, keyed by account id.
+    accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
 }
 
 impl MockAckiNacki {
@@ -40,7 +44,16 @@ impl MockAckiNacki {
             block_number: Arc::new(Mutex::new(1)),
             fail_mode: Arc::new(Mutex::new(false)),
             getter_response: Arc::new(Mutex::new(None)),
+            accounts: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Make `get_account_info` report `info` for `account_id`.
+    pub fn set_account(&self, account_id: &str, info: AccountInfo) {
+        self.accounts
+            .lock()
+            .unwrap()
+            .insert(account_id.to_owned(), info);
     }
 
     /// Set the decoded output every `run_getter` call returns.
@@ -180,6 +193,15 @@ impl IAckiNacki for MockAckiNacki {
                 "MockAckiNacki: no getter response set for {function}"
             ))
         })
+    }
+
+    async fn get_account_info(&self, address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        Ok(self
+            .accounts
+            .lock()
+            .unwrap()
+            .get(address.account_id())
+            .cloned())
     }
 }
 

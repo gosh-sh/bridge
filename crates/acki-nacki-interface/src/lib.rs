@@ -21,7 +21,9 @@ pub use tvm_client::{
     parse_exit_code_from_message, TvmAckiNacki, TvmClientConfig, EXIT_CONSTRUCTOR_ALREADY_CALLED,
     EXIT_INVALID_ZKPROOF, HD_PATH_V3,
 };
-pub use types::{AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus};
+pub use types::{
+    AccountInfo, AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus,
+};
 
 #[cfg(test)]
 mod tests;

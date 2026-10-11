@@ -43,10 +43,14 @@ use acki_nacki_interface::{ContractCallRequest, ExtendedAddress, IAckiNacki, Tra
 use alloy::primitives::U256;
 use async_trait::async_trait;
 use serde_json::json;
+use tokio::sync::OnceCell;
+use tracing::{debug, warn};
+use tvm_client::{abi::Abi, ClientContext};
 
 use crate::{
     error::RelayerError,
     types::{DepositEvent, DepositProofBundle, NUM_PUBLIC_INPUTS},
+    voucher::{self, DepositIdentity},
 };
 
 /// Outcome of an [`AnSubmitter::submit`] call.
@@ -72,11 +76,11 @@ pub enum SubmitOutcome {
 
 #[async_trait]
 pub trait AnSubmitter: Send + Sync {
-    /// Cheap nullifier pre-check: has this `deposit_id` already been
-    /// finalised on AN? Used to skip the expensive proof-generation step on
-    /// replays. A backend that can't query the nullifier returns `Ok(false)`
-    /// (the submit path is still safe — AN rejects double-finalisation).
-    async fn is_finalized(&self, deposit_id: u64) -> Result<bool, RelayerError>;
+    /// Cheap pre-check: has this deposit already been finalised on AN? Used
+    /// to skip the expensive proof-generation step on replays. A backend that
+    /// can't tell returns `Ok(false)` (the submit path is still safe — AN
+    /// rejects double-finalisation).
+    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
 
     /// Deliver the proof bundle and finalise the deposit.
     async fn submit(
@@ -229,13 +233,13 @@ impl MockAnSubmitter {
 
 #[async_trait]
 impl AnSubmitter for MockAnSubmitter {
-    async fn is_finalized(&self, deposit_id: u64) -> Result<bool, RelayerError> {
+    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         Ok(self
             .inner
             .lock()
             .expect("poisoned lock")
             .nullifiers
-            .contains(&deposit_id))
+            .contains(&event.deposit_id))
     }
 
     async fn submit(
@@ -307,15 +311,22 @@ pub fn build_finalize_deposit_params(bundle: &DepositProofBundle) -> serde_json:
 /// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
 /// [`IAckiNacki`] client.
 ///
-/// `is_finalized` returns `Ok(false)` because the current [`IAckiNacki`]
-/// surface has no contract-read primitive to query `usedDepositIds`. This is
-/// safe: the AN-side nullifier rejects a duplicate `finalizeDeposit`, which
-/// surfaces here as [`SubmitOutcome::Rejected`] and is handled idempotently
-/// by the relayer. When the AN team ships a read API, override this to skip
-/// re-proving replays.
+/// With [`Self::with_voucher_check`], `is_finalized` looks for the deposit's
+/// `DepositVoucher` on AN (see [`crate::voucher`]); without it, or when the
+/// lookup fails, it returns `Ok(false)` and the deposit is proven and
+/// submitted, which is safe: the voucher rejects a second finalization.
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
+    voucher_check: Option<VoucherCheck>,
+}
+
+/// What the voucher pre-check needs beyond the client.
+struct VoucherCheck {
+    ctx: Arc<ClientContext>,
+    bridge_abi: Abi,
+    /// `_depositVoucherCode`, read from the bridge once per process.
+    code: OnceCell<String>,
 }
 
 impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
@@ -323,7 +334,73 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         Self {
             client,
             config,
+            voucher_check: None,
         }
+    }
+
+    /// Answer `is_finalized` by looking for the deposit's `DepositVoucher`.
+    /// `bridge_abi` is the deployed bridge's ABI; its storage fields are what
+    /// locates `_depositVoucherCode`.
+    pub fn with_voucher_check(mut self, bridge_abi: Abi) -> Result<Self, RelayerError> {
+        self.voucher_check = Some(VoucherCheck {
+            ctx: voucher::offline_context()?,
+            bridge_abi,
+            code: OnceCell::new(),
+        });
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    fn with_voucher_code(mut self, code: &str) -> Self {
+        self.voucher_check = Some(VoucherCheck {
+            ctx: voucher::offline_context().unwrap(),
+            bridge_abi: Abi::Json("{}".to_string()),
+            code: OnceCell::new_with(Some(code.to_string())),
+        });
+        self
+    }
+
+    async fn voucher_code(&self, check: &VoucherCheck) -> Result<String, RelayerError> {
+        check
+            .code
+            .get_or_try_init(|| async {
+                let bridge = ExtendedAddress::parse(&self.config.token_bridge)
+                    .map_err(RelayerError::from)?;
+                let data = self
+                    .client
+                    .get_account_info(&bridge)
+                    .await
+                    .map_err(RelayerError::from)?
+                    .and_then(|info| info.data)
+                    .ok_or_else(|| RelayerError::other("bridge account has no data"))?;
+                voucher::voucher_code_from_bridge_data(&check.ctx, &check.bridge_abi, &data)
+            })
+            .await
+            .cloned()
+    }
+
+    async fn voucher_active(
+        &self,
+        check: &VoucherCheck,
+        event: &DepositEvent,
+    ) -> Result<bool, RelayerError> {
+        let code = self.voucher_code(check).await?;
+        let id = DepositIdentity {
+            deposit_id: U256::from(event.deposit_id),
+            contract_addr: U256::from_be_slice(event.source_contract.as_slice()),
+            chain_id: U256::from(event.source_chain_id),
+        };
+        let account = voucher::voucher_account_id(&check.ctx, &code, &id)?;
+        // A voucher is the root of its own dapp.
+        let address =
+            ExtendedAddress::parse(&format!("{account}::{account}")).map_err(RelayerError::from)?;
+        let info = self
+            .client
+            .get_account_info(&address)
+            .await
+            .map_err(RelayerError::from)?;
+        debug!(deposit_id = event.deposit_id, voucher = %account, ?info, "voucher pre-check");
+        Ok(info.is_some_and(|i| i.active))
     }
 
     /// Submit an already-generated bundle directly, without binding it to a
@@ -472,9 +549,21 @@ fn parse_exit_code_loose(msg: &str) -> Option<i32> {
 
 #[async_trait]
 impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
-    async fn is_finalized(&self, _deposit_id: u64) -> Result<bool, RelayerError> {
-        // No nullifier read primitive on IAckiNacki yet — see struct docs.
-        Ok(false)
+    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
+        let Some(check) = &self.voucher_check else {
+            return Ok(false);
+        };
+        match self.voucher_active(check, event).await {
+            Ok(active) => Ok(active),
+            Err(e) => {
+                warn!(
+                    deposit_id = event.deposit_id,
+                    error = %e,
+                    "voucher pre-check failed; proving the deposit anyway",
+                );
+                Ok(false)
+            },
+        }
     }
 
     async fn submit(
@@ -546,12 +635,12 @@ mod tests {
         let ev = event(1);
         let b = bundle(&ev);
 
-        assert!(!sub.is_finalized(1).await.unwrap());
+        assert!(!sub.is_finalized(&ev).await.unwrap());
         assert!(matches!(
             sub.submit(&ev, &b).await.unwrap(),
             SubmitOutcome::Finalized { .. }
         ));
-        assert!(sub.is_finalized(1).await.unwrap());
+        assert!(sub.is_finalized(&ev).await.unwrap());
         assert!(matches!(
             sub.submit(&ev, &b).await.unwrap(),
             SubmitOutcome::AlreadyFinalized
@@ -677,5 +766,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The deposit behind the shellnet voucher in `voucher::tests`.
+    fn shellnet_deposit() -> DepositEvent {
+        DepositEvent {
+            deposit_id: 1,
+            source_contract: "0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38"
+                .parse()
+                .unwrap(),
+            source_chain_id: 11_155_111,
+            ..event(1)
+        }
+    }
+
+    fn voucher_submitter(
+        client: Arc<acki_nacki_interface::MockAckiNacki>,
+        with_code: bool,
+    ) -> AnInterfaceSubmitter<acki_nacki_interface::MockAckiNacki> {
+        let dapp = "1a".repeat(32);
+        let sub = AnInterfaceSubmitter::new(client, AnSubmitConfig {
+            from: format!("{dapp}::{}", "ff".repeat(32)),
+            token_bridge: format!("{dapp}::{dapp}"),
+            confirm_timeout_secs: 1,
+        });
+        if with_code {
+            sub.with_voucher_code(include_str!("../tests/fixtures/deposit_voucher_code.b64").trim())
+        } else {
+            sub.with_voucher_check(Abi::Json("{}".to_string())).unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn voucher_precheck_reads_the_voucher_account() {
+        use acki_nacki_interface::{AccountInfo, MockAckiNacki};
+
+        let voucher = "ffd5c4e7770b73e67ad8a44c828c0d2ee2e642cbbff53096ffd0c68ed0f9a80e";
+        let ev = shellnet_deposit();
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = voucher_submitter(client.clone(), true);
+        assert!(!sub.is_finalized(&ev).await.unwrap(), "no voucher yet");
+
+        let info = |active| AccountInfo {
+            active,
+            code_hash: None,
+            data: None,
+        };
+        client.set_account(voucher, info(false));
+        assert!(
+            !sub.is_finalized(&ev).await.unwrap(),
+            "a failed deploy leaves no active voucher"
+        );
+        client.set_account(voucher, info(true));
+        assert!(sub.is_finalized(&ev).await.unwrap());
+        let other = DepositEvent {
+            source_chain_id: 1,
+            ..shellnet_deposit()
+        };
+        assert!(
+            !sub.is_finalized(&other).await.unwrap(),
+            "same depositId on another chain is a different deposit"
+        );
+    }
+
+    /// A pre-check that cannot run must not block the deposit.
+    #[tokio::test]
+    async fn voucher_precheck_failure_falls_back_to_proving() {
+        let client = Arc::new(acki_nacki_interface::MockAckiNacki::new());
+        let sub = voucher_submitter(client, false);
+        assert!(!sub.is_finalized(&shellnet_deposit()).await.unwrap());
     }
 }

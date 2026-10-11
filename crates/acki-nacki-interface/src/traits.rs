@@ -3,9 +3,11 @@
 use async_trait::async_trait;
 
 use crate::{
-    error::Result,
+    address::ExtendedAddress,
+    error::{AckiNackiError, Result},
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ContractCallRequest, TransactionReceipt,
+        TransactionStatus, TxHash,
     },
 };
 
@@ -46,6 +48,11 @@ pub trait IAckiNacki: Send + Sync {
         function: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value>;
+
+    /// State of the account at `address`; `None` when no such account exists.
+    async fn get_account_info(&self, _address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        Err(AckiNackiError::NotImplemented)
+    }
 }
 
 /// Trait for sending transactions with retry logic

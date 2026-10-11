@@ -26,7 +26,8 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ContractCallRequest, TransactionReceipt,
+        TransactionStatus, TxHash,
     },
 };
 
@@ -217,8 +218,7 @@ impl IAckiNacki for TvmAckiNacki {
         })
         .await
         .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
-        let tx = res
-            .result
+        let tx = graphql_data(&res.result)
             .get("blockchain")
             .and_then(|b| b.get("transaction"))
             .filter(|t| !t.is_null());
@@ -313,6 +313,26 @@ impl IAckiNacki for TvmAckiNacki {
             AckiNackiError::NetworkError(format!("run_tvm {function}: no decoded output"))
         })
     }
+    async fn get_account_info(&self, address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        let gql = format!(
+            "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ info {{ acc_type \
+             code_hash data }} }} }} }}",
+            address.account_id(),
+            address.dapp_id()
+        );
+        let res = query(self.context.clone(), ParamsOfQuery {
+            query: gql,
+            variables: None,
+        })
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        Ok(AccountInfo::from_blockchain_api(graphql_data(&res.result)))
+    }
+}
+
+/// `net::query` returns the whole GraphQL response, `{ "data": … }`.
+fn graphql_data(result: &Value) -> &Value {
+    result.get("data").unwrap_or(result)
 }
 
 /// Classify a tvm-sdk transaction JSON into status + compute exit code.

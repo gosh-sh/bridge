@@ -3,9 +3,10 @@
 //! [`Relayer::tick`] is the testable single-step entry point. For the next
 //! target `deposit_id` it:
 //!
-//! 1. cheaply checks the AN nullifier ([`AnSubmitter::is_finalized`]) so a
-//!    replay skips the expensive proving step;
-//! 2. asks the [`DepositSource`] for the confirmed `Deposit` event;
+//! 1. asks the [`DepositSource`] for the confirmed `Deposit` event;
+//! 2. cheaply checks whether AN already finalized it
+//!    ([`AnSubmitter::is_finalized`]) so a replay skips the expensive proving
+//!    step;
 //! 3. generates the AN-consumable proof triple via the [`ProofGenerator`];
 //! 4. submits it to AN via the [`AnSubmitter`] (`finalizeDeposit`);
 //! 5. on success — advances [`RelayerState`] and persists it; otherwise records
@@ -156,23 +157,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let target = self.state.next_target(self.config.start_deposit_id);
         self.publish_state_gauges(target);
 
-        // 1. Cheap nullifier pre-check — skip proving on replays.
-        let timer = StageTimer::start("is_finalized");
-        let finalized = self.submitter.is_finalized(target).await;
-        timer.finish();
-        if finalized? {
-            debug!(
-                deposit_id = target,
-                "already finalized on AN; advancing cursor"
-            );
-            self.state.record_progress(target);
-            self.persist_state()?;
-            return Ok(TickOutcome::AlreadyFinalized {
-                deposit_id: target,
-            });
-        }
-
-        // 2. Fetch the confirmed deposit event.
+        // 1. Fetch the confirmed deposit event.
         debug!(deposit_id = target, "fetching deposit event");
         let timer = StageTimer::start("fetch_event");
         let fetched = self.source.fetch(target).await;
@@ -194,6 +179,24 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             return Err(RelayerError::DepositIdMismatch {
                 requested: target,
                 got: event.deposit_id,
+            });
+        }
+
+        // 2. Cheap pre-check — skip proving on replays. Needs the event: the deposit's
+        //    AN identity includes its source contract and chain.
+        let timer = StageTimer::start("is_finalized");
+        let finalized = self.submitter.is_finalized(&event).await;
+        timer.finish();
+        if finalized? {
+            self.mark_finalized_block(event.block_number);
+            self.state.record_progress(target);
+            self.persist_state()?;
+            info!(
+                deposit_id = target,
+                "already finalized on AN; advancing without proving"
+            );
+            return Ok(TickOutcome::AlreadyFinalized {
+                deposit_id: target,
             });
         }
 
@@ -623,8 +626,7 @@ mod tests {
     async fn skips_already_finalized_without_proving() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
-        // Note: deposit 0 is NOT staged in the source — the nullifier
-        // pre-check must let us advance past it without a source hit.
+        source.insert(deposit(0));
         source.insert(deposit(1));
         let prover = Arc::new(MockProofGenerator::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());

@@ -162,6 +162,37 @@ impl TransactionReceipt {
     }
 }
 
+/// One internal message a transaction sent, and what the transaction it
+/// spawned at the destination did with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildTransaction {
+    /// Message hash.
+    pub message_id: String,
+    /// Destination in `workchain:account_id` form.
+    pub dst: String,
+    /// Outcome at the destination; `None` while that transaction is not yet
+    /// executed or not yet indexed.
+    pub outcome: Option<ChildOutcome>,
+}
+
+/// Compute-phase result of a [`ChildTransaction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildOutcome {
+    /// Hash of the destination transaction.
+    pub tx_hash: TxHash,
+    /// `compute.exit_code`, when the transaction reached the compute phase.
+    pub exit_code: Option<i32>,
+    /// Whether the transaction was aborted.
+    pub aborted: bool,
+}
+
+impl ChildOutcome {
+    /// Neither aborted nor a non-zero exit code.
+    pub fn is_success(&self) -> bool {
+        !self.aborted && self.exit_code.unwrap_or(0) == 0
+    }
+}
+
 /// Event log from a transaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Log {

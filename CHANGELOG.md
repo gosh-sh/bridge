@@ -275,6 +275,24 @@ assigns it when the release is tagged.
   USDC + aUSDC minus `amount` would fall below `treasuryBalance`. After a
   loss, interest goes to users first.
 
+- **`deposit-relayer daemon` no longer proves deposits that are already
+  finalized on Acki Nacki.** Before proving, it computes the address of the
+  deposit's `DepositVoucher` and checks whether that account is active. The
+  address comes from the deposit id, source contract and source chain plus
+  the voucher code stored in the bridge. If the voucher is active, the daemon
+  advances without proving, which saves a full proof (minutes) when an
+  operator replays a deposit range or another relayer got there first.
+  Before this the check always answered "not finalized".
+  - The voucher code is read once per process from the bridge's account
+    data, using the ABI in the AN config's `bridge_abi_path`. That ABI must
+    list the bridge's storage `fields`, including `_depositVoucherCode`; the
+    one compiled under `contracts/an/0.80.0_compiled/` does.
+  - If the check cannot run (unreachable endpoint, ABI without the field),
+    the daemon logs `voucher pre-check failed; proving the deposit anyway`
+    and behaves as before.
+  - The check now runs after the deposit event is fetched, not before, since
+    it needs the event's source contract and chain (bridge-audit#26).
+
 - **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
   account.** The wallet signs `approve` and `deposit` from a QR code —
   WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681

@@ -3,10 +3,11 @@
 use async_trait::async_trait;
 
 use crate::{
+    address::ExtendedAddress,
     error::{AckiNackiError, Result},
     types::{
-        AckiNackiTransaction, ChildTransaction, ContractCallRequest, TransactionReceipt,
-        TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -53,6 +54,11 @@ pub trait IAckiNacki: Send + Sync {
     /// 0 can still have every message it sent fail at the destination, so
     /// this is what tells a caller whether the call actually did its work.
     async fn get_internal_children(&self, _tx_hash: &TxHash) -> Result<Vec<ChildTransaction>> {
+        Err(AckiNackiError::NotImplemented)
+    }
+
+    /// State of the account at `address`; `None` when no such account exists.
+    async fn get_account_info(&self, _address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
         Err(AckiNackiError::NotImplemented)
     }
 }

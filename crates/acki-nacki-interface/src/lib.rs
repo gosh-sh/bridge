@@ -24,8 +24,8 @@ pub use tvm_client::{
     EXIT_INVALID_ZKPROOF, HD_PATH_V3,
 };
 pub use types::{
-    AckiNackiTransaction, ChildOutcome, ChildTransaction, ContractCallRequest, TransactionReceipt,
-    TransactionStatus,
+    AccountInfo, AckiNackiTransaction, ChildOutcome, ChildTransaction, ContractCallRequest,
+    TransactionReceipt, TransactionStatus,
 };
 
 #[cfg(test)]

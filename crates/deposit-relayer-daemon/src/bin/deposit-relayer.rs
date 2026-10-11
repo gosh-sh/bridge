@@ -744,6 +744,10 @@ async fn run_daemon(
         })
         .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
         let submit_cfg = an_cfg.to_submit_config();
+        let voucher_abi = TvmAckiNacki::load_abi(&an_cfg.bridge_abi_path)
+            .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
+        let submitter =
+            AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg).with_voucher_check(voucher_abi)?;
         run_daemon_loop(
             state_path,
             start_deposit_id,
@@ -754,7 +758,7 @@ async fn run_daemon(
             scan_cursor,
             source,
             prover,
-            Arc::new(AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg)),
+            Arc::new(submitter),
         )
         .await
     }

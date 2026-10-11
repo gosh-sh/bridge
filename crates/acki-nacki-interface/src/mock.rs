@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use tokio::time::{sleep, Duration};
 
 use crate::{
+    address::ExtendedAddress,
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
     types::{
-        AckiNackiTransaction, ChildTransaction, ContractCallRequest, TransactionReceipt,
-        TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -33,6 +34,8 @@ pub struct MockAckiNacki {
     /// What `get_internal_children` returns per parent tx; unknown parents
     /// have no children.
     children: Arc<Mutex<HashMap<TxHash, Vec<ChildTransaction>>>>,
+    /// Accounts `get_account_info` knows, keyed by account id.
+    accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
 }
 
 impl MockAckiNacki {
@@ -45,6 +48,7 @@ impl MockAckiNacki {
             fail_mode: Arc::new(Mutex::new(false)),
             getter_response: Arc::new(Mutex::new(None)),
             children: Arc::new(Mutex::new(HashMap::new())),
+            accounts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -58,6 +62,14 @@ impl MockAckiNacki {
     /// Set what `get_internal_children(parent)` returns.
     pub fn set_children(&self, parent: TxHash, children: Vec<ChildTransaction>) {
         self.children.lock().unwrap().insert(parent, children);
+    }
+
+    /// Make `get_account_info` report `info` for `account_id`.
+    pub fn set_account(&self, account_id: &str, info: AccountInfo) {
+        self.accounts
+            .lock()
+            .unwrap()
+            .insert(account_id.to_owned(), info);
     }
 
     /// Set the decoded output every `run_getter` call returns.
@@ -205,6 +217,15 @@ impl IAckiNacki for MockAckiNacki {
             .get(tx_hash)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn get_account_info(&self, address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        Ok(self
+            .accounts
+            .lock()
+            .unwrap()
+            .get(address.account_id())
+            .cloned())
     }
 }
 

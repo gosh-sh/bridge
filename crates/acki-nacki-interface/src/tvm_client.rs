@@ -27,8 +27,8 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AckiNackiTransaction, ChildTransaction, ContractCallRequest, TransactionReceipt,
-        TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -328,6 +328,16 @@ impl IAckiNacki for TvmAckiNacki {
             child.outcome = parse_message_dst_transaction(&self.gql(gql).await?);
         }
         Ok(children)
+    }
+
+    async fn get_account_info(&self, address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        let gql = format!(
+            "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ info {{ acc_type \
+             code_hash data }} }} }} }}",
+            address.account_id(),
+            address.dapp_id()
+        );
+        Ok(AccountInfo::from_blockchain_api(&self.gql(gql).await?))
     }
 }
 

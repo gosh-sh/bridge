@@ -229,8 +229,9 @@ impl std::error::Error for UnprovableEnclosingTx {}
 
 /// Refuse a deposit whose enclosing tx the circuit cannot prove.
 ///
-/// Type 0 (legacy) and type 4 (EIP-7702) are neither provable nor refundable
-/// — the depositor has to send again as type 1 or 2. axiom-eth also enforces
+/// Type 0 (legacy) and type 4 (EIP-7702) cannot be proven — the depositor
+/// has to send again as type 1 or 2. The contract has no refund; only the
+/// EVM bridge operator can return the funds. axiom-eth also enforces
 /// per-field caps (calldata 2048 B; type-2 access list 512 B; type-1 access
 /// list 2048 B, because that slot is merged with type-2 calldata). Checking
 /// only the total leaf length would let a 2300 B calldata / empty-AL type-2
@@ -249,8 +250,9 @@ pub fn reject_unprovable_enclosing_tx(
     if first != Some(EIP1559_TX_TYPE) && first != Some(EIP2930_TX_TYPE) {
         return Err(UnprovableEnclosingTx(format!(
             "deposit enclosing tx must be EIP-2930 (type 0x01) or EIP-1559 (type 0x02); got first \
-             byte {:#x}. Type 0 (legacy) and type 4 (EIP-7702) deposits are neither provable nor \
-             refundable — resend as type 1 or 2.",
+             byte {:#x}. Type 0 (legacy) and type 4 (EIP-7702) cannot be proven — resend as type \
+             1 or 2. The contract has no refund; only the EVM bridge operator can return the \
+             funds.",
             first.unwrap_or(0)
         )));
     }

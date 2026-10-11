@@ -338,14 +338,15 @@ operation id.
 
 Refused before any transaction is sent (exit 20):
 
-- **Safe and other smart-contract accounts, and ERC-4337 accounts.** Their
-  transactions go through a contract or an EntryPoint, and the deposit
-  circuit cannot prove them. The CLI refuses an account that holds code, and,
+- **Safe and other smart-contract accounts, and ERC-4337 accounts.** The
+  circuit can prove their type-1 and type-2 enclosing transactions and
+  their receipts. The CLI still refuses an account that holds code, and,
   with WalletConnect, one whose signature on the check message is not made
   with the account's own key — which catches an ERC-4337 account that is not
   deployed yet. `--qr-mode eip681` has no signature check: there an
-  undeployed ERC-4337 account is not caught, and its deposit ends at exit 35
-  with the USDC in the bridge. Deposit from a plain account.
+  undeployed ERC-4337 account is not caught, and a deposit sent through
+  another contract ends at exit 35 because the CLI requires the call to
+  go straight to the bridge. Deposit from a plain account.
 
 Accepted, with a warning:
 

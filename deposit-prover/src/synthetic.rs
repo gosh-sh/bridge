@@ -395,7 +395,7 @@ mod tests {
         let err = reject_unprovable_enclosing_tx(&input.tx_proof.tx_bytes)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("neither provable nor refundable"), "{err}");
+        assert!(err.contains("cannot be proven"), "{err}");
         assert!(typed_tx_chain_id(&input.tx_proof.tx_bytes).is_err());
     }
 }

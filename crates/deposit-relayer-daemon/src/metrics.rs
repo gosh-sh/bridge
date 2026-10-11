@@ -9,7 +9,7 @@
 //!
 //! | Metric | Type | Labels | Meaning |
 //! |---|---|---|---|
-//! | `deposit_relayer_ticks_total` | counter | `outcome` | One per `tick()`: `finalized`, `already_finalized`, `not_yet_available`, `proof_failed`, `an_rejected`, `an_pending`, `skipped`, `error` |
+//! | `deposit_relayer_ticks_total` | counter | `outcome` | One per `tick()`: `finalized`, `already_finalized`, `not_yet_available`, `proof_failed`, `an_rejected`, `an_pending`, `skipped`, `unprovable`, `error` |
 //! | `deposit_relayer_stage_duration_seconds` | histogram | `stage` | Wall time of `is_finalized`, `fetch_event`, `prove`, `submit`, and the whole `tick` |
 //! | `deposit_relayer_prover_stage_duration_seconds` | histogram | `example` | Wall time of each `deposit-prover` subprocess (`fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`) |
 //! | `deposit_relayer_prover_stage_failures_total` | counter | `example` | Subprocess exits that were not 0 (spawn failure, timeout, non-zero status) |
@@ -21,7 +21,7 @@
 //! | `deposit_relayer_target_deposit_id` | gauge | | The `depositId` the loop is working on |
 //! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN in this process |
 //! | `deposit_relayer_attempts_since_progress` | gauge | | Consecutive failed attempts at the current target (`state.json`); waiting for a deposit nobody made yet is not an attempt |
-//! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` |
+//! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked after `--skip-after-attempts` (still need `finalize-one`) and deposits the circuit cannot prove (only the EVM bridge operator can return those funds) |
 //! | `deposit_relayer_backoff_seconds` | gauge | | Sleep the daemon applies after the last tick |
 //! | `deposit_relayer_last_tick_timestamp_seconds` | gauge | | Unix time of the last completed tick |
 //! | `deposit_relayer_last_finalized_timestamp_seconds` | gauge | | Unix time of the last `finalized` / `already_finalized` outcome |
@@ -106,7 +106,8 @@ pub fn describe() {
     );
     describe_gauge!(
         PARKED_DEPOSITS,
-        "Deposits parked by --skip-after-attempts that still need finalize-one."
+        "Deposits parked after --skip-after-attempts (still need finalize-one) and deposits the \
+         circuit cannot prove (only the EVM bridge operator can return those funds)."
     );
     describe_gauge!(
         BACKOFF_SECONDS,

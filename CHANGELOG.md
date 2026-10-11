@@ -1014,11 +1014,6 @@ assigns it when the release is tagged.
   EVM bridge operator can return the funds. The tick is now
   `Unprovable`, counted on its own (`unprovable` / `unprovable_total`),
   and the log says so.
-- The deposit pre-check compared each receipt log's full RLP encoding
-  to axiom-eth's 2211-byte cap, which is the log's payload (list body,
-  header excluded). A four-topic log with 2051 bytes of data encodes
-  to 2212 and was refused even though the circuit accepts its 2209-byte
-  payload. The CLI and `check_receipt` now compare the payload.
 
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted

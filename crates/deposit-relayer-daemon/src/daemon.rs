@@ -309,8 +309,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     warn!(
                         deposit_id,
                         reason = %reason,
-                        "daemon: deposit cannot be proven; parked. Only the EVM bridge operator \
-                         can return its funds",
+                        "daemon: deposit cannot be proven; recorded in unprovable_deposit_ids. \
+                         finalize-one cannot help; only the EVM bridge operator can return its \
+                         funds",
                     );
                     (true, LastOutcome::Unprovable {
                         deposit_id,

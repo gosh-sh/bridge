@@ -21,7 +21,8 @@
 //! | `deposit_relayer_target_deposit_id` | gauge | | The `depositId` the loop is working on |
 //! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN in this process |
 //! | `deposit_relayer_attempts_since_progress` | gauge | | Consecutive failed attempts at the current target (`state.json`); waiting for a deposit nobody made yet is not an attempt |
-//! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked after `--skip-after-attempts` (still need `finalize-one`) and deposits the circuit cannot prove (only the EVM bridge operator can return those funds) |
+//! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` (`state.json` → `parked_deposit_ids`) |
+//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits the circuit cannot prove; only the EVM bridge operator can return those funds (`state.json` → `unprovable_deposit_ids`) |
 //! | `deposit_relayer_backoff_seconds` | gauge | | Sleep the daemon applies after the last tick |
 //! | `deposit_relayer_last_tick_timestamp_seconds` | gauge | | Unix time of the last completed tick |
 //! | `deposit_relayer_last_finalized_timestamp_seconds` | gauge | | Unix time of the last `finalized` / `already_finalized` outcome |
@@ -48,6 +49,7 @@ pub const TARGET_DEPOSIT_ID: &str = "deposit_relayer_target_deposit_id";
 pub const LAST_FINALIZED_DEPOSIT_ID: &str = "deposit_relayer_last_finalized_deposit_id";
 pub const ATTEMPTS_SINCE_PROGRESS: &str = "deposit_relayer_attempts_since_progress";
 pub const PARKED_DEPOSITS: &str = "deposit_relayer_parked_deposits";
+pub const UNPROVABLE_DEPOSITS: &str = "deposit_relayer_unprovable_deposits";
 pub const BACKOFF_SECONDS: &str = "deposit_relayer_backoff_seconds";
 pub const LAST_TICK_TIMESTAMP_SECONDS: &str = "deposit_relayer_last_tick_timestamp_seconds";
 pub const LAST_FINALIZED_TIMESTAMP_SECONDS: &str =
@@ -106,8 +108,11 @@ pub fn describe() {
     );
     describe_gauge!(
         PARKED_DEPOSITS,
-        "Deposits parked after --skip-after-attempts (still need finalize-one) and deposits the \
-         circuit cannot prove (only the EVM bridge operator can return those funds)."
+        "Deposits parked by --skip-after-attempts that still need finalize-one."
+    );
+    describe_gauge!(
+        UNPROVABLE_DEPOSITS,
+        "Deposits the circuit cannot prove; only the EVM bridge operator can return those funds."
     );
     describe_gauge!(
         BACKOFF_SECONDS,
@@ -162,11 +167,13 @@ pub fn set_state_gauges(
     target: u64,
     attempts_since_progress: u32,
     parked: usize,
+    unprovable: usize,
     scan_done_through_block: Option<u64>,
 ) {
     gauge!(TARGET_DEPOSIT_ID).set(target as f64);
     gauge!(ATTEMPTS_SINCE_PROGRESS).set(f64::from(attempts_since_progress));
     gauge!(PARKED_DEPOSITS).set(parked as f64);
+    gauge!(UNPROVABLE_DEPOSITS).set(unprovable as f64);
     if let Some(block) = scan_done_through_block {
         gauge!(SCAN_DONE_THROUGH_BLOCK).set(block as f64);
     }

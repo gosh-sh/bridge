@@ -81,12 +81,20 @@ assigns it when the release is tagged.
   and `export_vk_blob` check the log count, every log's topics and
   data, the receipt and header length, the MPT depths and the
   keccak budget, and also exit 3. `deposit` ends such an operation
-  at exit 35 instead of a resumable 32; `deposit-relayer` parks
-  the deposit at once, whatever `--skip-after-attempts` says,
-  instead of retrying it forever. Deposits parked or closed as
-  unprovable under the previous key (the 256-byte log shape)
-  should be re-driven after this deploy: the new key can prove
-  the Safe and 4337 receipts that the old one refused.
+  at exit 35 instead of a resumable 32. `deposit-relayer daemon`
+  skips such a deposit at once, whatever `--skip-after-attempts`
+  says, instead of retrying it forever: the tick is counted as
+  `deposit_relayer_ticks_total{outcome="unprovable"}`, the id goes
+  to a new `state.json` field `unprovable_deposit_ids` (gauge
+  `deposit_relayer_unprovable_deposits`), and the log says only
+  the EVM bridge operator can return its funds. `finalize-one`
+  cannot help these. `parked_deposit_ids` and
+  `deposit_relayer_parked_deposits` keep holding only deposits
+  parked by `--skip-after-attempts`. An existing `state.json` loads
+  unchanged. Deposits parked or given up on under the previous key
+  (the 256-byte log shape) should be re-driven after this deploy:
+  the new key can prove the Safe and 4337 receipts that the old
+  one refused.
 
   The tvm-sdk opcode fixtures and the acki-nacki copy of
   `deposit-prover/fixtures/deposit_10proofs` carry the old blob
@@ -470,7 +478,8 @@ assigns it when the release is tagged.
   calls are no-ops without one. Names are operator API, listed with their
   meaning in `deposit_relayer_daemon::metrics`:
   `deposit_relayer_ticks_total{outcome}` (finalized, already_finalized,
-  not_yet_available, proof_failed, an_rejected, an_pending, skipped, error),
+  not_yet_available, proof_failed, an_rejected, an_pending, skipped,
+  unprovable, error),
   `deposit_relayer_stage_duration_seconds{stage}` (is_finalized, fetch_event,
   prove, submit, tick), `deposit_relayer_prover_stage_duration_seconds{example}`
   and `deposit_relayer_prover_stage_failures_total{example}` per
@@ -484,6 +493,7 @@ assigns it when the release is tagged.
   `deposit_relayer_last_finalized_timestamp_seconds`,
   `deposit_relayer_last_tick_timestamp_seconds`,
   `deposit_relayer_attempts_since_progress`, `deposit_relayer_parked_deposits`,
+  `deposit_relayer_unprovable_deposits`,
   `deposit_relayer_backoff_seconds`, `deposit_relayer_build_info{version}` and
   `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
   counters and the shutdown snapshot are unchanged.
@@ -1007,13 +1017,6 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
-
-- `deposit-relayer daemon` counted a deposit the circuit cannot prove as
-  `already_finalized` and told the operator to run `finalize-one`. There
-  is no bundle for that deposit, so `finalize-one` cannot help; only the
-  EVM bridge operator can return the funds. The tick is now
-  `Unprovable`, counted on its own (`unprovable` / `unprovable_total`),
-  and the log says so.
 
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted

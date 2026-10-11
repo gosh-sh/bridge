@@ -213,14 +213,8 @@ impl IAckiNacki for TvmAckiNacki {
             "{{ blockchain {{ transaction(hash:\"{id}\") {{ aborted now compute {{ exit_code \
              success }} }} }} }}"
         );
-        let res = query(self.context.clone(), ParamsOfQuery {
-            query: gql,
-            variables: None,
-        })
-        .await
-        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        let res = self.gql(gql).await?;
         let tx = res
-            .result
             .get("blockchain")
             .and_then(|b| b.get("transaction"))
             .filter(|t| !t.is_null());
@@ -345,7 +339,11 @@ impl TvmAckiNacki {
         })
         .await
         .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
-        Ok(res.result)
+        // `net::query` returns the whole GraphQL response, `{ "data": … }`.
+        Ok(match res.result {
+            Value::Object(mut obj) if obj.contains_key("data") => obj.remove("data").unwrap(),
+            other => other,
+        })
     }
 }
 

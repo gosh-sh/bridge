@@ -4,7 +4,7 @@
 //! at most 2048 bytes. Type 2 access-list payload is at most 512 bytes;
 //! type 1 access list sits in the same field slot as type 2 calldata, so
 //! it may be 2048 bytes. The receipt parser reads at most 20 logs; each
-//! log's encoded size is at most 2211 bytes (2048 of data with four
+//! log's payload is at most 2211 bytes (2048 of data with four
 //! topics; more data if there are fewer topics).
 //! `limits_match_the_circuit_source` holds these numbers to the circuit.
 //! Fitting these bounds is necessary, not sufficient: the receipt must
@@ -33,7 +33,8 @@ pub const MAX_RECEIPT_LOGS: usize = 20;
 pub const MAX_LOG_DATA_BYTE_LEN: usize = 2048;
 /// Topics axiom-eth allows on each receipt log.
 pub const MAX_LOG_TOPICS: usize = 4;
-/// Encoded size of one receipt log, axiom-eth `calc_max_log_len`.
+/// Max payload of one receipt log, axiom-eth `calc_max_log_len`
+/// (list body, header excluded).
 pub const MAX_ENCODED_LOG_LEN: usize =
     3 + 21 + 3 + 33 * MAX_LOG_TOPICS + 3 + MAX_LOG_DATA_BYTE_LEN + 1;
 /// The exit code of the prover tools for a deposit the circuit cannot
@@ -85,9 +86,9 @@ pub enum ShapeViolation {
         /// The log count found.
         count: usize,
     },
-    /// Some receipt log's encoding exceeds the prover's bound.
+    /// Some receipt log's payload exceeds the prover's bound.
     EncodedLogTooLong {
-        /// The encoded length found.
+        /// The payload length found.
         len: usize,
     },
     /// The prover found it unprovable: the keccak budget, a type-1 leaf
@@ -141,7 +142,7 @@ impl std::fmt::Display for ShapeViolation {
                 len,
             } => write!(
                 f,
-                "a receipt log encodes to {len} bytes; the circuit reads at most \
+                "a receipt log payload is {len} bytes; the circuit reads at most \
                  {MAX_ENCODED_LOG_LEN}"
             ),
             Self::ProverRefused {
@@ -170,13 +171,14 @@ fn rlp_list_payload_len(encoded_len: usize) -> usize {
     }
 }
 
-/// Encoded size of an Ethereum log `[address, topics[], data]`.
+/// Payload of an Ethereum log `[address, topics[], data]` — the list
+/// body axiom-eth range-checks, header excluded.
 pub fn encoded_log_len(topic_count: usize, data: &[u8]) -> usize {
     let address = 21;
     let topics_payload = 33 * topic_count;
     let topics = rlp_list_encoded_len(topics_payload);
     let data_enc = rlp_bytes_encoded_len(data);
-    rlp_list_encoded_len(address + topics + data_enc)
+    address + topics + data_enc
 }
 
 fn rlp_list_encoded_len(payload: usize) -> usize {
@@ -231,8 +233,8 @@ pub fn check_tx_shape(shape: &TxShape, bridge: Address) -> Result<(), ShapeViola
 
 /// Checks a receipt against the prover parser's bounds.
 ///
-/// `max_encoded_log_len` is the longest **encoded** log of any log, not
-/// only the Deposit event: axiom-eth range-checks every log's encoding.
+/// `max_encoded_log_len` is the longest **payload** of any log, not
+/// only the Deposit event: axiom-eth range-checks every log's payload.
 pub fn check_receipt_bounds(
     log_count: usize,
     max_encoded_log_len: usize,
@@ -334,6 +336,20 @@ mod tests {
             check_receipt_bounds(2, MAX_ENCODED_LOG_LEN + 1),
             Err(ShapeViolation::EncodedLogTooLong {
                 len: MAX_ENCODED_LOG_LEN + 1
+            })
+        );
+        // Four topics + 2051 B of data: payload 2209, encoding 2212 —
+        // axiom-eth accepts the payload. Four topics + 2054 B: 2212.
+        assert_eq!(encoded_log_len(4, &[0u8; 2051]), 2209);
+        assert_eq!(
+            check_receipt_bounds(2, encoded_log_len(4, &[0u8; 2051])),
+            Ok(())
+        );
+        assert_eq!(encoded_log_len(4, &[0u8; 2054]), 2212);
+        assert_eq!(
+            check_receipt_bounds(2, encoded_log_len(4, &[0u8; 2054])),
+            Err(ShapeViolation::EncodedLogTooLong {
+                len: 2212
             })
         );
     }

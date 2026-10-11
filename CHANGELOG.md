@@ -38,8 +38,8 @@ assigns it when the release is tagged.
   512 bytes (RLP header excluded); type 1's access list shares a
   field slot with type 2 calldata, so it may be up to 2048 bytes,
   but a type 1 transaction's calldata and access list together
-  must fit its ~2805-byte leaf. Each receipt log may encode to at
-  most 2211 bytes (2048 of data with four topics; more data if
+  must fit its ~2805-byte leaf. Each receipt log's payload may be
+  at most 2211 bytes (2048 of data with four topics; more data if
   there are fewer topics), at most 20 logs. That is what lets a SafeL2
   `SafeMultiSigTransaction` through, including a two-signer
   MultiSend of `approve` + `deposit` (~1152 B of log data). The
@@ -1007,6 +1007,18 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- `deposit-relayer daemon` counted a deposit the circuit cannot prove as
+  `already_finalized` and told the operator to run `finalize-one`. There
+  is no bundle for that deposit, so `finalize-one` cannot help; only the
+  EVM bridge operator can return the funds. The tick is now
+  `Unprovable`, counted on its own (`unprovable` / `unprovable_total`),
+  and the log says so.
+- The deposit pre-check compared each receipt log's full RLP encoding
+  to axiom-eth's 2211-byte cap, which is the log's payload (list body,
+  header excluded). A four-topic log with 2051 bytes of data encodes
+  to 2212 and was refused even though the circuit accepts its 2209-byte
+  payload. The CLI and `check_receipt` now compare the payload.
 
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted

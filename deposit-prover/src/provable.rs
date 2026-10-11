@@ -102,10 +102,11 @@ pub fn check_witness_bounds(
 }
 
 /// The receipt fits the circuit's receipt leaf: at most `max_log_num`
-/// logs, each with at most `topic_num_bounds.1` topics and an encoded
-/// length of at most [`max_encoded_log_len`] (axiom-eth's per-log bound;
-/// a log with fewer topics can carry more than `max_data_byte_len` data
-/// bytes and still fit). Every log counts, not only `Deposit`.
+/// logs, each with at most `topic_num_bounds.1` topics and a payload of
+/// at most [`max_encoded_log_len`] (axiom-eth's per-log bound, the list
+/// body without its RLP header; a log with fewer topics can carry more
+/// than `max_data_byte_len` data bytes and still fit). Every log counts,
+/// not only `Deposit`.
 pub fn check_receipt(receipt_rlp: &[u8], config: &CircuitConfig) -> Result<(), Unprovable> {
     let max_len = receipt_max_byte_len(config.max_data_byte_len, config.max_log_num);
     if receipt_rlp.len() > max_len {
@@ -141,10 +142,10 @@ pub fn check_receipt(receipt_rlp: &[u8], config: &CircuitConfig) -> Result<(), U
                 config.topic_num_bounds.1
             ));
         }
-        if log.span.len() > max_log {
+        if log.payload.len() > max_log {
             return Err(unprovable!(
-                "log {i} encodes to {} bytes; the circuit reads at most {max_log} per log",
-                log.span.len()
+                "log {i} payload is {} bytes; the circuit reads at most {max_log} per log",
+                log.payload.len()
             ));
         }
     }
@@ -288,15 +289,15 @@ mod tests {
     }
 
     #[test]
-    fn a_log_over_the_encoded_bound_is_unprovable_not_only_deposit() {
-        // 2049 B of data with one topic still encodes under 2211; the
-        // circuit accepts it. Four topics and 2051 B of data encode to
-        // 2212 and do not.
-        let under = log(1, 2049);
+    fn a_log_over_the_payload_bound_is_unprovable_not_only_deposit() {
+        // axiom-eth caps the log's payload (list body), not the encoding.
+        // Four topics + 2051 B of data: payload 2209, encoding 2212 — the
+        // circuit accepts it. Four topics + 2054 B: payload 2212, refused.
+        let under = log(4, 2051);
         check_receipt(&receipt(&[log(3, 96), under]), &config()).unwrap();
-        let over = log(4, 2051);
+        let over = log(4, 2054);
         let e = check_receipt(&receipt(&[log(3, 96), over]), &config()).unwrap_err();
-        assert!(e.0.contains("log 1 encodes to"), "{e}");
+        assert!(e.0.contains("log 1 payload is"), "{e}");
         assert!(e.0.contains("2211"), "{e}");
     }
 

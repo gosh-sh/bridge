@@ -111,6 +111,10 @@ pub enum TickOutcome {
     /// The deposit was parked after `--skip-after-attempts`; cursor advanced
     /// for liveness. Operator must run `finalize-one` manually.
     Skipped { deposit_id: u64, reason: String },
+    /// The circuit cannot prove this deposit. Parked at once; there is no
+    /// bundle, so `finalize-one` cannot help. Only the EVM bridge operator
+    /// can return the funds.
+    Unprovable { deposit_id: u64, reason: String },
 }
 
 /// Single relayer instance. Holds a [`DepositSource`], a [`ProofGenerator`]
@@ -216,7 +220,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     "deposit cannot be proven; parked at once. Only the EVM bridge operator can \
                      return its funds",
                 );
-                return Ok(TickOutcome::Skipped {
+                return Ok(TickOutcome::Unprovable {
                     deposit_id: target,
                     reason: format!("unprovable: {reason}"),
                 });
@@ -830,14 +834,14 @@ mod tests {
         )
         .unwrap();
         match relayer.tick().await.unwrap() {
-            TickOutcome::Skipped {
+            TickOutcome::Unprovable {
                 deposit_id,
                 reason,
             } => {
                 assert_eq!(deposit_id, 0);
                 assert!(reason.starts_with("unprovable: "), "{reason}");
             },
-            other => panic!("expected Skipped, got {other:?}"),
+            other => panic!("expected Unprovable, got {other:?}"),
         }
         assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
         assert!(matches!(

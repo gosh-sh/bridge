@@ -21,6 +21,11 @@ pub struct RelayerState {
     pub updates_applied: u64,
     /// Period the daemon refused to cross without a rotate proof.
     pub rotate_pending_period: Option<u64>,
+    /// Newest hash an accepted `submitAncestry` span reached, or the newest
+    /// checkpoint when none was needed. A failed span leaves this behind the
+    /// head so the next tick retries it instead of losing those blocks.
+    #[serde(default)]
+    pub ancestry_anchor: Option<[u8; 32]>,
     /// Relayer already issued the one-way owner flip.
     #[serde(default)]
     pub owner_flip_done: bool,

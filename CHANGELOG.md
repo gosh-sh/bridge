@@ -63,20 +63,28 @@ assigns it when the release is tagged.
   extrapolated to ~2.07G. On-chain ancestry therefore works: a deposit in a
   non-checkpoint block is covered without the owner key, as long as the
   checkpoints bracketing it are both proven and no more than a span apart. A
-  checkpoint the daemon skipped is late-registered through `submitUpdate` with
-  its own proof, which brings the bracketing anchors back within reach; the
-  daemon's cadence (a step proof takes longer than an epoch) makes that the
-  normal case rather than the exception.
+  checkpoint the daemon skipped can be late-registered through `submitUpdate`
+  with its own proof, which brings the bracketing anchors back within reach —
+  but **nothing in this repository does that yet**: the daemon proves only the
+  latest finality update, and there is no subcommand for an older one. Since a
+  step proof takes longer than an epoch, accepted checkpoints are often two or
+  more epochs apart, the span is then wider than one call can carry, and those
+  blocks need `setAcceptedBlockHash` from the owner until something
+  late-registers the checkpoint between them. Do not call
+  `disableOwnerAnchors` while that is still true.
 
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…` → `e68f2381…`. On a live network the owner
-  upgrades the deployed client in place with `updateCode`, which keeps its
-  address, head, committee and proven set; `setLightClientCode` on the bridge
-  only refreshes the code a *future* `deployLightClient` would use, and
-  redeploying would start the client empty and have to bootstrap it again. The
-  ABI is unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP
+  code hash moves `314ac6b8…6092f5` → `a967be12…5b0ab8dc`. On a live network
+  the owner upgrades the deployed client in place with `updateCode`, which
+  keeps its address, head, committee and proven set. **Do not call
+  `setLightClientCode` after that upgrade:** it stores the code *and*
+  re-derives `_lightClient` from it, and the bridge accepts anchor pushes only
+  from that address, so the live client would start failing
+  `ERR_INVALID_SENDER` (207) against an address where nothing is deployed. It
+  belongs to a fresh `deployLightClient`, not to an in-place upgrade. The ABI
+  is unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP
   reader, which is now what the walk spends most of its gas on.
 
 - **The relayer builds ancestry payloads in the new shape, and the

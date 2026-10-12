@@ -288,7 +288,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         update: FinalityUpdate,
         bundle: crate::types::StepProofBundle,
     ) -> Result<TickOutcome, RelayerError> {
-        let prev_anchor = self.state.last_execution_block_hash;
+        let prev_anchor = self
+            .state
+            .ancestry_anchor
+            .or(self.state.last_execution_block_hash);
         match self.submitter.submit_update(&bundle).await? {
             SubmitOutcome::Accepted {
                 tx_hash,
@@ -397,6 +400,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             return;
         };
         let Some(older) = prev_anchor else {
+            self.advance_ancestry_anchor(checkpoint);
             info!("no previous anchor on record; epoch ancestry needs one at each end");
             return;
         };
@@ -406,15 +410,24 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let headers = match rpc.ancestry_span(checkpoint, older, 33).await {
             Ok(h) => h,
             Err(e) => {
-                warn!(error = %e, "epoch ancestry fetch failed");
+                // A gap wider than one span can never be sent, so retrying it
+                // every tick would only repeat the same 33 reads. Anything
+                // else is worth another attempt, and the cursor stays put.
+                let unreachable = e.to_string().contains("older anchor not reached");
+                if unreachable {
+                    self.advance_ancestry_anchor(checkpoint);
+                }
+                warn!(error = %e, retry = !unreachable, "epoch ancestry fetch failed");
                 return;
             },
         };
         if let Err(e) = crate::header_rlp::link_headers(&headers) {
+            self.advance_ancestry_anchor(checkpoint);
             warn!(error = %e, "epoch ancestry failed local link_headers");
             return;
         }
         if !self.config.submit_ancestry {
+            self.advance_ancestry_anchor(checkpoint);
             info!(
                 n = headers.len(),
                 "epoch ancestry linked locally; on-chain submitAncestry skipped \
@@ -426,14 +439,25 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             Ok(SubmitOutcome::Accepted {
                 ..
             }) => {
+                self.advance_ancestry_anchor(checkpoint);
                 info!(n = headers.len(), "submitAncestry accepted");
             },
             Ok(other) => {
-                warn!(?other, "submitAncestry did not accept");
+                warn!(?other, retry = true, "submitAncestry did not accept");
             },
             Err(e) => {
-                warn!(error = %e, "submitAncestry failed");
+                warn!(error = %e, retry = true, "submitAncestry failed");
             },
+        }
+    }
+
+    /// Move the span cursor up to `hash`. Called only where the span is done
+    /// with — sent, not wanted, or impossible — so that a transient failure
+    /// leaves the cursor behind the head and the next tick retries the span.
+    fn advance_ancestry_anchor(&mut self, hash: [u8; 32]) {
+        self.state.ancestry_anchor = Some(hash);
+        if let Err(e) = self.persist() {
+            warn!(error = %e, "could not persist the ancestry cursor");
         }
     }
 
@@ -995,6 +1019,32 @@ mod tests {
         assert_eq!(mock.ancestry_count(), 1);
         assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
         assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[2])));
+    }
+
+    #[tokio::test]
+    async fn a_failed_span_is_retried_on_the_next_checkpoint() {
+        let (mut r, mock, chain) = span_relayer(true);
+        mock.reject_ancestry();
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(mock.ancestry_count(), 0, "the span was refused");
+        assert_eq!(
+            r.state.ancestry_anchor,
+            Some(crate::header_rlp::keccak256(&chain[0])),
+            "the cursor must stay on the older anchor so the span is tried again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sent_span_moves_the_cursor_to_the_head() {
+        let (mut r, mock, chain) = span_relayer(true);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(mock.ancestry_count(), 1);
+        assert_eq!(
+            r.state.ancestry_anchor,
+            Some(crate::header_rlp::keccak256(&chain[3]))
+        );
     }
 
     #[tokio::test]

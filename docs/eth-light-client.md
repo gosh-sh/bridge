@@ -208,13 +208,15 @@ an older node the light client throws on an unknown opcode. `EthKeccak.sol` keep
 `rlpParentHash`, which is now where most of the gas goes.
 
 **What a span needs.** Both of its ends have to be proven checkpoints no more than 32 blocks
-apart. The head only moves forward, but a checkpoint the daemon skipped is not lost: it is
-late-registered through `submitUpdate` with its own proof and its own slot, which puts the
-bracketing anchors back within a span's reach. Since a step proof takes longer than an epoch
-(§6), skipping and then catching up is the normal cadence rather than an incident. What remains
-is ordering: a deposit in those blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224)
-until the skipped checkpoint is registered and the span sent, and on a bridge where
-`disableOwnerAnchors` has been called there is no owner fallback to cover the wait. First
+apart. The head only moves forward, but the contract still accepts a skipped checkpoint of the
+current committee behind the head, with its own proof and its own slot — which is what would put
+the bracketing anchors back within a span's reach. **Nothing in this repository performs that
+late registration today:** the daemon proves only the latest finality update and no subcommand
+proves an older one. A step proof takes longer than an epoch (§6), so accepted checkpoints are
+routinely two or more epochs apart, `ancestry_span` reports the older anchor as out of reach, and
+those blocks stay uncovered. A deposit in them fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK`
+(224) and needs the owner's `setAcceptedBlockHash`. Do not call `disableOwnerAnchors` until
+something late-registers the skipped checkpoints. First
 `EthKeccak` defects found on shellnet 2026-09-11
 ([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
 

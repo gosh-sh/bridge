@@ -18,7 +18,7 @@ use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
     gates::{GateInstructions, RangeInstructions},
     halo2_proofs::halo2curves::bn256::Fr,
-    utils::ScalarField,
+    utils::{bit_length, ScalarField},
     AssignedValue, Context,
 };
 
@@ -105,7 +105,7 @@ pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
 /// Bumped on every constraint change that may leave the column counts and
 /// limits as they were, so a cached proving key of the old circuit is not
 /// reused (see `pk_fingerprint`).
-pub const CONSTRAINT_REVISION: u32 = 2;
+pub const CONSTRAINT_REVISION: u32 = 3;
 /// EIP-2930 type byte / circuit `transaction_type` value.
 pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
@@ -265,6 +265,12 @@ pub struct DepositEventCircuitV2 {
     /// malicious prover can. Soundness tests only; `None` in every real proof.
     #[doc(hidden)]
     pub forged_log_amount: Option<[u8; 32]>,
+    /// Fills the receipt's log slot at `log_index` with the bytes of the log
+    /// at this index, as fresh witnesses — the way a malicious prover writes a
+    /// log of its own into a slot past the receipt's last log. Soundness tests
+    /// only; `None` in every real proof.
+    #[doc(hidden)]
+    pub forged_log_source: Option<usize>,
 }
 
 impl DepositEventCircuitV2 {
@@ -291,6 +297,7 @@ impl DepositEventCircuitV2 {
             inputs,
             params,
             forged_log_amount: None,
+            forged_log_source: None,
         }
     }
 
@@ -307,6 +314,7 @@ impl DepositEventCircuitV2 {
             inputs,
             params,
             forged_log_amount: None,
+            forged_log_source: None,
         }
     }
 }
@@ -376,8 +384,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         };
 
         // 4. Parse receipt proof (verifies MPT inclusion)
-        let receipt_witness = chip.parse_receipt_proof_phase0(ctx, rc_input);
+        let mut receipt_witness = chip.parse_receipt_proof_phase0(ctx, rc_input);
         println!("   ✓ Verified MPT inclusion proof");
+        if let Some(source) = self.forged_log_source {
+            let slot = self.inputs.event_data.log_index;
+            let logs = &mut receipt_witness.logs.field_witness;
+            let bytes: Vec<Fr> = logs[source].encoded_item.iter().map(|c| *c.value()).collect();
+            for (cell, byte) in logs[slot].encoded_item.iter_mut().zip(bytes) {
+                *cell = ctx.load_witness(byte);
+            }
+        }
 
         // 5. Load log index
         let log_index = ctx.load_witness(Fr::from(self.inputs.event_data.log_index as u64));
@@ -385,6 +401,21 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             "   ✓ Loaded log_index: {}",
             self.inputs.event_data.log_index
         );
+
+        // 5a. The index has to point at one of the receipt's logs. The logs
+        //     list is parsed with `max_log_num` slots, and the receipt's RLC
+        //     check does not look at the bytes of a slot past the last log, so
+        //     without this a prover could write a log of its own into such a
+        //     slot and select it.
+        let log_num_bits = bit_length(self.params.max_log_num as u64);
+        let range = chip.range();
+        range.range_check(ctx, log_index, log_num_bits);
+        let logs_len = receipt_witness
+            .logs
+            .list_len
+            .expect("the receipt's logs are parsed as a variable-length list");
+        range.check_less_than(ctx, log_index, logs_len, log_num_bits);
+        println!("   ✓ Constrained log_index < number of logs in the receipt");
 
         // 5b. Select the log at `log_index` and witness its three fields:
         //     [address, topics[], data]. This is first-phase work, see
@@ -776,7 +807,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // `decompose_rlp_array_phase0` only witnesses `field_cells`; it is this
         // RLC concatenation check that ties address, topics and data to the
         // selected log, and through `parse_receipt_proof_phase1` above to the
-        // receipt. Without it every event-bound public input is free.
+        // receipt (Phase 0 keeps `log_index` within the receipt's logs, so the
+        // selected slot is one the receipt's RLC check covers). Without it every
+        // event-bound public input is free.
         let log_array = phase0_output.deposit_log_witness;
         rlp_chip.decompose_rlp_array_phase1((ctx_gate, ctx_rlc), log_array.clone(), false);
         println!("   ✓ Bound log fields to the receipt's log bytes (RLC)");

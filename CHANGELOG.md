@@ -33,14 +33,16 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - **The deposit-prover verification key is rotated, and the rotation
-  closes a forgery.** Under the previous key — and every earlier one
+  closes two forgeries.** Under the previous key — and every earlier one
   built from `main`'s circuit — the circuit did not tie the
-  fields it reads out of the `Deposit` log to the log's bytes, so a
-  prover holding any real log in an accepted block could choose the
-  `depositId`, `sender`, `amount` (below 2^128), AN recipient and
-  bridge address, and `finalizeDeposit` would mint against them. Only
-  the per-chain mint cap (`setMintCap`) bounded the damage. Deploy the
-  new bridge as soon as possible, and set a mint cap until then.
+  fields it reads out of the `Deposit` log to the log's bytes, and it
+  did not require the log index to point at one of the receipt's logs:
+  a slot past the receipt's last log (the circuit holds 20) carried
+  whatever bytes the prover put there. Either way a prover holding any
+  real receipt in an accepted block could choose the `depositId`,
+  `sender`, `amount` (below 2^128), AN recipient and bridge address,
+  and `finalizeDeposit` would mint against them. Nothing in the bridge
+  bounded the damage. Deploy the new bridge as soon as possible.
 
   The enclosing transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
   calldata up to 2048 bytes. Type 2 access-list payload is up to

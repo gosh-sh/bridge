@@ -152,9 +152,10 @@ emitted, `getCommitteeState` shows the new period).
 - `USDCBridge` wiring (`getAnchorConfig`, `acceptBlockHashFromLightClient`,
   `disableOwnerAnchors`): shadow does not call them; production flip-owner does.
 - `submitRotate` and `disableOwnerRotation`.
-- `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...`)
-  and will OOG on Acki Nacki until a keccak builtin; the daemon does not send it
-  unless `SUBMIT_ANCESTRY=true`.
+- `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...
+  --checkpoint-hash <newer> --older-anchor-hash <older>`), and the daemon does
+  not send it unless `SUBMIT_ANCESTRY=true`. Both ends of the span have to be
+  proven anchors already.
 
 ## Notes
 

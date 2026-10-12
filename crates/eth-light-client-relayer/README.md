@@ -53,9 +53,10 @@ eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree …
 eth-lc-relayer ancestry-one --beacon-url … \
   --checkpoint-slot 12345678 --deposit-hash 0x…
 
-# 7. Write the 31 parent hashes on-chain (will OOG until a keccak builtin;
-#    needs --submit-ancestry on the daemon, or this one-shot + live-submit)
+# 7. Write the blocks between two proven anchors on-chain (needs
+#    --submit-ancestry on the daemon, or this one-shot + live-submit)
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
+  --older-anchor-hash 0x… \
   --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
 

@@ -208,9 +208,9 @@ enum Cmd {
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: Option<String>,
         /// Send `submitAncestry` after each checkpoint. Default **off**. The
-        /// span needs a proven anchor at both ends, so nothing is sent for the
-        /// first checkpoint after a start, or across a skipped epoch. Needs
-        /// `--eth-rpc-url`.
+        /// span needs a proven anchor at both ends, so nothing is sent until a
+        /// previous checkpoint is on record, nor when the gap to it is wider
+        /// than a span. Needs `--eth-rpc-url`.
         #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
         submit_ancestry: bool,
         /// With `--no-rotate`: on a period jump, prove a step of the new

@@ -37,10 +37,10 @@ pub struct RelayerConfig {
     pub owner_hop: bool,
     /// Call `submitAncestry` after each accepted checkpoint. Default
     /// **false**. The call needs a proven anchor at both ends of the span, so
-    /// it sends nothing for the first checkpoint after a start and nothing
-    /// across a skipped epoch. `ETH_RPC_URL` still attaches an execution
-    /// source so the daemon can run `link_headers` locally without sending
-    /// the tx.
+    /// it sends nothing until a previous checkpoint is on record — the state
+    /// file carries one across a restart — and nothing when the gap to it is
+    /// wider than a span. `ETH_RPC_URL` still attaches an execution source so
+    /// the daemon can run `link_headers` locally without sending the tx.
     pub submit_ancestry: bool,
 }
 

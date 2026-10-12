@@ -103,6 +103,7 @@ contract EthBeaconLightClient {
         uint256 fromCommitteeCommitment,
         uint256 toCommitteeCommitment
     );
+    /// `checkpointHash` is the newer of the two anchors the span ended on.
     event AncestryAccepted(
         uint256 checkpointHash,
         uint64  hashesAdded
@@ -275,7 +276,17 @@ contract EthBeaconLightClient {
         // committee (rotate ↔ step join).
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
         require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
-        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
+        // Head only moves forward. A slot behind the head is still admitted
+        // when its execution hash is not yet in the proven set (late-register
+        // a skipped checkpoint of the *current* committee). Same-slot replay
+        // and already-proven hashes revert ERR_STALE_UPDATE.
+        bool advancing = pi.finalizedSlot > _finalizedSlot;
+        bool late = pi.finalizedSlot < _finalizedSlot
+            && !_isLive(pi.executionBlockHash);
+        require(advancing || late, ERR_STALE_UPDATE);
+        if (late) {
+            require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
+        }
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -288,7 +299,7 @@ contract EthBeaconLightClient {
 
         ensureBalance();
 
-        {
+        if (advancing) {
             _finalizedSlot = pi.finalizedSlot;
             _finalizedBeaconRoot = pi.finalizedBeaconRoot;
             _finalizedExecutionBlockHash = pi.executionBlockHash;
@@ -299,6 +310,11 @@ contract EthBeaconLightClient {
             emit HeadUpdated{dest: addrExtern}(
                 pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
             );
+        } else {
+            _evictExpired();
+            _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
+            address addrExtern = address.makeAddrExtern(CheckpointBackfilledEmit, bitCntAddress);
+            emit CheckpointBackfilled{dest: addrExtern}(pi.finalizedSlot, pi.executionBlockHash);
         }
     }
 
@@ -370,7 +386,9 @@ contract EthBeaconLightClient {
     // Epoch ancestry (31/32 non-checkpoint execution hashes)
     // ========================================================
 
-    /// @notice Fills in the blocks between two proven anchors.
+    /// @notice Fills in the blocks between two proven anchors. Headers oldest
+    ///         first; `headerRlps[0]` and the last one must each already be
+    ///         proven, and only the blocks between them are admitted.
     ///         Permissionless: the keccak + parent links are the authorization.
     function submitAncestry(bytes[] headerRlps) public {
         require(headerRlps.length >= 3, ERR_BAD_ANCESTRY);
@@ -397,7 +415,7 @@ contract EthBeaconLightClient {
         }
         ensureBalance();
         address addrExtern = address.makeAddrExtern(AncestryAcceptedEmit, bitCntAddress);
-        emit AncestryAccepted{dest: addrExtern}(anchor, added);
+        emit AncestryAccepted{dest: addrExtern}(_piForm(prev), added);
     }
 
     function _yearCutoff() private view returns (uint64) {

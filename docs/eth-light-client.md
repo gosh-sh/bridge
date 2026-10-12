@@ -207,13 +207,15 @@ This needs a node whose VM carries the instruction and a `sold` built against th
 an older node the light client throws on an unknown opcode. `EthKeccak.sol` keeps only
 `rlpParentHash`, which is now where most of the gas goes.
 
-**What ancestry still cannot cover.** `submitUpdate` only moves the head forward, so a checkpoint
-the relayer skipped can never be registered afterwards, and a span reaches at most 32 blocks
-between its anchors. If the daemon is down, slow, or stuck on a rotate for longer than an epoch,
-consecutive anchors end up further apart than one span and the blocks in that gap have no
-trustless path: those deposits need the owner's `setAcceptedBlockHash`, and after
-`disableOwnerAnchors` nothing can admit them. Keeping the daemon from missing epochs is therefore
-an operational requirement, not a nicety. First `EthKeccak` defects found on shellnet 2026-09-11
+**What a span needs.** Both of its ends have to be proven checkpoints no more than 32 blocks
+apart. The head only moves forward, but a checkpoint the daemon skipped is not lost: it is
+late-registered through `submitUpdate` with its own proof and its own slot, which puts the
+bracketing anchors back within a span's reach. Since a step proof takes longer than an epoch
+(§6), skipping and then catching up is the normal cadence rather than an incident. What remains
+is ordering: a deposit in those blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224)
+until the skipped checkpoint is registered and the span sent, and on a bridge where
+`disableOwnerAnchors` has been called there is no owner fallback to cover the wait. First
+`EthKeccak` defects found on shellnet 2026-09-11
 ([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
 
 `rePushAnchor` (`EthBeaconLightClient.sol:404`) re-sends an already proven hash to the bridge.
@@ -267,8 +269,8 @@ anything. After the flip nothing but a valid proof adds a block hash. There is n
 only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on chain.
 
 **Do not flip yet.** After `disableOwnerAnchors` the light client is the only writer of
-`_acceptedBlockHash`, and the blocks it can write are the checkpoint of its `l1ChainId` plus the
-spans ancestry fills between consecutive checkpoints (§3.4) — not a skipped epoch, and no L2.
+`_acceptedBlockHash`, and the blocks it can write are the checkpoints of its `l1ChainId` —
+late-registered ones included — plus the spans ancestry fills between them (§3.4). No L2.
 `_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
 the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
 chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which

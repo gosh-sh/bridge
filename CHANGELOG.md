@@ -32,16 +32,15 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- **Anchors only ever move forward, and `submitAncestry` fills the span
-  between two of them.** `submitUpdate` refuses a finalized slot at or behind
-  the head (`ERR_STALE_UPDATE`, 244); the late-registration path that admitted
-  a proven checkpoint behind the head is gone, and with it the
-  `CheckpointBackfilled` event is no longer emitted. `submitAncestry` now takes
-  the headers oldest first and checks both ends: `headerRlps[0]` and the last
-  header must each hash to a block already in the proven set
-  (`ERR_UNKNOWN_CHECKPOINT`, 249), and only the headers between them are
-  anchored. The array holds 3 to 33 entries — two anchors and the 31 blocks of
-  an epoch.
+- **`submitAncestry` fills the span between two proven anchors instead of
+  walking back from one.** The headers go in oldest first, and both ends are
+  checked: `headerRlps[0]` and the last header must each hash to a block
+  already in the proven set (`ERR_UNKNOWN_CHECKPOINT`, 249), and only the
+  headers between them are anchored. The array holds 3 to 33 entries — two
+  anchors and the 31 blocks of an epoch. `submitUpdate` is unchanged: the head
+  still only moves forward, and a skipped checkpoint of the current committee
+  can still be late-registered with its own proof and its own slot, which is
+  what keeps consecutive anchors within a span's reach.
 
   Before, the walk started from one proven checkpoint and anchored that
   block's *parents*, with the checkpoint's slot attached. Anyone could chain
@@ -52,7 +51,8 @@ assigns it when the release is tagged.
   or one whose far end is not an anchor, is now refused.
 
   Callers have to be updated: headers oldest first, and the span must end on a
-  proven anchor.
+  proven anchor. `AncestryAccepted.checkpointHash` still carries the newest
+  anchor of the span, as it always did.
 
 - **`EthBeaconLightClient` hashes execution headers with the TVM `KECCAK256`
   instruction instead of the `EthKeccak` software implementation, and
@@ -61,12 +61,12 @@ assigns it when the release is tagged.
   against the 10M per-transaction limit: 703,479 gas for a 5-header span and
   1,930,730 for a full 33-header span, where the old software walk
   extrapolated to ~2.07G. On-chain ancestry therefore works: a deposit in a
-  non-checkpoint block is covered without the owner key **as long as it sits
-  between two proven anchors no more than one span apart**. A checkpoint the
-  relayer skipped cannot be registered afterwards, because the head only moves
-  forward, so blocks in a gap wider than one span still need
-  `setAcceptedBlockHash` from the owner — and after `disableOwnerAnchors`
-  nothing can admit them. Keep the relayer from missing epochs.
+  non-checkpoint block is covered without the owner key, as long as the
+  checkpoints bracketing it are both proven and no more than a span apart. A
+  checkpoint the daemon skipped is late-registered through `submitUpdate` with
+  its own proof, which brings the bracketing anchors back within reach; the
+  daemon's cadence (a step proof takes longer than an epoch) makes that the
+  normal case rather than the exception.
 
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
@@ -86,8 +86,8 @@ assigns it when the release is tagged.
   fails rather than truncating when the older anchor is further back than
   `max`. `link_headers` checks that order and returns both end hashes. The
   daemon sends a span only between two consecutive checkpoints, so it sends
-  nothing for the first checkpoint after a start and nothing across a skipped
-  epoch. `eth-lc-relayer submit-ancestry` takes a new required
+  nothing until a previous checkpoint is on record — the state file carries one
+  across a restart — and nothing when the gap to it is wider than a span. `eth-lc-relayer submit-ancestry` takes a new required
   `--older-anchor-hash` next to `--checkpoint-hash` (the newer anchor), and
   `--max-headers` now defaults to 33. Without this, every `submitAncestry` the
   old relayer sent would revert with `ERR_BAD_ANCESTRY`.
@@ -1269,23 +1269,21 @@ assigns it when the release is tagged.
 
 ### Known issues
 
-- **A gap wider than one ancestry span can only be covered by the owner key.**
-  Gas is no longer the obstacle — the `KECCAK256` instruction brought a full
-  33-header span to 1,930,730 gas against the 10M per-transaction limit (see
-  Breaking Changes) — but the shape of the two anchoring paths leaves one hole.
-  `submitUpdate` only moves the head forward, so a checkpoint the relayer did
-  not prove at the time can never be registered later, and `submitAncestry`
-  reaches at most 32 blocks between two already-proven anchors. Whenever the
-  daemon is down, slower than an epoch, or stuck on a rotate, consecutive
-  anchors end up further apart than one span, and deposits in those blocks
-  need the owner's `setAcceptedBlockHash`; after `disableOwnerAnchors` nothing
-  can admit them. Treat an uninterrupted relayer as an operational
-  requirement. `submitUpdate`, `submitRotate` and `rePushAnchor` are
-  unaffected; so are withdrawals. The earlier software-keccak measurements
-  that made ancestry impossible outright (one permutation 12.93M gas, a real
-  642-byte Sepolia header 64.68M, a 32-header walk ≈2.07G) are kept here for
-  the record: shellnet 2026-09-11, re-measured in tvm-debugger 3.0.6 on
-  2026-09-13 and on a real VM 2026-09-14.
+- **A deposit is only covered once both checkpoints bracketing its block are
+  proven and within a span of each other.** Gas is no longer the obstacle —
+  the `KECCAK256` instruction brought a full 33-header span to 1,930,730 gas
+  against the 10M per-transaction limit (see Breaking Changes) — and a
+  checkpoint the daemon skipped is late-registered through `submitUpdate`, so
+  the gap closes without the owner key. What is left is ordering: until the
+  skipped checkpoint is late-registered and the span sent, a deposit in those
+  blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and on a
+  bridge with `disableOwnerAnchors` already called there is no owner fallback
+  to bridge the wait. `submitRotate` and `rePushAnchor` are unaffected; so are
+  withdrawals. The earlier software-keccak measurements that made ancestry
+  impossible outright (one permutation 12.93M gas, a real 642-byte Sepolia
+  header 64.68M, a 32-header walk ≈2.07G) are kept here for the record:
+  shellnet 2026-09-11, re-measured in tvm-debugger 3.0.6 on 2026-09-13 and on
+  a real VM 2026-09-14.
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
   message to `addr_none` when no `USDCBridge` was configured: the unset

@@ -28,9 +28,10 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
 5. Sepolia (or local) `deposit` whose receipt is **in that checkpoint block**
    → `deposit-relayer prove-one` → `finalizeDeposit` ACCEPTED.
 6. For a deposit in a non-checkpoint block of the same epoch:
-   `eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL --checkpoint-hash 0x…`
-   then `finalizeDeposit`. `ancestry-one` is the read-only check. Today the call
-   does not fit the gas limit (`docs/eth-light-client.md` §3.4).
+   `eth-lc-relayer submit-ancestry --eth-rpc-url $ETH_RPC_URL
+   --checkpoint-hash 0x<newer> --older-anchor-hash 0x<older>` then
+   `finalizeDeposit`. `ancestry-one` is the read-only check. Both ends of the
+   span have to be proven anchors (`docs/eth-light-client.md` §3.4).
 7. Period boundary: `eth-lc-relayer daemon` (rotate **on** by default) **or**
    `submit-rotate` from `rotate_tree_n8` `EMIT_VKBLOB=1` (~40 GB n14).
 8. Owner flip, only on purpose: `eth-lc-relayer daemon --flip-owner` issues it

@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.7.0, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.8.0, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -30,13 +30,16 @@ verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Two writers fill
 the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which needs a light client first; the light
-client adds and ages out hashes with `acceptBlockHashFromLightClient` and
-`forgetBlockHashFromLightClient`. `getAnchorConfig()` returns the light client
-and whether the owner may still write. No function turns owner anchors back on,
-but the owner keeps two ways around it: `updateCode` does (`onCodeUpgrade` sets
-the flag back to true), and `setLightClientCode` still replaces the light
-client afterwards.
+until `disableOwnerAnchors()`, which needs a deployed light client first and
+turns the owner writer off only for that client's L1 (`ERR_NOT_LIGHT_CLIENT_CHAIN`
+(227) on any other id); the light client adds and ages out hashes with
+`acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient`. L2
+source chains on the deposit allowlist keep the owner writer. `getAnchorConfig()`
+returns the light client and whether the owner may still write that L1;
+`isOwnerAnchorsEnabled(chainId)` is the per-chain view. No function turns owner
+anchors back on, but the owner keeps two ways around it: `updateCode` does
+(`onCodeUpgrade` leaves every chain owner-writable), and `setLightClientCode`
+still replaces the light client afterwards.
 
 | Path | Contents |
 |------|----------|

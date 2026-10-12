@@ -22,16 +22,25 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
-### Documentation
-
-- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
-  is part of replay protection, and that an upgrade changing it has to ship a
-  block cutoff in the same code so past deposits stop going through. The
-  current contracts need no such restriction — the voucher's code is installed
-  by the zerostate and `updateCode` is called with an empty `userCell`.
-
 ### Breaking Changes
 
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the light
+  client's L1 can be flipped.** The previous bool `_ownerAnchorsEnabled`
+  turned the owner writer off for every source chain at once, so a flip
+  left the six L2s on the deposit allowlist with no writer. The call
+  (and `disableOwnerAnchorsOn(uint256 chainId)`) now sets
+  `_ownerAnchorsDisabled` only for the chain `deployLightClient` stored;
+  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
+  `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view. L2 deposits keep
+  `setAcceptedBlockHash`. The no-argument ABI the relayer already calls
+  is unchanged. The bridge reports 1.8.0. Rebuild `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade
+  the premined 1.7.0 bridge; `onCodeUpgrade` still does not carry the mapping
+  or the stored L1 id, so an upgraded bridge starts with the owner
+  writer on for every chain. Do not flip until `submitAncestry` fits
+  the gas limit: the light client still covers 1 of 32 L1 blocks, and
+  `eth-lc-relayer` still leaves the flip off unless started with
+  `--flip-owner`.
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block
@@ -657,6 +666,19 @@ assigns it when the release is tagged.
   and ownership moves only when that address calls `acceptOwnership`. Any
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
+
+### Documentation
+
+- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
+  is part of replay protection, and that an upgrade changing it has to ship a
+  block cutoff in the same code so past deposits stop going through. The
+  current contracts need no such restriction — the voucher's code is installed
+  by the zerostate and `updateCode` is called with an empty `userCell`.
+- `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
+  `docs/eth-light-client.md` §3.5, and
+  `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
+  the owner writer; L1 still covers 1 of 32 blocks until `submitAncestry`
+  fits the gas limit.
 
 ### Added
 

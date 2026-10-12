@@ -265,8 +265,8 @@ stateDiagram-v2
   direction LR
   state "USDCBridge anchors" as UBA {
     OwnerAnchors: owner or attesters write _acceptedBlockHash
-    LightClientAnchors: only EthBeaconLightClient writes
-    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way; light client already derived from code)
+    LightClientAnchors: LC writes L1; owner still writes L2
+    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way, L1 only)
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
@@ -276,17 +276,19 @@ stateDiagram-v2
 ```
 
 Before the flip the light client is advisory: it pushes hashes, but the owner key can still push
-anything. After the flip nothing but a valid proof adds a block hash. There is no way back; the
-only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on chain.
+anything. After the flip nothing but a valid proof adds an L1 block hash; L2 hashes still take
+the owner key. There is no way back on that L1; the only recovery from a stalled relayer is
+`reAnchorCommittee`, which is logged on chain.
 
-**Do not flip yet.** After `disableOwnerAnchors` the light client is the only writer of
-`_acceptedBlockHash`, and the blocks it can write are the checkpoints of its `l1ChainId` —
-late-registered ones included — plus the spans ancestry fills between them (§3.4). No L2.
-`_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
-the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
-chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts` is
-set. That is why the daemon does not flip unless told to.
+**Do not flip yet.** `disableOwnerAnchors` now turns the owner writer off only for the light
+client's L1 (`disableOwnerAnchorsOn(chainId)` refuses any other id with `ERR_NOT_LIGHT_CLIENT_CHAIN`
+(227)). L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining
+hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and the spans
+ancestry fills between them (§3.4). Until ancestry is cheap enough to run, a deposit from
+any of the other 31 blocks of an epoch fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK`
+(224), and `deposit-relayer`, which delivers deposits in order, stops at the first such
+deposit unless `--skip-after-attempts` is set. That is why the daemon does not flip unless
+told to.
 
 ## 4. Deployment
 

@@ -74,7 +74,7 @@ FIXED_KECCAK_CAPACITY: 128          // ~17 KB of preimages: a receipt up to ~13.
 // Enclosing tx chip — also baked into the VK
 MAX_TX_CALLDATA_BYTE_LEN: 2048      // 1-of-1 Safe execTransaction is 612 B
 MAX_TX_ACCESS_LIST_LEN: 512
-ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2; type 0 and type 4 stay off
+ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2 only; every other type is refused
 ```
 
 Fitting every bound above is necessary, not sufficient: the header, both MPT
@@ -85,8 +85,9 @@ combined cap also applies to the enclosing transaction: a type-1 tx's calldata
 and access list may each be up to 2048 B, but together they must fit the
 ~2805 B leaf.
 
-`fetch_deposit_data` exits **3** when the enclosing transaction is type 0
-or 4, or its leaf, calldata or access list is over the cap (that used to
+`fetch_deposit_data` exits **3** when the enclosing transaction is any
+type other than 1 or 2 (legacy 0, blob 3, EIP-7702 4, an L2 system type
+such as OP-stack 0x7e), or its leaf, calldata or access list is over the cap (that used to
 be exit 1, which the relayer retried). `export_blake2b_proof` and
 `export_vk_blob` then check the rest before loading the SRS or the key
 (`src/provable.rs`): log count, every log's topics and data, receipt and

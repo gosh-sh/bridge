@@ -8,7 +8,8 @@
 //! ```
 
 use deposit_prover::{
-    prover::{test_circuit_mock_pinned, CircuitConfig},
+    circuit_v2::DepositEventCircuitV2,
+    prover::{mock_circuit_pinned, test_circuit_mock_pinned, CircuitConfig},
     synthetic::{build, SyntheticSpec},
     types::DepositProofInput,
 };
@@ -72,4 +73,20 @@ fn type0_legacy_is_rejected_in_circuit() {
         err.contains("circuit not satisfied") || err.contains("Constraint"),
         "{err}"
     );
+}
+
+/// A prover that rewrites the parsed log's `amount` bytes, and claims the
+/// same value as the public input, must not satisfy the circuit: the parsed
+/// fields have to be the bytes of the log the receipt commits to.
+#[test]
+#[ignore]
+fn forged_log_amount_is_rejected_in_circuit() {
+    let mut input = load_proof_00();
+    let mut forged = input.event_data.amount;
+    forged[16] ^= 0x01;
+    input.event_data.amount = forged;
+    let mut circuit = DepositEventCircuitV2::new(input, &production());
+    circuit.forged_log_amount = Some(forged);
+    let err = mock_circuit_pinned(circuit).expect_err("forged amount must not verify");
+    assert!(err.contains("circuit not satisfied"), "{err}");
 }

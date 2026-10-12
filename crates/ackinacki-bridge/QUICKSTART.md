@@ -32,7 +32,8 @@ Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
 before it is written, and the deposit ceremony also against the Hermez
 [s]·G2. It wants ~10 GB free: withdrawal keys take ~6 GB, and the deposit
-prover writes a ~3.4 GB proving key on its first proof.
+prover writes a ~3.4 GB proving key on its first proof (on an upgrade
+that rotates the key, the old one stays until the new one is written).
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it

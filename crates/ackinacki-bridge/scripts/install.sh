@@ -43,7 +43,8 @@ readonly CEREMONY="kzg_bn254_21.srs"
 readonly DEPOSIT_CEREMONY="kzg_params_18.srs"
 readonly SUMS="SHA256SUMS"
 # Withdrawals: ceremony, binaries and keygen headroom, ~6 GB. Deposits: the
-# prover's data/ after its first proof (SRS and proving key), ~3.4 GB.
+# prover's data/ after its first proof (SRS and proving key), ~3.4 GB; the
+# prover deletes a rotated-out key once the new one is written.
 readonly DISK_NEED_KB=$((10 * 1024 * 1024))
 readonly RAM_WARN_GB=48                      # Circuit 4 peaks around 40 GB
 

@@ -32,8 +32,17 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- **The deposit-prover verification key is rotated.** The enclosing
-  transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
+- **The deposit-prover verification key is rotated, and the rotation
+  closes a forgery.** Under the previous key — and every earlier one
+  built from `main`'s circuit — the circuit did not tie the
+  fields it reads out of the `Deposit` log to the log's bytes, so a
+  prover holding any real log in an accepted block could choose the
+  `depositId`, `sender`, `amount` (below 2^128), AN recipient and
+  bridge address, and `finalizeDeposit` would mint against them. Only
+  the per-chain mint cap (`setMintCap`) bounded the damage. Deploy the
+  new bridge as soon as possible, and set a mint cap until then.
+
+  The enclosing transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
   calldata up to 2048 bytes. Type 2 access-list payload is up to
   512 bytes (RLP header excluded); type 1's access list shares a
   field slot with type 2 calldata, so it may be up to 2048 bytes,
@@ -46,9 +55,10 @@ assigns it when the release is tagged.
   keccak pin is 128 permutations (~17 KB of preimages, header and
   both MPT paths included): a receipt of up to about 13.5 KB fits,
   i.e. about six logs at 2048 bytes, fewer with a large type 1
-  transaction. A typical Safe or 4337 receipt fits. Type 0 and
-  type 4 deposits are neither provable nor refundable: send again
-  as type 1 or 2.
+  transaction. A typical Safe or 4337 receipt fits. Deposits in a
+  transaction of any other type (legacy 0, blob 3, EIP-7702 4, an L2
+  system type) are neither provable nor refundable: send again as
+  type 1 or 2.
 
   Proofs made for the previous key stop verifying. That includes a
   `proof.bin` / `public_inputs.bin` that `ackinacki-bridge deposit`
@@ -70,15 +80,19 @@ assigns it when the release is tagged.
   is refused with a retryable exit 1 naming the flags, never the
   final exit 3. The relayer prefers `target/release/examples/<name>`
   when the file exists and does not check it matches the source.
-  Cached `data/*.pk` is fine: the fingerprint includes the new
-  column counts and the new limits. `ackinacki-bridge deposit`
+  A cached `data/*.pk` is not reused: its file name carries a
+  fingerprint of the circuit, and the first proof after the upgrade
+  generates the new ~3.4 GB key and then deletes the old one, so
+  `data/` briefly needs room for both. `ackinacki-bridge deposit`
   installs get the prover tools from a release (`install.sh`), so
   they need a new release; its CLI refuses a bridge older than
   1.6.0, whose key its proofs do not match.
 
   The prover now refuses a deposit it cannot prove before loading
   the SRS or the key. `fetch_deposit_data` exits 3 when the
-  enclosing transaction is type 0 or 4, or its leaf, calldata or
+  enclosing transaction is any type other than 1 or 2 (legacy 0,
+  blob 3, EIP-7702 4, an L2 system type such as OP-stack 0x7e), or
+  its leaf, calldata or
   access list is over the circuit's cap — that refusal used to be
   exit 1, which the relayer retried forever. `export_blake2b_proof`
   and `export_vk_blob` check the log count, every log's topics and

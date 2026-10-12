@@ -102,6 +102,10 @@ pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
 /// Type 0 stays off — its RLP field 0 is the nonce, so extracting "chain_id"
 /// from it would publish nonce as the public `chainId`.
 pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
+/// Bumped on every constraint change that may leave the column counts and
+/// limits as they were, so a cached proving key of the old circuit is not
+/// reused (see `pk_fingerprint`).
+pub const CONSTRAINT_REVISION: u32 = 1;
 /// EIP-2930 type byte / circuit `transaction_type` value.
 pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
@@ -232,6 +236,10 @@ fn bytes_to_field<F: ScalarField>(
 pub struct DepositEventCircuitV2 {
     pub inputs: DepositProofInput,
     pub params: EthReceiptChipParams,
+    /// Overwrites the witnessed `amount` bytes of the parsed log, as a
+    /// malicious prover can. Soundness tests only; `None` in every real proof.
+    #[doc(hidden)]
+    pub forged_log_amount: Option<[u8; 32]>,
 }
 
 impl DepositEventCircuitV2 {
@@ -257,6 +265,7 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            forged_log_amount: None,
         }
     }
 
@@ -272,6 +281,7 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            forged_log_amount: None,
         }
     }
 }
@@ -741,12 +751,26 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // amount + anWorkchain + anAccount + timestamp).
         let log_max_field_lens = [20, 150, 128];
 
-        let log_array = rlp_chip.decompose_rlp_array_phase0(
+        let mut log_array = rlp_chip.decompose_rlp_array_phase0(
             ctx_gate,
             log_witness.log_bytes.clone(),
             &log_max_field_lens,
             false, // fixed length (always 3 fields)
         );
+        if let Some(forged) = self.forged_log_amount {
+            for (cell, byte) in log_array.field_witness[2]
+                .field_cells
+                .iter_mut()
+                .zip(forged)
+            {
+                *cell = ctx_gate.load_witness(Fr::from(byte as u64));
+            }
+        }
+        // `decompose_rlp_array_phase0` only witnesses `field_cells`; without the
+        // RLC concatenation checks of phase 1 nothing ties address, topics and
+        // data to `log_bytes`, and every event-bound public input is free.
+        rlp_chip.decompose_rlp_array_phase1((ctx_gate, ctx_rlc), log_array.clone(), false);
+        println!("   ✓ Bound log fields to the receipt's log bytes (RLC)");
         println!("   ✓ Parsed log RLP structure");
 
         // BC-D04: pin the payload lengths of the two variable-length log fields.
@@ -766,7 +790,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         ctx_gate.constrain_equal(&log_array.field_witness[1].field_len, &expected_topics_len);
         let expected_data_len = ctx_gate.load_constant(Fr::from(128u64));
         ctx_gate.constrain_equal(&log_array.field_witness[2].field_len, &expected_data_len);
-        println!("   ✓ Constrained topics len == 99, data len == 128 (BC-D04)");
+        // The RLC binding covers only `field_cells[..field_len]`; the address is
+        // read as 20 cells, so its length is pinned too.
+        let expected_address_len = ctx_gate.load_constant(Fr::from(20u64));
+        ctx_gate.constrain_equal(&log_array.field_witness[0].field_len, &expected_address_len);
+        // Each topic is read at a fixed offset behind a one-byte string prefix.
+        let topic_prefix = ctx_gate.load_constant(Fr::from(0xa0u64));
+        for offset in [0, 33, 66] {
+            ctx_gate.constrain_equal(
+                &log_array.field_witness[1].field_cells[offset],
+                &topic_prefix,
+            );
+        }
+        println!("   ✓ Constrained address len == 20, topics len == 99, data len == 128 (BC-D04)");
 
         // 5. Extract address (field 0)
         let address_bytes = &log_array.field_witness[0].field_cells;

@@ -1050,7 +1050,7 @@ under `--json`:
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(amount, 0, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
 | 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2 or type 1, input exactly the 100 bytes requested, an access list of at most 512 bytes payload (2048 on type 1), sent straight to the bridge; no receipt log whose payload is over 2211 bytes. The receipt must also fit the prover's keccak budget (about six logs at the 2048-byte cap; a plain deposit uses a fraction of it), which the prover checks at step 7. The wallet session is closed after this step. |
 | 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
-| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: a type 0 or 4 enclosing transaction, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
+| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: an enclosing transaction of any type other than 1 or 2, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
 | 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
 
@@ -1483,6 +1483,11 @@ runs, built from `deposit-prover/` as it is:
     └── .prove.lock
 ```
 
+A proof that has to generate a new key — the first one after an upgrade
+that changed the circuit — deletes the keys of earlier shapes from `data/`
+once the new one is written, so `data/` peaks at both keys for that one
+proof and then holds one.
+
 `scripts/install.sh` installs all of it. In a source checkout,
 `scripts/stage_deposit_prover.sh ./deposit-prover` builds the tools, with
 `deposit-prover`'s own `rust-toolchain.toml`, and lays them out where the
@@ -1509,7 +1514,7 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
 | Peak RAM | ~9.6 GB with a cold key cache, ~8.8 GB warm | ~40 GB |
-| Disk | ~3.4 GB in `data/` after the first proof, plus ~26 MB of tools | ~4.3 GB on a withdraw-only host (Step 0) |
+| Disk | ~3.4 GB in `data/` after the first proof, plus ~26 MB of tools; the first proof after an upgrade that rotates the key briefly holds the old key too, and then deletes it | ~4.3 GB on a withdraw-only host (Step 0) |
 | Proof, cold key cache (keygen included) | 2 min 7 s wall, 16 min CPU | ~20 min |
 | Proof, warm key cache | 56 s wall, 11 min CPU | ~5 min |
 

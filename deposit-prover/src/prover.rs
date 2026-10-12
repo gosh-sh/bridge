@@ -231,9 +231,14 @@ pub fn test_circuit_mock_pinned(
     input: DepositProofInput,
     config: &CircuitConfig,
 ) -> Result<(), String> {
+    mock_circuit_pinned(DepositEventCircuitV2::new(input, config))
+}
+
+/// [`test_circuit_mock_pinned`] for an already-built circuit, so soundness
+/// tests can set its malicious-prover hooks.
+pub fn mock_circuit_pinned(circuit_input: DepositEventCircuitV2) -> Result<(), String> {
     let params = get_default_params();
     let k = params.base.k as u32;
-    let circuit_input = DepositEventCircuitV2::new(input, config);
     let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let mut circuit = EthCircuitImpl::<Fr, _>::new_impl(
         CircuitBuilderStage::Mock,
@@ -439,6 +444,7 @@ fn pk_fingerprint(
     crate::circuit_v2::MAX_TX_CALLDATA_BYTE_LEN.hash(&mut h);
     crate::circuit_v2::MAX_TX_ACCESS_LIST_LEN.hash(&mut h);
     crate::circuit_v2::ENABLE_TX_TYPES.hash(&mut h);
+    crate::circuit_v2::CONSTRAINT_REVISION.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
@@ -455,6 +461,43 @@ fn pk_path_with_fingerprint(pk_path: &Path, fingerprint: &str) -> std::path::Pat
     match pk_path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.join(file),
         _ => std::path::PathBuf::from(file),
+    }
+}
+
+/// Delete proving keys of other shapes next to `current` (same stem and
+/// extension, different fingerprint) with their break-point sidecars. Each is
+/// over a gigabyte, and none is loaded again once the shape has moved on.
+fn remove_superseded_keys(current: &Path) {
+    let Some(name) = current.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let mut parts = name.splitn(2, '.');
+    let stem = parts.next().unwrap_or_default();
+    let ext = current.extension().and_then(|e| e.to_str()).unwrap_or("pk");
+    let dir = match current.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(other) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let fingerprinted = other.starts_with(&format!("{stem}."))
+            && other.ends_with(&format!(".{ext}"))
+            && other.matches('.').count() == 2;
+        let superseded = other != name && (fingerprinted || other == format!("{stem}.{ext}"));
+        if superseded {
+            println!(
+                "Removing proving key of a previous circuit shape: {:?}",
+                path
+            );
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(format!("{}.bp.json", path.display()));
+        }
     }
 }
 
@@ -556,6 +599,7 @@ pub fn get_or_create_proving_key(
         fs::write(&bp_path, &bytes)
             .map_err(|e| format!("writing break-points sidecar {:?}: {e}", bp_path))?;
         println!("Wrote break-points sidecar -> {:?}", bp_path);
+        remove_superseded_keys(pk_path);
         bp
     };
 
@@ -990,6 +1034,38 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_key_removes_keys_of_previous_shapes() {
+        let dir = std::env::temp_dir().join(format!("pk-cleanup-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("deposit_prover_k18.aaaa.pk");
+        let names = [
+            "deposit_prover_k18.aaaa.pk",
+            "deposit_prover_k18.aaaa.pk.bp.json",
+            "deposit_prover_k18.bbbb.pk",
+            "deposit_prover_k18.bbbb.pk.bp.json",
+            "deposit_prover_k18.pk",
+            "deposit_prover_k20.cccc.pk",
+            "kzg_params_18.srs",
+        ];
+        for n in names {
+            fs::write(dir.join(n), b"").unwrap();
+        }
+        remove_superseded_keys(&keep);
+        let mut left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(left, [
+            "deposit_prover_k18.aaaa.pk",
+            "deposit_prover_k18.aaaa.pk.bp.json",
+            "deposit_prover_k20.cccc.pk",
+            "kzg_params_18.srs",
+        ]);
+    }
 
     #[test]
     fn test_config_default() {

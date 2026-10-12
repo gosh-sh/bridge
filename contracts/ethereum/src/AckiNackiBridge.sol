@@ -54,6 +54,12 @@ contract AckiNackiBridge {
     ///         global TVL limit (QC-A1-1 / QC-AN-J1).
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
+    /// @notice Maximum per-tx amount moved in either direction.
+    uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
+
+    /// @notice Maximum user principal the bridge may hold.
+    uint256 public constant MAX_TVL = 1000 * USDC_UNIT;
+
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -380,6 +386,8 @@ contract AckiNackiBridge {
     ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
     error TransferAmountMismatch();
     error DepositTooLarge();
+    error TransferTooLarge();
+    error TvlCapExceeded();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
@@ -716,6 +724,8 @@ contract AckiNackiBridge {
     {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+        if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
+        if (treasuryBalance + amount > MAX_TVL) revert TvlCapExceeded();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
         uint256 credited = _pullExactUsdc(amount);
 
@@ -1422,6 +1432,7 @@ contract AckiNackiBridge {
         if (pub.amount > treasuryBalance) {
             revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
         }
+        if (pub.amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
 
         // ---- Effects (CEI: mutate state before any external call). ----
         _nullifiers[nullifierKey] = true;

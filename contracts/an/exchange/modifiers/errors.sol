@@ -21,4 +21,6 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_ZERO_RECIPIENT = 230;
     uint16 constant ERR_PAUSED = 231;
     uint16 constant ERR_ZERO_PUBKEY = 232;
+    uint16 constant ERR_TRANSFER_TOO_LARGE = 233;
+    uint16 constant ERR_TVL_CAP = 234;
 }

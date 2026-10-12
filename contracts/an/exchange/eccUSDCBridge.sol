@@ -395,12 +395,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
+        require(amount <= MAX_BRIDGE_TRANSFER, ERR_TRANSFER_TOO_LARGE);
 
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
         emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
+    }
+
+    function _bridgedOutstanding() private view returns (uint128) {
+        uint128 minted = _totalMintedBridgeByToken[USDC_ECC_ID];
+        uint128 burned = _totalBurnedBridgeByToken[USDC_ECC_ID];
+        return minted > burned ? minted - burned : 0;
     }
 
     /// @dev True when every byte of `recipient` is zero. The destination chain
@@ -599,6 +606,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(!_paused, ERR_PAUSED);
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
+        require(f.amount <= MAX_BRIDGE_TRANSFER, ERR_TRANSFER_TOO_LARGE);
+        require(_bridgedOutstanding() + f.amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
         // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
         // pins which (chain, bridge contract) pairs this side trusts. The deposit
         // passes if its proven address is in the chain's trusted set — an absent

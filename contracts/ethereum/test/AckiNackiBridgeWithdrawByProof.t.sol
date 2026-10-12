@@ -985,6 +985,17 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
     }
 
+    function test_withdrawByProof_aboveTransferCap_reverts() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, address(0xC0DE), 50 * UsdcTestLib.UNIT);
+        uint256 over = bridge.MAX_TRANSFER_AMOUNT() + 1;
+        assertLe(over, bridge.treasuryBalance(), "treasury must cover the over-cap amount");
+
+        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
+        bridge.withdrawByProof(
+            _dummyProof(), _defaultPub(over, Bn254FrLib.toFr(uint256(keccak256("over-cap"))))
+        );
+    }
+
     function test_withdrawByProof_verifierRejects_revertsAndDoesNotMutateState() public {
         withdrawalVerifier.setShouldAccept(false);
 

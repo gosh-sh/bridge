@@ -32,6 +32,22 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The bridge now refuses a transfer over 50 USDC, and refuses to hold more
+  than 1000 USDC of user principal.** Both caps are enforced on both chains
+  and in both directions, so a deposit or a withdrawal above 50 USDC reverts
+  wherever it is submitted. On Ethereum `deposit` and `withdrawByProof` revert
+  with `TransferTooLarge`, and `deposit` also reverts with `TvlCapExceeded`
+  once `treasuryBalance` would pass 1000 USDC; the constants are public
+  (`MAX_TRANSFER_AMOUNT`, `MAX_TVL`). On Acki Nacki `finalizeDeposit` and
+  `initiateWithdrawal` throw `ERR_TRANSFER_TOO_LARGE` (233), and
+  `finalizeDeposit` throws `ERR_TVL_CAP` (234) once the outstanding bridged
+  amount would pass 1000 USDC. A deposit refused by the Acki Nacki cap is
+  refused before its voucher is deployed, so the same deposit can be
+  finalized later once the cap frees up; the funds stay locked on Ethereum
+  until then. Existing deployments are unaffected until they are upgraded,
+  but any integration that moves more than 50 USDC at a time has to split the
+  amount, and the 1000 USDC ceiling applies to the bridge as a whole, not per
+  account.
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the

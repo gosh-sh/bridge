@@ -25,9 +25,9 @@ description = "JWT — Woodpecker API tokens and forge hook tokens are JWTs"
 regex = '''eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
 tags = ["jwt", "token"]
 
-[allowlist]
+# `[[allowlists]]` (plural): `[allowlist]` cannot sit next to another table.
+[[allowlists]]
 description = "Shellnet development fixtures and documentation placeholders"
-
 # Deliberately narrowed to specific paths rather than to the shape of a key:
 # allowlisting "any 64-hex next to PRIVATE_KEY" would switch the rule off for
 # the whole repository, which is the one thing this scan exists to prevent.
@@ -43,17 +43,20 @@ paths = [
   '''crates/(an-bridge-prover|bridge-prover-libraries)/python/contracts/[A-Za-z0-9.]+\.keys\.json''',
   '''.*\.env\.example$''',
   '''docs/archive/.*''',
-  # Public execution-header fixtures. EIP-7928's field is named
-  # `blockAccessListHash`; generic-api-key reads "access" + "hash" next to a
-  # 32-byte hex as a credential. These values are Sepolia / L2 block hashes
-  # from the JSON-RPC, not keys.
-  '''deposit-prover/fixtures/headers/sepolia_amsterdam\.json''',
-  '''crates/eth-light-client-relayer/src/fixtures/sepolia_amsterdam\.json''',
 ]
-
 regexes = [
   # Documentation placeholders: 0x0123456789abcdef… repeated, YOUR_KEY, XXXX…
   '''0x(0123456789abcdef){4}''',
   '''(?i)(your|example|placeholder|changeme|dummy|test)[_-]?(api[_-]?)?(key|token|secret)''',
   '''X{16,}''',
+]
+
+# Matched against the line, not the secret: the trigger is the RPC field
+# name `blockAccessListHash` sitting next to a 32-byte hex. The files stay
+# scanned for every other rule.
+[[allowlists]]
+description = "Public EIP-7928 execution-header field, not a credential"
+regexTarget = "line"
+regexes = [
+  '''"blockAccessListHash": "0x[0-9a-fA-F]{64}"''',
 ]

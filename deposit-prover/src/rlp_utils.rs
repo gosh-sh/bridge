@@ -176,16 +176,27 @@ const HEADER_TAIL_FIELDS: [(&str, Option<usize>); 3] = [
     ("slotNumber", None),              // Amsterdam, EIP-7843
 ];
 
+/// A tail field the node actually sent. JSON `null` is absent — some RPCs
+/// write optional header keys as `null` instead of omitting them.
+fn other_field<'a, T>(block: &'a Block<T>, key: &str) -> Option<&'a serde_json::Value> {
+    let raw = block.other.get(key)?;
+    if raw.is_null() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
 /// Read [`HEADER_TAIL_FIELDS`] out of the RPC response's `other` map, as the
 /// byte strings to append. Each fork only ever appends, so a later field
 /// without an earlier one is a header shape no chain emits and is rejected.
 fn header_tail_from_other<T>(block: &Block<T>) -> Result<Vec<Vec<u8>>> {
     let mut tail = Vec::new();
     for (key, width) in HEADER_TAIL_FIELDS {
-        let Some(raw) = block.other.get(key) else {
+        let Some(raw) = other_field(block, key) else {
             if let Some((later, _)) = HEADER_TAIL_FIELDS[tail.len() + 1..]
                 .iter()
-                .find(|(k, _)| block.other.contains_key(*k))
+                .find(|(k, _)| other_field(block, k).is_some())
             {
                 return Err(anyhow!("header carries {later} but not {key}"));
             }
@@ -210,7 +221,10 @@ fn header_tail_from_other<T>(block: &Block<T>) -> Result<Vec<Vec<u8>>> {
                 let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
                 bytes.drain(..start);
                 if bytes.len() > 8 {
-                    return Err(anyhow!("{key} is {} bytes, expected at most 8", bytes.len()));
+                    return Err(anyhow!(
+                        "{key} is {} bytes, expected at most 8",
+                        bytes.len()
+                    ));
                 }
             },
         }
@@ -772,6 +786,14 @@ mod tests {
         ),
     ];
 
+    fn header_sample(name: &str) -> &'static str {
+        HEADER_SAMPLES
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, raw, _)| *raw)
+            .unwrap_or_else(|| panic!("no header sample {name}"))
+    }
+
     fn rlp_field_count(header: &[u8]) -> usize {
         let prefix = header[0];
         let mut i = if prefix >= 0xf8 {
@@ -829,8 +851,7 @@ mod tests {
     /// that hashes to a plausible-looking non-canonical value.
     #[test]
     fn header_without_requests_hash_is_rejected() {
-        let (_, raw, _) = HEADER_SAMPLES[1];
-        let mut block: Block<H256> = serde_json::from_str(raw).unwrap();
+        let mut block: Block<H256> = serde_json::from_str(header_sample("sepolia_prague")).unwrap();
         assert!(
             block.other.remove("requestsHash").is_some(),
             "sample must carry requestsHash"
@@ -849,8 +870,7 @@ mod tests {
     /// that skips an earlier tail field but carries a later one.
     #[test]
     fn header_without_amsterdam_tail_is_rejected() {
-        let (_, raw, _) = HEADER_SAMPLES[0];
-        let full: Block<H256> = serde_json::from_str(raw).unwrap();
+        let full: Block<H256> = serde_json::from_str(header_sample("sepolia_amsterdam")).unwrap();
 
         let mut block = full.clone();
         assert!(block.other.remove("slotNumber").is_some());
@@ -866,12 +886,32 @@ mod tests {
         );
     }
 
+    /// Nodes that write absent optionals as JSON `null` must encode the same
+    /// as if the keys were omitted (pre-Amsterdam / L2 headers).
+    #[test]
+    fn json_null_tail_fields_are_absent() {
+        let mut prague: serde_json::Value =
+            serde_json::from_str(header_sample("sepolia_prague")).unwrap();
+        prague["blockAccessListHash"] = serde_json::Value::Null;
+        prague["slotNumber"] = serde_json::Value::Null;
+        let block: Block<H256> = serde_json::from_value(prague).unwrap();
+        verify_block_header_rlp(&block).unwrap();
+
+        let mut arb: serde_json::Value =
+            serde_json::from_str(header_sample("arbitrum_one")).unwrap();
+        arb["requestsHash"] = serde_json::Value::Null;
+        let block: Block<H256> = serde_json::from_value(arb).unwrap();
+        verify_block_header_rlp(&block).unwrap();
+    }
+
     /// The circuit's per-field caps must hold the Amsterdam tail, and the table
-    /// must keep its spare slot so the next appended field needs no VK rotation.
+    /// must keep its spare slot so the next appended field needs no VK
+    /// rotation.
     #[test]
     fn header_table_covers_amsterdam_with_a_spare_slot() {
         use crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS;
-        let (_, raw, fields) = HEADER_SAMPLES[0];
+        let raw = header_sample("sepolia_amsterdam");
+        let fields = 23;
         assert!(BLOCK_HEADER_MAX_FIELD_LENS.len() > fields);
         let block: Block<H256> = serde_json::from_str(raw).unwrap();
         let tail = header_tail_from_other(&block).unwrap();
@@ -977,8 +1017,7 @@ mod tests {
     /// it.
     #[test]
     fn arbitrum_gas_limit_fits_the_circuit_field_cap() {
-        let (_, raw, _) = HEADER_SAMPLES[4];
-        let block: Block<H256> = serde_json::from_str(raw).unwrap();
+        let block: Block<H256> = serde_json::from_str(header_sample("arbitrum_one")).unwrap();
         let gas_limit_bytes = (block.gas_limit.bits() + 7) / 8;
         assert!(
             gas_limit_bytes > 4,

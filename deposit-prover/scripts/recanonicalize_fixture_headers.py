@@ -24,7 +24,7 @@ import urllib.request
 RPC = os.environ.get("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com")
 FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "fixtures"
 
-# Header field order through Prague / OP Isthmus. Entries are
+# Header field order through Amsterdam. Entries are
 # (rpc key, "hash" for byte strings | "num" for quantities, required?).
 FIELDS = [
     ("parentHash", "hash", True),

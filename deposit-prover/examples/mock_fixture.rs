@@ -14,9 +14,8 @@
 //!
 //! # positive: re-shape the header to another chain's field count. Only
 //! # `transactionsRoot` / `receiptsRoot` (fields 4/5) and the keccak bind the
-//! # deposit, so fields 0–15 are kept and the tail is cut or extended:
-//! # `amsterdam` (23 fields), `spare` (24, the table's full width) and
-//! # `arbitrum` (16). Each must still satisfy every constraint.
+//! # deposit. `amsterdam` / `spare` keep the Prague 21 and append the tail;
+//! # `arbitrum` keeps the first 16. Each must still satisfy every constraint.
 //! cargo run --release --example mock_fixture -- <input.json> --reshape amsterdam
 //! ```
 //!
@@ -37,11 +36,8 @@ fn main() -> Result<()> {
         .first()
         .cloned()
         .unwrap_or_else(|| "fixtures/deposit_10proofs/proof_00/input.json".to_string());
-    let mutate = args
-        .iter()
-        .position(|a| a == "--mutate")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
+    let mutate = flag_value(&args, "--mutate")?;
+    let reshape = flag_value(&args, "--reshape")?;
 
     let json = fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
     let mut input: DepositProofInput =
@@ -55,11 +51,7 @@ fn main() -> Result<()> {
         input.receipt_proof.block_header_rlp.len()
     );
 
-    if let Some(shape) = args
-        .iter()
-        .position(|a| a == "--reshape")
-        .and_then(|i| args.get(i + 1))
-    {
+    if let Some(shape) = reshape.as_deref() {
         let header = &mut input.receipt_proof.block_header_rlp;
         *header = reshape_header(header, shape)?;
         println!(
@@ -101,20 +93,27 @@ fn main() -> Result<()> {
     }
 }
 
-/// Re-encode `header` with fields 0–15 kept and the post-London tail replaced
-/// by the one `shape` names.
+fn flag_value(args: &[String], name: &str) -> Result<Option<String>> {
+    let Some(i) = args.iter().position(|a| a == name) else {
+        return Ok(None);
+    };
+    match args.get(i + 1).filter(|v| !v.starts_with("--")) {
+        Some(v) => Ok(Some(v.clone())),
+        None => bail!("{name} needs a value"),
+    }
+}
+
+/// Re-encode `header`, keeping the prefix `shape` needs and replacing the tail.
 fn reshape_header(header: &[u8], shape: &str) -> Result<Vec<u8>> {
     let fields: Vec<Vec<u8>> = rlp::Rlp::new(header)
         .iter()
         .map(|f| f.as_raw().to_vec())
         .collect();
-    if fields.len() < 21 {
-        bail!("--reshape needs a Prague (21-field) witness, got {} fields", fields.len());
-    }
-    // Amsterdam values from fixtures/headers/sepolia_amsterdam.json.
+    // `blockAccessListHash` / `slotNumber` from
+    // fixtures/headers/sepolia_amsterdam.json.
     let block_access_list_hash =
-        hex::decode("7770d6dfe7d3dd2ba81c5fb1455d1e19d68a56978485d279117b126299dcb8e2")?;
-    let slot_number = vec![0xac, 0x82, 0x13];
+        hex::decode("14987b93fe0eb2981c574f7de2a7a2cf704803b24eb3f6eeb378e9f6cd2d7aef")?;
+    let slot_number = vec![0xac, 0x82, 0x24];
     let mut tail: Vec<Vec<u8>> = Vec::new();
     let keep = match shape {
         "arbitrum" => 16,
@@ -125,9 +124,15 @@ fn reshape_header(header: &[u8], shape: &str) -> Result<Vec<u8>> {
                 tail.push(rlp::encode(&vec![0xffu8; 32]).to_vec());
             }
             21
-        }
+        },
         other => bail!("unknown shape {other:?}; known: amsterdam, spare, arbitrum"),
     };
+    if fields.len() < keep {
+        bail!(
+            "--reshape {shape} needs a {keep}-field witness, got {} fields",
+            fields.len()
+        );
+    }
     let mut s = rlp::RlpStream::new_list(keep + tail.len());
     for f in fields.iter().take(keep).chain(tail.iter()) {
         s.append_raw(f, 1);

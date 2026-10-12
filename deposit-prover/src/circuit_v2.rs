@@ -790,7 +790,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
             (ctx_gate, ctx_rlc),
             phase0_output.block_header_witness,
-            true, // variable length (15–20 fields)
+            true, // variable length (16–24 fields)
         );
         println!("   ✓ Verified block header RLC");
 

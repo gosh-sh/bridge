@@ -96,6 +96,21 @@ pub fn encode_header_rlp(block: &Value) -> Result<Vec<u8>, RelayerError> {
         hx_opt(block, "blockAccessListHash")?,
         hx_opt(block, "slotNumber")?,
     ];
+    // Forks only append. A later optional without an earlier one is a header
+    // no chain emits; refuse it rather than compact the gap (keccak would
+    // then fail the node's hash, but only after the encode).
+    let mut seen_none = false;
+    for (i, o) in optionals.iter().enumerate() {
+        match o {
+            None => seen_none = true,
+            Some(_) if seen_none => {
+                return Err(RelayerError::other(format!(
+                    "header optional {i} is present after a missing earlier field"
+                )));
+            },
+            Some(_) => {},
+        }
+    }
     let n_opt = optionals.iter().filter(|o| o.is_some()).count();
     let mut s = RlpStream::new_list(15 + n_opt);
     s.append(&parent.as_slice());
@@ -263,6 +278,18 @@ mod tests {
         let got = keccak256(&rlp);
         let want = hex::decode(v["hash"].as_str().unwrap().trim_start_matches("0x")).unwrap();
         assert_eq!(hex::encode(got), hex::encode(&want));
+    }
+
+    #[test]
+    fn encode_rejects_a_later_optional_without_an_earlier_one() {
+        let mut v: Value = serde_json::from_str(include_str!("fixtures/sepolia_amsterdam.json"))
+            .expect("fixture json");
+        v["requestsHash"] = Value::Null;
+        let err = encode_header_rlp(&v).unwrap_err().to_string();
+        assert!(
+            err.contains("present after a missing earlier field"),
+            "got {err}"
+        );
     }
 
     #[test]

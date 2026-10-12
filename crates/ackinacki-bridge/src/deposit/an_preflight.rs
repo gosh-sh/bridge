@@ -402,9 +402,9 @@ mod tests {
         .unwrap();
         assert_eq!(ui.warnings().len(), 2);
         // The version is not relaxed: a resend is only safe on a fixed bridge.
-        an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.4.0", "value1": "eccUSDCBridge" }),
-        ]);
+        // Stay at the deposit key (1.7.0) so this hits `version_verdict`, not
+        // `key_verdict` (which refuses anything older than the key first).
+        let min = Some(BridgeVersion(1, 8, 0));
         assert!(
             run_with(&an, BRIDGE, 11_155_111, evm_bridge, &target, &ui, min, false, true)
                 .await

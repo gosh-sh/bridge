@@ -4011,9 +4011,11 @@ mod tests {
             tx_hash: None,
         });
         let mut d = w.deps();
-        d.min_bridge = Some(crate::deposit::an_preflight::BridgeVersion(1, 7, 0));
+        // Above the world's 1.7.0 so preflight refuses; equal to it the
+        // resume never ends (it waits for a refusal that does not come).
+        d.min_bridge = Some(crate::deposit::an_preflight::BridgeVersion(1, 8, 0));
         let e = resume(&p, &d, &target, None).await.unwrap_err();
-        assert!(e.to_string().contains("1.7.0"), "{e}");
+        assert!(e.to_string().contains("1.8.0"), "{e}");
         assert_eq!(
             e.exit_code(),
             ExitCode::DepositOutcomeUnknown,

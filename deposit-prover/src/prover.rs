@@ -444,6 +444,8 @@ fn pk_fingerprint(
     crate::circuit_v2::MAX_TX_CALLDATA_BYTE_LEN.hash(&mut h);
     crate::circuit_v2::MAX_TX_ACCESS_LIST_LEN.hash(&mut h);
     crate::circuit_v2::ENABLE_TX_TYPES.hash(&mut h);
+    crate::circuit_v2::MAX_BLOCK_HEADER_BYTES.hash(&mut h);
+    crate::circuit_v2::BLOCK_HEADER_MAX_FIELD_LENS.hash(&mut h);
     crate::circuit_v2::CONSTRAINT_REVISION.hash(&mut h);
     format!("{:016x}", h.finish())
 }

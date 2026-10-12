@@ -91,7 +91,9 @@ new `deposit_vk_blob.bin` bytes into `TokenBridge.sol`'s `VK_BLOB` constant.
 fixed-column constant (binding preserved via public input #3). Real deposits of
 different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
 the **byte-identical** production VkBlob. Current production VkBlob (12-PI, Hermez,
-13071 B) = **`83747b2e…74127a90`** — rotated for type 1/2 enclosing transactions and
+13071 B) = **`117f4a65…ad612cc`** — rotated for Amsterdam 23-field headers
+(24-slot table, `MAX_BLOCK_HEADER_BYTES` 717 → 792); before that
+`83747b2e…74127a90`, rotated for type 1/2 enclosing transactions and
 2048-byte / 20-log receipts (Safe and ERC-4337 deposits), with the parsed `Deposit` log
 fields RLC-bound to the log bytes (before that they were free witnesses) and `log_index`
 bound to the receipt's logs (before that an empty log slot carried any bytes); before that

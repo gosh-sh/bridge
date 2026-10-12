@@ -219,19 +219,20 @@ impl AnSubmitter for MockAnSubmitter {
         &self,
         header_rlps: &[Vec<u8>],
     ) -> Result<SubmitOutcome, RelayerError> {
-        let checkpoint = crate::header_rlp::link_headers(header_rlps)?;
+        let (older, newer) = crate::header_rlp::link_headers(header_rlps)?;
         let mut inner = self.inner.lock().expect("poisoned");
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "submitAncestry rejected".into(),
             });
         }
-        if !inner.proven.contains(&checkpoint) {
+        if !inner.proven.contains(&older) || !inner.proven.contains(&newer) {
             return Ok(SubmitOutcome::Rejected {
                 reason: "ERR_UNKNOWN_CHECKPOINT".into(),
             });
         }
-        for rlp in &header_rlps[1..] {
+        let last = header_rlps.len() - 1;
+        for rlp in &header_rlps[1..last] {
             inner.proven.insert(crate::header_rlp::keccak256(rlp));
         }
         inner.ancestry_count += 1;
@@ -378,39 +379,30 @@ mod set_committee_tests {
 #[cfg(test)]
 mod ancestry_submit_tests {
     use super::*;
-    use crate::header_rlp::{keccak256, link_headers};
-
-    fn two_headers() -> (Vec<u8>, Vec<u8>) {
-        let mut p = vec![0xf8, 33, 0xa0];
-        p.extend(std::iter::repeat_n(0x01, 32));
-        let p_hash = keccak256(&p);
-        let mut c = vec![0xf8, 33, 0xa0];
-        c.extend_from_slice(&p_hash);
-        (c, p)
-    }
+    use crate::header_rlp::keccak256;
 
     #[tokio::test]
-    async fn mock_submit_ancestry_admits_parents() {
-        let (c, p) = two_headers();
-        let ckpt = keccak256(&c);
-        let parent = keccak256(&p);
+    async fn mock_submit_ancestry_admits_the_blocks_between_the_anchors() {
+        let chain = crate::header_rlp::dummy_linked_chain(4);
         let mock = MockAnSubmitter::accepting();
-        mock.mark_proven(ckpt);
-        match mock.submit_ancestry(&[c.clone(), p.clone()]).await.unwrap() {
+        mock.mark_proven(keccak256(&chain[0]));
+        mock.mark_proven(keccak256(&chain[3]));
+        match mock.submit_ancestry(&chain).await.unwrap() {
             SubmitOutcome::Accepted {
                 ..
             } => {},
             other => panic!("{other:?}"),
         }
-        assert!(mock.is_proven(&parent));
-        assert_eq!(link_headers(&[c, p]).unwrap(), ckpt);
+        assert!(mock.is_proven(&keccak256(&chain[1])));
+        assert!(mock.is_proven(&keccak256(&chain[2])));
     }
 
     #[tokio::test]
     async fn mock_submit_ancestry_unknown_checkpoint() {
-        let (c, p) = two_headers();
+        let chain = crate::header_rlp::dummy_linked_chain(4);
         let mock = MockAnSubmitter::accepting();
-        let out = mock.submit_ancestry(&[c, p]).await.unwrap();
+        mock.mark_proven(keccak256(&chain[0]));
+        let out = mock.submit_ancestry(&chain).await.unwrap();
         match out {
             SubmitOutcome::Rejected {
                 reason,

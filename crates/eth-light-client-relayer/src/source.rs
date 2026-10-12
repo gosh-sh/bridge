@@ -22,12 +22,14 @@ pub trait BeaconSource: Send + Sync {
     async fn fetch_finality(&self) -> Result<FinalityUpdate, RelayerError>;
 }
 
-/// Execution parent-hash walk used after an accepted checkpoint.
+/// Execution header walk used after an accepted checkpoint. Returns the span
+/// between two anchors, oldest first — the order `submitAncestry` takes.
 #[async_trait]
 pub trait ExecutionSource: Send + Sync {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
     ) -> Result<Vec<Vec<u8>>, RelayerError>;
 }
@@ -49,18 +51,29 @@ impl InMemoryExecution {
 
 #[async_trait]
 impl ExecutionSource for InMemoryExecution {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
     ) -> Result<Vec<Vec<u8>>, RelayerError> {
         let chains = self.chains.lock().expect("poisoned");
         let headers = chains
-            .get(&checkpoint)
+            .get(&newer)
             .cloned()
             .ok_or_else(|| RelayerError::other("in-memory execution: unknown checkpoint"))?;
-        let max = max.clamp(2, 32);
-        Ok(headers.into_iter().take(max).collect())
+        let max = max.clamp(3, 33);
+        let span: Vec<Vec<u8>> = headers.into_iter().take(max).collect();
+        if crate::header_rlp::keccak256(
+            span.first()
+                .ok_or_else(|| RelayerError::other("in-memory execution: empty span"))?,
+        ) != older
+        {
+            return Err(RelayerError::other(
+                "in-memory execution: span does not start at the older anchor",
+            ));
+        }
+        Ok(span)
     }
 }
 
@@ -360,16 +373,20 @@ impl EthExecutionRpc {
         crate::header_rlp::encode_header_rlp(result)
     }
 
-    /// Checkpoint header first, then parents, ≤ `max` (≤ 32).
-    pub async fn ancestry_headers(
+    /// The span from `older` to `newer` inclusive, oldest first, at most `max`
+    /// headers (3 to 33). Walks parents from `newer` and stops on `older`; a
+    /// gap wider than `max` is an error rather than a truncated payload,
+    /// because `submitAncestry` requires both ends to be proven anchors.
+    pub async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
     ) -> Result<Vec<Vec<u8>>, RelayerError> {
-        let max = max.clamp(2, 32);
+        let max = max.clamp(3, 33);
         let mut headers = Vec::new();
-        let mut h = checkpoint;
-        for _ in 0..max {
+        let mut h = newer;
+        loop {
             let rlp = self.header_rlp(h).await?;
             let got = crate::header_rlp::keccak256(&rlp);
             if got != h {
@@ -379,23 +396,35 @@ impl EthExecutionRpc {
             }
             let parent = crate::header_rlp::rlp_parent_hash(&rlp)?;
             headers.push(rlp);
-            if headers.len() >= max {
+            if h == older {
                 break;
+            }
+            if headers.len() >= max {
+                return Err(RelayerError::other(
+                    "older anchor not reached within the ancestry span limit",
+                ));
             }
             h = parent;
         }
+        if headers.len() < 3 {
+            return Err(RelayerError::other(
+                "ancestry span shorter than two anchors + one block",
+            ));
+        }
+        headers.reverse();
         Ok(headers)
     }
 }
 
 #[async_trait]
 impl ExecutionSource for EthExecutionRpc {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
     ) -> Result<Vec<Vec<u8>>, RelayerError> {
-        EthExecutionRpc::ancestry_headers(self, checkpoint, max).await
+        EthExecutionRpc::ancestry_span(self, newer, older, max).await
     }
 }
 

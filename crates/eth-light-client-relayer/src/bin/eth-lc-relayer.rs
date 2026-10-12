@@ -10,10 +10,10 @@
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
-//!   flip. `ETH_RPC_URL` fetches epoch headers after each accepted checkpoint
-//!   and runs `link_headers` locally. On-chain `submitAncestry` stays off
-//!   unless `--submit-ancestry` is set (the call cannot succeed until a
-//!   keccak-256 builtin lands).
+//!   flip. `ETH_RPC_URL` fetches the span between the previous checkpoint and
+//!   the new one after each accepted checkpoint and runs `link_headers`
+//!   locally. On-chain `submitAncestry` stays off unless `--submit-ancestry` is
+//!   set.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -130,13 +130,17 @@ enum Cmd {
         #[arg(long)]
         deposit_hash: String,
     },
-    /// Fetch execution header RLPs and call `submitAncestry`.
+    /// Fetch the execution header RLPs between two proven anchors and call
+    /// `submitAncestry`. `--checkpoint-hash` is the newer anchor,
+    /// `--older-anchor-hash` the older one; both must already be proven.
     SubmitAncestry {
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: String,
         #[arg(long)]
         checkpoint_hash: String,
-        #[arg(long, default_value_t = 32)]
+        #[arg(long)]
+        older_anchor_hash: String,
+        #[arg(long, default_value_t = 33)]
         max_headers: usize,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
@@ -198,13 +202,14 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         no_flip_owner: bool,
         /// Execution JSON-RPC. When set, each accepted `submitUpdate` fetches
-        /// the epoch parent chain and runs `link_headers` locally. Does **not**
-        /// call `submitAncestry` unless `--submit-ancestry` is also set.
+        /// the span between the previous checkpoint and the new one and runs
+        /// `link_headers` locally. Does **not** call `submitAncestry` unless
+        /// `--submit-ancestry` is also set.
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: Option<String>,
-        /// Send `submitAncestry` after each checkpoint. Default **off**: two
-        /// headers already cost ~130 M gas against the 10 M limit, so the call
-        /// cannot succeed until a keccak-256 builtin lands. Needs
+        /// Send `submitAncestry` after each checkpoint. Default **off**. The
+        /// span needs a proven anchor at both ends, so nothing is sent for the
+        /// first checkpoint after a start, or across a skipped epoch. Needs
         /// `--eth-rpc-url`.
         #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
         submit_ancestry: bool,
@@ -338,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::SubmitAncestry {
             eth_rpc_url,
             checkpoint_hash,
+            older_anchor_hash,
             max_headers,
             an_graphql_url,
             an_keys_path,
@@ -348,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
             submit_ancestry_cmd(
                 eth_rpc_url,
                 checkpoint_hash,
+                older_anchor_hash,
                 max_headers,
                 an_graphql_url,
                 an_keys_path,
@@ -730,11 +737,22 @@ async fn submit_rotate(
     Ok(())
 }
 
+fn parse_anchor_pair(newer_hex: &str, older_hex: &str) -> anyhow::Result<([u8; 32], [u8; 32])> {
+    let newer: [u8; 32] = hex::decode(newer_hex.trim_start_matches("0x"))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    let older: [u8; 32] = hex::decode(older_hex.trim_start_matches("0x"))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--older-anchor-hash must be 32 bytes"))?;
+    Ok((newer, older))
+}
+
 #[cfg(not(feature = "live-submit"))]
 #[allow(clippy::too_many_arguments)]
 async fn submit_ancestry_cmd(
     eth_rpc_url: String,
     checkpoint_hash: String,
+    older_anchor_hash: String,
     max_headers: usize,
     _an_graphql_url: String,
     _an_keys_path: String,
@@ -742,16 +760,13 @@ async fn submit_ancestry_cmd(
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
-    let raw = hex::decode(checkpoint_hash.trim_start_matches("0x"))?;
-    let checkpoint: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    let (checkpoint, older) = parse_anchor_pair(&checkpoint_hash, &older_anchor_hash)?;
     let headers = EthExecutionRpc::new(eth_rpc_url)?
-        .ancestry_headers(checkpoint, max_headers)
+        .ancestry_span(checkpoint, older, max_headers)
         .await?;
     info!(
         n = headers.len(),
-        "fetched ancestry headers (rebuild with --features live-submit to submit)"
+        "fetched ancestry span (rebuild with --features live-submit to submit)"
     );
     let _ = headers;
     Err(live_submit_needs_feature())
@@ -762,6 +777,7 @@ async fn submit_ancestry_cmd(
 async fn submit_ancestry_cmd(
     eth_rpc_url: String,
     checkpoint_hash: String,
+    older_anchor_hash: String,
     max_headers: usize,
     an_graphql_url: String,
     an_keys_path: String,
@@ -769,16 +785,9 @@ async fn submit_ancestry_cmd(
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
-    let raw = hex::decode(checkpoint_hash.trim_start_matches("0x"))?;
-    let checkpoint: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
-    tracing::warn!(
-        "submit-ancestry is explicit, but on Acki Nacki today two headers cost ~130 M gas against \
-         a 10 M limit; this call will OOG until a keccak-256 builtin lands"
-    );
+    let (checkpoint, older) = parse_anchor_pair(&checkpoint_hash, &older_anchor_hash)?;
     let headers = EthExecutionRpc::new(eth_rpc_url)?
-        .ancestry_headers(checkpoint, max_headers)
+        .ancestry_span(checkpoint, older, max_headers)
         .await?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
     let abi =
@@ -1025,7 +1034,7 @@ where
                 info!(
                     %url,
                     "ETH_RPC_URL set with --submit-ancestry: daemon will send submitAncestry \
-                     after each checkpoint (will OOG on Acki Nacki until a keccak builtin)"
+                     for the span between consecutive checkpoints"
                 );
             } else {
                 info!(

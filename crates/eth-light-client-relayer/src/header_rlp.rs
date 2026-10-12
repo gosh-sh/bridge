@@ -151,24 +151,45 @@ pub fn dummy_linked_headers() -> (Vec<u8>, Vec<u8>) {
     (child, parent)
 }
 
-/// Walk `checkpoint` toward genesis, at most `max` headers (checkpoint first).
-pub fn link_headers(rlps: &[Vec<u8>]) -> Result<[u8; 32], RelayerError> {
-    if rlps.len() < 2 {
-        return Err(RelayerError::other("need checkpoint + ≥1 parent"));
+/// `n` minimal linked header RLPs, oldest first — the order `submitAncestry`
+/// takes. Not real Ethereum headers.
+pub fn dummy_linked_chain(n: usize) -> Vec<Vec<u8>> {
+    let mut root = vec![0xf8, 33, 0xa0];
+    root.extend(std::iter::repeat_n(0x01, 32));
+    let mut out = vec![root];
+    for _ in 1..n {
+        let prev = keccak256(out.last().expect("non-empty"));
+        let mut next = vec![0xf8, 33, 0xa0];
+        next.extend_from_slice(&prev);
+        out.push(next);
     }
-    if rlps.len() > 32 {
-        return Err(RelayerError::other("ancestry longer than one epoch"));
+    out
+}
+
+/// Check an ancestry payload in the shape `submitAncestry` takes: oldest
+/// first, 3 to 33 headers, each one naming its predecessor as parent. Returns
+/// the two end hashes, both of which the contract requires to be proven
+/// anchors — `(older, newer)`.
+pub fn link_headers(rlps: &[Vec<u8>]) -> Result<([u8; 32], [u8; 32]), RelayerError> {
+    if rlps.len() < 3 {
+        return Err(RelayerError::other(
+            "need two anchors + ≥1 block between them",
+        ));
     }
-    let checkpoint = keccak256(&rlps[0]);
-    let mut want = rlp_parent_hash(&rlps[0])?;
+    if rlps.len() > 33 {
+        return Err(RelayerError::other(
+            "ancestry longer than two anchors + one epoch",
+        ));
+    }
+    let older = keccak256(&rlps[0]);
+    let mut prev = older;
     for rlp in &rlps[1..] {
-        let h = keccak256(rlp);
-        if h != want {
+        if rlp_parent_hash(rlp)? != prev {
             return Err(RelayerError::other("parent_hash break in header RLP chain"));
         }
-        want = rlp_parent_hash(rlp)?;
+        prev = keccak256(rlp);
     }
-    Ok(checkpoint)
+    Ok((older, prev))
 }
 
 #[cfg(test)]
@@ -202,20 +223,29 @@ mod tests {
     }
 
     #[test]
-    fn linked_headers_roundtrip() {
-        let parent_of_a = [0x22; 32];
-        let mut a_body = vec![0xa0];
-        a_body.extend_from_slice(&parent_of_a);
-        // not a real header — link_headers uses keccak of whole RLP, so craft
-        // two lists where keccak(child) is planted as parent of parent list.
-        // Use real keccak chain: header P then header C with parentHash = keccak(P).
-        let mut p = vec![0xf8, 33, 0xa0];
-        p.extend(std::iter::repeat_n(0x01, 32));
-        let p_hash = keccak256(&p);
-        let mut c = vec![0xf8, 33, 0xa0];
-        c.extend_from_slice(&p_hash);
-        let ckpt = link_headers(&[c.clone(), p.clone()]).unwrap();
-        assert_eq!(ckpt, keccak256(&c));
+    fn link_headers_accepts_oldest_first_span() {
+        let chain = dummy_linked_chain(3);
+        let (older, newer) = link_headers(&chain).unwrap();
+        assert_eq!(older, keccak256(&chain[0]));
+        assert_eq!(newer, keccak256(&chain[2]));
+    }
+
+    #[test]
+    fn link_headers_refuses_newest_first_span() {
+        let mut chain = dummy_linked_chain(3);
+        chain.reverse();
+        assert!(link_headers(&chain).is_err());
+    }
+
+    #[test]
+    fn link_headers_refuses_a_span_without_room_between_the_anchors() {
+        assert!(link_headers(&dummy_linked_chain(2)).is_err());
+    }
+
+    #[test]
+    fn link_headers_refuses_more_than_two_anchors_and_an_epoch() {
+        assert!(link_headers(&dummy_linked_chain(34)).is_err());
+        assert!(link_headers(&dummy_linked_chain(33)).is_ok());
     }
 
     #[test]

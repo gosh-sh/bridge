@@ -49,19 +49,40 @@ assigns it when the release is tagged.
 - **`EthBeaconLightClient` hashes execution headers with the TVM `KECCAK256`
   instruction instead of the `EthKeccak` software implementation, and
   `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
-  64.68M gas before and costs 4,722 now; a 32-header epoch walk measures
-  469,816 gas against the 10M per-transaction limit, where it used to
-  extrapolate to ~2.07G. On-chain epoch ancestry therefore works, and a
-  deposit in a non-checkpoint block no longer needs `setAcceptedBlockHash`
-  from the owner key.
+  64.68M gas before and costs 4,722 now. Measured on a locally built node
+  against the 10M per-transaction limit: 703,479 gas for a 5-header span and
+  1,930,730 for a full 33-header span, where the old software walk
+  extrapolated to ~2.07G. On-chain ancestry therefore works: a deposit in a
+  non-checkpoint block is covered without the owner key **as long as it sits
+  between two proven anchors no more than one span apart**. A checkpoint the
+  relayer skipped cannot be registered afterwards, because the head only moves
+  forward, so blocks in a gap wider than one span still need
+  `setAcceptedBlockHash` from the owner — and after `disableOwnerAnchors`
+  nothing can admit them. Keep the relayer from missing epochs.
 
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
-  tvmlabs/tvm-sdk `05ff0848`) and a `sold` built against that SDK; against an
+  tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…` → `e68f2381…`, so the bridge has to be given the
-  new code with `setLightClientCode` and the client redeployed; its ABI is
-  unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP reader, which
-  is now what the walk spends most of its gas on.
+  code hash moves `314ac6b8…` → `e68f2381…`. On a live network the owner
+  upgrades the deployed client in place with `updateCode`, which keeps its
+  address, head, committee and proven set; `setLightClientCode` on the bridge
+  only refreshes the code a *future* `deployLightClient` would use, and
+  redeploying would start the client empty and have to bootstrap it again. The
+  ABI is unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP
+  reader, which is now what the walk spends most of its gas on.
+
+- **The relayer builds ancestry payloads in the new shape, and the
+  `submit-ancestry` one-shot needs the older anchor.** `ancestry_headers`
+  (checkpoint first, then parents, ≤32) is replaced by `ancestry_span(newer,
+  older, max)`, which returns the span oldest first, 3 to 33 headers, and
+  fails rather than truncating when the older anchor is further back than
+  `max`. `link_headers` checks that order and returns both end hashes. The
+  daemon sends a span only between two consecutive checkpoints, so it sends
+  nothing for the first checkpoint after a start and nothing across a skipped
+  epoch. `eth-lc-relayer submit-ancestry` takes a new required
+  `--older-anchor-hash` next to `--checkpoint-hash` (the newer anchor), and
+  `--max-headers` now defaults to 33. Without this, every `submitAncestry` the
+  old relayer sent would revert with `ERR_BAD_ANCESTRY`.
 
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
@@ -1171,7 +1192,7 @@ assigns it when the release is tagged.
   byte-identical to this file modulo its pragma, so `EthKeccak_sold_fixes.patch`
   carries the same change there — it applies cleanly to the head of
   gosh-sh/acki-nacki#2618 and moves the light client's code hash from
-  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry still cannot run: see Known
+  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry's residual limit: see Known
   issues.
 
 - `submitAncestry` and `rePushAnchor` were rejected by the light client
@@ -1240,24 +1261,23 @@ assigns it when the release is tagged.
 
 ### Known issues
 
-- **Epoch ancestry cannot run on Acki Nacki**, so the light client anchors only
-  the epoch checkpoint — 1 execution block of 32 — and a deposit in any other
-  block still needs the owner's `setAcceptedBlockHash`. Gas is now the only
-  reason: with the `sold` defects fixed (see below) `EthKeccak` computes the
-  right hashes, but it is software keccak — one permutation is 12.93M gas and
-  the real 642-byte Sepolia header of block 11683168 is 64.68M, against a 10M
-  per-transaction limit (p20/p21). Hashing the empty string is already over the
-  limit, so no input size makes `submitAncestry` callable, and a 32-header walk
-  is ~2e9 gas. Closing this needs a keccak-256 builtin in the node, the way
-  `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
-  Defects found on shellnet 2026-09-11; gas re-measured offline in
-  tvm-debugger 3.0.6 on 2026-09-13; a full 32-header walk measured on a real
-  VM (tvm-debugger from `v3.0.6.an` and tvm-sdk#284) 2026-09-14: 2 headers
-  129.7 M, slope 64.65 M/header, 32 headers OOG at 1e9, ≈2.07 G extrapolated
-  against 10 M `gas_limit`. The daemon therefore does **not** send
-  `submitAncestry` unless `--submit-ancestry` is set; `ETH_RPC_URL` still
-  fetches the epoch and runs `link_headers` locally. `submitUpdate`,
-  `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
+- **A gap wider than one ancestry span can only be covered by the owner key.**
+  Gas is no longer the obstacle — the `KECCAK256` instruction brought a full
+  33-header span to 1,930,730 gas against the 10M per-transaction limit (see
+  Breaking Changes) — but the shape of the two anchoring paths leaves one hole.
+  `submitUpdate` only moves the head forward, so a checkpoint the relayer did
+  not prove at the time can never be registered later, and `submitAncestry`
+  reaches at most 32 blocks between two already-proven anchors. Whenever the
+  daemon is down, slower than an epoch, or stuck on a rotate, consecutive
+  anchors end up further apart than one span, and deposits in those blocks
+  need the owner's `setAcceptedBlockHash`; after `disableOwnerAnchors` nothing
+  can admit them. Treat an uninterrupted relayer as an operational
+  requirement. `submitUpdate`, `submitRotate` and `rePushAnchor` are
+  unaffected; so are withdrawals. The earlier software-keccak measurements
+  that made ancestry impossible outright (one permutation 12.93M gas, a real
+  642-byte Sepolia header 64.68M, a 32-header walk ≈2.07G) are kept here for
+  the record: shellnet 2026-09-11, re-measured in tvm-debugger 3.0.6 on
+  2026-09-13 and on a real VM 2026-09-14.
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
   message to `addr_none` when no `USDCBridge` was configured: the unset

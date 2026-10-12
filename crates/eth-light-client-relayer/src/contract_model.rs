@@ -172,31 +172,43 @@ impl LightClient {
     }
 
     pub fn submit_ancestry(&mut self, header_rlps: &[Vec<u8>]) -> Result<u64, LcError> {
-        if header_rlps.len() < 2 {
+        if header_rlps.len() < 3 {
             return Err(LcError::BadAncestry);
         }
-        if header_rlps.len() > 32 {
+        if header_rlps.len() > 33 {
             return Err(LcError::AncestryTooLong);
         }
-        let checkpoint = pi_form(&keccak256(&header_rlps[0]));
-        if !self.is_live(&checkpoint) {
+        let last = header_rlps.len() - 1;
+        let mut prev = keccak256(&header_rlps[0]);
+        let anchor = pi_form(&prev);
+        if !self.is_live(&anchor) {
             return Err(LcError::UnknownCheckpoint);
         }
-        let ckpt_slot = *self.proven.get(&checkpoint).expect("live");
-        self.evict_expired();
-        let mut want = rlp_parent_hash(&header_rlps[0]).map_err(|_| LcError::BadAncestry)?;
-        let mut added = 0u64;
-        for rlp in &header_rlps[1..] {
-            let h = keccak256(rlp);
-            if h != want {
+        let anchor_slot = *self.proven.get(&anchor).expect("live");
+        // The contract reverts, undoing every write, so nothing may be stored
+        // before the whole payload has passed. Walk once to check, then write.
+        let mut between = Vec::new();
+        for (i, rlp) in header_rlps.iter().enumerate().skip(1) {
+            if rlp_parent_hash(rlp).map_err(|_| LcError::BadAncestry)? != prev {
                 return Err(LcError::BadAncestry);
             }
-            let key = pi_form(&h);
+            prev = keccak256(rlp);
+            let key = pi_form(&prev);
+            if i == last {
+                if !self.is_live(&key) {
+                    return Err(LcError::UnknownCheckpoint);
+                }
+            } else if !self.is_live(&key) {
+                between.push(key);
+            }
+        }
+        self.evict_expired();
+        let mut added = 0u64;
+        for key in between {
             if !self.is_live(&key) {
-                self.push_exec(key, ckpt_slot);
+                self.push_exec(key, anchor_slot);
                 added += 1;
             }
-            want = rlp_parent_hash(rlp).map_err(|_| LcError::BadAncestry)?;
         }
         Ok(added)
     }
@@ -269,7 +281,7 @@ pub enum UpdateKind {
 mod tests {
     use super::*;
     use crate::{
-        header_rlp::{dummy_linked_headers, keccak256},
+        header_rlp::{dummy_linked_chain, keccak256},
         submitter::anchor_key_hex,
     };
 
@@ -426,29 +438,57 @@ mod tests {
         );
     }
 
+    /// Both ends anchored: the blocks between them are admitted, the anchors
+    /// themselves are not re-added.
+    fn anchored_span(c: &mut LightClient, n: usize) -> Vec<Vec<u8>> {
+        let chain = dummy_linked_chain(n);
+        let older = pi_form(&keccak256(&chain[0]));
+        let newer = pi_form(&keccak256(&chain[n - 1]));
+        c.submit_update(32, older, [0xC0; 32]).unwrap();
+        c.submit_update(64, newer, [0xC0; 32]).unwrap();
+        chain
+    }
+
     #[test]
-    fn ancestry_walks_parents_into_proven_set() {
+    fn ancestry_fills_between_two_anchors() {
         let mut c = lc();
-        let (child, parent) = dummy_linked_headers();
-        let ckpt = pi_form(&keccak256(&child));
-        c.submit_update(32, ckpt, [0xC0; 32]).unwrap();
-        let added = c.submit_ancestry(&[child, parent.clone()]).unwrap();
-        assert_eq!(added, 1);
-        assert!(c.is_live(&pi_form(&keccak256(&parent))));
-        assert_eq!(c.sink_notifies.last(), Some(&keccak256(&parent)));
+        let chain = anchored_span(&mut c, 4);
+        let added = c.submit_ancestry(&chain).unwrap();
+        assert_eq!(added, 2);
+        assert!(c.is_live(&pi_form(&keccak256(&chain[1]))));
+        assert!(c.is_live(&pi_form(&keccak256(&chain[2]))));
+    }
+
+    #[test]
+    fn ancestry_newest_first_is_refused() {
+        let mut c = lc();
+        let mut chain = anchored_span(&mut c, 4);
+        chain.reverse();
+        assert_eq!(c.submit_ancestry(&chain).unwrap_err(), LcError::BadAncestry);
+    }
+
+    #[test]
+    fn ancestry_far_end_must_be_an_anchor() {
+        let mut c = lc();
+        let chain = dummy_linked_chain(4);
+        c.submit_update(32, pi_form(&keccak256(&chain[0])), [0xC0; 32])
+            .unwrap();
+        assert_eq!(
+            c.submit_ancestry(&chain).unwrap_err(),
+            LcError::UnknownCheckpoint
+        );
+        assert!(!c.is_live(&pi_form(&keccak256(&chain[1]))));
+        assert!(!c.is_live(&pi_form(&keccak256(&chain[2]))));
     }
 
     #[test]
     fn ancestry_re_walk_adds_and_notifies_nothing() {
         let mut c = lc();
-        let (child, parent) = dummy_linked_headers();
-        c.submit_update(32, pi_form(&keccak256(&child)), [0xC0; 32])
-            .unwrap();
-        let walk = [child, parent];
-        assert_eq!(c.submit_ancestry(&walk).unwrap(), 1);
+        let chain = anchored_span(&mut c, 4);
+        assert_eq!(c.submit_ancestry(&chain).unwrap(), 2);
         let notified = c.sink_notifies.len();
         let queued = c.queue.len();
-        assert_eq!(c.submit_ancestry(&walk).unwrap(), 0);
+        assert_eq!(c.submit_ancestry(&chain).unwrap(), 0);
         assert_eq!(c.sink_notifies.len(), notified);
         assert_eq!(c.queue.len(), queued);
     }
@@ -456,9 +496,8 @@ mod tests {
     #[test]
     fn ancestry_unknown_checkpoint() {
         let mut c = lc();
-        let (child, parent) = dummy_linked_headers();
         assert_eq!(
-            c.submit_ancestry(&[child, parent]).unwrap_err(),
+            c.submit_ancestry(&dummy_linked_chain(3)).unwrap_err(),
             LcError::UnknownCheckpoint
         );
     }
@@ -467,7 +506,11 @@ mod tests {
     fn ancestry_too_short_or_too_long() {
         let mut c = lc();
         assert_eq!(c.submit_ancestry(&[]).unwrap_err(), LcError::BadAncestry);
-        let too_long = vec![vec![0u8; 3]; 33];
+        assert_eq!(
+            c.submit_ancestry(&dummy_linked_chain(2)).unwrap_err(),
+            LcError::BadAncestry
+        );
+        let too_long = vec![vec![0u8; 3]; 34];
         assert_eq!(
             c.submit_ancestry(&too_long).unwrap_err(),
             LcError::AncestryTooLong
@@ -519,13 +562,11 @@ mod tests {
     #[test]
     fn ancestry_expired_checkpoint_unknown() {
         let mut c = lc();
-        let (child, parent) = dummy_linked_headers();
-        let ckpt = pi_form(&keccak256(&child));
-        c.submit_update(32, ckpt, [0xC0; 32]).unwrap();
-        c.submit_update(32 + SLOTS_PER_YEAR + 1, [0xEE; 32], [0xC0; 32])
+        let chain = anchored_span(&mut c, 4);
+        c.submit_update(64 + SLOTS_PER_YEAR + 1, [0xEE; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(
-            c.submit_ancestry(&[child, parent]).unwrap_err(),
+            c.submit_ancestry(&chain).unwrap_err(),
             LcError::UnknownCheckpoint
         );
     }

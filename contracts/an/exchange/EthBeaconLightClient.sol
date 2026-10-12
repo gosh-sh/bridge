@@ -37,9 +37,13 @@ import "./eccUSDCBridge.sol";
 ///             `disableOwnerRotation`, the owner hatch is `reAnchorCommittee`.
 ///
 ///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
-///         hash (1/32). `submitAncestry` walks that block's execution parent-hash
-///         chain (keccak256(header RLP) + RLP `parentHash`, ≤ 31 parents) and
-///         pushes those hashes into the same `_acceptedBlockHash` sink.
+///         hash (1/32), and only ever forward. `submitAncestry` fills the span
+///         between two already-proven anchors: headers oldest first, 3 to 33 of
+///         them (two anchors and up to the 31 blocks of an epoch), each hashed
+///         with `gosh.keccak256` and linked by RLP `parentHash`. The blocks
+///         between the anchors go into the same `_acceptedBlockHash` sink. A
+///         gap wider than one span — a checkpoint the relayer skipped — cannot
+///         be filled this way and needs the owner's `setAcceptedBlockHash`.
 ///         Proven hashes expire after `SLOTS_PER_YEAR` (365d of 12s slots) behind
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.

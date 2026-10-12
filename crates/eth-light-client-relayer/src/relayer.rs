@@ -36,11 +36,11 @@ pub struct RelayerConfig {
     /// contract refuses it after `disableOwnerRotation`. Default **false**.
     pub owner_hop: bool,
     /// Call `submitAncestry` after each accepted checkpoint. Default
-    /// **false**. Two headers already cost ~130 M gas against the 10 M
-    /// per-transaction limit, so the call cannot succeed until a keccak-256
-    /// builtin lands; leaving this on burned ~0.7 vmshell every epoch past
-    /// `tvm.accept()`. `ETH_RPC_URL` still attaches an execution source so
-    /// the daemon can run `link_headers` locally without sending the tx.
+    /// **false**. The call needs a proven anchor at both ends of the span, so
+    /// it sends nothing for the first checkpoint after a start and nothing
+    /// across a skipped epoch. `ETH_RPC_URL` still attaches an execution
+    /// source so the daemon can run `link_headers` locally without sending
+    /// the tx.
     pub submit_ancestry: bool,
 }
 
@@ -288,6 +288,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         update: FinalityUpdate,
         bundle: crate::types::StepProofBundle,
     ) -> Result<TickOutcome, RelayerError> {
+        let prev_anchor = self.state.last_execution_block_hash;
         match self.submitter.submit_update(&bundle).await? {
             SubmitOutcome::Accepted {
                 tx_hash,
@@ -301,7 +302,8 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 self.persist()?;
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
                 self.maybe_flip_owner().await?;
-                self.maybe_cover_epoch(update.execution_block_hash).await;
+                self.maybe_cover_epoch(prev_anchor, update.execution_block_hash)
+                    .await;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
                     tx_hash,
@@ -369,11 +371,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     /// After a proven checkpoint: re-push the hash to USDCBridge (the first
     /// push often bounced because the light client was not yet the sink
-    /// writer), then
-    /// optionally walk the epoch parent chain when an execution RPC is
-    /// configured. On-chain `submitAncestry` is a separate flag — the call
-    /// cannot succeed on Acki Nacki today (see `submit_ancestry`).
-    async fn maybe_cover_epoch(&mut self, checkpoint: [u8; 32]) {
+    /// writer), then, when an execution RPC is configured, fetch the span
+    /// between the previous anchor and this one and optionally send it on
+    /// chain. `submitAncestry` needs a proven anchor at both ends, so the span
+    /// only exists when the previous checkpoint is known and no more than one
+    /// epoch back; a skipped epoch leaves a gap no span can bridge.
+    async fn maybe_cover_epoch(&mut self, prev_anchor: Option<[u8; 32]>, checkpoint: [u8; 32]) {
         match self.submitter.re_push_anchor(checkpoint).await {
             Ok(SubmitOutcome::Accepted {
                 ..
@@ -393,17 +396,20 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let Some(rpc) = &self.execution else {
             return;
         };
-        let headers = match rpc.ancestry_headers(checkpoint, 32).await {
+        let Some(older) = prev_anchor else {
+            info!("no previous anchor on record; epoch ancestry needs one at each end");
+            return;
+        };
+        if older == checkpoint {
+            return;
+        }
+        let headers = match rpc.ancestry_span(checkpoint, older, 33).await {
             Ok(h) => h,
             Err(e) => {
                 warn!(error = %e, "epoch ancestry fetch failed");
                 return;
             },
         };
-        if headers.len() < 2 {
-            warn!(n = headers.len(), "epoch ancestry shorter than 2 headers");
-            return;
-        }
         if let Err(e) = crate::header_rlp::link_headers(&headers) {
             warn!(error = %e, "epoch ancestry failed local link_headers");
             return;
@@ -412,7 +418,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             info!(
                 n = headers.len(),
                 "epoch ancestry linked locally; on-chain submitAncestry skipped \
-                 (--submit-ancestry, default off: two headers already exceed the 10 M gas limit)"
+                 (--submit-ancestry, default off)"
             );
             return;
         }
@@ -579,7 +585,8 @@ mod tests {
             TickOutcome::SubmittedUpdate { .. }
         ));
         assert_eq!(r.state().last_committee_period, Some(0));
-        // Period jump: committee advanced by the owner, then the same bundle lands.
+        // Period jump: committee advanced by the owner, then the same bundle
+        // lands.
         let out = r.tick().await.unwrap();
         assert!(
             matches!(out, TickOutcome::SubmittedUpdate { finalized_slot, .. } if finalized_slot == p + 8),
@@ -939,61 +946,64 @@ mod tests {
         assert_eq!(mock.ancestry_count(), 0);
     }
 
-    #[tokio::test]
-    async fn execution_source_walks_ancestry_after_checkpoint() {
-        let (child, parent) = crate::header_rlp::dummy_linked_headers();
-        let ckpt = crate::header_rlp::keccak256(&child);
-        let parent_hash = crate::header_rlp::keccak256(&parent);
+    /// Two checkpoints one span apart, with the span's headers on the
+    /// execution source. `submit_ancestry` decides whether the span is sent.
+    fn span_relayer(
+        submit_ancestry: bool,
+    ) -> (
+        Relayer<InMemoryBeaconSource, MockProofGenerator, MockAnSubmitter>,
+        Arc<MockAnSubmitter>,
+        Vec<Vec<u8>>,
+    ) {
+        let chain = crate::header_rlp::dummy_linked_chain(4);
+        let older = crate::header_rlp::keccak256(&chain[0]);
+        let newer = crate::header_rlp::keccak256(&chain[3]);
         let dir = Box::leak(Box::new(tempdir().unwrap()));
         let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
         cfg.poll_interval = Duration::from_millis(1);
         cfg.enable_rotate = false;
-        cfg.submit_ancestry = true;
+        cfg.submit_ancestry = submit_ancestry;
         let mock = Arc::new(MockAnSubmitter::accepting());
-        let mut r = Relayer::new(
+        let r = Relayer::new(
             cfg,
-            Arc::new(InMemoryBeaconSource::new(vec![update_with_exec(
-                100, 96, ckpt,
-            )])),
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update_with_exec(100, 96, older),
+                update_with_exec(132, 128, newer),
+            ])),
             Arc::new(MockProofGenerator::new()),
             mock.clone(),
         )
         .unwrap()
         .with_execution(Arc::new(crate::source::InMemoryExecution::single(
-            ckpt,
-            vec![child, parent],
+            newer,
+            chain.clone(),
         )));
+        (r, mock, chain)
+    }
+
+    #[tokio::test]
+    async fn execution_source_sends_the_span_between_two_checkpoints() {
+        let (mut r, mock, chain) = span_relayer(true);
         r.tick().await.unwrap();
-        assert_eq!(mock.re_push_count(), 1);
+        assert_eq!(
+            mock.ancestry_count(),
+            0,
+            "first checkpoint has no older anchor yet"
+        );
+        r.tick().await.unwrap();
+        assert_eq!(mock.re_push_count(), 2);
         assert_eq!(mock.ancestry_count(), 1);
-        assert!(mock.is_proven(&ckpt));
-        assert!(mock.is_proven(&parent_hash));
+        assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
+        assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[2])));
     }
 
     #[tokio::test]
     async fn execution_rpc_without_submit_flag_skips_on_chain_ancestry() {
-        let (child, parent) = crate::header_rlp::dummy_linked_headers();
-        let ckpt = crate::header_rlp::keccak256(&child);
-        let dir = Box::leak(Box::new(tempdir().unwrap()));
-        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
-        cfg.poll_interval = Duration::from_millis(1);
-        cfg.enable_rotate = false;
-        let mock = Arc::new(MockAnSubmitter::accepting());
-        let mut r = Relayer::new(
-            cfg,
-            Arc::new(InMemoryBeaconSource::new(vec![update_with_exec(
-                100, 96, ckpt,
-            )])),
-            Arc::new(MockProofGenerator::new()),
-            mock.clone(),
-        )
-        .unwrap()
-        .with_execution(Arc::new(crate::source::InMemoryExecution::single(
-            ckpt,
-            vec![child, parent],
-        )));
+        let (mut r, mock, chain) = span_relayer(false);
         r.tick().await.unwrap();
-        assert_eq!(mock.re_push_count(), 1);
+        r.tick().await.unwrap();
+        assert_eq!(mock.re_push_count(), 2);
         assert_eq!(mock.ancestry_count(), 0);
+        assert!(!mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
     }
 }

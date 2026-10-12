@@ -191,23 +191,30 @@ flowchart TD
 A step proves one execution block per epoch, the checkpoint. The contract records it in its own
 `_provenEthSlot` map (hash → Ethereum slot) and pushes it into `USDCBridge` through an internal message
 (`_pushExecHash`, `_notifySink`). A hash older than one year behind head is not live. Deposits in the other 31
-blocks of the epoch are *meant* to be covered by **ancestry**: the daemon fetches the epoch's execution
-headers over JSON-RPC, and `submitAncestry(headerRlps)` (`EthBeaconLightClient.sol:369`)
-keccak-hashes each RLP header in the VM and walks `parentHash` from the proven checkpoint
-backwards, pushing every hash on the way. With `ETH_RPC_URL` set the daemon fetches this after
-every accepted update and runs `link_headers` locally (`src/relayer.rs`). On-chain
-`submitAncestry` is `--submit-ancestry` (default off).
+blocks of the epoch are covered by **ancestry**: the daemon fetches those execution headers over
+JSON-RPC, and `submitAncestry(headerRlps)` hashes each RLP header with the `gosh.keccak256`
+builtin and links them by RLP `parentHash`. The payload is the span between two anchors, oldest
+first, 3 to 33 headers: `headerRlps[0]` and the last header must each already be proven, and only
+the blocks between them are pushed. With `ETH_RPC_URL` set the daemon fetches the span back to the
+previous checkpoint after every accepted update and runs `link_headers` locally
+(`src/relayer.rs`). On-chain `submitAncestry` is `--submit-ancestry` (default off).
 
-**Ancestry does not work on Acki Nacki today, and not for a reason a patch fixes.** `EthKeccak`
-now computes correctly (three `sold` defects fixed — see CHANGELOG), but it is software keccak;
-one permutation measured **12.93M gas** against the **10M** per-transaction limit (p20/p21), so
-a single header already blows the budget. Measured on a real VM 2026-09-14: 2 headers
-**129.7 M**, slope 64.65 M/header, a 32-header walk OOG at 1e9 (≈2.07 G extrapolated). The
-daemon therefore does not send the call unless `--submit-ancestry` is set. Closing this needs a
-keccak-256 builtin in the node, the way `ZKHALO2VERIFYWITHVK` was added, or the parent chain
-proven in-circuit. Until then **only checkpoint blocks are usable for deposits**, 1 of 32, and a
-deposit in any other block needs the owner's `setAcceptedBlockHash`. First defects found on
-shellnet 2026-09-11 ([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
+**Ancestry now fits the gas limit.** The software `EthKeccak.hash` is gone; one 642-byte Sepolia
+header cost **64.68 M** gas through it and costs **4,722** through the `KECCAK256` instruction
+(opcode `0xC7 0x4B`). Measured on a locally built node: **703,479** gas for a 5-header span and
+**1,930,730** for a full 33-header span, against the **10 M** per-transaction limit (p20/p21).
+This needs a node whose VM carries the instruction and a `sold` built against that SDK; against
+an older node the light client throws on an unknown opcode. `EthKeccak.sol` keeps only
+`rlpParentHash`, which is now where most of the gas goes.
+
+**What ancestry still cannot cover.** `submitUpdate` only moves the head forward, so a checkpoint
+the relayer skipped can never be registered afterwards, and a span reaches at most 32 blocks
+between its anchors. If the daemon is down, slow, or stuck on a rotate for longer than an epoch,
+consecutive anchors end up further apart than one span and the blocks in that gap have no
+trustless path: those deposits need the owner's `setAcceptedBlockHash`, and after
+`disableOwnerAnchors` nothing can admit them. Keeping the daemon from missing epochs is therefore
+an operational requirement, not a nicety. First `EthKeccak` defects found on shellnet 2026-09-11
+([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
 
 `rePushAnchor` (`EthBeaconLightClient.sol:404`) re-sends an already proven hash to the bridge.
 The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) emits
@@ -260,8 +267,8 @@ anything. After the flip nothing but a valid proof adds a block hash. There is n
 only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on chain.
 
 **Do not flip yet.** After `disableOwnerAnchors` the light client is the only writer of
-`_acceptedBlockHash`, and today it writes one block per epoch of one chain: the checkpoint of its
-`l1ChainId`. Ancestry does not fit the gas limit (§3.4), and the light client proves no L2.
+`_acceptedBlockHash`, and the blocks it can write are the checkpoint of its `l1ChainId` plus the
+spans ancestry fills between consecutive checkpoints (§3.4) — not a skipped epoch, and no L2.
 `_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
 the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
 chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
@@ -355,7 +362,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `AN_LIGHT_CLIENT`, `AN_SENDER` | light client address as `dapp_id::account_id` (self-rooted deploy: both halves equal) | | |
 | `AN_USDC_BRIDGE`, `AN_USDC_ABI_PATH` | `USDCBridge` address and slim ABI | set | empty |
 | `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
-| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain (will OOG until keccak builtin) | unset | unset |
+| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain for the span between consecutive checkpoints | unset | unset |
 | daemon flags | | none (rotate on, flip off; `--flip-owner` only once §3.5 no longer applies) | `--no-rotate --no-flip-owner --owner-hop` |
 
 ### 4.5 Procedure

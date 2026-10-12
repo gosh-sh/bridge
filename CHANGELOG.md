@@ -101,6 +101,109 @@ assigns it when the release is tagged.
   `--max-headers` now defaults to 33. Without this, every `submitAncestry` the
   old relayer sent would revert with `ERR_BAD_ANCESTRY`.
 
+- **The deposit-prover verification key is rotated, and the rotation
+  closes two forgeries.** Under the previous key — and every earlier one
+  built from `main`'s circuit — the circuit did not tie the
+  fields it reads out of the `Deposit` log to the log's bytes, and it
+  did not require the log index to point at one of the receipt's logs:
+  a slot past the receipt's last log (the circuit holds 20) carried
+  whatever bytes the prover put there. Either way a prover holding any
+  real receipt in an accepted block could choose the `depositId`,
+  `sender`, `amount` (below 2^128), AN recipient and bridge address,
+  and `finalizeDeposit` would mint against them. Nothing in the bridge
+  bounded the damage. Deploy the new bridge as soon as possible.
+
+  The enclosing transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
+  calldata up to 2048 bytes. Type 2 access-list payload is up to
+  512 bytes (RLP header excluded); type 1's access list shares a
+  field slot with type 2 calldata, so it may be up to 2048 bytes,
+  but a type 1 transaction's calldata and access list together
+  must fit its ~2805-byte leaf. Each receipt log's payload may be
+  at most 2211 bytes (2048 of data with four topics; more data if
+  there are fewer topics), at most 20 logs. That is what lets a SafeL2
+  `SafeMultiSigTransaction` through, including a two-signer
+  MultiSend of `approve` + `deposit` (~1152 B of log data). The
+  keccak pin is 128 permutations (~17 KB of preimages, header and
+  both MPT paths included): a receipt of up to about 13.5 KB fits,
+  i.e. about six logs at 2048 bytes, fewer with a large type 1
+  transaction. A typical Safe or 4337 receipt fits. Deposits in a
+  transaction of any other type (legacy 0, blob 3, EIP-7702 4, an L2
+  system type) are neither provable nor refundable: send again as
+  type 1 or 2.
+
+  Proofs made for the previous key stop verifying. That includes a
+  `proof.bin` / `public_inputs.bin` that `ackinacki-bridge deposit`
+  left in its work directory (`--resume` reuses it, and the bridge
+  refuses it with 220, exit 33) and any `prove-one` bundle made
+  before the upgrade. Relayers must
+  finish or drain such deposits before the bridge is upgraded, or
+  prove them again after.
+
+  `eccUSDCBridge` embeds the new key and reports `version` 1.6.0;
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with
+  sold 0.80.0. Operators: deploy that tvc. On every relayer host
+  rebuild the `deposit-prover` examples (`cargo build --release
+  --examples`) and do **not** pass `--max-data-byte-len 256` — the
+  default is now 2048 and is part of the key. With a leftover
+  `--max-data-byte-len 256` (or any `--degree`, `--max-log-num`
+  other than 18 and 20) the proofs it makes are rejected by the
+  embedded key, and a deposit that does not fit the smaller shape
+  is refused with a retryable exit 1 naming the flags, never the
+  final exit 3. The relayer prefers `target/release/examples/<name>`
+  when the file exists and does not check it matches the source.
+  A cached `data/*.pk` is not reused: its file name carries a
+  fingerprint of the circuit, and the first proof after the upgrade
+  generates the new ~3.4 GB key and then deletes the old one, so
+  `data/` briefly needs room for both. `ackinacki-bridge deposit`
+  installs get the prover tools from a release (`install.sh`), so
+  they need a new release; its CLI refuses a bridge older than
+  1.6.0, whose key its proofs do not match.
+
+  The prover now refuses a deposit it cannot prove before loading
+  the SRS or the key. `fetch_deposit_data` exits 3 when the
+  enclosing transaction is any type other than 1 or 2 (legacy 0,
+  blob 3, EIP-7702 4, an L2 system type such as OP-stack 0x7e), or
+  its leaf, calldata or
+  access list is over the circuit's cap — that refusal used to be
+  exit 1, which the relayer retried forever. `export_blake2b_proof`
+  and `export_vk_blob` check the log count, every log's topics and
+  data, the receipt and header length, the MPT depths and the
+  keccak budget, and also exit 3 — but only under the key's own
+  shape (the default flags); under other flags they exit 1. `deposit` ends such an operation
+  at exit 35 instead of a resumable 32. `deposit-relayer daemon`
+  skips such a deposit at once, whatever `--skip-after-attempts`
+  says, instead of retrying it forever: the tick is counted as
+  `deposit_relayer_ticks_total{outcome="unprovable"}`, the id goes
+  to a new `state.json` field `unprovable_deposit_ids` (gauge
+  `deposit_relayer_unprovable_deposits`), and the log says only
+  the EVM bridge operator can return its funds. `finalize-one`
+  cannot help these. `parked_deposit_ids` and
+  `deposit_relayer_parked_deposits` keep holding only deposits
+  parked by `--skip-after-attempts`. An existing `state.json` loads
+  unchanged. Deposits parked or given up on under the previous key
+  (the 256-byte log shape) should be re-driven after this deploy:
+  the new key can prove the Safe and 4337 receipts that the old
+  one refused.
+
+  The tvm-sdk opcode fixtures and the acki-nacki copy of
+  `deposit-prover/fixtures/deposit_10proofs` carry the old blob
+  and must be refreshed from this repository's fixtures.
+
+- **`ackinacki-bridge withdraw` needs the `aggregate-proof` of its own
+  release.** Stage 5 passes `aggregate-proof --slot-report`, which an older
+  build refuses, after the burn; preflight now refuses an `aggregate-proof`
+  whose `--help` does not name it, and one it cannot read to hash — with exit 2,
+  or exit 10 on a run that resumes a recorded burn. Upgrade the two together: on
+  an install made by `scripts/install.sh`, download the script again and run it
+  — this one counts an `aggregate-proof` without `--slot-report` as missing and
+  replaces it from the latest release, while an older copy calls it ok; from a
+  checkout, rebuild `aggregate-proof` (`cargo build --release --bin
+  aggregate-proof` in `crates/bridge-evm-aggregator`). Do not rebuild or replace
+  it while a withdrawal is between preflight and its proof — the anchor wait at
+  stage 4b can last up to 120 min, and the wait for the prove lock has no bound:
+  stage 5 refuses with exit 12 an `aggregate-proof` that is not the binary
+  preflight hashed, and the way on is `--allow-retry`, whose preflight checks
+  the new one.
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the
@@ -325,6 +428,13 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
+  neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
+  bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
+  Before, a paused Acki Nacki bridge bounced the burn and the run waited out
+  the capture (exit 11); a paused EVM bridge let the burn through and the run
+  failed in stage 4b or 6. A resume over a recorded burn checks only the EVM
+  side and refuses with exit 10, naming `--allow-retry`.
 - **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
   account.** The wallet signs `approve` and `deposit` from a QR code —
   WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681
@@ -386,9 +496,9 @@ assigns it when the release is tagged.
     unchanged.
   - **Requirements.** `--state-dir` and the prover directory must be on a
     filesystem with `flock`: unlike `withdraw`, `deposit` refuses without it
-    (exit 2). The prover needs ~4.4 GB of RAM and ~1.3 GB of disk, the
-    proving key it writes on its first proof; a proof takes under a minute
-    on a 20-thread host. The RPC must serve every receipt and raw
+    (exit 2). The prover needs ~10 GB of RAM and ~3.4 GB of disk, the
+    proving key it writes on its first proof; a proof takes one to two
+    minutes on a 20-thread host. The RPC must serve every receipt and raw
     transaction of a block, and the `--gql-endpoint` host must serve
     GraphQL and `POST /v2/messages`.
   - **Refusals before any transaction:** Safe and other smart-contract
@@ -448,7 +558,8 @@ assigns it when the release is tagged.
   `BRIDGE_DEPOSIT_CONFIRMATIONS`. Over an installation from before
   deposits, it downloads the bundle again and appends those three keys to
   the existing profile, changing nothing else in it; `--check` reports such
-  a profile as missing them. It now wants ~8 GB free instead of ~6 GB.
+  a profile as missing them. It now wants ~13 GB free instead of ~6 GB
+  (withdrawal keys ~9.5 GB and the deposit proving key ~3.4 GB).
 
 - **`deposit` draws its QR codes as images on terminals that can show them:**
   kitty graphics (kitty, Ghostty, Konsole from 22.04), iTerm2 inline images
@@ -480,7 +591,8 @@ assigns it when the release is tagged.
   calls are no-ops without one. Names are operator API, listed with their
   meaning in `deposit_relayer_daemon::metrics`:
   `deposit_relayer_ticks_total{outcome}` (finalized, already_finalized,
-  not_yet_available, proof_failed, an_rejected, an_pending, skipped, error),
+  not_yet_available, proof_failed, an_rejected, an_pending, skipped,
+  unprovable, error),
   `deposit_relayer_stage_duration_seconds{stage}` (is_finalized, fetch_event,
   prove, submit, tick), `deposit_relayer_prover_stage_duration_seconds{example}`
   and `deposit_relayer_prover_stage_failures_total{example}` per
@@ -494,6 +606,7 @@ assigns it when the release is tagged.
   `deposit_relayer_last_finalized_timestamp_seconds`,
   `deposit_relayer_last_tick_timestamp_seconds`,
   `deposit_relayer_attempts_since_progress`, `deposit_relayer_parked_deposits`,
+  `deposit_relayer_unprovable_deposits`,
   `deposit_relayer_backoff_seconds`, `deposit_relayer_build_info{version}` and
   `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
   counters and the shutdown snapshot are unchanged.
@@ -708,6 +821,31 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
+  the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
+  cold run on the test host, system-wide and sampled every 5 s; the CLI
+  reached 9.5 GB RSS in Circuit 4, and the `aggregate-proof` it waits on
+  12.6 GB while the CLI still held part of its own. They said ~40 GB, which no
+  measurement backed.
+- `ackinacki-bridge withdraw` exit 11 and exit 12 end with the AN burn's hash,
+  the path of the withdrawal's record and the command that carries on (the same
+  command with `--allow-retry`, which skips the burn and resumes at capture).
+  Exit 11 also says when not to: a bounced burn emits no event, and the
+  advanced runbook's Case 3a applies.
+- `ackinacki-bridge withdraw` checks the `WithdrawalInitiated` event it
+  captures against the withdrawal it is running — amount, recipient,
+  destination chain, token (USDC) and sender multisig — before proving it. A
+  mismatch refuses with exit 10 and lists what differs; the record is left as
+  it was. Before, a resume whose record carried another withdrawal's burn hash
+  (written in by hand during reconciliation) proved and paid out that other
+  withdrawal and marked this record confirmed.
+- `ackinacki-bridge withdraw` exit 13 names the `AckiNackiBridge` custom error
+  a `withdrawByProof` dry run or submit reverted with, with its arguments
+  (`NullifierAlreadyUsed(nullifier: 0x…)`, `BridgePaused()`,
+  `WithdrawTreasuryShortfall(requested: …, available: …)`), and for the common
+  ones what to do next. Before, it printed the node's raw text, which on public
+  Sepolia RPCs reads "tried to decode error from abi but failed" followed by
+  the selector.
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
   per-slot window heights from `LayerAnchorAppended` logs. The scan walks
@@ -1018,6 +1156,119 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- An `aggregate-proof` run that hits its timeout (`--prover-timeout-s` in
+  `ackinacki-bridge withdraw` and `relayer withdraw-e2e`, a fixed 30 min in
+  `relayer daemon-live` and `relayer prove-withdraw-shplonk`) is killed.
+  Before, it kept running after the caller gave up — holding its memory and
+  still writing the pk cache — beside the proof the next run started. Since a
+  killed keygen starts over on the next run, the error of a command with
+  `--prover-timeout-s` says to raise it rather than retry with the same
+  budget. For scale: a cold withdrawal `aggregate-proof`, keygen included,
+  took ~2 min on the test host.
+- `aggregate-proof` logs to stderr, at `info` unless `RUST_LOG` says
+  otherwise, and `ackinacki-bridge withdraw` and the relayer put each of its
+  lines into their own log as it comes, prefixed `aggregate-proof:` and at
+  the level it was logged with — among them the pk cache's notices: waiting
+  for another keygen, a filesystem without locks, leftovers removed, a slot
+  loaded or generated — and the lines of an error it prints, `Caused by:` and
+  all, at `error`. They do not pass their own `RUST_LOG` on to it, and a
+  `RUST_LOG` of yours must let `bridge_relayer_daemon=info` through to show
+  its lines — `RUST_LOG=ackinacki_bridge=info` alone, as the 0.2.0 notes
+  suggest, hides them. A failed or timed-out run's error quotes its error
+  message — up to its backtrace — or, without one, its last 40 lines. Before,
+  it logged only errors, to stdout, which the callers discarded, a failure
+  quoted the whole of its stderr, and a timeout quoted nothing.
+- `aggregate-proof` writes a new pk-cache slot under
+  `<stem>.pk.partial-<pid>-<random>` /
+  `<stem>.meta.json.partial-<pid>-<random>`, syncs each file to disk and renames
+  it into place, so neither a keygen killed mid-write (a timeout, the OOM
+  killer) nor a host crash just after it leaves a truncated `<stem>.pk` that
+  every later run panicked on until it was deleted by hand. A write that fails —
+  a full disk — removes its own partial file. A `.pk` without its `.meta.json`
+  is regenerated rather than read. The `.meta.json` now records the key's length
+  (`pk_bytes`) — a slot published before gets it once a run that can take the
+  cache's lock, and owns the `.meta.json`, has read its key back whole — and a
+  key is read in halo2's checked `RawBytes` format, which reads the same bytes,
+  after its header's `k` is checked against the degree the `.meta.json` records.
+  A key whose length or `k` is not the recorded one, that ends early, or whose
+  wrong bytes are not field elements, or a `.meta.json` that is not whole, fails
+  the run with `cached aggregator key … is damaged` (or `cache meta … is
+  damaged`); one that cannot be read for another reason — a permission — says so
+  without telling anyone to remove it. A key of the right length whose wrong
+  bytes are field elements still reads, and the proof made with it fails the
+  check the SDK runs on every proof it makes: the run fails with `making the
+  aggregated proof failed (…)`, saying that the key read from the cache, or the
+  ceremony file it names, is damaged — or, for a key the run generated itself,
+  that the ceremony is damaged or keygen and prover disagree. In these cases the
+  slot is set aside when it can be: its `.meta.json` is renamed to
+  `<stem>.meta.json.damaged`, which unpublishes it, the next run that needs it
+  removes both files and generates the key again, and the error says that
+  removing them by hand frees the key's ~6.85 GB at once — preflight reserves
+  room for the new key and cannot count the old one's. It waits for another
+  `aggregate-proof` that holds the cache lock to finish first; with the
+  `.meta.json` replaced since it was read, or a rename that fails, the slot
+  stays published and the error names the two files to remove. `ackinacki-bridge
+  withdraw` preflight names a set-aside slot with a warning, and, when the
+  aggregator is to generate its key, refuses — with exit 2, or exit 10 on a run
+  that resumes a recorded burn — a key without its `.meta.json` this user cannot
+  remove, since stage 5 removes it first. Before, a key that could not be opened
+  was regenerated over the published name without the lock, and a truncated one
+  panicked. A process generating a key holds `<pk-cache>/.keygen.lock` (`flock`)
+  until the slot is published, so cold keygens on one cache run one at a time
+  and a process that waited loads the slot its predecessor published. Partial
+  files are removed only by a holder of that lock, so never one another process,
+  on the host or in a container sharing the cache, is still writing. A lock file
+  another user created is opened read-only. Only a filesystem without `flock`
+  lets a keygen run unlocked, and it then removes no partial file; any other
+  failure to take the lock fails the run. With `--pk-cache-dir`,
+  `aggregate-proof --slot-report <path>` writes the stem of the slot it used to
+  `<path>` once its calldata is written. `ackinacki-bridge withdraw` preflight
+  names any partial file in the pk cache before it measures free space, and
+  refuses with exit 2 (exit 10 on a resume) a withdrawal slot whose key is not
+  the length its `.meta.json` records or whose header is not a key's at the
+  degree it records, whose `.meta.json` is not whole or not one the aggregator
+  wrote (a field missing or of the wrong type), or that this user cannot read —
+  the last with advice to fix its permissions, not to remove it.
+- `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
+  `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
+  `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,
+  `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert while paused.
+  It said the bridge had no pause switch. Its storage table is regenerated
+  from `forge inspect`: `pendingOwner` (slot 6), `paused` (slot 7, offset 20)
+  and `storedPrevBkSetCommitment` (slot 11) were missing, and the slots after
+  them were off.
+- Two `ackinacki-bridge withdraw` runs with one `--snark-dir` prove one at a
+  time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
+  it waits, then reads the bridge's state again and re-checks the Circuit-4
+  proving key before it proves, so the anchor it binds to is still in the
+  window and the key is the one preflight verified. Preflight tries this
+  lock without waiting — and the aggregator's `<pk-cache>/.keygen.lock` when
+  the aggregator will generate its key (a file another user owns is opened
+  read-only) — and refuses with exit 2 when one cannot be opened or locked —
+  on NFS, a read-only lock file — instead of failing with exit 12 after the
+  burn. A lock another run holds passes with a warning; the wait for
+  `.keygen.lock` counts against `--prover-timeout-s`.
+  Before, both runs wrote the snark directory's fixed-name files at once and
+  one failed with exit 12 ("calldata instance … != public input …").
+- `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator
+  proving key instead of 1 GiB: the key a cold run writes into the pk cache is
+  ~6.85 GB. A cold run now asks for ~10.7 GB free on the filesystem that holds
+  `--params-dir` and `--pk-cache-dir` (one filesystem in the shipped profile)
+  and refuses with exit 2 below that; before, a host with 4–9 GB free passed
+  preflight and failed in stage 5, after the burn. `scripts/install.sh` now
+  wants 13 GB free. A withdrawal whose aggregator key is already in the pk
+  cache reserves nothing for it: after a proof, `withdraw` notes in
+  `<pk-cache>/.withdraw-slot.json` the aggregator key the proof used, which
+  `aggregate-proof` names in `<snark-dir>/aggregator-slot`
+  (`--slot-report`), with the Circuit-4 key and the `aggregate-proof` it ran
+  with as preflight verified them, and a later preflight that finds both
+  digests unchanged and that key and its `.meta.json` still there skips the
+  7 GiB (see Breaking Changes for what this asks of an upgrade). The first
+  withdrawal after an upgrade reserves room again while
+  the previous keys are still on disk: budget ~17 GB for a new
+  `aggregate-proof`, ~20 GB when it also brings a new Circuit-4 key, or
+  remove the previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk` and its
+  `.meta.json` first.
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had

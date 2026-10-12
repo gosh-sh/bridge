@@ -7,7 +7,7 @@ use axiom_eth::{
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
     rlc::{circuit::builder::RlcCircuitBuilder, FIRST_PHASE},
-    rlp::{evaluate_byte_array, types::RlpArrayWitness},
+    rlp::{evaluate_byte_array, types::RlpArrayWitness, RlpChip},
     transaction::{
         EthTransactionChip, EthTransactionChipParams, EthTransactionInputAssigned,
         EthTransactionWitness,
@@ -18,18 +18,44 @@ use ethers_core::{types::Chain, utils::keccak256};
 use halo2_base::{
     gates::{GateInstructions, RangeInstructions},
     halo2_proofs::halo2curves::bn256::Fr,
-    utils::ScalarField,
+    utils::{bit_length, ScalarField},
     AssignedValue, Context,
 };
 
 use crate::types::{DepositProofInput, ReceiptProof, TransactionProof};
 
-/// Circuit parameters (OPTION B+: Ultra-aggressively optimized to reduce
-/// verifier size)
-pub const MAX_DATA_BYTE_LEN: usize = 128; // Max event data length (reduced from 256)
-pub const MAX_LOG_NUM: usize = 3; // Max number of logs in receipt (OPTION B+: ultra-aggressive)
+/// Code-default receipt limits (`CircuitConfig::default`, unit tests).
+/// Production is [`PRODUCTION_MAX_DATA_BYTE_LEN`] / [`PRODUCTION_MAX_LOG_NUM`]
+/// — those are what `export_*` and the relayer bake into the VK.
+pub const MAX_DATA_BYTE_LEN: usize = 128;
+pub const MAX_LOG_NUM: usize = 3;
 pub const TOPIC_NUM_BOUNDS: (usize, usize) = (0, 4); // Min/max topics per log
 pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
+
+/// Production per-log data cap, baked into the VK.
+///
+/// axiom-eth range-checks the encoded size of every log, not only the
+/// Deposit event: `3+21+3+33*4+3+max_data+1` = 163 + max_data. A two-signer
+/// SafeL2 `SafeMultiSigTransaction` that MultiSends `approve` + `deposit`
+/// is ~1152 B of data / ~1213 B encoded. 1024 B of data capped that at
+/// 1187 B encoded and rejected it. 2048 B encoded-cap is 2211 B.
+pub const PRODUCTION_MAX_DATA_BYTE_LEN: usize = 2048;
+/// Production max logs per receipt (relayer / `export_*` default).
+/// The keccak pin does **not** cover 20 full-size logs; see
+/// [`crate::prover::FIXED_KECCAK_CAPACITY`].
+pub const PRODUCTION_MAX_LOG_NUM: usize = 20;
+/// Max payload of one receipt log at the production data and topic caps
+/// (axiom-eth `calc_max_log_len`, the list body, header excluded).
+/// A log with fewer than four topics can carry more than
+/// [`PRODUCTION_MAX_DATA_BYTE_LEN`] data bytes and still fit.
+pub const PRODUCTION_MAX_ENCODED_LOG_LEN: usize =
+    max_encoded_log_len(PRODUCTION_MAX_DATA_BYTE_LEN, TOPIC_NUM_BOUNDS.1);
+/// 1-of-1 Safe `execTransaction` with a 100 B inner call:
+/// `4 + 320 + 32 + 128 + 32 + 96 = 612` (not 489).
+pub const SAFE_EXECTX_MIN_CALLDATA: usize = 612;
+/// Two-signer SafeL2 `SafeMultiSigTransaction` MultiSend of approve+deposit.
+/// (`352+32+448+32+160+128 = 1152`.)
+pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1152;
 
 /// Public-input layout, in slot order. This is the wire contract the AN-side
 /// `USDCBridge._parsePublicInputs` reads by fixed offset, so it must not drift
@@ -61,10 +87,27 @@ pub const DEPOSIT_NUM_PUBLIC_INPUTS: usize = DEPOSIT_PUBLIC_INPUT_LAYOUT.len();
 pub const PI_CHAIN_ID: usize = 4;
 /// Max depth of the transactions-trie MPT proof (mirrors receipt path).
 pub const TX_PF_MAX_DEPTH: usize = 10;
-/// Max calldata bytes for the enclosing EIP-1559 tx (deposit ABI is small).
-pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 256;
-/// Max RLP-encoded access-list length (deposit txs typically have none).
-pub const MAX_TX_ACCESS_LIST_LEN: usize = 64;
+/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is ~100 B;
+/// a 1-of-1 Safe `execTransaction` is [`SAFE_EXECTX_MIN_CALLDATA`] (612 B).
+/// 2048 covers that and a modest ERC-4337 `handleOps`. Larger batches
+/// still cannot be proven.
+pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
+/// Max access-list payload bytes for type 2 (field 8), RLP header excluded.
+/// Type 1's access list sits at field 7, which axiom-eth merges with type-2
+/// calldata, so that field is capped at [`MAX_TX_CALLDATA_BYTE_LEN`] (2048),
+/// not this constant. One address with one storage key is 56 B and fits 64;
+/// two keys did not. 512 B covers a short type-2 list.
+pub const MAX_TX_ACCESS_LIST_LEN: usize = 512;
+/// axiom-eth `enable_types`: legacy / EIP-2930 / EIP-1559.
+/// Type 0 stays off — its RLP field 0 is the nonce, so extracting "chain_id"
+/// from it would publish nonce as the public `chainId`.
+pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
+/// Bumped on every constraint change that may leave the column counts and
+/// limits as they were, so a cached proving key of the old circuit is not
+/// reused (see `pk_fingerprint`).
+pub const CONSTRAINT_REVISION: u32 = 3;
+/// EIP-2930 type byte / circuit `transaction_type` value.
+pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
 pub const EIP1559_TX_TYPE: u64 = 2;
 
@@ -72,13 +115,13 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 ///
 /// UNIVERSAL-VK INVARIANT: the block header is the only input the circuit loads
 /// at its *natural* length. Different blocks have different header lengths (the
-/// `number` / `gasUsed` / `baseFeePerGas` fields use a variable number of bytes),
-/// so loading it raw made the constraint system — and therefore the verifying
-/// key — witness-dependent. We instead load a FIXED-size, zero-padded witness
-/// vector of this length so `keccak_var_len` and `decompose_rlp_array_*` emit an
-/// identical number of cells / copy-constraints for every block. The true header
-/// length is still bound cryptographically via the `keccak_var_len` length
-/// witness.
+/// `number` / `gasUsed` / `baseFeePerGas` fields use a variable number of
+/// bytes), so loading it raw made the constraint system — and therefore the
+/// verifying key — witness-dependent. We instead load a FIXED-size, zero-padded
+/// witness vector of this length so `keccak_var_len` and
+/// `decompose_rlp_array_*` emit an identical number of cells / copy-constraints
+/// for every block. The true header length is still bound cryptographically via
+/// the `keccak_var_len` length witness.
 ///
 /// Sized for the Prague/Isthmus 21-field header table: axiom-eth's
 /// Cancun/Ecotone `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the
@@ -188,11 +231,46 @@ fn bytes_to_field<F: ScalarField>(
     result
 }
 
+/// Max payload lengths of the three fields of the selected receipt log,
+/// `[address, topics, data]`: a 20-byte address, up to four topics behind their
+/// one-byte prefixes, and the four ABI words of `Deposit`'s data.
+const DEPOSIT_LOG_MAX_FIELD_LENS: [usize; 3] = [20, 150, 128];
+
+/// Witnesses the RLP decomposition of the selected receipt log.
+///
+/// The returned field cells are not constrained here. What ties them to
+/// `log_bytes` is the RLC check of `decompose_rlp_array_phase1`, and an RLC
+/// check holds only for cells committed before its challenge is drawn. Every
+/// event-bound public input is read out of these cells, so they have to be
+/// first-phase witnesses — hence the assertion.
+fn decompose_deposit_log(
+    ctx: &mut Context<Fr>,
+    rlp: &RlpChip<Fr>,
+    log_bytes: Vec<AssignedValue<Fr>>,
+) -> RlpArrayWitness<Fr> {
+    assert_eq!(
+        ctx.phase(),
+        FIRST_PHASE,
+        "the Deposit log must be decomposed in the first phase, before the RLC challenge"
+    );
+    rlp.decompose_rlp_array_phase0(ctx, log_bytes, &DEPOSIT_LOG_MAX_FIELD_LENS, false)
+}
+
 /// Deposit event circuit using axiom-eth
 #[derive(Clone)]
 pub struct DepositEventCircuitV2 {
     pub inputs: DepositProofInput,
     pub params: EthReceiptChipParams,
+    /// Overwrites the witnessed `amount` bytes of the parsed log, as a
+    /// malicious prover can. Soundness tests only; `None` in every real proof.
+    #[doc(hidden)]
+    pub forged_log_amount: Option<[u8; 32]>,
+    /// Fills the receipt's log slot at `log_index` with the bytes of the log
+    /// at this index, as fresh witnesses — the way a malicious prover writes a
+    /// log of its own into a slot past the receipt's last log. Soundness tests
+    /// only; `None` in every real proof.
+    #[doc(hidden)]
+    pub forged_log_source: Option<usize>,
 }
 
 impl DepositEventCircuitV2 {
@@ -218,6 +296,8 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            forged_log_amount: None,
+            forged_log_source: None,
         }
     }
 
@@ -233,6 +313,8 @@ impl DepositEventCircuitV2 {
         Self {
             inputs,
             params,
+            forged_log_amount: None,
+            forged_log_source: None,
         }
     }
 }
@@ -242,7 +324,9 @@ impl DepositEventCircuitV2 {
 pub struct Phase0Output {
     pub receipt_witness: EthReceiptWitness<Fr>,
     pub tx_witness: EthTransactionWitness<Fr>,
-    pub log_index: AssignedValue<Fr>,
+    /// First-phase decomposition of the selected receipt log, `[address,
+    /// topics, data]`. Phase 1 binds it to the receipt's bytes by RLC.
+    pub deposit_log_witness: RlpArrayWitness<Fr>,
     pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
     pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
     pub mpt_root_bytes: Vec<AssignedValue<Fr>>,   // 32 bytes from MPT proof
@@ -300,8 +384,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         };
 
         // 4. Parse receipt proof (verifies MPT inclusion)
-        let receipt_witness = chip.parse_receipt_proof_phase0(ctx, rc_input);
+        let mut receipt_witness = chip.parse_receipt_proof_phase0(ctx, rc_input);
         println!("   ✓ Verified MPT inclusion proof");
+        if let Some(source) = self.forged_log_source {
+            let slot = self.inputs.event_data.log_index;
+            let logs = &mut receipt_witness.logs.field_witness;
+            let bytes: Vec<Fr> = logs[source].encoded_item.iter().map(|c| *c.value()).collect();
+            for (cell, byte) in logs[slot].encoded_item.iter_mut().zip(bytes) {
+                *cell = ctx.load_witness(byte);
+            }
+        }
 
         // 5. Load log index
         let log_index = ctx.load_witness(Fr::from(self.inputs.event_data.log_index as u64));
@@ -309,6 +401,38 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             "   ✓ Loaded log_index: {}",
             self.inputs.event_data.log_index
         );
+
+        // 5a. The index has to point at one of the receipt's logs. The logs
+        //     list is parsed with `max_log_num` slots, and the receipt's RLC
+        //     check does not look at the bytes of a slot past the last log, so
+        //     without this a prover could write a log of its own into such a
+        //     slot and select it.
+        let log_num_bits = bit_length(self.params.max_log_num as u64);
+        let range = chip.range();
+        range.range_check(ctx, log_index, log_num_bits);
+        let logs_len = receipt_witness
+            .logs
+            .list_len
+            .expect("the receipt's logs are parsed as a variable-length list");
+        range.check_less_than(ctx, log_index, logs_len, log_num_bits);
+        println!("   ✓ Constrained log_index < number of logs in the receipt");
+
+        // 5b. Select the log at `log_index` and witness its three fields:
+        //     [address, topics[], data]. This is first-phase work, see
+        //     `decompose_deposit_log`; Phase 1 only adds the RLC check.
+        let log_witness = chip.extract_receipt_log(ctx, &receipt_witness, log_index);
+        let mut deposit_log_witness =
+            decompose_deposit_log(ctx, &chip.rlp(), log_witness.log_bytes);
+        if let Some(forged) = self.forged_log_amount {
+            for (cell, byte) in deposit_log_witness.field_witness[2]
+                .field_cells
+                .iter_mut()
+                .zip(forged)
+            {
+                *cell = ctx.load_witness(Fr::from(byte as u64));
+            }
+        }
+        println!("   ✓ Extracted and decomposed the log at log_index");
 
         // 6. Parse block header RLP and compute block hash (MUST be in Phase 0 for
         //    Keccak)
@@ -380,7 +504,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Extracted transactionsRoot from block header (32 bytes)");
 
         // ====================================================================
-        // Track 2: bind enclosing EIP-1559 tx (chain_id + to + same tx_index)
+        // Track 2: bind enclosing typed tx (chain_id + same tx_index)
         // ====================================================================
         // `from` is NOT in the typed-tx RLP (ECDSA-only); binding the Deposit
         // `sender` topic to the same `tx_index` as this MPT proof closes that
@@ -394,7 +518,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let tx_chip_params = EthTransactionChipParams {
             max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
             max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
-            enable_types: [false, false, true], // EIP-1559 only
+            enable_types: ENABLE_TX_TYPES,
             network: self.params.network,
         };
         let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
@@ -422,17 +546,23 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Constrained tx MPT root == transactionsRoot");
 
-        // transaction_type == 2 (EIP-1559)
-        let eip1559 = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
-        ctx.constrain_equal(&tx_witness.transaction_type, &eip1559);
-        println!("   ✓ Constrained tx type == EIP-1559 (0x02)");
+        // Type ∈ {1, 2}. Field 0 is chain_id for both EIP-2930 and EIP-1559.
+        // (type − 1)(type − 2) == 0 also refuses type 0, whose field 0 is nonce.
+        let gate = tx_chip.gate();
+        let one = ctx.load_constant(Fr::from(EIP2930_TX_TYPE));
+        let two = ctx.load_constant(Fr::from(EIP1559_TX_TYPE));
+        let d1 = gate.sub(ctx, tx_witness.transaction_type, one);
+        let d2 = gate.sub(ctx, tx_witness.transaction_type, two);
+        let prod = gate.mul(ctx, d1, d2);
+        let zero = ctx.load_constant(Fr::from(0u64));
+        ctx.constrain_equal(&prod, &zero);
+        println!("   ✓ Constrained tx type ∈ {{EIP-2930, EIP-1559}}");
 
-        // Extract EIP-1559 chain_id (RLP field 0) and expose as a public input.
+        // Extract typed-tx chain_id (RLP field 0) and expose as a public input.
         // Not constrained to a VK-baked constant — AN allowlists (chainId →
         // expected bridge Fr); the relayer sanity-checks against eth_chainId.
         let chain_id_idx = ctx.load_constant(Fr::from(0u64));
-        let chain_id_field =
-            tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
+        let chain_id_field = tx_chip.extract_field(ctx, tx_witness.clone(), chain_id_idx);
         let chain_id_val = evaluate_byte_array(
             ctx,
             tx_chip.gate(),
@@ -529,18 +659,18 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         );
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
-        // 5. chainId - extracted EIP-1559 RLP field 0 (already computed above).
-        //    Exposed as a public input so USDCBridge can allowlist
+        // 5. chainId - extracted typed-tx RLP field 0 (EIP-2930 / EIP-1559, already
+        //    computed above). Exposed as a public input so USDCBridge can allowlist
         //    (chainId → expected bridge Fr). Not constrained to a constant.
 
-        // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied
-        //    from the bridge config (NOT from the Ethereum event). It replaced
-        //    `anWorkchain` on 2026-06-02. A full UInt256 dappId can exceed the
-        //    BN254 scalar modulus, so it is split into high/low 16-byte halves
-        //    (mirrors the anAccount/block-hash split). These are witness values
-        //    promoted to public instances; they are NOT constrained against
-        //    event data — the AN-side `TokenBridge` checks them against its
-        //    configured dappId, which is what binds the proof to a dApp.
+        // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied from
+        //    the bridge config (NOT from the Ethereum event). It replaced `anWorkchain`
+        //    on 2026-06-02. A full UInt256 dappId can exceed the BN254 scalar modulus,
+        //    so it is split into high/low 16-byte halves (mirrors the
+        //    anAccount/block-hash split). These are witness values promoted to public
+        //    instances; they are NOT constrained against event data — the AN-side
+        //    `TokenBridge` checks them against its configured dappId, which is what
+        //    binds the proof to a dApp.
         //
         //    BC-D05: unlike every other 32-byte input here, `dappId` has no
         //    Phase-1 counterpart to be constrained against, so these witnesses
@@ -590,7 +720,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         //    blockHashHigh, blockHashLow, (promiseCommit)]
         // All except dappId{High,Low} and chainId are verified in Phase 1
         // against the RLP-parsed event data; chainId is bound via tx MPT +
-        // EIP-1559 decode; dappId is a config-supplied tag (see above).
+        // typed-tx (EIP-2930 / EIP-1559) decode; dappId is a config-supplied
+        // tag (see above).
         let public_instances = vec![
             deposit_id_field,
             sender_field,
@@ -608,13 +739,15 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         builder.base.assigned_instances[0] = public_instances;
 
         println!("   ✓ Set 11 explicit public instances in Phase 0 (chainId at PI[4])");
-        println!("   (promise_commit is appended automatically → 12 total, matches num_instance())");
+        println!(
+            "   (promise_commit is appended automatically → 12 total, matches num_instance())"
+        );
         println!("   (Phase 1 will verify these match the RLP-parsed event data)");
 
         Phase0Output {
             receipt_witness,
             tx_witness,
-            log_index,
+            deposit_log_witness,
             block_hash_bytes,
             receipts_root_bytes,
             mpt_root_bytes,
@@ -653,15 +786,15 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Verified block header RLC");
 
         // 2. Parse receipt in phase 1 (RLC verification)
-        let _receipt_trace = chip
-            .parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness.clone());
+        let _receipt_trace =
+            chip.parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness);
         println!("   ✓ Verified receipt RLC");
 
         // 2b. Transaction RLC (chain-binding witness from Phase 0)
         let tx_chip_params = EthTransactionChipParams {
             max_data_byte_len: MAX_TX_CALLDATA_BYTE_LEN,
             max_access_list_len: MAX_TX_ACCESS_LIST_LEN,
-            enable_types: [false, false, true],
+            enable_types: ENABLE_TX_TYPES,
             network: self.params.network,
         };
         let tx_chip = EthTransactionChip::new(mpt, tx_chip_params);
@@ -669,37 +802,17 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             tx_chip.parse_transaction_proof_phase1((ctx_gate, ctx_rlc), phase0_output.tx_witness);
         println!("   ✓ Verified transaction RLC");
 
-        // 3. Extract the specific log at log_index
-        let log_witness = chip.extract_receipt_log(
-            ctx_gate,
-            &phase0_output.receipt_witness,
-            phase0_output.log_index,
-        );
-        println!(
-            "   ✓ Extracted log at index {}",
-            self.inputs.event_data.log_index
-        );
-        println!("   Log length: {:?}", log_witness.log_len);
-        println!(
-            "   Log bytes (first 16): {:?}",
-            &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]
-        );
-
-        // 4. Parse log RLP structure: [address, topics[], data]
-
-        // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte
-        // hashes), data (variable). Max lengths: address=20,
-        // topics=4*32+overhead=150, data=128 (4 ABI words:
-        // amount + anWorkchain + anAccount + timestamp).
-        let log_max_field_lens = [20, 150, 128];
-
-        let log_array = rlp_chip.decompose_rlp_array_phase0(
-            ctx_gate,
-            log_witness.log_bytes.clone(),
-            &log_max_field_lens,
-            false, // fixed length (always 3 fields)
-        );
-        println!("   ✓ Parsed log RLP structure");
+        // 3. Bind the log fields witnessed in Phase 0 to the receipt's log bytes.
+        //
+        // `decompose_rlp_array_phase0` only witnesses `field_cells`; it is this
+        // RLC concatenation check that ties address, topics and data to the
+        // selected log, and through `parse_receipt_proof_phase1` above to the
+        // receipt (Phase 0 keeps `log_index` within the receipt's logs, so the
+        // selected slot is one the receipt's RLC check covers). Without it every
+        // event-bound public input is free.
+        let log_array = phase0_output.deposit_log_witness;
+        rlp_chip.decompose_rlp_array_phase1((ctx_gate, ctx_rlc), log_array.clone(), false);
+        println!("   ✓ Bound log fields to the receipt's log bytes (RLC)");
 
         // BC-D04: pin the payload lengths of the two variable-length log fields.
         //
@@ -718,7 +831,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         ctx_gate.constrain_equal(&log_array.field_witness[1].field_len, &expected_topics_len);
         let expected_data_len = ctx_gate.load_constant(Fr::from(128u64));
         ctx_gate.constrain_equal(&log_array.field_witness[2].field_len, &expected_data_len);
-        println!("   ✓ Constrained topics len == 99, data len == 128 (BC-D04)");
+        // The RLC binding covers only `field_cells[..field_len]`; the address is
+        // read as 20 cells, so its length is pinned too.
+        let expected_address_len = ctx_gate.load_constant(Fr::from(20u64));
+        ctx_gate.constrain_equal(&log_array.field_witness[0].field_len, &expected_address_len);
+        // Each topic is read at a fixed offset behind a one-byte string prefix.
+        let topic_prefix = ctx_gate.load_constant(Fr::from(0xa0u64));
+        for offset in [0, 33, 66] {
+            ctx_gate.constrain_equal(
+                &log_array.field_witness[1].field_cells[offset],
+                &topic_prefix,
+            );
+        }
+        println!("   ✓ Constrained address len == 20, topics len == 99, data len == 128 (BC-D04)");
 
         // 5. Extract address (field 0)
         let address_bytes = &log_array.field_witness[0].field_cells;
@@ -966,6 +1091,19 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
     }
 }
 
+/// axiom-eth `calc_max_log_len`: max payload of one receipt log (the list
+/// body passed as `max_field_lens` to `decompose_rlp_array_phase0`).
+pub const fn max_encoded_log_len(max_data_byte_len: usize, max_topic_num: usize) -> usize {
+    3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1
+}
+
+/// The longest RLP receipt the receipt MPT leaf holds: axiom-eth's
+/// `receipt::calc_max_val_len` with [`TOPIC_NUM_BOUNDS`]'s maximum.
+pub fn receipt_max_byte_len(max_data_byte_len: usize, max_log_num: usize) -> usize {
+    let max_log_len = max_encoded_log_len(max_data_byte_len, TOPIC_NUM_BOUNDS.1);
+    4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len
+}
+
 /// Helper trait for converting ReceiptProof to MPTInput
 trait ToMPTInput {
     fn to_mpt_input(
@@ -990,12 +1128,7 @@ impl ToMPTInput for ReceiptProof {
         let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
 
-        // Calculate value_max_byte_len using axiom-eth's formula
-        // This is the maximum size of the RLP-encoded receipt
-        // Formula from axiom-eth/src/receipt/mod.rs:calc_max_val_len
-        let max_topic_num = TOPIC_NUM_BOUNDS.1; // max topics = 4
-        let max_log_len = 3 + 21 + 3 + 33 * max_topic_num + 3 + max_data_byte_len + 1;
-        let value_max_byte_len = 4 + 33 + 33 + 259 + 4 + max_log_num * max_log_len;
+        let value_max_byte_len = receipt_max_byte_len(max_data_byte_len, max_log_num);
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
@@ -1035,7 +1168,7 @@ impl TransactionProof {
         let path_bytes = crate::rlp_utils::encode_tx_index(tx_index);
         let path_len = path_bytes.len();
         let value_max_byte_len =
-            calc_max_val_len(max_data_byte_len, max_access_list_len, [false, false, true]);
+            calc_max_val_len(max_data_byte_len, max_access_list_len, ENABLE_TX_TYPES);
 
         MPTInput {
             path: axiom_eth::mpt::PathBytes(path_bytes),
@@ -1064,17 +1197,19 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     ///  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
     ///  blockHashHigh, blockHashLow, promiseCommit]
     ///
-    /// `chainId` is the EIP-1559 RLP field-0 value extracted from the enclosing
-    /// tx (MPT-bound under `transactionsRoot`). It is **not** VK-baked — the
+    /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559)
+    /// extracted from the enclosing tx (MPT-bound under `transactionsRoot`).
+    /// It is **not** VK-baked — the
     /// AN-side `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
-    /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier) replaced
-    /// the single `anWorkchain` slot on 2026-06-02. dappId is a config-supplied
-    /// tag — it is not bound to event data in-circuit; the AN-side
-    /// `TokenBridge.finalizeDeposit` checks it against its configured dappId.
-    /// `anAccountHigh`/`anAccountLow` remain the event-bound AN recipient account.
-    /// The `ZKHALO2VERIFYWITHVK` consumer is VK-driven (it reads this count from
-    /// the VkBlob), and `TokenBridge.finalizeDeposit` builds the public-inputs
-    /// cell from the same 12-scalar layout.
+    /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier)
+    /// replaced the single `anWorkchain` slot on 2026-06-02. dappId is a
+    /// config-supplied tag — it is not bound to event data in-circuit; the
+    /// AN-side `TokenBridge.finalizeDeposit` checks it against its
+    /// configured dappId. `anAccountHigh`/`anAccountLow` remain the
+    /// event-bound AN recipient account. The `ZKHALO2VERIFYWITHVK` consumer
+    /// is VK-driven (it reads this count from the VkBlob), and
+    /// `TokenBridge.finalizeDeposit` builds the public-inputs cell from the
+    /// same 12-scalar layout.
     fn num_instance(&self) -> Vec<usize> {
         vec![DEPOSIT_NUM_PUBLIC_INPUTS] // 11 user values + 1 promise_commit
     }
@@ -1182,6 +1317,76 @@ mod tests {
             vec![DEPOSIT_NUM_PUBLIC_INPUTS],
             "num_instance() drifted from DEPOSIT_PUBLIC_INPUT_LAYOUT"
         );
+    }
+
+    /// Safe/4337 need more than 256 B of calldata; SafeL2 needs more
+    /// than 256 B of receipt-log data; type 1 shares field-0 chain_id with
+    /// type 2; type 0 must stay off.
+    #[test]
+    fn enclosing_tx_limits_admit_safe_and_type1() {
+        assert_eq!(ENABLE_TX_TYPES, [false, true, true]);
+        assert!(
+            MAX_TX_CALLDATA_BYTE_LEN >= SAFE_EXECTX_MIN_CALLDATA,
+            "1-of-1 Safe execTransaction with a 100 B inner call is {SAFE_EXECTX_MIN_CALLDATA} B"
+        );
+        assert!(
+            PRODUCTION_MAX_DATA_BYTE_LEN >= SAFEL2_MULTISIG_LOG_DATA,
+            "SafeL2 SafeMultiSigTransaction log data is ~{SAFEL2_MULTISIG_LOG_DATA} B"
+        );
+        assert!(MAX_TX_ACCESS_LIST_LEN >= 56);
+        assert_eq!(EIP2930_TX_TYPE, 1);
+        assert_eq!(EIP1559_TX_TYPE, 2);
+    }
+
+    /// A `Deposit`-shaped log, `[address, [3 topics], 128 B of data]`, as the
+    /// receipt chip hands it over: RLP-encoded and zero-padded.
+    fn deposit_shaped_log() -> Vec<u8> {
+        let mut log = vec![0xf8, 252, 0x94];
+        log.extend([0x33; 20]);
+        log.extend([0xf8, 99]);
+        for topic in [0x01u8, 0x02, 0x03] {
+            log.push(0xa0);
+            log.extend([topic; 32]);
+        }
+        log.extend([0xb8, 128]);
+        log.extend([0x44; 128]);
+        log.resize(320, 0);
+        log
+    }
+
+    fn decompose_deposit_log_in(phase: usize) -> RlpArrayWitness<Fr> {
+        let mut builder = RlcCircuitBuilder::<Fr>::new(false, 10);
+        builder.base.set_lookup_bits(8);
+        let range = builder.range_chip();
+        let rlp = RlpChip::new(&range, None);
+        let ctx = builder.base.main(phase);
+        let log_bytes =
+            ctx.assign_witnesses(deposit_shaped_log().into_iter().map(|b| Fr::from(b as u64)));
+        decompose_deposit_log(ctx, &rlp, log_bytes)
+    }
+
+    #[test]
+    fn deposit_log_decomposes_in_the_first_phase() {
+        let log = decompose_deposit_log_in(FIRST_PHASE);
+        let lens: Vec<u64> = log
+            .field_witness
+            .iter()
+            .map(|f| f.field_len.value().get_lower_64())
+            .collect();
+        assert_eq!(lens, [20, 99, 128]);
+        assert_eq!(*log.field_witness[0].field_cells[0].value(), Fr::from(0x33));
+        assert_eq!(
+            *log.field_witness[2].field_cells[127].value(),
+            Fr::from(0x44)
+        );
+    }
+
+    /// The cells the public inputs are read from are tied to the log only by an
+    /// RLC check, which holds only for cells committed before the challenge.
+    #[test]
+    #[should_panic(expected = "first phase")]
+    fn deposit_log_is_not_decomposed_after_the_rlc_challenge() {
+        decompose_deposit_log_in(axiom_eth::rlc::RLC_PHASE);
     }
 
     /// Shape-only `DepositProofInput` — enough to construct the circuit struct

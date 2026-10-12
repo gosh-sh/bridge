@@ -55,18 +55,21 @@ pub enum ExitCode {
     /// failure inside `burn::send` propagates before the block that
     /// writes `an_tx_hash`, so what an exit 10 leaves is a `Reserved`
     /// record with `an_tx_hash: null` — and the CLI cannot write a hash
-    /// it never learned. The hash is on the record only for the two exit
-    /// 10s raised AFTER the send returned: a failed post-burn `update`,
-    /// and a refusal on the resume path.
+    /// it never learned. The hash is on the record only for the exit 10s
+    /// raised AFTER the send returned: a failed post-burn `update`, a
+    /// refusal on the resume path, and a captured event that is not this
+    /// withdrawal's (the hash on the record leads to another one's burn).
     ///
     /// So reconciliation is the remedy in every case, and where the hash
     /// is not on the record it is not in the CLI either: look for a
     /// `sendTransaction` from this multisig around the record's
     /// `reserved_at`. The advanced runbook's Case 3a is the procedure.
     BurnOutcomeUnknown = 10,
-    /// AN burn confirmed but `WithdrawalInitiated` capture timed out. The
-    /// event is durable in GQL; re-run with `--allow-retry` (v1) or
-    /// `--resume` (v2) to pick up capture.
+    /// AN burn broadcast but no `WithdrawalInitiated` captured in time.
+    /// Either the event is late — once emitted it stays in GQL, and
+    /// `--allow-retry` resumes at capture — or the burn bounced and no
+    /// event will come, which a re-run cannot fix. The message says how to
+    /// tell them apart before re-running.
     CaptureTimeout = 11,
     /// Capture succeeded but the Circuit-4 proof pipeline failed
     /// (aggregator subprocess crash, C4 wall-time exceeded, enricher timed
@@ -286,8 +289,14 @@ pub enum CliError {
     },
 
     // -- Capture (exit 11) --
-    #[error("capture: timed out waiting for WithdrawalInitiated event (AN tx {an_tx})")]
-    CaptureTimeout { an_tx: String },
+    /// `next_steps` is what to do now: the burn is on the wire, and the
+    /// operator needs the hash, the record and the command that resumes
+    /// without burning again.
+    #[error(
+        "capture: timed out waiting for WithdrawalInitiated event (AN tx {an_tx})\n\x20 \
+         {next_steps}"
+    )]
+    CaptureTimeout { an_tx: String, next_steps: String },
 
     // -- Prove (exit 12) --
     #[error("prove: {reason}")]
@@ -685,7 +694,8 @@ mod tests {
         );
         assert_eq!(
             CliError::CaptureTimeout {
-                an_tx: "0x…".into()
+                an_tx: "0x…".into(),
+                next_steps: String::new(),
             }
             .exit_code(),
             ExitCode::CaptureTimeout

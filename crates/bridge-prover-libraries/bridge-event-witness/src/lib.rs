@@ -51,7 +51,7 @@ use tvm_block::{Deserializable, Message, Serializable};
 use crate::boc_walk::{serialize_cells_tree_root_first, FlatCell};
 use crate::event_decode::{decode_event, validate_layout};
 use crate::schema::{
-    BlockContext, CellRecord, PrivateWitness, SCHEMA_VERSION,
+    BlockContext, CellRecord, PrivateWitness, WithdrawalInitiated, SCHEMA_VERSION,
 };
 
 /// Caller-supplied block context fields. These come from the GraphQL block
@@ -73,15 +73,7 @@ pub fn export_from_event_boc_base64(
     event_boc_b64: &str,
     ctx: &BlockContextInput,
 ) -> Result<PrivateWitness> {
-    let msg = Message::construct_from_base64(event_boc_b64)
-        .map_err(|e| anyhow::anyhow!("failed to parse event BOC from base64: {e}"))?;
-    let msg_cell = msg
-        .serialize()
-        .map_err(|e| anyhow::anyhow!("failed to serialize Message cell: {e}"))?;
-
-    let cells = serialize_cells_tree_root_first(&msg_cell)
-        .map_err(|e| anyhow::anyhow!("failed to flatten cell tree: {e}"))?;
-    let entries = validate_layout(cells).context("BOC layout validation failed")?;
+    let entries = event_entries(event_boc_b64)?;
 
     let event = decode_event(&entries).context("event field decoding failed")?;
 
@@ -109,6 +101,27 @@ pub fn export_from_event_boc_base64(
         block_tree_proof: None,
         anchor: None,
     })
+}
+
+/// The `WithdrawalInitiated` fields of an ExtOut `Message` BOC, without
+/// building a witness. The same parse and layout check as
+/// [`export_from_event_boc_base64`], so an event this accepts is one the
+/// exporter accepts too.
+pub fn decode_event_boc_base64(event_boc_b64: &str) -> Result<WithdrawalInitiated> {
+    decode_event(&event_entries(event_boc_b64)?).context("event field decoding failed")
+}
+
+/// Parse, flatten and layout-check an ExtOut `Message` BOC: the four cells
+/// the circuit reads.
+fn event_entries(event_boc_b64: &str) -> Result<[FlatCell; 4]> {
+    let msg = Message::construct_from_base64(event_boc_b64)
+        .map_err(|e| anyhow::anyhow!("failed to parse event BOC from base64: {e}"))?;
+    let msg_cell = msg
+        .serialize()
+        .map_err(|e| anyhow::anyhow!("failed to serialize Message cell: {e}"))?;
+    let cells = serialize_cells_tree_root_first(&msg_cell)
+        .map_err(|e| anyhow::anyhow!("failed to flatten cell tree: {e}"))?;
+    validate_layout(cells).context("BOC layout validation failed")
 }
 
 fn flat_to_record(c: &FlatCell) -> CellRecord {

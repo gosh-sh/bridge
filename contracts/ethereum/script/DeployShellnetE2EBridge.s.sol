@@ -25,10 +25,12 @@ import "./ShplonkDeployLib.sol";
 ///      `false` off anvil reverts.
 contract DeployShellnetE2EBridge is Script {
     // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
-    // The previous constant (0x94a9D9AC...) was a Pruvendo-owned mock with
-    // owner-only mint, so third-party devs couldn't fund the burner via any
-    // public faucet. Wiring against Circle canonical means the same USDC that
-    // Circle's faucet dispenses is the one the bridge's deposit() consumes.
+    // The previous constant (0x94a9D9AC...) is the AAVE V3 Sepolia USDC reserve
+    // (`aEthUSDC`); it is what `DeployRealBridge` uses when `USE_AAVE=true`.
+    // This script does not wire AAVE: Circle's token is not a reserve on that
+    // pool, and `aavePool` is immutable, so a later `setAaveEnabled(true)`
+    // would revert `InvalidAaveAddress`. A stand that must earn yield is a
+    // `DeployRealBridge` redeploy with `USE_AAVE=true`, not this script.
     address constant USDC_SEPOLIA = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
 
     struct VerifyBlockWiring {

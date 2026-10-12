@@ -7,6 +7,30 @@ Idle USDC is lent to the AAVE V3 USDC market. This page is what an operator need
 is, which command collects what, and the two ways to get it wrong. The contract-level detail is in
 [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §10.
 
+## Not wired on any live deploy
+
+`deposit()` never talks to AAVE; idle USDC sits on the contract until the owner calls
+`supplyToAave`. None of the Sepolia bridges (`0xCdFd6Cef…4fdb`, `0x0F4F8b7E…2fc7`,
+`0x8545129b…8f44`) have a pool: `aavePool` is `address(0)`, `aaveEnabled` is false,
+`suppliedPrincipal` is 0. `aavePool` is immutable, and `setAaveEnabled(true)` reverts
+`InvalidAaveAddress` when the pool is zero, so attaching AAVE means a new deploy.
+
+`DeployShellnetE2EBridge` never wires a pool. Its USDC is Circle's Sepolia token
+(`0x1c7D4B19…7238`). The AAVE V3 pool on Sepolia (`0x6Ae43d32…8951`) does not list
+that token; `getReserveData` returns a zero aToken. The pool's USDC is
+`0x94a9D9AC…E4C8` (`aEthUSDC` `0x16dA4541…EB80`), which is what `DeployRealBridge`
+uses when `USE_AAVE=true`. A stand that must earn yield has to be redeployed with
+that script, that token, and `USE_AAVE=true` — not flipped on afterwards.
+
+`DeployRealBridge` only knows AAVE addresses on Ethereum mainnet and Sepolia. It
+reverts on any other chain. The deposit allowlist's six L2s have no pool wiring
+in this tree. Mainnet is not a deposit-source chain.
+
+`supplyToAave` and `harvestYield` are `onlyOwner`. There is no keeper role and no
+script in this repository that calls them outside tests. A bot that should run
+them needs the owner key (or a later role split, which the contract does not
+have).
+
 ## Where the money is
 
 | | What it means | Read it with |

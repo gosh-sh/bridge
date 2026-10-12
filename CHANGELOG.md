@@ -24,6 +24,14 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- AAVE is not attached on any live deploy, and the shellnet stand cannot grow
+  a yield position without a redeploy. `docs/aave-yield.md` states that:
+  `deposit()` never supplies; `aavePool` is immutable; the three Sepolia
+  bridges have a zero pool; `DeployShellnetE2EBridge` uses Circle USDC, which
+  the Sepolia AAVE V3 pool does not list; `DeployRealBridge USE_AAVE=true`
+  wires the pool's USDC (`0x94a9D9AC…E4C8`) on mainnet and Sepolia only;
+  `supplyToAave` / `harvestYield` are `onlyOwner`. `EVM-contracts-spec.md`
+  §12.1–12.2 and the `DeployShellnetE2EBridge` comment say the same.
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
   is part of replay protection, and that an upgrade changing it has to ship a
   block cutoff in the same code so past deposits stop going through. The

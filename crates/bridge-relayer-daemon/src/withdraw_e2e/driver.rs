@@ -14,7 +14,10 @@
 //! non-CLI callers (tests, higher-level loops) that don't have or want
 //! a signing key.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use bridge_event_witness::{
@@ -93,6 +96,9 @@ pub struct WithdrawE2EConfig {
     /// Aggregator subprocess timeout (Circuit-4 outer keygen+aggregate
     /// from cold PK can take minutes; default generously).
     pub prover_timeout: Duration,
+    /// Where `aggregate-proof` names the pk-cache slot it used
+    /// (`--slot-report`); `None` for no report.
+    pub slot_report: Option<PathBuf>,
     /// Seqno stamped into the summary + witness/proof filenames.
     pub prover_seq_no: u32,
     /// Replay-mode: skip the baseline snapshot and pick the youngest
@@ -349,10 +355,7 @@ async fn prove_and_finalize(
         .pk_cache_dir
         .clone()
         .unwrap_or_else(|| cfg.params_dir.join("pk_cache"));
-    let mut agg_cfg =
-        SubprocessAggregatorConfig::new(&cfg.aggregator_dir, &cfg.verifiers_dir, &cfg.params_dir)
-            .with_pk_cache_dir(&pk_cache_dir);
-    agg_cfg.timeout = cfg.prover_timeout;
+    let agg_cfg = aggregator_config(cfg, &pk_cache_dir);
     let snark_prover = InProcessCircuit4SnarkProver::new(&cfg.params_dir);
     let aggregator = SubprocessAggregator::new(agg_cfg);
     let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
@@ -414,9 +417,55 @@ fn parse_hex32(s: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
+/// The `aggregate-proof` call for `cfg`. Both commands that run this driver
+/// — `ackinacki-bridge withdraw` and `relayer withdraw-e2e` — set its
+/// timeout with `--prover-timeout-s`, so a timeout names that flag.
+fn aggregator_config(cfg: &WithdrawE2EConfig, pk_cache_dir: &Path) -> SubprocessAggregatorConfig {
+    let mut agg_cfg =
+        SubprocessAggregatorConfig::new(&cfg.aggregator_dir, &cfg.verifiers_dir, &cfg.params_dir)
+            .with_pk_cache_dir(pk_cache_dir);
+    agg_cfg.timeout = cfg.prover_timeout;
+    agg_cfg.timeout_flag = Some("--prover-timeout-s");
+    agg_cfg.slot_report = cfg.slot_report.clone();
+    agg_cfg
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_hex32;
+
+    #[test]
+    fn a_withdrawal_proofs_timeout_names_the_flag_that_sets_it() {
+        let p = std::path::PathBuf::from;
+        let cfg = super::WithdrawE2EConfig {
+            gql_endpoint: String::new(),
+            prover_state_path: p("/state.json"),
+            window_size: 1,
+            bridge_account_id_hex: String::new(),
+            bridge_dapp_id_hex: String::new(),
+            event_dst_filter: String::new(),
+            event_wait: super::Duration::from_secs(1),
+            event_poll_interval: super::Duration::from_secs(1),
+            anchor_mode: super::AnchorLayerMode::Auto,
+            i_know_the_wait: false,
+            work_dir: p("/work"),
+            aggregator_dir: p("/agg"),
+            verifiers_dir: p("/verifiers"),
+            params_dir: p("/params"),
+            snark_dir: p("/snark"),
+            pk_cache_dir: None,
+            prover_out_dir: None,
+            prover_timeout: super::Duration::from_secs(3600),
+            slot_report: Some(p("/snark/aggregator-slot")),
+            prover_seq_no: 0,
+            replay_latest: false,
+        };
+        let agg = super::aggregator_config(&cfg, std::path::Path::new("/params/pk_cache"));
+        assert_eq!(agg.timeout, cfg.prover_timeout);
+        assert_eq!(agg.timeout_flag, Some("--prover-timeout-s"));
+        assert_eq!(agg.pk_cache_dir, Some(p("/params/pk_cache")));
+        assert_eq!(agg.slot_report, cfg.slot_report);
+    }
 
     #[test]
     fn parse_hex32_accepts_both_prefixed_and_bare() {

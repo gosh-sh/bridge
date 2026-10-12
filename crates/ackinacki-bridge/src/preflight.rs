@@ -93,6 +93,10 @@ pub struct PreflightReport {
 pub enum BalanceCheck {
     /// No burn has been broadcast for this identity. The multisig must
     /// hold at least `amount`.
+    ///
+    /// It also gates the AN bridge's pause check: that pause refuses
+    /// `initiateWithdrawal`, so it matters only while the burn is still to
+    /// be sent.
     Require,
     /// A prior run already broadcast the burn (`an_tx_hash` on file). The
     /// balance is expected to be short — that is what success looks like.
@@ -258,6 +262,27 @@ pub async fn run(
     };
     let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
     let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+
+    // 6b. The AN bridge's own pause. While it is set `initiateWithdrawal`
+    //     refuses the burn with 231, the ECC bounces back to the multisig,
+    //     and stage 4 waits for an event that never comes. Asked only while
+    //     the burn is still to be sent: once it is on the wire the pause can
+    //     no longer stop it, and a resume should not gain a way to fail.
+    if matches!(balance_check, BalanceCheck::Require) {
+        let bridge_boc =
+            fetch_account_boc(&context, &usdc_bridge_dapp_id, usdc_bridge_account_id_hex).await?;
+        if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} is paused by its owner \
+                     (isPaused() is true): initiateWithdrawal would refuse the burn with 231 and \
+                     the USDC would bounce back to the multisig. Re-run once the owner lifts the \
+                     pause."
+                ),
+                source: None,
+            });
+        }
+    }
 
     // 7. ECC[3] balance from the parsed account.
     //
@@ -457,6 +482,61 @@ async fn call_get_custodians(
             source: None,
         })?;
     parse_custodians(&decoded)
+}
+
+/// Run the USDCBridge's `isPaused` on its own code, locally — the getter
+/// `deposit` reads too.
+async fn call_is_paused(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+) -> CliResult<bool> {
+    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        address: Some(bridge_legacy.to_string()),
+        call_set: Some(CallSet {
+            function_name: "isPaused".to_string(),
+            header: None,
+            input: Some(json!({})),
+        }),
+        signer: Signer::None,
+        deploy_set: None,
+        processing_try_index: None,
+        signature_id: None,
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!("encode isPaused call for {bridge_legacy}: {}", e.message()),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
+        message: encoded.message,
+        account: bridge_boc.to_string(),
+        abi: Some(abi),
+        execution_options: None,
+        boc_cache: None,
+        return_updated_account: Some(false),
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!(
+            "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: {} — a bridge without \
+             isPaused() predates the pause and this CLI",
+            e.message()
+        ),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    run.decoded
+        .and_then(|d| d.output)
+        .and_then(|o| o["value0"].as_bool())
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: no boolean answer \
+                 (ABI mismatch?)"
+            ),
+            source: None,
+        })
 }
 
 /// The custodian list out of a `getCustodians` answer, refusing
@@ -742,10 +822,11 @@ const EVENT_KEYGEN_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 /// Bytes the outer SHPLONK aggregator keygen writes into the pk cache.
 ///
-/// Measured, not guessed: `aggregator_cache.rs:16` documents the slot as
-/// "proving key (SDK's `RawBytes` format, ~800 MB @ K=21)". Rounded up for
-/// the `.meta.json` sibling and slack.
-const OUTER_PK_BYTES: u64 = 1024 * 1024 * 1024;
+/// Measured: a cold run wrote a 6 846 416 031-byte
+/// `BridgeWithdrawalAggregatorVerifier__v3__….pk`, and the slot before it
+/// was the same size. Rounded up to 7 GiB for the `.meta.json` sibling and
+/// slack.
+const OUTER_PK_BYTES: u64 = 7 * 1024 * 1024 * 1024;
 
 /// How long the `--help` probe waits in production.
 pub(crate) const AGGREGATOR_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -787,7 +868,7 @@ pub async fn check_prover_artifacts(
     snark_dir: &Path,
     pk_cache_dir: Option<&Path>,
     allow_verifier_drift: bool,
-) -> CliResult<Option<PkFingerprint>> {
+) -> CliResult<ProverArtifacts> {
     check_ceremony(&p.params_dir)?;
     check_verifier_bin(&p.verifiers_dir, allow_verifier_drift)?;
     check_verifier_sol(&p.verifiers_dir, allow_verifier_drift)?;
@@ -834,10 +915,8 @@ pub async fn check_prover_artifacts(
     // Threading the raw `Option` through instead is how the default path
     // would end up unchecked: with a warm cache `params_dir` is not passed
     // to `check_output_dirs` either, so nothing would probe the directory
-    // the aggregator is about to write ~800 MB into.
-    let effective_pk_cache = pk_cache_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| p.params_dir.join("pk_cache"));
+    // the aggregator is about to write ~6.8 GB into.
+    let effective_pk_cache = effective_pk_cache_dir(pk_cache_dir, &p.params_dir);
 
     check_output_dirs(
         &p.work_dir,
@@ -845,9 +924,244 @@ pub async fn check_prover_artifacts(
         &effective_pk_cache,
         params_needs_write.then_some(p.params_dir.as_path()),
     )?;
-    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache)?;
+    // The aggregator's ~6.85 GB key is written once per Circuit-4 key and
+    // aggregator build; a run whose predecessor already left it needs no
+    // room for it. Hashed once, here: stage 5 re-checks the binary against
+    // this digest and notes the slot its proof used with it.
+    let artifacts = ProverArtifacts {
+        pk_fingerprint: fingerprint,
+        aggregate_proof_sha256: hash_aggregate_proof(&aggregate_proof_bin(&p.aggregator_dir))?,
+    };
+    let aggregator_key = aggregator_key(&effective_pk_cache, artifacts.verified_inputs().as_ref());
+    // A key in the pk cache stage 5 would fail on, after the burn, if its
+    // proof needed that slot: refused now instead.
+    check_aggregator_keys(&effective_pk_cache, aggregator_key)?;
+    check_disk_headroom(&p.params_dir, &effective_pk_cache, cache, aggregator_key)?;
+    // The locks stage 5 waits for, tried now: one that cannot be taken fails
+    // the run before the burn rather than after it.
+    for lock in stage_5_locks(snark_dir, &effective_pk_cache, aggregator_key) {
+        crate::prove_lock::check_lockable(&lock.path, lock.flag, lock.busy)?;
+    }
 
-    Ok(fingerprint)
+    Ok(artifacts)
+}
+
+/// The digest stage 5 checks `aggregate-proof` against. One this user can
+/// run but not read — mode 0711, say — is refused: there is nothing to
+/// check it against later.
+fn hash_aggregate_proof(bin: &Path) -> CliResult<String> {
+    bridge_prover_lib::keys::sha256_of(bin).map_err(|e| CliError::Preflight {
+        reason: format!(
+            "--aggregator-dir: cannot read {} to hash it: {e}. Stage 5 checks the binary it runs \
+             against this digest. Make it readable for this user (chmod a+r).",
+            bin.display()
+        ),
+        source: None,
+    })
+}
+
+/// What preflight verified for stage 5.
+#[derive(Debug)]
+pub struct ProverArtifacts {
+    /// The Circuit-4 proving key as preflight streamed it; `None` when the
+    /// key cache was not warm.
+    pub pk_fingerprint: Option<PkFingerprint>,
+    /// SHA-256 of the `aggregate-proof` binary as preflight read it.
+    pub aggregate_proof_sha256: String,
+}
+
+impl ProverArtifacts {
+    /// What the aggregator's slot depends on, as preflight verified it —
+    /// both digests, on a warm Circuit-4 key cache. What preflight asks
+    /// [`crate::aggregator_slot::is_cached`] about.
+    pub(crate) fn verified_inputs(&self) -> Option<crate::aggregator_slot::ProofInputs> {
+        Some(crate::aggregator_slot::ProofInputs {
+            event_pk_sha256: self.pk_fingerprint.as_ref()?.sha256.clone(),
+            aggregate_proof_sha256: self.aggregate_proof_sha256.clone(),
+        })
+    }
+
+    /// What a stage-5 proof ran with: [`Self::verified_inputs`], or, on a
+    /// run that generated the Circuit-4 key itself, that key's digest as its
+    /// manifest in `params_dir` records it now. The binary is always the one
+    /// preflight hashed — stage 5 refuses another.
+    pub(crate) fn proof_inputs(
+        &self,
+        params_dir: &Path,
+    ) -> Option<crate::aggregator_slot::ProofInputs> {
+        let event_pk_sha256 = match &self.pk_fingerprint {
+            Some(f) => f.sha256.clone(),
+            None => bridge_prover_lib::keys::event_pk_recorded_digest(params_dir)?.1,
+        };
+        Some(crate::aggregator_slot::ProofInputs {
+            event_pk_sha256,
+            aggregate_proof_sha256: self.aggregate_proof_sha256.clone(),
+        })
+    }
+}
+
+/// Refuse if `aggregate-proof` is not the binary preflight hashed.
+///
+/// Called right before the proof, after the burn, the anchor wait at stage
+/// 4b (up to 120 minutes) and any wait for the prove lock: a binary
+/// replaced meanwhile was never probed, and the slot it names would be noted
+/// against the old one's digest. Exit 12; a re-run with `--allow-retry`
+/// checks the new one in its own preflight and resumes from the recorded
+/// burn.
+pub fn recheck_aggregate_proof(before: &str, bin: &Path) -> CliResult<()> {
+    match bridge_prover_lib::keys::sha256_of(bin) {
+        Ok(now) if now == before => Ok(()),
+        Ok(now) => Err(CliError::ProofFailed {
+            reason: format!(
+                "{} is not the aggregate-proof preflight checked: sha256 {}…, was {}…. Re-run \
+                 with --allow-retry: its preflight checks this one, and it resumes from the \
+                 recorded burn.",
+                bin.display(),
+                &now[..8.min(now.len())],
+                &before[..8.min(before.len())],
+            ),
+            source: None,
+        }),
+        Err(e) => Err(CliError::ProofFailed {
+            reason: format!(
+                "{}: cannot read the aggregate-proof preflight checked: {e}",
+                bin.display()
+            ),
+            source: None,
+        }),
+    }
+}
+
+/// Whether stage 5 will load the aggregator key the proof needs, by what
+/// the last proof through `pk_cache_dir` noted.
+fn aggregator_key(
+    pk_cache_dir: &Path,
+    inputs: Option<&crate::aggregator_slot::ProofInputs>,
+) -> AggregatorKey {
+    if crate::aggregator_slot::is_cached(pk_cache_dir, inputs) {
+        AggregatorKey::Cached
+    } else {
+        AggregatorKey::ToGenerate
+    }
+}
+
+/// Refuse a pk cache that holds a withdrawal aggregator key stage 5 would
+/// fail on: a published one that is damaged is to be removed, one this user
+/// cannot read is to be made readable
+/// ([`crate::aggregator_slot::bad_slots`]); and when the aggregator is to
+/// generate its key, an unpublished one this user cannot remove — stage 5
+/// removes it first ([`crate::aggregator_slot::stuck_unpublished_keys`]).
+fn check_aggregator_keys(pk_cache_dir: &Path, aggregator_key: AggregatorKey) -> CliResult<()> {
+    use crate::aggregator_slot::SlotProblem;
+
+    let stuck: Vec<String> = match aggregator_key {
+        AggregatorKey::Cached => Vec::new(),
+        AggregatorKey::ToGenerate => crate::aggregator_slot::stuck_unpublished_keys(pk_cache_dir)
+            .iter()
+            .map(|k| k.display().to_string())
+            .collect(),
+    };
+    if !stuck.is_empty() {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--pk-cache-dir: an aggregator key with no .meta.json — set aside as damaged, or \
+                 never published — that stage 5 removes before it generates the key, and this \
+                 user cannot remove: {}. Have its owner remove it (and any .meta.json.damaged \
+                 beside it), or point --pk-cache-dir at a cache of your own.",
+                stuck.join("; ")
+            ),
+            source: None,
+        });
+    }
+    let bad = crate::aggregator_slot::bad_slots(pk_cache_dir);
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let list = |unreadable: bool| -> Vec<String> {
+        bad.iter()
+            .filter_map(|b| match &b.problem {
+                SlotProblem::Damaged(why) if !unreadable => {
+                    Some(format!("{} ({why})", b.key.display()))
+                },
+                SlotProblem::Unreadable(why) if unreadable => {
+                    Some(format!("{} ({why})", b.key.display()))
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let mut reasons = Vec::new();
+    let damaged = list(false);
+    if !damaged.is_empty() {
+        reasons.push(format!(
+            "a damaged aggregator key: {}. Remove each .pk named here and the .meta.json beside \
+             it; the next proof that needs the key generates it again.",
+            damaged.join("; ")
+        ));
+    }
+    let unreadable = list(true);
+    if !unreadable.is_empty() {
+        reasons.push(format!(
+            "an aggregator key this user cannot read: {}. Make the .pk and the .meta.json beside \
+             it readable for this user — nothing says they are damaged, so do not remove them for \
+             this — or point --pk-cache-dir at a cache of your own.",
+            unreadable.join("; ")
+        ));
+    }
+    Err(CliError::Preflight {
+        reason: format!(
+            "--pk-cache-dir: {} Stage 5 would fail on it after the burn if its proof needs it.",
+            reasons.join(" And ")
+        ),
+        source: None,
+    })
+}
+
+/// A lock stage 5 waits for, as preflight tries it.
+#[derive(Debug, PartialEq, Eq)]
+struct Stage5Lock {
+    path: PathBuf,
+    /// The flag that names its directory.
+    flag: &'static str,
+    /// What it means that another process holds it now.
+    busy: &'static str,
+}
+
+/// The locks stage 5 waits for: the prove lock, and the aggregator's keygen
+/// lock when the aggregator generates its key. One that loads the key only
+/// tries that lock, to clear leftovers, and carries on without it.
+fn stage_5_locks(
+    snark_dir: &Path,
+    pk_cache_dir: &Path,
+    aggregator_key: AggregatorKey,
+) -> Vec<Stage5Lock> {
+    let mut locks = vec![Stage5Lock {
+        path: crate::prove_lock::lock_path(snark_dir),
+        flag: "--snark-dir",
+        busy: "another withdrawal is proving in this --snark-dir; stage 5 waits for it",
+    }];
+    if aggregator_key == AggregatorKey::ToGenerate {
+        locks.push(Stage5Lock {
+            path: pk_cache_dir.join(AGGREGATOR_KEYGEN_LOCK),
+            flag: "--pk-cache-dir",
+            busy: "another aggregate-proof is generating a key in this pk cache; stage 5 waits \
+                   for it if it still is, and the wait counts against --prover-timeout-s",
+        });
+    }
+    locks
+}
+
+/// Where the aggregator keeps its pk cache: `--pk-cache-dir`, or
+/// `<params_dir>/pk_cache` without it, the way the runtime resolves it.
+pub(crate) fn effective_pk_cache_dir(pk_cache_dir: Option<&Path>, params_dir: &Path) -> PathBuf {
+    pk_cache_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| params_dir.join("pk_cache"))
+}
+
+/// The `aggregate-proof` binary under `--aggregator-dir`.
+pub(crate) fn aggregate_proof_bin(aggregator_dir: &Path) -> PathBuf {
+    aggregator_dir.join("target/release/aggregate-proof")
 }
 
 /// The proving key as stage 1 verified it, carried to stage 5.
@@ -859,8 +1173,9 @@ pub async fn check_prover_artifacts(
 /// deliberately skips the proving key's digest (four constructors, and the
 /// verifier daemon never loads a proving key at all).
 ///
-/// Between that check and `load_pk` in stage 5 sit the burn and up to ~91
-/// minutes of anchor wait. A key replaced inside that window is not exotic
+/// Between that check and `load_pk` in stage 5 sit the burn, the anchor wait
+/// at stage 4b (up to 120 minutes) and any wait for the prove lock. A key
+/// replaced inside that window is not exotic
 /// — an rsync, a second keygen, a restored backup — and it is not reliably
 /// caught later: `try_load_pk` is panic-wrapped so a TRUNCATED key reports,
 /// but a same-length corruption past the embedded verifying key
@@ -1151,7 +1466,7 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
     // canonicalises `aggregator_dir` at construction, so by the time
     // `release_bin` joins onto it the path is already absolute. Preflight
     // has no such step, which is why it needs this one.
-    let relative_bin = aggregator_dir.join("target/release/aggregate-proof");
+    let relative_bin = aggregate_proof_bin(aggregator_dir);
     if !relative_bin.is_file() {
         return Err(refuse(format!(
             "--aggregator-dir {}: no target/release/aggregate-proof.\n\x20 Build it first — this \
@@ -1208,9 +1523,29 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
         Ok(Ok(out))
             if out.status.success()
                 && help_mentions_our_flags(&out)
-                && help_mentions_source_self_check(&out) =>
+                && help_mentions_source_self_check(&out)
+                && help_mentions(&out, "--slot-report") =>
         {
             Ok(())
+        },
+        // Stage 5 passes `--slot-report`, and an older aggregate-proof
+        // refuses an argument it does not know — after the burn.
+        Ok(Ok(out))
+            if out.status.success()
+                && help_mentions_our_flags(&out)
+                && help_mentions_source_self_check(&out) =>
+        {
+            Err(refuse(format!(
+                "--aggregator-dir {}: {} predates `--slot-report`, which stage 5 passes it, and \
+                 would refuse it after the burn. On an install made by scripts/install.sh, \
+                 download the script again and run it: it replaces an aggregate-proof without \
+                 `--slot-report` with the latest release's, which an older copy of it does not. \
+                 From a checkout, rebuild it:\n\x20   cd {} && cargo build --release --bin \
+                 aggregate-proof",
+                aggregator_dir.display(),
+                release_bin.display(),
+                aggregator_dir.display(),
+            )))
         },
         // `--inner-snark` alone is not enough: the old aggregate-proof prints
         // that too, and with the solc probe gone this CLI can no longer tell
@@ -1280,6 +1615,12 @@ fn help_mentions_our_flags(out: &std::process::Output) -> bool {
     let text = String::from_utf8_lossy(&out.stdout);
     let err = String::from_utf8_lossy(&out.stderr);
     text.contains("--inner-snark") || err.contains("--inner-snark")
+}
+
+/// Whether `--help` output names `flag`.
+fn help_mentions(out: &std::process::Output, flag: &str) -> bool {
+    String::from_utf8_lossy(&out.stdout).contains(flag)
+        || String::from_utf8_lossy(&out.stderr).contains(flag)
 }
 
 /// `--help` output must name `--allow-source-drift`, which only the
@@ -1411,7 +1752,7 @@ fn ensure_writable_dir(flag: &'static str, dir: &Path) -> CliResult<()> {
 /// and not of the directory.** The shipped profile puts the pk cache
 /// *inside* params (`BRIDGE_PK_CACHE_DIR=…/params/pk_cache`,
 /// `bridge_config.shellnet:95`), so two independent comparisons against the
-/// same `statvfs` both pass at 3.5 GB free while the run needs ~3.65 GB —
+/// same `statvfs` both pass at 8 GB free while the run needs ~10.7 GB —
 /// and the shortfall lands during aggregation, after the burn. Two checks
 /// that each ask "is there room for my piece?" never notice they are sharing
 /// a pie.
@@ -1429,6 +1770,7 @@ pub fn check_disk_headroom(
     params_dir: &Path,
     pk_cache_dir: &Path,
     cache: KeyCacheState,
+    aggregator_key: AggregatorKey,
 ) -> CliResult<()> {
     // Report litter before measuring, whether or not the measurement then
     // refuses. A killed keygen leaves its whole partial temp behind
@@ -1444,10 +1786,71 @@ pub fn check_disk_headroom(
         );
     }
 
-    for r in plan_disk_headroom(params_dir, pk_cache_dir, cache)? {
+    // A slot an aggregator found damaged and set aside: stage 5 removes
+    // both files before it generates the key again, but they hold their
+    // space until then.
+    for aside in crate::aggregator_slot::set_aside_slots(pk_cache_dir) {
+        tracing::warn!(
+            key = %aside.key.as_deref().unwrap_or(Path::new("gone")).display(),
+            meta = %aside.meta.display(),
+            gb = aside
+                .key
+                .as_deref()
+                .and_then(|k| std::fs::metadata(k).ok())
+                .map_or(0.0, |m| m.len() as f64 / 1e9),
+            "an aggregator key an earlier run found damaged and set aside. Stage 5 removes both \
+             files before it generates the key again; until then they hold space this run may \
+             need, and removing them by hand frees it now",
+        );
+    }
+
+    // The aggregator's counterpart: a killed `aggregate-proof` leaves its
+    // half-written key under a `.partial-` name. The next aggregator
+    // run removes it, but this measurement comes first.
+    for (path, bytes) in aggregator_partials(pk_cache_dir) {
+        tracing::warn!(
+            path = %path.display(),
+            gb = bytes as f64 / 1e9,
+            "a partial pk-cache file: an aggregate-proof running now is writing it, or an \
+             interrupted one left it. It holds space this run may need. The next aggregate-proof \
+             that takes the cache's lock removes a leftover; remove it by hand only while no \
+             aggregate-proof is running",
+        );
+    }
+
+    for r in plan_disk_headroom(params_dir, pk_cache_dir, cache, aggregator_key)? {
         require_space(r.probe, r.needed, &r.parts)?;
     }
     Ok(())
+}
+
+/// Suffix `aggregate-proof` gives a pk-cache file it is still writing
+/// (`PARTIAL_SUFFIX` in `bridge-evm-aggregator/src/aggregator_cache.rs`,
+/// a separate workspace this crate cannot import).
+const AGGREGATOR_PARTIAL_SUFFIX: &str = ".partial-";
+
+/// The lock `aggregate-proof` holds in the pk cache while it generates a
+/// key (`KEYGEN_LOCK` in `bridge-evm-aggregator/src/aggregator_cache.rs`).
+const AGGREGATOR_KEYGEN_LOCK: &str = ".keygen.lock";
+
+/// The partial files an interrupted `aggregate-proof` left in
+/// `pk_cache_dir`, with their sizes. Unreadable directory: none.
+fn aggregator_partials(pk_cache_dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(pk_cache_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.contains(AGGREGATOR_PARTIAL_SUFFIX))
+        })
+        .filter_map(|e| {
+            let md = std::fs::symlink_metadata(e.path()).ok()?;
+            md.is_file().then(|| (e.path(), md.len()))
+        })
+        .collect()
 }
 
 /// Everything the check DECIDES, decided — and nothing performed.
@@ -1462,10 +1865,11 @@ fn plan_disk_headroom<'a>(
     params_dir: &'a Path,
     pk_cache_dir: &'a Path,
     cache: KeyCacheState,
+    aggregator_key: AggregatorKey,
 ) -> CliResult<Vec<SpaceRequirement<'a>>> {
     // What each path needs, in bytes, on this run.
     let params_need = keygen_requirement(params_dir, cache)?;
-    let pk_need = pk_cache_requirement(pk_cache_dir);
+    let pk_need = pk_cache_requirement(aggregator_key);
 
     // Group by device. `st_dev` is what makes two paths share a pool;
     // comparing the paths themselves would miss a bind mount and a symlink
@@ -1520,7 +1924,7 @@ fn space_requirements<'a>(
 ) -> Vec<SpaceRequirement<'a>> {
     if shared {
         // One comparison against one `statvfs`. Two independent ones both
-        // pass at 3.5 GB free while the run needs ~3.65 GB.
+        // pass at 8 GB free while the run needs ~10.7 GB.
         vec![SpaceRequirement {
             probe: params_dir,
             needed: params_need + pk_need,
@@ -1601,16 +2005,29 @@ fn keygen_requirement(params_dir: &Path, cache: KeyCacheState) -> CliResult<u64>
     }
 }
 
+/// Whether stage 5 will find the outer aggregator's key in the pk cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregatorKey {
+    /// The last proof through this cache ran with the same Circuit-4 key and
+    /// the same `aggregate-proof`, and the slot it used — its key and meta —
+    /// is still there (`aggregator_slot`).
+    Cached,
+    /// Anything else: the first withdrawal on a host, the first after a
+    /// Circuit-4 key or an `aggregate-proof` changed, or a slot removed since.
+    ToGenerate,
+}
+
 /// Bytes the outer aggregator keygen may write into the pk cache.
 ///
-/// Always `OUTER_PK_BYTES`, and the argument is deliberately unused: the
-/// slot's name is a content hash over the inner proof, which does not exist
-/// until stage 5, so there is nothing in the directory this function could
-/// match against to narrow the figure. The parameter stays in the signature
-/// because the day the slot name becomes predictable this is where the
-/// narrowing goes.
-fn pk_cache_requirement(_pk_cache_dir: &Path) -> u64 {
-    OUTER_PK_BYTES
+/// The slot's name is a hash over the Circuit-4 verifying key, the SRS and
+/// the aggregator's configuration, which this crate cannot compute before
+/// stage 5; `aggregator_slot` recognises it instead by what the last proof
+/// ran with. Recognised: nothing is written. Otherwise the whole key is.
+fn pk_cache_requirement(aggregator_key: AggregatorKey) -> u64 {
+    match aggregator_key {
+        AggregatorKey::Cached => 0,
+        AggregatorKey::ToGenerate => OUTER_PK_BYTES,
+    }
 }
 
 /// Compare one filesystem's free space against the sum of what will be
@@ -1634,8 +2051,8 @@ fn require_space(probe: &Path, needed: u64, parts: &[(&str, u64)]) -> CliResult<
         return Ok(());
     }
 
-    // Itemise. "needs 4.3 GB" invites the operator to free 4.3 GB and be
-    // surprised; "3.0 for keygen + 0.9 for the aggregator, same filesystem"
+    // Itemise. "needs 10.7 GB" invites the operator to free 10.7 GB and be
+    // surprised; "3.2 for keygen + 7.5 for the aggregator, same filesystem"
     // tells them what is actually happening.
     let breakdown = parts
         .iter()
@@ -1644,7 +2061,7 @@ fn require_space(probe: &Path, needed: u64, parts: &[(&str, u64)]) -> CliResult<
         .collect::<Vec<_>>()
         .join(" + ");
 
-    // "Free 4.0 GB" is the wrong instruction when 2.65 GB of the shortfall
+    // "Free 10.7 GB" is the wrong instruction when 2.65 GB of the shortfall
     // is a temp file the operator cannot see. Name it, and name the tool,
     // before telling them to go find space elsewhere.
     let leaks = leaked_keygen_temp_files(probe);
@@ -1888,8 +2305,8 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 
 /// Preflight the destination *deploy*: something is there, its withdrawal
 /// verifier stack is real and is the one this build proves against, its
-/// pinned AN-side identity is ours, and its treasury visibly covers this
-/// amount.
+/// pinned AN-side identity is ours, its treasury visibly covers this
+/// amount, and it is not paused.
 ///
 /// Key-free, so `--dry-run` exercises all of it.
 ///
@@ -2126,6 +2543,29 @@ pub async fn check_bridge_deploy(
             source: None,
         });
     }
+
+    // 6. Is it open? While `paused()` is true, `verifyBlock` and `withdrawByProof`
+    //    revert `BridgePaused`: no bundle covers the burn and no payout can land
+    //    until the owner unpauses. A bridge without the getter predates the pause
+    //    and counts as open, as for `deposit`.
+    use crate::deposit::evm::EvmRead as _;
+    let paused = crate::deposit::evm::AlloyEvm::connect(rpc_url)?
+        .bridge_paused(bridge)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("--bridge-address {bridge}: paused() failed: {e:#}"),
+            source: None,
+        })?;
+    if paused == Some(true) {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge} is paused by its owner (paused() is true): verifyBlock \
+                 and withdrawByProof revert BridgePaused until unpause(), so a burn made now \
+                 could not be paid out before then. Re-run once the owner unpauses it."
+            ),
+            source: None,
+        });
+    }
     Ok(())
 }
 
@@ -2217,11 +2657,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn preflight_passes_its_an_side_against_a_fake_node() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
-        let usdc_bridge_account_id = "2b".repeat(32);
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge(false).await;
         let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
             account_id: account_id.clone(),
             account_boc,
             usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
         })
         .await;
 
@@ -2268,6 +2710,123 @@ pub(crate) mod tests {
             seen.contains("POST /graphql"),
             "the USDCBridge was queried: {seen}"
         );
+        assert!(
+            seen.contains(&usdc_bridge_account_id),
+            "the USDCBridge account was fetched for isPaused: {seen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_offline_bridge_answers_is_paused_both_ways() {
+        let ctx = build_client_context("http://127.0.0.1:1/graphql")
+            .expect("a context needs no reachable endpoint to run TVM locally");
+        for paused in [false, true] {
+            let (id, boc) = crate::test_chain::deployed_usdc_bridge(paused).await;
+            assert_eq!(
+                call_is_paused(&ctx, &format!("0:{id}"), &boc)
+                    .await
+                    .unwrap(),
+                paused
+            );
+        }
+    }
+
+    /// A node serving a funded multisig and a USDCBridge, paused or not;
+    /// and the arguments of a withdrawal from that multisig.
+    async fn an_side(
+        paused: bool,
+    ) -> (
+        crate::test_chain::FakeNode,
+        String,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        FromAddress,
+        ToAddress,
+        UsdcAmount,
+    ) {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (bridge, usdc_bridge_boc) = crate::test_chain::deployed_usdc_bridge(paused).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: bridge.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+        (node, bridge, dir, keys, from, to, amount)
+    }
+
+    #[tokio::test]
+    async fn a_paused_an_bridge_is_refused_before_the_burn() {
+        let (node, bridge, _dir, keys, from, to, amount) = an_side(true).await;
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &bridge,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("initiateWithdrawal refuses while the bridge is paused");
+        node.complaint();
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("paused"), "{msg}");
+        assert!(
+            msg.contains("231"),
+            "names the refusal the burn would get: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resume_does_not_ask_the_an_bridge_about_its_pause() {
+        let (node, bridge, _dir, keys, from, to, amount) = an_side(true).await;
+        run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &bridge,
+            BalanceCheck::SkipSpent,
+        )
+        .await
+        .expect("the burn is on the wire; the AN pause cannot stop it any more");
+        node.complaint();
+        let seen = node.seen.lock().await.join("\n");
+        assert!(
+            !seen.contains(&bridge),
+            "the bridge account was not fetched: {seen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paused_evm_bridge_is_refused_before_the_burn() {
+        let paused = format!("0x{:064x}", 1u8);
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_PAUSED, paused)])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect_err("withdrawByProof and verifyBlock revert BridgePaused while it is set");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("paused"), "{msg}");
+        assert!(msg.contains("unpause"), "says what lifts it: {msg}");
     }
 
     /// `check_key_file_perms` wants exactly `0400`, and `write_keys`
@@ -2543,6 +3102,7 @@ pub(crate) mod tests {
     const SEL_LAST_BK_UPD: &str = "a91a27ac"; // storedLastBkSetUpdateSeqNo()
     const SEL_GENESIS_ANCHOR: &str = "6cd06281"; // storedPrevMaxLevelLayerHash()
     const SEL_LAYER_WINDOW: &str = "a95d2271"; // getLayerWindow(uint8)
+    pub(crate) const SEL_PAUSED: &str = "5c975abb"; // paused()
 
     /// A 32-byte zero word — what a getter returns when its slot is unset.
     const ZERO_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -2771,6 +3331,8 @@ pub(crate) mod tests {
             (SEL_DAPP_FR, ZERO_WORD.to_string()),
             (SEL_ACC_FR, ZERO_WORD.to_string()),
             (SEL_TREASURY, MAX_WORD.to_string()),
+            // Not paused: the last check `check_bridge_deploy` makes.
+            (SEL_PAUSED, ZERO_WORD.to_string()),
             // Matches the zero digest tests write into their tempdir's
             // `_calldata.bin` (24 words of `0x00`). Callers overriding
             // this pair must override both sides.
@@ -3108,9 +3670,14 @@ pub(crate) mod tests {
         let pk_cache = params.join("pk_cache");
         std::fs::create_dir_all(&pk_cache).unwrap();
 
-        let plan = plan_disk_headroom(&params, &pk_cache, KeyCacheState::Cold {
-            why: "no manifest".into(),
-        })
+        let plan = plan_disk_headroom(
+            &params,
+            &pk_cache,
+            KeyCacheState::Cold {
+                why: "no manifest".into(),
+            },
+            AggregatorKey::ToGenerate,
+        )
         .expect("a cold cache is a requirement, not a refusal");
 
         assert_eq!(
@@ -3135,9 +3702,14 @@ pub(crate) mod tests {
         // This is the one deterministic path through the whole function —
         // it needs no assumption about the host's free space.
         let d = tempfile::TempDir::new().unwrap();
-        let err = check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {
-            why: "digest mismatch".into(),
-        })
+        let err = check_disk_headroom(
+            d.path(),
+            d.path(),
+            KeyCacheState::Corrupt {
+                why: "digest mismatch".into(),
+            },
+            AggregatorKey::ToGenerate,
+        )
         .expect_err("an untrustworthy cache is not something to spend a burn on");
         assert_eq!(err.exit_code().as_i32(), 2, "{err}");
         let msg = format!("{err}");
@@ -3196,9 +3768,14 @@ pub(crate) mod tests {
         let outcome = crate::test_log::with_default(subscriber, || {
             // `Corrupt` so the outcome is a refusal on every host: the
             // point here is what was said on the way, not the verdict.
-            check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {
-                why: "digest mismatch".into(),
-            })
+            check_disk_headroom(
+                d.path(),
+                d.path(),
+                KeyCacheState::Corrupt {
+                    why: "digest mismatch".into(),
+                },
+                AggregatorKey::ToGenerate,
+            )
         });
         outcome.expect_err("a corrupt cache is a refusal");
 
@@ -3214,12 +3791,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_partial_aggregator_key_is_reported_before_the_measurement_decides_anything() {
+        // An `aggregate-proof` killed mid-keygen (its timeout, the OOM
+        // killer) leaves `<stem>.pk.partial-<pid>` — up to ~6.85 GB — in the
+        // pk cache. The next aggregate-proof run removes it, but this check
+        // runs first and may refuse for the space it holds.
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<String>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let params = tempfile::TempDir::new().unwrap();
+        let pk_cache = tempfile::TempDir::new().unwrap();
+        let leak = pk_cache
+            .path()
+            .join("BridgeWithdrawalAggregatorVerifier__v3__ab.pk.partial-4242");
+        std::fs::write(&leak, vec![0u8; 4096]).unwrap();
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .finish();
+        let outcome = crate::test_log::with_default(subscriber, || {
+            check_disk_headroom(
+                params.path(),
+                pk_cache.path(),
+                KeyCacheState::Corrupt {
+                    why: "digest mismatch".into(),
+                },
+                AggregatorKey::ToGenerate,
+            )
+        });
+        outcome.expect_err("a corrupt cache is a refusal");
+
+        let logged = sink.0.lock().unwrap().clone();
+        assert!(
+            logged.contains("pk.partial-4242"),
+            "the leftover must be named before the measurement decides anything: {logged}",
+        );
+    }
+
+    #[test]
     fn two_directories_on_one_filesystem_are_asked_for_the_sum() {
         // The composition the function exists for, and the one thing the
         // suite could not see before: `require_space` and both helpers
         // were covered, the summing was not. Two independent comparisons
-        // against the same statvfs both pass at 3.5 GB free while the run
-        // needs ~3.65 GB, and the shortfall then lands during aggregation
+        // against the same statvfs both pass at 8 GB free while the run
+        // needs ~10.7 GB, and the shortfall then lands during aggregation
         // — after the burn.
         let plan = space_requirements(
             Path::new("/params"),
@@ -3303,7 +3942,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_shortfall_itemises_what_shares_the_filesystem() {
-        // "needs 4.0 GB" invites the operator to free 4 GB and be
+        // "needs 10.7 GB" invites the operator to free 10.7 GB and be
         // surprised. The sum is the whole reason this is one check.
         let dir = tempfile::TempDir::new().unwrap();
         let absurd = u64::MAX / 4; // ~4.6 exabytes: no test host has this
@@ -3318,7 +3957,7 @@ pub(crate) mod tests {
             "must itemise keygen: {msg}"
         );
         assert!(
-            msg.contains("--pk-cache-dir 1.1 GB"),
+            msg.contains("--pk-cache-dir 7.5 GB"),
             "must itemise the aggregator: {msg}"
         );
         assert!(
@@ -3329,7 +3968,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_shortfall_names_the_space_a_dead_keygen_is_holding() {
-        // "Free 4.0 GB" is the wrong instruction when most of the
+        // "Free 10.7 GB" is the wrong instruction when most of the
         // shortfall is a temp file the operator cannot see: the name
         // starts with a dot, so `ls` does not show it, and a killed
         // keygen is the only thing that produces one.
@@ -3420,15 +4059,327 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_warm_cache_still_reserves_for_the_aggregator() {
-        // The pk-cache requirement is unconditional — its slot name is a
-        // hash over a proof that does not exist until stage 5, so there is
-        // nothing on disk to narrow it against.
-        let dir = tempfile::TempDir::new().unwrap();
-        assert_eq!(pk_cache_requirement(dir.path()), OUTER_PK_BYTES);
+    fn the_pk_cache_names_are_the_aggregators_own() {
+        // A separate workspace this crate cannot import: read its source.
+        let aggregator = include_str!("../../bridge-evm-aggregator/src/aggregator_cache.rs");
+        assert!(aggregator.contains(&format!(
+            "const KEYGEN_LOCK: &str = \"{AGGREGATOR_KEYGEN_LOCK}\";"
+        )));
+        assert!(aggregator.contains(&format!(
+            "pub const PARTIAL_SUFFIX: &str = \"{AGGREGATOR_PARTIAL_SUFFIX}\";"
+        )));
+        let aggregate_proof =
+            include_str!("../../bridge-evm-aggregator/src/bin/aggregate_proof.rs");
+        assert!(aggregate_proof.contains("\"--slot-report\" => slot_report ="));
+        assert!(aggregator.contains(&format!(
+            "    {}: Option<u64>,",
+            crate::aggregator_slot::META_KEY_LENGTH
+        )));
+        assert!(aggregator.contains(&format!(
+            "pub const DAMAGED_SUFFIX: &str = \"{}\";",
+            crate::aggregator_slot::DAMAGED_SUFFIX
+        )));
+        let tag = crate::aggregator_slot::CURRENT_SLOT_PREFIX
+            .strip_prefix("BridgeWithdrawalAggregatorVerifier")
+            .unwrap();
+        assert!(
+            aggregator.contains(&format!("format!(\"{{base_name}}{tag}{{}}\"")),
+            "the slot format tag is {tag}"
+        );
+        let meta = &aggregator[aggregator.find("struct CachedMeta {").unwrap()..];
+        let meta = &meta[..meta.find("\n}").unwrap()];
+        for field in crate::aggregator_slot::META_FIELDS {
+            assert!(meta.contains(&format!("    {field}: ")), "{field}");
+        }
+        let calculated = &aggregator[aggregator.find("struct MirrorConfigParams {").unwrap()..];
+        let calculated = &calculated[..calculated.find("\n}").unwrap()];
+        for field in crate::aggregator_slot::META_CALCULATED_FIELDS {
+            assert!(calculated.contains(&format!("    {field}: ")), "{field}");
+        }
+    }
+
+    #[test]
+    fn the_aggregator_key_counts_as_cached_only_where_the_last_proof_left_it() {
+        // Preflight, a proof noted by stage 5, preflight again: the same
+        // artifacts, through the same calls both stages make.
+        let d = tempfile::TempDir::new().unwrap();
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        std::fs::write(d.path().join(format!("{slot}.pk")), b"key").unwrap();
+        std::fs::write(d.path().join(format!("{slot}.meta.json")), b"{}").unwrap();
+        let report = crate::aggregator_slot::report_path(d.path());
+        std::fs::write(&report, slot).unwrap();
+        let artifacts = ProverArtifacts {
+            pk_fingerprint: Some(PkFingerprint {
+                path: d.path().join("event_pk.bin"),
+                sha256: "aa".to_string(),
+            }),
+            aggregate_proof_sha256: "bb".to_string(),
+        };
+        let preflight = || aggregator_key(d.path(), artifacts.verified_inputs().as_ref());
+        assert_eq!(preflight(), AggregatorKey::ToGenerate);
+        crate::aggregator_slot::note_proof(
+            d.path(),
+            Some(&report),
+            artifacts.proof_inputs(d.path()).as_ref(),
+        );
+        assert_eq!(preflight(), AggregatorKey::Cached);
+        assert_eq!(aggregator_key(d.path(), None), AggregatorKey::ToGenerate);
+
+        let other = ProverArtifacts {
+            aggregate_proof_sha256: "cc".to_string(),
+            ..artifacts
+        };
         assert_eq!(
-            pk_cache_requirement(Path::new("/nonexistent")),
+            aggregator_key(d.path(), other.verified_inputs().as_ref()),
+            AggregatorKey::ToGenerate,
+            "another aggregate-proof"
+        );
+    }
+
+    #[test]
+    fn an_aggregate_proof_this_user_cannot_read_is_refused_before_the_burn() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let bin = d.path().join("aggregate-proof");
+        std::fs::write(&bin, b"v1").unwrap();
+        hash_aggregate_proof(&bin).expect("readable");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o311)).unwrap();
+        // Root reads anything: nothing to learn here then.
+        if std::fs::File::open(&bin).is_ok() {
+            return;
+        }
+        let err = hash_aggregate_proof(&bin).expect_err("run but not read");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        assert!(format!("{err}").contains("chmod a+r"), "{err}");
+    }
+
+    #[test]
+    fn a_replaced_aggregate_proof_is_refused_before_the_proof() {
+        let d = tempfile::TempDir::new().unwrap();
+        let bin = d.path().join("aggregate-proof");
+        std::fs::write(&bin, b"v1").unwrap();
+        let before = bridge_prover_lib::keys::sha256_of(&bin).unwrap();
+        recheck_aggregate_proof(&before, &bin).expect("unchanged");
+        std::fs::write(&bin, b"v2").unwrap();
+        let err = recheck_aggregate_proof(&before, &bin).expect_err("replaced");
+        assert_eq!(err.exit_code().as_i32(), 12, "after the burn: {err}");
+        assert!(format!("{err}").contains("--allow-retry"), "{err}");
+        std::fs::remove_file(&bin).unwrap();
+        let err = recheck_aggregate_proof(&before, &bin).expect_err("gone");
+        assert_eq!(err.exit_code().as_i32(), 12, "{err}");
+    }
+
+    #[test]
+    fn preflight_tries_the_keygen_lock_only_when_stage_5_waits_for_it() {
+        // A run that loads the aggregator key only tries that lock, and
+        // carries on without it: refusing it here was stricter than stage 5.
+        let snark = Path::new("/snark");
+        let pk_cache = Path::new("/pk_cache");
+        let paths = |key| -> Vec<(PathBuf, &str)> {
+            stage_5_locks(snark, pk_cache, key)
+                .into_iter()
+                .map(|l| (l.path, l.flag))
+                .collect()
+        };
+        assert_eq!(paths(AggregatorKey::Cached), vec![(
+            PathBuf::from("/snark/.prove.lock"),
+            "--snark-dir"
+        )]);
+        assert_eq!(paths(AggregatorKey::ToGenerate), vec![
+            (PathBuf::from("/snark/.prove.lock"), "--snark-dir"),
+            (PathBuf::from("/pk_cache/.keygen.lock"), "--pk-cache-dir"),
+        ]);
+        let keygen = stage_5_locks(snark, pk_cache, AggregatorKey::ToGenerate).remove(1);
+        assert!(
+            keygen.busy.contains("--prover-timeout-s"),
+            "{}",
+            keygen.busy
+        );
+
+        let src =
+            crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
+        assert!(src.contains(
+            "for lock in stage_5_locks(snark_dir, &effective_pk_cache, aggregator_key) {\n        \
+             crate::prove_lock::check_lockable(&lock.path, lock.flag, lock.busy)?;"
+        ));
+    }
+
+    #[test]
+    fn a_damaged_aggregator_key_is_refused_before_the_burn() {
+        let d = tempfile::TempDir::new().unwrap();
+        check_aggregator_keys(d.path(), AggregatorKey::ToGenerate).expect("an empty cache");
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        std::fs::write(d.path().join(format!("{slot}.pk")), [0x03, 21, 0x01, 0x07]).unwrap();
+        std::fs::write(
+            d.path().join(format!("{slot}.meta.json")),
+            br#"{"break_points": [], "calculated": {"degree": 21, "num_advice": 5, "num_lookup_advice": 1, "num_fixed": 1, "lookup_bits": 20}, "num_instance": [], "pk_bytes": 6846416031}"#,
+        )
+        .unwrap();
+        let err = check_aggregator_keys(d.path(), AggregatorKey::ToGenerate)
+            .expect_err("4 bytes of 6846416031");
+        assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&format!("{slot}.pk"))
+                && msg.contains("4 bytes, and its .meta.json records 6846416031")
+                && msg.contains("Remove each .pk named here"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_set_aside_key_this_user_cannot_remove_is_refused_before_the_burn() {
+        // Stage 5 removes it before it generates the key again, and would
+        // fail there, after the burn.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        std::fs::write(d.path().join(format!("{slot}.pk")), [0x03, 21]).unwrap();
+        std::fs::write(d.path().join(format!("{slot}.meta.json.damaged")), b"{}").unwrap();
+        check_aggregator_keys(d.path(), AggregatorKey::ToGenerate)
+            .expect("a set-aside key this user can remove");
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let checked = check_aggregator_keys(d.path(), AggregatorKey::ToGenerate);
+        let loaded = check_aggregator_keys(d.path(), AggregatorKey::Cached);
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        loaded.expect("a run that loads its key does not touch it");
+        // SAFETY: no arguments, cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let err = checked.expect_err("cannot be removed");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        assert!(format!("{err}").contains(&format!("{slot}.pk")), "{err}");
+    }
+
+    #[test]
+    fn an_aggregator_key_this_user_cannot_read_is_refused_with_no_word_of_removing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let slot = "BridgeWithdrawalAggregatorVerifier__v3__0123abcd";
+        let key = d.path().join(format!("{slot}.pk"));
+        std::fs::write(&key, b"key").unwrap();
+        std::fs::write(d.path().join(format!("{slot}.meta.json")), b"{}").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root opens anything: nothing to learn here then.
+        if std::fs::File::open(&key).is_ok() {
+            return;
+        }
+        let err =
+            check_aggregator_keys(d.path(), AggregatorKey::ToGenerate).expect_err("unreadable");
+        assert_eq!(err.exit_code().as_i32(), 2, "nothing is sent yet: {err}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("readable for this user") && !msg.contains("Remove each"),
+            "{msg}"
+        );
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn the_aggregator_key_is_reserved_unless_the_cache_already_holds_it() {
+        assert_eq!(
+            pk_cache_requirement(AggregatorKey::ToGenerate),
             OUTER_PK_BYTES
+        );
+        assert_eq!(pk_cache_requirement(AggregatorKey::Cached), 0);
+    }
+
+    #[test]
+    fn a_withdrawal_that_loads_both_keys_needs_no_room_for_them() {
+        // The second withdrawal on a host: the Circuit-4 key is warm and the
+        // aggregator's slot is the one the first proof used. Reserving 7 GiB
+        // for it anyway refused that withdrawal on a host sized for one.
+        let d = tempfile::TempDir::new().unwrap();
+        let params = d.path().join("params");
+        let pk_cache = params.join("pk_cache");
+        std::fs::create_dir_all(&pk_cache).unwrap();
+        let plan = plan_disk_headroom(
+            &params,
+            &pk_cache,
+            KeyCacheState::Warm,
+            AggregatorKey::Cached,
+        )
+        .unwrap();
+        assert!(plan.iter().all(|r| r.needed == 0), "{plan:?}");
+    }
+
+    #[test]
+    fn preflight_asks_whether_the_aggregator_key_is_cached_and_stage_5_says_so() {
+        let src =
+            crate::source_guard::production_source("preflight.rs", include_str!("preflight.rs"));
+        let artifacts = &src[src.find("pub async fn check_prover_artifacts(").unwrap()..];
+        let artifacts = &artifacts[..artifacts.find("\n}\n").unwrap()];
+        let damaged = artifacts
+            .find("check_aggregator_keys(&effective_pk_cache, aggregator_key)?;")
+            .expect("preflight refuses a damaged key");
+        let asked = artifacts
+            .find("aggregator_key(&effective_pk_cache, artifacts.verified_inputs().as_ref())")
+            .expect("preflight asks");
+        assert!(asked < damaged, "the refusal depends on the answer");
+        let measured = artifacts
+            .find("check_disk_headroom(")
+            .expect("and measures");
+        assert!(asked < measured);
+        assert!(
+            artifacts.contains("aggregator_key)?;"),
+            "the answer reaches the measurement"
+        );
+
+        let orchestrator = crate::source_guard::production_source(
+            "orchestrator.rs",
+            include_str!("orchestrator.rs"),
+        );
+        let lock = orchestrator.find("prove_lock::take(").unwrap();
+        let cleared = orchestrator
+            .find("aggregator_slot::fresh_report(")
+            .expect("a proof starts with no slot named");
+        let rechecked = orchestrator
+            .find("preflight::recheck_aggregate_proof(")
+            .expect("and the aggregator preflight hashed");
+        let proved = orchestrator.find("run_once_with_state(").unwrap();
+        let noted = orchestrator
+            .find("aggregator_slot::note_proof(")
+            .expect("a proof notes the slot it used");
+        let note = &orchestrator[noted..];
+        let note = &note[..note.find(");").unwrap()];
+        assert!(
+            note.contains("slot_report.as_deref()") && note.contains("proof_inputs("),
+            "noted with the report this proof cleared and the inputs it ran with: {note}"
+        );
+        let released = orchestrator.find("drop(prove_lock);").unwrap();
+        let reported = orchestrator
+            .find("e2e_cfg.slot_report = slot_report.clone();")
+            .expect("the aggregator is told where to report");
+        let submit = orchestrator.find("info!(\"stage 6/6").unwrap();
+        assert!(
+            lock < rechecked
+                && rechecked < cleared
+                && cleared < reported
+                && reported < proved
+                && proved < noted
+                && noted < released
+                && released < submit,
+            "the report is cleared and read while the lock is held"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "both sides are constants on purpose: the test pins the reservation against a \
+                  measurement, and fails with both numbers when someone lowers it"
+    )]
+    fn the_aggregator_reservation_covers_the_slot_a_cold_run_writes() {
+        // Measured on shellnet: the first run after a Circuit 4 key change
+        // wrote a 6 846 416 031-byte `BridgeWithdrawalAggregatorVerifier__v3__….pk`.
+        // With 1 GiB reserved, a host with 4-9 GB free passed preflight and
+        // ran out of disk in stage 5, after the burn.
+        const MEASURED_SLOT: u64 = 6_846_416_031;
+        assert!(
+            OUTER_PK_BYTES >= MEASURED_SLOT,
+            "the reservation ({OUTER_PK_BYTES} B) is smaller than the slot the aggregator writes \
+             ({MEASURED_SLOT} B)",
         );
     }
 
@@ -4314,7 +5265,7 @@ pub(crate) mod tests {
         write_exec(
             &bin_dir.join("aggregate-proof"),
             "#!/bin/sh\necho 'aggregate-proof --inner-snark <path> --name <verifier> \
-             --allow-source-drift'\n",
+             --allow-source-drift --slot-report <path>'\n",
         );
 
         let relative = std::path::Path::new(dir.path().file_name().unwrap());
@@ -4336,7 +5287,7 @@ pub(crate) mod tests {
         write_exec(
             &dir.path().join("agg/target/release/aggregate-proof"),
             "#!/bin/sh\necho 'usage: aggregate-proof --inner-snark <path> --name <n> \
-             --allow-source-drift'\nexit 0\n",
+             --allow-source-drift --slot-report <path>'\nexit 0\n",
         );
 
         check_aggregator_runnable(&dir.path().join("agg"))
@@ -4389,12 +5340,39 @@ pub(crate) mod tests {
             &dir.path().join("agg/target/release/aggregate-proof"),
             "#!/bin/sh\ncat <<'USAGE'\naggregate-proof --inner-snark <path> --name <verifier> \
              --out <path>\n [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n \
-             [--allow-source-drift] [--pk-cache-dir <dir>]\nUSAGE\n",
+             [--allow-source-drift] [--pk-cache-dir <dir>] [--slot-report <path>]\nUSAGE\n",
         );
 
         check_aggregator_runnable(&dir.path().join("agg"))
             .await
             .expect("a --help naming --allow-source-drift must pass");
+    }
+
+    #[tokio::test]
+    async fn aggregator_check_refuses_a_binary_that_cannot_report_its_slot() {
+        // Stage 5 passes `--slot-report`, and an aggregate-proof that does
+        // not know it refuses the whole command line — after the burn.
+        let _spawning = crate::test_forks::spawning();
+        let dir = tempfile::TempDir::new().unwrap();
+        make_artifact_tree(dir.path());
+        write_exec(
+            &dir.path().join("agg/target/release/aggregate-proof"),
+            "#!/bin/sh\ncat <<'USAGE'\naggregate-proof --inner-snark <path> --name <verifier> \
+             --out <path>\n [--verifiers-dir <dir>] [--k-outer <n>] [--universality <mode>]\n \
+             [--allow-source-drift] [--pk-cache-dir <dir>]\nUSAGE\n",
+        );
+
+        let err = check_aggregator_runnable(&dir.path().join("agg"))
+            .await
+            .expect_err("an aggregate-proof without --slot-report must be refused");
+        let msg = format!("{err}");
+        assert_eq!(err.exit_code().as_i32(), 2, "{msg}");
+        assert!(
+            msg.contains("--slot-report")
+                && msg.contains("cargo build --release")
+                && msg.contains("install.sh"),
+            "{msg}"
+        );
     }
 
     #[test]

@@ -323,11 +323,17 @@ pub struct SubprocessAggregatorConfig {
     pub params_dir: PathBuf,
     /// Hard timeout for the (K=21) aggregation run.
     pub timeout: Duration,
+    /// The calling command's flag for `timeout`, named when it runs out;
+    /// `None` where the command has none.
+    pub timeout_flag: Option<&'static str>,
+    /// Where `aggregate-proof` writes the stem of the pk-cache slot it used
+    /// (`--slot-report`), for a caller that notes it.
+    pub slot_report: Option<PathBuf>,
     /// Persistent outer PK cache directory. When set, forwarded to
     /// `aggregate-proof` as `--pk-cache-dir`, which memoises the K=21 outer
-    /// keygen. First bundle against a fresh slot still pays the full ~3–5 min
-    /// keygen; subsequent bundles hit the on-disk PK (~15–60 s). Without this,
-    /// every bundle re-keygens from scratch — see `aggregator_cache.rs`.
+    /// keygen. The first run against a fresh slot still pays the full keygen;
+    /// later ones load the key from disk. Without this, every run re-keygens
+    /// from scratch — see `aggregator_cache.rs`.
     pub pk_cache_dir: Option<PathBuf>,
 }
 
@@ -342,6 +348,8 @@ impl SubprocessAggregatorConfig {
             verifiers_dir: verifiers_dir.into(),
             params_dir: params_dir.into(),
             timeout: Duration::from_secs(1800),
+            timeout_flag: None,
+            slot_report: None,
             pk_cache_dir: None,
         }
     }
@@ -351,6 +359,148 @@ impl SubprocessAggregatorConfig {
         self.pk_cache_dir = Some(dir.into());
         self
     }
+}
+
+/// How many of the aggregator's stderr lines its failure quotes. All of
+/// them are in the log already, forwarded as they came.
+const QUOTED_LINES: usize = 40;
+
+/// How long to wait for the aggregator's pipes to close once it has exited
+/// or been killed. Something it started may hold them open; its own words
+/// are in by then.
+const OUTPUT_GRACE: Duration = Duration::from_secs(5);
+
+/// What the aggregator said on one stream, for its failure to quote.
+#[derive(Debug, Default)]
+struct Said {
+    /// The last [`QUOTED_LINES`] lines.
+    tail: std::collections::VecDeque<String>,
+    /// The last error it printed — `Error: …` from its `main`, or a panic —
+    /// up to its backtrace: with `RUST_BACKTRACE` set, the tail is frames.
+    error: Vec<String>,
+    collecting_error: bool,
+}
+
+impl Said {
+    /// Take `line` in, and say whether it belongs to an error: the
+    /// `Caused by:` lines under an `Error:` are as much the error as it is.
+    fn push(&mut self, line: &str) -> bool {
+        if line.starts_with("Error: ") || line.contains("panicked at") {
+            self.error.clear();
+            self.collecting_error = true;
+        } else if line
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("stack backtrace:")
+        {
+            self.collecting_error = false;
+        }
+        if self.collecting_error && self.error.len() < QUOTED_LINES {
+            self.error.push(line.to_string());
+        }
+        if self.tail.len() == QUOTED_LINES {
+            self.tail.pop_front();
+        }
+        self.tail.push_back(line.to_string());
+        self.collecting_error
+    }
+
+    /// The lines a failure quotes: the error, or the tail without one.
+    fn quote(&self) -> String {
+        if self.error.is_empty() {
+            Vec::from_iter(self.tail.iter().cloned()).join("\n")
+        } else {
+            self.error.join("\n")
+        }
+    }
+}
+
+/// The level a line the aggregator printed is logged at: the one its log
+/// lines start with, `error` for its `main`'s `Error:` and for a panic, and
+/// `info` for anything else.
+fn level_of(line: &str) -> tracing::Level {
+    match line.split_whitespace().next().unwrap_or("") {
+        "ERROR" | "Error:" => tracing::Level::ERROR,
+        _ if line.contains("panicked at") => tracing::Level::ERROR,
+        "WARN" => tracing::Level::WARN,
+        "DEBUG" => tracing::Level::DEBUG,
+        "TRACE" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    }
+}
+
+/// Log a line the aggregator printed at [`level_of`] it, or at `error`
+/// within an error it printed.
+fn forward_line(line: &str, in_error: bool) {
+    let level = if in_error {
+        tracing::Level::ERROR
+    } else {
+        level_of(line)
+    };
+    match level {
+        tracing::Level::ERROR => tracing::error!("{AGGREGATE_BIN}: {line}"),
+        tracing::Level::WARN => tracing::warn!("{AGGREGATE_BIN}: {line}"),
+        tracing::Level::DEBUG => tracing::debug!("{AGGREGATE_BIN}: {line}"),
+        tracing::Level::TRACE => tracing::trace!("{AGGREGATE_BIN}: {line}"),
+        _ => info!("{AGGREGATE_BIN}: {line}"),
+    }
+}
+
+/// What one stream said so far, shared between its forwarding task and the
+/// wait for it: a stream held open past the grace still has its lines.
+type Heard = std::sync::Arc<std::sync::Mutex<Said>>;
+
+/// Log each line of a child's `stream` as `aggregate-proof: <line>` as it
+/// comes, and keep what it said in `heard`. Read to the end whatever the
+/// bytes are, and drained even past a read error: a child blocked on a full
+/// pipe never finishes, and one whose pipe is closed fails its next write.
+async fn forward_lines<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>, heard: Heard) {
+    use tokio::io::AsyncBufReadExt as _;
+
+    let Some(stream) = stream else {
+        return;
+    };
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {},
+            Err(e) => {
+                tracing::warn!("reading {AGGREGATE_BIN}'s output failed: {e}; discarding the rest");
+                tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                    .await
+                    .ok();
+                break;
+            },
+        }
+        let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+        let in_error = heard.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+        forward_line(&line, in_error);
+    }
+}
+
+/// Forward `stream` on a task of its own; [`collected`] waits for it.
+fn forward(
+    stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+) -> (tokio::task::JoinHandle<()>, Heard) {
+    let heard = Heard::default();
+    (tokio::spawn(forward_lines(stream, heard.clone())), heard)
+}
+
+/// What a stream said, once its forwarding task is done or `grace` has
+/// passed: the lines heard by then either way.
+async fn collected((task, heard): (tokio::task::JoinHandle<()>, Heard), grace: Duration) -> Said {
+    match tokio::time::timeout(grace, task).await {
+        Ok(Ok(())) => {},
+        Ok(Err(e)) => tracing::warn!("forwarding {AGGREGATE_BIN}'s output failed: {e}"),
+        Err(_) => tracing::warn!(
+            "{AGGREGATE_BIN}'s output is still open {grace:?} after it ended; something it \
+             started holds it"
+        ),
+    }
+    std::mem::take(&mut *heard.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Production aggregator. Shells out to `aggregate-proof`.
@@ -368,6 +518,21 @@ impl SubprocessAggregator {
         }
         if let Ok(abs) = config.params_dir.canonicalize() {
             config.params_dir = abs;
+        }
+        // Not there yet — the aggregator writes it — so made absolute rather
+        // than canonical: the subprocess runs in `aggregator_dir`, and a
+        // relative path (a relative `--snark-dir`, the CLI's default) would
+        // land there instead of where the caller reads it.
+        if let Some(report) = config.slot_report.as_mut() {
+            match std::path::absolute(&*report) {
+                Ok(abs) => *report = abs,
+                Err(e) => tracing::warn!(
+                    path = %report.display(),
+                    error = %e,
+                    "cannot make the slot-report path absolute; the aggregator resolves it in \
+                     its own directory",
+                ),
+            }
         }
         if let Some(dir) = config.pk_cache_dir.as_mut() {
             // Create if missing so canonicalize() can succeed and the
@@ -390,6 +555,28 @@ impl SubprocessAggregator {
         }
     }
 
+    /// The refusal for a `verifier_name` run that hit `timeout`. The
+    /// measured figure is the withdrawal aggregator's, and only it gets one.
+    fn timed_out(&self, verifier_name: &str) -> String {
+        let measured = if verifier_name == WITHDRAWAL_VERIFIER_NAME {
+            " — a cold withdrawal run, keygen and proof, took ~2 min on the test host —"
+        } else {
+            ""
+        };
+        let mut msg = format!(
+            "{AGGREGATE_BIN} timed out after {:?} and was killed. A cold pk cache generates the \
+             aggregator key first{measured} and waits while another process generates one in the \
+             same cache.",
+            self.config.timeout
+        );
+        if let Some(flag) = self.config.timeout_flag {
+            msg.push_str(&format!(
+                " A retry with the same budget can run out the same way: raise it with {flag}."
+            ));
+        }
+        msg
+    }
+
     fn release_bin(&self) -> Option<PathBuf> {
         let bin = self
             .config
@@ -397,6 +584,34 @@ impl SubprocessAggregator {
             .join("target/release")
             .join(AGGREGATE_BIN);
         bin.is_file().then_some(bin)
+    }
+
+    /// The command for `args`. `RUST_LOG` is not passed on: a filter written
+    /// for this process — `ackinacki_bridge=info`, say — names none of the
+    /// aggregator's targets and would silence it; it logs at its own default.
+    fn command(&self, args: &[String]) -> tokio::process::Command {
+        use tokio::process::Command;
+
+        let mut cmd = if let Some(bin) = self.release_bin() {
+            let mut c = Command::new(bin);
+            c.current_dir(&self.config.aggregator_dir).args(args);
+            c
+        } else {
+            let mut c = Command::new("cargo");
+            c.current_dir(&self.config.aggregator_dir)
+                .args(["run", "--release", "--bin", AGGREGATE_BIN, "--"])
+                .args(args);
+            c
+        };
+        // Killed when the wait is abandoned: a timed-out aggregator left
+        // running keeps its memory and its pk-cache writes, beside whatever
+        // proof the operator starts next.
+        cmd.env("PARAMS_DIR", &self.config.params_dir)
+            .env_remove("RUST_LOG")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        cmd
     }
 
     /// argv (program excluded) for a given inner snark, verifier name and
@@ -416,6 +631,10 @@ impl SubprocessAggregator {
             v.push("--pk-cache-dir".to_string());
             v.push(dir.display().to_string());
         }
+        if let Some(path) = self.config.slot_report.as_ref() {
+            v.push("--slot-report".to_string());
+            v.push(path.display().to_string());
+        }
         v
     }
 }
@@ -427,8 +646,6 @@ impl ProofAggregator for SubprocessAggregator {
         inner_snark: &Path,
         verifier_name: &str,
     ) -> Result<Vec<u8>, RelayerError> {
-        use tokio::process::Command;
-
         let out_path = std::env::temp_dir().join(format!(
             "agg_calldata_{verifier_name}_{}.bin",
             std::process::id()
@@ -445,38 +662,42 @@ impl ProofAggregator for SubprocessAggregator {
             .unwrap_or_else(|_| inner_snark.to_path_buf());
         let args = self.args(&inner_snark_abs, verifier_name, &out_path);
 
-        let mut cmd = if let Some(bin) = self.release_bin() {
-            let mut c = Command::new(bin);
-            c.current_dir(&self.config.aggregator_dir).args(&args);
-            c
-        } else {
-            let mut c = Command::new("cargo");
-            c.current_dir(&self.config.aggregator_dir)
-                .args(["run", "--release", "--bin", AGGREGATE_BIN, "--"])
-                .args(&args);
-            c
-        };
-        cmd.env("PARAMS_DIR", &self.config.params_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
         let t_agg = Instant::now();
-        let output = tokio::time::timeout(self.config.timeout, cmd.output())
-            .await
-            .map_err(|_| {
-                RelayerError::other(format!(
-                    "{AGGREGATE_BIN} timed out after {:?}",
-                    self.config.timeout
-                ))
-            })?
+        let mut child = self
+            .command(&args)
+            .spawn()
             .map_err(|e| RelayerError::other(format!("failed to spawn {AGGREGATE_BIN}: {e}")))?;
+        // Into this process's log as they come: the pk cache's notices are
+        // for the operator while the run is still going.
+        let stdout = forward(child.stdout.take());
+        let stderr = forward(child.stderr.take());
+        let status = match tokio::time::timeout(self.config.timeout, child.wait()).await {
+            Ok(status) => {
+                status.map_err(|e| RelayerError::other(format!("wait for {AGGREGATE_BIN}: {e}")))?
+            },
+            Err(_) => {
+                // Killed here rather than on drop, so that what it said
+                // last — waiting for another keygen, say — is quoted. Under
+                // the `cargo run` fallback this kills cargo, not the
+                // aggregator it started; `ackinacki-bridge` requires the
+                // release binary.
+                child.start_kill().ok();
+                tokio::time::timeout(OUTPUT_GRACE, child.wait()).await.ok();
+                let said = collected(stderr, OUTPUT_GRACE).await.quote();
+                return Err(RelayerError::other(format!(
+                    "{}\n{AGGREGATE_BIN} said last:\n{said}",
+                    self.timed_out(verifier_name)
+                )));
+            },
+        };
         let agg_subprocess_ms = t_agg.elapsed().as_millis() as u64;
+        collected(stdout, OUTPUT_GRACE).await;
+        let said = collected(stderr, OUTPUT_GRACE).await;
 
-        if !output.status.success() {
+        if !status.success() {
             return Err(RelayerError::other(format!(
-                "{AGGREGATE_BIN} exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
+                "{AGGREGATE_BIN} exited with {status}: {}",
+                said.quote()
             )));
         }
 
@@ -1226,6 +1447,24 @@ mod tests {
     }
 
     #[test]
+    fn subprocess_aggregate_args_include_the_slot_report_when_set() {
+        let mut cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        cfg.slot_report = Some(PathBuf::from("/snark/aggregator-slot"));
+        let agg = SubprocessAggregator {
+            config: cfg,
+        };
+        let args = agg.args(
+            Path::new("/s/circuit4.snark"),
+            WITHDRAWAL_VERIFIER_NAME,
+            Path::new("/tmp/out.bin"),
+        );
+        assert_eq!(&args[args.len() - 2..], [
+            "--slot-report",
+            "/snark/aggregator-slot"
+        ]);
+    }
+
+    #[test]
     fn read_instances_le_roundtrip_and_length_check() {
         let dir = std::env::temp_dir().join(format!("agg_inst_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1323,6 +1562,409 @@ mod tests {
         assert!(
             calldata_binds_instances(&cd, &instances, Some(&wrong_le)).is_err(),
             "mismatched expected digest must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_aggregator_is_killed_not_orphaned() {
+        // The CLI holds its prove lock only while it waits for this
+        // process. A timeout that dropped the child without killing it left
+        // the aggregator running, unlocked, beside the next run's proof.
+        //
+        // The fake publishes its pid and `exec`s, so the pid is the process
+        // that has to be gone; `exec` matters, without it `sh` forks `sleep`
+        // and only the shell would be killed.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin_dir = dir.path().join("target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let bin = bin_dir.join(AGGREGATE_BIN);
+        install_script(
+            &bin,
+            &format!(
+                "#!/bin/sh\necho 'waiting for another keygen' >&2\necho $$ > {p}.tmp\nmv {p}.tmp \
+                 {p}\nexec sleep 120\n",
+                p = pidfile.display()
+            ),
+        );
+        let mut cfg = SubprocessAggregatorConfig::new(dir.path(), dir.path(), dir.path());
+        cfg.timeout = Duration::from_secs(5);
+        cfg.timeout_flag = Some("--prover-timeout-s");
+        let agg = SubprocessAggregator::new(cfg);
+
+        let err = agg
+            .aggregate(&dir.path().join("inner.snark"), WITHDRAWAL_VERIFIER_NAME)
+            .await
+            .expect_err("an aggregator that never finishes times out");
+        assert!(err.to_string().contains("timed out"), "{err}");
+        // A cold run keygens before it proves, and may wait for another
+        // process's keygen first: a retry with the same budget times out the
+        // same way.
+        assert!(err.to_string().contains("--prover-timeout-s"), "{err}");
+
+        // On a loaded host the shell may not have reached its first line
+        // when the timeout fired. Killed before it wrote its pid, it was
+        // not orphaned either.
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(p) = std::fs::read_to_string(&pidfile) {
+                pid = Some(p.trim().to_string());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(pid) = pid else {
+            return;
+        };
+        // It said what it was doing before it wrote its pid, and that is
+        // quoted.
+        assert!(
+            err.to_string().contains("waiting for another keygen"),
+            "{err}"
+        );
+        // SIGKILL and reaping are not instantaneous: poll. A zombie counts as
+        // gone — it holds no memory and writes nothing.
+        let mut gone = false;
+        for _ in 0..50 {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Err(_) => gone = true,
+                Ok(stat) => {
+                    gone = stat
+                        .rsplit(')')
+                        .next()
+                        .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+                },
+            }
+            if gone {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !gone {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid])
+                .status();
+        }
+        assert!(
+            gone,
+            "pid {pid} survived the timeout: the aggregator outlives the run that started it"
+        );
+    }
+
+    /// A fake `aggregate-proof` under `dir` that writes `lines` progress
+    /// lines to stderr and one to stdout, then writes calldata to `--out`
+    /// and exits 0 — or exits 1 without it when `fail`.
+    fn chatty_aggregator(dir: &Path, lines: usize, fail: bool) {
+        let bin_dir = dir.join("target/release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join(AGGREGATE_BIN);
+        let end = if fail {
+            "echo 'Error: the last word' >&2\necho >&2\necho 'Caused by:' >&2\necho '    the \
+             cause' >&2\nexit 1\n"
+        } else {
+            "while [ \"$1\" != --out ]; do shift; done\nprintf calldata > \"$2\"\n"
+        };
+        install_script(
+            &bin,
+            &format!(
+                "#!/bin/sh\ni=1\nwhile [ $i -le {lines} ]; do echo \"progress line $i\" >&2; \
+                 i=$((i+1)); done\necho 'Aggregator shape match'\n{end}"
+            ),
+        );
+    }
+
+    /// Put an executable `script` at `bin`. Copied there by `cp`, not
+    /// written from this process: a test running beside this one may fork
+    /// while this process holds the file open for writing, and the child
+    /// holds it until it execs — exec'ing the script meanwhile fails with
+    /// `ETXTBSY`.
+    fn install_script(bin: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let source = bin.with_extension("src");
+        std::fs::write(&source, script).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(bin)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+
+    /// What is logged on this thread, from now until the guard is dropped.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Sink {
+        fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+            let sink = Sink::default();
+            let writer = sink.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_max_level(tracing::Level::TRACE)
+                .with_ansi(false)
+                .finish();
+            (sink, tracing::subscriber::set_default(subscriber))
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// Everything logged on this thread while `f` runs, which a broken
+    /// forwarder turns into a failure rather than a hang.
+    async fn logged<T>(f: impl std::future::Future<Output = T>) -> (T, String) {
+        let (sink, _guard) = Sink::capture();
+        let out = tokio::time::timeout(Duration::from_secs(60), f)
+            .await
+            .expect("the aggregator call ends");
+        (out, sink.text())
+    }
+
+    /// A config for a fake aggregator under `dir`, with a budget a broken
+    /// test runs into well before anyone waits for it.
+    fn fake_config(dir: &Path) -> SubprocessAggregatorConfig {
+        let mut cfg = SubprocessAggregatorConfig::new(dir, dir, dir);
+        cfg.timeout = Duration::from_secs(30);
+        cfg
+    }
+
+    #[tokio::test]
+    async fn the_aggregators_output_reaches_the_log_whole() {
+        let dir = tempfile::TempDir::new().unwrap();
+        chatty_aggregator(dir.path(), 5000, false);
+        let agg = SubprocessAggregator::new(fake_config(dir.path()));
+        let (calldata, log) = logged(agg.aggregate(&dir.path().join("in.snark"), "V")).await;
+        assert_eq!(
+            calldata.unwrap(),
+            b"calldata",
+            "more than a pipe holds does not stall it"
+        );
+        assert!(log.contains("aggregate-proof: progress line 1\n"), "{log}");
+        assert!(log.contains("aggregate-proof: progress line 5000\n"));
+        assert!(log.contains("aggregate-proof: Aggregator shape match"));
+    }
+
+    #[tokio::test]
+    async fn the_aggregators_progress_reaches_the_log_while_it_runs() {
+        // The pk cache's notices — waiting for another keygen, say — are for
+        // the operator while the run is still going, not once it is over.
+        let dir = tempfile::TempDir::new().unwrap();
+        let go = dir.path().join("go");
+        install_script(
+            &dir.path().join("target/release").join(AGGREGATE_BIN),
+            &format!(
+                "#!/bin/sh\necho ' WARN bridge_evm_aggregator::cache: waiting for another keygen' \
+                 >&2\nwhile [ ! -e {go} ]; do sleep 0.05; done\nwhile [ \"$1\" != --out ]; do \
+                 shift; done\nprintf calldata > \"$2\"\n",
+                go = go.display()
+            ),
+        );
+        let agg = SubprocessAggregator::new(fake_config(dir.path()));
+        let snark = dir.path().join("in.snark");
+        let (sink, _guard) = Sink::capture();
+        let watch = async {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !sink.text().contains("waiting for another keygen") {
+                if Instant::now() > deadline {
+                    std::fs::write(&go, b"").unwrap();
+                    panic!("nothing was forwarded while the aggregator ran");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            std::fs::write(&go, b"").unwrap();
+        };
+        let (calldata, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(agg.aggregate(&snark, "V"), watch)
+        })
+        .await
+        .expect("no hang");
+        assert_eq!(calldata.unwrap(), b"calldata");
+        assert!(
+            sink.text()
+                .contains("WARN bridge_relayer_daemon::aggregator: aggregate-proof:  WARN"),
+            "logged at the level it was printed with: {}",
+            sink.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_aggregator_is_quoted_by_its_error() {
+        // The whole of its stderr is in the log already.
+        let dir = tempfile::TempDir::new().unwrap();
+        chatty_aggregator(dir.path(), 5000, true);
+        let agg = SubprocessAggregator::new(fake_config(dir.path()));
+        let (err, log) = logged(agg.aggregate(&dir.path().join("in.snark"), "V")).await;
+        let err = err.expect_err("exit 1").to_string();
+        assert!(err.contains("Error: the last word"), "{err}");
+        assert!(!err.contains("progress line"), "{err}");
+        assert!(
+            log.contains("ERROR bridge_relayer_daemon::aggregator: aggregate-proof: Error:"),
+            "{log}"
+        );
+        assert!(
+            log.contains("ERROR bridge_relayer_daemon::aggregator: aggregate-proof: Caused by:"),
+            "the lines under the error are the error too: {log}"
+        );
+        assert!(err.contains("the cause"), "{err}");
+    }
+
+    #[test]
+    fn the_lines_under_an_error_belong_to_it() {
+        let mut said = Said::default();
+        assert!(!said.push(" INFO aggregate_proof: started"));
+        assert!(said.push("Error: aggregate + evm-proof"));
+        assert!(said.push("Caused by:"), "logged at error, not info");
+        assert!(said.push("    cached aggregator key /c/S.pk is damaged"));
+        assert!(!said.push("Stack backtrace:"));
+    }
+
+    #[test]
+    fn a_failure_quotes_its_error_and_not_its_backtrace() {
+        let mut said = Said::default();
+        for i in 0..100 {
+            said.push(&format!("progress line {i}"));
+        }
+        assert!(
+            said.quote().starts_with("progress line 60\n"),
+            "no error: the last {QUOTED_LINES} lines"
+        );
+        for line in [
+            "Error: aggregate + evm-proof (aggregate_and_prove_cached)",
+            "",
+            "Caused by:",
+            "    cached aggregator key /c/S.pk is damaged",
+            "",
+            "Stack backtrace:",
+        ] {
+            said.push(line);
+        }
+        for i in 0..100 {
+            said.push(&format!("  {i}: std::backtrace::Backtrace::create"));
+        }
+        let quote = said.quote();
+        assert!(quote.contains("is damaged"), "{quote}");
+        assert!(!quote.contains("Backtrace::create"), "{quote}");
+    }
+
+    #[test]
+    fn the_aggregator_logs_at_its_own_level_whatever_rust_log_says_here() {
+        // A RUST_LOG written for this process — `ackinacki_bridge=info` —
+        // names none of the aggregator's targets and would silence it.
+        let agg = SubprocessAggregator::new(fake_config(Path::new("/agg")));
+        let cmd = agg.command(&[]);
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .any(|(k, v)| k == "RUST_LOG" && v.is_none()),
+            "RUST_LOG is removed"
+        );
+    }
+
+    #[test]
+    fn a_timeout_names_the_flag_that_raises_it_only_where_there_is_one() {
+        let mut cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        let fixed = SubprocessAggregator {
+            config: cfg.clone(),
+        }
+        .timed_out(WITHDRAWAL_VERIFIER_NAME);
+        assert!(fixed.contains("timed out after 1800s"), "{fixed}");
+        assert!(fixed.contains("~2 min"), "the withdrawal figure: {fixed}");
+        assert!(
+            !fixed.contains("--"),
+            "this command has no flag for it: {fixed}"
+        );
+        cfg.timeout_flag = Some("--prover-timeout-s");
+        let flagged = SubprocessAggregator {
+            config: cfg.clone(),
+        }
+        .timed_out(WITHDRAWAL_VERIFIER_NAME);
+        assert!(
+            flagged.contains("raise it with --prover-timeout-s"),
+            "{flagged}"
+        );
+        let block = SubprocessAggregator {
+            config: cfg,
+        }
+        .timed_out("BridgeBlockAggregatorVerifier");
+        assert!(
+            !block.contains("min"),
+            "no measured figure for another aggregator: {block}"
+        );
+    }
+
+    #[test]
+    fn each_line_is_logged_at_the_level_it_was_printed_with() {
+        use tracing::Level;
+        for (line, level) in [
+            (
+                " INFO bridge_evm_aggregator::cache: aggregator PK cache HIT",
+                Level::INFO,
+            ),
+            (
+                " WARN bridge_evm_aggregator::cache: removed a partial",
+                Level::WARN,
+            ),
+            ("ERROR aggregate_proof: something", Level::ERROR),
+            ("DEBUG halo2: detail", Level::DEBUG),
+            ("TRACE halo2: more detail", Level::TRACE),
+            ("Error: aggregate + evm-proof", Level::ERROR),
+            ("thread 'main' panicked at src/x.rs:1:1:", Level::ERROR),
+            ("Aggregator shape match: regenerated", Level::INFO),
+            ("", Level::INFO),
+        ] {
+            assert_eq!(level_of(line), level, "{line:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn output_held_open_past_the_grace_keeps_what_it_said() {
+        // Something the aggregator started can hold its pipe open after it
+        // ended: what it said before then is still quoted.
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let forwarded = forward(Some(reader));
+        writer.write_all(b"Error: the last word\n").await.unwrap();
+        let said = tokio::time::timeout(
+            Duration::from_secs(30),
+            collected(forwarded, Duration::from_millis(200)),
+        )
+        .await
+        .expect("the grace bounds the wait");
+        assert_eq!(said.quote(), "Error: the last word");
+        drop(writer);
+    }
+
+    #[test]
+    fn a_relative_slot_report_is_made_absolute() {
+        // The aggregator runs in `aggregator_dir`: a relative `--snark-dir`
+        // — the CLI's default — would put the report where nobody reads it.
+        let mut cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        cfg.slot_report = Some(PathBuf::from("shplonk-snark/aggregator-slot"));
+        let agg = SubprocessAggregator::new(cfg);
+        let args = agg.args(
+            Path::new("/s/circuit4.snark"),
+            WITHDRAWAL_VERIFIER_NAME,
+            Path::new("/tmp/out.bin"),
+        );
+        assert_eq!(
+            PathBuf::from(&args[args.len() - 1]),
+            std::env::current_dir()
+                .unwrap()
+                .join("shplonk-snark/aggregator-slot")
         );
     }
 

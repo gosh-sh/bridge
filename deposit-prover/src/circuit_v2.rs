@@ -7,7 +7,7 @@ use axiom_eth::{
     mpt::MPTChip,
     receipt::{EthReceiptChip, EthReceiptChipParams, EthReceiptInputAssigned, EthReceiptWitness},
     rlc::{circuit::builder::RlcCircuitBuilder, FIRST_PHASE},
-    rlp::{evaluate_byte_array, types::RlpArrayWitness},
+    rlp::{evaluate_byte_array, types::RlpArrayWitness, RlpChip},
     transaction::{
         EthTransactionChip, EthTransactionChipParams, EthTransactionInputAssigned,
         EthTransactionWitness,
@@ -105,7 +105,7 @@ pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
 /// Bumped on every constraint change that may leave the column counts and
 /// limits as they were, so a cached proving key of the old circuit is not
 /// reused (see `pk_fingerprint`).
-pub const CONSTRAINT_REVISION: u32 = 1;
+pub const CONSTRAINT_REVISION: u32 = 2;
 /// EIP-2930 type byte / circuit `transaction_type` value.
 pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
@@ -231,6 +231,31 @@ fn bytes_to_field<F: ScalarField>(
     result
 }
 
+/// Max payload lengths of the three fields of the selected receipt log,
+/// `[address, topics, data]`: a 20-byte address, up to four topics behind their
+/// one-byte prefixes, and the four ABI words of `Deposit`'s data.
+const DEPOSIT_LOG_MAX_FIELD_LENS: [usize; 3] = [20, 150, 128];
+
+/// Witnesses the RLP decomposition of the selected receipt log.
+///
+/// The returned field cells are not constrained here. What ties them to
+/// `log_bytes` is the RLC check of `decompose_rlp_array_phase1`, and an RLC
+/// check holds only for cells committed before its challenge is drawn. Every
+/// event-bound public input is read out of these cells, so they have to be
+/// first-phase witnesses — hence the assertion.
+fn decompose_deposit_log(
+    ctx: &mut Context<Fr>,
+    rlp: &RlpChip<Fr>,
+    log_bytes: Vec<AssignedValue<Fr>>,
+) -> RlpArrayWitness<Fr> {
+    assert_eq!(
+        ctx.phase(),
+        FIRST_PHASE,
+        "the Deposit log must be decomposed in the first phase, before the RLC challenge"
+    );
+    rlp.decompose_rlp_array_phase0(ctx, log_bytes, &DEPOSIT_LOG_MAX_FIELD_LENS, false)
+}
+
 /// Deposit event circuit using axiom-eth
 #[derive(Clone)]
 pub struct DepositEventCircuitV2 {
@@ -291,7 +316,9 @@ impl DepositEventCircuitV2 {
 pub struct Phase0Output {
     pub receipt_witness: EthReceiptWitness<Fr>,
     pub tx_witness: EthTransactionWitness<Fr>,
-    pub log_index: AssignedValue<Fr>,
+    /// First-phase decomposition of the selected receipt log, `[address,
+    /// topics, data]`. Phase 1 binds it to the receipt's bytes by RLC.
+    pub deposit_log_witness: RlpArrayWitness<Fr>,
     pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
     pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
     pub mpt_root_bytes: Vec<AssignedValue<Fr>>,   // 32 bytes from MPT proof
@@ -358,6 +385,23 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             "   ✓ Loaded log_index: {}",
             self.inputs.event_data.log_index
         );
+
+        // 5b. Select the log at `log_index` and witness its three fields:
+        //     [address, topics[], data]. This is first-phase work, see
+        //     `decompose_deposit_log`; Phase 1 only adds the RLC check.
+        let log_witness = chip.extract_receipt_log(ctx, &receipt_witness, log_index);
+        let mut deposit_log_witness =
+            decompose_deposit_log(ctx, &chip.rlp(), log_witness.log_bytes);
+        if let Some(forged) = self.forged_log_amount {
+            for (cell, byte) in deposit_log_witness.field_witness[2]
+                .field_cells
+                .iter_mut()
+                .zip(forged)
+            {
+                *cell = ctx.load_witness(Fr::from(byte as u64));
+            }
+        }
+        println!("   ✓ Extracted and decomposed the log at log_index");
 
         // 6. Parse block header RLP and compute block hash (MUST be in Phase 0 for
         //    Keccak)
@@ -672,7 +716,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         Phase0Output {
             receipt_witness,
             tx_witness,
-            log_index,
+            deposit_log_witness,
             block_hash_bytes,
             receipts_root_bytes,
             mpt_root_bytes,
@@ -711,8 +755,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   ✓ Verified block header RLC");
 
         // 2. Parse receipt in phase 1 (RLC verification)
-        let _receipt_trace = chip
-            .parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness.clone());
+        let _receipt_trace =
+            chip.parse_receipt_proof_phase1((ctx_gate, ctx_rlc), phase0_output.receipt_witness);
         println!("   ✓ Verified receipt RLC");
 
         // 2b. Transaction RLC (chain-binding witness from Phase 0)
@@ -727,51 +771,15 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             tx_chip.parse_transaction_proof_phase1((ctx_gate, ctx_rlc), phase0_output.tx_witness);
         println!("   ✓ Verified transaction RLC");
 
-        // 3. Extract the specific log at log_index
-        let log_witness = chip.extract_receipt_log(
-            ctx_gate,
-            &phase0_output.receipt_witness,
-            phase0_output.log_index,
-        );
-        println!(
-            "   ✓ Extracted log at index {}",
-            self.inputs.event_data.log_index
-        );
-        println!("   Log length: {:?}", log_witness.log_len);
-        println!(
-            "   Log bytes (first 16): {:?}",
-            &log_witness.log_bytes[0..16.min(log_witness.log_bytes.len())]
-        );
-
-        // 4. Parse log RLP structure: [address, topics[], data]
-
-        // Log structure has 3 fields: address (20 bytes), topics (array of 32-byte
-        // hashes), data (variable). Max lengths: address=20,
-        // topics=4*32+overhead=150, data=128 (4 ABI words:
-        // amount + anWorkchain + anAccount + timestamp).
-        let log_max_field_lens = [20, 150, 128];
-
-        let mut log_array = rlp_chip.decompose_rlp_array_phase0(
-            ctx_gate,
-            log_witness.log_bytes.clone(),
-            &log_max_field_lens,
-            false, // fixed length (always 3 fields)
-        );
-        if let Some(forged) = self.forged_log_amount {
-            for (cell, byte) in log_array.field_witness[2]
-                .field_cells
-                .iter_mut()
-                .zip(forged)
-            {
-                *cell = ctx_gate.load_witness(Fr::from(byte as u64));
-            }
-        }
-        // `decompose_rlp_array_phase0` only witnesses `field_cells`; without the
-        // RLC concatenation checks of phase 1 nothing ties address, topics and
-        // data to `log_bytes`, and every event-bound public input is free.
+        // 3. Bind the log fields witnessed in Phase 0 to the receipt's log bytes.
+        //
+        // `decompose_rlp_array_phase0` only witnesses `field_cells`; it is this
+        // RLC concatenation check that ties address, topics and data to the
+        // selected log, and through `parse_receipt_proof_phase1` above to the
+        // receipt. Without it every event-bound public input is free.
+        let log_array = phase0_output.deposit_log_witness;
         rlp_chip.decompose_rlp_array_phase1((ctx_gate, ctx_rlc), log_array.clone(), false);
         println!("   ✓ Bound log fields to the receipt's log bytes (RLC)");
-        println!("   ✓ Parsed log RLP structure");
 
         // BC-D04: pin the payload lengths of the two variable-length log fields.
         //
@@ -1295,6 +1303,57 @@ mod tests {
         assert!(MAX_TX_ACCESS_LIST_LEN >= 56);
         assert_eq!(EIP2930_TX_TYPE, 1);
         assert_eq!(EIP1559_TX_TYPE, 2);
+    }
+
+    /// A `Deposit`-shaped log, `[address, [3 topics], 128 B of data]`, as the
+    /// receipt chip hands it over: RLP-encoded and zero-padded.
+    fn deposit_shaped_log() -> Vec<u8> {
+        let mut log = vec![0xf8, 252, 0x94];
+        log.extend([0x33; 20]);
+        log.extend([0xf8, 99]);
+        for topic in [0x01u8, 0x02, 0x03] {
+            log.push(0xa0);
+            log.extend([topic; 32]);
+        }
+        log.extend([0xb8, 128]);
+        log.extend([0x44; 128]);
+        log.resize(320, 0);
+        log
+    }
+
+    fn decompose_deposit_log_in(phase: usize) -> RlpArrayWitness<Fr> {
+        let mut builder = RlcCircuitBuilder::<Fr>::new(false, 10);
+        builder.base.set_lookup_bits(8);
+        let range = builder.range_chip();
+        let rlp = RlpChip::new(&range, None);
+        let ctx = builder.base.main(phase);
+        let log_bytes =
+            ctx.assign_witnesses(deposit_shaped_log().into_iter().map(|b| Fr::from(b as u64)));
+        decompose_deposit_log(ctx, &rlp, log_bytes)
+    }
+
+    #[test]
+    fn deposit_log_decomposes_in_the_first_phase() {
+        let log = decompose_deposit_log_in(FIRST_PHASE);
+        let lens: Vec<u64> = log
+            .field_witness
+            .iter()
+            .map(|f| f.field_len.value().get_lower_64())
+            .collect();
+        assert_eq!(lens, [20, 99, 128]);
+        assert_eq!(*log.field_witness[0].field_cells[0].value(), Fr::from(0x33));
+        assert_eq!(
+            *log.field_witness[2].field_cells[127].value(),
+            Fr::from(0x44)
+        );
+    }
+
+    /// The cells the public inputs are read from are tied to the log only by an
+    /// RLC check, which holds only for cells committed before the challenge.
+    #[test]
+    #[should_panic(expected = "first phase")]
+    fn deposit_log_is_not_decomposed_after_the_rlc_challenge() {
+        decompose_deposit_log_in(axiom_eth::rlc::RLC_PHASE);
     }
 
     /// Shape-only `DepositProofInput` — enough to construct the circuit struct

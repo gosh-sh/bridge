@@ -43,6 +43,12 @@ paths = [
   '''crates/(an-bridge-prover|bridge-prover-libraries)/python/contracts/[A-Za-z0-9.]+\.keys\.json''',
   '''.*\.env\.example$''',
   '''docs/archive/.*''',
+  # Public execution-header fixtures. EIP-7928's field is named
+  # `blockAccessListHash`; generic-api-key reads "access" + "hash" next to a
+  # 32-byte hex as a credential. These values are Sepolia / L2 block hashes
+  # from the JSON-RPC, not keys.
+  '''deposit-prover/fixtures/headers/sepolia_amsterdam\.json''',
+  '''crates/eth-light-client-relayer/src/fixtures/sepolia_amsterdam\.json''',
 ]
 
 regexes = [

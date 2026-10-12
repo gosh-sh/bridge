@@ -405,7 +405,83 @@ Faucets without an anti-Sybil mainnet-deposit gate:
 `applyBkSetUpdate` submit (less frequent). **Target ≥ 0.1 ETH before
 deploy**, ≥ 0.5 ETH for a multi-day E2E run with rotations ON.
 
-### 3. Deploy + wire — one end-to-end script
+### 3. Produce a live `BRIDGE_BK_SET_CONFIG` for a rotated chain (public GQL only)
+
+**Skip this step** if either (a) the target shellnet is still at its
+genesis BK set (`storedLastBkSetUpdateSeqNo()==0` on the previous
+deploy, or no previous deploy at all), or (b) you control an AN node
+and can refresh `bk_set.shellnet.json` from `/v2/bk_set`
+([Case 10 fix path 2](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation)).
+
+**Why it is mandatory on a rotated chain reached only through public
+GQL.** `compute_bridge_anchors` (step 4 below) reads
+`BRIDGE_BK_SET_CONFIG` verbatim and does **not** fold `bkSetUpdates` on
+top of it. If `BRIDGE_BK_SET_CONFIG` still points at the committed
+`bk_set.shellnet.json` after rotations have landed on-chain, the file's
+Poseidon commitment no longer matches the chain's live BK set.
+`compute_bridge_anchors` will nevertheless emit a
+`GENESIS_BK_SET_COMMITMENT` built from that stale file, and the deploy
+will succeed with a constructor-pinned BK commitment that no live
+rotation ACK can heal — the daemon then enters a permanent
+`Phase 1 BkSetCommitmentMismatch` loop on the first `applyBkSetUpdate`.
+
+**The fix.** Produce an auxiliary flat-format file
+(`bk_set.shellnet.live.json`) that reflects the BK set active at
+current chain head, and point `BRIDGE_BK_SET_CONFIG` at it for the
+duration of the deploy. The same `seed_prover_bk_set` example used in
+[Case 10 fix path 4](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation)
+gives you the raw material; one `jq` step extracts the flat map
+`compute_bridge_anchors` expects.
+
+```bash
+cd crates/bridge-prover-libraries
+
+# Pick a cap-height that is <= chain head and reflects a committed BK
+# set. The simplest choice is the latest bkSetUpdates seq_no returned
+# by the public GQL — any value in [latest_bk_update, chain_head] is
+# fine, because the daemon will drain intermediate rotations through
+# the normal applyBkSetUpdate lane after launch.
+LATEST_BK_UPDATE=$(curl -s "$BRIDGE_GQL_ENDPOINT" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ bkSetUpdates(first:1, orderBy:{path:\"block_seq_no\",direction:DESC}) { edges { node { blockSeqNo } } } }"}' \
+  | jq -r '.data.bkSetUpdates.edges[0].node.blockSeqNo')
+echo "latest bkSetUpdates seq_no on public GQL = $LATEST_BK_UPDATE"
+
+# 1. Fold bkSetUpdates <= $LATEST_BK_UPDATE on top of the committed
+#    genesis snapshot. Writes a ProverBkSet-shaped JSON — not what
+#    BRIDGE_BK_SET_CONFIG wants, but the input we need for step 2.
+BRIDGE_GQL_ENDPOINT="$BRIDGE_GQL_ENDPOINT" \
+BRIDGE_BK_SET_CONFIG=bk_set.shellnet.json \
+  cargo run --release -p bridge-prover-daemon \
+  --example seed_prover_bk_set -- \
+  --cap-height "$LATEST_BK_UPDATE" \
+  --out /tmp/prover_bk_set.live.json
+
+# 2. Extract the flat {idx: hex} map compute_bridge_anchors reads.
+jq '.pubkeys_hex' /tmp/prover_bk_set.live.json > bk_set.shellnet.live.json
+
+# 3. Verify size vs expected (shellnet typically runs 5 signers under
+#    minBK=4; a membership change can shift this by ±1 across each epoch).
+jq 'length' bk_set.shellnet.live.json
+```
+
+**Export the override** before continuing to §4 — `deploy_bridge_bundle.sh`
+reads `BRIDGE_BK_SET_CONFIG` from the environment and threads it into
+`compute_bridge_anchors`:
+
+```bash
+export BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json
+```
+
+**Precondition — GQL retention.** Same window as Case 10 fix path 4:
+every rotation from genesis through `$LATEST_BK_UPDATE` must still be
+reachable via `bkSetUpdates`. If retention has lapsed, the fold
+produces a BK set that will not match chain, and the deploy will
+re-pin a bad commitment. Verify by committing the live file as the
+daemon's bootstrap file (post-deploy, see §5 below) and checking the
+cold-start commitment compare passes.
+
+### 4. Deploy + wire — one end-to-end script
 
 > **The one thing to know.** `GENESIS_LAST_SEEN_BLOCK_SEQNO` is **not**
 > a value you pick by hand. It is derived by
@@ -468,6 +544,50 @@ check. If you hand-pick a boundary *ahead* of chain head, the daemon
 enters an **indefinite polling loop**, emitting `Bootstrapping {
 seed_seqno=N, chain_head_seqno=<current head> }` on every tick until
 chain catches up. No timeout. `--at-head` guarantees `N ≤ head`.
+
+### 5. Carry the live BK-set file forward as the daemon's bootstrap
+
+**Only if** you went through §3 to produce `bk_set.shellnet.live.json`.
+After `deploy_bridge_bundle.sh` finishes, the deploy env
+(`L${LEVEL}_config/env`) still points `BRIDGE_BK_SET_CONFIG` at the
+tracked `./bk_set.shellnet.json`, which is now wrong for this bridge:
+Case 1 will refuse to cold-start because the file commitment does not
+match the just-pinned `storedBkSetCommitment`. Three valid resolutions,
+in increasing order of invasiveness:
+
+1. **Override at launch.** Export the live file in the daemon shell
+   before running Step 6 of
+   [Binary + env prerequisites](#binary--env-prerequisites):
+   ```bash
+   export BRIDGE_BK_SET_CONFIG=$PWD/bk_set.shellnet.live.json
+   ```
+   Simplest; adequate for an isolated test lane.
+
+2. **Replace the tracked file in-tree** (same procedure as
+   [Case 10 fix path 2](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation)
+   step 4):
+   ```bash
+   mv bk_set.shellnet.json bk_set.shellnet.pre_live_$(date +%s).json
+   mv bk_set.shellnet.live.json bk_set.shellnet.json
+   sha256sum bk_set.shellnet.json   # record in private handoff
+   ```
+   Choose this when the deploy will be the new in-repo development
+   target. **Do not commit** the updated file as part of an unrelated
+   PR — it is a bootstrap artifact for a specific chain state.
+
+3. **Install the live file into the runtime bind mount** (production
+   Compose deploy). Point `BRIDGE_BK_SET_CONFIG` at the mounted path
+   in your runtime env file; the tracked `bk_set.shellnet.json` stays
+   as the "genesis" record of the development chain, never consulted
+   on this server.
+
+**Startup commitment check.** Whichever route you take, the first cold
+launch (Case 1 Step 4b in the pre-flight checklist) must log
+`chain-config check: OK` — if it does not, the live BK-set capture
+drifted from the deploy-time BK-set capture, which means another
+rotation landed between §3 and §4. Re-run §3 against the current head
+and redeploy from scratch; mid-deploy state is not recoverable (the
+constructor pinned a now-stale commitment).
 
 Now jump to [Binary + env prerequisites](#binary--env-prerequisites)
 and continue with [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy).
@@ -1027,7 +1147,10 @@ cargo run --release --bin compute_bridge_anchors -- \
 # If `storedBkSetCommitment` on-chain != GENESIS_BK_SET_COMMITMENT in
 # the output, the chain's BK set has rotated since; you MUST re-seed
 # $BRIDGE_BK_SET_CONFIG from a node that reflects the live set
-# (`curl http://<an-node>:8600/v2/bk_set | jq`) — see Case 10.
+# (`curl http://<an-node>:8600/v2/bk_set | jq`) — see Case 10 Fix path 2.
+# If you only have access to the public GQL endpoint (no AN REST),
+# use Case 10 Fix path 4 to reconstruct `state/prover_bk_set.json`
+# from `bkSetUpdates` instead; leave $BRIDGE_BK_SET_CONFIG untouched.
 cd ../bridge-prover-libraries
 
 # 5. Cold-start launch (identical to Case 1)
@@ -1316,12 +1439,208 @@ committed file when you need to onboard a fresh clone to a long-lived
 rotated chain, and record the SHA-256 in the private handoff each
 time.
 
+**Fix path 4 — reconstruct `prover_bk_set.json` from public GQL.**
+Use when you *don't* control an AN node's REST endpoint (fix path 2 is
+unavailable) *and* you still have a legitimate genesis
+`bk_set.shellnet.json` on disk. This is the public-shellnet path.
+
+The `seed_prover_bk_set` example in
+`crates/bridge-prover-libraries/bridge-prover-daemon/examples/seed_prover_bk_set.rs`
+folds `bkSetUpdates` from the public GQL on top of the committed
+genesis snapshot and writes a `prover_bk_set.json` that reflects the
+BK set active at `--cap-height`. Pick `--cap-height` to equal
+`storedLastBkSetUpdateSeqNo()` on-chain so the file's Poseidon
+commitment lines up with `storedBkSetCommitment()` and the daemon's
+startup guard passes; any residual rotations past the on-chain cursor
+will drain through the normal `applyBkSetUpdate` lane after launch.
+
+```bash
+cd crates/bridge-prover-libraries
+
+# 1. Read the on-chain BK cursor (both anchor levels share the same storage).
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+ONCHAIN_BK=$(cast call $BRIDGE_ADDRESS 'storedLastBkSetUpdateSeqNo()(uint64)' \
+             --rpc-url $RPC_URL --json | jq -r '.[0]')
+echo "on-chain last_bk_set_update_seq_no = $ONCHAIN_BK"
+
+# 2. Preserve the current (stale) prover_bk_set — reversible rollback.
+TS=$(date +%Y%m%d_%H%M%S)
+[ -f "$BRIDGE_CONFIG_DIR/state/prover_bk_set.json" ] && \
+  cp "$BRIDGE_CONFIG_DIR/state/prover_bk_set.json" \
+     "$BRIDGE_CONFIG_DIR/state/prover_bk_set.pre_reseed_${TS}.json"
+
+# 3. Fold bkSetUpdates <= $ONCHAIN_BK onto bk_set.shellnet.json
+#    and overwrite state/prover_bk_set.json.
+BRIDGE_GQL_ENDPOINT=$BRIDGE_GQL_ENDPOINT \
+BRIDGE_BK_SET_CONFIG=bk_set.shellnet.json \
+  cargo run --release -p bridge-prover-daemon \
+  --example seed_prover_bk_set -- \
+  --cap-height $ONCHAIN_BK \
+  --out $BRIDGE_CONFIG_DIR/state/prover_bk_set.json
+
+# 4. Verify the resulting commitment matches on-chain BEFORE restarting.
+#    `storedBkSetCommitment()` returns a uint256; the reseeded file
+#    stores the same 32 bytes as a decimal byte array.
+EXPECTED_HEX=$(cast call $BRIDGE_ADDRESS 'storedBkSetCommitment()(uint256)' \
+               --rpc-url $RPC_URL --json | jq -r '.[0]' | \
+               python3 -c 'import sys; print(hex(int(sys.stdin.read().strip()))[2:].zfill(64))')
+GOT_HEX=$(jq -r '.commitment | map(. | tonumber | tostring(16) | if length==1 then "0"+. else . end) | join("")' \
+          "$BRIDGE_CONFIG_DIR/state/prover_bk_set.json" 2>/dev/null || \
+          python3 -c 'import json,sys; print("".join(f"{b:02x}" for b in json.load(open(sys.argv[1]))["commitment"]))' \
+                 "$BRIDGE_CONFIG_DIR/state/prover_bk_set.json")
+echo "on-chain commitment: 0x$EXPECTED_HEX"
+echo "reseeded commitment: 0x$GOT_HEX"
+[ "$EXPECTED_HEX" = "$GOT_HEX" ] && echo OK || { echo MISMATCH; exit 1; }
+```
+
+**Expected on next launch.** The file-first guard logs
+
+```
+chain-config check: bk_set.shellnet.json commitment X != prover_bk_set Y (cursor $ONCHAIN_BK)
+                    — daemon has rotated past the genesis snapshot; not an issue
+```
+
+(INFO, not BAIL). The daemon then matches `prover_bk_set.commitment`
+against `state.stored_bk_set_commitment` and continues; the BK-update
+lane picks up any rotations with `height > $ONCHAIN_BK` and submits
+them one by one.
+
+**Precondition — GQL retention.** Fix path 4 is only sound while
+every rotation event from genesis through `$ONCHAIN_BK` is still
+reachable via `bkSetUpdates`. The public shellnet endpoint prunes old
+events as archive DBs rotate out of the attached set
+(`max_attached_db=9` in `gql-server/config-default.yaml`), so there is
+a finite window — currently measured in weeks since BK rotation
+enablement on 2026-10-08 — in which this path works. If
+`seed_prover_bk_set`'s output commitment does **not** match
+`storedBkSetCommitment()` on-chain, the delta log is already
+incomplete and fix path 4 is no longer usable; fall back to fix path 2
+with an AN REST endpoint, or request a dump of the historical
+`bk_set_updates` rows from the chain team.
+
 **What this is not.** This is not the same as a chain-side
 inconsistency (`storedBkSetCommitment` does not match any legitimate
 set). If `verify_bk_set_commitment` fails against every reasonable
 source, suspect either (a) the AN node is on a different fork, or (b)
 an unauthorized `applyBkSetUpdate` landed from a non-relayer account.
 Both are incident-response territory; do not patch the file.
+
+---
+
+## Case 11 — Redeploy at a fresh seed to escape a GQL pruning dead-zone
+
+**When to use.** The daemon is wedged on a bundle whose Circuit 2
+witness requires a key block the public GQL endpoint has already pruned
+out of its attached archive window. Symptoms:
+
+- Daemon log repeats `GQL error: block_by_height(N) returned null` for
+  some `N < state.last_processed_seqno`, where `N` is the previous
+  stride boundary Circuit 2 anchors against (L1: previous `W·P`
+  multiple; L2: previous `W²` multiple).
+- Public GQL `blockByHeight(latest_head - ~2.4M)` returns null — the
+  shellnet gql-server attaches at most `max_attached_db=9` archive DBs
+  per
+  [`gql-server/config-default.yaml`](../../../../acki-nacki/gql-server/config-default.yaml),
+  which caps live retention around ~2.4M blocks behind head.
+- The dead zone covers the entire inter-anchor window the daemon
+  would need to walk from its current cursor to the next provable
+  bundle. No forward progress is possible from this state file.
+
+> **Why Case 6a / 6b do not help.** Both resurrect modes rebuild a
+> prover state against the existing on-chain bridge, which is still
+> pinned at the stale cursor. The *contract* itself is in the dead
+> zone; no amount of state restoration moves it forward.
+
+**Fix — redeploy a fresh bridge bundle past the dead zone.** Pick a
+new seed boundary that:
+
+- is `>=` the oldest key block the public GQL still serves, with
+  enough margin for the chain to generate the next covering bundle
+  before pruning catches up (~2–3 bundle strides is typical);
+- is stride-aligned (`seed % 1024 == 0` for L1, `seed % 16384 == 0`
+  for L2);
+- lies `<=` current chain head.
+
+```bash
+cd crates/bridge-prover-libraries
+set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
+
+# 1. Measure the live GQL pruning window. The oldest reachable height
+#    gives us the lower bound on the next viable seed.
+CHAIN_HEAD=$(curl -s "$BRIDGE_GQL_ENDPOINT" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ blockchain { blocks(last:1) { edges { node { seqNo } } } } }"}' \
+  | jq -r '.data.blockchain.blocks.edges[-1].node.seqNo')
+echo "chain head = $CHAIN_HEAD"
+
+# Shellnet observed pruning depth is ~2.4M; probe with a canary query to
+# confirm before planning (public GQL retention is operational, not SLA'd).
+PROBE=$((CHAIN_HEAD - 2400000))
+curl -s "$BRIDGE_GQL_ENDPOINT" \
+  -H 'Content-Type: application/json' \
+  -d "{\"query\":\"{ blockchain { blockByHeight(height:$PROBE) { seqNo } } }\"}" | jq .
+#   null  → pruned at probe depth, raise the lower bound
+#   {seqNo: $PROBE} → reachable, probe can go deeper
+
+# 2. Pick a stride-aligned seed with margin. For L2 (W²=16384) with
+#    ~91 min per bundle at shellnet rate, 2–3 strides of margin is
+#    ~32768–49152 blocks past the first reachable boundary.
+STRIDE=16384                                   # L1=1024, L2=16384
+MARGIN=$((STRIDE * 3))
+RAW_FLOOR=$((CHAIN_HEAD - 2400000 + MARGIN))
+BRIDGE_SEED_SEQNO=$(( (RAW_FLOOR / STRIDE + 1) * STRIDE ))
+[ "$BRIDGE_SEED_SEQNO" -le "$CHAIN_HEAD" ] || {
+  echo "seed $BRIDGE_SEED_SEQNO > chain head $CHAIN_HEAD — chain is behind the pruning window"
+  exit 1
+}
+echo "redeploy seed = $BRIDGE_SEED_SEQNO (stride $STRIDE, margin $MARGIN)"
+
+# 3. Produce the live BK-set file (same procedure as the deploy §3).
+# See "Deploy your own bridge bundle from scratch" §3 for the full
+# commands; the output is bk_set.shellnet.live.json.
+# ...
+
+# 4. Archive the stuck daemon state. Preserve, do not delete.
+STUCK_TS=$(date +%Y%m%d_%H%M%S)
+mv "$BRIDGE_CONFIG_DIR/state"            "$BRIDGE_CONFIG_DIR/state.stuck_${STUCK_TS}"
+mv "$BRIDGE_CONFIG_DIR/relayer-state.json" "$BRIDGE_CONFIG_DIR/relayer-state.json.stuck_${STUCK_TS}"
+
+# 5. Deploy a fresh bundle pinned to the chosen seed and live BK set.
+#    BRIDGE_SEED_SEQNO overrides compute_bridge_anchors --at-head and
+#    pins the constructor's storedLastSeenBlockSeqNo to that value.
+cd crates/bridge-prover-libraries
+BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
+BRIDGE_SEED_SEQNO="$BRIDGE_SEED_SEQNO" \
+CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
+  LEVEL=2 PRIVATE_KEY=<sepolia burner> \
+  WITHDRAW_ACC_FR=<authoritative AN bridge account field element> \
+  ./scripts/deploy_bridge_bundle.sh
+
+# 6. Carry the live BK-set file forward (deploy §5), then cold-start
+#    through Case 1. The new contract address lands in the broadcast
+#    JSON and gets wired into L${LEVEL}_config/env automatically.
+```
+
+**Precondition — new contract address.** This is a full redeploy, not
+a migration. The old bridge is abandoned at its last-written cursor
+and its on-chain history is frozen; downstream consumers (withdraw
+CLI, Ethereum watcher scripts, prometheus dashboards keyed on
+`$BRIDGE_ADDRESS`) must all be reconfigured. Keep the old
+`broadcast/.../run-latest.json` for the operator-handoff record.
+
+**Precondition — monotonic chain head.** `BRIDGE_SEED_SEQNO` must be
+`<= CHAIN_HEAD` **and** every rotation up to the chosen seed must
+still be reachable via `bkSetUpdates`. The same retention caveat as
+Case 10 fix path 4 and the deploy §3 applies: if the fold reports a
+BK commitment that does not match the one `compute_bridge_anchors`
+derives from the seed block, the delta log is incomplete and the
+redeploy will cold-start with a bad commitment.
+
+**Why this is not Case 6b.** Case 6b re-bootstraps the daemon against
+the same contract from a different mid-chain seed. That works only
+when the on-chain cursor still falls inside the pruning window. Here,
+the on-chain cursor itself is in the dead zone — no state restoration
+against this contract can fix it. Hence a fresh bridge.
 
 ---
 

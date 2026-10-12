@@ -29,6 +29,14 @@ Both answer different questions.
 ## When to use which
 
 - Standing up a daemon without walking the whole chain → `seed_prover_bk_set`.
+- Re-bootstrapping an existing daemon against a chain that has rotated past
+  the committed `bk_set.shellnet.json`, when only public GQL is reachable
+  (no AN REST on port 8600) → `seed_prover_bk_set`. The full procedure is
+  Case 10 fix path 4 in
+  [`crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md`](../../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md);
+  that section covers the pre-/post-conditions this example alone does not
+  (choosing `--cap-height`, verifying the output commitment against
+  `storedBkSetCommitment()`, GQL-retention risk, startup-guard semantics).
 - Adding / refreshing a real-chain regression test for rotation transitions
   (e.g. after touching `parse_bk_set_changes_pub`, `normalize_bk_set_pubkeys`,
   or the 16-leaf handling) → `capture_bk_update_fixture`.

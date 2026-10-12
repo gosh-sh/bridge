@@ -50,6 +50,27 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The beacon light client's step and rotate verification keys are rotated
+  for Gloas (ePBS), and both proofs gain a public input.** From Gloas the
+  beacon `finalized_checkpoint`, the sync committees and the execution block
+  hash sit at different generalized indices (finality 169 → 735, next sync
+  committee 87 → 2946, execution block hash 812 → 2856), so the circuits pick
+  the index per header from its slot against a Gloas fork slot that is now a
+  public input: the step proof has 11 inputs (`gloasForkSlot` at index 10) and
+  the rotate proof 16 (`gloasForkSlot` after `period`). Step and rotate proofs
+  made for the previous circuits no longer verify — regenerate them, and
+  replace `EthBeaconLightClient` code (step VkBlob sha256 `581910a739788e1e4269c9cbf848c29f57a9e9a49e60f5e0178cc1ed67f397db`,
+  rotate VkBlob sha256 `19027e2302aa9ec7b82d7640a3288e1454c6a5d6c4c8ffa4d21f3591aa47f5cb`) with `updateCode`, passing
+  `abi.encode(uint64 gloasForkSlot)` as the user cell, or call
+  `setGloasForkSlot` after an upgrade with an empty cell. Until the slot is
+  set, `submitUpdate` and `submitRotate` reject everything with exit code 254;
+  a proof made for a different slot fails with 253. The value is
+  `GLOAS_FORK_EPOCH × 32`: `11296768` on Sepolia, `type(uint64).max` (Gloas
+  not scheduled) on mainnet. The owner can change it while unset or while
+  owner rotation is still enabled; after `disableOwnerRotation` only
+  `updateCode` can. Later `updateCode` calls with an empty user cell keep the
+  current value. Constructors and `deployLightClient` are unchanged.
+
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the
@@ -272,6 +293,20 @@ assigns it when the release is tagged.
   needs the second call.
 
 ### Added
+
+- Gloas (ePBS) support in the beacon light client. `eth-lc-relayer` reads
+  `GLOAS_FORK_EPOCH` from the beacon node's `/eth/v1/config/spec` and hands
+  the fork slot to the step and rotate provers as `BEACON_GLOAS_FORK_SLOT`;
+  run by hand, the provers default to the network's own value (Sepolia
+  `11296768`, mainnet not scheduled) and take the variable as an override. It
+  must equal the contract's slot. From Gloas the beacon block carries a
+  payload bid instead of the payload, so the hash the light client stores for
+  a finalized block is the bid's `parent_block_hash`, the execution block that
+  block built on, read from `finalized_header.execution_block_hash`; before
+  Gloas it is still the payload's own `block_hash`.
+- `EthBeaconLightClient.setGloasForkSlot(uint64)` (owner) and
+  `getGloasForkSlot() → (uint64 slot, bool set)`; errors 253 (proof made for
+  a different Gloas fork slot) and 254 (fork slot not set).
 
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits

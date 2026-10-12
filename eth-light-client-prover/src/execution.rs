@@ -31,8 +31,8 @@
 //! `beacon.body_root` at `EXECUTION_PAYLOAD_GINDEX = 25` (depth 4).
 
 use crate::ssz::{
-    container_root, load_bytes, load_node, native_bytes_root, native_container_root,
-    native_sha256_pair, native_uint64_root, sha256_pair, uint64_root, Node,
+    container_root, load_bytes, load_node, native_bytes_root, native_container_proof,
+    native_container_root, native_sha256_pair, native_uint64_root, sha256_pair, uint64_root, Node,
 };
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::utils::BigPrimeField;
@@ -140,6 +140,14 @@ pub fn execution_payload_root<F: BigPrimeField>(
 // ---------------------------------------------------------------------------
 
 pub fn native_execution_payload_root(p: &ExecutionPayloadVals) -> [u8; 32] {
+    native_container_root(native_execution_payload_fields(p))
+}
+
+/// Index of `block_hash` among the [`ExecutionPayloadVals`] fields.
+pub const BLOCK_HASH_FIELD_INDEX: usize = 12;
+
+/// The 17 field roots of `ExecutionPayloadHeader`, in SSZ order.
+pub fn native_execution_payload_fields(p: &ExecutionPayloadVals) -> Vec<[u8; 32]> {
     assert_eq!(p.logs_bloom.len(), 256);
     assert!(p.extra_data.len() <= 32);
 
@@ -150,7 +158,7 @@ pub fn native_execution_payload_root(p: &ExecutionPayloadVals) -> [u8; 32] {
         native_sha256_pair(&chunk, &len_node)
     };
 
-    native_container_root(vec![
+    vec![
         p.parent_hash,
         native_bytes_root(&p.fee_recipient),
         p.state_root,
@@ -168,5 +176,18 @@ pub fn native_execution_payload_root(p: &ExecutionPayloadVals) -> [u8; 32] {
         p.withdrawals_root,
         native_uint64_root(p.blob_gas_used),
         native_uint64_root(p.excess_blob_gas),
-    ])
+    ]
+}
+
+/// Deneb..Fulu: the `block_hash` proof against `body_root` at gindex 812 —
+/// its 5-node proof inside the payload header, then the light-client
+/// `execution_branch` (payload header at gindex 25).
+pub fn native_block_hash_branch(
+    p: &ExecutionPayloadVals,
+    execution_branch: &[[u8; 32]],
+) -> Vec<[u8; 32]> {
+    let mut branch =
+        native_container_proof(native_execution_payload_fields(p), BLOCK_HASH_FIELD_INDEX);
+    branch.extend_from_slice(execution_branch);
+    branch
 }

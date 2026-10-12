@@ -1,7 +1,7 @@
 //! Beacon `LightClientFinalityUpdate` parse + step public-input packing.
 //!
 //! Layout matches `eth-light-client-prover/src/step.rs` (`STEP_INSTANCE_LEN =
-//! 10`) and `EthBeaconLightClient._parsePublicInputs`.
+//! 11`) and `EthBeaconLightClient._parsePublicInputs`.
 
 use serde_json::Value;
 
@@ -10,11 +10,17 @@ use crate::error::RelayerError;
 /// 32 slots/epoch × 256 epochs/period.
 pub const SLOTS_PER_SYNC_PERIOD: u64 = 32 * 256;
 /// Step circuit public inputs.
-pub const STEP_INSTANCE_LEN: usize = 10;
+pub const STEP_INSTANCE_LEN: usize = 11;
 pub const PUBLIC_INPUT_BYTES: usize = STEP_INSTANCE_LEN * 32;
-/// Rotate PI: 12 accumulator limbs + current/next/period.
+/// Index of `gloas_fork_slot` in the step public inputs.
+pub const STEP_GLOAS_FORK_SLOT_INDEX: usize = 10;
+/// Rotate PI: 12 accumulator limbs + current/next/period/gloas_fork_slot.
 pub const ROTATE_ACCUMULATOR_LIMBS: usize = 12;
-pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
+pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
+/// Index of `period` in the rotate public inputs.
+pub const ROTATE_PERIOD_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 2;
+/// `gloas_fork_slot` of a network that has not scheduled Gloas.
+pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 
 /// Signing-domain inputs the beacon source resolved for one update: the
 /// `fork_version` active at `signature_slot` (fork schedule from
@@ -25,15 +31,21 @@ pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
 /// `BEACON_GENESIS_VALIDATORS_ROOT` (both are circuit witnesses, the VK does
 /// not change). `None` leaves the prover on its own environment, whose default
 /// is mainnet Fulu.
+///
+/// `gloas_fork_slot` (`GLOAS_FORK_EPOCH × SLOTS_PER_EPOCH`) goes out as
+/// `BEACON_GLOAS_FORK_SLOT`. It picks the Merkle indices the step proof reads
+/// the update at, and it is a public input the contract pins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeaconChainParams {
     pub fork_version: [u8; 4],
     pub genesis_validators_root: [u8; 32],
+    pub gloas_fork_slot: u64,
 }
 
 impl BeaconChainParams {
     pub const ENV_FORK_VERSION: &'static str = "BEACON_FORK_VERSION";
     pub const ENV_GENESIS_VALIDATORS_ROOT: &'static str = "BEACON_GENESIS_VALIDATORS_ROOT";
+    pub const ENV_GLOAS_FORK_SLOT: &'static str = "BEACON_GLOAS_FORK_SLOT";
 
     pub fn fork_version_hex(&self) -> String {
         format!("0x{}", hex::encode(self.fork_version))
@@ -116,6 +128,12 @@ impl StepProofBundle {
                 },
                 execution_block_hash: [0u8; 32],
                 attested_state_root: [0u8; 32],
+                gloas_fork_slot: u64::from_le_bytes(
+                    public_inputs
+                        [STEP_GLOAS_FORK_SLOT_INDEX * 32..STEP_GLOAS_FORK_SLOT_INDEX * 32 + 8]
+                        .try_into()
+                        .unwrap(),
+                ),
             },
             public_inputs,
             proof,
@@ -123,7 +141,7 @@ impl StepProofBundle {
     }
 }
 
-/// Decoded step PI (same order as the 10 LE Fr words).
+/// Decoded step PI (same order as the 11 LE Fr words).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepPublicInputs {
     pub attested_slot: u64,
@@ -133,6 +151,7 @@ pub struct StepPublicInputs {
     pub committee_commitment: [u8; 32],
     pub execution_block_hash: [u8; 32],
     pub attested_state_root: [u8; 32],
+    pub gloas_fork_slot: u64,
 }
 
 /// Opcode operands for `submitRotate`.
@@ -156,7 +175,7 @@ impl RotateProofBundle {
                 public_inputs.len()
             )));
         }
-        let off = (ROTATE_INSTANCE_LEN - 1) * 32;
+        let off = ROTATE_PERIOD_INDEX * 32;
         let period = u64::from_le_bytes(public_inputs[off..off + 8].try_into().unwrap());
         Ok(Self {
             public_inputs,
@@ -176,10 +195,18 @@ pub fn parse_finality_update(json: &str) -> Result<FinalityUpdate, RelayerError>
     };
     let attested = beacon_header(data, "attested_header")?;
     let finalized = beacon_header(data, "finalized_header")?;
+    // Gloas headers carry `execution_block_hash` (the payload bid's parent
+    // block hash); Deneb..Fulu ones the full `execution` payload header.
+    let fh = &data["finalized_header"];
     let exec_hash = hex32(
-        data["finalized_header"]["execution"]["block_hash"]
+        fh["execution_block_hash"]
             .as_str()
-            .ok_or_else(|| RelayerError::beacon("missing finalized execution.block_hash"))?,
+            .or_else(|| fh["execution"]["block_hash"].as_str())
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing finalized_header.execution_block_hash / execution.block_hash",
+                )
+            })?,
     )?;
     let bits = data["sync_aggregate"]["sync_committee_bits"]
         .as_str()
@@ -238,7 +265,7 @@ fn popcount_bits(hex_bits: &str) -> Result<u64, RelayerError> {
     Ok(raw.iter().map(|b| u64::from(b.count_ones())).sum())
 }
 
-/// Pack 10 LE-Fr words. 32-byte roots are split `hi = root[0..16] ‖ 0`,
+/// Pack 11 LE-Fr words. 32-byte roots are split `hi = root[0..16] ‖ 0`,
 /// `lo = root[16..32] ‖ 0` (circuit `node_hi_lo` / contract `(hi<<128)|lo`).
 pub fn pack_step_public_inputs(
     update: &FinalityUpdate,
@@ -252,6 +279,9 @@ pub fn pack_step_public_inputs(
         committee_commitment,
         execution_block_hash: update.execution_block_hash,
         attested_state_root: update.attested_state_root,
+        gloas_fork_slot: update
+            .chain
+            .map_or(GLOAS_NOT_SCHEDULED, |c| c.gloas_fork_slot),
     };
     let mut out = Vec::with_capacity(PUBLIC_INPUT_BYTES);
     out.extend_from_slice(&u64_le_fr(parsed.attested_slot));
@@ -267,6 +297,7 @@ pub fn pack_step_public_inputs(
     let (sh, sl) = root_hi_lo(&parsed.attested_state_root);
     out.extend_from_slice(&sh);
     out.extend_from_slice(&sl);
+    out.extend_from_slice(&u64_le_fr(parsed.gloas_fork_slot));
     (out, parsed)
 }
 
@@ -323,12 +354,37 @@ mod tests {
     }
 
     #[test]
-    fn packed_pi_is_10_words() {
-        let u = parse_finality_update(&sample_json(5, 4)).unwrap();
+    fn packed_pi_is_11_words() {
+        let mut u = parse_finality_update(&sample_json(5, 4)).unwrap();
         let (bytes, parsed) = pack_step_public_inputs(&u, [0xAB; 32]);
         assert_eq!(bytes.len(), PUBLIC_INPUT_BYTES);
         assert_eq!(parsed.finalized_slot, 4);
         assert_eq!(&bytes[..8], &5u64.to_le_bytes());
+        assert_eq!(
+            &bytes[STEP_GLOAS_FORK_SLOT_INDEX * 32..STEP_GLOAS_FORK_SLOT_INDEX * 32 + 8],
+            &u64::MAX.to_le_bytes()
+        );
+        u.chain = Some(BeaconChainParams {
+            fork_version: [0x90, 0, 0, 0x76],
+            genesis_validators_root: [0xd8; 32],
+            gloas_fork_slot: 11_296_768,
+        });
+        let (bytes, parsed) = pack_step_public_inputs(&u, [0xAB; 32]);
+        assert_eq!(parsed.gloas_fork_slot, 11_296_768);
+        assert_eq!(
+            &bytes[STEP_GLOAS_FORK_SLOT_INDEX * 32..STEP_GLOAS_FORK_SLOT_INDEX * 32 + 8],
+            &11_296_768u64.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn parses_gloas_execution_block_hash() {
+        let mut v: serde_json::Value = serde_json::from_str(&sample_json(5, 4)).unwrap();
+        let fh = v["data"]["finalized_header"].as_object_mut().unwrap();
+        let hash = fh.remove("execution").unwrap()["block_hash"].clone();
+        fh.insert("execution_block_hash".into(), hash);
+        let u = parse_finality_update(&v.to_string()).unwrap();
+        assert_eq!(u.execution_block_hash, [0x22; 32]);
     }
 
     #[test]
@@ -357,6 +413,7 @@ mod tests {
         let c = BeaconChainParams {
             fork_version: [0x90, 0, 0, 0x75],
             genesis_validators_root: [0xd8; 32],
+            gloas_fork_slot: GLOAS_NOT_SCHEDULED,
         };
         assert_eq!(c.fork_version_hex(), "0x90000075");
         assert_eq!(
@@ -385,7 +442,7 @@ mod tests {
     fn rotate_bundle_from_dir_reads_period_word() {
         let dir = tempfile::tempdir().unwrap();
         let mut pi = vec![0u8; ROTATE_INSTANCE_LEN * 32];
-        let off = (ROTATE_INSTANCE_LEN - 1) * 32;
+        let off = ROTATE_PERIOD_INDEX * 32;
         pi[off..off + 8].copy_from_slice(&42u64.to_le_bytes());
         std::fs::write(dir.path().join("rotate_public_inputs.bin"), &pi).unwrap();
         std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0xCDu8; 4]).unwrap();

@@ -10,7 +10,7 @@ use crate::{
     error::RelayerError,
     types::{
         pack_step_public_inputs, FinalityUpdate, RotateProofBundle, StepProofBundle,
-        ROTATE_INSTANCE_LEN,
+        ROTATE_INSTANCE_LEN, ROTATE_PERIOD_INDEX,
     },
 };
 
@@ -64,7 +64,7 @@ impl ProofGenerator for MockProofGenerator {
             ));
         }
         let mut public_inputs = vec![0u8; ROTATE_INSTANCE_LEN * 32];
-        let off = (ROTATE_INSTANCE_LEN - 1) * 32;
+        let off = ROTATE_PERIOD_INDEX * 32;
         public_inputs[off..off + 8].copy_from_slice(&to_period.to_le_bytes());
         Ok(RotateProofBundle {
             public_inputs,
@@ -131,6 +131,10 @@ impl SubprocessProofGenerator {
             .env(
                 crate::types::BeaconChainParams::ENV_GENESIS_VALIDATORS_ROOT,
                 chain.genesis_validators_root_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GLOAS_FORK_SLOT,
+                chain.gloas_fork_slot.to_string(),
             );
         }
         let output = cmd

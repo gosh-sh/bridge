@@ -521,6 +521,7 @@ mod tests {
         u.chain = Some(crate::types::BeaconChainParams {
             fork_version: [0x90, 0, 0, 0x75],
             genesis_validators_root: [gvr_byte; 32],
+            gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
         });
         u
     }

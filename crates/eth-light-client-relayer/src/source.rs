@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::{
     ancestry::ExecLink,
     error::RelayerError,
-    types::{parse_finality_update, BeaconChainParams, FinalityUpdate},
+    types::{parse_finality_update, BeaconChainParams, FinalityUpdate, GLOAS_NOT_SCHEDULED},
 };
 
 #[async_trait]
@@ -73,6 +73,8 @@ pub struct ChainSpec {
     /// (`FAR_FUTURE_EPOCH`) are dropped.
     pub fork_schedule: Vec<(u64, [u8; 4])>,
     pub slots_per_epoch: u64,
+    /// First Gloas slot, [`GLOAS_NOT_SCHEDULED`] if the network has none.
+    pub gloas_fork_slot: u64,
 }
 
 impl ChainSpec {
@@ -88,8 +90,29 @@ impl ChainSpec {
         Ok(BeaconChainParams {
             fork_version: self.fork_version_at_slot(slot)?,
             genesis_validators_root: self.genesis_validators_root,
+            gloas_fork_slot: self.gloas_fork_slot,
         })
     }
+}
+
+/// `GET /eth/v1/config/spec` → first slot of the Gloas fork
+/// (`GLOAS_FORK_EPOCH × SLOTS_PER_EPOCH`); [`GLOAS_NOT_SCHEDULED`] when the
+/// epoch is absent or `FAR_FUTURE_EPOCH`.
+pub fn parse_gloas_fork_slot(spec_json: &str, slots_per_epoch: u64) -> Result<u64, RelayerError> {
+    let v: Value = serde_json::from_str(spec_json)
+        .map_err(|e| RelayerError::beacon(format!("spec JSON: {e}")))?;
+    let epoch = match &v["data"]["GLOAS_FORK_EPOCH"] {
+        Value::String(s) => Some(
+            s.parse::<u64>()
+                .map_err(|e| RelayerError::beacon(format!("spec: GLOAS_FORK_EPOCH={s}: {e}")))?,
+        ),
+        Value::Number(n) => n.as_u64(),
+        _ => None,
+    };
+    Ok(epoch
+        .filter(|e| *e != u64::MAX)
+        .and_then(|e| e.checked_mul(slots_per_epoch))
+        .unwrap_or(GLOAS_NOT_SCHEDULED))
 }
 
 /// `GET /eth/v1/beacon/genesis` → `data.genesis_validators_root`.
@@ -225,10 +248,12 @@ impl HttpBeaconSource {
         let spec = self
             .get_text(&format!("{}/eth/v1/config/spec", self.base_url))
             .await?;
+        let slots_per_epoch = parse_slots_per_epoch(&spec);
         let resolved = ChainSpec {
             genesis_validators_root: parse_genesis_validators_root(&genesis)?,
             fork_schedule: parse_fork_schedule(&spec)?,
-            slots_per_epoch: parse_slots_per_epoch(&spec),
+            slots_per_epoch,
+            gloas_fork_slot: parse_gloas_fork_slot(&spec, slots_per_epoch)?,
         };
         *self.spec.lock().expect("poisoned") = Some(resolved.clone());
         Ok(resolved)
@@ -523,8 +548,10 @@ mod tests {
             genesis_validators_root: [0xd8; 32],
             fork_schedule: parse_fork_schedule(SEPOLIA_SPEC).unwrap(),
             slots_per_epoch: parse_slots_per_epoch(SEPOLIA_SPEC),
+            gloas_fork_slot: parse_gloas_fork_slot(SEPOLIA_SPEC, 32).unwrap(),
         };
         assert_eq!(spec.slots_per_epoch, 32);
+        assert_eq!(spec.gloas_fork_slot, GLOAS_NOT_SCHEDULED);
         // Sepolia slot 11_065_463 → epoch 345_795 → Fulu.
         let p = spec.params_at_slot(11_065_463).unwrap();
         assert_eq!(p.fork_version_hex(), "0x90000075");
@@ -532,6 +559,32 @@ mod tests {
         // Last Electra slot: 272640*32 - 1.
         let p = spec.params_at_slot(272_640 * 32 - 1).unwrap();
         assert_eq!(p.fork_version_hex(), "0x90000074");
+    }
+
+    /// Sepolia after Gloas was scheduled for epoch 353_024.
+    #[test]
+    fn gloas_fork_slot_and_version_after_scheduling() {
+        let spec_json = SEPOLIA_SPEC.replace(
+            r#""GLOAS_FORK_EPOCH":"18446744073709551615""#,
+            r#""GLOAS_FORK_EPOCH":"353024""#,
+        );
+        let spec = ChainSpec {
+            genesis_validators_root: [0xd8; 32],
+            fork_schedule: parse_fork_schedule(&spec_json).unwrap(),
+            slots_per_epoch: 32,
+            gloas_fork_slot: parse_gloas_fork_slot(&spec_json, 32).unwrap(),
+        };
+        assert_eq!(spec.gloas_fork_slot, 353_024 * 32);
+        let p = spec.params_at_slot(11_335_777).unwrap();
+        assert_eq!(p.fork_version_hex(), "0x90000076");
+        assert_eq!(p.gloas_fork_slot, 11_296_768);
+        let p = spec.params_at_slot(353_024 * 32 - 1).unwrap();
+        assert_eq!(p.fork_version_hex(), "0x90000075");
+        assert!(parse_gloas_fork_slot(r#"{"data":{"GLOAS_FORK_EPOCH":"x"}}"#, 32).is_err());
+        assert_eq!(
+            parse_gloas_fork_slot(r#"{"data":{}}"#, 32).unwrap(),
+            GLOAS_NOT_SCHEDULED
+        );
     }
 
     #[test]

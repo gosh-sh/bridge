@@ -33,13 +33,10 @@
 use std::{fs, path::Path, time::Instant};
 
 use eth_light_client_prover::{
-    bls_core::{signing_root_to_g2, verify_native},
-    execution::ExecutionPayloadVals,
-    live_witness::ChainParams,
+    live_witness::{synthetic_step_witness, update_headers, ChainParams},
     mainnet::find_update_fixture,
     poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite},
-    signing::native_sync_committee_signing_root,
-    step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN},
+    step::{verify_step, StepWitness, STEP_INSTANCE_LEN},
 };
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::{
@@ -49,12 +46,7 @@ use halo2_base::{
     },
     halo2_proofs::{
         halo2curves::{
-            bls12_381::{
-                G1Affine as BlsG1Affine, G2Affine as BlsG2Affine, G1 as BlsG1, G2 as BlsG2,
-            },
             bn256::{Bn256, Fr, G1Affine},
-            ff::Field,
-            group::{Curve, Group},
             serde::SerdeObject,
         },
         plonk::{create_proof, keygen_pk, keygen_vk, verify_proof, VerifyingKey},
@@ -70,7 +62,6 @@ use halo2_base::{
     },
 };
 use rand::rngs::OsRng;
-use serde_json::Value;
 
 const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
 /// Keygen the step at **k=21** (not the k=19 used for the standalone opcode
@@ -84,67 +75,6 @@ const LOOKUP_BITS: usize = 18;
 /// Hermez `[s]·G2` raw-bytes head — the ceremony snark-verifier's decider
 /// needs.
 const HERMEZ_SG2_HEAD: [u8; 4] = [0x92, 0x8f, 0xaf, 0xb3];
-
-fn h32(s: &str) -> [u8; 32] {
-    hex::decode(s.trim_start_matches("0x"))
-        .unwrap()
-        .try_into()
-        .unwrap()
-}
-fn hexv(s: &str) -> Vec<u8> {
-    hex::decode(s.trim_start_matches("0x")).unwrap()
-}
-fn u64s(v: &Value) -> u64 {
-    v.as_str().unwrap().parse().unwrap()
-}
-fn u256_le(s: &str) -> [u8; 32] {
-    let val: u128 = s.parse().unwrap();
-    let mut out = [0u8; 32];
-    out[..16].copy_from_slice(&val.to_le_bytes());
-    out
-}
-fn header(data: &Value, which: &str) -> HeaderVals {
-    let b = &data[which]["beacon"];
-    HeaderVals {
-        slot: b["slot"].as_str().unwrap().parse().unwrap(),
-        proposer_index: b["proposer_index"].as_str().unwrap().parse().unwrap(),
-        parent_root: h32(b["parent_root"].as_str().unwrap()),
-        state_root: h32(b["state_root"].as_str().unwrap()),
-        body_root: h32(b["body_root"].as_str().unwrap()),
-    }
-}
-fn execution(data: &Value, which: &str) -> ExecutionPayloadVals {
-    let e = &data[which]["execution"];
-    ExecutionPayloadVals {
-        parent_hash: h32(e["parent_hash"].as_str().unwrap()),
-        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap())
-            .try_into()
-            .unwrap(),
-        state_root: h32(e["state_root"].as_str().unwrap()),
-        receipts_root: h32(e["receipts_root"].as_str().unwrap()),
-        logs_bloom: hexv(e["logs_bloom"].as_str().unwrap()),
-        prev_randao: h32(e["prev_randao"].as_str().unwrap()),
-        block_number: u64s(&e["block_number"]),
-        gas_limit: u64s(&e["gas_limit"]),
-        gas_used: u64s(&e["gas_used"]),
-        timestamp: u64s(&e["timestamp"]),
-        extra_data: hexv(e["extra_data"].as_str().unwrap()),
-        base_fee_per_gas: u256_le(e["base_fee_per_gas"].as_str().unwrap()),
-        block_hash: h32(e["block_hash"].as_str().unwrap()),
-        transactions_root: h32(e["transactions_root"].as_str().unwrap()),
-        withdrawals_root: h32(e["withdrawals_root"].as_str().unwrap()),
-        blob_gas_used: u64s(&e["blob_gas_used"]),
-        excess_blob_gas: u64s(&e["excess_blob_gas"]),
-    }
-}
-fn execution_branch(data: &Value, which: &str) -> Vec<[u8; 32]> {
-    data[which]["execution_branch"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| h32(e.as_str().unwrap()))
-        .collect()
-}
 
 /// Build the step witness with a synthetic (self-consistent) signing committee.
 ///
@@ -167,73 +97,13 @@ fn build_witness() -> (StepWitness, [u8; 32], String) {
             "finality_update.json (embedded)".to_string(),
         ),
     };
-    let v: Value = serde_json::from_str(&raw).unwrap();
-    // Fixtures are either `{"data": {...}}` or `[{"data": {...}}]`.
-    let data = if v.is_array() {
-        v[0]["data"].clone()
-    } else {
-        v["data"].clone()
-    };
-
-    let attested = header(&data, "attested_header");
-    let finalized = header(&data, "finalized_header");
-    let attested_state_root = attested.state_root;
-    let finality_branch: Vec<[u8; 32]> = data["finality_branch"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| h32(e.as_str().unwrap()))
-        .collect();
-
     // Synthetic committee: the domain only has to be self-consistent, but keep
     // it in step with the fixture's network (env override, default mainnet).
-    let params =
-        ChainParams::from_env().expect("BEACON_FORK_VERSION / BEACON_GENESIS_VALIDATORS_ROOT");
-    let signing_root = native_sync_committee_signing_root(
-        attested.slot,
-        attested.proposer_index,
-        &attested.parent_root,
-        &attested.state_root,
-        &attested.body_root,
-        &params.fork_version,
-        &params.genesis_validators_root,
-    );
-    let msg_hash = signing_root_to_g2(&signing_root);
-    let hm = BlsG2::from(msg_hash);
-
-    let mut pubkeys: Vec<BlsG1Affine> = Vec::with_capacity(512);
-    let mut agg = BlsG1::identity();
-    let mut sig = BlsG2::identity();
-    for _ in 0..512 {
-        let sk = <BlsG1 as Group>::Scalar::random(OsRng);
-        pubkeys.push((BlsG1::generator() * sk).to_affine());
-        agg += BlsG1::generator() * sk;
-        sig += hm * sk;
-    }
-    let signature: BlsG2Affine = sig.to_affine();
-    assert!(
-        verify_native(&signature, &agg.to_affine(), &msg_hash),
-        "synthetic committee must verify"
-    );
-
-    let pubkeys_compressed: Vec<[u8; 48]> = pubkeys.iter().map(|p| p.to_compressed_be()).collect();
-    let aggregate_pubkey = agg.to_affine().to_compressed_be();
-
-    let w = StepWitness {
-        attested,
-        finalized,
-        finality_branch,
-        fork_version: params.fork_version,
-        genesis_validators_root: params.genesis_validators_root,
-        pubkeys,
-        pubkeys_compressed,
-        aggregate_pubkey,
-        bits: vec![true; 512],
-        signature,
-        finalized_execution: execution(&data, "finalized_header"),
-        execution_branch: execution_branch(&data, "finalized_header"),
-    };
-    (w, attested_state_root, label)
+    let params = ChainParams::from_env()
+        .expect("BEACON_FORK_VERSION / BEACON_GENESIS_VALIDATORS_ROOT / BEACON_GLOAS_FORK_SLOT");
+    let headers = update_headers(&raw, params.gloas_fork_slot).expect("update fixture headers");
+    let attested_state_root = headers.attested.state_root;
+    (synthetic_step_witness(headers, &params), attested_state_root, label)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

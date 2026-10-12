@@ -16,12 +16,13 @@
 //!    the verified instances).
 //! 3. runs the cheap SHA top [`sync_committee_root_from_subtrees`] over the N
 //!    reconstructed subtree roots + `aggregate_pubkey` → the committee SSZ root.
-//! 4. [`verify_merkle_branch`] binds that committee root to a beacon `state_root`
-//!    at [`crate::rotate::NEXT_SYNC_COMMITTEE_GINDEX`] (= 87).
+//! 4. [`verify_merkle_branch_either`] binds that committee root to a beacon
+//!    `state_root` at `next_sync_committee`: gindex 87 before Gloas, 2946 from it,
+//!    picked by the attested slot against the Gloas fork slot ([`crate::fork`]).
 //! 5. [`combine_committee_commitment`] folds the N shard Poseidon digests +
 //!    aggregate into the committee commitment (`next_commit`).
-//! 6. exposes rotate public inputs `[current_commit, next_commit, period]` after
-//!    the 12-limb KZG accumulator.
+//! 6. exposes rotate public inputs `[current_commit, next_commit, period,
+//!    gloas_fork_slot]` after the 12-limb KZG accumulator.
 //!
 //! ## Accumulator (KZG decider)
 //!
@@ -37,10 +38,15 @@
 
 use crate::committee::{native_sync_committee_root_from_subtrees, sync_committee_root_from_subtrees};
 use crate::rotate::{combine_committee_commitment, new_committee_hasher, SHARD_INSTANCE_LEN};
-use crate::ssz::{
-    load_bytes, load_node, merkle_depth, native_merkle_branch_root, verify_merkle_branch, Node,
+use crate::fork::{
+    assert_is_gloas, is_gloas, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA, NEXT_SYNC_COMMITTEE_GINDEX_GLOAS,
+    SYNC_COMMITTEE_BRANCH_LEN,
 };
-use crate::step::STEP_INSTANCE_LEN;
+use crate::ssz::{
+    load_bytes, load_node, merkle_depth, native_merkle_branch_root_either,
+    verify_merkle_branch_either, Node,
+};
+use crate::step::{STEP_GLOAS_FORK_SLOT_INDEX, STEP_INSTANCE_LEN};
 
 use gosh_sha256_chip::Sha256Chip;
 
@@ -66,8 +72,14 @@ use snark_verifier_sdk::{CircuitExt, Snark, SHPLONK};
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
 /// Rotate public inputs appended after the accumulator: `[current_commit,
-/// next_commit, period]` (R2 self-contained layout — see `EthBeaconLightClient`).
-pub const NUM_ROTATE_PUBLIC_INPUTS: usize = 3;
+/// next_commit, period, gloas_fork_slot]` (R2 self-contained layout — see
+/// `EthBeaconLightClient`). The circuit accepts any `gloas_fork_slot`, so the
+/// consumer must require its network's.
+pub const NUM_ROTATE_PUBLIC_INPUTS: usize = 4;
+
+/// Index of the attested slot in a verified step proof's public instances. When
+/// a step snark is folded, the `next_sync_committee` index is chosen by it.
+pub const STEP_ATTESTED_SLOT_INDEX: usize = 0;
 
 /// Index of the signing committee's Poseidon `committee_commitment` in a verified
 /// step proof's public instances (`crate::step::pack_step_instances`). When a step
@@ -90,15 +102,22 @@ pub struct RotateGlueWitness {
     pub subtree_roots: Vec<[u8; 32]>,
     /// `aggregate_pubkey` (48 compressed bytes).
     pub aggregate: [u8; 48],
-    /// `next_sync_committee` SSZ Merkle branch (`floor(log2(gindex))` nodes).
+    /// `next_sync_committee` SSZ Merkle branch: [`SYNC_COMMITTEE_BRANCH_LEN`]
+    /// nodes, leaf sibling first, zero-padded at the end before Gloas
+    /// ([`crate::ssz::branch_for_either`]).
     pub branch: Vec<[u8; 32]>,
     /// Beacon `state_root` the branch reconstructs. Used as the anchor witness when
     /// no step snark is folded; when a step snark IS folded (`bls-state-root`), the
     /// anchor is bound to the step's verified attested `state_root` and this value is
     /// only range-checked as the byte pre-image (must equal the signed state_root).
     pub state_root: [u8; 32],
-    /// Generalized index of the committee field (87 for `next_sync_committee`).
-    pub gindex: u64,
+    /// Slot of the attested header whose state holds the committee. Picks the
+    /// generalized index; bound to the step's attested slot when a step snark is
+    /// folded.
+    pub attested_slot: u64,
+    /// Gloas fork slot of the network. Exposed; bound to the step's when a step
+    /// snark is folded.
+    pub gloas_fork_slot: u64,
     /// Previous committee commitment (R2 passthrough). Used only when the circuit
     /// is built WITHOUT a step snark; when a step snark is folded (`bls-bind`),
     /// `current_commit` is bound to the verified step proof's `committee_commitment`
@@ -115,22 +134,43 @@ impl RotateGlueWitness {
     pub fn synthetic(
         subtree_roots: Vec<[u8; 32]>,
         aggregate: [u8; 48],
-        gindex: u64,
+        attested_slot: u64,
+        gloas_fork_slot: u64,
         current_commit: Fr,
         period: u64,
     ) -> Self {
         let committee_root = native_sync_committee_root_from_subtrees(&subtree_roots, &aggregate);
+        let gloas = is_gloas(attested_slot, gloas_fork_slot);
+        let gindex =
+            if gloas { NEXT_SYNC_COMMITTEE_GINDEX_GLOAS } else { NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA };
         let depth = merkle_depth(gindex);
-        let branch: Vec<[u8; 32]> = (0..depth)
+        let branch: Vec<[u8; 32]> = (0..SYNC_COMMITTEE_BRANCH_LEN)
             .map(|i| {
                 let mut n = [0u8; 32];
-                n[0] = (i as u8).wrapping_add(1);
-                n[31] = 0xAB;
+                if i < depth {
+                    n[0] = (i as u8).wrapping_add(1);
+                    n[31] = 0xAB;
+                }
                 n
             })
             .collect();
-        let state_root = native_merkle_branch_root(&committee_root, &branch, gindex);
-        Self { subtree_roots, aggregate, branch, state_root, gindex, current_commit, period }
+        let state_root = native_merkle_branch_root_either(
+            &committee_root,
+            &branch,
+            NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+            NEXT_SYNC_COMMITTEE_GINDEX_GLOAS,
+            gloas,
+        );
+        Self {
+            subtree_roots,
+            aggregate,
+            branch,
+            state_root,
+            attested_slot,
+            gloas_fork_slot,
+            current_commit,
+            period,
+        }
     }
 }
 
@@ -265,9 +305,16 @@ impl RotateAggregationCircuit {
             //    step snark is folded, the anchor state_root is BOUND to the step's
             //    verified attested `state_root` (indices 8/9) — the state the current
             //    committee signed — so the successor committee is proven to sit in the
-            //    signed state (bls-state-root); else it is witnessed (mechanics).
+            //    signed state (bls-state-root); else it is witnessed (mechanics). The
+            //    generalized index follows that state's fork, so the attested slot and
+            //    the Gloas fork slot are bound to the step's as well.
+            assert_eq!(
+                witness.branch.len(),
+                SYNC_COMMITTEE_BRANCH_LEN,
+                "next_sync_committee branch must have {SYNC_COMMITTEE_BRANCH_LEN} nodes"
+            );
             let branch: Vec<Node<Fr>> = witness.branch.iter().map(|b| load_node(ctx, b)).collect();
-            let state_root = if has_step {
+            let (attested_slot, gloas_fork_slot) = if has_step {
                 let sp = &out.previous_instances[n_committee_inputs];
                 assert_eq!(
                     sp.len(),
@@ -275,6 +322,16 @@ impl RotateAggregationCircuit {
                     "step snark must expose {STEP_INSTANCE_LEN} instances, got {}",
                     sp.len()
                 );
+                (sp[STEP_ATTESTED_SLOT_INDEX], sp[STEP_GLOAS_FORK_SLOT_INDEX])
+            } else {
+                (
+                    ctx.load_witness(Fr::from(witness.attested_slot)),
+                    ctx.load_witness(Fr::from(witness.gloas_fork_slot)),
+                )
+            };
+            let attested_is_gloas = assert_is_gloas(ctx, &range, attested_slot, gloas_fork_slot);
+            let state_root = if has_step {
+                let sp = &out.previous_instances[n_committee_inputs];
                 node_from_hilo(
                     ctx,
                     &range,
@@ -285,26 +342,29 @@ impl RotateAggregationCircuit {
             } else {
                 load_node(ctx, &witness.state_root)
             };
-            verify_merkle_branch(&sha, ctx, &committee_root, &branch, witness.gindex, &state_root);
+            verify_merkle_branch_either(
+                &sha,
+                gate,
+                ctx,
+                &committee_root,
+                &branch,
+                NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+                NEXT_SYNC_COMMITTEE_GINDEX_GLOAS,
+                attested_is_gloas,
+                &state_root,
+            );
 
             // 5. + 6. commitments + rotate PIs. `current_commit` is BOUND to the
             //    folded step proof's verified `committee_commitment` when present
             //    (bls-bind, R2 opt-1), else witnessed (mechanics bring-up).
             let next_commit = combine_committee_commitment(&hasher, ctx, gate, &digests, &agg_cells);
             let current_commit = if has_step {
-                let sp = &out.previous_instances[n_committee_inputs];
-                assert_eq!(
-                    sp.len(),
-                    STEP_INSTANCE_LEN,
-                    "step snark must expose {STEP_INSTANCE_LEN} instances, got {}",
-                    sp.len()
-                );
-                sp[STEP_COMMITTEE_COMMITMENT_INDEX]
+                out.previous_instances[n_committee_inputs][STEP_COMMITTEE_COMMITMENT_INDEX]
             } else {
                 ctx.load_witness(witness.current_commit)
             };
             let period = ctx.load_witness(Fr::from(witness.period));
-            vec![current_commit, next_commit, period]
+            vec![current_commit, next_commit, period, gloas_fork_slot]
         };
 
         assert_eq!(builder.assigned_instances.len(), 1, "one instance column");

@@ -471,8 +471,9 @@ mod ancestry_submit_tests {
                 committee_commitment: [0xC0; 32],
                 execution_block_hash: [0xAA; 32],
                 attested_state_root: [0; 32],
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
             },
-            public_inputs: vec![0u8; 320],
+            public_inputs: vec![0u8; crate::types::PUBLIC_INPUT_BYTES],
             proof: vec![0xAB; 8],
         };
         mock.submit_update(&first).await.unwrap();
@@ -485,8 +486,9 @@ mod ancestry_submit_tests {
                 committee_commitment: [0xC0; 32],
                 execution_block_hash: [0xBB; 32],
                 attested_state_root: [0; 32],
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
             },
-            public_inputs: vec![0u8; 320],
+            public_inputs: vec![0u8; crate::types::PUBLIC_INPUT_BYTES],
             proof: vec![0xAB; 8],
         };
         match mock.submit_update(&late).await.unwrap() {

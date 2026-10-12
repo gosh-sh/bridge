@@ -10,30 +10,38 @@
 //! 4. **signature validity**: the G2 signature is on-curve **and subgroup-checked**
 //!    (M-hardening; the *same* assigned point feeds the pairing — sound binding),
 //!    then `e(-G1, sig) · e(agg, H(signing_root)) == 1`.
-//! 5. **finality**: `hash_tree_root(finalized.beacon)` + `finality_branch` at the
-//!    Electra/Fulu gindex reconstruct `attested.beacon.state_root` (M2 branch).
+//! 5. **finality**: `hash_tree_root(finalized.beacon)` + `finality_branch`
+//!    reconstruct `attested.beacon.state_root` at the Electra/Fulu or Gloas index,
+//!    whichever the attested slot falls under ([`crate::fork`]).
 //!
 //! 6. **committee decode-bind** (M4-fusion): each aggregated pubkey is bound to
 //!    its 48-byte compressed encoding, and the committee **Poseidon commitment**
 //!    (= the rotate proof's output) is recomputed — so the aggregated committee
 //!    is the chain-anchored one, not a prover-chosen set.
-//! 7. **execution block_hash** (M4-fusion): `htr(ExecutionPayloadHeader)` +
-//!    `execution_branch` reconstruct the *same* `finalized.body_root`, exposing
-//!    the finalized execution block hash (the deposit-path output).
+//! 7. **execution block_hash** (M4-fusion): the finalized header's
+//!    `execution_block_hash` + `execution_branch` reconstruct the *same*
+//!    `finalized.body_root`, at the Deneb..Fulu or Gloas index by the finalized
+//!    slot, exposing the finalized execution block hash (the deposit-path output).
+//!    Under Gloas that is the payload bid's `parent_block_hash`.
 //!
 //! Outputs [`StepPublicInputs`] (attested/finalized slot, finalized beacon root,
-//! participation, committee commitment, execution block hash) and packs them into
+//! participation, committee commitment, execution block hash, attested state
+//! root, Gloas fork slot) and packs them into
 //! the canonical [`StepPublicInputs::instances`] layout (see [`pack_step_instances`])
 //! ready to be committed to the circuit's single instance column — the public-input
 //! shape the `ZKHALO2VERIFYWITHVK` VkBlob will pin.
 
 use crate::bls_core::{ETH_BLS_DST, LIMB_BITS, NUM_LIMBS, SYNC_COMMITTEE_SIZE};
 use crate::decode::assert_pubkey_bytes_bind_point;
-use crate::execution::{execution_payload_root, ExecutionPayloadVals, EXECUTION_PAYLOAD_GINDEX};
 use crate::committee::PUBKEYS_PER_SHARD;
+use crate::fork::{
+    assert_is_gloas, EXECUTION_BLOCK_HASH_GINDEX_DENEB, EXECUTION_BLOCK_HASH_GINDEX_GLOAS,
+    EXECUTION_BRANCH_LEN, FINALITY_BRANCH_LEN, FINALIZED_ROOT_GINDEX_ELECTRA,
+    FINALIZED_ROOT_GINDEX_GLOAS,
+};
 use crate::rotate::{commit_sync_committee_2level, new_committee_hasher};
 use crate::signing::{beacon_header_root, compute_domain, signing_root as ssz_signing_root};
-use crate::ssz::{load_bytes, load_node, verify_merkle_branch, Node};
+use crate::ssz::{load_bytes, load_node, verify_merkle_branch_either, Node};
 use crate::subgroup::assert_g2_in_subgroup;
 use gosh_bls_verification::{compute_all_pub_sum, load_bk_set_pubkeys};
 use gosh_sha256_chip::Sha256Chip;
@@ -48,12 +56,8 @@ use halo2_ecc::bls12_381::{Fp2Chip, FpChip, G2Point};
 use halo2_ecc::ecc::hash_to_curve::{ExpandMsgXmd, HashToCurveChip};
 use halo2_ecc::ecc::{check_is_on_curve, EccChip};
 
-/// Electra/Fulu generalized index of `finalized_checkpoint.root` in `BeaconState`
-/// (M0 spec §3). `floor(log2(169)) = 7` → 7-element branch.
-pub const FINALIZED_ROOT_GINDEX: u64 = 169;
-
 /// A `BeaconBlockHeader`'s five fields as native values.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HeaderVals {
     pub slot: u64,
     pub proposer_index: u64,
@@ -66,6 +70,8 @@ pub struct HeaderVals {
 pub struct StepWitness {
     pub attested: HeaderVals,
     pub finalized: HeaderVals,
+    /// [`FINALITY_BRANCH_LEN`] nodes, leaf sibling first, zero-padded at the end
+    /// for a pre-Gloas attested state ([`crate::ssz::branch_for_either`]).
     pub finality_branch: Vec<[u8; 32]>,
     pub fork_version: [u8; 4],
     pub genesis_validators_root: [u8; 32],
@@ -76,10 +82,14 @@ pub struct StepWitness {
     pub aggregate_pubkey: [u8; 48],
     pub bits: Vec<bool>,
     pub signature: G2Affine,
-    /// Finalized block's execution payload header (its `block_hash` is exposed).
-    pub finalized_execution: ExecutionPayloadVals,
-    /// `execution_branch` proving `htr(execution)` against `finalized.body_root`.
+    /// The finalized header's `execution_block_hash` (exposed).
+    pub finalized_execution_block_hash: [u8; 32],
+    /// [`EXECUTION_BRANCH_LEN`] nodes proving it against `finalized.body_root`,
+    /// laid out like `finality_branch`.
     pub execution_branch: Vec<[u8; 32]>,
+    /// First slot of the Gloas fork on this network
+    /// ([`crate::fork::GLOAS_NOT_SCHEDULED`] if none). Exposed.
+    pub gloas_fork_slot: u64,
 }
 
 /// Number of field elements in the step circuit's public-instance column.
@@ -87,14 +97,20 @@ pub struct StepWitness {
 /// Layout (see [`pack_step_instances`]):
 /// `[attested_slot, finalized_slot, finalized_beacon_root_hi, finalized_beacon_root_lo,
 ///   participation, committee_commitment, execution_block_hash_hi, execution_block_hash_lo,
-///   attested_state_root_hi, attested_state_root_lo]`.
+///   attested_state_root_hi, attested_state_root_lo, gloas_fork_slot]`.
 ///
 /// Indices 8/9 expose the **attested beacon `state_root`** — the state the current
 /// committee's BLS signature commits to (it is hashed into the signing root and is
 /// the finality-branch anchor). The recursive rotate aggregation binds its
 /// `next_sync_committee_branch` anchor to this value (R2 soundness, `bls-state-root`),
 /// so the successor committee is proven to sit in the *signed* state.
-pub const STEP_INSTANCE_LEN: usize = 10;
+///
+/// Index 10 is the Gloas fork slot the proof picked its generalized indices by.
+/// The circuit accepts any value, so the consumer must require its network's.
+pub const STEP_INSTANCE_LEN: usize = 11;
+
+/// Index of the Gloas fork slot in the step instances.
+pub const STEP_GLOAS_FORK_SLOT_INDEX: usize = 10;
 
 /// The step circuit's public outputs.
 ///
@@ -116,6 +132,8 @@ pub struct StepPublicInputs<F: BigPrimeField> {
     /// the signed header) and the finality-branch anchor. Exposed so the rotate
     /// aggregation can anchor `next_sync_committee_branch` to the *signed* state.
     pub attested_state_root: Node<F>,
+    /// The Gloas fork slot the generalized indices were chosen by.
+    pub gloas_fork_slot: AssignedValue<F>,
     /// Canonical ordered public inputs, ready for the instance column.
     pub instances: Vec<AssignedValue<F>>,
 }
@@ -158,6 +176,7 @@ fn node_hi_lo<F: BigPrimeField>(
 /// [4] participation                 [5] committee_commitment
 /// [6] execution_block_hash_hi       [7] execution_block_hash_lo
 /// [8] attested_state_root_hi        [9] attested_state_root_lo
+/// [10] gloas_fork_slot
 /// ```
 ///
 /// 32-byte roots are split hi/lo via [`node_hi_lo`]; slots / participation are
@@ -174,6 +193,7 @@ pub fn pack_step_instances<F: BigPrimeField>(
     committee_commitment: AssignedValue<F>,
     execution_block_hash: &Node<F>,
     attested_state_root: &Node<F>,
+    gloas_fork_slot: AssignedValue<F>,
 ) -> Vec<AssignedValue<F>> {
     let (fbr_hi, fbr_lo) = node_hi_lo(ctx, gate, finalized_beacon_root);
     let (bh_hi, bh_lo) = node_hi_lo(ctx, gate, execution_block_hash);
@@ -189,6 +209,7 @@ pub fn pack_step_instances<F: BigPrimeField>(
         bh_lo,
         sr_hi,
         sr_lo,
+        gloas_fork_slot,
     ]
 }
 
@@ -220,8 +241,16 @@ pub fn verify_step<F: BigPrimeField>(
         "expected 512 compressed committee pubkeys"
     );
     assert_eq!(w.bits.len(), SYNC_COMMITTEE_SIZE, "expected 512 participation bits");
-    assert_eq!(w.finality_branch.len(), 7, "finality_branch must be depth 7 (gindex 169)");
-    assert_eq!(w.execution_branch.len(), 4, "execution_branch must be depth 4 (gindex 25)");
+    assert_eq!(
+        w.finality_branch.len(),
+        FINALITY_BRANCH_LEN,
+        "finality_branch must have {FINALITY_BRANCH_LEN} nodes"
+    );
+    assert_eq!(
+        w.execution_branch.len(),
+        EXECUTION_BRANCH_LEN,
+        "execution_branch must have {EXECUTION_BRANCH_LEN} nodes"
+    );
 
     let fp_chip = FpChip::<F>::new(range, LIMB_BITS, NUM_LIMBS);
     let fp2_chip = Fp2Chip::<F>::new(&fp_chip);
@@ -246,6 +275,8 @@ pub fn verify_step<F: BigPrimeField>(
         shifted_scalars,
         participation,
         f_body,
+        gloas_fork_slot,
+        finalized_is_gloas,
     ) = {
         let ctx = pool.main();
 
@@ -256,6 +287,9 @@ pub fn verify_step<F: BigPrimeField>(
 
         let attested_slot = le_to_field(ctx, gate, &a_slot);
         let finalized_slot = le_to_field(ctx, gate, &f_slot);
+        let gloas_fork_slot = ctx.load_witness(F::from(w.gloas_fork_slot));
+        let attested_is_gloas = assert_is_gloas(ctx, range, attested_slot, gloas_fork_slot);
+        let finalized_is_gloas = assert_is_gloas(ctx, range, finalized_slot, gloas_fork_slot);
 
         // signing_root = SHA256( htr(attested.beacon) ‖ domain )
         let attested_object_root =
@@ -263,11 +297,22 @@ pub fn verify_step<F: BigPrimeField>(
         let domain = compute_domain(sha, ctx, &fork, &gvr);
         let signing_node = ssz_signing_root(sha, ctx, &attested_object_root, &domain);
 
-        // finality: htr(finalized.beacon) + finality_branch reconstructs attested state_root.
+        // finality: htr(finalized.beacon) + finality_branch reconstructs the attested
+        // state_root, at the index of the attested state's fork.
         let finalized_beacon_root =
             beacon_header_root(sha, ctx, &f_slot, &f_prop, &f_parent, &f_state, &f_body);
         let branch: Vec<Node<F>> = w.finality_branch.iter().map(|b| load_node(ctx, b)).collect();
-        verify_merkle_branch(sha, ctx, &finalized_beacon_root, &branch, FINALIZED_ROOT_GINDEX, &a_state);
+        verify_merkle_branch_either(
+            sha,
+            gate,
+            ctx,
+            &finalized_beacon_root,
+            &branch,
+            FINALIZED_ROOT_GINDEX_ELECTRA,
+            FINALIZED_ROOT_GINDEX_GLOAS,
+            attested_is_gloas,
+            &a_state,
+        );
 
         // committee pubkeys (on-curve) + sum for the shifted-MSM correction.
         let assigned_pks = load_bk_set_pubkeys(ctx, range, &w.pubkeys, LIMB_BITS, NUM_LIMBS);
@@ -305,6 +350,8 @@ pub fn verify_step<F: BigPrimeField>(
             shifted_scalars,
             participation,
             f_body,
+            gloas_fork_slot,
+            finalized_is_gloas,
         )
     };
 
@@ -338,12 +385,22 @@ pub fn verify_step<F: BigPrimeField>(
         let committee_commitment =
             commit_sync_committee_2level(&hasher, ctx, gate, &pk_bytes, &agg_bytes, PUBKEYS_PER_SHARD);
 
-        // execution block_hash: htr(ExecutionPayloadHeader) + execution_branch @ 25
-        // reconstruct the finalized body_root (same cells as the finality path).
-        let (exec_root, block_hash) = execution_payload_root(sha, ctx, &w.finalized_execution);
+        // execution block_hash + execution_branch reconstruct the finalized body_root
+        // (same cells as the finality path), at the index of the finalized block's fork.
+        let block_hash = load_node(ctx, &w.finalized_execution_block_hash);
         let exec_branch: Vec<Node<F>> =
             w.execution_branch.iter().map(|b| load_node(ctx, b)).collect();
-        verify_merkle_branch(sha, ctx, &exec_root, &exec_branch, EXECUTION_PAYLOAD_GINDEX, &f_body);
+        verify_merkle_branch_either(
+            sha,
+            gate,
+            ctx,
+            &block_hash,
+            &exec_branch,
+            EXECUTION_BLOCK_HASH_GINDEX_DENEB,
+            EXECUTION_BLOCK_HASH_GINDEX_GLOAS,
+            finalized_is_gloas,
+            &f_body,
+        );
 
         (committee_commitment, block_hash)
     };
@@ -392,6 +449,7 @@ pub fn verify_step<F: BigPrimeField>(
         committee_commitment,
         &execution_block_hash,
         &attested_state_root,
+        gloas_fork_slot,
     );
     debug_assert_eq!(instances.len(), STEP_INSTANCE_LEN);
 
@@ -403,6 +461,7 @@ pub fn verify_step<F: BigPrimeField>(
         committee_commitment,
         execution_block_hash,
         attested_state_root,
+        gloas_fork_slot,
         instances,
     }
 }

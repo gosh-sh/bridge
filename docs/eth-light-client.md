@@ -127,14 +127,14 @@ sequenceDiagram
 ```
 
 What the contract checks, in order (`contracts/an/EthBeaconLightClient.sol:248`): the public
-inputs parse; at least 342 of 512 committee members signed (also enforced in-circuit); the
+inputs parse; the Gloas fork slot is set and the proof was made for it; at least 342 of 512 committee members signed (also enforced in-circuit); the
 proof's committee commitment equals the anchored one; the finalized slot moves the head forward
 (or back-fills a skipped checkpoint of the current committee); then `tvm.accept()` and the opcode.
 The contract pays for the verification itself, which is why it holds a balance and why a bad
 proof only wastes the contract's gas. `submitUpdate` is permissionless: the proof is the
 authorization.
 
-The 10 public inputs (`eth-light-client-prover/src/step.rs:104`), each a 32-byte little-endian
+The 11 public inputs (`STEP_INSTANCE_LEN` in `eth-light-client-prover/src/step.rs`), each a 32-byte little-endian
 field element:
 
 | # | Word | Meaning |
@@ -146,6 +146,16 @@ field element:
 | 5 | `committee_commitment` | Poseidon commitment to the 512 signer keys (what `setCommitteeCommitment` and `submitRotate` anchor) |
 | 6, 7 | `execution_block_hash` hi, lo | the finalized execution (EL) block hash, the value the deposit path consumes |
 | 8, 9 | `attested_state_root` hi, lo | signed state root, used by the rotate join |
+| 10 | `gloas_fork_slot` | first Gloas slot the proof assumed (`GLOAS_FORK_EPOCH × 32`, `2^64 − 1` if not scheduled); must equal `getGloasForkSlot()` |
+
+Gloas (ePBS) moves the fields the circuit proves against: the finalized checkpoint from
+generalized index 169 to 735, the next sync committee from 87 to 2946, and the execution block
+hash from 812 to 2856, where it is the payload bid's `parent_block_hash` rather than the
+payload's own `block_hash`. The circuits choose the index per header by comparing its slot with
+`gloas_fork_slot`, so one verification key covers both sides of the fork; the rotate proof
+exposes the same slot after `period`. The owner sets it with `setGloasForkSlot` or in the
+`updateCode` user cell (`abi.encode(uint64)`); until then `submitUpdate` and `submitRotate` fail
+with exit code 254, and a proof for a different slot fails with 253.
 
 The signing domain (`fork_version`, `genesis_validators_root`) is a circuit witness, not a public
 input, so one verification key serves mainnet and Sepolia. The relayer resolves both from the

@@ -93,8 +93,12 @@ be exit 1, which the relayer retried). `export_blake2b_proof` and
 header length, MPT depths and the keccak budget. A deposit the circuit
 cannot prove exits with code **3** and the reason on stderr; any other
 failure is a different code. Callers treat 3 as final: the `deposit` CLI
-ends at its exit 35, and `deposit-relayer` parks the deposit at once
-instead of retrying.
+ends at its exit 35, and `deposit-relayer` skips the deposit at once
+instead of retrying, recording it in `unprovable_deposit_ids` (not
+`parked_deposit_ids`). Only a refusal under the key's own shape (`--degree 18
+--max-data-byte-len 2048 --max-log-num 20`, the defaults) is final: under any
+other flags the tools exit 1 instead, which callers retry once the flags are
+fixed.
 
 A type 0 (legacy) or type 4 (EIP-7702) deposit is neither provable nor
 refundable. Send again as type 1 or 2. EIP-155 `chainId = (v − 35) / 2` would

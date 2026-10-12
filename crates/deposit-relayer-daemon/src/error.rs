@@ -31,8 +31,8 @@ pub enum RelayerError {
     /// enclosing transaction the circuit rejects (type 0 or 4, oversized
     /// leaf / calldata / access list), or `export_*` on the keccak budget,
     /// a log or a receipt over the circuit's bounds. Final for that
-    /// deposit: the relayer parks it at once, and only the operator can
-    /// return the funds.
+    /// deposit: the relayer skips it at once into `unprovable_deposit_ids`,
+    /// and only the operator can return the funds.
     #[error("the deposit cannot be proven: {0}")]
     Unprovable(String),
 

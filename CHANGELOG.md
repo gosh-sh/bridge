@@ -63,9 +63,12 @@ assigns it when the release is tagged.
   sold 0.80.0. Operators: deploy that tvc. On every relayer host
   rebuild the `deposit-prover` examples (`cargo build --release
   --examples`) and do **not** pass `--max-data-byte-len 256` — the
-  default is now 2048 and is part of the key. A leftover
-  `--max-data-byte-len 256` produces proofs the embedded key
-  rejects. The relayer prefers `target/release/examples/<name>`
+  default is now 2048 and is part of the key. With a leftover
+  `--max-data-byte-len 256` (or any `--degree`, `--max-log-num`
+  other than 18 and 20) the proofs it makes are rejected by the
+  embedded key, and a deposit that does not fit the smaller shape
+  is refused with a retryable exit 1 naming the flags, never the
+  final exit 3. The relayer prefers `target/release/examples/<name>`
   when the file exists and does not check it matches the source.
   Cached `data/*.pk` is fine: the fingerprint includes the new
   column counts and the new limits. `ackinacki-bridge deposit`
@@ -80,7 +83,8 @@ assigns it when the release is tagged.
   exit 1, which the relayer retried forever. `export_blake2b_proof`
   and `export_vk_blob` check the log count, every log's topics and
   data, the receipt and header length, the MPT depths and the
-  keccak budget, and also exit 3. `deposit` ends such an operation
+  keccak budget, and also exit 3 — but only under the key's own
+  shape (the default flags); under other flags they exit 1. `deposit` ends such an operation
   at exit 35 instead of a resumable 32. `deposit-relayer daemon`
   skips such a deposit at once, whatever `--skip-after-attempts`
   says, instead of retrying it forever: the tick is counted as

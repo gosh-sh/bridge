@@ -194,7 +194,7 @@ pub async fn generate_transaction_proof(
     // fail with a clear error rather than an opaque RLP constraint failure
     // (axiom-eth silently truncates `value` to `value_max_byte_len`). The
     // `UnprovableEnclosingTx` source is what lets `fetch_deposit_data` exit 3
-    // instead of 1, so the relayer parks the deposit.
+    // instead of 1, so the relayer skips the deposit as unprovable.
     reject_unprovable_enclosing_tx(&tx_bytes).map_err(anyhow::Error::from)?;
 
     let key = get_tx_key_from_index(tx_index as usize);

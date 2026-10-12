@@ -115,7 +115,7 @@ pub const FIXED_KECCAK_CAPACITY: usize = 128;
 pub const PRODUCTION_DEGREE: u32 = 18;
 
 /// Configuration for the deposit proof circuit
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CircuitConfig {
     /// Circuit degree (log2 of number of rows)
     /// Typical values: 18-22 (256K - 4M rows)

@@ -7,7 +7,7 @@
 
 use deposit_prover::{
     mpt::proof_for_single_leaf,
-    provable::{check_keccak_budget, check_provable},
+    provable::{check_against_key, check_keccak_budget, check_provable, Refusal},
     prover::CircuitConfig,
     rlp_utils::encode_tx_index,
     types::DepositProofInput,
@@ -62,15 +62,40 @@ fn a_real_deposit_is_provable() {
     check_provable(&load_proof_00(), &CircuitConfig::production()).unwrap();
 }
 
-#[test]
-fn a_receipt_within_every_log_bound_can_still_exceed_the_keccak_budget() {
+fn with_receipt(receipt_rlp: Vec<u8>) -> DepositProofInput {
     let mut input = load_proof_00();
-    let big = receipt(20, 2048);
     let key = encode_tx_index(input.event_data.transaction_index);
-    let (root, nodes) = proof_for_single_leaf(key, big.clone()).unwrap();
-    input.receipt_proof.receipt_rlp = big;
+    let (root, nodes) = proof_for_single_leaf(key, receipt_rlp.clone()).unwrap();
+    input.receipt_proof.receipt_rlp = receipt_rlp;
     input.receipt_proof.receipt_root = root;
     input.receipt_proof.proof_nodes = nodes;
+    input
+}
+
+#[test]
+fn a_refusal_under_a_narrower_shape_than_the_key_is_not_final() {
+    // A SafeL2 `SafeMultiSigTransaction`-sized log, under a leftover
+    // `--max-data-byte-len 256`.
+    let input = with_receipt(receipt(1, 1152));
+    let narrow = CircuitConfig {
+        max_data_byte_len: 256,
+        ..CircuitConfig::production()
+    };
+    check_against_key(&input, &CircuitConfig::production()).unwrap();
+    let e = check_against_key(&input, &narrow).unwrap_err();
+    assert!(matches!(e, Refusal::ShapeDiffersFromKey(_)), "{e:?}");
+}
+
+#[test]
+fn a_refusal_under_the_production_shape_is_final() {
+    let input = with_receipt(receipt(21, 32));
+    let e = check_against_key(&input, &CircuitConfig::production()).unwrap_err();
+    assert!(matches!(e, Refusal::Unprovable(_)), "{e:?}");
+}
+
+#[test]
+fn a_receipt_within_every_log_bound_can_still_exceed_the_keccak_budget() {
+    let input = with_receipt(receipt(20, 2048));
     let config = CircuitConfig::production();
     deposit_prover::provable::check_witness_bounds(&input, &config).unwrap();
     let e = check_keccak_budget(&input, &config).unwrap_err();

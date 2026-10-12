@@ -111,7 +111,8 @@ async fn main() -> anyhow::Result<()> {
             // generate_transaction_proof refuses type 0/4, an oversized
             // leaf, calldata or access list as UnprovableEnclosingTx. That
             // must be exit 3 here: export_* never sees those witnesses, and
-            // the relayer only parks on 3. Exit 1 is retried forever.
+            // the relayer skips as unprovable only on 3. Exit 1 is retried
+            // forever.
             if let Some(reason) = e.chain().find_map(|c| {
                 c.downcast_ref::<UnprovableEnclosingTx>()
                     .map(|u| u.0.clone())

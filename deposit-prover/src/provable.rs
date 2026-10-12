@@ -33,8 +33,13 @@ use crate::{
 
 /// The exit code of the prover tools for a deposit the circuit cannot
 /// prove. Callers match on it: the CLI ends the operation at its exit 35,
-/// and the relayer parks the deposit at once.
+/// and the relayer skips the deposit at once into `unprovable_deposit_ids`.
 pub const UNPROVABLE_EXIT_CODE: i32 = 3;
+
+/// The exit code for a deposit refused under a shape other than
+/// [`CircuitConfig::production`]: the flags, not the deposit, may be at
+/// fault, so callers retry it.
+pub const SHAPE_REFUSAL_EXIT_CODE: i32 = 1;
 
 /// Why the circuit cannot prove a deposit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,12 +67,53 @@ pub fn check_provable(input: &DepositProofInput, config: &CircuitConfig) -> Resu
     check_keccak_budget(input, config)
 }
 
-/// [`check_provable`]; on a refusal, the reason goes to stderr and the
-/// process exits with [`UNPROVABLE_EXIT_CODE`].
+/// A refusal by [`check_against_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// Refused under the production key's shape: final for the deposit.
+    Unprovable(Unprovable),
+    /// Refused under the shape passed, which is not the production key's.
+    ShapeDiffersFromKey(Unprovable),
+}
+
+/// [`check_provable`] under `config`. The verdict is final only when
+/// `config` is the shape baked into the production key; under any other
+/// shape (a leftover `--max-data-byte-len 256`, say) the refusal says
+/// nothing about what the key can prove.
+pub fn check_against_key(input: &DepositProofInput, config: &CircuitConfig) -> Result<(), Refusal> {
+    check_provable(input, config).map_err(|e| {
+        if *config == CircuitConfig::production() {
+            Refusal::Unprovable(e)
+        } else {
+            Refusal::ShapeDiffersFromKey(e)
+        }
+    })
+}
+
+/// [`check_against_key`]; on a refusal, the reason goes to stderr and the
+/// process exits with [`UNPROVABLE_EXIT_CODE`], or with
+/// [`SHAPE_REFUSAL_EXIT_CODE`] when the shape is not the production one.
 pub fn exit_if_unprovable(input: &DepositProofInput, config: &CircuitConfig) {
-    if let Err(e) = check_provable(input, config) {
-        eprintln!("unprovable: {e}");
-        std::process::exit(UNPROVABLE_EXIT_CODE);
+    match check_against_key(input, config) {
+        Ok(()) => {},
+        Err(Refusal::Unprovable(e)) => {
+            eprintln!("unprovable: {e}");
+            std::process::exit(UNPROVABLE_EXIT_CODE);
+        },
+        Err(Refusal::ShapeDiffersFromKey(e)) => {
+            let p = CircuitConfig::production();
+            eprintln!(
+                "refused under --degree {} --max-data-byte-len {} --max-log-num {}, which is not \
+                 the production key's {} / {} / {}; not final, fix the flags: {e}",
+                config.degree,
+                config.max_data_byte_len,
+                config.max_log_num,
+                p.degree,
+                p.max_data_byte_len,
+                p.max_log_num
+            );
+            std::process::exit(SHAPE_REFUSAL_EXIT_CODE);
+        },
     }
 }
 

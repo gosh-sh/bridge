@@ -31,8 +31,12 @@ at degree 18 for deposits — about 350 MB in total, most of it the ceremony.
 Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
 before it is written, and the deposit ceremony also against the Hermez
-[s]·G2. It wants ~8 GB free: withdrawal keys take ~6 GB, and the deposit
-prover writes a ~1.3 GB proving key on its first proof.
+[s]·G2. It wants ~12 GB free: withdrawal keys take ~9.5 GB, and the deposit
+prover writes a ~1.3 GB proving key on its first proof. Later withdrawals
+reuse those keys. The first withdrawal after an upgrade may write a new
+~6.85 GB aggregator key beside the old one, so it wants ~7.5 GB more —
+~10.7 GB when the upgrade also brings a new Circuit-4 key — or the old
+aggregator key removed first (README, Step 0).
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it
@@ -162,7 +166,8 @@ Stage 4b is the wait. Leave it running.
 1. **Never delete the state record.** It is the only local trace that a burn
    may have happened, and deleting it is how the same USDC gets burned
    twice. The refusal names the file.
-2. **Re-run the same command with `--allow-retry`.** It resumes from
+2. **Re-run the command with `--allow-retry`, changing only what the error
+   asks for** — a larger `--prover-timeout-s`, say. It resumes from
    whatever is already done — it does not burn again if the record carries
    an AN transaction hash.
 

@@ -26,17 +26,21 @@
 //! waiver.
 #![warn(clippy::let_underscore_must_use)]
 
+mod aggregator_slot;
 mod args;
 mod burn;
 mod deposit;
 mod errors;
+mod event_identity;
 mod idempotency;
 mod orchestrator;
 mod output;
 mod preflight;
+mod prove_lock;
 mod resurrect;
 #[cfg(test)]
 mod source_guard;
+mod submit_revert;
 #[cfg(test)]
 mod test_chain;
 #[cfg(test)]

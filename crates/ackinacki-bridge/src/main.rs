@@ -43,6 +43,8 @@ mod test_chain;
 mod test_forks;
 #[cfg(test)]
 mod test_keys;
+#[cfg(test)]
+mod test_log;
 
 use std::{borrow::Cow, io::IsTerminal, process::ExitCode as ProcExitCode};
 

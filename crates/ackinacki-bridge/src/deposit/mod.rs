@@ -30,6 +30,7 @@ pub mod preflight;
 pub mod prover;
 pub mod prover_files;
 pub mod qr;
+pub mod qr_display;
 pub mod recovery;
 pub mod refusals;
 pub mod retry;
@@ -56,7 +57,7 @@ pub async fn run(p: args::DepositParams) -> CliResult<DepositSuccess> {
     let current_op: Arc<Mutex<Option<String>>> = Arc::default();
     // The step board moves into `dispatch` and goes with it, before the
     // summary or the error is printed.
-    let ui = ui::pick(&p.globals, p.uri_only, p.qr_invert);
+    let ui = ui::pick(&p.globals, p.uri_only, p.qr_invert, p.qr_display);
     match signals::until_signal(dispatch(&p, ui, current_op.clone())).await {
         Ok(r) => r,
         Err(sig) => {

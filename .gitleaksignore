@@ -27,3 +27,14 @@ f125bcfd5edf91e1e186ac6b0c762725fccd58a6:.cursor/skills/evm-an-deposit-e2e/SKILL
 7feb52836a3222190cada3121b4a0ec50d5df702:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:2166
 87b381d298e013a8cc640184efb8d9bfa1998e46:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:2106
 c6ba4ec6fb56342784756074759cacdaa6d7ae43:crates/ackinacki-bridge/src/idempotency.rs:generic-api-key:1792
+
+# Not credentials. The WalletConnect relay test compares a `did:key` and a
+# relay JWT with an independent implementation, both derived from the fixed
+# test signing key `[0x42; 32]`. The `did:key` (jwt.rs:80) matches
+# generic-api-key; the JWT (jwt.rs:84) matches `jwt` and, once base64-decoded,
+# generic-api-key. In the crypto module's doc comment (crypto.rs:2), "to a
+# symmetric key" followed by a cipher name reads as a key assignment.
+dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/crypto.rs:generic-api-key:2
+dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:generic-api-key:80
+dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:generic-api-key:84
+dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:jwt:84

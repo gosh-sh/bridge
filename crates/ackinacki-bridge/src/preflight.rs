@@ -3193,7 +3193,7 @@ pub(crate) mod tests {
             .finish();
         // Bound, not discarded: `with_default` hands back what the closure
         // returned, and saying which refusal it was documents the fixture.
-        let outcome = tracing::subscriber::with_default(subscriber, || {
+        let outcome = crate::test_log::with_default(subscriber, || {
             // `Corrupt` so the outcome is a refusal on every host: the
             // point here is what was said on the way, not the verdict.
             check_disk_headroom(d.path(), d.path(), KeyCacheState::Corrupt {

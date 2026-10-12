@@ -7,6 +7,7 @@ use serde_json::json;
 
 use crate::{
     args::{parse_amount, redact, UsdcAmount},
+    deposit::qr_display::QrDisplay,
     errors::{CliError, CliResult},
 };
 
@@ -134,6 +135,29 @@ pub enum QrMode {
     Both,
 }
 
+/// How a QR code is drawn: `auto` asks the terminal what it can show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum QrDisplayArg {
+    Auto,
+    Text,
+    Kitty,
+    Iterm2,
+    Sixel,
+}
+
+impl QrDisplayArg {
+    /// The rendering this names; `None` for `auto`.
+    pub fn forced(self) -> Option<QrDisplay> {
+        match self {
+            QrDisplayArg::Auto => None,
+            QrDisplayArg::Text => Some(QrDisplay::Text),
+            QrDisplayArg::Kitty => Some(QrDisplay::Kitty),
+            QrDisplayArg::Iterm2 => Some(QrDisplay::Iterm2),
+            QrDisplayArg::Sixel => Some(QrDisplay::Sixel),
+        }
+    }
+}
+
 /// What `--resume` names: an operation, or — once the deposit is known —
 /// the bridge's deposit id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +263,8 @@ pub struct DepositArgs {
     pub uri_only: bool,
     #[arg(long)]
     pub qr_invert: bool,
+    #[arg(long, value_enum, env = "BRIDGE_QR_DISPLAY", default_value_t = QrDisplayArg::Auto)]
+    pub qr_display: QrDisplayArg,
     #[arg(long, env = "BRIDGE_WC_PROJECT_ID", hide_env_values = true)]
     pub wc_project_id: Option<String>,
     #[arg(long, default_value = "wss://relay.walletconnect.org")]
@@ -361,6 +387,8 @@ pub struct DepositParams {
     pub qr_out: Option<PathBuf>,
     pub uri_only: bool,
     pub qr_invert: bool,
+    /// `--qr-display`: `None` lets the terminal decide.
+    pub qr_display: Option<QrDisplay>,
     pub wc_project_id: Option<String>,
     pub wc_relay_url: String,
     pub from_address: Option<Address>,
@@ -542,6 +570,7 @@ impl DepositArgs {
             qr_out: self.qr_out.clone().map(|q| abs(q, "qr-out")).transpose()?,
             uri_only: self.uri_only,
             qr_invert: self.qr_invert,
+            qr_display: self.qr_display.forced(),
             wc_project_id,
             wc_relay_url: self.wc_relay_url.clone(),
             from_address: self.from_address,
@@ -718,6 +747,39 @@ mod tests {
                 got.display()
             );
         }
+    }
+
+    #[test]
+    fn qr_display_lets_the_terminal_decide_unless_a_rendering_is_named() {
+        assert_eq!(fresh_with(&[]).unwrap().qr_display, None);
+        assert_eq!(
+            fresh_with(&["--qr-display", "auto"]).unwrap().qr_display,
+            None
+        );
+        for (name, want) in [
+            ("text", QrDisplay::Text),
+            ("kitty", QrDisplay::Kitty),
+            ("iterm2", QrDisplay::Iterm2),
+            ("sixel", QrDisplay::Sixel),
+        ] {
+            assert_eq!(
+                fresh_with(&["--qr-display", name]).unwrap().qr_display,
+                Some(want),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_qr_display_is_a_usage_error() {
+        let e = crate::args::Cli::try_parse_from([
+            "ackinacki-bridge",
+            "deposit",
+            "--qr-display",
+            "png",
+        ])
+        .unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     /// A complete fresh deposit command line, with `extra` appended.

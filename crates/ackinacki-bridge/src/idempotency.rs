@@ -2035,7 +2035,7 @@ mod tests {
             .with_ansi(false)
             .with_max_level(tracing::Level::TRACE)
             .finish();
-        let out = tracing::subscriber::with_default(subscriber, f);
+        let out = crate::test_log::with_default(subscriber, f);
         let logged = String::from_utf8(sink.0.lock().expect("test sink").clone())
             .expect("the fmt layer writes UTF-8");
         (out, logged)

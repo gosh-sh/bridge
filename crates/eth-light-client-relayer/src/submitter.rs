@@ -119,6 +119,11 @@ impl MockAnSubmitter {
         self.inner.lock().expect("poisoned").reject_ancestry = true;
     }
 
+    /// Stop refusing `submitAncestry`.
+    pub fn accept_ancestry(&self) {
+        self.inner.lock().expect("poisoned").reject_ancestry = false;
+    }
+
     pub fn rejecting() -> Self {
         let s = Self::accepting();
         s.inner.lock().unwrap().reject = true;

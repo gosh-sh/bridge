@@ -155,7 +155,11 @@ emitted, `getCommitteeState` shows the new period).
 - `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...
   --checkpoint-hash <newer> --older-anchor-hash <older>`), and the daemon does
   not send it unless `SUBMIT_ANCESTRY=true`. Both ends of the span have to be
-  proven anchors already.
+  proven anchors already. **Not against this kit yet:** `compile-contract.sh`
+  builds `contracts/an/EthBeaconLightClient.sol`, the standalone copy, which
+  still takes the old newest-first payload and still hashes in software, so the
+  call either runs out of gas or fails `ERR_BAD_ANCESTRY`. Leave
+  `SUBMIT_ANCESTRY=false` here until that copy is ported.
 
 ## Notes
 

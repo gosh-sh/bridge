@@ -1593,12 +1593,14 @@ enabled.
      chain's finalized head; its latest ancestry checkpoint is at most 768 s
      behind its head. The bounds are build constants, not flags.
 
-Ancestry runs on Acki Nacki once the light client hashes headers with the
+  Ancestry runs on Acki Nacki once the light client hashes headers with the
   `KECCAK256` instruction ([docs/eth-light-client.md](../../docs/eth-light-client.md)).
-  Check 3 still fails for a block no span covers, and a bridge with owner
-  anchors disabled takes no such deposit from this CLI. The CLI starts
-  accepting them by itself once the checks pass; that needs no new CLI
-  release.
+  Check 3 does not look at the deposit's own block: it asks whether any
+  `AncestryAccepted` has reached the bridge since the switch-off and whether
+  the head and that event are fresh enough. A deposit in a block no span
+  covers passes check 3 and then fails on chain with `ERR_UNKNOWN_BLOCK`
+  (224). The CLI starts accepting deposits by itself once the checks pass;
+  that needs no new CLI release.
 
 **The residual risk of this mode.** Preflight only shows that ancestry worked
 recently. If it stops after the deposit is made, the block is not anchored

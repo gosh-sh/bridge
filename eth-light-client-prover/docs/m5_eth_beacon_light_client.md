@@ -164,10 +164,12 @@ check, E2E runbook, audit scope, and the `finalizeDeposit` flip procedure are
 
 **Deposits in non-checkpoint blocks (31/32).** `submitUpdate` records
 `finalized_execution.block_hash` — one execution hash per epoch (~6.4 min).
-`submitAncestry(bytes[] headerRlps)` walks that checkpoint's execution
-parent-hash chain (`keccak256(header RLP)` + RLP `parentHash`, ≤ 31 parents)
-and pushes each hash into `USDCBridge._acceptedBlockHash`. Operator:
-`eth-lc-relayer submit-ancestry`.
+`submitAncestry(bytes[] headerRlps)` fills the span between two checkpoints
+that are already proven: headers oldest first, 3 to 33 of them, hashed with the
+`gosh.keccak256` builtin and linked by RLP `parentHash`. The blocks between the
+two anchors go into `USDCBridge._acceptedBlockHash`. Operator:
+`eth-lc-relayer submit-ancestry --checkpoint-hash <newer>
+--older-anchor-hash <older>`.
 
 **Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
 be submitted without the skipped ones. A skipped checkpoint **of the current

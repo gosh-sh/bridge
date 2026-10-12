@@ -98,8 +98,9 @@ pub struct Relayer<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> {
     prover: Arc<P>,
     submitter: Arc<A>,
     state: RelayerState,
-    /// When set, each accepted `submitUpdate` walks the epoch parent-hash
-    /// chain and calls `submitAncestry` (31/32 coverage). CLI-only without it.
+    /// When set, the daemon fetches the span between its previous checkpoint
+    /// and the new one and calls `submitAncestry` (31/32 coverage). CLI-only
+    /// without it.
     execution: Option<Arc<dyn ExecutionSource>>,
 }
 
@@ -131,6 +132,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     }
 
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
+        self.cover_pending_span().await;
         let update = self.source.fetch_finality().await?;
         self.guard_network(&update)?;
         if let Some(lag) = self.ws_lag(&update) {
@@ -451,9 +453,31 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         }
     }
 
+    /// Retry the span a previous tick could not send. Coverage is driven from
+    /// here as well as from an accepted update, because the next accepted
+    /// checkpoint can be two epochs away — by then the span the cursor still
+    /// points at would be out of reach and both epochs would be lost.
+    async fn cover_pending_span(&mut self) {
+        let (Some(cursor), Some(head)) =
+            (self.state.ancestry_anchor, self.state.last_execution_block_hash)
+        else {
+            return;
+        };
+        if cursor == head {
+            return;
+        }
+        info!(
+            from = %hex::encode(cursor),
+            to = %hex::encode(head),
+            "retrying the ancestry span the cursor is still behind"
+        );
+        self.maybe_cover_epoch(Some(cursor), head).await;
+    }
+
     /// Move the span cursor up to `hash`. Called only where the span is done
-    /// with — sent, not wanted, or impossible — so that a transient failure
-    /// leaves the cursor behind the head and the next tick retries the span.
+    /// with — sent, not wanted, or impossible because the gap is wider than
+    /// one call — so that a transient failure leaves the cursor behind the
+    /// head and the next tick retries it.
     fn advance_ancestry_anchor(&mut self, hash: [u8; 32]) {
         self.state.ancestry_anchor = Some(hash);
         if let Err(e) = self.persist() {
@@ -1021,17 +1045,30 @@ mod tests {
         assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[2])));
     }
 
+    /// The span the daemon could not send is sent on a later tick, without
+    /// waiting for the next checkpoint — by then the gap would be too wide.
     #[tokio::test]
-    async fn a_failed_span_is_retried_on_the_next_checkpoint() {
+    async fn a_refused_span_is_sent_on_a_later_tick() {
         let (mut r, mock, chain) = span_relayer(true);
         mock.reject_ancestry();
         r.tick().await.unwrap();
         r.tick().await.unwrap();
-        assert_eq!(mock.ancestry_count(), 0, "the span was refused");
+        assert_eq!(mock.ancestry_count(), 0, "both sends were refused");
         assert_eq!(
             r.state.ancestry_anchor,
             Some(crate::header_rlp::keccak256(&chain[0])),
-            "the cursor must stay on the older anchor so the span is tried again"
+            "the cursor stays on the older anchor while the span is unsent"
+        );
+
+        mock.accept_ancestry();
+        r.tick().await.unwrap();
+        assert_eq!(mock.ancestry_count(), 1, "the retry must actually send the span");
+        assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
+        assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[2])));
+        assert_eq!(
+            r.state.ancestry_anchor,
+            Some(crate::header_rlp::keccak256(&chain[3])),
+            "a sent span moves the cursor to the head"
         );
     }
 

@@ -277,7 +277,7 @@ mod tests {
     fn the_bundled_bridge_abi_matches_the_deployed_one() {
         let bundled: serde_json::Value = serde_json::from_str(BRIDGE_ABI).unwrap();
         let deployed: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
+            "../../../../contracts/an/0.81.0_compiled/exchange/eccUSDCBridge.abi.json"
         ))
         .unwrap();
         let sig = |abi: &serde_json::Value, name: &str| {

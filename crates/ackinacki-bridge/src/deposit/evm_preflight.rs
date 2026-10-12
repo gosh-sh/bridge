@@ -5,7 +5,10 @@ use alloy_primitives::{Address, U256};
 use crate::{
     deposit::{
         args::Network,
-        evm::{read_allowance, read_balance, read_decimals, read_usdc, BlockTag, EvmRead},
+        evm::{
+            read_allowance, read_balance, read_decimals, read_usdc, read_volume_limits, BlockTag,
+            EvmRead,
+        },
     },
     errors::{CliError, CliResult},
 };
@@ -76,6 +79,30 @@ pub async fn run(
             "the EVM bridge is paused by its owner: deposit() would revert".into(),
             None,
         ));
+    }
+    // A bridge that predates the volume ceilings answers none of these, and
+    // enforces nothing, so a deposit against it must not be refused here.
+    if let Some((per_tx, tvl, held)) = read_volume_limits(evm, bridge).await {
+        let want = U256::from(amount);
+        if want > per_tx {
+            return Err(refuse(
+                format!(
+                    "{} micro-USDC is above the bridge's MAX_TRANSFER_AMOUNT of {per_tx}:                      deposit() would revert with TransferTooLarge. Split the amount.",
+                    amount
+                ),
+                None,
+            ));
+        }
+        if held + want > tvl {
+            return Err(refuse(
+                format!(
+                    "the bridge holds {held} micro-USDC of a MAX_TVL of {tvl}, so {} more would                      cross the ceiling: deposit() would revert with TvlCapExceeded. Room left:                      {}.",
+                    amount,
+                    tvl.saturating_sub(held)
+                ),
+                None,
+            ));
+        }
     }
     let dec = read_decimals(evm, usdc)
         .await

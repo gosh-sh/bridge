@@ -366,7 +366,7 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
 2. The bridge is `eccUSDCBridge` from the zerostate, which installs the light-client code
    (`setLightClientCode`) and with it the light-client address. Note the bridge owner key.
 3. With the owner key, call `deployLightClient(pubkey, l1ChainId, 0, 0)` on the bridge (ABI in
-   `contracts/an/0.80.0_compiled/exchange/`). The light client's constructor accepts only the
+   `contracts/an/0.81.0_compiled/exchange/`). The light client's constructor accepts only the
    bridge as sender, so a copy deployed with `sold` or `tvm-cli deploy` is not the one the bridge
    listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
    (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).

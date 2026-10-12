@@ -930,9 +930,10 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
                 format!(
                     "the deposit transaction reverted on the EVM side{}: no USDC was taken, only \
                      gas was spent. Likely causes: InvalidAmount, DepositTooLarge, \
-                     InvalidAnAccount, the allowance or the balance changed after the preflight, \
-                     TransferAmountMismatch, BridgePaused (the owner paused the bridge after the \
-                     check before the request)",
+                     TransferTooLarge, TvlCapExceeded (another deposit filled the ceiling after \
+                     the check), InvalidAnAccount, the allowance or the balance changed after the \
+                     preflight, TransferAmountMismatch, BridgePaused (the owner paused the bridge \
+                     after the check before the request)",
                     why.map(|w| format!(" ({w})")).unwrap_or_default()
                 ),
             )

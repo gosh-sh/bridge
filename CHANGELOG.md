@@ -48,6 +48,27 @@ assigns it when the release is tagged.
   but any integration that moves more than 50 USDC at a time has to split the
   amount, and the 1000 USDC ceiling applies to the bridge as a whole, not per
   account.
+- **`eccUSDCBridge` is built with `sold` 0.81.0, and its artefacts moved from
+  `contracts/an/0.80.0_compiled/exchange/` to `0.81.0_compiled/exchange/`.**
+  All three Acki Nacki contracts now use one compiler, so `make -C
+  contracts/an/exchange` takes `SOLD_0_81` alone and `SOLD_0_80` is gone.
+  `place.json`, `zerostate_init.py`, the ABI the deposit CLI embeds and the
+  check scripts follow the new path. `DepositVoucher.tvc` is reproduced byte
+  for byte by 0.81.0, so voucher addresses — and the replay protection that
+  rests on them — do not move. The bridge's own code hash does change, as does
+  the light client's; both are upgraded with `updateCode`.
+- **Contract versions: `eccUSDCBridge` 1.5.0 → 1.6.0,
+  `EthBeaconLightClient` 1.4.1 → 1.4.2** (the standalone variant 0.1.1 →
+  0.1.2), so `getVersion` tells a deployment with the limits apart from one
+  without.
+- **The deposit CLI refuses an over-limit deposit in preflight instead of
+  letting it revert.** It reads `MAX_TRANSFER_AMOUNT`, `MAX_TVL` and
+  `treasuryBalance` off the bridge, so it needs no rebuild when the ceilings
+  change, and it says how much room is left when the TVL check is what
+  refuses. A bridge that predates the ceilings answers none of those reads and
+  enforces nothing, so deposits against it are not refused. `TransferTooLarge`
+  and `TvlCapExceeded` are listed among the likely causes when a deposit
+  reverts anyway — the ceiling can fill between the check and the send.
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the

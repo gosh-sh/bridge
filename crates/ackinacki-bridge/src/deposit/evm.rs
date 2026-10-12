@@ -22,6 +22,9 @@ alloy::sol! {
         function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external;
         function usdc() external view returns (address);
         function paused() external view returns (bool);
+        function treasuryBalance() external view returns (uint256);
+        function MAX_TRANSFER_AMOUNT() external view returns (uint256);
+        function MAX_TVL() external view returns (uint256);
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, int8 anWorkchain, bytes32 anAccount, uint256 timestamp);
         error BridgePaused();
     }
@@ -254,6 +257,23 @@ pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
 }
 
 /// The bridge's `usdc()`: the token it takes deposits in.
+/// The bridge's volume ceilings and what it currently holds, or `None` on a
+/// bridge that predates them: the three reads revert there, and an older
+/// deployment enforces no ceiling, so the caller must not refuse the deposit.
+pub async fn read_volume_limits(
+    evm: &dyn EvmRead,
+    bridge: Address,
+) -> Option<(U256, U256, U256)> {
+    let one = async |data: Bytes| -> Option<U256> {
+        let out = evm.call(bridge, data).await.ok()?;
+        (out.len() == 32).then(|| U256::from_be_slice(&out))
+    };
+    let per_tx = one(IDeposit::MAX_TRANSFER_AMOUNTCall {}.abi_encode().into()).await?;
+    let tvl = one(IDeposit::MAX_TVLCall {}.abi_encode().into()).await?;
+    let held = one(IDeposit::treasuryBalanceCall {}.abi_encode().into()).await?;
+    Some((per_tx, tvl, held))
+}
+
 pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Address> {
     let out = evm
         .call(bridge, IDeposit::usdcCall {}.abi_encode().into())

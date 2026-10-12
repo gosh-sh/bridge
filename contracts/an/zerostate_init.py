@@ -28,8 +28,8 @@ CONTEXT_VERSION = 1
 L1_CHAIN_ID = os.environ.get("BRIDGE_ZS_L1_CHAIN_ID", "11155111")
 L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE", "0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb")
 
-BRIDGE_TVC = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc"
-BRIDGE_ABI = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
+BRIDGE_TVC = "contracts/an/0.81.0_compiled/exchange/eccUSDCBridge.tvc"
+BRIDGE_ABI = "contracts/an/0.81.0_compiled/exchange/eccUSDCBridge.abi.json"
 VOUCHER_TVC = "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc"
 LIGHT_CLIENT_TVC = "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc"
 ENCODER_TVC = "contracts/an/zerostate/BridgeZerostateData.tvc"

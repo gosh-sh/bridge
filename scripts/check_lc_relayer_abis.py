@@ -31,7 +31,7 @@ TRIMMED = REPO / "crates/eth-light-client-relayer/abi"
 PAIRS = [
     (
         TRIMMED / "USDCBridge.abi.json",
-        REPO / "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json",
+        REPO / "contracts/an/0.81.0_compiled/exchange/eccUSDCBridge.abi.json",
         ["getAnchorConfig", "disableOwnerAnchors"],
     ),
     (

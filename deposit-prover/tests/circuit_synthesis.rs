@@ -8,7 +8,7 @@
 //! ```
 
 use deposit_prover::{
-    circuit_v2::DepositEventCircuitV2,
+    circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_LOG_NUM},
     prover::{mock_circuit_pinned, test_circuit_mock_pinned, CircuitConfig},
     synthetic::{build, SyntheticSpec},
     types::DepositProofInput,
@@ -88,5 +88,24 @@ fn forged_log_amount_is_rejected_in_circuit() {
     let mut circuit = DepositEventCircuitV2::new(input, &production());
     circuit.forged_log_amount = Some(forged);
     let err = mock_circuit_pinned(circuit).expect_err("forged amount must not verify");
+    assert!(err.contains("circuit not satisfied"), "{err}");
+}
+
+/// A prover that points `log_index` past the receipt's last log, and writes a
+/// well-formed `Deposit` log into that empty slot, must not satisfy the
+/// circuit: the selected log has to be one of the logs the receipt commits to.
+/// proof_00's receipt has two logs, so slot 19 is empty — as is every slot
+/// from 2 on; the receipt's own RLC check does not look at an empty slot's
+/// bytes.
+#[test]
+#[ignore]
+fn log_slot_past_the_receipts_logs_is_rejected_in_circuit() {
+    let mut input = load_proof_00();
+    let real_log_index = input.event_data.log_index;
+    input.event_data.log_index = PRODUCTION_MAX_LOG_NUM - 1;
+    let mut circuit = DepositEventCircuitV2::new(input, &production());
+    circuit.forged_log_source = Some(real_log_index);
+    let err = mock_circuit_pinned(circuit)
+        .expect_err("a log slot past the receipt's logs must not verify");
     assert!(err.contains("circuit not satisfied"), "{err}");
 }

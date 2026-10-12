@@ -45,11 +45,12 @@ readonly DEPOSIT_CEREMONY="kzg_params_18.srs"
 readonly SUMS="SHA256SUMS"
 # Withdrawals: ceremony, binaries and keygen headroom, ~10.5 GB; later
 # withdrawals reuse the keys. Deposits: the prover's data/ after its first
-# proof (SRS and proving key), ~1.3 GB. Not counted: the first withdrawal after
-# an upgrade that changes aggregate-proof writes a new ~6.85 GB aggregator key
+# proof (SRS and proving key), ~3.4 GB; the prover deletes a rotated-out key
+# once the new one is written. Not counted: the first withdrawal after an
+# upgrade that changes aggregate-proof writes a new ~6.85 GB aggregator key
 # beside the old one, and one that also changes the Circuit-4 key reserves
 # 3 GiB more for that key (README, Step 0).
-readonly DISK_NEED_KB=$((12 * 1024 * 1024))
+readonly DISK_NEED_KB=$((13 * 1024 * 1024))
 readonly RAM_WARN_GB=24                      # a cold withdrawal peaked near 19 GB (README)
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"

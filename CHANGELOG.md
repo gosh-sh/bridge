@@ -32,6 +32,94 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The deposit-prover verification key is rotated, and the rotation
+  closes two forgeries.** Under the previous key — and every earlier one
+  built from `main`'s circuit — the circuit did not tie the
+  fields it reads out of the `Deposit` log to the log's bytes, and it
+  did not require the log index to point at one of the receipt's logs:
+  a slot past the receipt's last log (the circuit holds 20) carried
+  whatever bytes the prover put there. Either way a prover holding any
+  real receipt in an accepted block could choose the `depositId`,
+  `sender`, `amount` (below 2^128), AN recipient and bridge address,
+  and `finalizeDeposit` would mint against them. Nothing in the bridge
+  bounded the damage. Deploy the new bridge as soon as possible.
+
+  The enclosing transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
+  calldata up to 2048 bytes. Type 2 access-list payload is up to
+  512 bytes (RLP header excluded); type 1's access list shares a
+  field slot with type 2 calldata, so it may be up to 2048 bytes,
+  but a type 1 transaction's calldata and access list together
+  must fit its ~2805-byte leaf. Each receipt log's payload may be
+  at most 2211 bytes (2048 of data with four topics; more data if
+  there are fewer topics), at most 20 logs. That is what lets a SafeL2
+  `SafeMultiSigTransaction` through, including a two-signer
+  MultiSend of `approve` + `deposit` (~1152 B of log data). The
+  keccak pin is 128 permutations (~17 KB of preimages, header and
+  both MPT paths included): a receipt of up to about 13.5 KB fits,
+  i.e. about six logs at 2048 bytes, fewer with a large type 1
+  transaction. A typical Safe or 4337 receipt fits. Deposits in a
+  transaction of any other type (legacy 0, blob 3, EIP-7702 4, an L2
+  system type) are neither provable nor refundable: send again as
+  type 1 or 2.
+
+  Proofs made for the previous key stop verifying. That includes a
+  `proof.bin` / `public_inputs.bin` that `ackinacki-bridge deposit`
+  left in its work directory (`--resume` reuses it, and the bridge
+  refuses it with 220, exit 33) and any `prove-one` bundle made
+  before the upgrade. Relayers must
+  finish or drain such deposits before the bridge is upgraded, or
+  prove them again after.
+
+  `eccUSDCBridge` embeds the new key and reports `version` 1.6.0;
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with
+  sold 0.80.0. Operators: deploy that tvc. On every relayer host
+  rebuild the `deposit-prover` examples (`cargo build --release
+  --examples`) and do **not** pass `--max-data-byte-len 256` — the
+  default is now 2048 and is part of the key. With a leftover
+  `--max-data-byte-len 256` (or any `--degree`, `--max-log-num`
+  other than 18 and 20) the proofs it makes are rejected by the
+  embedded key, and a deposit that does not fit the smaller shape
+  is refused with a retryable exit 1 naming the flags, never the
+  final exit 3. The relayer prefers `target/release/examples/<name>`
+  when the file exists and does not check it matches the source.
+  A cached `data/*.pk` is not reused: its file name carries a
+  fingerprint of the circuit, and the first proof after the upgrade
+  generates the new ~3.4 GB key and then deletes the old one, so
+  `data/` briefly needs room for both. `ackinacki-bridge deposit`
+  installs get the prover tools from a release (`install.sh`), so
+  they need a new release; its CLI refuses a bridge older than
+  1.6.0, whose key its proofs do not match.
+
+  The prover now refuses a deposit it cannot prove before loading
+  the SRS or the key. `fetch_deposit_data` exits 3 when the
+  enclosing transaction is any type other than 1 or 2 (legacy 0,
+  blob 3, EIP-7702 4, an L2 system type such as OP-stack 0x7e), or
+  its leaf, calldata or
+  access list is over the circuit's cap — that refusal used to be
+  exit 1, which the relayer retried forever. `export_blake2b_proof`
+  and `export_vk_blob` check the log count, every log's topics and
+  data, the receipt and header length, the MPT depths and the
+  keccak budget, and also exit 3 — but only under the key's own
+  shape (the default flags); under other flags they exit 1. `deposit` ends such an operation
+  at exit 35 instead of a resumable 32. `deposit-relayer daemon`
+  skips such a deposit at once, whatever `--skip-after-attempts`
+  says, instead of retrying it forever: the tick is counted as
+  `deposit_relayer_ticks_total{outcome="unprovable"}`, the id goes
+  to a new `state.json` field `unprovable_deposit_ids` (gauge
+  `deposit_relayer_unprovable_deposits`), and the log says only
+  the EVM bridge operator can return its funds. `finalize-one`
+  cannot help these. `parked_deposit_ids` and
+  `deposit_relayer_parked_deposits` keep holding only deposits
+  parked by `--skip-after-attempts`. An existing `state.json` loads
+  unchanged. Deposits parked or given up on under the previous key
+  (the 256-byte log shape) should be re-driven after this deploy:
+  the new key can prove the Safe and 4337 receipts that the old
+  one refused.
+
+  The tvm-sdk opcode fixtures and the acki-nacki copy of
+  `deposit-prover/fixtures/deposit_10proofs` carry the old blob
+  and must be refreshed from this repository's fixtures.
+
 - **`ackinacki-bridge withdraw` needs the `aggregate-proof` of its own
   release.** Stage 5 passes `aggregate-proof --slot-report`, which an older
   build refuses, after the burn; preflight now refuses an `aggregate-proof`
@@ -338,9 +426,9 @@ assigns it when the release is tagged.
     unchanged.
   - **Requirements.** `--state-dir` and the prover directory must be on a
     filesystem with `flock`: unlike `withdraw`, `deposit` refuses without it
-    (exit 2). The prover needs ~4.4 GB of RAM and ~1.3 GB of disk, the
-    proving key it writes on its first proof; a proof takes under a minute
-    on a 20-thread host. The RPC must serve every receipt and raw
+    (exit 2). The prover needs ~10 GB of RAM and ~3.4 GB of disk, the
+    proving key it writes on its first proof; a proof takes one to two
+    minutes on a 20-thread host. The RPC must serve every receipt and raw
     transaction of a block, and the `--gql-endpoint` host must serve
     GraphQL and `POST /v2/messages`.
   - **Refusals before any transaction:** Safe and other smart-contract
@@ -400,7 +488,8 @@ assigns it when the release is tagged.
   `BRIDGE_DEPOSIT_CONFIRMATIONS`. Over an installation from before
   deposits, it downloads the bundle again and appends those three keys to
   the existing profile, changing nothing else in it; `--check` reports such
-  a profile as missing them. It now wants ~8 GB free instead of ~6 GB.
+  a profile as missing them. It now wants ~13 GB free instead of ~6 GB
+  (withdrawal keys ~9.5 GB and the deposit proving key ~3.4 GB).
 
 - **`deposit` draws its QR codes as images on terminals that can show them:**
   kitty graphics (kitty, Ghostty, Konsole from 22.04), iTerm2 inline images
@@ -432,7 +521,8 @@ assigns it when the release is tagged.
   calls are no-ops without one. Names are operator API, listed with their
   meaning in `deposit_relayer_daemon::metrics`:
   `deposit_relayer_ticks_total{outcome}` (finalized, already_finalized,
-  not_yet_available, proof_failed, an_rejected, an_pending, skipped, error),
+  not_yet_available, proof_failed, an_rejected, an_pending, skipped,
+  unprovable, error),
   `deposit_relayer_stage_duration_seconds{stage}` (is_finalized, fetch_event,
   prove, submit, tick), `deposit_relayer_prover_stage_duration_seconds{example}`
   and `deposit_relayer_prover_stage_failures_total{example}` per
@@ -446,6 +536,7 @@ assigns it when the release is tagged.
   `deposit_relayer_last_finalized_timestamp_seconds`,
   `deposit_relayer_last_tick_timestamp_seconds`,
   `deposit_relayer_attempts_since_progress`, `deposit_relayer_parked_deposits`,
+  `deposit_relayer_unprovable_deposits`,
   `deposit_relayer_backoff_seconds`, `deposit_relayer_build_info{version}` and
   `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
   counters and the shutdown snapshot are unchanged.
@@ -1095,7 +1186,7 @@ assigns it when the release is tagged.
   `--params-dir` and `--pk-cache-dir` (one filesystem in the shipped profile)
   and refuses with exit 2 below that; before, a host with 4–9 GB free passed
   preflight and failed in stage 5, after the burn. `scripts/install.sh` now
-  wants 12 GB free. A withdrawal whose aggregator key is already in the pk
+  wants 13 GB free. A withdrawal whose aggregator key is already in the pk
   cache reserves nothing for it: after a proof, `withdraw` notes in
   `<pk-cache>/.withdraw-slot.json` the aggregator key the proof used, which
   `aggregate-proof` names in `<snark-dir>/aggregator-slot`

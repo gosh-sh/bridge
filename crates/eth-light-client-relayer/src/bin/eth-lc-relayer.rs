@@ -763,7 +763,13 @@ async fn submit_ancestry_cmd(
     let (checkpoint, older) = parse_anchor_pair(&checkpoint_hash, &older_anchor_hash)?;
     let headers = EthExecutionRpc::new(eth_rpc_url)?
         .ancestry_span(checkpoint, older, max_headers)
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--older-anchor-hash is further back than --max-headers allows: one \
+                 submitAncestry cannot carry this span"
+            )
+        })?;
     info!(
         n = headers.len(),
         "fetched ancestry span (rebuild with --features live-submit to submit)"
@@ -788,7 +794,13 @@ async fn submit_ancestry_cmd(
     let (checkpoint, older) = parse_anchor_pair(&checkpoint_hash, &older_anchor_hash)?;
     let headers = EthExecutionRpc::new(eth_rpc_url)?
         .ancestry_span(checkpoint, older, max_headers)
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--older-anchor-hash is further back than --max-headers allows: one \
+                 submitAncestry cannot carry this span"
+            )
+        })?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
     let abi =
         TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;

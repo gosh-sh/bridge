@@ -61,6 +61,7 @@ contract EthBeaconLightClient {
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
+    uint64 constant SINK_VALUE = 1 vmshell;
 
     uint64 constant MIN_BALANCE = 100 vmshell;
     uint constant bitCntAddress = 256;
@@ -255,6 +256,7 @@ contract EthBeaconLightClient {
         if (address(this).balance >= MIN_BALANCE) { return; }
         gosh.mintshellq(MIN_BALANCE);
     }
+
 
     // ========================================================
     // Light-client update (consumer side of opcode 0xC7 0x4A)
@@ -513,7 +515,7 @@ contract EthBeaconLightClient {
         // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
         // is the retry (submitUpdate would hit ERR_STALE_UPDATE).
         eccUSDCBridge(USDC_BRIDGE_ADDRESS).acceptBlockHashFromLightClient{
-            value: 1 vmshell,
+            value: SINK_VALUE,
             bounce: true,
             flag: 1
         }(_l1ChainId, _piForm(h));
@@ -521,7 +523,7 @@ contract EthBeaconLightClient {
 
     function _forgetSink(uint256 h) private {
         eccUSDCBridge(USDC_BRIDGE_ADDRESS).forgetBlockHashFromLightClient{
-            value: 1 vmshell,
+            value: SINK_VALUE,
             bounce: true,
             flag: 1
         }(_l1ChainId, _piForm(h));

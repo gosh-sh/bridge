@@ -58,9 +58,10 @@ assigns it when the release is tagged.
   instruction instead of the `EthKeccak` software implementation, and
   `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
   64.68M gas before and costs 4,722 now. Measured on a locally built node
-  against the 10M per-transaction limit: 703,479 gas for a 5-header span and
-  1,930,730 for a full 33-header span, where the old software walk
-  extrapolated to ~2.07G. On-chain ancestry therefore works: a deposit in a
+  against the 10M per-transaction limit: 715,066 gas for a 5-header span,
+  1,230,602 for 17 headers and 1,942,271 for a full 33-header span, where the
+  old software walk extrapolated to ~2.07G. Measured end to end, compute and
+  action phase both, not compute alone. On-chain ancestry therefore works: a deposit in a
   non-checkpoint block is covered without the owner key, as long as the
   checkpoints bracketing it are both proven and no more than a span apart. A
   checkpoint the daemon skipped can be late-registered through `submitUpdate`
@@ -1281,8 +1282,10 @@ assigns it when the release is tagged.
   proven and within a span of each other.** Gas is no longer the obstacle —
   the `KECCAK256` instruction brought a full 33-header span to 1,930,730 gas
   against the 10M per-transaction limit (see Breaking Changes) — and a
-  checkpoint the daemon skipped is late-registered through `submitUpdate`, so
-  the gap closes without the owner key. What is left is ordering: until the
+  checkpoint the daemon skipped can be late-registered through `submitUpdate`,
+  which would close the gap without the owner key — but nothing in this
+  repository does that yet, so today those blocks need
+  `setAcceptedBlockHash`. What is left is ordering: until the
   skipped checkpoint is late-registered and the span sent, a deposit in those
   blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and on a
   bridge with `disableOwnerAnchors` already called there is no owner fallback

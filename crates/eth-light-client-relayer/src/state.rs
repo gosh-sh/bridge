@@ -26,6 +26,9 @@ pub struct RelayerState {
     /// head so the next tick retries it instead of losing those blocks.
     #[serde(default)]
     pub ancestry_anchor: Option<[u8; 32]>,
+    /// Ticks spent retrying the span the cursor is behind.
+    #[serde(default)]
+    pub span_attempts: u32,
     /// Relayer already issued the one-way owner flip.
     #[serde(default)]
     pub owner_flip_done: bool,

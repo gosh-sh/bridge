@@ -89,6 +89,7 @@ struct MockInner {
     period: Option<u64>,
     reject: bool,
     reject_ancestry: bool,
+    ancestry_attempts: u32,
     reject_flip: bool,
     owner_anchors_enabled: bool,
     owner_rotation_enabled: bool,
@@ -105,6 +106,7 @@ impl MockAnSubmitter {
                 period: None,
                 reject: false,
                 reject_ancestry: false,
+                ancestry_attempts: 0,
                 reject_flip: false,
                 owner_anchors_enabled: true,
                 owner_rotation_enabled: true,
@@ -117,6 +119,11 @@ impl MockAnSubmitter {
     /// Refuse only `submitAncestry`, so an update still lands.
     pub fn reject_ancestry(&self) {
         self.inner.lock().expect("poisoned").reject_ancestry = true;
+    }
+
+    /// Every `submitAncestry` reaching the mock, refused ones included.
+    pub fn ancestry_attempts(&self) -> u32 {
+        self.inner.lock().expect("poisoned").ancestry_attempts
     }
 
     /// Stop refusing `submitAncestry`.
@@ -233,6 +240,7 @@ impl AnSubmitter for MockAnSubmitter {
     ) -> Result<SubmitOutcome, RelayerError> {
         let (older, newer) = crate::header_rlp::link_headers(header_rlps)?;
         let mut inner = self.inner.lock().expect("poisoned");
+        inner.ancestry_attempts += 1;
         if inner.reject || inner.reject_ancestry {
             return Ok(SubmitOutcome::Rejected {
                 reason: "submitAncestry rejected".into(),

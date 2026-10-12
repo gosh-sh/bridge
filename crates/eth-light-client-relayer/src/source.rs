@@ -24,6 +24,9 @@ pub trait BeaconSource: Send + Sync {
 
 /// Execution header walk used after an accepted checkpoint. Returns the span
 /// between two anchors, oldest first — the order `submitAncestry` takes.
+/// `Ok(None)` means the older anchor is further back than `max`, which no call
+/// can carry: a distinct outcome from a transient `Err`, because one is never
+/// worth retrying and the other is.
 #[async_trait]
 pub trait ExecutionSource: Send + Sync {
     async fn ancestry_span(
@@ -31,7 +34,7 @@ pub trait ExecutionSource: Send + Sync {
         newer: [u8; 32],
         older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError>;
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError>;
 }
 
 /// In-memory epoch chain for tests (`Relayer::with_execution`).
@@ -56,7 +59,7 @@ impl ExecutionSource for InMemoryExecution {
         newer: [u8; 32],
         older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
         let chains = self.chains.lock().expect("poisoned");
         let headers = chains
             .get(&newer)
@@ -64,16 +67,13 @@ impl ExecutionSource for InMemoryExecution {
             .ok_or_else(|| RelayerError::other("in-memory execution: unknown checkpoint"))?;
         let max = max.clamp(3, 33);
         let span: Vec<Vec<u8>> = headers.into_iter().take(max).collect();
-        if crate::header_rlp::keccak256(
-            span.first()
-                .ok_or_else(|| RelayerError::other("in-memory execution: empty span"))?,
-        ) != older
-        {
-            return Err(RelayerError::other(
-                "in-memory execution: span does not start at the older anchor",
-            ));
+        let Some(first) = span.first() else {
+            return Ok(None);
+        };
+        if crate::header_rlp::keccak256(first) != older {
+            return Ok(None);
         }
-        Ok(span)
+        Ok(Some(span))
     }
 }
 
@@ -382,7 +382,7 @@ impl EthExecutionRpc {
         newer: [u8; 32],
         older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
         let max = max.clamp(3, 33);
         let mut headers = Vec::new();
         let mut h = newer;
@@ -400,19 +400,15 @@ impl EthExecutionRpc {
                 break;
             }
             if headers.len() >= max {
-                return Err(RelayerError::other(
-                    "older anchor not reached within the ancestry span limit",
-                ));
+                return Ok(None);
             }
             h = parent;
         }
         if headers.len() < 3 {
-            return Err(RelayerError::other(
-                "ancestry span shorter than two anchors + one block",
-            ));
+            return Ok(None);
         }
         headers.reverse();
-        Ok(headers)
+        Ok(Some(headers))
     }
 }
 
@@ -423,7 +419,7 @@ impl ExecutionSource for EthExecutionRpc {
         newer: [u8; 32],
         older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
         EthExecutionRpc::ancestry_span(self, newer, older, max).await
     }
 }

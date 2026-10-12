@@ -92,6 +92,11 @@ pub enum TickOutcome {
     },
 }
 
+/// How many ticks in a row may retry one ancestry span before it is written
+/// off. Each attempt is a paid submission, so a span the contract will never
+/// accept must stop costing the light client.
+const MAX_SPAN_ATTEMPTS: u32 = 3;
+
 pub struct Relayer<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> {
     config: RelayerConfig,
     source: Arc<S>,
@@ -376,11 +381,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     /// After a proven checkpoint: re-push the hash to USDCBridge (the first
     /// push often bounced because the light client was not yet the sink
-    /// writer), then, when an execution RPC is configured, fetch the span
-    /// between the previous anchor and this one and optionally send it on
-    /// chain. `submitAncestry` needs a proven anchor at both ends, so the span
-    /// only exists when the previous checkpoint is known and no more than one
-    /// epoch back; a skipped epoch leaves a gap no span can bridge.
+    /// writer), then try to cover the span back to the previous anchor.
+    /// `rePushAnchor` belongs here and not to a retry: it is a paid call tied
+    /// to this checkpoint, and resending it every tick would burn the light
+    /// client's balance for an anchor the bridge already has.
     async fn maybe_cover_epoch(&mut self, prev_anchor: Option<[u8; 32]>, checkpoint: [u8; 32]) {
         match self.submitter.re_push_anchor(checkpoint).await {
             Ok(SubmitOutcome::Accepted {
@@ -398,38 +402,52 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 warn!(error = %e, "rePushAnchor failed");
             },
         }
-        let Some(rpc) = &self.execution else {
-            return;
-        };
         let Some(older) = prev_anchor else {
             self.advance_ancestry_anchor(checkpoint);
             info!("no previous anchor on record; epoch ancestry needs one at each end");
             return;
         };
-        if older == checkpoint {
+        self.cover_span(older, checkpoint).await;
+    }
+
+    /// Send the span between two anchors, and decide what the cursor does
+    /// next. Settles the cursor on every outcome that will not change by
+    /// trying again — sent, not wanted, no execution source, out of reach, a
+    /// broken chain — and leaves it behind the head only for an outcome a
+    /// later tick could still get through, up to [`MAX_SPAN_ATTEMPTS`].
+    async fn cover_span(&mut self, older: [u8; 32], newer: [u8; 32]) {
+        if older == newer {
             return;
         }
-        let headers = match rpc.ancestry_span(checkpoint, older, 33).await {
-            Ok(h) => h,
+        let Some(rpc) = &self.execution else {
+            // Nothing will ever fetch the headers, so holding the cursor back
+            // would only repeat this forever.
+            self.advance_ancestry_anchor(newer);
+            return;
+        };
+        let headers = match rpc.ancestry_span(newer, older, 33).await {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                self.advance_ancestry_anchor(newer);
+                warn!(
+                    from = %hex::encode(older),
+                    to = %hex::encode(newer),
+                    "ancestry span wider than one call: these blocks need setAcceptedBlockHash"
+                );
+                return;
+            },
             Err(e) => {
-                // A gap wider than one span can never be sent, so retrying it
-                // every tick would only repeat the same 33 reads. Anything
-                // else is worth another attempt, and the cursor stays put.
-                let unreachable = e.to_string().contains("older anchor not reached");
-                if unreachable {
-                    self.advance_ancestry_anchor(checkpoint);
-                }
-                warn!(error = %e, retry = !unreachable, "epoch ancestry fetch failed");
+                self.retry_span_later(e.to_string(), newer);
                 return;
             },
         };
         if let Err(e) = crate::header_rlp::link_headers(&headers) {
-            self.advance_ancestry_anchor(checkpoint);
+            self.advance_ancestry_anchor(newer);
             warn!(error = %e, "epoch ancestry failed local link_headers");
             return;
         }
         if !self.config.submit_ancestry {
-            self.advance_ancestry_anchor(checkpoint);
+            self.advance_ancestry_anchor(newer);
             info!(
                 n = headers.len(),
                 "epoch ancestry linked locally; on-chain submitAncestry skipped \
@@ -441,14 +459,14 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             Ok(SubmitOutcome::Accepted {
                 ..
             }) => {
-                self.advance_ancestry_anchor(checkpoint);
+                self.advance_ancestry_anchor(newer);
                 info!(n = headers.len(), "submitAncestry accepted");
             },
             Ok(other) => {
-                warn!(?other, retry = true, "submitAncestry did not accept");
+                self.retry_span_later(format!("{other:?}"), newer);
             },
             Err(e) => {
-                warn!(error = %e, retry = true, "submitAncestry failed");
+                self.retry_span_later(e.to_string(), newer);
             },
         }
     }
@@ -456,7 +474,9 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// Retry the span a previous tick could not send. Coverage is driven from
     /// here as well as from an accepted update, because the next accepted
     /// checkpoint can be two epochs away — by then the span the cursor still
-    /// points at would be out of reach and both epochs would be lost.
+    /// points at would be out of reach and both epochs would be lost. Only the
+    /// span is retried: `rePushAnchor` stays with the checkpoint that earned
+    /// it.
     async fn cover_pending_span(&mut self) {
         let (Some(cursor), Some(head)) =
             (self.state.ancestry_anchor, self.state.last_execution_block_hash)
@@ -469,9 +489,33 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         info!(
             from = %hex::encode(cursor),
             to = %hex::encode(head),
+            attempt = self.state.span_attempts + 1,
             "retrying the ancestry span the cursor is still behind"
         );
-        self.maybe_cover_epoch(Some(cursor), head).await;
+        self.cover_span(cursor, head).await;
+    }
+
+    /// Leave the cursor behind the head so a later tick tries the span again,
+    /// until [`MAX_SPAN_ATTEMPTS`] is spent. Each attempt costs a submission
+    /// the light client pays for, so an outcome that never changes — an old
+    /// contract refusing the new payload, a node without `KECCAK256` — must
+    /// not be repeated for the life of the daemon.
+    fn retry_span_later(&mut self, reason: String, newer: [u8; 32]) {
+        self.state.span_attempts = self.state.span_attempts.saturating_add(1);
+        if self.state.span_attempts >= MAX_SPAN_ATTEMPTS {
+            self.state.span_attempts = 0;
+            self.advance_ancestry_anchor(newer);
+            warn!(
+                reason,
+                attempts = MAX_SPAN_ATTEMPTS,
+                "giving up on this ancestry span: these blocks need setAcceptedBlockHash"
+            );
+            return;
+        }
+        if let Err(e) = self.persist() {
+            warn!(error = %e, "could not persist the span attempt count");
+        }
+        warn!(reason, attempt = self.state.span_attempts, "ancestry span not sent; will retry");
     }
 
     /// Move the span cursor up to `hash`. Called only where the span is done
@@ -480,6 +524,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// head and the next tick retries it.
     fn advance_ancestry_anchor(&mut self, hash: [u8; 32]) {
         self.state.ancestry_anchor = Some(hash);
+        self.state.span_attempts = 0;
         if let Err(e) = self.persist() {
             warn!(error = %e, "could not persist the ancestry cursor");
         }
@@ -1082,6 +1127,64 @@ mod tests {
             r.state.ancestry_anchor,
             Some(crate::header_rlp::keccak256(&chain[3]))
         );
+    }
+
+    /// Without an execution source nothing can ever fetch the headers, so the
+    /// cursor must settle instead of making every tick pay for a rePushAnchor.
+    #[tokio::test]
+    async fn no_execution_source_settles_the_cursor_and_pays_nothing() {
+        let (mut r, mock, _chain) = span_relayer(true);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.execution = None;
+        r.state.ancestry_anchor = Some([0x77; 32]);
+        let pushes = mock.re_push_count();
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(mock.re_push_count(), pushes, "the retry path must not rePushAnchor");
+        assert_eq!(
+            r.state.ancestry_anchor, r.state.last_execution_block_hash,
+            "the cursor must settle on the head"
+        );
+    }
+
+    /// A span the contract will never accept must stop costing submissions.
+    #[tokio::test]
+    async fn a_span_refused_for_good_is_written_off_after_the_attempt_budget() {
+        let (mut r, mock, chain) = span_relayer(true);
+        mock.reject_ancestry();
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        for _ in 0..8 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(
+            r.state.ancestry_anchor,
+            Some(crate::header_rlp::keccak256(&chain[3])),
+            "the cursor must be written off to the head once the budget is spent"
+        );
+        assert_eq!(r.state.span_attempts, 0, "the counter resets with the cursor");
+        assert!(
+            mock.ancestry_attempts() <= super::MAX_SPAN_ATTEMPTS,
+            "sent {} submissions for a span that can never land",
+            mock.ancestry_attempts()
+        );
+    }
+
+    /// An out-of-reach span is not a transient failure: no retry, no budget.
+    #[tokio::test]
+    async fn an_out_of_reach_span_is_written_off_at_once() {
+        let (mut r, mock, _chain) = span_relayer(true);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.state.ancestry_anchor = Some([0x99; 32]);
+        let attempts = mock.ancestry_attempts();
+        r.tick().await.unwrap();
+        assert_eq!(
+            r.state.ancestry_anchor, r.state.last_execution_block_hash,
+            "an unreachable older anchor is written off immediately"
+        );
+        assert_eq!(mock.ancestry_attempts(), attempts, "nothing was submitted");
     }
 
     #[tokio::test]

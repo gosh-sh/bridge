@@ -11,8 +11,11 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until it is
   lifted; nothing else the bridge does is affected.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
-  from the deposit identity; a second finalization of the same deposit collides
-  with it and does not mint again.
+  from the deposit identity and from the voucher's own code; a second
+  finalization of the same deposit collides with it and does not mint again.
+  The bridge holds that code in `_depositVoucherCode`, and it is what makes the
+  collision happen — part of the replay protection rather than an
+  implementation detail. It can be changed, see *Upgrading the bridge* below.
 - `EthBeaconLightClient`, with the `EthKeccak` library — deployed by the bridge
   (`deployLightClient`) from the code the zerostate installs
   (`setLightClientCode`). It verifies Ethereum sync-committee step proofs and
@@ -94,6 +97,31 @@ Before committing new artefacts:
     scripts/check_voucher_abi_consistency.py
     scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
     scripts/check_zerostate_data_encoder.py
+
+## Upgrading the bridge
+
+The voucher's code can be changed. But replay protection rests on the voucher's
+address, and that address is derived from its code: the moment the code
+changes, every deposit finalized so far gets a new, unoccupied address. Anyone
+can finalize them again — the deposit event is still in its Ethereum block, and
+a proof of it can be built afresh at any time.
+
+**So an upgrade that changes the voucher's code also makes past deposits stop
+going through.** The restriction ships in the upgraded code itself: a block
+cutoff, where deposits from blocks older than the upgrade are refused. What is
+rejected is the deposit, not the shape of its proof.
+
+**The current contracts carry no such restriction, and none is needed here:**
+the voucher's code is not changed, it is installed by the zerostate, and
+`updateCode` is called with an empty `userCell` — the bridge keeps the code it
+has, voucher addresses stay put, and replay protection holds. The restriction
+arrives with the upgrade that first changes the voucher's code; no separate fix
+to the present version is required.
+
+The voucher's code can also change by accident: rebuilding `DepositVoucher.tvc`
+with a different compiler yields a different code hash.
+`getDepositVoucherCodeHash()` reports what the bridge currently holds — compare
+it against the tracked artefact before and after an upgrade.
 
 ## The zerostate module
 

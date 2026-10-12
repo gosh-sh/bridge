@@ -967,6 +967,23 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `daemon-live` halted with `ERROR chain monotonicity drift — halting`
+  seconds after a successful `applyBkSetUpdate` or `verifyBlock` tx on
+  load-balanced public RPCs (observed on publicnode's Sepolia gateway).
+  The post-write snapshot used receipt-pinned reads, but the next tick's
+  consistency check read `latest` through the balancer and sometimes
+  landed on a backend that had not yet propagated the write — producing
+  a `last_seen_block_seq_no_rewound` or `last_bk_set_update_seq_no_rewound`
+  signal that the daemon treated as a fatal timeline divergence. Those
+  two rewind signals are now classified as transient RPC
+  read-after-write lag: the tick returns `NotYetAvailable` with a `WARN
+  transient RPC read-after-write lag — will retry next tick` log, counts
+  toward `not_yet_available_total` instead of `history_drift_detected_total`,
+  and the daemon continues on the next backoff. Jumps, orphan commitments
+  and uncovered rotations keep their fatal semantics — a stale backend
+  serves an older snapshot, not a different timeline. Validated on the
+  Sepolia Deploy #8 shellnet replay: five BK rotations and one bundle
+  applied in 24 minutes with no false-positive halts.
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had

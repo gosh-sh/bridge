@@ -27,6 +27,26 @@ impl std::fmt::Display for HistoryDrift {
     }
 }
 
+impl HistoryDrift {
+    /// `true` for drift signals that only indicate the RPC endpoint we read
+    /// from is lagging behind our most recent write (classic read-after-write
+    /// staleness on load-balanced public endpoints — publicnode's balancer
+    /// has observable 3–30 s backend-propagation lag). The tick loop should
+    /// retry next backoff rather than halt: Ethereum post-merge finalized
+    /// bridge storage cannot legitimately rewind, so a `_rewound` signal is
+    /// always transient RPC lag.
+    ///
+    /// Jumps, orphan commitments and uncovered rotations are NOT transient
+    /// and keep their fatal semantics — a stale backend serves an older
+    /// snapshot, not a different timeline.
+    pub fn is_transient_rpc_lag(&self) -> bool {
+        matches!(
+            self.field,
+            "last_seen_block_seq_no_rewound" | "last_bk_set_update_seq_no_rewound"
+        )
+    }
+}
+
 fn drift(
     field: &'static str,
     expected: impl Into<String>,
@@ -232,6 +252,31 @@ mod tests {
             ..remembered.clone()
         };
         assert!(check_chain_monotonicity(&remembered, &actual, 2048).is_ok());
+    }
+
+    #[test]
+    fn is_transient_rpc_lag_classifies_rewinds_only() {
+        // Both rewind signals must be classified as transient: a backend
+        // behind the load balancer served us a pre-write snapshot.
+        let seen_rewound = drift("last_seen_block_seq_no_rewound", "10", "9");
+        assert!(seen_rewound.is_transient_rpc_lag());
+        let bk_rewound = drift("last_bk_set_update_seq_no_rewound", "500", "0");
+        assert!(bk_rewound.is_transient_rpc_lag());
+
+        // Jumps, orphan commitments and uncovered rotations are structural
+        // and must remain fatal — stale RPC alone cannot produce them.
+        for field in [
+            "last_seen_block_seq_no_jumped",
+            "bk_set_commitment_without_update",
+            "last_bk_set_update_seq_no_jumped",
+            "last_bk_set_update_seq_no_uncovered",
+            "startup_on_chain_drift",
+        ] {
+            assert!(
+                !drift(field, "a", "b").is_transient_rpc_lag(),
+                "{field} must not be reclassified as transient"
+            );
+        }
     }
 
     #[test]

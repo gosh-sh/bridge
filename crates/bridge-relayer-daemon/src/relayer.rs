@@ -184,8 +184,26 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let on_chain = self.bridge.read_state().await?;
 
         // Check B — chain monotonicity vs last observed snapshot.
+        // A `_rewound` drift against our remembered snapshot (which was
+        // populated by a receipt-pinned `read_state_at(receipt.block_number)`
+        // after our own last successful submit) can only be read-after-write
+        // staleness on the load-balanced public RPC: Ethereum post-merge
+        // finalized storage cannot legitimately rewind. Downgrade those to
+        // `NotYetAvailable` so the daemon retries on the next backoff.
+        // Jumps / orphan commitments / uncovered rotations keep their fatal
+        // semantics — a stale backend serves an older snapshot, not a
+        // different timeline.
         if let Some(remembered) = &self.state.last_observed_on_chain {
             if let Err(drift) = check_chain_monotonicity(remembered, &on_chain, MAX_FORWARD_GAP) {
+                if drift.is_transient_rpc_lag() {
+                    warn!(
+                        ?drift,
+                        "transient RPC read-after-write lag — will retry next tick"
+                    );
+                    return Ok(TickOutcome::NotYetAvailable {
+                        target_seq_no: remembered.last_seen_block_seq_no.saturating_add(1),
+                    });
+                }
                 error!(?drift, "chain monotonicity drift — halting");
                 return Err(RelayerError::other(format!("chain drift: {drift}")));
             }

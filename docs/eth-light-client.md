@@ -128,8 +128,11 @@ sequenceDiagram
 
 What the contract checks, in order (`contracts/an/EthBeaconLightClient.sol:248`): the public
 inputs parse; at least 342 of 512 committee members signed (also enforced in-circuit); the
-proof's committee commitment equals the anchored one; the finalized slot moves the head forward
-(or back-fills a skipped checkpoint, signed by the committee in force or by the one a rotation replaced); then `tvm.accept()` and the opcode.
+the finalized slot moves the head forward, or back-fills a skipped checkpoint; then the proof's
+committee commitment equals the one in force, or the one a rotation replaced and only for a
+back-fill inside its slot window; then `tvm.accept()` and the opcode. The slot test comes before
+the committee test, so a stale update from a wrong committee fails `ERR_STALE_UPDATE` (244), not
+`ERR_WRONG_COMMITTEE` (242).
 The contract pays for the verification itself, which is why it holds a balance and why a bad
 proof only wastes the contract's gas. `submitUpdate` is permissionless: the proof is the
 authorization.
@@ -201,9 +204,13 @@ previous checkpoint after every accepted update and runs `link_headers` locally
 
 **Ancestry now fits the gas limit.** The software `EthKeccak.hash` is gone; one 642-byte Sepolia
 header cost **64.68 M** gas through it and costs **4,722** through the `KECCAK256` instruction
-(opcode `0xC7 0x4B`). Measured on a locally built node, compute and action phase both: **715,066**
-gas for a 5-header span, **1,230,602** for 17 headers and **1,942,271** for a full 33-header span,
-against the **10 M** per-transaction limit (p20/p21).
+(opcode `0xC7 0x4B`). Measured on a locally built node, compute and action phase both, with the
+client at exactly its `MIN_BALANCE` floor: **748,015** gas for a 5-header span and **1,976,017**
+for a full 33-header span, against the **10 M** per-transaction limit (p20/p21). Both include the
+two anchor hashes the call does before `tvm.accept()`. A span whose far end is not a proven anchor
+is refused inside that pre-accept credit and costs the light client nothing; one whose *middle* is
+forged still costs it the walk (1,917,462 gas measured), the same exposure `submitUpdate` has
+carried since 1.4.1.
 This needs a node whose VM carries the instruction and a `sold` built against that SDK; against
 an older node the light client throws on an unknown opcode. `EthKeccak.sol` keeps only
 `rlpParentHash`, which is now where most of the gas goes.
@@ -423,7 +430,10 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 
 - `getHead()` (`EthBeaconLightClient.sol:583`) returns `finalizedSlot`, `finalizedBeaconRoot`,
   `executionBlockHash`, `committeeCommitment`, `updatesApplied`; `getCommitteeState()`
-  (`:619`) returns the committee, period, `ownerRotationEnabled`, `reAnchorsApplied`.
+  returns the committee, **`prevCommittee`**, period, `ownerRotationEnabled`, `reAnchorsApplied` —
+  five values, with `prevCommittee` second, so read them by name and not by position. The period
+  is derived from the proven head, not taken from a rotate proof, and is approximate while the
+  head lags.
 - Roots come back in the contract's encoding: `(hi << 128) | lo` over little-endian 16-byte
   halves. For `executionBlockHash` that is the *stored* key, not the word `finalizeDeposit`
   looks up: the bridge holds the Ethereum-order hash (§3.4). Byte-reverse each half of a `getHead` root to get the

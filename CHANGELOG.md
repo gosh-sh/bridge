@@ -48,16 +48,28 @@ assigns it when the release is tagged.
   the calls backwards: each run made 31 more hashes live, every one of them a
   valid starting point for the next, and the one-year window never expired
   them because they carried a fresh slot. History could be replayed in
-  indefinitely and the client's state grew with it. A chain in the old order,
-  or one whose far end is not an anchor, is now refused.
+  indefinitely and the client's state grew with it, and expired keys that the
+  FIFO had not yet passed stayed live while they carried a fresh slot. A chain
+  in the old order, or one whose far end is not an anchor, is now refused.
 
   Both ends are checked *before* `tvm.accept()`, inside the pre-accept gas
-  credit. `submitAncestry` is permissionless and the light client pays for
-  everything that runs after `accept`; a transaction that throws still spends
-  the gas it used, so a payload of made-up headers starting at a real anchor
-  and ending nowhere would have cost the client a full walk — up to ~1.9M gas
-  — per message. Two hashes at 4,722 each settle it first, so an unanchored
-  span is refused on the sender's own credit and costs the client nothing.
+  credit, so a span that cannot admit anything is refused without the light
+  client paying for the walk: a payload starting at a real anchor and ending
+  nowhere costs it nothing, where it used to cost 1,942,825 gas per message.
+
+  **This does not make `submitAncestry` cheap to abuse.** The call is
+  permissionless, the contract pays for everything after `accept`, and a
+  transaction that throws still spends the gas it used. A payload whose two
+  ends are both real anchors with forged headers between them — they link to
+  each other and break only at the last link — costs the light client
+  1,917,462 gas and admits nothing, measured on a local node. No cheap check
+  bounds this, because verifying the chain is the work the gas pays for. The
+  same exposure has been in `submitUpdate` since 1.4.1, where `accept` has to
+  precede the halo2 verify. What keeps it from stranding the client is that
+  the client mints its own gas: `rePushAnchor` is permissionless, cheap and
+  reaches `ensureBalance`, so anyone can restore the balance floor. Operators
+  should expect a griefer to be able to burn the client's minted balance, and
+  should watch `getBalance` rather than assume the floor holds.
 
   Callers have to be updated: headers oldest first, and the span must end on a
   proven anchor. `AncestryAccepted.checkpointHash` still carries the newest
@@ -67,20 +79,24 @@ assigns it when the release is tagged.
   instruction instead of the `EthKeccak` software implementation, and
   `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
   64.68M gas before and costs 4,722 now. Measured on a locally built node
-  against the 10M per-transaction limit: 738,280 gas for a 5-header span and
-  1,966,282 for a full 33-header span, where the old software walk
-  extrapolated to ~2.07G. Both include the two anchor hashes the call now does
-  before `tvm.accept()`, which cost about 24,000 of that. Measured end to end,
-  compute and action phase both, not compute alone. A span whose far end is
-  not an anchor costs the light client nothing at all: it is refused before
-  `accept`, no transaction is committed and the balance does not move.
+  against the 10M per-transaction limit, with the client sitting at exactly
+  its `MIN_BALANCE` floor: 748,015 gas for a 5-header span and 1,976,017 for a
+  full 33-header span, where the old software walk extrapolated to ~2.07G.
+  Both include the two anchor hashes the call now does before `tvm.accept()`,
+  about 24,000 of that. Measured end to end, compute and action phase both,
+  not compute alone. A span whose far end is not an anchor costs the light
+  client nothing at all: it is refused before `accept`, no transaction is
+  committed and the balance does not move.
   On-chain ancestry therefore works: a deposit in a
   non-checkpoint block is covered without the owner key, as long as the
   checkpoints bracketing it are both proven and no more than a span apart. A
   checkpoint the daemon skipped can be late-registered through `submitUpdate`
   with its own proof, which brings the bracketing anchors back within reach —
-  but **nothing in this repository does that yet**: the daemon proves only the
-  latest finality update, and there is no subcommand for an older one. Since a
+  but **the daemon does not do it on its own**: it proves only the latest
+  finality update. An operator who kept the update's JSON can late-register it
+  by hand — `eth-lc-relayer prove-one --finality-json <file>` proves whatever
+  it is handed and `submit-one --bundle-dir` sends it — but nothing watches for
+  a skip and nothing fetches an older update from the beacon node. Since a
   step proof takes longer than an epoch, accepted checkpoints are often two or
   more epochs apart, the span is then wider than one call can carry, and those
   blocks need `setAcceptedBlockHash` from the owner until something
@@ -90,8 +106,8 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `92d54080…ea59d0ea`, and `getVersion`
-  reports 1.4.7 instead of 1.4.1, which is how an operator tells a client that
+  code hash moves `314ac6b8…6092f5` → `1078d5f1…64945a`, and `getVersion`
+  reports 1.4.8 instead of 1.4.1, which is how an operator tells a client that
   takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
@@ -129,6 +145,35 @@ assigns it when the release is tagged.
   `owed_spans`, which defaults to empty, so an existing state file is read as
   before.
 
+- **A transaction can no longer queue more sink messages than its balance
+  floor covers, which was losing honest ancestry spans.** Every hash the light
+  client anchors or forgets is an internal message carrying `SINK_VALUE`
+  (1 vmshell). One call could queue `MAX_EVICT_PER_TX` = 128 forgets plus up
+  to 31 pushes: 159 vmshell against a `MIN_BALANCE` of 100. Messages are paid
+  in the action phase in creation order, and `ensureBalance` was called after
+  them, so the mint was too late to help — the first send that crossed the
+  balance failed with action code 37 and the whole transaction aborted after a
+  compute phase that had reported success, with the gas spent and nothing
+  written. The relayer then resent the same valid payload until its budget ran
+  out and gave the span up, so blocks that were covered became blocks needing
+  `setAcceptedBlockHash`. No attacker needed: expired keys are contiguous in
+  the FIFO, so the first time a year's worth comes due the forgets arrive in
+  full batches.
+
+  Two changes. Forgets per transaction are now capped separately at 32
+  (`MAX_FORGETS_PER_TX`), so the worst case one call can queue is 32 + 33 = 65
+  vmshell and fits under the floor with the gas of a full span inside it;
+  examinations stay at 128, so compaction keeps its rate and only the messages
+  are bounded. And the mint is now taken before anything is queued, sized for
+  that worst case. An operator sees `AnchorsExpired` in batches of at most 32
+  where it used to be up to 128, and more transactions to work through a large
+  expiry cluster. Measured on a locally built node: a 33-header span with the
+  client at exactly 100 vmshell now completes with action code 0 and all 31
+  blocks anchored, where 1.4.7 aborted. The mint is not what makes this safe:
+  `gosh.mintshellq` is clamped to the dapp's credit and quietly yields nothing
+  when that is spent — on a self-rooted test deployment it yields nothing at
+  all — which is why the bound, not the mint, is the fix.
+
 - **A checkpoint skipped near the end of a sync-committee period can still be
   registered after the rotation.** `submitUpdate` keeps the commitment a
   `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
@@ -164,29 +209,68 @@ assigns it when the release is tagged.
   `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
   upgraded client therefore starts with no previous committee, which only
   means no catch-up across the rotation already behind it; the field fills on
-  the next rotation. `getCommitteeState` gains a `prevCommittee`
-  output; no other function or event changes, and the ABI's `fields` section
-  gains `_prevCommittee`.
+  the next rotation. The same goes for `_prevCommitteeHeadSlot`, the second new
+  field, a `uint64` next to it: also set to 0 on the upgrade, also filled by
+  the next rotation, and the late path stays closed until both are non-zero.
 
-- **A `submitRotate` hand-off can no longer be labelled with a period far
-  beyond the proven head.** The rotate circuit loads its period as a free
-  witness, so monotonicity (`pi.period > _committeePeriod`) was not a replay
-  guard: anyone could take a genuine hand-off, label it `type(uint64).max` and
-  submit it — the call is permissionless — after which every later rotation
-  failed `ERR_STALE_PERIOD` (245) for good. With `disableOwnerRotation`
-  already run, `setCommitteeCommitment` is closed, so nothing but an owner
-  `reAnchorCommittee` every period could carry the committee at all, and
-  trustless rotation could not be restored. The label must now also satisfy
-  `pi.period <= finalizedSlot / 8192 + 2` (`ERR_PERIOD_TOO_FAR`, 253), which
-  ties it to a slot the step circuit reads out of a signed header. Two periods
-  of slack leave an honest hand-off working while the head is a period behind,
-  and the ceiling rises as the head advances, so a bad label now costs a wait
-  rather than the rotation path. The ceiling applies only once the client has
-  a head: before the first `submitUpdate` the finalized slot is 0, the ceiling
-  would be 2, and a client bootstrapped at a real period (around 1200 on
-  mainnet) could never rotate at all. This defect is in the deployed 1.4.1 as well;
-  constraining the period in the circuit is the complete fix and is not in
-  this change.
+  `getCommitteeState` gains a `prevCommittee` output and no other function or
+  event changes — but it is inserted **second**, so anything reading those
+  outputs positionally shifts. The in-repo readers (`status.sh`,
+  `deploy-contract.sh`, the relayer's embedded ABI) take them by name. The
+  ABI's `fields` section gains `_prevCommittee` and `_prevCommitteeHeadSlot`
+  at positions 11 and 12, so account data decoded with the 1.4.1 ABI reads
+  rubbish from `_committeePeriod` onward: anything decoding this client's state
+  off-chain needs the new ABI.
+
+  The window is slack around a proven slot, not a period boundary. When the
+  head is near the end of its period at the rotation it reaches into the next
+  one, and an early hand-off puts it wherever the sender put the head. Signing
+  there needs a supermajority of the retired committee's keys — the long-range
+  assumption this design already carries — but the contract does not and
+  cannot enforce "the committee of the attested slot's period" while the
+  period is a free witness in the circuit.
+
+- **`submitRotate` no longer decides anything by the period on the proof, and
+  refuses a hand-off that does not change the committee.** The rotate circuit
+  loads its period as a free witness (`rotate_aggregation`: `ctx.load_witness`),
+  so the label is a number the sender types. Monotonicity
+  (`pi.period > _committeePeriod`) was therefore not a replay guard but a way
+  to brick the call: anyone could take a genuine hand-off, label it
+  `type(uint64).max` and submit it — the call is permissionless — after which
+  every later rotation failed `ERR_STALE_PERIOD` (245) for good. With
+  `disableOwnerRotation` already run, nothing but an owner `reAnchorCommittee`
+  every period could carry the committee at all. A ceiling tied to the head
+  does not fix that, it only shrinks the label that does it.
+
+  What prevents replay is the committee chain, which was already there:
+  `pi.currentCommitteeCommitment == _currentCommittee`, so once a rotation
+  lands the same proof no longer matches, and the hand-off out of a given
+  committee is unique. So the period is now out of the decision entirely —
+  both the monotonicity test and the ceiling are gone, and `ERR_STALE_PERIOD`
+  can only come from the owner's `reAnchorCommittee`. `_committeePeriod` is
+  derived from the proven head (`finalizedSlot / 8192 + 1`) instead of being
+  taken from the proof, so an unproven label can no longer reach storage at
+  all; `CommitteeRotated` carries that derived number. It is a report for
+  operators, approximate while the head lags, and nothing gates on it.
+
+  `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
+  (`ERR_SELF_ROTATION`, 253 — the code `ERR_PERIOD_TOO_FAR` held in earlier
+  commits of this branch, which never shipped). A genuine proof with
+  `next == current` exists for every period boundary: the last header of a
+  period is signed in the next one and its state still carries the signer as
+  `next_sync_committee`. It would have passed, changed nothing visible, and
+  overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
+  every checkpoint the replaced committee had not registered yet.
+
+  **Still open, and not fixable here.** Nothing binds a committee to a period
+  except that free label, so a genuine hand-off submitted early — the next
+  committee is in the headers of the current period, so the proof exists from
+  its first slot — installs a committee that has signed nothing yet. The head
+  then cannot move until the chain reaches that committee's period (up to ~27
+  h), and the replaced committee's unregistered checkpoints are stranded. This
+  is permissionless, repeatable once per period, and true of the deployed
+  1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
+  circuit, which is not in this change.
 
 - **The deposit-prover verification key is rotated again, for Amsterdam
   block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
@@ -1647,14 +1731,34 @@ assigns it when the release is tagged.
 
 ### Known issues
 
+- **The FIFO compaction walk is not measured against a full proven set.**
+  `_evictExpired` re-queues every still-live hash it examines, which advances
+  the queue head, so the loop runs its full examination cap on every
+  `submitUpdate` and `submitAncestry` whether anything has expired or not.
+  With ancestry on, the proven set grows from one hash per epoch to one per
+  execution block — roughly 2.6M entries over a year instead of ~82K — and
+  each examination is a dictionary read, delete and write whose cost grows
+  with that depth. The numbers in Breaking Changes were measured on an
+  essentially empty map. Before mainnet this wants measuring against a
+  populated one, together with the eviction lag it implies: the bridge forgets
+  a hash only when the tail passes it, so `finalizeDeposit` can still accept a
+  deposit whose block is older than a year by as much as one full rotation of
+  the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
+  is the light client's own `_isLive`, not the bridge's map.
+
+- **A genuine committee hand-off can be submitted early and freeze the head.**
+  Permissionless, repeatable once per period, and present in the deployed
+  1.4.1; see the `submitRotate` entry in Breaking Changes. The fix belongs in
+  the rotate circuit, which has to bind the hand-off to a slot.
+
 - **A deposit is only covered once both checkpoints bracketing its block are
   proven and within a span of each other.** Gas is no longer the obstacle —
-  the `KECCAK256` instruction brought a full 33-header span to 1,942,271 gas
+  the `KECCAK256` instruction brought a full 33-header span to 1,976,017 gas
   against the 10M per-transaction limit (see Breaking Changes) — and a
   checkpoint the daemon skipped can be late-registered through `submitUpdate`,
-  which would close the gap without the owner key — but nothing in this
-  repository does that yet, so today those blocks need
-  `setAcceptedBlockHash`. What is left is ordering: until the
+  which closes the gap without the owner key — but the daemon never does it by
+  itself, so today those blocks need `setAcceptedBlockHash` unless an operator
+  late-registers the checkpoint by hand. What is left is ordering: until the
   skipped checkpoint is late-registered and the span sent, a deposit in those
   blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and on a
   bridge with `disableOwnerAnchors` already called there is no owner fallback

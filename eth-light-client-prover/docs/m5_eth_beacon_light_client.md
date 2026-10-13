@@ -173,14 +173,22 @@ two anchors go into `USDCBridge._acceptedBlockHash`. Operator:
 
 **Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
 be submitted without the skipped ones. A skipped checkpoint can still be
-late-registered, signed by the committee of its attested slot's period — the
-one in force, or the one a `submitRotate` replaced, so a skip at a period edge
-is not lost. `submitUpdate` verifies the proof, records the exec hash (and
-pushes it to `USDCBridge`), and does **not** move the head back. Same-slot
-replay and already-proven hashes still revert. A committee that has left
-office cannot sign outside the period it served, and the owner hatches
+late-registered, signed by the committee in force or by the one a
+`submitRotate` replaced, so a skip at a period edge is not lost in the honest
+case. `submitUpdate` verifies the proof, records the exec hash (and pushes it
+to `USDCBridge`), and does **not** move the head back. Same-slot replay and
+already-proven hashes still revert. The owner hatches
 (`setCommitteeCommitment`, `reAnchorCommittee`) leave no window to the
 committee they replace.
+
+The replaced committee's window is a band of slots around the head it left,
+and **not** a binding to the period it served: the rotate circuit loads its
+period as a free witness, so the contract has no proven fact tying a committee
+to a period. When the head sits near the end of its period at the rotation the
+band reaches into the next one, and a hand-off submitted early puts the band
+wherever the sender put the head. Signing inside it still needs a
+supermajority of the retired committee's keys. Binding the hand-off to a slot
+in the circuit is what would make this exact.
 
 - Head liveness does **not** require every 6.4 min update — jumping to the
   latest checkpoint is enough to keep the committee/WS clock moving.

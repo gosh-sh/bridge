@@ -121,7 +121,8 @@ level-opaque):
 ```bash
 cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)'  --rpc-url $RPC
 # 0  → no rotation has ever been applied (minBK=5 regime, or fresh deploy)
-# N  → latest applied rotation seq_no; verifyBlock accepts the previous
+# N  → latest applied rotation seq_no (before the first one: the deploy-time
+#      GENESIS_LAST_BK_SET_UPDATE_SEQNO); verifyBlock accepts the previous
 #      commitment for every seqNo <= N
 
 cast call $BRIDGE 'storedBkSetCommitment()(uint256)'      --rpc-url $RPC
@@ -505,7 +506,18 @@ cold-start commitment compare passes.
 >    `layer_hashes[level]` and `bk_set` commitment.
 > 4. Prints `KEY=value` lines to stdout, ready to `source`:
 >    `GENESIS_BK_SET_COMMITMENT`, `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`,
->    `GENESIS_SEED_SEQNO`, `GENESIS_SEED_HEIGHT`, `GENESIS_ANCHOR_LEVEL`.
+>    `GENESIS_SEED_SEQNO`, `GENESIS_SEED_HEIGHT`, `GENESIS_ANCHOR_LEVEL`,
+>    `GENESIS_LAST_BK_SET_UPDATE_SEQNO`. The last one is the highest
+>    `bkSetUpdates.height ≤ seed_seqno` observed via GQL at run time;
+>    `DeployShellnetE2EBridge.s.sol` forwards it to the constructor arg
+>    `genesisLastBkSetUpdateSeqNo` via `vm.envOr(..., 0)`, which the
+>    constructor writes verbatim to `storedLastBkSetUpdateSeqNo`. On a
+>    chain whose GQL retention window has rotated past the current
+>    `bk_set.*.json` snapshot, this seeds the on-chain cursor past those
+>    historical rotations so the daemon's drain does not re-apply events
+>    already folded into `genesisBkSetCommitment`. Operators do not set
+>    it by hand; it defaults to `0` on chains without pre-bootstrap
+>    rotations in GQL.
 >
 > ⚠️ **Name mismatch to be aware of.** The tool emits
 > `GENESIS_SEED_SEQNO`. The Solidity deploy script
@@ -543,9 +555,11 @@ bridge that will serve withdrawals.
 **BK-set anchor at deploy time.** The constructor receives
 `GENESIS_BK_SET_COMMITMENT` and sets `storedBkSetCommitment` to it;
 `storedPrevBkSetCommitment` is initialised to zero and
-`storedLastBkSetUpdateSeqNo` to 0. The first `applyBkSetUpdate` moves
-the current commitment into `storedPrevBkSetCommitment` and installs
-the new one into `storedBkSetCommitment`.
+`storedLastBkSetUpdateSeqNo` to `GENESIS_LAST_BK_SET_UPDATE_SEQNO`
+(0 unless GQL still held rotations at or below the seed). The first
+`applyBkSetUpdate` moves the current commitment into
+`storedPrevBkSetCommitment` and installs the new one into
+`storedBkSetCommitment`.
 
 **Why `--at-head` matters (danger).** The daemon's cold-start policy
 does **no** chain-head comparison at startup — only the alignment
@@ -627,7 +641,7 @@ cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'    --rpc-url $RPC   # == 
 cast call $BRIDGE 'expectedPrevAnchor(uint8)(uint256)' $BRIDGE_ANCHOR_LEVEL --rpc-url $RPC   # == GENESIS_PREV_MAX_LEVEL_LAYER_HASH
 cast call $BRIDGE 'storedBkSetCommitment()(uint256)'      --rpc-url $RPC   # == GENESIS_BK_SET_COMMITMENT
 cast call $BRIDGE 'storedPrevBkSetCommitment()(uint256)'  --rpc-url $RPC   # == 0 (no rotation applied yet)
-cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)'  --rpc-url $RPC   # == 0
+cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)'  --rpc-url $RPC   # == GENESIS_LAST_BK_SET_UPDATE_SEQNO (usually 0)
 ```
 
 If any of these don't match your deploy's genesis values, **stop** —
@@ -1584,6 +1598,17 @@ out of its attached archive window. Symptoms:
 > prover state against the existing on-chain bridge, which is still
 > pinned at the stale cursor. The *contract* itself is in the dead
 > zone; no amount of state restoration moves it forward.
+
+> **Historical bk-rotations past the pruning window.** If the live
+> `bk_set.*.json` was built from a snapshot that already encodes
+> rotations whose `bkSetUpdates` events are still visible via GQL
+> (even past the key-block pruning depth), do **not** pre-fold them by
+> hand. `compute_bridge_anchors` now emits
+> `GENESIS_LAST_BK_SET_UPDATE_SEQNO = max(bkSetUpdates.height ≤ seed_seqno)`,
+> and `scripts/deploy_bridge_bundle.sh` forwards it to the constructor;
+> the daemon's cold-start seed does the same via GQL on first launch.
+> The on-chain cursor is written to `storedLastBkSetUpdateSeqNo` at
+> deploy and the drain starts from the first rotation strictly past it.
 
 **Fix — redeploy a fresh bridge bundle past the dead zone.** Pick a
 new seed boundary that:

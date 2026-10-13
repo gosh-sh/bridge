@@ -3,24 +3,36 @@
 *Verified against `contracts/ethereum/src/AckiNackiBridge.sol` at commit `a69ba36`, 2026-08-19.
 Line references are to that file.*
 
-Idle USDC is lent to the AAVE V3 USDC market. This page is what an operator needs: where the money
-is, which command collects what, and the two ways to get it wrong. The contract-level detail is in
+The contract can lend idle USDC to the AAVE V3 USDC market. No live deploy does:
+`aavePool` is immutable and is `address(0)` on every Sepolia bridge this tree
+pins. This page is what an operator needs: where the money is, which command
+collects what, and the two ways to get it wrong. The contract-level detail is in
 [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §10.
 
 ## Not wired on any live deploy
 
-`deposit()` never talks to AAVE; idle USDC sits on the contract until the owner calls
-`supplyToAave`. None of the Sepolia bridges (`0xCdFd6Cef…4fdb`, `0x0F4F8b7E…2fc7`,
-`0x8545129b…8f44`) have a pool: `aavePool` is `address(0)`, `aaveEnabled` is false,
-`suppliedPrincipal` is 0. `aavePool` is immutable, and `setAaveEnabled(true)` reverts
-`InvalidAaveAddress` when the pool is zero, so attaching AAVE means a new deploy.
+`deposit()` never talks to AAVE; idle USDC sits on the contract until the owner
+calls `supplyToAave`. None of the Sepolia bridges this tree names have a pool:
+the live pinned deploy `0xa1baf3f7…2cb36` (`crates/ackinacki-bridge/config/bridge_config.shellnet`),
+the stopped `0x0F4F8b7E…2fc7` and `0xCdFd6Cef…4fdb`, and the rolled-back
+NODE-4011 `0x8545129b…8644`. On each, `aavePool` is `address(0)`, `aaveEnabled`
+is false, `suppliedPrincipal` is 0. `aavePool` is immutable, and
+`setAaveEnabled(true)` reverts `InvalidAaveAddress` when the pool is zero, so
+attaching AAVE means a new deploy.
 
 `DeployShellnetE2EBridge` never wires a pool. Its USDC is Circle's Sepolia token
 (`0x1c7D4B19…7238`). The AAVE V3 pool on Sepolia (`0x6Ae43d32…8951`) does not list
-that token; `getReserveData` returns a zero aToken. The pool's USDC is
-`0x94a9D9AC…E4C8` (`aEthUSDC` `0x16dA4541…EB80`), which is what `DeployRealBridge`
-uses when `USE_AAVE=true`. A stand that must earn yield has to be redeployed with
-that script, that token, and `USE_AAVE=true` — not flipped on afterwards.
+that token; `getReserveData` returns a zero aToken. The pool's underlying USDC is
+`0x94a9D9AC…E4C8` (aToken `0x16dA4541…EB80`). `DeployRealBridge` always uses that
+underlying as `usdc` on Sepolia; `USE_AAVE=true` only fills the pool and aToken
+slots. A stand that must earn yield is a `DeployRealBridge` redeploy with
+`USE_AAVE=true` **and** the stand's withdraw aliases
+(`WITHDRAW_ALT_DST_CHAIN_ID=1`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID=11155111`,
+`WITHDRAW_ALT_TOKEN_ID=3`). Left at the script's zeros, `withdrawByProof` for
+`dstChainId=1` / `tokenId=3` reverts and the shellnet-l2 `preflight.sh` stops on
+the USDC and alt-chain checks — Circle USDC and those aliases are what
+`runtime.env.example` expects. That redeploy also changes the deposit token: the
+live shellnet bridges hold Circle USDC, not the pool's.
 
 `DeployRealBridge` only knows AAVE addresses on Ethereum mainnet and Sepolia. It
 reverts on any other chain. The deposit allowlist's six L2s have no pool wiring

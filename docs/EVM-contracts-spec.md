@@ -663,7 +663,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | Script | Purpose |
 |---|---|
 | `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, **no AAVE**, Circle Sepolia USDC (`0x1c7D4B19…7238`). That token is not a reserve on the Sepolia AAVE V3 pool, and `aavePool` is immutable, so this script cannot grow a yield position later. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
+| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, **no AAVE**, Circle Sepolia USDC (`0x1c7D4B19…7238`). That token is not a reserve on the Sepolia AAVE V3 pool, and `aavePool` is immutable, so this script cannot grow a yield position later. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`DeployShellnetE2EBridge.s.sol` `wireWithdraw` guard). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
@@ -676,7 +676,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 |---|---|---|
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle`, else mock. |
-| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. Default **false**. On Sepolia the USDC it wires is the pool's `0x94a9D9AC…E4C8`, not Circle's `0x1c7D4B19…7238`. Mainnet and Sepolia only; any other chain reverts. The live Sepolia bridges were deployed with this unset, so they have `aavePool = 0` and cannot be flipped on. |
+| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. Default **false**. Does not pick the USDC: on Sepolia `_resolveTokenAddresses` always sets `usdc` to the pool's underlying `0x94a9D9AC…E4C8`; the flag only fills the pool and aToken. Mainnet uses canonical `0xA0b86991…eB48`. Mainnet and Sepolia only; any other chain reverts. The live Sepolia bridges were deployed with `DeployShellnetE2EBridge` (Circle USDC, no pool), so they have `aavePool = 0` and cannot be flipped on. |
 | `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
@@ -703,7 +703,7 @@ address.
 | Chain | USDC | AAVE V3 Pool | aUSDC | Axiom V2 Core |
 |---|---|---|---|---|
 | Mainnet (1) | `0xA0b86991…eB48` | `0x87870Bca…A4E2` | `0x98C23E9d…6F5c` | `0x69963768…C98B` |
-| Sepolia (11155111) | `0x94a9D9AC…E4C8` (Aave-faucet test USDC) | `0x6Ae43d32…8951` | `0x16dA4541…EB80` | `0x69963768…C98B` (mock core) |
+| Sepolia (11155111) | `0x94a9D9AC…E4C8` (Aave-faucet test USDC, `DeployRealBridge`) / `0x1c7D4B19…7238` (Circle USDC, `DeployShellnetE2EBridge` and the live shellnet bridges) | `0x6Ae43d32…8951` | `0x16dA4541…EB80` | `0x69963768…C98B` (mock core) |
 
 No deployment-address artefact is committed to this repo (`deployment_real.json` is produced at
 deploy time and not tracked; `contracts/ethereum/broadcast/` is gitignored, `.gitignore:26`), so

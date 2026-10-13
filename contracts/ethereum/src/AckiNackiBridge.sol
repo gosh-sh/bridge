@@ -14,7 +14,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 /// @dev Holds user USDC (ERC-20, 6 decimals) on deposit and routes idle balance
 ///      into AAVE V3 USDC market for yield.
 ///      - `deposit(uint256 amount)` stays cheap: funds accumulate in the contract;
-///        an owner/keeper batches supplies to AAVE with `supplyToAave()` to amortise gas.
+///        the owner batches supplies to AAVE with `supplyToAave()` to amortise gas.
 ///      - Owner can harvest accrued yield without touching user principal.
 ///
 ///      AN→ETH state (Phase 4): the bridge stores a rolling commitment to the
@@ -595,8 +595,11 @@ contract AckiNackiBridge {
     ///                            construction so re-deploys are unnecessary
     ///                            when the burn-proof flow lands.
     /// @param _usdc               USDC (ERC-20, 6 decimals) accepted for deposits.
-    ///                            Sepolia testnet: Aave-faucet USDC
-    ///                            `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8`.
+    ///                            Sepolia: Aave-faucet USDC
+    ///                            `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8`
+    ///                            (`DeployRealBridge`) or Circle
+    ///                            `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`
+    ///                            (`DeployShellnetE2EBridge` / live shellnet).
     /// @param _aavePool           AAVE V3 Pool address.
     /// @param _aUSDC              aUSDC token minted by AAVE for supplied USDC.
     /// @param _vb                 AN→ETH verifyBlock wiring (Phase 4). Pass all
@@ -690,8 +693,8 @@ contract AckiNackiBridge {
     /// @notice Deposit USDC to be bridged to Acki Nacki.
     /// @dev Caller must `approve` this contract for `amount` before calling.
     ///      Emits a `Deposit` event that is later proven by a ZK circuit.
-    ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
-    ///      in batches via `supplyToAave()`.
+    ///      Funds stay as USDC in this contract; the owner supplies them to AAVE
+    ///      in batches via `supplyToAave()`. There is no keeper role.
     /// @param amount      USDC amount (6 decimals) to bridge.
     /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
     ///                    but Acki Nacki ignores it: the workchain concept is

@@ -379,7 +379,7 @@ wallet-balance line — refill from either faucet when it drops below
 >    `GENESIS_SEED_SEQNO`, `GENESIS_SEED_HEIGHT`, `GENESIS_ANCHOR_LEVEL`.
 >
 > ⚠️ **Name mismatch to be aware of.** The tool emits `GENESIS_SEED_SEQNO`.
-> The Solidity deploy script (`DeployShellnetE2EBridge.s.sol:138`) reads
+> The Solidity deploy script (`DeployShellnetE2EBridge.s.sol`, `GENESIS_LAST_SEEN_BLOCK_SEQNO`) reads
 > `GENESIS_LAST_SEEN_BLOCK_SEQNO` via `vm.envOr(..., 0)` — **silently
 > defaulting to `0` if the var is missing**, which pins
 > `storedLastSeenBlockSeqNo=0` into the constructor and permanently

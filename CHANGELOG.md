@@ -301,8 +301,14 @@ assigns it when the release is tagged.
   block built on, read from `finalized_header.execution_block_hash`; before
   Gloas it is still the payload's own `block_hash`.
 - `EthBeaconLightClient.setGloasForkSlot(uint64)` (owner) and
-  `getGloasForkSlot() → (uint64 slot, bool set)`; errors 253 (proof made for
-  a different Gloas fork slot) and 254 (fork slot not set).
+  `getGloasForkSlot() → (uint64 gloasForkSlot, bool isSet)`; errors 253 (proof made for
+  a different Gloas fork slot) and 254 (fork slot not set). `eth-lc-relayer
+  set-gloas-fork-slot --slot …` is the operator call; a fresh deploy rejects
+  every submission with 254 until it runs.
+- `submitRotate` accepts only the next period (`pi.period == _committeePeriod +
+  1`). A rotate proof cannot jump `_committeePeriod` to `type(uint64).max` and
+  freeze trustless rotation; a skip of more than one period still goes through
+  `reAnchorCommittee`.
 
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki

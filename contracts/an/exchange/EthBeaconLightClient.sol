@@ -382,8 +382,11 @@ contract EthBeaconLightClient {
         require(pi.currentCommitteeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
         require(_gloasForkSlotSet, ERR_FORK_SLOT_UNSET);
         require(pi.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
-        // Monotonic period — reject stale / replayed hand-offs.
-        require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
+        // Next period only. `period` is still a free circuit witness, so a
+        // proof of the real successor committee could otherwise expose
+        // `type(uint64).max` and freeze every later `submitRotate`
+        // (`ERR_STALE_PERIOD`) and leave `reAnchorCommittee` stuck at max.
+        require(pi.period == _committeePeriod + 1, ERR_STALE_PERIOD);
 
         tvm.accept();
         require(

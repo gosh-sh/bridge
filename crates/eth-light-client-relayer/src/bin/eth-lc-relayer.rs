@@ -7,6 +7,8 @@
 //! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
 //! - `set-committee` — owner `setCommitteeCommitment` from a proven bundle
 //!   (weak-subjectivity bootstrap / manual hop while `--no-rotate`)
+//! - `set-gloas-fork-slot` — owner `setGloasForkSlot`; required once after
+//!   deploy or `submitUpdate` / `submitRotate` revert 254
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
@@ -95,6 +97,24 @@ enum Cmd {
         period: Option<u64>,
         #[arg(long, default_value = "./eth-lc-relayer-state.json")]
         state: PathBuf,
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        #[arg(long, env = "AN_LC_ABI_PATH")]
+        an_lc_abi_path: String,
+        #[arg(long, env = "AN_LIGHT_CLIENT")]
+        an_light_client: String,
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
+    },
+    /// Owner `setGloasForkSlot(slot)`. After `deployLightClient` (or
+    /// `updateCode` with an empty user cell) both `submitUpdate` and
+    /// `submitRotate` revert 254 until this runs. Sepolia: `11296768`.
+    /// Mainnet (Gloas unscheduled): `18446744073709551615`.
+    SetGloasForkSlot {
+        #[arg(long)]
+        slot: u64,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -304,6 +324,24 @@ async fn main() -> anyhow::Result<()> {
         } => {
             submit_one(
                 bundle_dir,
+                an_graphql_url,
+                an_keys_path,
+                an_lc_abi_path,
+                an_light_client,
+                an_sender,
+            )
+            .await
+        },
+        Cmd::SetGloasForkSlot {
+            slot,
+            an_graphql_url,
+            an_keys_path,
+            an_lc_abi_path,
+            an_light_client,
+            an_sender,
+        } => {
+            set_gloas_fork_slot(
+                slot,
                 an_graphql_url,
                 an_keys_path,
                 an_lc_abi_path,
@@ -548,6 +586,56 @@ async fn set_committee(
     st.rotate_pending_period = None;
     st.save(&state)?;
     info!(state = %state.display(), period, "state file records the committee period");
+    Ok(())
+}
+
+#[cfg(not(feature = "live-submit"))]
+#[allow(clippy::too_many_arguments)]
+async fn set_gloas_fork_slot(
+    _slot: u64,
+    _an_graphql_url: String,
+    _an_keys_path: String,
+    _an_lc_abi_path: String,
+    _an_light_client: String,
+    _an_sender: String,
+) -> anyhow::Result<()> {
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+async fn set_gloas_fork_slot(
+    slot: u64,
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_lc_abi_path: String,
+    an_light_client: String,
+    an_sender: String,
+) -> anyhow::Result<()> {
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
+    let abi =
+        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi: abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), eth_light_client_relayer::AnSubmitConfig {
+            from: an_sender,
+            light_client: an_light_client,
+            confirm_timeout_secs: 120,
+            usdc_bridge: None,
+        });
+    info!(slot, "setGloasForkSlot");
+    match submitter.set_gloas_fork_slot(slot).await? {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            tx_hash,
+        } => {
+            info!(tx = ?tx_hash.map(hex::encode), "setGloasForkSlot accepted");
+        },
+        other => anyhow::bail!("setGloasForkSlot: {other:?}"),
+    }
     Ok(())
 }
 

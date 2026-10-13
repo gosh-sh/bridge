@@ -83,6 +83,8 @@ log "getVersion / getConfig / getCommitteeState"
 tvm_json runx --abi "$ABI" --addr "$DAPP_ADDR" -m getVersion
 tvm_json runx --abi "$ABI" --addr "$DAPP_ADDR" -m getConfig
 tvm_json runx --abi "$ABI" --addr "$DAPP_ADDR" -m getCommitteeState
+log "pin the Gloas fork slot before prove-one / submit-one (254 until set)"
+echo "  eth-lc-relayer set-gloas-fork-slot --slot 11296768   # Sepolia"
 
 cat <<EOF
 

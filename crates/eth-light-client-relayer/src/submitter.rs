@@ -55,6 +55,11 @@ pub trait AnSubmitter: Send + Sync {
         commitment: [u8; 32],
         period: u64,
     ) -> Result<SubmitOutcome, RelayerError>;
+
+    /// Owner `setGloasForkSlot(slot)`. Required once after deploy / after
+    /// `updateCode` with an empty user cell; until it runs, every
+    /// `submitUpdate` / `submitRotate` reverts 254.
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -267,6 +272,18 @@ impl AnSubmitter for MockAnSubmitter {
         }
         inner.owner_anchors_enabled = false;
         inner.owner_rotation_enabled = false;
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
+
+    async fn set_gloas_fork_slot(&self, _slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        let inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "setGloasForkSlot rejected".into(),
+            });
+        }
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
@@ -708,6 +725,11 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             }),
         )
         .await
+    }
+
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        self.call("setGloasForkSlot", json!({ "gloasForkSlot": slot }))
+            .await
     }
 }
 

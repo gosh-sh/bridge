@@ -381,8 +381,12 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
    (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
-5. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
-6. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
+5. Pin the Gloas fork slot **before** any proof: `eth-lc-relayer set-gloas-fork-slot --slot
+   11296768` on Sepolia, `--slot 18446744073709551615` on mainnet (Gloas not scheduled). Until
+   `getGloasForkSlot` reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 254.
+   `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell instead.
+6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
+7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
    flag, after the first accepted update the daemon checks `getAnchorConfig().lightClient`
    against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchors` and `disableOwnerRotation`; from
    then on the bridge refuses `setAcceptedBlockHash`.

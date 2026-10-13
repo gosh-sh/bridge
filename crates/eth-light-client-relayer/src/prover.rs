@@ -19,7 +19,11 @@ pub trait ProofGenerator: Send + Sync {
     async fn generate_step(&self, update: &FinalityUpdate)
         -> Result<StepProofBundle, RelayerError>;
 
-    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError>;
+    async fn generate_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError>;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,7 +61,11 @@ impl ProofGenerator for MockProofGenerator {
         })
     }
 
-    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
+    async fn generate_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError> {
         if self.fail_rotate {
             return Err(RelayerError::ProofGeneration(
                 "mock configured to fail rotate".into(),
@@ -66,6 +74,11 @@ impl ProofGenerator for MockProofGenerator {
         let mut public_inputs = vec![0u8; ROTATE_INSTANCE_LEN * 32];
         let off = ROTATE_PERIOD_INDEX * 32;
         public_inputs[off..off + 8].copy_from_slice(&to_period.to_le_bytes());
+        if let Some(chain) = chain {
+            let fork_off = crate::types::ROTATE_GLOAS_FORK_SLOT_INDEX * 32;
+            public_inputs[fork_off..fork_off + 8]
+                .copy_from_slice(&chain.gloas_fork_slot.to_le_bytes());
+        }
         Ok(RotateProofBundle {
             public_inputs,
             proof: vec![0xCD; 64],
@@ -203,13 +216,17 @@ impl SubprocessProofGenerator {
         })
     }
 
-    async fn run_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
+    async fn run_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError> {
         let work = tempfile::tempdir()
             .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
         let tree_out = work.path().join("rotate_tree");
         std::fs::create_dir_all(&tree_out)?;
-        let status = Command::new("cargo")
-            .current_dir(&self.cfg.prover_dir)
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(&self.cfg.prover_dir)
             .args([
                 "run",
                 "--release",
@@ -220,7 +237,22 @@ impl SubprocessProofGenerator {
             ])
             .env("EMIT_VKBLOB", "1")
             .env("TREE_OUT", &tree_out)
-            .env("STEP_SRS", &self.cfg.srs_path)
+            .env("STEP_SRS", &self.cfg.srs_path);
+        if let Some(chain) = &chain {
+            cmd.env(
+                crate::types::BeaconChainParams::ENV_FORK_VERSION,
+                chain.fork_version_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GENESIS_VALIDATORS_ROOT,
+                chain.genesis_validators_root_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GLOAS_FORK_SLOT,
+                chain.gloas_fork_slot.to_string(),
+            );
+        }
+        let status = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -249,8 +281,12 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_step(update).await
     }
 
-    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
-        self.run_rotate(to_period).await
+    async fn generate_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError> {
+        self.run_rotate(to_period, chain).await
     }
 }
 

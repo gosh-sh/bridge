@@ -19,6 +19,8 @@ pub const ROTATE_ACCUMULATOR_LIMBS: usize = 12;
 pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
 /// Index of `period` in the rotate public inputs.
 pub const ROTATE_PERIOD_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 2;
+/// Index of `gloas_fork_slot` in the rotate public inputs.
+pub const ROTATE_GLOAS_FORK_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
 /// `gloas_fork_slot` of a network that has not scheduled Gloas.
 pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 

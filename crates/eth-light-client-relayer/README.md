@@ -45,21 +45,24 @@ eth-lc-relayer prove-one --beacon-url … \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle
 
-# 5. Submit step / rotate
+# 5. Pin the Gloas fork slot (required once; Sepolia 11296768, mainnet max)
+eth-lc-relayer set-gloas-fork-slot --slot 11296768 …
+
+# 6. Submit step / rotate
 eth-lc-relayer submit-one --bundle-dir ./bundle …
 eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree …
 
-# 6. Is this deposit's execution hash on the checkpoint parent chain?
+# 7. Is this deposit's execution hash on the checkpoint parent chain?
 eth-lc-relayer ancestry-one --beacon-url … \
   --checkpoint-slot 12345678 --deposit-hash 0x…
 
-# 7. Write the 31 parent hashes on-chain (will OOG until a keccak builtin;
+# 8. Write the 31 parent hashes on-chain (will OOG until a keccak builtin;
 #    needs --submit-ancestry on the daemon, or this one-shot + live-submit)
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
   --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
 
-# 8. One-shot owner flip (the daemon does it only with --flip-owner)
+# 9. One-shot owner flip (the daemon does it only with --flip-owner)
 eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' \
   --an-usdc-abi-path ./abi/USDCBridge.abi.json …
 ```

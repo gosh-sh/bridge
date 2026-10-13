@@ -434,16 +434,35 @@ fn hex32_exec(s: &str) -> Result<[u8; 32], RelayerError> {
 fn parse_exec_link(json: &str) -> Result<ExecLink, RelayerError> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| RelayerError::beacon(format!("block JSON: {e}")))?;
-    let payload = &v["data"]["message"]["body"]["execution_payload"];
+    let body = &v["data"]["message"]["body"];
+    let payload = &body["execution_payload"];
+    // Gloas beacon blocks carry a payload bid instead of the payload. The
+    // light client stores the bid's `parent_block_hash` (the EL block that
+    // slot built on); `block_hash` on the bid is that same stored hash when
+    // the node fills it.
+    let bid = &body["signed_execution_payload_bid"]["message"];
     let block_hash = hex32_exec(
         payload["block_hash"]
             .as_str()
-            .ok_or_else(|| RelayerError::beacon("missing execution_payload.block_hash"))?,
+            .or_else(|| bid["parent_block_hash"].as_str())
+            .or_else(|| bid["block_hash"].as_str())
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing execution_payload.block_hash / \
+                     signed_execution_payload_bid.message.parent_block_hash",
+                )
+            })?,
     )?;
     let parent_hash = hex32_exec(
         payload["parent_hash"]
             .as_str()
-            .ok_or_else(|| RelayerError::beacon("missing execution_payload.parent_hash"))?,
+            .or_else(|| bid["parent_block_hash"].as_str())
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing execution_payload.parent_hash / \
+                     signed_execution_payload_bid.message.parent_block_hash",
+                )
+            })?,
     )?;
     Ok(ExecLink {
         block_hash,
@@ -502,6 +521,18 @@ mod tests {
     #[test]
     fn parse_exec_link_rejects_missing_payload() {
         assert!(parse_exec_link(r#"{"data":{}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_exec_link_reads_gloas_payload_bid() {
+        let json = r#"{
+          "data":{"message":{"body":{"signed_execution_payload_bid":{"message":{
+            "parent_block_hash":"0x3333333333333333333333333333333333333333333333333333333333333333"
+          }}}}}
+        }"#;
+        let link = parse_exec_link(json).unwrap();
+        assert_eq!(link.block_hash, [0x33; 32]);
+        assert_eq!(link.parent_hash, [0x33; 32]);
     }
 
     // Trimmed `GET /eth/v1/config/spec` of Sepolia (2026-09-04): Fulu live,

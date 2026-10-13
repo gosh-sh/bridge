@@ -181,7 +181,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 to_period,
             });
         }
-        let bundle = match self.prover.generate_rotate(to_period).await {
+        let bundle = match self.prover.generate_rotate(to_period, update.chain).await {
             Ok(b) => b,
             Err(e) => {
                 return Ok(TickOutcome::ProofFailed {

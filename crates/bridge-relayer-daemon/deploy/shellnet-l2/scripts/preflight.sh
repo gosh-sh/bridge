@@ -280,7 +280,7 @@ else
   if [[ -f "$state_bridge_file" ]]; then
     state_bridge=$(tr -d '[:space:]' <"$state_bridge_file")
     [[ "${state_bridge,,}" == "$bridge_lc" ]] ||
-      die "prover state in $BRIDGE_STATE_DIR belongs to bridge $state_bridge, not $BRIDGE_ADDRESS; start the new bridge with an empty state directory"
+      die "prover state in $BRIDGE_STATE_DIR belongs to bridge $state_bridge, not $BRIDGE_ADDRESS; move $BRIDGE_STATE_DIR and L2_config/relayer-state.json (one level up) aside and start the new bridge with empty state"
   else
     # State from before bridge_address existed: adopt it, unless the contract
     # has never advanced, which is a fresh bridge next to someone else's state.
@@ -343,4 +343,4 @@ free_kib=$(df -Pk "$BRIDGE_PK_CACHE_DIR" | awk 'NR==2 {print $4}')
 (( free_kib >= 80 * 1024 * 1024 )) || die "less than 80 GiB free on runtime filesystem"
 ok "disk headroom $((free_kib / 1024 / 1024)) GiB"
 
-printf 'READ-ONLY L2 PREFLIGHT PASSED. No transaction was sent and no daemon was started.\n'
+printf 'L2 PREFLIGHT PASSED. No transaction was sent and no daemon was started. State dir may have gained bridge_address.\n'

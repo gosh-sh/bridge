@@ -874,7 +874,7 @@ seed followed by a larger burn is the other.
 grown by users bridging IN (`deposit()`), and payouts on the AN→ETH leg
 draw from that pool. Shellnet demos usually burn on the AN side without a
 prior ETH→AN deposit — so the treasury never funds itself organically.
-`AckiNackiBridge.sol:1188` enforces `pub.amount > treasuryBalance` →
+`AckiNackiBridge.sol:1425` enforces `pub.amount > treasuryBalance` →
 revert; there is no admin bypass. AAVE cannot help with this one: on a
 bridge with a pool, `withdrawByProof` pulls from AAVE only the gap between
 the USDC on the contract and `pub.amount`, and only for money that is

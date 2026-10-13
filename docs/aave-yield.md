@@ -165,14 +165,18 @@ AN="tvm-cli -u https://shellnet.ackinacki.org"
 
    Then stop its AN→ETH relayer (step 5 reuses the instance with fresh state).
 
-4. **Reopen Acki Nacki** with `setPaused(false)`. Deposits made into `OLD_BRIDGE`
-   before step 3 finalize as usual, because it is still trusted. Burns made from now
-   on wait for the stand.
+   **Leave Acki Nacki paused.** The stand does not exist yet. Its genesis is
+   taken at deploy time from the current head (`deploy_bridge_bundle.sh` /
+   `compute_bridge_anchors --at-head`). A burn made after a reopen, if a
+   window boundary passes before that deploy, sits below the seed: the stand
+   never holds an anchor that covers it, and `OLD_BRIDGE` is already paused
+   and cannot pay it.
 
 ### 3. Deploy
 
-Deploy after step 2: the stand must not hold anchors or a treasury while the live
-bridge can still pay.
+Deploy after step 2, while Acki Nacki is still paused: the stand must not hold
+anchors or a treasury while the live bridge can still pay, and no new burn
+must land before the stand exists.
 
 The usual way is the shellnet bundle script with `USE_AAVE=true`. It derives the
 genesis values from the shellnet head, runs `DeployRealBridge` with the shellnet
@@ -223,7 +227,7 @@ cast call $BRIDGE 'bridgeWithdrawalAltTokenId()(uint256)' --rpc-url $RPC   # 3
 cast call $BRIDGE 'yieldRecipient()(address)' --rpc-url $RPC
 ```
 
-### 4. Trust the stand on Acki Nacki, in place of the live bridge
+### 4. Trust the stand on Acki Nacki
 
 `eccUSDCBridge.finalizeDeposit` rejects a deposit whose proven
 `(chainId, contractAddress)` is not in its allowlist (`contracts/an/README.md`). The
@@ -238,37 +242,66 @@ $AN runx --abi $ABI --addr $AN_BRIDGE \
 ```
 
 Until this is done every deposit into the stand is proven but refused on Acki Nacki.
-Withdrawals (AN→ETH) do not depend on it.
+Withdrawals (AN→ETH) do not depend on it. Leave `OLD_BRIDGE` in the set until
+step 7: deposits made into it before its pause still need `finalizeDeposit`.
 
-Once the ETH→AN relayer has finalized every deposit made into `OLD_BRIDGE` before its
-pause, remove it from the set with the same call and `"allowed":false`.
+### 5. Point the AN→ETH relayer at the stand
 
-### 5. Point the off-chain parts at the stand
+The stopped instance from step 2, **with fresh state**. Its state files belong
+to the live bridge; move them aside rather than deleting them:
 
-- AN→ETH relayer (`crates/bridge-relayer-daemon/deploy/shellnet-l2/`): the stopped
-  instance from step 2, **with fresh state**. Its state files belong to the live
-  bridge; move them aside rather than deleting them:
+```bash
+ROOT=/var/lib/gosh-bridge-relayer   # RELAYER_RUNTIME_ROOT
+sudo mv $ROOT/L2_config $ROOT/L2_config.$OLD_BRIDGE
+sudo install -d -o gosh-relayer -g gosh-relayer $ROOT/L2_config $ROOT/L2_config/state
+```
 
-  ```bash
-  ROOT=/var/lib/gosh-bridge-relayer   # RELAYER_RUNTIME_ROOT
-  sudo mv $ROOT/L2_config $ROOT/L2_config.$OLD_BRIDGE
-  sudo install -d -o gosh-relayer -g gosh-relayer $ROOT/L2_config $ROOT/L2_config/state
-  ```
+In `/etc/gosh-bridge-relayer/shellnet-l2.env` set `BRIDGE_ADDRESS`,
+`BRIDGE_DEPLOY_BLOCK`, `BRIDGE_BOOTSTRAP_SEQNO`, the `EXPECTED_*` genesis and
+withdraw values you deployed with,
+`EXPECTED_USDC_ADDRESS=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` and
+`EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`, then run
+`preflight` and start the service. `preflight` writes `$BRIDGE_STATE_DIR/bridge_address`
+and stops if that file (or leftover `L2_config/relayer-state.json` one level
+up) names another bridge. The stand can now `verifyBlock`; it still cannot
+see burns that have not been made yet.
 
-  In `/etc/gosh-bridge-relayer/shellnet-l2.env` set `BRIDGE_ADDRESS`,
-  `BRIDGE_DEPLOY_BLOCK`, `BRIDGE_BOOTSTRAP_SEQNO`, the `EXPECTED_*` genesis and
-  withdraw values you deployed with,
-  `EXPECTED_USDC_ADDRESS=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` and
-  `EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`, then run
-  `preflight` and start the service. `preflight` stops on a state directory that
-  was used for another bridge.
-- ETH→AN relayer (`deposit-relayer`): `--bridge-address`, `BRIDGE_DEPLOY_BLOCK` and a
-  new `--state` file. The old file is bound to the live bridge and the daemon
-  refuses it; `--force-state` would rebind it but keep the old cursor.
-- `ackinacki-bridge` CLI: `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` in its config. It
-  reads the deposit token from the bridge's `usdc()`, so nothing else changes.
+### 6. Reopen Acki Nacki
 
-### 6. Fund and supply
+```bash
+$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
+  -m setPaused '{"paused":false}'
+```
+
+Burns made from here on can be paid on the stand: it already exists, and its
+genesis is at or below this head. Deposits made into `OLD_BRIDGE` before its
+pause finalize as usual, because it is still trusted. `finalizeDeposit` was
+refusing them while Acki Nacki was paused.
+
+### 7. Finish the ETH→AN side
+
+Keep `deposit-relayer` on `OLD_BRIDGE` until it has finalized every deposit
+made there before the pause. The daemon follows one `--bridge-address`; if
+it is moved first, those deposits stay on the paused bridge and the owner
+has no call that moves user principal off it.
+
+Then point the remaining off-chain parts at the stand:
+
+- ETH→AN relayer (`deposit-relayer`): `--bridge-address`, `BRIDGE_DEPLOY_BLOCK`
+  and a new `--state` file. The old file is bound to the live bridge and the
+  daemon refuses it; `--force-state` would rebind it but keep the old cursor.
+- `ackinacki-bridge` CLI: `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` in its
+  config. It reads the deposit token from the bridge's `usdc()`, so nothing
+  else changes.
+
+Then remove `OLD_BRIDGE` from the trusted set:
+
+```bash
+$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
+  -m setTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<OLD_BRIDGE>","allowed":false}'
+```
+
+### 8. Fund and supply
 
 ```bash
 FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D   # permissionless, 10 000 USDC per call
@@ -311,7 +344,8 @@ Circle USDC, the withdraw aliases — so users fund from
 [faucet.circle.com](https://faucet.circle.com) as before. Its deposit token is the live
 bridge's, so the faucet problem above does not arise, but one burn would still be
 payable on both bridges: the demo stand **replaces the live bridge too**. Retire the
-live bridge first ([step 2](#2-retire-the-live-bridge)), then deploy:
+live bridge first ([step 2](#2-retire-the-live-bridge)), then deploy
+while Acki Nacki is still paused:
 
 ```bash
 cd crates/bridge-prover-libraries
@@ -325,9 +359,10 @@ mainnet) deploys a `DemoAavePool` over Circle USDC, owned by the `PRIVATE_KEY`
 address, and wires the bridge to it and its `DemoAToken`. The script prints the pool
 address and writes it into `L2_config/env` as `EXPECTED_AAVE_POOL`; set that and
 `EXPECTED_USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` in the relayer's
-runtime env. Steps 4 and 5 of the section above — trusting the stand on Acki Nacki in
-place of the live bridge, and pointing the relayers, with fresh state, and the CLI at
-it — apply unchanged.
+runtime env. Steps 4–7 of the section above — trusting the stand, pointing the
+AN→ETH relayer with fresh state, reopening Acki Nacki, then moving the
+ETH→AN relayer and the CLI only after `OLD_BRIDGE` deposits are finalized —
+apply unchanged.
 
 After deposits, supply, pay yield in, and collect it. `USDC` is Circle's token here,
 not the AAVE test USDC of step 1:

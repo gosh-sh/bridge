@@ -313,10 +313,12 @@ assigns it when the release is tagged.
   Circle's. **It replaces the live shellnet bridge and must not run next to
   it**: with the same withdraw identity, one Acki Nacki burn is payable on
   both, and AAVE faucet USDC deposited into the stand withdraws as Circle USDC
-  from the live bridge. Pause the live bridge first, then trust the stand on
-  Acki Nacki with `setTrustedL1Bridge(11155111, <bridge>, true)`. The steps
-  are in `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*. Without
-  `USE_AAVE` the script behaves as before.
+  from the live bridge. Pause Acki Nacki and the live L1 bridge, deploy the
+  stand while Acki Nacki is still paused, then reopen it; keep
+  `deposit-relayer` on the old bridge until its pending deposits finalize.
+  Trust the stand with `setTrustedL1Bridge(11155111, <bridge>, true)`. The
+  steps are in `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*.
+  Without `USE_AAVE` the script behaves as before.
 - **A demo AAVE pool for Sepolia stands.** New contract
   `contracts/ethereum/src/DemoAavePool.sol` answers the AAVE V3 Pool calls the
   bridge makes (`supply`, `withdraw`, `getReserveData`) over any token, holds

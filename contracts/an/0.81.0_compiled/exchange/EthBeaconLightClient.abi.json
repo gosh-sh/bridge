@@ -153,6 +153,7 @@
 			],
 			"outputs": [
 				{"name":"currentCommittee","type":"uint256"},
+				{"name":"prevCommittee","type":"uint256"},
 				{"name":"committeePeriod","type":"uint64"},
 				{"name":"ownerRotationEnabled","type":"bool"},
 				{"name":"reAnchorsApplied","type":"uint64"}

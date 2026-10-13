@@ -69,7 +69,7 @@ function setCommitteeCommitment(uint256 commitment, uint64 period) // owner, boo
     public;                                                        //   (gated by _ownerRotationEnabled)
 function disableOwnerRotation() public;                           // owner, one-way
 function reAnchorCommittee(uint256 commitment, uint64 period) public; // owner, WS hatch after disable
-function getCommitteeState() external view returns (uint256, uint64, bool, uint64);
+function getCommitteeState() external view returns (uint256, uint256, uint64, bool, uint64);
 ```
 
 `submitRotate` logic:

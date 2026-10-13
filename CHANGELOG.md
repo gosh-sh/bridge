@@ -37,10 +37,11 @@ assigns it when the release is tagged.
   checked: `headerRlps[0]` and the last header must each hash to a block
   already in the proven set (`ERR_UNKNOWN_CHECKPOINT`, 249), and only the
   headers between them are anchored. The array holds 3 to 33 entries — two
-  anchors and the 31 blocks of an epoch. `submitUpdate` is unchanged: the head
-  still only moves forward, and a skipped checkpoint of the current committee
-  can still be late-registered with its own proof and its own slot, which is
-  what keeps consecutive anchors within a span's reach.
+  anchors and the 31 blocks of an epoch. `submitUpdate` keeps its shape: the head
+  still only moves forward, and a skipped checkpoint can still be
+  late-registered with its own proof and its own slot, which is what keeps
+  consecutive anchors within a span's reach. Which committee may sign it is a
+  change of its own, below.
 
   Before, the walk started from one proven checkpoint and anchored that
   block's *parents*, with the checkpoint's slot attached. Anyone could chain
@@ -77,15 +78,16 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `2b30ad8f…9a34e068`, and `getVersion` reports 1.4.3 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
+  code hash moves `314ac6b8…6092f5` → `1335cee5…6894a5d5`, and `getVersion` reports 1.4.4 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
   re-derives `_lightClient` from it, and the bridge accepts anchor pushes only
   from that address, so the live client would start failing
   `ERR_INVALID_SENDER` (207) against an address where nothing is deployed. It
-  belongs to a fresh `deployLightClient`, not to an in-place upgrade. The ABI
-  is unchanged. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP
+  belongs to a fresh `deployLightClient`, not to an in-place upgrade. `getCommitteeState` gains a
+  `prevCommittee` return value and the ABI's `fields` gain `_prevCommittee`;
+  no other function or event changes. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP
   reader, which is now what the walk spends most of its gas on.
 
 - **The relayer builds ancestry payloads in the new shape, and the
@@ -115,10 +117,17 @@ assigns it when the release is tagged.
   file is read as before.
 
 - **A checkpoint skipped near the end of a sync-committee period can still be
-  registered after the rotation.** `submitUpdate` keeps the commitment the
-  rotation replaced (`_prevCommittee`) and accepts a proof signed by it for
-  late registration only — never to move the head, which still needs the
-  committee in force. Before this, a checkpoint the daemon had not proven by
+  registered after the rotation.** `submitUpdate` keeps the commitment a
+  `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
+  for late registration only — never to move the head, which still needs the
+  committee in force. The signer must match the period of the attested slot:
+  the committee in force covers its own period, the replaced one covers the
+  period before it and nothing else, so a committee that has left office
+  cannot write hashes for slots it never attested. The owner hatches
+  (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
+  rather than carrying it: they replace a committee the owner is rejecting, or
+  jump several periods, so neither is a hand-off. `getCommitteeState` returns
+  `prevCommittee` so an operator can see what is trusted. Before this, a checkpoint the daemon had not proven by
   the time `submitRotate` landed was unanchorable for good: its proof carries
   the old commitment and `ERR_WRONG_COMMITTEE` (242) refused it for ever, so
   the 32 blocks of that epoch could only be admitted by the owner's

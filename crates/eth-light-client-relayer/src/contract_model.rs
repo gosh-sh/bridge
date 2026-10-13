@@ -10,6 +10,8 @@ use crate::header_rlp::{keccak256, rlp_parent_hash};
 
 /// 365 * 24 * 3600 / 12. Matches `EthBeaconLightClient.SLOTS_PER_YEAR`.
 pub const SLOTS_PER_YEAR: u64 = 2_628_000;
+/// Sync-committee period: 256 epochs of 32 slots.
+pub const SLOTS_PER_PERIOD: u64 = 8192;
 /// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
 pub const MAX_EVICT_PER_TX: usize = 128;
 
@@ -143,9 +145,23 @@ impl LightClient {
 
     /// `submitUpdate` after a successful ZK verify (committee already checked).
     /// `exec` is the stored key, as the step public inputs carry it.
+    /// As [`Self::submit_update_at`], attested inside the period in force.
     pub fn submit_update(
         &mut self,
         slot: u64,
+        exec: [u8; 32],
+        committee: [u8; 32],
+    ) -> Result<UpdateKind, LcError> {
+        let attested = self.period.saturating_mul(SLOTS_PER_PERIOD);
+        self.submit_update_at(slot, attested, exec, committee)
+    }
+
+    /// `attested_slot` decides which committee may sign: the one in force for
+    /// its own period, the one a rotation replaced for the period before.
+    pub fn submit_update_at(
+        &mut self,
+        slot: u64,
+        attested_slot: u64,
         exec: [u8; 32],
         committee: [u8; 32],
     ) -> Result<UpdateKind, LcError> {
@@ -157,8 +173,12 @@ impl LightClient {
         if !advancing && !late {
             return Err(LcError::StaleUpdate);
         }
-        let signer_ok = committee == self.committee
-            || (late && self.prev_committee != [0; 32] && committee == self.prev_committee);
+        let prev_ok = late
+            && self.prev_committee != [0; 32]
+            && committee == self.prev_committee
+            && self.period > 0
+            && attested_slot / SLOTS_PER_PERIOD == self.period - 1;
+        let signer_ok = committee == self.committee || prev_ok;
         if !signer_ok {
             return Err(LcError::WrongCommittee);
         }
@@ -231,11 +251,27 @@ impl LightClient {
         Ok(())
     }
 
+    /// `submitRotate`: a proven hand-off. The committee leaving office is kept
+    /// as the previous one, which is the only path that grants it the
+    /// late-registration window.
+    pub fn rotate(&mut self, next: [u8; 32], period: u64) -> Result<(), LcError> {
+        if self.committee == [0; 32] {
+            return Err(LcError::CommitteeUnset);
+        }
+        if period <= self.period {
+            return Err(LcError::StalePeriod);
+        }
+        self.prev_committee = self.committee;
+        self.committee = next;
+        self.period = period;
+        Ok(())
+    }
+
     pub fn set_committee(&mut self, commitment: [u8; 32], period: u64) -> Result<(), LcError> {
         if !self.owner_rotation_enabled {
             return Err(LcError::OwnerRotationDisabled);
         }
-        self.prev_committee = self.committee;
+        self.prev_committee = [0; 32];
         self.committee = commitment;
         self.period = period;
         Ok(())
@@ -266,7 +302,7 @@ impl LightClient {
         if commitment == self.committee && period == self.period {
             return Err(LcError::ReanchorNoop);
         }
-        self.prev_committee = self.committee;
+        self.prev_committee = [0; 32];
         self.committee = commitment;
         self.period = period;
         self.re_anchors_applied += 1;
@@ -470,15 +506,67 @@ mod tests {
         c.submit_update(64, [0xAA; 32], old_committee).unwrap();
 
         // Slot 32 was never proven, and the committee rotates before it is.
-        c.set_committee(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2).unwrap();
         assert_eq!(c.committee, new_committee);
 
-        c.submit_update(32, [0xBB; 32], old_committee)
+        // Attested inside the period the old committee served.
+        c.submit_update_at(32, SLOTS_PER_PERIOD, [0xBB; 32], old_committee)
             .expect("the skipped checkpoint must still be registrable");
         assert!(c.is_live(&[0xBB; 32]));
         assert_eq!(
             c.finalized_slot, 64,
             "late registration must not move the head"
+        );
+    }
+
+    /// The replaced committee may only sign the period it actually served.
+    /// Without this it could sign any slot in the one-year window, including
+    /// slots of the period after it, and the hashes it wrote would back mints.
+    #[test]
+    fn the_replaced_committee_cannot_sign_outside_its_own_period() {
+        let old_committee = [0xC0; 32];
+        let new_committee = [0xC1; 32];
+        let mut c = LightClient::bootstrap(old_committee, 1);
+        c.submit_update_at(
+            2 * SLOTS_PER_PERIOD,
+            SLOTS_PER_PERIOD,
+            [0xAA; 32],
+            old_committee,
+        )
+        .unwrap();
+        c.rotate(new_committee, 2).unwrap();
+
+        // Attested inside period 2 — the one the old committee never served.
+        assert_eq!(
+            c.submit_update_at(
+                2 * SLOTS_PER_PERIOD - 1,
+                2 * SLOTS_PER_PERIOD + 5,
+                [0xDD; 32],
+                old_committee
+            )
+            .unwrap_err(),
+            LcError::WrongCommittee
+        );
+        assert!(!c.is_live(&[0xDD; 32]));
+    }
+
+    /// The owner hatches replace a committee the owner is rejecting, so it
+    /// must not keep the late-registration window.
+    #[test]
+    fn an_owner_correction_leaves_no_window_for_the_committee_it_replaces() {
+        let bad = [0xBA; 32];
+        let good = [0x60; 32];
+        let mut c = LightClient::bootstrap(bad, 1);
+        c.submit_update(64, [0xAA; 32], bad).unwrap();
+        c.set_committee(good, 1).unwrap();
+        assert_eq!(
+            c.prev_committee, [0; 32],
+            "the rejected committee is not kept"
+        );
+        assert_eq!(
+            c.submit_update_at(32, SLOTS_PER_PERIOD, [0xBB; 32], bad)
+                .unwrap_err(),
+            LcError::WrongCommittee
         );
     }
 
@@ -489,7 +577,7 @@ mod tests {
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
         c.submit_update(64, [0xAA; 32], old_committee).unwrap();
-        c.set_committee(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2).unwrap();
 
         assert_eq!(
             c.submit_update(96, [0xCC; 32], old_committee).unwrap_err(),

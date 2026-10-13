@@ -172,17 +172,22 @@ two anchors go into `USDCBridge._acceptedBlockHash`. Operator:
 --older-anchor-hash <older>`.
 
 **Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
-be submitted without the skipped ones. A skipped checkpoint **of the current
-committee** can still be late-registered: `submitUpdate` verifies the proof,
-records the exec hash (and pushes it to `USDCBridge`), and does **not** move
-the head back. Same-slot replay and already-proven hashes still revert.
+be submitted without the skipped ones. A skipped checkpoint can still be
+late-registered, signed by the committee of its attested slot's period — the
+one in force, or the one a `submitRotate` replaced, so a skip at a period edge
+is not lost. `submitUpdate` verifies the proof, records the exec hash (and
+pushes it to `USDCBridge`), and does **not** move the head back. Same-slot
+replay and already-proven hashes still revert. A committee that has left
+office cannot sign outside the period it served, and the owner hatches
+(`setCommitteeCommitment`, `reAnchorCommittee`) leave no window to the
+committee they replace.
 
 - Head liveness does **not** require every 6.4 min update — jumping to the
   latest checkpoint is enough to keep the committee/WS clock moving.
 - 1/32 deposit coverage: catch up later in the same period by late-registering
-  the skipped checkpoint proofs. After `submitRotate` the previous committee
-  is no longer accepted (`ERR_WRONG_COMMITTEE`), so a gap that spans a
-  rotation waits for ancestry.
+  the skipped checkpoint proofs. One rotation later that window closes: the
+  committee two periods back is no longer accepted (`ERR_WRONG_COMMITTEE`),
+  so a gap older than that waits for ancestry.
 - Intended cadence (M0 §7 / M5 relayer): ≥ 1 update per period (~27 h) for
   weak-subjectivity safety, plus on-demand so a pending deposit's checkpoint
   is anchored.

@@ -31,15 +31,19 @@ import "./eccUSDCBridge.sol";
 ///         What the proof CANNOT establish, and this contract asserts from
 ///         outside it:
 ///           * that the signing committee is the *chain-anchored* one for this
-///             period — enforced by `committeeCommitment == _currentCommittee`
+///             period — enforced by matching `committeeCommitment` to the
+///             committee of the attested slot's period: the one in force, or
+///             the one a rotation replaced (late registration only)
 ///             (the rotate ↔ step join). Bootstrapped from a weak-subjectivity
 ///             checkpoint; advanced by `submitRotate`. After
 ///             `disableOwnerRotation`, the owner hatch is `reAnchorCommittee`.
 ///
 ///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
 ///         hash (1/32). The head only moves forward, but a skipped checkpoint
-///         of the current committee can still be late-registered behind it,
-///         with its own proof and its own slot (`CheckpointBackfilled`).
+///         can still be late-registered behind it, with its own proof and
+///         its own slot (`CheckpointBackfilled`), signed by the committee of
+///         the attested slot's period — the one in force, or the one a
+///         rotation replaced, which is what rescues a skip at a period edge.
 ///         `submitAncestry` fills the span between two already-proven anchors:
 ///         headers oldest first, 3 to 33 of them (two anchors and up to the 31
 ///         blocks of an epoch), each hashed with `gosh.keccak256` and linked by
@@ -51,13 +55,15 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.3";
+    string constant version = "1.4.4";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
     // 365 * 24 * 3600 / 12. A proven execution hash older than this many
     // slots behind head is not canonical for `finalizeDeposit` (one-year SLA).
     uint64 constant SLOTS_PER_YEAR = 2_628_000;
+    // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
+    uint64 constant SLOTS_PER_PERIOD = 8192;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
@@ -297,16 +303,20 @@ contract EthBeaconLightClient {
         if (late) {
             require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
-        // Moving the head needs the committee in force. Late registration also
-        // takes the one it replaced: a checkpoint skipped near the end of a
-        // period is signed by that committee, and without this it would be
-        // unanchorable the moment the rotation lands — 32 blocks whose
-        // deposits only the owner could admit.
-        require(
-            pi.committeeCommitment == _currentCommittee
-                || (late && _prevCommittee != 0 && pi.committeeCommitment == _prevCommittee),
-            ERR_WRONG_COMMITTEE
-        );
+        // The signer must be the committee that served the attested slot's
+        // period. The one in force covers its own period; the one a rotation
+        // replaced covers the period before it, and only for late
+        // registration. Without the period test a replaced committee could
+        // sign any slot in the one-year window — including slots of the
+        // period after it, which it never attested — and mint-backing hashes
+        // would follow from a committee that has left office.
+        bool currentSigner = pi.committeeCommitment == _currentCommittee;
+        bool prevSigner = late
+            && _prevCommittee != 0
+            && pi.committeeCommitment == _prevCommittee
+            && _committeePeriod > 0
+            && pi.attestedSlot / SLOTS_PER_PERIOD == _committeePeriod - 1;
+        require(currentSigner || prevSigner, ERR_WRONG_COMMITTEE);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -345,7 +355,7 @@ contract EthBeaconLightClient {
     /// @notice Advances the trusted sync committee by verifying a **rotate**
     ///         proof. This is what makes the committee chain trustless from the
     ///         weak-subjectivity checkpoint: `submitUpdate` only trusts a
-    ///         committee equal to `_currentCommittee`, and this is the only
+    ///         committee of the attested slot's period, and this is the only
     ///         permissionless way that value moves.
     ///
     ///         The rotate proof (`eth-light-client-prover` recursive rotate, M6)
@@ -572,7 +582,9 @@ contract EthBeaconLightClient {
     {
         require(_ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();
-        _prevCommittee = _currentCommittee;
+        // A correction, not a hand-off: the committee being replaced is the
+        // one the owner is rejecting, so it must not keep write access.
+        _prevCommittee = 0;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
     }
@@ -619,7 +631,9 @@ contract EthBeaconLightClient {
         );
         ensureBalance();
         uint256 from = _currentCommittee;
-        _prevCommittee = from;
+        // Same reasoning as `setCommitteeCommitment`, and a re-anchor may jump
+        // over several periods, so what it replaces is not the period before.
+        _prevCommittee = 0;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
         _reAnchorsApplied += 1;
@@ -762,11 +776,18 @@ contract EthBeaconLightClient {
     ///         logged weak-subjectivity hop.
     function getCommitteeState() external view returns (
         uint256 currentCommittee,
+        uint256 prevCommittee,
         uint64  committeePeriod,
         bool    ownerRotationEnabled,
         uint64  reAnchorsApplied
     ) {
-        return (_currentCommittee, _committeePeriod, _ownerRotationEnabled, _reAnchorsApplied);
+        return (
+            _currentCommittee,
+            _prevCommittee,
+            _committeePeriod,
+            _ownerRotationEnabled,
+            _reAnchorsApplied
+        );
     }
 
     function getVersion() external pure returns (string, string) {

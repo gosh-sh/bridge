@@ -55,7 +55,7 @@ assigns it when the release is tagged.
   Both ends are checked *before* `tvm.accept()`, inside the pre-accept gas
   credit, so a span that cannot admit anything is refused without the light
   client paying for the walk: a payload starting at a real anchor and ending
-  nowhere costs it nothing, where it used to cost 1,942,825 gas per message.
+  nowhere costs it nothing at all, because the message never reaches `accept`.
 
   **This does not make `submitAncestry` cheap to abuse.** The call is
   permissionless, the contract pays for everything after `accept`, and a
@@ -136,9 +136,13 @@ assigns it when the release is tagged.
   confirmation was lost — queues the span back to the checkpoint it replaced; one poll works the span at the
   front of that queue, and the entry leaves only when it is settled — sent, or
   given up with "span given up: these blocks need setAcceptedBlockHash". A
-  span the chain refuses is given up after three paid submissions. One whose
-  headers will not fetch retries for free and is given up only after 15
-  minutes of failures, so an execution RPC that rate-limits costs no coverage.
+  span the chain refuses is given up after three paid submissions, and so is
+  one whose submission ends in an unknown outcome — a wait timeout or a
+  dropped connection comes after the message was broadcast, so it may have
+  been executed and charged, and the daemon counts it rather than resending
+  for ever. One whose *headers* will not fetch retries for free and is given up
+  only after 15 minutes of failures, because nothing of that reaches the
+  chain, so an execution RPC that rate-limits costs no coverage.
   The queue holds at most 64 spans; past that the oldest is given up, since
   its anchors are the ones most likely outside the one-year window.
 
@@ -222,9 +226,11 @@ assigns it when the release is tagged.
   just positional ones: the compiled ABI is version 2.4 with no explicit
   function id, so the id is derived from the signature including its outputs,
   and an added `uint256` output changes it. A caller still holding the 1.4.1
-  ABI sends an id this code does not dispatch and the getter simply fails. In
-  this repository `status.sh`, `deploy-contract.sh` and the relayer's embedded
-  copy are all updated. The
+  ABI sends an id this code does not dispatch and the getter simply fails. The
+  relayer's embedded copy of the ABI is updated here. The shadow kit's
+  `status.sh` and `deploy-contract.sh` read whatever `AN_LC_ABI_PATH` points
+  at, so they need the new ABI file beside them and no change of their own.
+  The
   ABI's `fields` section gains `_prevCommittee` and `_prevCommitteeHeadSlot`
   at positions 11 and 12, so account data decoded with the 1.4.1 ABI reads
   rubbish from `_committeePeriod` onward: anything decoding this client's state
@@ -247,15 +253,16 @@ assigns it when the release is tagged.
   `type(uint64).max` and submit it — the call is permissionless — after which
   every later rotation failed `ERR_STALE_PERIOD` (245) for good. With
   `disableOwnerRotation` already run, nothing but an owner `reAnchorCommittee`
-  every period could carry the committee at all. A ceiling tied to the head
-  does not fix that, it only shrinks the label that does it.
+  every period could carry the committee at all. No bound on the label fixes
+  this, because any bound still lets a genuine hand-off be labelled at its own
+  edge and shut the path there.
 
   What prevents replay is the committee chain, which was already there:
   `pi.currentCommitteeCommitment == _currentCommittee`, so once a rotation
   lands the same proof no longer matches, and the hand-off out of a given
-  committee is unique. So the period is now out of the decision entirely —
-  both the monotonicity test and the ceiling are gone, and `ERR_STALE_PERIOD`
-  can only come from the owner's `reAnchorCommittee`. `_committeePeriod` is
+  committee is unique. So the period is now out of the decision entirely: the
+  monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
+  the owner's `reAnchorCommittee`. `_committeePeriod` is
   derived from the proven head (`finalizedSlot / 8192 + 1`) instead of being
   taken from the proof, so an unproven label can no longer reach storage at
   all; `CommitteeRotated` carries that derived number. It is a report for

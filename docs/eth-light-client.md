@@ -126,9 +126,10 @@ sequenceDiagram
   end
 ```
 
-What the contract checks, in order (`contracts/an/EthBeaconLightClient.sol:248`): the public
-inputs parse; at least 342 of 512 committee members signed (also enforced in-circuit); the
-the finalized slot moves the head forward, or back-fills a skipped checkpoint; then the proof's
+What the contract checks, in order (`contracts/an/exchange/EthBeaconLightClient.sol`, the copy
+shellnet runs): the public inputs parse; at least 342 of 512 committee members signed (also
+enforced in-circuit); the finalized slot moves the head forward, or back-fills a skipped
+checkpoint; then the proof's
 committee commitment equals the one in force, or the one a rotation replaced and only for a
 back-fill inside its slot window; then `tvm.accept()` and the opcode. The slot test comes before
 the committee test, so a stale update from a wrong committee fails `ERR_STALE_UPDATE` (244), not

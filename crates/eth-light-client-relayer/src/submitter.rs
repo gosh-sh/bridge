@@ -101,6 +101,8 @@ struct MockInner {
     period: Option<u64>,
     reject: bool,
     reject_ancestry: bool,
+    not_send_ancestry: bool,
+    error_ancestry: bool,
     ancestry_attempts: u32,
     reject_flip: bool,
     owner_anchors_enabled: bool,
@@ -124,6 +126,8 @@ impl MockAnSubmitter {
                 period: None,
                 reject: false,
                 reject_ancestry: false,
+                not_send_ancestry: false,
+                error_ancestry: false,
                 ancestry_attempts: 0,
                 reject_flip: false,
                 owner_anchors_enabled: true,
@@ -151,6 +155,18 @@ impl MockAnSubmitter {
     }
 
     /// Refuse only `submitAncestry`, so an update still lands.
+    /// Fail the `submitAncestry` call itself, the way a transport error does
+    /// after the message has already gone out.
+    pub fn error_ancestry(&self) {
+        self.inner.lock().expect("poisoned").error_ancestry = true;
+    }
+
+    /// Answer `submitAncestry` the way a wait timeout does: the chain may or
+    /// may not have run it.
+    pub fn not_send_ancestry(&self) {
+        self.inner.lock().expect("poisoned").not_send_ancestry = true;
+    }
+
     pub fn reject_ancestry(&self) {
         self.inner.lock().expect("poisoned").reject_ancestry = true;
     }
@@ -281,6 +297,16 @@ impl AnSubmitter for MockAnSubmitter {
         let (older, newer) = crate::header_rlp::link_headers(header_rlps)?;
         let mut inner = self.inner.lock().expect("poisoned");
         inner.ancestry_attempts += 1;
+        if inner.error_ancestry {
+            return Err(RelayerError::other(
+                "submitAncestry: connection reset by peer",
+            ));
+        }
+        if inner.not_send_ancestry {
+            return Ok(SubmitOutcome::NotSent {
+                reason: "wait timed out".into(),
+            });
+        }
         if inner.reject || inner.reject_ancestry {
             return Ok(SubmitOutcome::Rejected {
                 reason: "submitAncestry rejected".into(),

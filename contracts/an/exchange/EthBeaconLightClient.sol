@@ -432,8 +432,8 @@ contract EthBeaconLightClient {
 
     /// @notice Advances the trusted sync committee by verifying a **rotate**
     ///         proof. This is what makes the committee chain trustless from the
-    ///         weak-subjectivity checkpoint: `submitUpdate` only trusts a
-    ///         committee of the attested slot's period, and this is the only
+    ///         weak-subjectivity checkpoint: `submitUpdate` only trusts the
+    ///         commitment this contract holds, and this is the only
     ///         permissionless way that value moves.
     ///
     ///         The rotate proof (`eth-light-client-prover` recursive rotate, M6)

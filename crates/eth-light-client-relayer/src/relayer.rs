@@ -433,12 +433,6 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         Ok(())
     }
 
-    /// After a proven checkpoint: re-push the hash to USDCBridge (the first
-    /// push often bounced because the light client was not yet the sink
-    /// writer), then try to cover the span back to the previous anchor.
-    /// `rePushAnchor` belongs here and not to a retry: it is a paid call tied
-    /// to this checkpoint, and resending it every tick would burn the light
-    /// client's balance for an anchor the bridge already has.
     /// Queue the span back to the checkpoint the head stood on before. State
     /// only, no await: the caller persists it in the same write as the head it
     /// belongs to. That is the whole point of keeping this synchronous — a span
@@ -557,25 +551,21 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 info!(n = headers.len(), "submitAncestry accepted");
                 self.settle_front("sent", false);
             },
-            // Nothing reached the chain, or it may still land: either way the
-            // light client has not paid for a refusal, so the budget that
-            // exists to stop paid resubmissions must not move.
-            Ok(SubmitOutcome::NotSent {
-                reason,
-            })
-            | Ok(SubmitOutcome::Pending {
-                reason,
-            }) => {
-                warn!(
-                    reason,
-                    "submitAncestry did not reach the chain; will retry for free"
-                );
-            },
+            // Everything else costs an attempt, including the outcomes that
+            // read like "it never got there". `call_contract` sends the
+            // message and waits for it in one call, so a timeout or a dropped
+            // connection arrives after the broadcast: the message may already
+            // have been executed, and a ~2M-gas span charged. The daemon
+            // cannot tell that from the error text, so it must assume it paid.
+            // Treating these as free retries resent one span every tick
+            // without limit and held back every span behind it. A fetch
+            // failure is different and stays free — nothing of it reaches the
+            // chain, which is what `retry_front_fetch` is for.
             Ok(other) => {
                 self.retry_front_paid(format!("{other:?}"));
             },
             Err(e) => {
-                warn!(error = %e, "submitAncestry call failed before sending; will retry for free");
+                self.retry_front_paid(format!("call failed, outcome unknown: {e}"));
             },
         }
     }
@@ -1443,6 +1433,50 @@ mod tests {
             r.state.owed_spans.len(),
             spans,
             "and no span may be queued against it"
+        );
+    }
+
+    /// An outcome that reads like "it never reached the chain" still costs an
+    /// attempt. `call_contract` sends and waits in one call, so a wait timeout
+    /// comes after the broadcast and the span may already have been executed
+    /// and paid for. Treated as free, one span was resent every tick for ever,
+    /// each repeat a ~2M-gas charge, and it blocked every span behind it.
+    #[tokio::test]
+    async fn an_unknown_submission_outcome_costs_an_attempt() {
+        let (mut r, mock, _chain) = span_relayer(true);
+        mock.not_send_ancestry();
+        for _ in 0..(super::MAX_SPAN_ATTEMPTS + 6) {
+            r.tick().await.unwrap();
+        }
+        assert!(
+            r.state.owed_spans.is_empty(),
+            "the span must be given up, not retried for ever"
+        );
+        assert_eq!(
+            mock.ancestry_attempts(),
+            super::MAX_SPAN_ATTEMPTS,
+            "an unknown outcome must cost exactly one attempt each, like a refusal"
+        );
+    }
+
+    /// And the same for the call failing outright rather than answering: the
+    /// error arrives after the broadcast too, so it is counted, not retried
+    /// for free.
+    #[tokio::test]
+    async fn a_failed_submission_call_also_costs_an_attempt() {
+        let (mut r, mock, _chain) = span_relayer(true);
+        mock.error_ancestry();
+        for _ in 0..(super::MAX_SPAN_ATTEMPTS + 6) {
+            r.tick().await.unwrap();
+        }
+        assert!(
+            r.state.owed_spans.is_empty(),
+            "the span must be given up, not retried for ever"
+        );
+        assert_eq!(
+            mock.ancestry_attempts(),
+            super::MAX_SPAN_ATTEMPTS,
+            "a failed call must cost one attempt each"
         );
     }
 

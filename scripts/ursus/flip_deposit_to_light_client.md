@@ -50,10 +50,11 @@ eth-lc-relayer flip-owner \
 ```
 
 Non-checkpoint deposits: `eth-lc-relayer submit-ancestry --eth-rpc-url
-$ETH_RPC_URL --checkpoint-hash 0x…` walks the epoch back from a proven
-checkpoint, but it does not fit the per-transaction gas limit today
-(`docs/eth-light-client.md` §3.4). Until it does, a deposit in any of the other
-31 blocks needs the owner's `setAcceptedBlockHash`, which the flip turns off.
+$ETH_RPC_URL --checkpoint-hash 0x<newer> --older-anchor-hash 0x<older>` fills
+the blocks between two proven anchors (`docs/eth-light-client.md` §3.4). A
+deposit in a block no span covers — one whose bracketing anchors are further
+apart than a span — needs the owner's `setAcceptedBlockHash`, which the flip
+turns off.
 
 Period jumps: the daemon rotates by default. After `disableOwnerRotation()`, a
 lag past one sync-committee period (~27 h) is `reAnchorCommittee`, not

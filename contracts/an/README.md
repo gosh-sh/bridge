@@ -1,8 +1,8 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.5.0, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.4.1:
+`exchange/` — `eccUSDCBridge` at version 1.7.0, `DepositVoucher` at 1.4.0 and
+`EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -80,8 +80,11 @@ Any other compiler changes the code hash, so the `Makefile` builds each contract
 with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
 unset or the binary reports a different version.
 
-`sold` 0.81.0 reproduces `DepositVoucher.tvc`, `EthBeaconLightClient.tvc` and
-all three ABIs byte for byte, but not `eccUSDCBridge.tvc`. `sold` 0.82.0 does not
+`sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
+but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` needs more than the
+version: the source calls `gosh.keccak256`, so `SOLD_0_81` has to be a `sold`
+built against a tvm-sdk that carries the `KECCAK256` instruction. A stock
+0.81.0 emits the mnemonic its assembler does not know. `sold` 0.82.0 does not
 compile the bridge. The bridge keeps the voucher's code in its data, and the
 zerostate installs the light client's code into the bridge, so replace the
 rebuilt artefacts together.

@@ -22,14 +22,21 @@ pub trait BeaconSource: Send + Sync {
     async fn fetch_finality(&self) -> Result<FinalityUpdate, RelayerError>;
 }
 
-/// Execution parent-hash walk used after an accepted checkpoint.
+/// Execution header walk used after an accepted checkpoint. Returns the span
+/// between two anchors, oldest first — the order `submitAncestry` takes.
+/// `Ok(None)` means no payload exists for this pair, and no retry will make
+/// one: the older anchor is further back than `max`, or it is not an ancestor
+/// of `newer` at all, or the two are adjacent with nothing between them. A
+/// transient `Err` is the opposite — the headers may well be fetchable on the
+/// next try — so the two must not be treated alike.
 #[async_trait]
 pub trait ExecutionSource: Send + Sync {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError>;
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError>;
 }
 
 /// In-memory epoch chain for tests (`Relayer::with_execution`).
@@ -39,28 +46,40 @@ pub struct InMemoryExecution {
 
 impl InMemoryExecution {
     pub fn single(checkpoint: [u8; 32], headers: Vec<Vec<u8>>) -> Self {
-        let mut chains = std::collections::HashMap::new();
-        chains.insert(checkpoint, headers);
+        Self::many(vec![(checkpoint, headers)])
+    }
+
+    /// Several spans, each keyed by its newer end — enough to walk more than
+    /// one checkpoint in a test.
+    pub fn many(spans: Vec<([u8; 32], Vec<Vec<u8>>)>) -> Self {
         Self {
-            chains: Mutex::new(chains),
+            chains: Mutex::new(spans.into_iter().collect()),
         }
     }
 }
 
 #[async_trait]
 impl ExecutionSource for InMemoryExecution {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
         let chains = self.chains.lock().expect("poisoned");
         let headers = chains
-            .get(&checkpoint)
+            .get(&newer)
             .cloned()
             .ok_or_else(|| RelayerError::other("in-memory execution: unknown checkpoint"))?;
-        let max = max.clamp(2, 32);
-        Ok(headers.into_iter().take(max).collect())
+        let max = max.clamp(3, 33);
+        let span: Vec<Vec<u8>> = headers.into_iter().take(max).collect();
+        let Some(first) = span.first() else {
+            return Ok(None);
+        };
+        if crate::header_rlp::keccak256(first) != older {
+            return Ok(None);
+        }
+        Ok(Some(span))
     }
 }
 
@@ -360,16 +379,32 @@ impl EthExecutionRpc {
         crate::header_rlp::encode_header_rlp(result)
     }
 
-    /// Checkpoint header first, then parents, ≤ `max` (≤ 32).
-    pub async fn ancestry_headers(
+    /// The span from `older` to `newer` inclusive, oldest first, at most `max`
+    /// headers (3 to 33). Walks parents from `newer` and stops on `older`.
+    ///
+    /// `Ok(None)` means no payload exists to send, never a truncated one,
+    /// because `submitAncestry` requires both ends to be proven anchors. It
+    /// covers three cases the caller cannot tell apart: `older` is further
+    /// back than `max` headers, `older` is not an ancestor of `newer` at all,
+    /// and the two are adjacent with nothing in between.
+    ///
+    /// An `Err` is usually a transport failure, which the caller retries for
+    /// free, but not always: a header whose RLP does not hash back to the hash
+    /// it was fetched for, and an encoder that is behind the current fork, come
+    /// back the same way and fail identically on every attempt. Such a span is
+    /// held for the whole fetch grace under a "will retry" warning and then
+    /// given up as unfetchable, which is the right end state but a misleading
+    /// log on the way to it.
+    pub async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
-        let max = max.clamp(2, 32);
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
+        let max = max.clamp(3, 33);
         let mut headers = Vec::new();
-        let mut h = checkpoint;
-        for _ in 0..max {
+        let mut h = newer;
+        loop {
             let rlp = self.header_rlp(h).await?;
             let got = crate::header_rlp::keccak256(&rlp);
             if got != h {
@@ -379,23 +414,31 @@ impl EthExecutionRpc {
             }
             let parent = crate::header_rlp::rlp_parent_hash(&rlp)?;
             headers.push(rlp);
-            if headers.len() >= max {
+            if h == older {
                 break;
+            }
+            if headers.len() >= max {
+                return Ok(None);
             }
             h = parent;
         }
-        Ok(headers)
+        if headers.len() < 3 {
+            return Ok(None);
+        }
+        headers.reverse();
+        Ok(Some(headers))
     }
 }
 
 #[async_trait]
 impl ExecutionSource for EthExecutionRpc {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
-        EthExecutionRpc::ancestry_headers(self, checkpoint, max).await
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
+        EthExecutionRpc::ancestry_span(self, newer, older, max).await
     }
 }
 

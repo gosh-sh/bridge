@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::RelayerError;
 
+/// One span of execution headers the daemon still owes the light client.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwedSpan {
+    /// The older anchor: the checkpoint the head stood on before.
+    pub older: [u8; 32],
+    /// The newer anchor: the checkpoint that moved the head.
+    pub newer: [u8; 32],
+    /// Submissions this span has already cost the light client.
+    #[serde(default)]
+    pub paid_attempts: u32,
+    /// When its headers first failed to fetch; unset while fetching works.
+    #[serde(default)]
+    pub fetch_since: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayerState {
     pub last_finalized_slot: Option<u64>,
@@ -21,6 +36,22 @@ pub struct RelayerState {
     pub updates_applied: u64,
     /// Period the daemon refused to cross without a rotate proof.
     pub rotate_pending_period: Option<u64>,
+    /// Period of a `submitRotate` that went out but whose outcome never came
+    /// back. `call_contract` broadcasts and waits in one call, so a timeout
+    /// can arrive after the chain already ran the rotation. The next attempt
+    /// for the same period is then refused against the committee that is
+    /// already current, and this field is what tells that refusal apart from
+    /// a proof the chain never accepted.
+    #[serde(default)]
+    pub rotate_in_flight_period: Option<u64>,
+    /// Spans still owed to `submitAncestry`, oldest first. A pair is fixed
+    /// when its newer end is accepted, so a span is never re-paired with a
+    /// later checkpoint, and each carries its own accounting — one cursor and
+    /// one counter cannot represent two owed spans, which is how earlier
+    /// versions lost them. An entry leaves only when it is settled: sent, or
+    /// written off with a warning.
+    #[serde(default)]
+    pub owed_spans: Vec<OwedSpan>,
     /// Relayer already issued the one-way owner flip.
     #[serde(default)]
     pub owner_flip_done: bool,
@@ -72,10 +103,15 @@ impl RelayerState {
     pub fn record_rotate(&mut self, period: u64) {
         self.last_committee_period = Some(period);
         self.rotate_pending_period = None;
+        self.rotate_in_flight_period = None;
     }
 
     pub fn record_rotate_pending(&mut self, period: u64) {
         self.rotate_pending_period = Some(period);
+    }
+
+    pub fn record_rotate_in_flight(&mut self, period: u64) {
+        self.rotate_in_flight_period = Some(period);
     }
 }
 
@@ -124,6 +160,56 @@ mod tests {
 
     use super::*;
 
+    /// Every field this version added has to be optional on the way in, or a
+    /// daemon started on a state file written by the previous build refuses to
+    /// load it and stops dead.
+    #[test]
+    fn a_state_file_written_before_the_queue_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(
+            &path,
+            br#"{"last_finalized_slot":100,"last_committee_period":0,
+                 "last_execution_block_hash":null,"last_attested_slot":120,
+                 "updates_applied":3,"rotate_pending_period":null}"#,
+        )
+        .unwrap();
+        let s = RelayerState::load(&path).unwrap().expect("must load");
+        assert_eq!(s.last_finalized_slot, Some(100));
+        assert_eq!(s.updates_applied, 3);
+        assert!(s.owed_spans.is_empty(), "no spans were owed in that file");
+        assert!(!s.owner_flip_done);
+    }
+
+    /// And a queue has to come back as it went in: this is the only record of
+    /// what the light client is owed, so losing it across a restart loses the
+    /// coverage with it.
+    #[test]
+    fn the_owed_queue_survives_a_save_and_a_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = RelayerState::default();
+        s.record_update(200, 1, [9u8; 32], 232);
+        s.owed_spans.push(OwedSpan {
+            older: [1u8; 32],
+            newer: [2u8; 32],
+            paid_attempts: 2,
+            fetch_since: Some(1_700_000_000),
+        });
+        s.owed_spans.push(OwedSpan {
+            older: [2u8; 32],
+            newer: [3u8; 32],
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        s.save(&path).unwrap();
+
+        let back = RelayerState::load(&path).unwrap().expect("must load");
+        assert_eq!(back.owed_spans, s.owed_spans);
+        assert_eq!(back.owed_spans[0].paid_attempts, 2);
+        assert_eq!(back.owed_spans[0].fetch_since, Some(1_700_000_000));
+    }
+
     #[test]
     fn roundtrip() {
         let dir = tempdir().unwrap();
@@ -135,4 +221,12 @@ mod tests {
         assert_eq!(loaded.last_finalized_slot, Some(100));
         assert_eq!(loaded.updates_applied, 1);
     }
+}
+
+/// Wall-clock seconds, for bounds that must not move with the poll interval.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

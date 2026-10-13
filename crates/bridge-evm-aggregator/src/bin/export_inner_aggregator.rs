@@ -43,8 +43,8 @@ fn main() -> anyhow::Result<()> {
             }
             // Optional persistent outer PK cache. First run against a new
             // (name, k_outer, lookup_bits, universality, inner-shape) slot
-            // does full keygen (~3-5 min at K=21); subsequent runs load PK
-            // from disk (~15-60 s). See `aggregator_cache.rs` for slot layout.
+            // does full keygen at K=21; later runs load the key from disk.
+            // See `aggregator_cache.rs` for slot layout.
             "--pk-cache-dir" => pk_cache_dir = args.next().map(PathBuf::from),
             other => anyhow::bail!("unknown arg: {other}"),
         }

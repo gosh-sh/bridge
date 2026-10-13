@@ -28,16 +28,16 @@
 #                              required and immutable after deployment
 #   USE_AAVE                   true: deploy with DeployRealBridge instead, wired
 #                              to the AAVE V3 Sepolia pool. The bridge then takes
-#                              the pool's USDC (0x94a9D9AC…E4C8), not Circle's,
-#                              and it replaces the live bridge: pause that one
-#                              first, then trust the new address on the AN side
-#                              (docs/aave-yield.md, "Launching a Sepolia stand
-#                              with AAVE"). Default: false.
+#                              the pool's USDC (0x94a9D9AC…E4C8), not Circle's.
+#                              This is a test stand: pause the live bridge first
+#                              and do not point deposit-relayer or the user CLI
+#                              at it (docs/aave-yield.md, "Launching a Sepolia
+#                              stand with AAVE"). Default: false.
 #   DEMO_AAVE                  true: keep DeployShellnetE2EBridge and Circle USDC,
 #                              and wire the bridge to a fresh DemoAavePool owned
 #                              by PRIVATE_KEY; yield is whatever that key pays in
 #                              with accrueYield (docs/aave-yield.md, "A demo pool
-#                              on Sepolia"). Replaces the live bridge as well.
+#                              on Sepolia"). Same test-stand rules as USE_AAVE.
 #                              Excludes USE_AAVE. Default: false.
 set -euo pipefail
 set +x

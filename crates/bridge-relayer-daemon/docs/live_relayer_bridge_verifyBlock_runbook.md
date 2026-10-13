@@ -155,7 +155,8 @@ logs without printing the private key.
 
 The supported long-running server wrapper is
 [`deploy/shellnet-l2/`](../deploy/shellnet-l2/README.md). It provides an
-immutable non-root image, read-only preflight, bounded Docker logs, explicit
+immutable non-root image, preflight (it writes
+`$BRIDGE_STATE_DIR/bridge_address`; it does not send a transaction), bounded Docker logs, explicit
 bind mounts, status tooling and example env files containing placeholders
 only. The operator flow is:
 

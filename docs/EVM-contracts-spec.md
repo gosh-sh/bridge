@@ -7,6 +7,11 @@ citations below are re-anchored to that commit — the two-line-number-bases spl
 previous revisions of this document carried is gone. When editing the spec, either
 re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
 
+**Drift (2026-10-14):** §12 `DeployRealBridge.s.sol` line numbers (`:137`,
+`:140`, `:145`, `:150-151`, `:254`) match this branch after the
+`IATokenSupply` insert in that script, not `4021c68`. The rest of the
+citations are still the 2026-09-25 pass.
+
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -385,8 +390,9 @@ on a deployment whose host chain is not the configured one. On the **same** chai
 no public input names the bridge contract, so a second deployment with the same
 `bridgeWithdrawalDappFr`/`bridgeWithdrawalAccFr` pays the same burn again once one of its anchors
 covers it. Pausing the first deployment does not prevent that: the nullifier map
-is per contract. Keep the new deployment's treasury to what the test needs
-([`aave-yield.md`](aave-yield.md)). The rotated
+is per contract. Keep the new deployment's treasury to what the operator
+deposits for the test, and do not point `deposit-relayer` or the user CLI
+at a same-identity redeploy ([`aave-yield.md`](aave-yield.md)). The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
 nullifier, so two identical burns in one AN block mint distinct
 nullifiers (trade-off 12).

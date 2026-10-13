@@ -47,7 +47,9 @@ have).
 
 ## Launching a Sepolia stand with AAVE
 
-**The stand replaces the live bridge; it cannot run next to it.** Everything below
+**This is a test stand. It cannot run next to the live bridge, and it
+must not take user deposits.** Same withdraw identity means a burn the
+old bridge already paid can be paid again on the stand. Everything below
 was checked against Sepolia on 2026-10-13.
 
 ### Why two bridges cannot share the Acki Nacki bridge
@@ -68,17 +70,22 @@ for:
   faucet becomes ECC[3], and that ECC[3] withdraws as Circle USDC from the live
   bridge's treasury.
 
-So the live bridge is paused before the stand takes deposits or anchors, and stays
-paused. After the cutover the ECC[3] already in circulation, minted against Circle
-USDC, is redeemed from the stand — in AAVE test USDC on a `USE_AAVE` stand, in Circle
-USDC on a [demo stand](#a-demo-pool-on-sepolia). The Circle USDC left on the paused
-bridge stays there; the owner has no call that moves user principal off a bridge.
+So the live bridge is paused before the stand takes anchors, and stays
+paused. Do not redeem circulating ECC[3] from the stand. That token was
+minted against Circle USDC on `OLD_BRIDGE`; the owner has no call that
+moves that principal off the paused bridge. The stand's `treasuryBalance`
+is only what is deposited into the stand. Paying old holders from it
+would drain the operator's test funds, pay them in AAVE test USDC on a
+`USE_AAVE` stand, and still leave whoever redeems last with
+`WithdrawTreasuryShortfall`.
 
-The nullifier map does not carry over to the stand. A burn the old bridge already
-paid can, in principle, be proven again on the stand once one of its anchors covers
-that burn's block; the higher layer windows cover long stretches of history. This is
-true of every redeploy on the same withdraw identity, not only of an AAVE stand; keep
-the stand's treasury to what the test needs.
+The nullifier map does not carry over. A burn `OLD_BRIDGE` already paid
+can be proven again on the stand once one of its anchors covers that
+block — including higher-layer windows, which span history from before
+the stand's genesis. That is why the stand must not hold user deposits:
+those deposits become the treasury a replay would take. Keep it to what
+the operator puts in for the test (step 8) and do not point
+`deposit-relayer` or the user CLI at the stand.
 
 ### What is different from the shellnet stand
 
@@ -87,7 +94,7 @@ the stand's treasury to what the test needs.
 | Deposit token | Circle USDC `0x1c7D4B19…7238`, [faucet.circle.com](https://faucet.circle.com) | AAVE test USDC `0x94a9D9AC…E4C8`, the AAVE faucet `0xC959483D…f42D` |
 | AAVE pool / aToken | none | `0x6Ae43d32…8951` / `0x16dA4541…EB80` |
 | Withdraw aliases | default to 1 / 11155111 / 3 | default to 0 — set them by hand |
-| Acki Nacki side | its address is trusted | trusted in place of the live bridge (step 4) |
+| Acki Nacki side | its address is trusted | trusted so the operator's test deposit can finalize (step 4); not a user cutover |
 
 A user's Circle USDC cannot be deposited into the AAVE stand, and the reverse.
 
@@ -119,7 +126,8 @@ RPC=<Sepolia RPC>
 POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951
 USDC=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8
 CFG=$(cast call $POOL 'getConfiguration(address)(uint256)' $USDC --rpc-url $RPC | awk '{print $1}')
-echo "cap (whole USDC): $(( (CFG >> 116) & ((1 << 36) - 1) ))"   # 0 means no cap
+# bash arithmetic is 64-bit; the configuration word is 256-bit.
+python3 -c "c=int('$CFG',0); print('cap (whole USDC):', (c >> 116) & ((1 << 36) - 1))"   # 0 means no cap
 cast call 0x16dA4541aD1807f4443d92D26044C1147406EB80 'totalSupply()(uint256)' --rpc-url $RPC   # supplied, 6 decimals
 cast call $USDC 'balanceOf(address)(uint256)' 0x16dA4541aD1807f4443d92D26044C1147406EB80 --rpc-url $RPC   # free to withdraw
 ```
@@ -149,10 +157,15 @@ AN="tvm-cli -u https://shellnet.ackinacki.org"
      -m setPaused '{"paused":true}'
    ```
 
-2. **Let the live bridge pay what is already burned.** Keep its AN→ETH relayer
-   running until every `proof_event_*.json` it holds has been paid
-   (`isNullifierUsed(nullifier)` is true on `OLD_BRIDGE`) and no burn made before
-   step 1 is still waiting for its covering anchor.
+2. **Let the live bridge pay what is already burned.** Users withdraw with
+   `ackinacki-bridge withdraw`; that proof can take hours. Keep the AN→ETH
+   relayer running until every `proof_event_*.json` it holds has been paid
+   (`isNullifierUsed(nullifier)` is true on `OLD_BRIDGE`), no burn made
+   before step 1 is still waiting for its covering anchor, **and** a
+   proof-window has passed since step 1 so a user who burned just before
+   the pause has time to finish proving. Pausing `OLD_BRIDGE` while that
+   proof is still running strands them: `withdrawByProof` reverts
+   `whenNotPaused`, and the stand is not a payout path for those burns.
 
 3. **Pause the live bridge.** `pause()` makes `deposit`, `verifyBlock`,
    `applyBkSetUpdate` and `withdrawByProof` revert (`:1614`), so it pays nothing
@@ -168,9 +181,11 @@ AN="tvm-cli -u https://shellnet.ackinacki.org"
    **Leave Acki Nacki paused.** The stand does not exist yet. Its genesis is
    taken at deploy time from the current head (`deploy_bridge_bundle.sh` /
    `compute_bridge_anchors --at-head`). A burn made after a reopen, if a
-   window boundary passes before that deploy, sits below the seed: the stand
-   never holds an anchor that covers it, and `OLD_BRIDGE` is already paused
-   and cannot pay it.
+   window boundary passes before that deploy, sits below the L1/L2 seed.
+   Higher-layer windows can still cover older history once the stand has
+   been proving — that is the replay path above, not a way to pay a user
+   whose burn landed in that gap. `OLD_BRIDGE` is already paused and
+   cannot pay it.
 
 ### 3. Deploy
 
@@ -261,10 +276,13 @@ In `/etc/gosh-bridge-relayer/shellnet-l2.env` set `BRIDGE_ADDRESS`,
 withdraw values you deployed with,
 `EXPECTED_USDC_ADDRESS=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` and
 `EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`, then run
-`preflight` and start the service. `preflight` writes `$BRIDGE_STATE_DIR/bridge_address`
-and stops if that file (or leftover `L2_config/relayer-state.json` one level
-up) names another bridge. The stand can now `verifyBlock`; it still cannot
-see burns that have not been made yet.
+`preflight` and start the service. `preflight` writes
+`$BRIDGE_STATE_DIR/bridge_address` and stops if **that file** names another
+bridge. It does not look at leftover `L2_config/relayer-state.json`.
+`daemon-live` does, and it will drift if that file is still from
+`OLD_BRIDGE` — that is why the whole `L2_config` is moved aside above,
+not only `state/`. The stand can now `verifyBlock`; it still cannot see
+burns that have not been made yet.
 
 ### 6. Reopen Acki Nacki
 
@@ -273,28 +291,28 @@ $AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
   -m setPaused '{"paused":false}'
 ```
 
-Burns made from here on can be paid on the stand: it already exists, and its
-genesis is at or below this head. Deposits made into `OLD_BRIDGE` before its
-pause finalize as usual, because it is still trusted. `finalizeDeposit` was
-refusing them while Acki Nacki was paused.
+This reopen is so leftover `OLD_BRIDGE` deposits can `finalizeDeposit` —
+that call was refusing them while Acki Nacki was paused. It also lets
+anyone with ECC[3] burn. Those burns are payable on the stand if it has
+anchors and `treasuryBalance`. Do not treat that as a user payout path:
+the stand holds only the operator's test funds (step 8), pays in AAVE
+test USDC on a `USE_AAVE` stand, and can replay a burn `OLD_BRIDGE`
+already paid. Do not publish the stand as the CLI withdraw target.
 
-### 7. Finish the ETH→AN side
+### 7. Finish leftover deposits on `OLD_BRIDGE`
 
 Keep `deposit-relayer` on `OLD_BRIDGE` until it has finalized every deposit
 made there before the pause. The daemon follows one `--bridge-address`; if
 it is moved first, those deposits stay on the paused bridge and the owner
 has no call that moves user principal off it.
 
-Then point the remaining off-chain parts at the stand:
+Then **stop** `deposit-relayer`. Do not point it, or the user
+`ackinacki-bridge` CLI, at the stand. New user deposits into a
+same-identity stand become the treasury a replay of an already-paid burn
+would take. The operator funds the stand by hand in step 8.
 
-- ETH→AN relayer (`deposit-relayer`): `--bridge-address`, `BRIDGE_DEPLOY_BLOCK`
-  and a new `--state` file. The old file is bound to the live bridge and the
-  daemon refuses it; `--force-state` would rebind it but keep the old cursor.
-- `ackinacki-bridge` CLI: `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` in its
-  config. It reads the deposit token from the bridge's `usdc()`, so nothing
-  else changes.
-
-Then remove `OLD_BRIDGE` from the trusted set:
+Then remove `OLD_BRIDGE` from the trusted set (new deposits already fail
+there — it is paused):
 
 ```bash
 $AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
@@ -343,9 +361,9 @@ The demo stand keeps everything else of the shellnet stand — `DeployShellnetE2
 Circle USDC, the withdraw aliases — so users fund from
 [faucet.circle.com](https://faucet.circle.com) as before. Its deposit token is the live
 bridge's, so the faucet problem above does not arise, but one burn would still be
-payable on both bridges: the demo stand **replaces the live bridge too**. Retire the
-live bridge first ([step 2](#2-retire-the-live-bridge)), then deploy
-while Acki Nacki is still paused:
+payable on both bridges: the demo stand is the same kind of test stand.
+Retire the live bridge first ([step 2](#2-retire-the-live-bridge)), then
+deploy while Acki Nacki is still paused:
 
 ```bash
 cd crates/bridge-prover-libraries
@@ -359,10 +377,10 @@ mainnet) deploys a `DemoAavePool` over Circle USDC, owned by the `PRIVATE_KEY`
 address, and wires the bridge to it and its `DemoAToken`. The script prints the pool
 address and writes it into `L2_config/env` as `EXPECTED_AAVE_POOL`; set that and
 `EXPECTED_USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` in the relayer's
-runtime env. Steps 4–7 of the section above — trusting the stand, pointing the
-AN→ETH relayer with fresh state, reopening Acki Nacki, then moving the
-ETH→AN relayer and the CLI only after `OLD_BRIDGE` deposits are finalized —
-apply unchanged.
+runtime env. Steps 4–7 of the section above apply unchanged: trust the
+stand, point the AN→ETH relayer with fresh state, reopen Acki Nacki so
+leftover `OLD_BRIDGE` deposits can finalize, then stop `deposit-relayer`.
+Do not move the ETH→AN relayer or the user CLI onto the stand.
 
 After deposits, supply, pay yield in, and collect it. `USDC` is Circle's token here,
 not the AAVE test USDC of step 1:

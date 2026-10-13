@@ -39,15 +39,24 @@ assigns it when the release is tagged.
   for "all of it". It does not: anything above `accruedYield()` reverts
   `NoYield`, which reads as "no yield". Pass `accruedYield()`. Only
   `skimExcessUsdc` takes the max.
-- `docs/aave-yield.md` launches a Sepolia AAVE or demo stand as a cutover of
-  the live bridge rather than next to it: pause withdrawals on Acki Nacki with
-  `setPaused(true)`, let the live bridge pay what is already burned, `pause()`
-  it, reopen Acki Nacki, then deploy and trust the stand and give both
-  relayers fresh state. Removing the live bridge from the trusted set waits
-  until its last deposits are finalized. `EVM-contracts-spec.md` no longer
-  says a withdrawal proof cannot be replayed on a second deployment: that
-  holds only across chains; on one chain any unpaused bridge with the same
-  withdraw identity pays it.
+- `docs/aave-yield.md` launches a Sepolia AAVE or demo stand as a **test
+  stand**, not a user cutover. Same withdraw identity means a burn the
+  live bridge already paid can be paid again on the stand, so the live
+  bridge is paused first, the stand is deployed while Acki Nacki is still
+  paused, and `deposit-relayer` and the user CLI stay off the stand.
+  Circulating ECC[3] stays backed by Circle USDC on the paused live
+  bridge; the stand's treasury is only what the operator deposits for the
+  test. Wait a proving window before `pause()` on the live bridge —
+  `ackinacki-bridge withdraw` can take hours, and `withdrawByProof`
+  reverts `whenNotPaused`. `EVM-contracts-spec.md` §7.2 says the same:
+  a withdrawal proof cannot be replayed on another chain, but on one
+  chain any unpaused bridge with the same identity pays it. The runbook's
+  supply-cap check now uses Python 256-bit arithmetic — bash
+  `$((CFG >> 116))` printed 16 for a 2 000 000 000 cap. `preflight`
+  writes `$BRIDGE_STATE_DIR/bridge_address` and does not inspect leftover
+  `relayer-state.json`; `daemon-live` does, so the whole `L2_config` is
+  moved aside. The verifyBlock runbook no longer calls that preflight
+  read-only.
 - `docs/aave-yield.md` no longer says `transferOwnership` leaves
   `yieldRecipient` behind. Ownership moves in two steps, and `acceptOwnership`
   moves `yieldRecipient` with it while it still equals the outgoing owner; a
@@ -310,15 +319,19 @@ assigns it when the release is tagged.
   `1` / `11155111` / `3`, and writes the `EXPECTED_USDC_ADDRESS` and
   `EXPECTED_AAVE_POOL` values for the relayer into `L<LEVEL>_config/env` as
   comments. Such a bridge takes the AAVE pool's USDC (`0x94a9D9AC…E4C8`), not
-  Circle's. **It replaces the live shellnet bridge and must not run next to
-  it**: with the same withdraw identity, one Acki Nacki burn is payable on
-  both, and AAVE faucet USDC deposited into the stand withdraws as Circle USDC
-  from the live bridge. Pause Acki Nacki and the live L1 bridge, deploy the
-  stand while Acki Nacki is still paused, then reopen it; keep
-  `deposit-relayer` on the old bridge until its pending deposits finalize.
-  Trust the stand with `setTrustedL1Bridge(11155111, <bridge>, true)`. The
-  steps are in `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*.
-  Without `USE_AAVE` the script behaves as before.
+  Circle's. **It is a test stand and must not run next to the live
+  bridge or take user deposits**: with the same withdraw identity, one
+  Acki Nacki burn is payable on both, and a user deposit into the stand
+  is the treasury a replay would take. Pause Acki Nacki and the live L1
+  bridge, wait a proving window so in-flight CLI withdrawals can finish,
+  deploy the stand while Acki Nacki is still paused, then reopen it so
+  leftover live-bridge deposits can finalize. Keep `deposit-relayer` on
+  the old bridge until those deposits finalize, then stop it — do not
+  point it or the user CLI at the stand. Trust the stand with
+  `setTrustedL1Bridge(11155111, <bridge>, true)` so the operator's test
+  deposit can finalize. The steps are in `docs/aave-yield.md`,
+  *Launching a Sepolia stand with AAVE*. Without `USE_AAVE` the script
+  behaves as before.
 - **A demo AAVE pool for Sepolia stands.** New contract
   `contracts/ethereum/src/DemoAavePool.sol` answers the AAVE V3 Pool calls the
   bridge makes (`supply`, `withdraw`, `getReserveData`) over any token, holds
@@ -330,10 +343,11 @@ assigns it when the release is tagged.
   wires the bridge to it; Circle USDC, the faucet and the withdraw aliases stay
   as on the shellnet stand. `deploy_bridge_bundle.sh` passes `DEMO_AAVE=true`
   through and writes the pool address as `EXPECTED_AAVE_POOL`. A demo stand
-  also replaces the live bridge — one burn would otherwise be payable on both —
-  so the live bridge is paused first; then Acki Nacki needs
-  `setTrustedL1Bridge` for the stand, and the relayers and CLI need its
-  address. Steps in `docs/aave-yield.md`, *A demo pool on Sepolia*.
+  is the same kind of test stand — one burn would otherwise be payable on
+  both — so the live bridge is paused first; then Acki Nacki needs
+  `setTrustedL1Bridge` for the stand. Do not point `deposit-relayer` or
+  the user CLI at it. Steps in `docs/aave-yield.md`, *A demo pool on
+  Sepolia*.
 - `DeployRealBridge` with `USE_AAVE=true` checks the pool before deploying: it
   stops if the pool does not list the USDC under the hard-coded aToken, and it
   prints the reserve's supply cap and total supply, with a warning when the cap

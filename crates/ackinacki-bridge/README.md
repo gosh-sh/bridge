@@ -1723,9 +1723,10 @@ enabled.
 
   Ancestry runs on Acki Nacki once the light client hashes headers with the
   `KECCAK256` instruction ([docs/eth-light-client.md](../../docs/eth-light-client.md)).
-  Check 3 does not look at the deposit's own block: it asks whether any
-  `AncestryAccepted` has reached the bridge since the switch-off and whether
-  the head and that event are fresh enough. A deposit in a block no span
+  Check 3 does not look at the deposit's own block. It asks whether the light
+  client's own event history carries an `AncestryAccepted` with new hashes
+  since the switch-off, whether the bridge accepted the block before that
+  event's checkpoint, and whether the head and the event are fresh enough. A deposit in a block no span
   covers passes check 3 and then fails on chain with `ERR_UNKNOWN_BLOCK`
   (224). The CLI starts accepting deposits by itself once the checks pass;
   that needs no new CLI release.

@@ -497,9 +497,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     /// Leave the cursor behind the head so a later tick tries the span again,
     /// until [`MAX_SPAN_ATTEMPTS`] is spent. Each attempt costs a submission
-    /// the light client pays for, so an outcome that never changes — an old
-    /// contract refusing the new payload, a node without `KECCAK256` — must
-    /// not be repeated for the life of the daemon.
+    /// the light client pays for, so the budget is what keeps one span from
+    /// being resubmitted without end. The budget is per span, not per daemon:
+    /// a condition that will not change — an old contract refusing the new
+    /// payload, a node without `KECCAK256` — costs that many attempts again
+    /// on the next span, because nothing here can tell a permanent refusal
+    /// from a long outage.
     fn retry_span_later(&mut self, reason: String, newer: [u8; 32]) {
         self.state.span_attempts = self.state.span_attempts.saturating_add(1);
         if self.state.span_attempts >= MAX_SPAN_ATTEMPTS {

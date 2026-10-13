@@ -1561,7 +1561,7 @@ assigns it when the release is tagged.
 
 - **A deposit is only covered once both checkpoints bracketing its block are
   proven and within a span of each other.** Gas is no longer the obstacle —
-  the `KECCAK256` instruction brought a full 33-header span to 1,930,730 gas
+  the `KECCAK256` instruction brought a full 33-header span to 1,942,271 gas
   against the 10M per-transaction limit (see Breaking Changes) — and a
   checkpoint the daemon skipped can be late-registered through `submitUpdate`,
   which would close the gap without the owner key — but nothing in this

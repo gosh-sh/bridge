@@ -1687,10 +1687,10 @@ version is the build constant `MIN_BRIDGE_VERSION`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
 already. Independently of that minimum, preflight also refuses a bridge
-older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.6.0`) with exit 2: this CLI's
+older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.6.0`) gets a warning.
+than the newest this build was checked against (`1.7.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

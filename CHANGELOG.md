@@ -100,6 +100,36 @@ assigns it when the release is tagged.
   `--older-anchor-hash` next to `--checkpoint-hash` (the newer anchor), and
   `--max-headers` now defaults to 33. Without this, every `submitAncestry` the
   old relayer sent would revert with `ERR_BAD_ANCESTRY`.
+- **The deposit-prover verification key is rotated again, for Amsterdam
+  block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
+  353024; Hoodi and mainnet not yet scheduled) execution headers carry 23
+  fields, `blockAccessListHash` and `slotNumber` after `requestsHash`, and
+  the previous key could not prove a deposit in such a block. The circuit
+  now accepts headers of 16 to 24 fields up to 792 bytes, so one key covers
+  mainnet before and after the fork, Sepolia, and the L2s the bridge reads
+  (Arbitrum 16 fields, Blast 20, Base, OP, Mantle and World Chain 21), with
+  one spare slot for the next appended field. A header padded with junk is
+  still rejected. The deposit-prover encoder (`rlp_utils`) and
+  `eth-lc-relayer` (`header_rlp`, used with `--submit-ancestry`) emit the
+  two new fields. Rebuild both binaries from this source.
+
+  Post-fork Sepolia blocks still cannot be anchored by the light client:
+  the step circuit and its witness builder have not followed Gloas
+  (`execution_payload` became `signed_execution_payload_bid`). Until that
+  change lands, a post-fork block is accepted only if the owner writes it
+  with `setAcceptedBlockHash`. After `disableOwnerAnchors` those deposits
+  cannot be finalized. No deposit is stuck today: no bridge contract on
+  Sepolia has had an event since the fork.
+
+  `eccUSDCBridge` embeds the new key, reports `version` 1.7.0, and
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with sold 0.80.0;
+  the ABI is unchanged. Operators: deploy that tvc and, at the same time,
+  rebuild the `deposit-prover` examples (`cargo build --release
+  --examples`) on every relayer host and anywhere `ackinacki-bridge
+  deposit` proves. Proofs made with the previous key (bridge 1.6.0) stop
+  verifying, and a stale `target/release/examples/<name>` produces proofs
+  the new key rejects. `ackinacki-bridge deposit` refuses a bridge older
+  than 1.7.0.
 
 - **The deposit-prover verification key is rotated, and the rotation
   closes two forgeries.** Under the previous key — and every earlier one
@@ -139,9 +169,9 @@ assigns it when the release is tagged.
   finish or drain such deposits before the bridge is upgraded, or
   prove them again after.
 
-  `eccUSDCBridge` embeds the new key and reports `version` 1.6.0;
-  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with
-  sold 0.80.0. Operators: deploy that tvc. On every relayer host
+  Those constraints first shipped as bridge 1.6.0. The tree now carries
+  the 1.7.0 tvc of the Amsterdam entry above, which includes them.
+  Operators deploy that tvc, not a 1.6.0 artefact. On every relayer host
   rebuild the `deposit-prover` examples (`cargo build --release
   --examples`) and do **not** pass `--max-data-byte-len 256` — the
   default is now 2048 and is part of the key. With a leftover
@@ -156,8 +186,8 @@ assigns it when the release is tagged.
   generates the new ~3.4 GB key and then deletes the old one, so
   `data/` briefly needs room for both. `ackinacki-bridge deposit`
   installs get the prover tools from a release (`install.sh`), so
-  they need a new release; its CLI refuses a bridge older than
-  1.6.0, whose key its proofs do not match.
+  they need a new release; this CLI refuses a bridge older than
+  1.7.0, whose key its proofs do not match.
 
   The prover now refuses a deposit it cannot prove before loading
   the SRS or the key. `fetch_deposit_data` exits 3 when the

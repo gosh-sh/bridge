@@ -10,9 +10,9 @@ actually hit in production.
 the on-chain bridge state (its global history — anchor chain, per-layer
 history window, latest verified bundle, latest BK-set commitment)
 advances continuously in step with the Acki Nacki chain. The daemon
-polls shellnet, proves key blocks with some specified cadence (not each
-key block!), and posts `verifyBlock` to Sepolia; when the chain rotates
-its BK set, the daemon detects the rotation off-chain, submits
+polls shellnet, proves one key block per `W²` window (not each key
+block — see below), and posts `verifyBlock` to Sepolia; when the chain
+rotates its BK set, the daemon detects the rotation off-chain, submits
 `applyBkSetUpdate`, and keeps proving against the right (incoming or
 outgoing) BK set per the contract's two-slot model
 (`storedBkSetCommitment` / `storedPrevBkSetCommitment`).
@@ -26,7 +26,8 @@ outgoing) BK set per the contract's two-slot model
   against the **outgoing** BK set (wrapped and aggregated exactly like
   the attestation half of a bundle) and submits it together with the
   block's block-id tree leaves L2 (old BK-set commitment) and L3 (new
-  commitment) plus three SHA-256 siblings. The contract folds L2/L3 up
+  commitment) — leaf positions 2 and 3, unrelated to L2 anchoring —
+  plus three SHA-256 siblings. The contract folds L2/L3 up
   the depth-4 / 16-leaf tree and requires the root (mod BN254 r) to equal
   the attested `blockId` — see
   [`docs/EVM-contracts-spec.md` §7.3](../../../docs/EVM-contracts-spec.md#73-applybksetupdate--rotate-the-bk-set-commitment).
@@ -43,32 +44,32 @@ of scope** — see the withdraw-side runbook.
 > (producer-side, `W = 128` — the historical window size). A key block
 > carries essential AN historical data that will serve as an anchor in
 > the Ethereum bridge contract. A **bundle** is what the daemon actually
-> proves; its stride depends on anchor mode — `W·P = 1024` under L1
-> (thinning `P = 8`), `W² = 16384` under L2 (no thinning).
+> proves: one block per `W² = 16384` seq_nos, i.e. every 128th key block
+> (L2 anchoring).
 
 **Why we do not prove every key block.** A single bundle proof
 (Circuit 1A + Circuit 2, aggregated by SHPLONK) costs ~10 min
-warm / ~14 min cold on dev hardware. Shellnet emits a key block every
-`W` = 128 source blocks and runs fast — at the observed ~3 b/s that is
-one key block every ~43 s — so a per-key-block prover would fall ~15×
-behind. Two levers stack to make the system viable:
+warm / ~14 min cold on dev hardware
+([`daemon_live_performance.md`](daemon_live_performance.md)). Shellnet
+emits a key block every `W` = 128 source blocks and runs fast — at the
+observed ~3 b/s that is one key block every ~43 s — so a per-key-block
+prover would fall ~15× behind. The bridge therefore anchors at
+**layer 2** (`BRIDGE_ANCHOR_LEVEL=2`): the daemon proves one bundle per
+full `W²` window — every 128th key block, a single L2 hop
+(`chain_steps = 1` in Circuit 2), ~91 min of shellnet time apart. A
+10–14 min proof leaves most of each window idle, so the prover keeps
+pace with the chain indefinitely. A user waits up to ~2 h for a
+withdrawal to become provable — a *constant* cadence — and the bridge
+writes to Sepolia once per window, which keeps gas low.
 
-- **Thinning** (bridge-side, param `P`). Relay only every `P`-th key
-  block, i.e. heights `SEQ_NO % (W*P) == 0`. Current setting
-  `W = 128, P = 8` → bundle stride 1024 source blocks (~5 min
-  chain-time).
-- **Anchor level** (on-chain, env `BRIDGE_ANCHOR_LEVEL`). Controls how
-  often the bridge advances its covering layer-hash on Sepolia, and
-  therefore how often a user can withdraw.
-  - `L1` (stride `W·P = 1024`, ~5 min shellnet-time) — every bundle is
-    an anchor. Convenient for one-fire-and-withdraw E2E tests and CI;
-    about 30–50 minutes per test.
-  - `L2` (stride `W² = 16384`, ~91 min shellnet-time) — the production
-    variant. Thinning does **not** apply here: the daemon proves one
-    bundle per full `W²` window directly (single L2 hop, `chain_steps =
-    1` in Circuit 2). A user waits up to ~2 h for their withdrawal to
-    become provable — a *constant* cadence — in exchange for far fewer
-    on-chain writes and lower gas.
+**L2 is the only production mode, and the only one this runbook
+covers.** Every command below uses `BRIDGE_CONFIG_DIR=./L2_config`, and
+`BRIDGE_ANCHOR_LEVEL` must be `2`. The `relayer` binary's built-in
+default is not `2`, and a daemon started at the wrong level either
+refuses to start or cannot submit its first bundle
+([Step 5](#step-5--sanity-check-the-resulting-environment) checks the
+variable). [Case 7](#case-7--l1-anchoring-one-off-tests-only) explains
+why the other config directory in the repo is test-only.
 
 > **Runtime layout.** For a long-running L2 server, use the production
 > [Docker Compose kit](../deploy/shellnet-l2/README.md): runtime state
@@ -163,10 +164,11 @@ Any drift is a Case 5 revert waiting to happen.
 - [Case 5 — Restart after on-chain revert](#case-5--restart-after-on-chain-revert)
 - [Case 6a — Chain-resurrect (advanced contract + fresh daemon)](#case-6a--chain-resurrect-advanced-contract--fresh-daemon)
 - [Case 6b — State loss / re-bootstrap from mid-chain](#case-6b--state-loss--re-bootstrap-from-mid-chain)
-- [Case 7 — L2-anchored cold-start (`BRIDGE_CONFIG_DIR=./L2_config`)](#case-7--l2-anchored-cold-start-bridge_config_dirl2_config)
+- [Case 7 — L1 anchoring: one-off tests only](#case-7--l1-anchoring-one-off-tests-only)
 - [Case 8 — Observed BK-set rotation (routine, no action required)](#case-8--observed-bk-set-rotation-routine-no-action-required)
 - [Case 9 — Rotation deferred: second rotation crosses an unverified bundle boundary](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary)
 - [Case 10 — `bk_set.shellnet.json` has gone stale after the first rotation](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation)
+- [Case 11 — Redeploy at a fresh seed to escape a GQL pruning dead-zone](#case-11--redeploy-at-a-fresh-seed-to-escape-a-gql-pruning-dead-zone)
 - [Health checks (run any time)](#health-checks-run-any-time)
 - [File & state reference](#file--state-reference)
 - [Onboarding wrap-up — new operator on a fresh L2 server](#onboarding-wrap-up--new-operator-on-a-fresh-l2-server)
@@ -181,7 +183,7 @@ pending or in-flight.
 
 ```bash
 cd crates/bridge-prover-libraries
-export BRIDGE_CONFIG_DIR=./L1_config      # or ./L2_config
+export BRIDGE_CONFIG_DIR=./L2_config
 export RELAYER_STATE_PATH="$BRIDGE_CONFIG_DIR/relayer-state.json"
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 export BRIDGE=$BRIDGE_ADDRESS
@@ -264,18 +266,15 @@ Never start two daemons with the same bridge/EOA/state tuple.
 
 Working directory: `crates/bridge-prover-libraries/`.
 
-### Step 1 — Choose the anchor mode
+### Step 1 — Select the L2 config directory
 
-`BRIDGE_CONFIG_DIR` is the single mode selector. Pick **one** of the
-two lines below and export it in the shell you will use for all
-subsequent commands:
+Export `BRIDGE_CONFIG_DIR` in the shell you will use for all subsequent
+commands:
 
 ```bash
 cd crates/bridge-prover-libraries
 
-export BRIDGE_CONFIG_DIR=./L2_config   # production on a server (W² = 16384 stride)
-# — OR —
-export BRIDGE_CONFIG_DIR=./L1_config   # one-off withdraw test  (W·P = 1024 stride)
+export BRIDGE_CONFIG_DIR=./L2_config   # L2 anchoring, W² = 16384 stride
 export RELAYER_STATE_PATH="$BRIDGE_CONFIG_DIR/relayer-state.json"
 ```
 
@@ -316,15 +315,15 @@ cargo build --release -p bridge-prover-lib --bin bootstrap_hermez_srs
 Pin and verify the resulting artifact manifest before starting a
 production container.
 
-### Step 4 — Source the mode env file
+### Step 4 — Source the L2 env file
 
 ```bash
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 ```
 
-The development env file first sources `../shellnet.common` for shared
-test settings and then sets the three mode-specific vars
-(`BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`).
+`L2_config/env` first sources `../shellnet.common` for shared test
+settings and then sets the deploy-specific vars: `BRIDGE_ADDRESS`,
+`BRIDGE_BOOTSTRAP_SEQNO` and `BRIDGE_ANCHOR_LEVEL=2`.
 
 For a server, do not edit either tracked file. Install a dedicated
 runtime env outside the clone from
@@ -340,9 +339,13 @@ for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY \
          BRIDGE_BOOTSTRAP_SEQNO; do
   [ -n "${!v:-}" ] && echo "  ok  $v" || echo "  FAIL $v"
 done
+[ "${BRIDGE_ANCHOR_LEVEL:-}" = 2 ] && echo "  ok  BRIDGE_ANCHOR_LEVEL=2" \
+  || echo "  FAIL BRIDGE_ANCHOR_LEVEL must be 2"
 ```
 
-All ten variables must print `ok`. Optional:
+All eleven lines must print `ok`. `BRIDGE_ANCHOR_LEVEL` is checked by
+value: the `relayer` binary does not default to `2`, so an unset
+variable would start the daemon at the wrong anchor level. Optional:
 `BRIDGE_GQL_FAILOVER_ENDPOINTS` (comma-separated GraphQL endpoints
 tried after `BRIDGE_GQL_ENDPOINT` exhausts its three retries) and
 `RELAYER_METRICS_ADDR` (Prometheus `/metrics` bind address).
@@ -374,8 +377,8 @@ subcommand arguments are needed.
 ## Deploy your own bridge bundle from scratch
 
 **You may not need this section.** The repo ships pre-populated
-development `shellnet.common`, `L1_config/env`, and `L2_config/env`
-pointing at a live Sepolia deploy. A server operator must instead use a
+development `shellnet.common` and `L2_config/env` pointing at a live
+Sepolia deploy. A server operator must instead use a
 dedicated EOA and an external runtime env, then skip to
 [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy) — the
 daemon can `Resurrect` off the on-chain state (see
@@ -383,8 +386,8 @@ daemon can `Resurrect` off the on-chain state (see
 regardless of who deployed it.
 
 Deploy your own bundle only if the shared deploy no longer suits (e.g.
-different anchor level, custom W/P, isolated test lane, or you want to
-own the key that owns the contract). `verifyBlock` and
+an isolated test lane, or you want to own the key that owns the
+contract). `verifyBlock` and
 `applyBkSetUpdate` are both permissionless on `AckiNackiBridge`.
 
 **Network.** Target is Sepolia (chain 11155111). Point `RPC_URL` at a
@@ -500,8 +503,8 @@ cold-start commitment compare passes.
 >
 > 1. Queries shellnet chain head over GraphQL — no separate `curl`
 >    needed.
-> 2. Picks the newest stride-aligned boundary ≤ head
->    (L1: `⌊head / 1024⌋ · 1024`; L2: `⌊head / 16384⌋ · 16384`).
+> 2. Picks the newest `W²`-aligned boundary ≤ head
+>    (`⌊head / 16384⌋ · 16384`).
 > 3. Fetches that seed block and derives the on-chain anchor from its
 >    `layer_hashes[level]` and `bk_set` commitment.
 > 4. Prints `KEY=value` lines to stdout, ready to `source`:
@@ -540,10 +543,9 @@ account `latest`/`pending` nonces and receipts.
 ```bash
 cd crates/bridge-prover-libraries
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
-  LEVEL=1 PRIVATE_KEY=<sepolia burner from §1> \
+  LEVEL=2 PRIVATE_KEY=<sepolia burner from §1> \
   WITHDRAW_ACC_FR=<authoritative AN bridge account field element> \
   ./scripts/deploy_bridge_bundle.sh
-# or LEVEL=2 for L2 anchoring
 ```
 
 `WITHDRAW_ACC_FR` identifies the expected Acki Nacki bridge account in
@@ -572,7 +574,7 @@ chain catches up. No timeout. `--at-head` guarantees `N ≤ head`.
 
 **Only if** you went through §3 to produce `bk_set.shellnet.live.json`.
 After `deploy_bridge_bundle.sh` finishes, the deploy env
-(`L${LEVEL}_config/env`) still points `BRIDGE_BK_SET_CONFIG` at the
+(`L2_config/env`) still points `BRIDGE_BK_SET_CONFIG` at the
 tracked `./bk_set.shellnet.json`, which is now wrong for this bridge:
 Case 1 will refuse to cold-start because the file commitment does not
 match the just-pinned `storedBkSetCommitment`. Three valid resolutions,
@@ -620,18 +622,14 @@ and continue with [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy).
 ## Case 1 — First-time bootstrap from a fresh deploy
 
 **When to use.** Contract just deployed; no
-`$BRIDGE_CONFIG_DIR/state/prover_state.json` yet. One case, one code
-path — L2 differs only in bootstrap seqno alignment (`W²` vs `W·P`),
-covering-bundle wait time, and one log field.
+`$BRIDGE_CONFIG_DIR/state/prover_state.json` yet.
 
 **Prerequisites.** Complete [Binary + env prerequisites](#binary--env-prerequisites)
 Steps 1–5 first. All commands below assume `$BRIDGE_CONFIG_DIR` is
-exported and `$BRIDGE_ADDRESS`, `$RPC_URL`, etc. are populated.
-L1 uses `W·P=1024`-block stride (~5.7 min per covering bundle); L2
-uses `W²=16384` (~91 min per covering bundle).
+exported and `$BRIDGE_ADDRESS`, `$RPC_URL`, etc. are populated. The
+bundle stride is `W² = 16384` blocks (~91 min per covering bundle).
 
-**Pre-flight (contract sanity).** Level-opaque — the same storage
-slots are verified regardless of `$BRIDGE_CONFIG_DIR`.
+**Pre-flight (contract sanity).** Check the constructor values:
 
 ```bash
 export BRIDGE=$BRIDGE_ADDRESS
@@ -717,7 +715,7 @@ INFO bridge_prover_lib::keys::layer:       loaded layer VK from cache
 INFO bridge_prover_lib::keys::event:       loaded event VK from cache
 INFO bridge_prover_lib::bk_set_bootstrap:  chain-config check OK: ./bk_set.shellnet.json matches prover_bk_set.commitment
 INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)
-INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq_no=<N>, height=<N>, layers=<1 for L1 | 2 for L2>
+INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq_no=<N>, height=<N>, layers=2
 ```
 
 `seed_policy=Explicit(N)` means the daemon is seeding from
@@ -727,11 +725,11 @@ existing `$BRIDGE_CONFIG_DIR/state/prover_state.json` and is resuming
 
 **Cold-start seed timing.** The daemon does **not** compare
 `BRIDGE_BOOTSTRAP_SEQNO` against shellnet head at startup — only
-stride-alignment (L1: `%1024`, L2: `%16384`).
+stride-alignment (`BRIDGE_BOOTSTRAP_SEQNO % 16384 == 0`).
 
 - `BRIDGE_BOOTSTRAP_SEQNO ≤ shellnet head` (normal): seed block fetched
-  immediately; first `verifyBlock confirmed` follows in ~15 min
-  worst-case (L1) or ~56 min average, up to ~101 min worst-case (L2).
+  immediately; the first `verifyBlock` lands ~56 min later on average,
+  up to ~101 min worst-case.
 - `BRIDGE_BOOTSTRAP_SEQNO > shellnet head` (footgun): daemon enters an
   **indefinite polling loop**. Kill, redeploy with `--at-head`.
 
@@ -740,20 +738,21 @@ stride-alignment (L1: `%1024`, L2: `%16384`).
 `Resurrect` or `WarmResume`, you are not in Case 1 — go to
 [Case 6a](#case-6a--chain-resurrect-advanced-contract--fresh-daemon).
 
-**First cycle timing** —
-- **L1** — first `verifyBlock confirmed` in **~15 min**.
-- **L2** — first `verifyBlock confirmed` in **~56 min avg, up to ~101
-  min**. The seed is written into the contract as the genesis anchor
-  and trusted as-is — **no ZK proof is computed for the bootstrap
-  seq_no**. The first proven bundle is the *next* W²-aligned boundary.
+**First cycle timing.** The first `verifyBlock` lands in **~56 min on
+average, up to ~101 min**. The seed is written into the contract as the
+genesis anchor and trusted as-is — **no ZK proof is computed for the
+bootstrap seq_no**. The first proven bundle is the *next* W²-aligned
+boundary.
 
-**Startup drift check (cross-level guard).** The daemon refuses to
-boot if `prover_state.anchor_level != BRIDGE_ANCHOR_LEVEL`. If
-switching a running config from L1 to L2 (or the reverse), rename the
-offending state dir first:
+**Startup drift check (anchor-level guard).** The daemon refuses to
+boot if `prover_state.anchor_level != BRIDGE_ANCHOR_LEVEL`. Check
+`BRIDGE_ANCHOR_LEVEL=2` first
+([Step 5](#step-5--sanity-check-the-resulting-environment)). If an
+earlier launch at the wrong level already stamped the state dir, the
+guard keeps tripping after the env is fixed — archive the state dir:
 
 ```bash
-mv "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/state.pre_L${OLD_LEVEL}_$(date +%s)"
+mv "$BRIDGE_CONFIG_DIR/state" "$BRIDGE_CONFIG_DIR/state.pre_level_mismatch_$(date +%s)"
 mkdir -p "$BRIDGE_CONFIG_DIR/state"
 ```
 
@@ -805,13 +804,11 @@ deploy in place.
 
 ## Case 2 — Steady-state operation
 
-Once bootstrapped, cadence is **per bundle**, not per key-block:
-
-- **L1** — bundle every `W·P = 1024` seq_nos (~5 min chain-time).
-  Prover is the limiter (~10–14 min per bundle), effective cadence
-  **~13 min per bundle**.
-- **L2** — bundle every `W² = 16384` seq_nos (~91 min chain-time).
-  Chain is the limiter; effective cadence **~91 min per bundle**.
+Once bootstrapped, cadence is **per bundle**, not per key-block: one
+bundle every `W² = 16384` seq_nos (~91 min chain-time). The chain is
+the limiter — proving takes ~10–14 min — so the effective cadence is
+**~91 min per bundle**, and the prover idles for the rest of each
+window.
 
 Interleaved with that (Phase 1 of the same relayer tick, before the
 `verifyBlock` lane), the rotation lane fires whenever shellnet publishes
@@ -999,7 +996,7 @@ hard-aborts on the next transport blip in either lane.
 
 Same as [Case 3](#case-3--clean-restart-no-state-loss). Expect
 `seed_policy=Resume`. First cycle regenerates the pending proof from
-scratch (prior proof was in RAM, lost on exit) — ~13 min to next
+scratch (prior proof was in RAM, lost on exit) — ~10–14 min to next
 `verifyBlock` submit; a pending rotation re-proves the rotation block's
 Circuit 1A/1B attestation and re-aggregates it (~3.5–5 min on the
 primary path, per [`daemon_live_performance.md`](daemon_live_performance.md))
@@ -1142,7 +1139,9 @@ INFO relayer: LiveProverDriver seed policy seed_policy=Resume
   contract.
 - `HISTORY_WINDOW_SIZE` mismatch between daemon binary and contract W.
 - `state.anchor_level != BRIDGE_ANCHOR_LEVEL`.
-- L1 daemon against contract with `_layerWindows[L>=2].data_len > 0`.
+- `BRIDGE_ANCHOR_LEVEL` does not match the layers the contract's
+  `_layerWindows` were advanced on — usually the env was not sourced
+  (the binary's default is not `2`).
 
 If a `Stop` bail was legitimate, proceed to
 [Case 6b](#case-6b--state-loss--re-bootstrap-from-mid-chain).
@@ -1171,7 +1170,7 @@ CURRENT_BKN=$(cast  call $BRIDGE_ADDRESS 'storedLastBkSetUpdateSeqNo()(uint64)' 
 echo "chain last_seen = $CURRENT_SEEN   last_bk = $CURRENT_BKN"
 
 # 2. Update BRIDGE_BOOTSTRAP_SEQNO in $BRIDGE_CONFIG_DIR/env to match
-#    (must equal $CURRENT_SEEN and be aligned to the level's stride)
+#    (must equal $CURRENT_SEEN, a multiple of 16384)
 grep '^BRIDGE_BOOTSTRAP_SEQNO=' "$BRIDGE_CONFIG_DIR/env"
 
 # 3. Archive existing state
@@ -1216,18 +1215,21 @@ sound.
 
 ---
 
-## Case 7 — L2-anchored cold-start (`BRIDGE_CONFIG_DIR=./L2_config`)
+## Case 7 — L1 anchoring: one-off tests only
 
-Merged into [Case 1](#case-1--first-time-bootstrap-from-a-fresh-deploy)
-— the three L2 deltas (`W²=16384`-aligned bootstrap seqno, up to ~101
-min first-verify wait, `layers=2` startup-log field) are covered
-in-line there. Cases 2–6 are anchor-level opaque; substitute
-`./L1_config` ↔ `./L2_config` in any command block. BK-set rotation is
-anchor-level opaque: `applyBkSetUpdate` cadence depends only on the
-chain's rotation schedule, not on `BRIDGE_ANCHOR_LEVEL`.
-
-For the L2 E2E withdrawal (burn → `withdraw-e2e` submit), see the
-withdraw runbook.
+**Not for production and not for withdrawals; planned to be
+disallowed.** The repo also ships `./L1_config` (deployed with
+`LEVEL=1`, `BRIDGE_ANCHOR_LEVEL=1`): layer-1 anchoring with thinning
+`P = 8`, one bundle per `W·P = 1024` seq_nos — ~5.7 min of shellnet
+time at ~3 b/s. A bundle takes ~10 min warm / ~14 min cold to prove
+([`daemon_live_performance.md`](daemon_live_performance.md)), so the
+prover runs ~1.75–2.4× slower than the chain and falls further behind
+with every bundle. That is acceptable only for a one-off test from a
+fresh seed near chain head. A withdrawal becomes provable only once a
+bundle covering its burn block is verified on Sepolia, so as the
+backlog grows, so does every withdrawal's wait. The production Compose
+kit already refuses any `BRIDGE_ANCHOR_LEVEL` other than `2`, and the
+rest of this runbook assumes L2.
 
 ---
 
@@ -1241,7 +1243,7 @@ picks it up on the next tick.
 
 **No operator action.** This case documents what the daemon does
 unaided, so you can tell "routine rotation in progress" apart from
-"stuck rotation" ([Case 9](#case-9--phase-1-stuck-two-rotations-with-no-bundle-target-between-them))
+"deferred rotation" ([Case 9](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary))
 and "stale BK-set file"
 ([Case 10](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation)).
 
@@ -1505,7 +1507,7 @@ will drain through the normal `applyBkSetUpdate` lane after launch.
 ```bash
 cd crates/bridge-prover-libraries
 
-# 1. Read the on-chain BK cursor (both anchor levels share the same storage).
+# 1. Read the on-chain BK cursor.
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
 ONCHAIN_BK=$(cast call $BRIDGE_ADDRESS 'storedLastBkSetUpdateSeqNo()(uint64)' \
              --rpc-url $RPC_URL --json | jq -r '.[0]')
@@ -1583,8 +1585,7 @@ out of its attached archive window. Symptoms:
 
 - Daemon log repeats `GQL error: block_by_height(N) returned null` for
   some `N < state.last_processed_seqno`, where `N` is the previous
-  stride boundary Circuit 2 anchors against (L1: previous `W·P`
-  multiple; L2: previous `W²` multiple).
+  `W²` boundary Circuit 2 anchors against.
 - Public GQL `blockByHeight(latest_head - ~2.4M)` returns null — the
   shellnet gql-server attaches at most `max_attached_db=9` archive DBs
   per
@@ -1616,8 +1617,7 @@ new seed boundary that:
 - is `>=` the oldest key block the public GQL still serves, with
   enough margin for the chain to generate the next covering bundle
   before pruning catches up (~2–3 bundle strides is typical);
-- is stride-aligned (`seed % 1024 == 0` for L1, `seed % 16384 == 0`
-  for L2);
+- is `W²`-aligned (`seed % 16384 == 0`);
 - lies `<=` current chain head.
 
 ```bash
@@ -1641,10 +1641,10 @@ curl -s "$BRIDGE_GQL_ENDPOINT" \
 #   null  → pruned at probe depth, raise the lower bound
 #   {seqNo: $PROBE} → reachable, probe can go deeper
 
-# 2. Pick a stride-aligned seed with margin. For L2 (W²=16384) with
-#    ~91 min per bundle at shellnet rate, 2–3 strides of margin is
-#    ~32768–49152 blocks past the first reachable boundary.
-STRIDE=16384                                   # L1=1024, L2=16384
+# 2. Pick a W²-aligned seed with margin. With ~91 min per bundle at
+#    shellnet rate, 2–3 strides of margin is ~32768–49152 blocks past
+#    the first reachable boundary.
+STRIDE=16384                                   # W²
 MARGIN=$((STRIDE * 3))
 RAW_FLOOR=$((CHAIN_HEAD - 2400000 + MARGIN))
 BRIDGE_SEED_SEQNO=$(( (RAW_FLOOR / STRIDE + 1) * STRIDE ))
@@ -1677,7 +1677,7 @@ CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS \
 
 # 6. Carry the live BK-set file forward (deploy §5), then cold-start
 #    through Case 1. The new contract address lands in the broadcast
-#    JSON and gets wired into L${LEVEL}_config/env automatically.
+#    JSON and gets wired into L2_config/env automatically.
 ```
 
 **Precondition — new contract address.** This is a full redeploy, not
@@ -1810,15 +1810,14 @@ directory is **source code only** — no runtime data lands there.
 ```
 crates/bridge-prover-libraries/
 ├── shellnet.common                  ← tracked development fixture; not a server secret store
-├── L1_config/                       ← L1-anchor mode config dir (BRIDGE_CONFIG_DIR=./L1_config)
-│   ├── env                          ← sources ../shellnet.common + L1 overrides
+├── L2_config/                       ← config dir (BRIDGE_CONFIG_DIR=./L2_config)
+│   ├── env                          ← sources ../shellnet.common + deploy vars (BRIDGE_ANCHOR_LEVEL=2)
 │   ├── relayer-state.json           ← verifier cursor + on-chain observation cache (both lanes)
 │   ├── state/
 │   │   ├── prover_state.json        ← LiveProverDriver snapshot (~574 KB) — auth. resume point
 │   │   └── prover_bk_set.json       ← active BK-set snapshot (authoritative after first ACK)
-│   ├── proofs/                      ← per-mode SHPLONK-wrapped Circuit 4 output (event proofs)
-│   └── work_dir/                    ← per-mode enriched witnesses + shplonk-snark scratch
-├── L2_config/                       ← same layout as L1_config
+│   ├── proofs/                      ← SHPLONK-wrapped Circuit 4 output (event proofs)
+│   └── work_dir/                    ← enriched witnesses + shplonk-snark scratch
 ├── bk_set.shellnet.json             ← bootstrap-only BK-set (5 signers at genesis); stale after first rotation
 ├── submissions/                     ← verifyBlock calldata dumps (BRIDGE_DUMP_SUBMISSIONS_DIR); applyBkSetUpdate is not dumped
 ├── logs/                            ← daemon stdout+stderr

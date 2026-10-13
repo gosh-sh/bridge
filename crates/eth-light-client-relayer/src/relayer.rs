@@ -326,9 +326,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 );
                 self.persist()?;
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
-                self.maybe_flip_owner().await?;
+                // Queue the span before anything that can return early: the
+                // head has been persisted, so a span not queued here is a span
+                // no later tick can reconstruct.
                 self.maybe_cover_epoch(old_head, update.execution_block_hash)
                     .await;
+                self.maybe_flip_owner().await?;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
                     tx_hash,
@@ -342,6 +345,13 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     update.attested_slot,
                 );
                 self.persist()?;
+                // The update is on the head whether this call put it there or
+                // an earlier one did whose outcome never came back. Either way
+                // the head has moved, so the span behind it is owed — queuing
+                // it only here is what keeps a lost confirmation from silently
+                // costing those blocks their anchors.
+                self.maybe_cover_epoch(old_head, update.execution_block_hash)
+                    .await;
                 Ok(TickOutcome::AlreadyOnHead {
                     finalized_slot: update.finalized_slot,
                 })
@@ -1243,6 +1253,25 @@ mod tests {
             assert!(mock.is_proven(&k(i)), "header {i} was never anchored");
         }
         assert!(r.state.owed_spans.is_empty(), "both spans settled");
+    }
+
+    /// A resubmitted update that the chain already has still moved the head,
+    /// so the span behind it is owed. Queuing only on `Accepted` lost it.
+    #[tokio::test]
+    async fn an_update_already_on_head_still_owes_its_span() {
+        let (mut r, mock, chain) = span_relayer(true);
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+        r.tick().await.unwrap();
+        // The second update's finalized slot is 128 (attested 132).
+        mock.set_head_slot(128);
+        r.tick().await.unwrap();
+        assert_eq!(
+            r.state.owed_spans.len(),
+            1,
+            "the span behind the head must be queued even when the update was already there"
+        );
+        assert_eq!(r.state.owed_spans[0].older, k(0));
+        assert_eq!(r.state.owed_spans[0].newer, k(3));
     }
 
     #[tokio::test]

@@ -138,6 +138,12 @@ impl MockAnSubmitter {
         self.inner.lock().expect("poisoned").ancestry_attempts
     }
 
+    /// Pretend an earlier submission already moved the head to `slot`, the
+    /// way a landed message whose confirmation was lost looks to the daemon.
+    pub fn set_head_slot(&self, slot: u64) {
+        self.inner.lock().expect("poisoned").head_slot = Some(slot);
+    }
+
     /// Stop refusing `submitAncestry`.
     pub fn accept_ancestry(&self) {
         self.inner.lock().expect("poisoned").reject_ancestry = false;

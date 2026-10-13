@@ -98,8 +98,9 @@ assigns it when the release is tagged.
   revert with `ERR_BAD_ANCESTRY`: it built the payload newest-first and capped
   it at 32.
 
-  What an operator sees from the daemon. Each accepted checkpoint queues the
-  span back to the checkpoint it replaced; one poll works the span at the
+  What an operator sees from the daemon. Each checkpoint the chain confirms —
+  whether this call put it on the head or an earlier one did and its
+  confirmation was lost — queues the span back to the checkpoint it replaced; one poll works the span at the
   front of that queue, and the entry leaves only when it is settled — sent, or
   given up with "span given up: these blocks need setAcceptedBlockHash". A
   span the chain refuses is given up after three paid submissions. One whose

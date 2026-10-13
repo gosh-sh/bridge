@@ -34,7 +34,7 @@ echo "== daemon state $STATE"
 if [[ -n "${BEACON_URL:-}" ]]; then
     echo "== Sepolia finality ($BEACON_URL)"
     curl -s -m 15 -H 'accept: application/json' "$BEACON_URL/eth/v1/beacon/light_client/finality_update" \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; f=d["finalized_header"]; print("finalized_slot", f["beacon"]["slot"], "exec", f["execution"]["block_hash"])' \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; f=d["finalized_header"]; print("finalized_slot", f["beacon"]["slot"], "exec", f.get("execution_block_hash") or f["execution"]["block_hash"])' \
         || echo "(beacon unreachable)"
 fi
 

@@ -25,7 +25,7 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    to, and the flip refuses it. `getAnchorConfig().lightClient` returns
    `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`.
 3. Pin the Gloas fork slot. The constructor does not set it, and
-   `submitUpdate` / `submitRotate` revert 254 until it is set:
+   `submitUpdate` / `submitRotate` revert 256 until it is set:
    `eth-lc-relayer set-gloas-fork-slot --slot 11296768` on Sepolia,
    `--slot 18446744073709551615` on mainnet while Gloas is unscheduled.
    The daemon does not call this itself.
@@ -55,10 +55,11 @@ eth-lc-relayer flip-owner \
 ```
 
 Non-checkpoint deposits: `eth-lc-relayer submit-ancestry --eth-rpc-url
-$ETH_RPC_URL --checkpoint-hash 0x…` walks the epoch back from a proven
-checkpoint, but it does not fit the per-transaction gas limit today
-(`docs/eth-light-client.md` §3.4). Until it does, a deposit in any of the other
-31 blocks needs the owner's `setAcceptedBlockHash`, which the flip turns off.
+$ETH_RPC_URL --checkpoint-hash 0x<newer> --older-anchor-hash 0x<older>` fills
+the blocks between two proven anchors (`docs/eth-light-client.md` §3.4). A
+deposit in a block no span covers — one whose bracketing anchors are further
+apart than a span — needs the owner's `setAcceptedBlockHash`, which the flip
+turns off.
 
 Period jumps: the daemon rotates by default. After `disableOwnerRotation()`, a
 lag past one sync-committee period (~27 h) is `reAnchorCommittee`, not

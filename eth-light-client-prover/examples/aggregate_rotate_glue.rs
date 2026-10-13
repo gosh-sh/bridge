@@ -147,7 +147,6 @@ fn main() -> anyhow::Result<()> {
         9_412u64 * 8192,
         GLOAS_NOT_SCHEDULED,
         Fr::from(0x1234_5678u64),
-        9_412u64,
     );
     println!(
         "glue witness: {n} subtree root(s), attested slot={}, branch nodes={}\n",

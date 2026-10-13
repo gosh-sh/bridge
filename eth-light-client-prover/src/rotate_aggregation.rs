@@ -46,6 +46,7 @@ use crate::ssz::{
     load_bytes, load_node, merkle_depth, native_merkle_branch_root_either,
     verify_merkle_branch_either, Node,
 };
+use crate::mainnet::SLOTS_PER_SYNC_PERIOD;
 use crate::step::{STEP_GLOAS_FORK_SLOT_INDEX, STEP_INSTANCE_LEN};
 
 use gosh_sha256_chip::Sha256Chip;
@@ -73,8 +74,9 @@ pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
 /// Rotate public inputs appended after the accumulator: `[current_commit,
 /// next_commit, period, gloas_fork_slot]` (R2 self-contained layout — see
-/// `EthBeaconLightClient`). The circuit accepts any `gloas_fork_slot`, so the
-/// consumer must require its network's.
+/// `EthBeaconLightClient`). `period` is [`crate::mainnet::rotate_period`] of the
+/// attested slot, constrained in-circuit. The circuit accepts any
+/// `gloas_fork_slot`, so the consumer must require its network's.
 pub const NUM_ROTATE_PUBLIC_INPUTS: usize = 4;
 
 /// Index of the attested slot in a verified step proof's public instances. When
@@ -112,8 +114,8 @@ pub struct RotateGlueWitness {
     /// only range-checked as the byte pre-image (must equal the signed state_root).
     pub state_root: [u8; 32],
     /// Slot of the attested header whose state holds the committee. Picks the
-    /// generalized index; bound to the step's attested slot when a step snark is
-    /// folded.
+    /// generalized index and gives the exposed `period`; bound to the step's
+    /// attested slot when a step snark is folded.
     pub attested_slot: u64,
     /// Gloas fork slot of the network. Exposed; bound to the step's when a step
     /// snark is folded.
@@ -123,8 +125,6 @@ pub struct RotateGlueWitness {
     /// `current_commit` is bound to the verified step proof's `committee_commitment`
     /// and this witness value is ignored.
     pub current_commit: Fr,
-    /// Sync-committee period (R2 passthrough).
-    pub period: u64,
 }
 
 impl RotateGlueWitness {
@@ -137,7 +137,6 @@ impl RotateGlueWitness {
         attested_slot: u64,
         gloas_fork_slot: u64,
         current_commit: Fr,
-        period: u64,
     ) -> Self {
         let committee_root = native_sync_committee_root_from_subtrees(&subtree_roots, &aggregate);
         let gloas = is_gloas(attested_slot, gloas_fork_slot);
@@ -169,8 +168,12 @@ impl RotateGlueWitness {
             attested_slot,
             gloas_fork_slot,
             current_commit,
-            period,
         }
+    }
+
+    /// The `period` the circuit exposes for this witness.
+    pub fn period(&self) -> u64 {
+        crate::mainnet::rotate_period(self.attested_slot)
     }
 }
 
@@ -363,7 +366,11 @@ impl RotateAggregationCircuit {
             } else {
                 ctx.load_witness(witness.current_commit)
             };
-            let period = ctx.load_witness(Fr::from(witness.period));
+            // period = attested_slot / 8192 + 1. `assert_is_gloas` above has
+            // range-checked the slot to 64 bits, which `div_mod` relies on.
+            let (attested_period, _) =
+                range.div_mod(ctx, attested_slot, SLOTS_PER_SYNC_PERIOD, 64);
+            let period = gate.add(ctx, attested_period, QuantumCell::Constant(Fr::ONE));
             vec![current_commit, next_commit, period, gloas_fork_slot]
         };
 

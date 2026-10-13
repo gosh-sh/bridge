@@ -91,8 +91,10 @@ contract EthBeaconLightClient {
     uint16 constant ERR_BAD_ANCESTRY       = 250;
     uint16 constant ERR_ANCESTRY_TOO_LONG  = 251;
     uint16 constant ERR_NOT_PROVEN         = 252;
-    uint16 constant ERR_WRONG_FORK_SLOT    = 253;
-    uint16 constant ERR_FORK_SLOT_UNSET    = 254;
+    uint16 constant ERR_SELF_ROTATION      = 253;
+    uint16 constant ERR_ZERO_PUBKEY        = 254;
+    uint16 constant ERR_WRONG_FORK_SLOT    = 255;
+    uint16 constant ERR_FORK_SLOT_UNSET    = 256;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -256,6 +258,7 @@ contract EthBeaconLightClient {
         uint256 bootstrapCommittee,
         uint64  bootstrapPeriod
     ) accept {
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
         _currentCommittee = bootstrapCommittee;
@@ -386,7 +389,12 @@ contract EthBeaconLightClient {
         require(pi.currentCommitteeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
         require(_gloasForkSlotSet, ERR_FORK_SLOT_UNSET);
         require(pi.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
-        // Monotonic period — reject stale / replayed hand-offs.
+        // The last header of a period is signed in the next one and its
+        // state's `next_sync_committee` is still the signer: a genuine
+        // hand-off that changes nothing.
+        require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
+        // Monotonic period — reject stale / replayed hand-offs. The circuit
+        // binds `period` to the attested slot, so it cannot be inflated.
         require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
 
         tvm.accept();
@@ -588,6 +596,7 @@ contract EthBeaconLightClient {
     // ========================================================
 
     function setPubkey(uint256 pubkey) public onlyOwnerPubkey accept {
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         ensureBalance();
         _ownerPubkey = pubkey;
     }
@@ -741,6 +750,7 @@ contract EthBeaconLightClient {
                 mapping(uint256 => uint64), mapping(uint64 => uint256), uint64, uint64,
                 TvmCell
             ));
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
         _usdcBridge = usdcBridge;
@@ -1148,13 +1158,13 @@ contract EthBeaconLightClient {
     // refresh the tvm-sdk opcode fixtures
     //   (acki-nacki-bridge/scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh).
     // Do NOT hand-edit the hex.
-    //   sha256 19027e2302aa9ec7b82d7640a3288e1454c6a5d6c4c8ffa4d21f3591aa47f5cb
+    //   sha256 4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54
     bytes constant ROTATE_VK_BLOB =
         hex"564b424c4f4200000100000c000000007e0000007b226b223a32312c226e756d5f6164766963655f7065725f7068617365223a5b32315d2c226e756d"
         hex"5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f7065725f7068617365223a5b325d2c226c6f6f6b75705f62697473223a3230"
         hex"2c226e756d5f696e7374616e63655f636f6c756d6e73223a317d0a0c00000215000000001700000078d954a4152ede302e415658146c54f2100aa5cc"
-        hex"7cf5347a457200b12e38de28d1331f3ae14f45dc9a79f4b9895f681a9c9daba02b61c0fa0bbf0166ae0c020e0482e25a899523063fc2f307606b96d4"
-        hex"8fb82115d9e1b79a19513105c637ed26f0b8a611157869e32ed1c0bf442b07ddcb471b591c9cc63924c980ba96d89b27f7729708653603842eb9fe4e"
+        hex"7cf5347a457200b12e38de28d1331f3ae14f45dc9a79f4b9895f681a9c9daba02b61c0fa0bbf0166ae0c020e4b8c9d0177a326d5a901ff4c9605f3ea"
+        hex"3717e57bab01d903b468ce188e44b42c7eeaece01656bb6ed85bb9dd9ed80e810909cd4f762a5ddcf4c9f8a764710614f7729708653603842eb9fe4e"
         hex"c8326ce8cafea0e257c1be63568b918ae6ec361eb309b606de89e790a567641617daf13305f6a4bef3f779dd796169b08f8d402b8a1bebe283a8b1be"
         hex"67390514071840329780c648a5e4786a82276dd6d2a4571e6f11c6b2f316934ef3256879596acfb6353e475a6c02542bc1bd1a995a3ef50326b34cb7"
         hex"fb7847514c0159c52427b2c8b1f6b970b9f64c621cb6dd586c8316124c48151793217acf2524d92294234cef1033480573fa386bd66a9762c5cba824"
@@ -1176,32 +1186,32 @@ contract EthBeaconLightClient {
         hex"17ad08040ce8d4667cf5ec68c317539b2b47c27e1cb75903e25ad820b173c3e61615aae3ca1e6d742d96aec24e768aa037f1487c9b41827e4973ab1d"
         hex"3ed2622703afe87e4b836c70cec34a32624f8c03f10016bddb9f71b8611e36165f76a116cce40758ec13084367631ec4b7771d828ee9a8cfb72a8a8d"
         hex"0d792c1f07f8b1292dc69444f1f8bd4ee89f886469597c7c0977a4ea27298d0816aca11d942c99456d61450693a42eaf05a0c706c179cf2679362de3"
-        hex"af084e4ada2f4a070d22cd33fb4c8f838fc7868260e9b0f3aea86fcdc8ded89d31185e58dfa9c723cfd0058c495dac99d45ec2b88e8edfea439214d6"
-        hex"23c4a39b77d50564e59946114049d3d6ca4db2257e4cdbcf89a7744d8434087e3aca83c70468a2a043f17c19bcc74359bfd9edb077284773fccfbe84"
-        hex"941fae2d5e5e922b6dc2b68492633f2dc1c9bfd6ba598a29840162cd38b8d47b189adb2f6934935ead23e39a075b3509ae23a8a7729335c087d30b57"
-        hex"366fd1410f255a1256e5130cf87d40d761bc4d0a658ddfc8889ad660a2dad5edbe876371ebd667573bf3acf33044a9b597a2b11e28241d5b45b1f37e"
+        hex"af084e4ada2f4a07c44b330994db73c5df461ed89de289165e07f27c9821e625dba628b3debe191f19946d3809db8d44e07d6ce18ae6c60f22ebe1f8"
+        hex"61801a42487df9f4b4a5de1b6cc75707c01ba9e92d6c585bdf5b5db9e6e18dd771d915fd1d3ee50182155e1746eb0f1767427b8e173548f977bffe95"
+        hex"047e122668ec5640ba995aa7190c650b7e85d4ebe98e8c0930315b2557454d444c7d70e7a9591d13251098e5d61592119343c9bc2d899974bb3c7506"
+        hex"d98d88626b16ea426bbce555cb79712356714e22658ddfc8889ad660a2dad5edbe876371ebd667573bf3acf33044a9b597a2b11e28241d5b45b1f37e"
         hex"046e1442012e8b5e3fad1f13e89939cb18863373c71f171d2ed959f5d126135d7fbbdfc990dd1afee6321dbc67113997d4c6c066178473202feb6ed1"
         hex"a90a2e4f2a6235ceef54d716bc06bd96625a733a2aa41e61ae036f1228565328736a2a6ffd25c850f529719797045f51c895b7244d6e7026e0f02e0a"
         hex"b129b1b6676b775f03203fb456e50563f0cc4c1d0a2ba44c2f2877a3c998b51697eebf461e6206e4034cb4333f39879084caca5871cba4b28085eee0"
         hex"913b4f06b83af8f98e9de281c37d9a60efdb9117d9f8568b3684d376c571bc2e6e8d550bb4f9599ce5829b06ba75e0adb8f4b3a0b659d20c5bfae1bf"
         hex"1f6c1fbc40fae62de0355c60bbae1a291774a7f0cad116cd135f9cc8456f738d014f2ed52d13da187795dcc0d8149810464b4d6d39da7092831dd70d"
         hex"dda9b60b18fab5e70c0fed0dc4b5464ff8920b69758e7480d6b2a71122a0f02a7bb520e7ce00472f5943c71e4526c8deb7e80c0acf28c47f2935adab"
-        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f3226ebc7b11f21100d6f9d0abafb"
-        hex"c81a0d7b6c73ceaa12f73992923c1db68e3e040acd1216d263fb9768841c2cc58a4fcfed82c90d924f67113eb631eb2fa7b03000b052e04e333311e1"
+        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f322674d099a572988d155cf8a54d"
+        hex"b5a5106cdf9cc9d0fe9ed924e9d4b5836c47181761081f5b98de7cd58c5901d13b72392cab066627455a268e79d0f225979bf702b052e04e333311e1"
         hex"54012da7b05a0a9f5073d9b4e7f31002c029c124b1fc410f5b91c66c715d1dbb33a5c2f0911d50eedcc14b6c2d8bd786f2546b238b4a480c8d865bd8"
         hex"719730c4548d26d88b34024836b7b0ff0199ccb77e96f9a12af3cf0374993dad386f7d1454c43d8ad84020123fe51adb17b20e16755999f8335bcb00"
         hex"06efe595b621406f68fbabc21e9bf5a1d50c264ea052145f35330d43c4383e30660d105d6cf1198c00a099e718792b52c42362e4eca92ae6b25dc6ad"
         hex"8ab00c10e34c9595b9d991ba21c06bb1430cc22830de63c50d85a372c6e0bab699365f1fd78161c13a8221f416102220a62e56929e970847a6c1b9ff"
-        hex"f3cf22d931a9d30a6bb42c745f8ba25f33cfe757b387677ad052f0a1ef98f035e5f22734a2d54d1780df347809410c2353cc9ce21bdc09289d2921a5"
-        hex"c7ebfc160e917bba762f75258f7505e39a0f2c517bc251535a5542b699dddb8cb56f4f53f34e99a2a48c3a159ac80a31bc6e6573dad1be520171e284"
+        hex"f3cf22d931a9d30a431dc606b5ac3b2af201824bf04fb2f87a93d30eda75df4c9f25989adf45bf147cddb031ed795792a9e1606d6428c383225fd7d2"
+        hex"c908e7dc74271a1b0ec139248f7505e39a0f2c517bc251535a5542b699dddb8cb56f4f53f34e99a2a48c3a159ac80a31bc6e6573dad1be520171e284"
         hex"d1c809cc9ec762936339cbea19daa4074bbaf91546801cfb9d4ff84280832eaa56bacf5db41ba054afe3a5f99761570954fc5009cf04f5ae07c773bf"
-        hex"4836bef5e11e00871a9c56e523387128249e172339196706a801a5bfa41bdc5567436df52b29aabf1e0acadcb9b6b6591794cc255dcbaf02582d1aa6"
-        hex"5b61b5b2ae34cba7f04a96bd4398b1e325eb42e8a234c611a3f2c41d23dedf50b3c11b9fcb44aeb8fc7069897ee8705dd626b2b05a666311fb4ef445"
+        hex"4836bef5e11e00871a9c56e523387128249e17233ecfdd473530cac7e60a480350db97b43487ba4ed9cee412f9deb2b6c5e56a01aa173d952b3f4bc3"
+        hex"a7abffb2c989f681ce38980326daef06c5019b976b179922a3f2c41d23dedf50b3c11b9fcb44aeb8fc7069897ee8705dd626b2b05a666311fb4ef445"
         hex"ba7f7d5a66b631a97d33ed5ff6889b09bc94e34fe993c015f8e3981e6e2a9165bb547d8c88af03609dacc237d38b1dd39f9d002921c331af82f01b22"
         hex"c5e77bff73dc39770998f43292b2f39341b1ff47087560eceb21e93a476e960fdf92a72e2c05632ca1fd514c90a42bec24e11393c244004efc70b26a"
-        hex"6cb4171f3028d919e90cb5504ed5c03cd1bb111984343be7c41a7fbd9e998f6bafe0f911f81c22d1c55642c71d0692fe8c73c6979674aa34d5d6b6d7"
-        hex"8ae417095ee88b26df764b89e5a8a583f03c7f222a9becadea2ce805c7e3a074cae719226981d411e7bc7bb0f106e5b7292c75732538c1520c461cc5"
-        hex"399b5bb02f0c8ddc74326b2d42a4063698dea1d59525152b33ea88268eba83fc639a00427201fce0b5e5b50982233b6e5cda3012cc945d3777c921f6"
-        hex"28b5188fc8a7a3e5ef03aa0bcb10b51636e766ebe6203734c62e782bc2ec34164904a6aa2b0c0c287cda89d7be5ce52fe7babf6954b91b431c87f0c5"
-        hex"c4f54ff65979d41196669e1ddf6d12700d906401acde1f99639c6977138dda7c59893f53585c2e3523cfd1e274a86e02c1522c1f";
+        hex"6cb4171f3028d919e90cb5504ed5c03cd1bb111984343be7c41a7fbd9e998f6bafe0f9116ad7e277dd22e04762ac8321598c88629013cf928e5f83d9"
+        hex"614b8f91722e45265a4b47d418e32ea1cffa40527f351b7d4988de72d35cc2d9d025a37b3106a10e9149cca6f75ac2653365cdd9b23a2974379e41d7"
+        hex"a53fc7a2c7b9b6e422559612407dc6bf399b39c02a84f5154c69c83a595863646ace33b256e2bcf1a3ae641cd1f64e9b9efbf76c24e9dbda1723f08f"
+        hex"63e3d8a3d49836b2874fa6d39bd9f923aa8f52bc5b5f37aef032a65c8741d792e2a05932262a9c9e277dc0cb05be702a37480b5609269b9e96199c8e"
+        hex"51604660453d94344456271100be5ade1e7ad9040d65e819139ed0585349add8e893c304467d2926dc98147d77a2f8029104542b";
 }

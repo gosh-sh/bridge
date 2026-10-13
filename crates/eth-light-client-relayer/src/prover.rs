@@ -196,8 +196,8 @@ impl SubprocessProofGenerator {
             .map_err(|e| RelayerError::ProofGeneration(format!("read proof: {e}")))?;
         let (expected, parsed) = pack_step_public_inputs(update, [0u8; 32]);
         let parsed = if pi.len() == expected.len() {
-            // Live prove fills committee_commitment in-circuit; keep slots/hashes
-            // from the beacon update for logging.
+            // Live prove fills committee_commitment in-circuit; keep
+            // slots/hashes from the beacon update for logging.
             crate::types::StepPublicInputs {
                 committee_commitment: {
                     let mut c = [0u8; 32];
@@ -266,8 +266,13 @@ impl SubprocessProofGenerator {
                 "rotate_tree_n8 exited {child}"
             )));
         }
-        let mut bundle = RotateProofBundle::from_dir(&tree_out)?;
-        bundle.period = to_period;
+        let bundle = RotateProofBundle::from_dir(&tree_out)?;
+        if bundle.period != to_period {
+            return Err(RelayerError::ProofGeneration(format!(
+                "rotate proof is for period {}, not {to_period}",
+                bundle.period
+            )));
+        }
         Ok(bundle)
     }
 }

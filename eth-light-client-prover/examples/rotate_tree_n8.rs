@@ -289,7 +289,6 @@ fn main() -> anyhow::Result<()> {
                 gloas_fork_slot,
                 // R2 passthrough: bound by a BLS/finality proof later (id: bls-bind).
                 current_commit: Fr::from(0x1234_5678u64),
-                period: fx.period(),
             }
         }
         None => RotateGlueWitness::synthetic(
@@ -298,7 +297,6 @@ fn main() -> anyhow::Result<()> {
             9_412u64 * SLOTS_PER_SYNC_PERIOD,
             gloas_fork_slot,
             Fr::from(0x1234_5678u64),
-            9_412u64,
         ),
     };
     println!(
@@ -309,7 +307,7 @@ fn main() -> anyhow::Result<()> {
         witness.attested_slot,
         witness.gloas_fork_slot,
         witness.branch.len(),
-        witness.period
+        witness.period()
     );
 
     let outer_srs = std::env::var("OUTER_SRS")

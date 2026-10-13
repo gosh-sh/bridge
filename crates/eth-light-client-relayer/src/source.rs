@@ -22,14 +22,21 @@ pub trait BeaconSource: Send + Sync {
     async fn fetch_finality(&self) -> Result<FinalityUpdate, RelayerError>;
 }
 
-/// Execution parent-hash walk used after an accepted checkpoint.
+/// Execution header walk used after an accepted checkpoint. Returns the span
+/// between two anchors, oldest first — the order `submitAncestry` takes.
+/// `Ok(None)` means no payload exists for this pair, and no retry will make
+/// one: the older anchor is further back than `max`, or it is not an ancestor
+/// of `newer` at all, or the two are adjacent with nothing between them. A
+/// transient `Err` is the opposite — the headers may well be fetchable on the
+/// next try — so the two must not be treated alike.
 #[async_trait]
 pub trait ExecutionSource: Send + Sync {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError>;
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError>;
 }
 
 /// In-memory epoch chain for tests (`Relayer::with_execution`).
@@ -39,28 +46,40 @@ pub struct InMemoryExecution {
 
 impl InMemoryExecution {
     pub fn single(checkpoint: [u8; 32], headers: Vec<Vec<u8>>) -> Self {
-        let mut chains = std::collections::HashMap::new();
-        chains.insert(checkpoint, headers);
+        Self::many(vec![(checkpoint, headers)])
+    }
+
+    /// Several spans, each keyed by its newer end — enough to walk more than
+    /// one checkpoint in a test.
+    pub fn many(spans: Vec<([u8; 32], Vec<Vec<u8>>)>) -> Self {
         Self {
-            chains: Mutex::new(chains),
+            chains: Mutex::new(spans.into_iter().collect()),
         }
     }
 }
 
 #[async_trait]
 impl ExecutionSource for InMemoryExecution {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
         let chains = self.chains.lock().expect("poisoned");
         let headers = chains
-            .get(&checkpoint)
+            .get(&newer)
             .cloned()
             .ok_or_else(|| RelayerError::other("in-memory execution: unknown checkpoint"))?;
-        let max = max.clamp(2, 32);
-        Ok(headers.into_iter().take(max).collect())
+        let max = max.clamp(3, 33);
+        let span: Vec<Vec<u8>> = headers.into_iter().take(max).collect();
+        let Some(first) = span.first() else {
+            return Ok(None);
+        };
+        if crate::header_rlp::keccak256(first) != older {
+            return Ok(None);
+        }
+        Ok(Some(span))
     }
 }
 
@@ -316,6 +335,16 @@ impl HttpBeaconSource {
     /// `GET /eth/v2/beacon/blocks/{slot}` → execution `block_hash` /
     /// `parent_hash`.
     pub async fn fetch_exec_link_at_slot(&self, slot: u64) -> Result<ExecLink, RelayerError> {
+        parse_exec_link(&self.fetch_block_json(slot).await?)
+    }
+
+    /// The execution hash the light client anchors for the block at `slot`
+    /// ([`parse_anchored_exec_hash`]).
+    pub async fn fetch_anchored_exec_hash(&self, slot: u64) -> Result<[u8; 32], RelayerError> {
+        parse_anchored_exec_hash(&self.fetch_block_json(slot).await?)
+    }
+
+    async fn fetch_block_json(&self, slot: u64) -> Result<String, RelayerError> {
         let url = format!("{}/eth/v2/beacon/blocks/{slot}", self.base_url);
         let resp = self
             .client
@@ -335,7 +364,7 @@ impl HttpBeaconSource {
                 body.chars().take(200).collect::<String>()
             )));
         }
-        parse_exec_link(&body)
+        Ok(body)
     }
 }
 
@@ -385,16 +414,32 @@ impl EthExecutionRpc {
         crate::header_rlp::encode_header_rlp(result)
     }
 
-    /// Checkpoint header first, then parents, ≤ `max` (≤ 32).
-    pub async fn ancestry_headers(
+    /// The span from `older` to `newer` inclusive, oldest first, at most `max`
+    /// headers (3 to 33). Walks parents from `newer` and stops on `older`.
+    ///
+    /// `Ok(None)` means no payload exists to send, never a truncated one,
+    /// because `submitAncestry` requires both ends to be proven anchors. It
+    /// covers three cases the caller cannot tell apart: `older` is further
+    /// back than `max` headers, `older` is not an ancestor of `newer` at all,
+    /// and the two are adjacent with nothing in between.
+    ///
+    /// An `Err` is usually a transport failure, which the caller retries for
+    /// free, but not always: a header whose RLP does not hash back to the hash
+    /// it was fetched for, and an encoder that is behind the current fork, come
+    /// back the same way and fail identically on every attempt. Such a span is
+    /// held for the whole fetch grace under a "will retry" warning and then
+    /// given up as unfetchable, which is the right end state but a misleading
+    /// log on the way to it.
+    pub async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
-        let max = max.clamp(2, 32);
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
+        let max = max.clamp(3, 33);
         let mut headers = Vec::new();
-        let mut h = checkpoint;
-        for _ in 0..max {
+        let mut h = newer;
+        loop {
             let rlp = self.header_rlp(h).await?;
             let got = crate::header_rlp::keccak256(&rlp);
             if got != h {
@@ -404,23 +449,31 @@ impl EthExecutionRpc {
             }
             let parent = crate::header_rlp::rlp_parent_hash(&rlp)?;
             headers.push(rlp);
-            if headers.len() >= max {
+            if h == older {
                 break;
+            }
+            if headers.len() >= max {
+                return Ok(None);
             }
             h = parent;
         }
-        Ok(headers)
+        if headers.len() < 3 {
+            return Ok(None);
+        }
+        headers.reverse();
+        Ok(Some(headers))
     }
 }
 
 #[async_trait]
 impl ExecutionSource for EthExecutionRpc {
-    async fn ancestry_headers(
+    async fn ancestry_span(
         &self,
-        checkpoint: [u8; 32],
+        newer: [u8; 32],
+        older: [u8; 32],
         max: usize,
-    ) -> Result<Vec<Vec<u8>>, RelayerError> {
-        EthExecutionRpc::ancestry_headers(self, checkpoint, max).await
+    ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
+        EthExecutionRpc::ancestry_span(self, newer, older, max).await
     }
 }
 
@@ -468,6 +521,28 @@ fn parse_exec_link(json: &str) -> Result<ExecLink, RelayerError> {
         block_hash,
         parent_hash,
     })
+}
+
+/// What `submitUpdate` anchors when this block is the finalized one: the
+/// payload's `block_hash` before Gloas, and from Gloas the bid's
+/// `parent_block_hash` — the bid's own `block_hash` is not proven yet.
+fn parse_anchored_exec_hash(json: &str) -> Result<[u8; 32], RelayerError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| RelayerError::beacon(format!("block JSON: {e}")))?;
+    let body = &v["data"]["message"]["body"];
+    hex32_exec(
+        body["execution_payload"]["block_hash"]
+            .as_str()
+            .or_else(|| {
+                body["signed_execution_payload_bid"]["message"]["parent_block_hash"].as_str()
+            })
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing execution_payload.block_hash / \
+                     signed_execution_payload_bid.message.parent_block_hash",
+                )
+            })?,
+    )
 }
 
 /// Test source: pop from a queue of updates.
@@ -534,6 +609,18 @@ mod tests {
         let link = parse_exec_link(json).unwrap();
         assert_eq!(link.block_hash, [0x11; 32]);
         assert_eq!(link.parent_hash, [0x22; 32]);
+        assert_eq!(parse_anchored_exec_hash(json).unwrap(), [0x22; 32]);
+    }
+
+    #[test]
+    fn anchored_exec_hash_before_gloas_is_the_payload_hash() {
+        let json = r#"{
+          "data":{"message":{"body":{"execution_payload":{
+            "block_hash":"0x1111111111111111111111111111111111111111111111111111111111111111",
+            "parent_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"
+          }}}}
+        }"#;
+        assert_eq!(parse_anchored_exec_hash(json).unwrap(), [0x11; 32]);
     }
 
     // Trimmed `GET /eth/v1/config/spec` of Sepolia (2026-09-04): Fulu live,

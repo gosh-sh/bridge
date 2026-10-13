@@ -40,15 +40,15 @@ struct Args {
     output: String,
 
     /// Circuit degree (default: 18)
-    #[arg(long, default_value = "18")]
+    #[arg(long, default_value_t = deposit_prover::prover::PRODUCTION_DEGREE)]
     degree: u32,
 
-    /// Max data byte length (default: 256)
-    #[arg(long, default_value = "256")]
+    /// Max data byte length (default: production / SafeL2)
+    #[arg(long, default_value_t = deposit_prover::circuit_v2::PRODUCTION_MAX_DATA_BYTE_LEN)]
     max_data_byte_len: usize,
 
-    /// Max log number (default: 20)
-    #[arg(long, default_value = "20")]
+    /// Max log number (default: production)
+    #[arg(long, default_value_t = deposit_prover::circuit_v2::PRODUCTION_MAX_LOG_NUM)]
     max_log_num: usize,
 
     /// Source network (not baked into VK; proven chainId is a PI). Must be in

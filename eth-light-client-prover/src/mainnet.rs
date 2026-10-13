@@ -40,15 +40,17 @@ pub struct RotateFixture {
     pub signature_slot: u64,
 }
 
+/// The period a hand-off installs, as the rotate circuit proves it: the state
+/// at `attested_slot` holds the committee of the period after its own.
+pub fn rotate_period(attested_slot: u64) -> u64 {
+    attested_slot / SLOTS_PER_SYNC_PERIOD + 1
+}
+
 impl RotateFixture {
-    /// Sync-committee period the update rotates INTO.
-    ///
-    /// `signature_slot / 8192` is the period of the committee that signed;
-    /// `submitRotate` stores the destination and requires
-    /// `pi.period == _committeePeriod + 1`, so the proven label is that
-    /// signing period plus one.
+    /// Sync-committee period the update rotates INTO ([`rotate_period`] of the
+    /// attested slot).
     pub fn period(&self) -> u64 {
-        self.signature_slot / SLOTS_PER_SYNC_PERIOD + 1
+        rotate_period(self.attested_slot)
     }
 
     /// The branch in the layout `RotateGlueWitness` takes, read at the index of

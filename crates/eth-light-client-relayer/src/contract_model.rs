@@ -190,7 +190,7 @@ impl LightClient {
             && self.prev_committee != [0; 32]
             && committee == self.prev_committee
             && self.prev_committee_head_slot != 0
-            && attested_slot <= self.prev_committee_head_slot
+            && attested_slot <= self.prev_committee_head_slot + SLOTS_PER_PERIOD
             && attested_slot + SLOTS_PER_PERIOD >= self.prev_committee_head_slot;
         let signer_ok = committee == self.committee || prev_ok;
         if !signer_ok {
@@ -219,7 +219,8 @@ impl LightClient {
         let last = header_rlps.len() - 1;
         let mut prev = keccak256(&header_rlps[0]);
         let anchor = pi_form(&prev);
-        if !self.is_live(&anchor) {
+        // Both ends before anything else, as the contract does before accept.
+        if !self.is_live(&anchor) || !self.is_live(&pi_form(&keccak256(&header_rlps[last]))) {
             return Err(LcError::UnknownCheckpoint);
         }
         let anchor_slot = *self.proven.get(&anchor).expect("live");
@@ -275,7 +276,7 @@ impl LightClient {
         // The circuit leaves this period unconstrained, so the ceiling comes
         // from the proven head: a label far in the future would otherwise
         // close the rotation path for good.
-        if period > self.finalized_slot / SLOTS_PER_PERIOD + 2 {
+        if self.finalized_slot != 0 && period > self.finalized_slot / SLOTS_PER_PERIOD + 2 {
             return Err(LcError::PeriodTooFar);
         }
         self.prev_committee = self.committee;
@@ -581,11 +582,12 @@ mod tests {
         .unwrap();
         c.rotate(new_committee, 2).unwrap();
 
-        // Attested inside period 2 — the one the old committee never served.
+        // The head it left was 2 periods in; more than one period past that
+        // is outside the window.
         assert_eq!(
             c.submit_update_at(
                 2 * SLOTS_PER_PERIOD - 1,
-                2 * SLOTS_PER_PERIOD + 5,
+                3 * SLOTS_PER_PERIOD + 1,
                 [0xDD; 32],
                 old_committee
             )
@@ -593,6 +595,41 @@ mod tests {
             LcError::WrongCommittee
         );
         assert!(!c.is_live(&[0xDD; 32]));
+    }
+
+    /// The skip the window exists for: a checkpoint the leaving committee
+    /// never got to prove, attested *after* the last head it moved but still
+    /// within its own period. The first slot-based window excluded exactly
+    /// these, which is the case the feature is about.
+    #[test]
+    fn a_skip_after_the_last_moved_head_is_still_rescued() {
+        let old_committee = [0xC0; 32];
+        let new_committee = [0xC1; 32];
+        let mut c = LightClient::bootstrap(old_committee, 1);
+        c.submit_update_at(
+            SLOTS_PER_PERIOD,
+            SLOTS_PER_PERIOD,
+            [0xAA; 32],
+            old_committee,
+        )
+        .unwrap();
+        c.rotate(new_committee, 2).unwrap();
+        c.submit_update_at(
+            2 * SLOTS_PER_PERIOD,
+            2 * SLOTS_PER_PERIOD,
+            [0xEE; 32],
+            new_committee,
+        )
+        .unwrap();
+
+        c.submit_update_at(
+            SLOTS_PER_PERIOD + 32,
+            SLOTS_PER_PERIOD + 40,
+            [0xBB; 32],
+            old_committee,
+        )
+        .expect("a skip just after the last moved head must be registrable");
+        assert!(c.is_live(&[0xBB; 32]));
     }
 
     /// Nor anything more than one period before that head.

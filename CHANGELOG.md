@@ -51,6 +51,14 @@ assigns it when the release is tagged.
   indefinitely and the client's state grew with it. A chain in the old order,
   or one whose far end is not an anchor, is now refused.
 
+  Both ends are checked *before* `tvm.accept()`, inside the pre-accept gas
+  credit. `submitAncestry` is permissionless and the light client pays for
+  everything that runs after `accept`; a transaction that throws still spends
+  the gas it used, so a payload of made-up headers starting at a real anchor
+  and ending nowhere would have cost the client a full walk — up to ~1.9M gas
+  — per message. Two hashes at 4,722 each settle it first, so an unanchored
+  span is refused on the sender's own credit and costs the client nothing.
+
   Callers have to be updated: headers oldest first, and the span must end on a
   proven anchor. `AncestryAccepted.checkpointHash` still carries the newest
   anchor of the span, as it always did.
@@ -78,7 +86,9 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `0b100f00…93396607`, and `getVersion` reports 1.4.6 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
+  code hash moves `314ac6b8…6092f5` → `92d54080…ea59d0ea`, and `getVersion`
+  reports 1.4.7 instead of 1.4.1, which is how an operator tells a client that
+  takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
@@ -120,9 +130,13 @@ assigns it when the release is tagged.
   `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
   for late registration only — never to move the head, which still needs the
   committee in force. The replaced committee may sign only around
-  the head it left behind: the attested slot must be at or before the
-  finalized slot recorded when the rotation landed, and no more than one
-  period before it. The bound is a slot and not the period label on purpose —
+  the head it left behind: the attested slot must be within one period either
+  side of the finalized slot recorded when the rotation landed. The slack on
+  the later side is what makes the feature work at all — that recorded slot is
+  the last head the leaving committee moved, not the end of its period, so the
+  checkpoint it skipped is attested *after* it and an upper bound at the
+  recorded slot itself would exclude exactly the skips this exists for. The
+  bound is a slot and not the period label on purpose —
   the rotate circuit loads its period as a free witness
   (`rotate_aggregation.rs`), so a valid hand-off can be labelled with any
   later period, and a window measured in periods could be moved onto slots the
@@ -163,7 +177,10 @@ assigns it when the release is tagged.
   ties it to a slot the step circuit reads out of a signed header. Two periods
   of slack leave an honest hand-off working while the head is a period behind,
   and the ceiling rises as the head advances, so a bad label now costs a wait
-  rather than the rotation path. This defect is in the deployed 1.4.1 as well;
+  rather than the rotation path. The ceiling applies only once the client has
+  a head: before the first `submitUpdate` the finalized slot is 0, the ceiling
+  would be 2, and a client bootstrapped at a real period (around 1200 on
+  mainnet) could never rotate at all. This defect is in the deployed 1.4.1 as well;
   constraining the period in the circuit is the complete fix and is not in
   this change.
 

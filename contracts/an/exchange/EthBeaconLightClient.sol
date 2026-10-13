@@ -55,7 +55,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.6";
+    string constant version = "1.4.7";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -207,6 +207,12 @@ contract EthBeaconLightClient {
     // move the head forward. 0 before the first rotation.
     uint256 _prevCommittee;
     // The finalized slot the head stood on when `_prevCommittee` left office.
+    // The window runs one period either side of it. The head is the last one
+    // the leaving committee moved, not the end of its period, so a checkpoint
+    // it skipped afterwards sits above this slot and needs the upper slack to
+    // be rescued at all — which is the whole point of the window. Both bounds
+    // are slack around a proven slot, not an exact period boundary; the exact
+    // boundary needs the rotate circuit to bind its period to a slot.
     // The window is measured from this and not from `_committeePeriod`: the
     // rotate circuit takes its period as a free witness (`rotate_aggregation`
     // loads it unconstrained), so a valid hand-off can be labelled with any
@@ -324,7 +330,7 @@ contract EthBeaconLightClient {
             && _prevCommittee != 0
             && pi.committeeCommitment == _prevCommittee
             && _prevCommitteeHeadSlot != 0
-            && pi.attestedSlot <= _prevCommitteeHeadSlot
+            && pi.attestedSlot <= _prevCommitteeHeadSlot + SLOTS_PER_PERIOD
             && pi.attestedSlot + SLOTS_PER_PERIOD >= _prevCommitteeHeadSlot;
         require(currentSigner || prevSigner, ERR_WRONG_COMMITTEE);
 
@@ -415,8 +421,12 @@ contract EthBeaconLightClient {
         // hand-off working while the head is a period behind, and the ceiling
         // rises as the head advances, so a bad label costs at most a wait
         // rather than the rotation path.
+        // Only once a head exists. Before the first step `_finalizedSlot` is
+        // 0, the ceiling would be 2, and a real bootstrap period (around 1200)
+        // could never rotate.
         require(
-            pi.period <= _finalizedSlot / SLOTS_PER_PERIOD + 2,
+            _finalizedSlot == 0
+                || pi.period <= _finalizedSlot / SLOTS_PER_PERIOD + 2,
             ERR_PERIOD_TOO_FAR
         );
 
@@ -449,6 +459,17 @@ contract EthBeaconLightClient {
     function submitAncestry(bytes[] headerRlps) public {
         require(headerRlps.length >= 3, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 33, ERR_ANCESTRY_TOO_LONG);
+        // Both anchors before `accept`, within the pre-accept credit. The call
+        // is permissionless and the light client pays for whatever runs after
+        // `accept` — a reverted transaction still spends the gas it used, and
+        // `ensureBalance` is never reached on that path, so a chain of
+        // made-up headers ending one block past a real anchor could spend
+        // ~1.9M gas per message. Two `gosh.keccak256` calls at 4,722 each
+        // settle it before any of that: the walk only starts when both ends
+        // are already proven.
+        uint256 firstKey = _piForm(gosh.keccak256(headerRlps[0]));
+        uint256 lastKey = _piForm(gosh.keccak256(headerRlps[headerRlps.length - 1]));
+        require(_isLive(firstKey) && _isLive(lastKey), ERR_UNKNOWN_CHECKPOINT);
         tvm.accept();
         uint last = headerRlps.length - 1;
         uint256 prev = gosh.keccak256(headerRlps[0]);

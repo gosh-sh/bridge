@@ -77,7 +77,7 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `a967be12…5b0ab8dc`. On a live network
+  code hash moves `314ac6b8…6092f5` → `f5bf3dd3…9ee34109`, and `getVersion` reports 1.4.2 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
@@ -89,29 +89,23 @@ assigns it when the release is tagged.
   reader, which is now what the walk spends most of its gas on.
 
 - **The relayer builds ancestry payloads in the new shape, and the
-  `submit-ancestry` one-shot needs the older anchor.** `ancestry_headers`
-  (checkpoint first, then parents, ≤32) is replaced by `ancestry_span(newer,
-  older, max)`, which returns the span oldest first, 3 to 33 headers, and
-  fails rather than truncating when the older anchor is further back than
-  `max`. `link_headers` checks that order and returns both end hashes. The
-  daemon sends a span only between two consecutive checkpoints, so it sends
-  nothing until a previous checkpoint is on record — the state file carries one
-  across a restart — and nothing when the gap to it is wider than a span. `eth-lc-relayer submit-ancestry` takes a new required
-  `--older-anchor-hash` next to `--checkpoint-hash` (the newer anchor), and
-  `--max-headers` now defaults to 33. Without this, every `submitAncestry` the
-  old relayer sent would revert with `ERR_BAD_ANCESTRY`.
-- **The deposit-prover verification key is rotated again, for Amsterdam
-  block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
-  353024; Hoodi and mainnet not yet scheduled) execution headers carry 23
-  fields, `blockAccessListHash` and `slotNumber` after `requestsHash`, and
-  the previous key could not prove a deposit in such a block. The circuit
-  now accepts headers of 16 to 24 fields up to 792 bytes, so one key covers
-  mainnet before and after the fork, Sepolia, and the L2s the bridge reads
-  (Arbitrum 16 fields, Blast 20, Base, OP, Mantle and World Chain 21), with
-  one spare slot for the next appended field. A header padded with junk is
-  still rejected. The deposit-prover encoder (`rlp_utils`) and
-  `eth-lc-relayer` (`header_rlp`, used with `--submit-ancestry`) emit the
-  two new fields. Rebuild both binaries from this source.
+  `submit-ancestry` one-shot needs the older anchor.** `eth-lc-relayer
+  submit-ancestry` takes a new required `--older-anchor-hash` next to
+  `--checkpoint-hash` (the newer anchor), and `--max-headers` now defaults to
+  33. Without this change every `submitAncestry` the old relayer sent would
+  revert with `ERR_BAD_ANCESTRY`: it built the payload newest-first and capped
+  it at 32.
+
+  What an operator sees from the daemon. A span is sent only between two
+  consecutive checkpoints, and it is retried at the start of every poll while
+  it is still owed, not only after the next checkpoint arrives. A span the
+  chain refuses is written off after three paid submissions, logged as "giving
+  up on this ancestry span"; a span whose headers will not fetch retries for
+  free and is written off only after 15 minutes of failures, so an execution
+  RPC that rate-limits does not cost coverage. Written off means those blocks
+  need `setAcceptedBlockHash` from the owner. The state file gains
+  `ancestry_anchor`, `span_attempts` and `span_fetch_since`; all three default
+  to empty, so an existing state file is read as before.
 
   Post-fork Sepolia blocks still cannot be anchored by the light client:
   the step circuit and its witness builder have not followed Gloas

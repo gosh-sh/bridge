@@ -766,8 +766,9 @@ async fn submit_ancestry_cmd(
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "--older-anchor-hash is further back than --max-headers allows: one \
-                 submitAncestry cannot carry this span"
+                "no span joins these two anchors: --older-anchor-hash is further back than \
+                 --max-headers allows, is not an ancestor of --checkpoint-hash, or the two are \
+                 adjacent with nothing between them"
             )
         })?;
     info!(
@@ -797,8 +798,9 @@ async fn submit_ancestry_cmd(
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "--older-anchor-hash is further back than --max-headers allows: one \
-                 submitAncestry cannot carry this span"
+                "no span joins these two anchors: --older-anchor-hash is further back than \
+                 --max-headers allows, is not an ancestor of --checkpoint-hash, or the two are \
+                 adjacent with nothing between them"
             )
         })?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;

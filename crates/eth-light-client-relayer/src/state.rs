@@ -26,7 +26,11 @@ pub struct RelayerState {
     /// head so the next tick retries it instead of losing those blocks.
     #[serde(default)]
     pub ancestry_anchor: Option<[u8; 32]>,
-    /// Ticks spent retrying the span the cursor is behind.
+    /// When the headers for the pending span first failed to fetch. Unset
+    /// while fetching works; cleared whenever the cursor settles.
+    #[serde(default)]
+    pub span_fetch_since: Option<u64>,
+    /// Paid submissions spent on the span the cursor is behind.
     #[serde(default)]
     pub span_attempts: u32,
     /// Relayer already issued the one-way owner flip.
@@ -143,4 +147,12 @@ mod tests {
         assert_eq!(loaded.last_finalized_slot, Some(100));
         assert_eq!(loaded.updates_applied, 1);
     }
+}
+
+/// Wall-clock seconds, for bounds that must not move with the poll interval.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

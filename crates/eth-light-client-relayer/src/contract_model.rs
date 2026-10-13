@@ -453,10 +453,19 @@ mod tests {
     fn ancestry_fills_between_two_anchors() {
         let mut c = lc();
         let chain = anchored_span(&mut c, 4);
+        let before = c.sink_notifies.len();
         let added = c.submit_ancestry(&chain).unwrap();
         assert_eq!(added, 2);
         assert!(c.is_live(&pi_form(&keccak256(&chain[1]))));
         assert!(c.is_live(&pi_form(&keccak256(&chain[2]))));
+        // The sink takes the Ethereum byte order, not the stored key — the
+        // defect 1.4.1 fixed on the checkpoint path, which the span path has
+        // to honour too.
+        assert_eq!(
+            &c.sink_notifies[before..],
+            &[keccak256(&chain[1]), keccak256(&chain[2])],
+            "ancestry must notify the sink in Ethereum byte order, oldest first"
+        );
     }
 
     #[test]

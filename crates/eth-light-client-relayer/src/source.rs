@@ -24,9 +24,11 @@ pub trait BeaconSource: Send + Sync {
 
 /// Execution header walk used after an accepted checkpoint. Returns the span
 /// between two anchors, oldest first — the order `submitAncestry` takes.
-/// `Ok(None)` means the older anchor is further back than `max`, which no call
-/// can carry: a distinct outcome from a transient `Err`, because one is never
-/// worth retrying and the other is.
+/// `Ok(None)` means no payload exists for this pair, and no retry will make
+/// one: the older anchor is further back than `max`, or it is not an ancestor
+/// of `newer` at all, or the two are adjacent with nothing between them. A
+/// transient `Err` is the opposite — the headers may well be fetchable on the
+/// next try — so the two must not be treated alike.
 #[async_trait]
 pub trait ExecutionSource: Send + Sync {
     async fn ancestry_span(
@@ -44,10 +46,14 @@ pub struct InMemoryExecution {
 
 impl InMemoryExecution {
     pub fn single(checkpoint: [u8; 32], headers: Vec<Vec<u8>>) -> Self {
-        let mut chains = std::collections::HashMap::new();
-        chains.insert(checkpoint, headers);
+        Self::many(vec![(checkpoint, headers)])
+    }
+
+    /// Several spans, each keyed by its newer end — enough to walk more than
+    /// one checkpoint in a test.
+    pub fn many(spans: Vec<([u8; 32], Vec<Vec<u8>>)>) -> Self {
         Self {
-            chains: Mutex::new(chains),
+            chains: Mutex::new(spans.into_iter().collect()),
         }
     }
 }

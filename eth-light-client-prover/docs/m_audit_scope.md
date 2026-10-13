@@ -11,7 +11,7 @@ this list**. It is not a later milestone.
 | Opcode decider | tvm-sdk#284 (co-deploys with this contract) | `submitRotate` is emission-sound only with the KZG accumulator pairing; `disableOwnerRotation` is the intended flip |
 | AN contract | `contracts/an/EthBeaconLightClient.sol` + `EthKeccak.sol` (standalone variant; shellnet runs `acki-nacki` `contracts/exchange`) | committee gate, monotonic head, `acceptBlockHashFromLightClient`, `submitAncestry` |
 | Relayer | `crates/eth-light-client-relayer` | real committee fetch, no silent mock in systemd |
-| Ancestry | `submitAncestry` + `src/header_rlp.rs` + `contracts/an/EthKeccak.sol` | keccak256(header RLP) + parentHash chain, ≤ 31, writes `_acceptedBlockHash` |
+| Ancestry | `submitAncestry` + `src/header_rlp.rs` + `contracts/an/exchange/EthKeccak.sol` | `gosh.keccak256(header RLP)` + parentHash links, oldest first between two proven anchors, 3 to 33 headers, writes `_acceptedBlockHash` |
 | Deposit flip | `eth-lc-relayer` `flip-owner` / `daemon --flip-owner` after first `submitUpdate` | `getAnchorConfig().lightClient` equals `AN_LIGHT_CLIENT`, then `disableOwnerAnchors` + `disableOwnerRotation` (relayer keys = owner); what the owner key can still do afterwards |
 
 Scripts already pinning the rotate blob: `scripts/check_rotate_vkblob_accumulator.sh`.

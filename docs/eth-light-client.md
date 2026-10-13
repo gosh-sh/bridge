@@ -77,7 +77,7 @@ flowchart LR
     DR["deposit-relayer / user"]
   end
   BN -- "finality_update, updates,<br/>genesis, config/spec" --> D
-  EN -. "eth_getBlockByHash x32<br/>(ancestry)" .-> D
+  EN -. "eth_getBlockByHash per span header<br/>(ancestry)" .-> D
   D -- "witness JSON + env" --> P
   P -- "proof + public inputs" --> D
   D --- S
@@ -121,8 +121,8 @@ sequenceDiagram
   LC-->>R: HeadUpdated event
   opt ETH_RPC_URL set
     R->>LC: rePushAnchor(execHash)
-    R->>LC: submitAncestry(headerRlps, up to 32)
-    LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(key)) for each parent
+    R->>LC: submitAncestry(headerRlps, oldest first, 3 to 33)
+    LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(key)) per block between the anchors
   end
 ```
 
@@ -325,7 +325,7 @@ flowchart LR
 | relayer → beacon node | HTTPS 443 (public), HTTP on the client's REST port when self-hosted | `GET /eth/v1/beacon/light_client/finality_update` | every poll | `src/source.rs:1` |
 | | | `GET /eth/v1/beacon/light_client/updates?start_period=&count=1` | once per period, before a prove | `src/source.rs:248` |
 | | | `GET /eth/v1/beacon/genesis`, `GET /eth/v1/config/spec` | once, cached | `src/source.rs:218` |
-| relayer → execution node | HTTPS 443 (public), 8545 self-hosted default | JSON-RPC `eth_getBlockByHash` | ancestry, 32 calls per checkpoint | `src/source.rs:340` |
+| relayer → execution node | HTTPS 443 (public), 8545 self-hosted default | JSON-RPC `eth_getBlockByHash` | ancestry, one call per span header | `src/source.rs:340` |
 | relayer → Acki Nacki | HTTPS 443 | `/graphql` on the network gateway (`AN_GRAPHQL_URL`); tvm_client sends signed external messages and reads accounts | every submit | `src/an_config.rs:15` |
 | operator → Acki Nacki | HTTPS 443 | `tvm-cli --url <gateway host>` (REST) for deploy, funding, getters | deploy kit | `deploy/shellnet-shadow/lib.sh` |
 | self-hosted Acki Nacki node | TCP 8600 Block Keeper API (`api_addr`), UDP 10000 gossip, UDP 8500 node QUIC, gql-server TCP 3000 (`--listen`) | | | `acki-nacki` repo: `node/src/config/network_config.rs`, `gql-server/src/defaults.rs:4` |

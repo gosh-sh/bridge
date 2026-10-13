@@ -157,17 +157,6 @@ pub fn encode_header_rlp(block: &Value) -> Result<Vec<u8>, RelayerError> {
     Ok(rlp)
 }
 
-/// Two minimal linked header RLPs for tests (not real Ethereum headers).
-/// `keccak(child)` has `parentHash == keccak(parent)`.
-pub fn dummy_linked_headers() -> (Vec<u8>, Vec<u8>) {
-    let mut parent = vec![0xf8, 33, 0xa0];
-    parent.extend(std::iter::repeat_n(0x01, 32));
-    let p_hash = keccak256(&parent);
-    let mut child = vec![0xf8, 33, 0xa0];
-    child.extend_from_slice(&p_hash);
-    (child, parent)
-}
-
 /// `n` minimal linked header RLPs, oldest first — the order `submitAncestry`
 /// takes. Not real Ethereum headers.
 pub fn dummy_linked_chain(n: usize) -> Vec<Vec<u8>> {

@@ -379,9 +379,12 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
-(or its scoped alias), so the same proof cannot be replayed on a second deployment. The
+(or its scoped alias), so the same proof cannot be replayed on a deployment on another chain. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
-on a deployment whose host chain is not the configured one. The rotated
+on a deployment whose host chain is not the configured one. On the **same** chain nothing stops it:
+no public input names the bridge contract, so a second deployment with the same
+`bridgeWithdrawalDappFr`/`bridgeWithdrawalAccFr` pays the same burn again once one of its anchors
+covers it. Only one such deployment may be unpaused at a time ([`aave-yield.md`](aave-yield.md)). The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
 nullifier, so two identical burns in one AN block mint distinct
 nullifiers (trade-off 12).

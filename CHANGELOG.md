@@ -39,6 +39,19 @@ assigns it when the release is tagged.
   for "all of it". It does not: anything above `accruedYield()` reverts
   `NoYield`, which reads as "no yield". Pass `accruedYield()`. Only
   `skimExcessUsdc` takes the max.
+- `docs/aave-yield.md` launches a Sepolia AAVE or demo stand as a cutover of
+  the live bridge rather than next to it: pause withdrawals on Acki Nacki with
+  `setPaused(true)`, let the live bridge pay what is already burned, `pause()`
+  it, reopen Acki Nacki, then deploy and trust the stand and give both
+  relayers fresh state. Removing the live bridge from the trusted set waits
+  until its last deposits are finalized. `EVM-contracts-spec.md` no longer
+  says a withdrawal proof cannot be replayed on a second deployment: that
+  holds only across chains; on one chain any unpaused bridge with the same
+  withdraw identity pays it.
+- `docs/aave-yield.md` no longer says `transferOwnership` leaves
+  `yieldRecipient` behind. Ownership moves in two steps, and `acceptOwnership`
+  moves `yieldRecipient` with it while it still equals the outgoing owner; a
+  recipient set with `setYieldRecipient` stays put.
 - `live_withdrawByProof_runbook.md` no longer says AAVE is never a payout
   source: on a bridge with a pool, `withdrawByProof` withdraws from AAVE the
   part of a payout the USDC on the contract does not cover. AAVE still cannot
@@ -297,9 +310,12 @@ assigns it when the release is tagged.
   `1` / `11155111` / `3`, and writes the `EXPECTED_USDC_ADDRESS` and
   `EXPECTED_AAVE_POOL` values for the relayer into `L<LEVEL>_config/env` as
   comments. Such a bridge takes the AAVE pool's USDC (`0x94a9D9AC…E4C8`), not
-  Circle's, and Acki Nacki refuses its deposits until the AN bridge owner calls
-  `setTrustedL1Bridge(11155111, <bridge>, true)`. The steps are in
-  `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*. Without
+  Circle's. **It replaces the live shellnet bridge and must not run next to
+  it**: with the same withdraw identity, one Acki Nacki burn is payable on
+  both, and AAVE faucet USDC deposited into the stand withdraws as Circle USDC
+  from the live bridge. Pause the live bridge first, then trust the stand on
+  Acki Nacki with `setTrustedL1Bridge(11155111, <bridge>, true)`. The steps
+  are in `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*. Without
   `USE_AAVE` the script behaves as before.
 - **A demo AAVE pool for Sepolia stands.** New contract
   `contracts/ethereum/src/DemoAavePool.sol` answers the AAVE V3 Pool calls the
@@ -311,10 +327,11 @@ assigns it when the release is tagged.
   mainnet): it deploys the pool over Circle USDC, owned by the deployer, and
   wires the bridge to it; Circle USDC, the faucet and the withdraw aliases stay
   as on the shellnet stand. `deploy_bridge_bundle.sh` passes `DEMO_AAVE=true`
-  through and writes the pool address as `EXPECTED_AAVE_POOL`. A demo stand is
-  a new bridge: Acki Nacki needs `setTrustedL1Bridge` for it, and the relayers
-  and CLI need its address. Steps in `docs/aave-yield.md`, *A demo pool on
-  Sepolia*.
+  through and writes the pool address as `EXPECTED_AAVE_POOL`. A demo stand
+  also replaces the live bridge — one burn would otherwise be payable on both —
+  so the live bridge is paused first; then Acki Nacki needs
+  `setTrustedL1Bridge` for the stand, and the relayers and CLI need its
+  address. Steps in `docs/aave-yield.md`, *A demo pool on Sepolia*.
 - `DeployRealBridge` with `USE_AAVE=true` checks the pool before deploying: it
   stops if the pool does not list the USDC under the hard-coded aToken, and it
   prints the reserve's supply cap and total supply, with a warning when the cap
@@ -718,6 +735,14 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- The shellnet-l2 `preflight.sh` ties the prover state directory to one
+  bridge. On a cold start it writes the bridge address to
+  `$BRIDGE_STATE_DIR/bridge_address`; on a later start it refuses when that
+  file names another bridge than `BRIDGE_ADDRESS`. A state directory from
+  before this file existed is adopted, unless the bridge is still at
+  `BRIDGE_BOOTSTRAP_SEQNO` — a fresh bridge next to existing state — which it
+  also refuses. Pointing the runtime env at a new bridge therefore needs an
+  empty state directory; move the old one aside.
 - **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
   the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
   cold run on the test host, system-wide and sampled every 5 s; the CLI

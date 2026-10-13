@@ -1,6 +1,6 @@
 # AAVE yield — operator runbook
 
-*Verified against `contracts/ethereum/src/AckiNackiBridge.sol` at commit `a69ba36`, 2026-08-19.
+*Verified against `contracts/ethereum/src/AckiNackiBridge.sol` at commit `9b10946`, 2026-10-13.
 Line references are to that file.*
 
 The contract can lend idle USDC to the AAVE V3 USDC market. No live deploy does:
@@ -47,8 +47,38 @@ have).
 
 ## Launching a Sepolia stand with AAVE
 
-A new bridge, not a change to the live one. Everything below was checked against
-Sepolia on 2026-10-13.
+**The stand replaces the live bridge; it cannot run next to it.** Everything below
+was checked against Sepolia on 2026-10-13.
+
+### Why two bridges cannot share the Acki Nacki bridge
+
+The stand is deployed with the live bridge's withdraw identity (`WITHDRAW_ACC_FR`,
+`WITHDRAW_DAPP_FR`) and its aliases 1 / 11155111 / 3, and it is trusted on the same
+Acki Nacki account `…::1a1a…`. Nothing in a withdrawal names the L1 bridge it is
+for:
+
+- `withdrawByProof` checks the withdraw identity, the destination chain and the
+  token (`:1371-1386`). `WithdrawalPublicInputs` has no field for the bridge
+  address, and the spent-nullifier map is per contract (`:1405`, `:1430`). One
+  `initiateWithdrawal` burn is therefore payable **on every unpaused bridge** that
+  holds an anchor covering it and enough `treasuryBalance` — once on each.
+- `eccUSDCBridge.finalizeDeposit` mints the same ECC[3] for a deposit into any
+  trusted bridge, and `initiateWithdrawal` burns that same ECC[3]. With the AAVE
+  stand trusted next to the live bridge, test USDC from the permissionless AAVE
+  faucet becomes ECC[3], and that ECC[3] withdraws as Circle USDC from the live
+  bridge's treasury.
+
+So the live bridge is paused before the stand takes deposits or anchors, and stays
+paused. After the cutover the ECC[3] already in circulation, minted against Circle
+USDC, is redeemed from the stand — in AAVE test USDC on a `USE_AAVE` stand, in Circle
+USDC on a [demo stand](#a-demo-pool-on-sepolia). The Circle USDC left on the paused
+bridge stays there; the owner has no call that moves user principal off a bridge.
+
+The nullifier map does not carry over to the stand. A burn the old bridge already
+paid can, in principle, be proven again on the stand once one of its anchors covers
+that burn's block; the higher layer windows cover long stretches of history. This is
+true of every redeploy on the same withdraw identity, not only of an AAVE stand; keep
+the stand's treasury to what the test needs.
 
 ### What is different from the shellnet stand
 
@@ -57,10 +87,9 @@ Sepolia on 2026-10-13.
 | Deposit token | Circle USDC `0x1c7D4B19…7238`, [faucet.circle.com](https://faucet.circle.com) | AAVE test USDC `0x94a9D9AC…E4C8`, the AAVE faucet `0xC959483D…f42D` |
 | AAVE pool / aToken | none | `0x6Ae43d32…8951` / `0x16dA4541…EB80` |
 | Withdraw aliases | default to 1 / 11155111 / 3 | default to 0 — set them by hand |
-| Acki Nacki side | its address is already trusted | `setTrustedL1Bridge` for the new address |
+| Acki Nacki side | its address is trusted | trusted in place of the live bridge (step 4) |
 
-A user's Circle USDC cannot be deposited into the AAVE stand, and the reverse; the
-two stands do not share a treasury.
+A user's Circle USDC cannot be deposited into the AAVE stand, and the reverse.
 
 ### 1. Check the AAVE reserve first
 
@@ -99,7 +128,51 @@ cast call $USDC 'balanceOf(address)(uint256)' 0x16dA4541aD1807f4443d92D26044C114
 fork suite checks the bridge against the real pool either way; a green fork run says
 nothing about whether the live reserve takes supplies today.
 
-### 2. Deploy
+### 2. Retire the live bridge
+
+`OLD_BRIDGE` is the live bridge, `AN_BRIDGE` and `ABI` the Acki Nacki bridge account
+and its ABI:
+
+```bash
+# tvm-cli v3 addresses accounts as <dapp_id>::<account_id>; the shellnet bridge's dapp_id is zero.
+AN_BRIDGE=0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
+ABI=contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json
+AN="tvm-cli -u https://shellnet.ackinacki.org"
+```
+
+1. **Stop new burns.** `setPaused(true)` on the Acki Nacki bridge makes
+   `initiateWithdrawal` and `finalizeDeposit` refuse
+   (`contracts/an/exchange/eccUSDCBridge.sol`):
+
+   ```bash
+   $AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
+     -m setPaused '{"paused":true}'
+   ```
+
+2. **Let the live bridge pay what is already burned.** Keep its AN→ETH relayer
+   running until every `proof_event_*.json` it holds has been paid
+   (`isNullifierUsed(nullifier)` is true on `OLD_BRIDGE`) and no burn made before
+   step 1 is still waiting for its covering anchor.
+
+3. **Pause the live bridge.** `pause()` makes `deposit`, `verifyBlock`,
+   `applyBkSetUpdate` and `withdrawByProof` revert (`:1614`), so it pays nothing
+   from here on:
+
+   ```bash
+   cast send $OLD_BRIDGE 'pause()' --rpc-url $RPC --private-key $OWNER_PK
+   cast call $OLD_BRIDGE 'paused()(bool)' --rpc-url $RPC   # true
+   ```
+
+   Then stop its AN→ETH relayer (step 5 reuses the instance with fresh state).
+
+4. **Reopen Acki Nacki** with `setPaused(false)`. Deposits made into `OLD_BRIDGE`
+   before step 3 finalize as usual, because it is still trusted. Burns made from now
+   on wait for the stand.
+
+### 3. Deploy
+
+Deploy after step 2: the stand must not hold anchors or a treasury while the live
+bridge can still pay.
 
 The usual way is the shellnet bundle script with `USE_AAVE=true`. It derives the
 genesis values from the shellnet head, runs `DeployRealBridge` with the shellnet
@@ -150,40 +223,52 @@ cast call $BRIDGE 'bridgeWithdrawalAltTokenId()(uint256)' --rpc-url $RPC   # 3
 cast call $BRIDGE 'yieldRecipient()(address)' --rpc-url $RPC
 ```
 
-### 3. Trust the new bridge on Acki Nacki
+### 4. Trust the stand on Acki Nacki, in place of the live bridge
 
 `eccUSDCBridge.finalizeDeposit` rejects a deposit whose proven
 `(chainId, contractAddress)` is not in its allowlist (`contracts/an/README.md`). The
-owner of the Acki Nacki bridge account adds the new address with
+owner of the Acki Nacki bridge account adds the stand with
 `setTrustedL1Bridge(chainId, l1Bridge, allowed)`:
 
 ```bash
-# tvm-cli v3 addresses accounts as <dapp_id>::<account_id>; the shellnet bridge's dapp_id is zero.
-AN_BRIDGE=0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
-ABI=contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json
-tvm-cli -u https://shellnet.ackinacki.org callx --abi $ABI --addr $AN_BRIDGE \
-  --keys <owner keys of the AN bridge> -m setTrustedL1Bridge \
-  '{"chainId":"11155111","l1Bridge":"<new bridge address>","allowed":true}'
-tvm-cli -u https://shellnet.ackinacki.org runx --abi $ABI --addr $AN_BRIDGE \
-  -m isTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<new bridge address>"}'
+$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
+  -m setTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<stand address>","allowed":true}'
+$AN runx --abi $ABI --addr $AN_BRIDGE \
+  -m isTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<stand address>"}'
 ```
 
-Until this is done every deposit into the new bridge is proven but refused on Acki
-Nacki. Withdrawals (AN→ETH) do not depend on it.
+Until this is done every deposit into the stand is proven but refused on Acki Nacki.
+Withdrawals (AN→ETH) do not depend on it.
 
-### 4. Point the off-chain parts at the new bridge
+Once the ETH→AN relayer has finalized every deposit made into `OLD_BRIDGE` before its
+pause, remove it from the set with the same call and `"allowed":false`.
 
-- AN→ETH relayer (`crates/bridge-relayer-daemon/deploy/shellnet-l2/`): in the runtime
-  env set `BRIDGE_ADDRESS`, `BRIDGE_DEPLOY_BLOCK`, the `EXPECTED_*` genesis and
+### 5. Point the off-chain parts at the stand
+
+- AN→ETH relayer (`crates/bridge-relayer-daemon/deploy/shellnet-l2/`): the stopped
+  instance from step 2, **with fresh state**. Its state files belong to the live
+  bridge; move them aside rather than deleting them:
+
+  ```bash
+  ROOT=/var/lib/gosh-bridge-relayer   # RELAYER_RUNTIME_ROOT
+  sudo mv $ROOT/L2_config $ROOT/L2_config.$OLD_BRIDGE
+  sudo install -d -o gosh-relayer -g gosh-relayer $ROOT/L2_config $ROOT/L2_config/state
+  ```
+
+  In `/etc/gosh-bridge-relayer/shellnet-l2.env` set `BRIDGE_ADDRESS`,
+  `BRIDGE_DEPLOY_BLOCK`, `BRIDGE_BOOTSTRAP_SEQNO`, the `EXPECTED_*` genesis and
   withdraw values you deployed with,
   `EXPECTED_USDC_ADDRESS=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` and
   `EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`, then run
-  `preflight`.
-- ETH→AN relayer (`deposit-relayer`): `--bridge-address` and `BRIDGE_DEPLOY_BLOCK`.
+  `preflight` and start the service. `preflight` stops on a state directory that
+  was used for another bridge.
+- ETH→AN relayer (`deposit-relayer`): `--bridge-address`, `BRIDGE_DEPLOY_BLOCK` and a
+  new `--state` file. The old file is bound to the live bridge and the daemon
+  refuses it; `--force-state` would rebind it but keep the old cursor.
 - `ackinacki-bridge` CLI: `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` in its config. It
   reads the deposit token from the bridge's `usdc()`, so nothing else changes.
 
-### 5. Fund and supply
+### 6. Fund and supply
 
 ```bash
 FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D   # permissionless, 10 000 USDC per call
@@ -223,7 +308,10 @@ not what a market would pay.
 
 The demo stand keeps everything else of the shellnet stand — `DeployShellnetE2EBridge`,
 Circle USDC, the withdraw aliases — so users fund from
-[faucet.circle.com](https://faucet.circle.com) as before. It is still a new bridge:
+[faucet.circle.com](https://faucet.circle.com) as before. Its deposit token is the live
+bridge's, so the faucet problem above does not arise, but one burn would still be
+payable on both bridges: the demo stand **replaces the live bridge too**. Retire the
+live bridge first ([step 2](#2-retire-the-live-bridge)), then deploy:
 
 ```bash
 cd crates/bridge-prover-libraries
@@ -237,12 +325,15 @@ mainnet) deploys a `DemoAavePool` over Circle USDC, owned by the `PRIVATE_KEY`
 address, and wires the bridge to it and its `DemoAToken`. The script prints the pool
 address and writes it into `L2_config/env` as `EXPECTED_AAVE_POOL`; set that and
 `EXPECTED_USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` in the relayer's
-runtime env. Steps 3 and 4 of the section above — `setTrustedL1Bridge` on Acki
-Nacki and pointing the relayers and the CLI at the new address — apply unchanged.
+runtime env. Steps 4 and 5 of the section above — trusting the stand on Acki Nacki in
+place of the live bridge, and pointing the relayers, with fresh state, and the CLI at
+it — apply unchanged.
 
-After deposits, supply, pay yield in, and collect it:
+After deposits, supply, pay yield in, and collect it. `USDC` is Circle's token here,
+not the AAVE test USDC of step 1:
 
 ```bash
+USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238   # the demo pool's underlying
 POOL=<DemoAavePool>
 cast send $BRIDGE 'supplyToAave(uint256)' $(cast max-uint) --rpc-url $RPC --private-key $OWNER_PK
 cast send $USDC 'approve(address,uint256)' $POOL 1000000 --rpc-url $RPC --private-key $POOL_OWNER_PK
@@ -259,15 +350,15 @@ supply cap.
 
 | | What it means | Read it with |
 |---|---|---|
-| **Owed to users** | A book number. Up on deposit, down on a proven payout — nothing else. | `treasuryBalance()` (`:98`) |
+| **Owed to users** | A book number. Up on deposit, down on a proven payout — nothing else. | `treasuryBalance()` (`:104`) |
 | **Liquid** | USDC on the contract, spendable now. | `usdc.balanceOf(bridge)` |
-| **In AAVE** | `suppliedPrincipal()` is what we put in; `aUsdcBalance()` is what it is worth now. | both (`:123`, `:1387`) |
+| **In AAVE** | `suppliedPrincipal()` is what we put in; `aUsdcBalance()` is what it is worth now. | both (`:129`, `:1709`) |
 
 Two derived numbers decide everything below:
 
-* `accruedYield()` = `aUsdcBalance() − suppliedPrincipal()` — yield **still inside AAVE** (`:1393`).
+* `accruedYield()` = `aUsdcBalance() − suppliedPrincipal()` — yield **still inside AAVE** (`:1715`).
 * `excessUsdc()` = `usdc.balanceOf(bridge) − treasuryBalance()` — surplus **already on the contract**
-  (`:1307`).
+  (`:1591`).
 
 Solvent iff `totalAssets() ≥ treasuryBalance()`. `treasuryBalance` is book value and is never
 reconciled against real assets, so a loss in AAVE does not shrink it — it surfaces later, on a payout.
@@ -278,8 +369,8 @@ reconciled against real assets, so a loss in AAVE does not shrink it — it surf
 
 | Yield is… | Command | Fails with |
 |---|---|---|
-| in AAVE | `harvestYield(amount)` (`:1287`) | `NoYield` if `accruedYield() == 0` |
-| on the contract | `skimExcessUsdc(amount)` (`:1315`) | `NoExcessUsdc` if `excessUsdc() == 0` |
+| in AAVE | `harvestYield(amount)` (`:1571`) | `NoYield` if `accruedYield() == 0`, `amount == 0` or `amount > accruedYield()` |
+| on the contract | `skimExcessUsdc(amount)` (`:1599`) | `NoExcessUsdc` if `excessUsdc() == 0` |
 
 Both send to `yieldRecipient`, never to the caller. `skimExcessUsdc` accepts `type(uint256).max` for
 "all of it"; `harvestYield` does not — anything above `accruedYield()` reverts `NoYield`, so pass
@@ -291,8 +382,8 @@ AAVE, and that absence is the guarantee.
 
 | You called | Yield ends up | Collect with |
 |---|---|---|
-| `withdrawFromAave(max)` (`:1258`) | stays in AAVE — it pulls only the booked principal | `harvestYield` |
-| `emergencyWithdrawAll()` (`:1270`) | on the contract — it pulls principal **and** interest, and zeroes the book | `skimExcessUsdc` |
+| `withdrawFromAave(max)` (`:1531`) | stays in AAVE — it pulls only the booked principal | `harvestYield` |
+| `emergencyWithdrawAll()` (`:1548`) | on the contract — it pulls principal **and** interest, and zeroes the book | `skimExcessUsdc` |
 
 ### After an emergency unwind — three cases, not one
 
@@ -307,9 +398,9 @@ AAVE, and that absence is the guarantee.
 Yield can be back in AAVE after an emergency in three ways: the module was re-enabled and re-supplied
 (the normal one); someone sent aUSDC to the bridge directly, which reads as pure yield because the
 book says we supplied nothing; or rounding dust survived the `withdraw(max)`. In all three
-`harvestYield` works — note it has **no** `aaveEnabled` guard (`:1287-1289`), so a disabled module
+`harvestYield` works — note it has **no** `aaveEnabled` guard (`:1571-1573`), so a disabled module
 does not block collection. `withdrawFromAave`, by contrast, reverts `InvalidAmount` while
-`suppliedPrincipal` is zero (`:1259-1260`).
+`suppliedPrincipal` is zero (`:1532-1533`).
 
 This is why the rule above is stated over pockets rather than over history: it answers all three
 cases without anyone having to remember what was called last.
@@ -317,9 +408,9 @@ cases without anyone having to remember what was called last.
 ## Two ways to get it wrong
 
 **1. Re-supplying before you skim.** `supplyToAave` subtracts only the liquid reserve, not the
-surplus (`:1358-1363`), so uncollected yield goes back into the pool and is booked as *principal*.
-It is then invisible to both collectors. Not lost — it keeps earning — but recovering it needs a
-`withdrawFromAave(max)` first. Correct order after an emergency:
+surplus (`_amountSupplyable`, `:1677-1682`), so uncollected yield goes back into the pool and is
+booked as *principal*. It is then invisible to both collectors. Not lost — it keeps earning — but
+recovering it needs a `withdrawFromAave(max)` first. Correct order after an emergency:
 
 ```
 skimExcessUsdc(max)  →  setAaveEnabled(true)  →  supplyToAave(max)
@@ -351,16 +442,18 @@ guard doing its job, and it may be telling you there is a shortfall. Check `tota
 
 ## Check the recipient before the first collection
 
-The constructor sets `owner = yieldRecipient = msg.sender` (`:554-555`), and `transferOwnership`
-moves **only** `owner` (`:1347`). The constructor takes no recipient argument, so on any deploy where
-ownership was handed to a multisig afterwards, yield still goes to the deploying key until someone
-calls `setYieldRecipient` (`:1341`).
+The constructor sets `owner = yieldRecipient = msg.sender` (`:680-681`). Ownership moves in two
+steps, `transferOwnership` then `acceptOwnership` by the new owner (`:1649`); `acceptOwnership`
+moves `yieldRecipient` along only while it still equals the outgoing owner (`:1664-1667`). A
+recipient set explicitly with `setYieldRecipient` (`:1641`) stays where it is through any number of
+ownership changes, so after a handover to a multisig, yield can still go to an address the new
+owner does not control.
 
 Separating the two roles is intentional and fine. The hazard is that they separate *silently*.
 
 ```bash
 cast call $BRIDGE 'owner()(address)'          --rpc-url $RPC
-cast call $BRIDGE 'yieldRecipient()(address)' --rpc-url $RPC   # is this still the deployer?
+cast call $BRIDGE 'yieldRecipient()(address)' --rpc-url $RPC   # is this who should be paid?
 ```
 
 ## Health check
@@ -386,11 +479,13 @@ excessUsdc() > 0 across a collection cycle        # uncollected surplus; the nex
 
 ## Other owner controls
 
-`setLiquidReserveBps` — the share of user principal kept liquid. Default `1_000` = 10 % (`:557`),
-capped at 50 % (`:67`). Ours, not an AAVE convention. `setAaveEnabled` — gate on new supplies;
-`emergencyWithdrawAll` turns it off, and only an explicit call turns it back on.
+`setLiquidReserveBps` — the share of user principal kept liquid. Default `1_000` = 10 % (`:683`),
+capped at 50 % (`MAX_LIQUID_RESERVE_BPS`, `:61`). Ours, not an AAVE convention. `setAaveEnabled` —
+gate on new supplies; `emergencyWithdrawAll` turns it off, and only an explicit call turns it back
+on.
 
 The owner cannot reduce `treasuryBalance` and cannot replace a verifier — those bindings are
-immutable. The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
-`applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield controls above stay
-available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec.md`, §10.1).
+immutable. The owner can pause the bridge (`pause()` / `unpause()`, `:1614`, `:1621`): `deposit`,
+`verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield
+controls above stay available, so funds can be moved out of AAVE during a pause
+(`EVM-contracts-spec.md`, §10.1).

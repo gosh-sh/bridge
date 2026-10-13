@@ -264,14 +264,30 @@ withdraw_alt_host=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalAltDstHostChain
 withdraw_alt_token=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalAltTokenId()(uint256)')
 [[ "$withdraw_alt_token" == "$EXPECTED_WITHDRAW_ALT_TOKEN_ID" ]] || die "withdraw alt token mismatch"
 
+# The prover state belongs to one bridge. bridge_address records which, so a
+# runtime env pointed at a new bridge cannot pick up the old bridge's state.
+state_bridge_file="$BRIDGE_STATE_DIR/bridge_address"
+bridge_lc=${BRIDGE_ADDRESS,,}
 if [[ ! -f "$BRIDGE_STATE_DIR/prover_state.json" ]]; then
   [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]] ||
     die "cold start has no local state but contract cursor $last_seen != bootstrap $BRIDGE_BOOTSTRAP_SEQNO"
   expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
   [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+  printf '%s\n' "$bridge_lc" >"$state_bridge_file"
 else
   jq -e '.initialized == true and .anchor_level == 2' "$BRIDGE_STATE_DIR/prover_state.json" >/dev/null ||
     die "existing prover state is not initialized L2 state"
+  if [[ -f "$state_bridge_file" ]]; then
+    state_bridge=$(tr -d '[:space:]' <"$state_bridge_file")
+    [[ "${state_bridge,,}" == "$bridge_lc" ]] ||
+      die "prover state in $BRIDGE_STATE_DIR belongs to bridge $state_bridge, not $BRIDGE_ADDRESS; start the new bridge with an empty state directory"
+  else
+    # State from before bridge_address existed: adopt it, unless the contract
+    # has never advanced, which is a fresh bridge next to someone else's state.
+    [[ "$last_seen" != "$BRIDGE_BOOTSTRAP_SEQNO" ]] ||
+      die "prover state exists but the bridge is still at its bootstrap seqno $last_seen; is $BRIDGE_STATE_DIR from another bridge?"
+    printf '%s\n' "$bridge_lc" >"$state_bridge_file"
+  fi
 fi
 ok "Sepolia bridge owner/config/anchors cursor=$last_seen"
 

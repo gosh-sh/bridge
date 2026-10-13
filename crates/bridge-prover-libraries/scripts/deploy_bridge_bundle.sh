@@ -29,14 +29,16 @@
 #   USE_AAVE                   true: deploy with DeployRealBridge instead, wired
 #                              to the AAVE V3 Sepolia pool. The bridge then takes
 #                              the pool's USDC (0x94a9D9AC…E4C8), not Circle's,
-#                              and the AN side must trust the new address
+#                              and it replaces the live bridge: pause that one
+#                              first, then trust the new address on the AN side
 #                              (docs/aave-yield.md, "Launching a Sepolia stand
 #                              with AAVE"). Default: false.
 #   DEMO_AAVE                  true: keep DeployShellnetE2EBridge and Circle USDC,
 #                              and wire the bridge to a fresh DemoAavePool owned
 #                              by PRIVATE_KEY; yield is whatever that key pays in
 #                              with accrueYield (docs/aave-yield.md, "A demo pool
-#                              on Sepolia"). Excludes USE_AAVE. Default: false.
+#                              on Sepolia"). Replaces the live bridge as well.
+#                              Excludes USE_AAVE. Default: false.
 set -euo pipefail
 set +x
 umask 077
@@ -176,7 +178,8 @@ BRIDGE_ANCHOR_LEVEL=$LEVEL
 EOF
 echo ">>> Wrote $CFG_DIR/env"
 if [[ "$USE_AAVE" == true || "$DEMO_AAVE" == true ]]; then
-  echo ">>> AAVE stand: add $BRIDGE_ADDRESS to the AN bridge with setTrustedL1Bridge before the first deposit"
+  echo ">>> AAVE stand: it replaces the live bridge, which must already be paused (docs/aave-yield.md, step 2)."
+  echo ">>> Trust $BRIDGE_ADDRESS on the AN bridge with setTrustedL1Bridge before the first deposit."
 fi
 
 # ─── 5. Archive stale state so the new bridge cold-start remains recoverable ─

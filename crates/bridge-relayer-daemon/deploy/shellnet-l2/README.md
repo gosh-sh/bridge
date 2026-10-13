@@ -68,7 +68,9 @@ $RELAYER_RUNTIME_ROOT/
 │   └── pk_cache/           # writable primary/layer outer PK cache (~17 GiB)
 ├── L2_config/
 │   ├── relayer-state.json
-│   └── state/prover_state.json
+│   └── state/
+│       ├── prover_state.json
+│       └── bridge_address  # written by preflight; the bridge this state belongs to
 ├── submissions/            # exact verifyBlock calldata dumps
 └── tmp/
 ```

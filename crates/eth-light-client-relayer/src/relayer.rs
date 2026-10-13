@@ -238,21 +238,79 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }),
             SubmitOutcome::Rejected {
                 reason,
-            } => Ok(TickOutcome::AnRejected {
-                reason,
-            }),
+            } => {
+                // A rotation whose own attempt went out and was never
+                // confirmed is refused on the retry, because the committee it
+                // rotates to is the one the chain already holds:
+                // `ERR_WRONG_COMMITTEE` on the current commitment, or
+                // `ERR_SELF_ROTATION` on the next one. Read as a plain
+                // refusal, that re-proves the same period on every later tick
+                // and the head never advances again, so the landed rotation is
+                // recorded here. Only for the period that was actually sent:
+                // without an attempt on record the same codes mean the chain
+                // sits on a committee this daemon cannot rotate from, which is
+                // an operator's business.
+                if self.state.rotate_in_flight_period == Some(to_period)
+                    && matches!(
+                        crate::submitter::parsed_exit_code(&reason),
+                        Some(242) | Some(253)
+                    )
+                {
+                    let before = self.state.clone();
+                    self.state.record_rotate(to_period);
+                    if let Err(e) = self.persist() {
+                        self.state = before;
+                        return Err(e);
+                    }
+                    warn!(
+                        to_period,
+                        reason = %reason,
+                        "submitRotate refused against the committee it rotates to; the earlier \
+                         attempt landed — recording the rotation"
+                    );
+                    return Ok(TickOutcome::AlreadyOnHead {
+                        finalized_slot: self.state.last_finalized_slot.unwrap_or(0),
+                    });
+                }
+                Ok(TickOutcome::AnRejected {
+                    reason,
+                })
+            },
+            // The proof went out and its fate is unknown: the chain may have
+            // run the rotation after the wait gave up.
             SubmitOutcome::Pending {
                 reason,
-            } => Ok(TickOutcome::AnPending {
-                reason,
-            }),
-            // Nothing reached the chain, so the next tick simply tries again.
+            } => {
+                self.mark_rotate_in_flight(to_period)?;
+                Ok(TickOutcome::AnPending {
+                    reason,
+                })
+            },
+            // A timeout is classified here too: `call_contract` broadcasts and
+            // waits in one call, so "nothing was paid for" is a billing
+            // statement and not a promise that the message never landed.
             SubmitOutcome::NotSent {
                 reason,
-            } => Ok(TickOutcome::AnPending {
-                reason,
-            }),
+            } => {
+                self.mark_rotate_in_flight(to_period)?;
+                Ok(TickOutcome::AnPending {
+                    reason,
+                })
+            },
         }
+    }
+
+    fn mark_rotate_in_flight(&mut self, period: u64) -> Result<(), RelayerError> {
+        if self.state.rotate_in_flight_period == Some(period) {
+            return Ok(());
+        }
+        let before = self.state.clone();
+        self.state.record_rotate_in_flight(period);
+        if let Err(e) = self.persist() {
+            self.state = before;
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Shadow period hop: the step proof of the new period already carries the
@@ -1040,6 +1098,83 @@ mod tests {
             } => assert_eq!(period, 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `call_contract` broadcasts and waits in one call, so a wait that times
+    /// out can still have left the rotation on the chain. The retry is then
+    /// refused with `ERR_WRONG_COMMITTEE` (242) against the committee it
+    /// rotates to. Unless that refusal is read as "it landed", every later
+    /// tick re-enters the period jump and the head never moves again.
+    #[tokio::test]
+    async fn a_rotate_that_timed_out_and_then_is_refused_as_applied_is_recorded() {
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.script_rotate(vec![
+            SubmitOutcome::NotSent {
+                reason: "submitRotate: Error: wait message timed out".into(),
+            },
+            SubmitOutcome::Rejected {
+                reason: "submitRotate failed: tvm error (account=0abc) (exit_code=242)".into(),
+            },
+        ]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            submitter,
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnPending { .. }), "{out:?}");
+        assert_eq!(r.state().rotate_in_flight_period, Some(1));
+        assert_eq!(r.state().last_committee_period, Some(0));
+
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AlreadyOnHead { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(1));
+        assert_eq!(r.state().rotate_in_flight_period, None);
+
+        // The point of recording it: the daemon reaches the step again.
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { .. }),
+            "the head must advance after the rotation is recorded: {out:?}"
+        );
+        assert_eq!(r.state().last_finalized_slot, Some(8192));
+    }
+
+    /// The same refusal without an attempt of this daemon's own on record
+    /// means the chain sits on a committee it cannot rotate from. That is not
+    /// a rotation to record — it needs an operator.
+    #[tokio::test]
+    async fn a_wrong_committee_refusal_with_no_attempt_in_flight_is_not_recorded() {
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.script_rotate(vec![SubmitOutcome::Rejected {
+            reason: "submitRotate failed: tvm error (account=0abc) (exit_code=242)".into(),
+        }]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            submitter,
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnRejected { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(0));
+        assert_eq!(r.state().rotate_in_flight_period, None);
     }
 
     #[tokio::test]

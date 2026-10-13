@@ -36,6 +36,14 @@ pub struct RelayerState {
     pub updates_applied: u64,
     /// Period the daemon refused to cross without a rotate proof.
     pub rotate_pending_period: Option<u64>,
+    /// Period of a `submitRotate` that went out but whose outcome never came
+    /// back. `call_contract` broadcasts and waits in one call, so a timeout
+    /// can arrive after the chain already ran the rotation. The next attempt
+    /// for the same period is then refused against the committee that is
+    /// already current, and this field is what tells that refusal apart from
+    /// a proof the chain never accepted.
+    #[serde(default)]
+    pub rotate_in_flight_period: Option<u64>,
     /// Spans still owed to `submitAncestry`, oldest first. A pair is fixed
     /// when its newer end is accepted, so a span is never re-paired with a
     /// later checkpoint, and each carries its own accounting — one cursor and
@@ -95,10 +103,15 @@ impl RelayerState {
     pub fn record_rotate(&mut self, period: u64) {
         self.last_committee_period = Some(period);
         self.rotate_pending_period = None;
+        self.rotate_in_flight_period = None;
     }
 
     pub fn record_rotate_pending(&mut self, period: u64) {
         self.rotate_pending_period = Some(period);
+    }
+
+    pub fn record_rotate_in_flight(&mut self, period: u64) {
+        self.rotate_in_flight_period = Some(period);
     }
 }
 

@@ -286,6 +286,22 @@ assigns it when the release is tagged.
   1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
   circuit, which is not in this change.
 
+- **A rotate whose confirmation is lost no longer stops the daemon for
+  good.** `call_contract` broadcasts the message and waits for it in one
+  call, so a wait that times out can leave the rotation on the chain while
+  the daemon records nothing. Every later poll then re-entered the period
+  jump, re-proved the same rotation and was refused — the proof starts from a
+  committee the chain has already replaced (`ERR_WRONG_COMMITTEE`, 242) —
+  and the light-client head stopped advancing until an operator edited the
+  state file. The state file gains `rotate_in_flight_period`, which defaults
+  to unset, so an existing file is read as before: a rotate sent with an
+  unknown outcome is written down there, and a 242 or `ERR_SELF_ROTATION`
+  (253) refusal of that same period is read as "the earlier attempt landed",
+  recorded, and the daemon goes back to submitting updates. Without an
+  attempt of its own on record those codes are still a plain refusal — then
+  the chain is on a committee this daemon cannot rotate from, which needs an
+  operator.
+
 - **The deposit-prover verification key is rotated again, for Amsterdam
   block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
   353024; Hoodi and mainnet not yet scheduled) execution headers carry 23

@@ -115,6 +115,9 @@ struct MockInner {
     /// this await must already have the span on disk.
     watch_state: Option<std::path::PathBuf>,
     state_at_re_push: Option<String>,
+    /// Answers for the next `submit_rotate` calls, oldest first. Empty means
+    /// the default behaviour.
+    rotate_script: std::collections::VecDeque<SubmitOutcome>,
 }
 
 impl MockAnSubmitter {
@@ -136,8 +139,17 @@ impl MockAnSubmitter {
                 ancestry_count: 0,
                 watch_state: None,
                 state_at_re_push: None,
+                rotate_script: std::collections::VecDeque::new(),
             }),
         }
+    }
+
+    /// Answer the next `submit_rotate` calls with these outcomes, in order.
+    /// Lets a test play the one sequence that matters: the first attempt times
+    /// out, the chain ran it anyway, and the retry is refused against the
+    /// committee that is already current.
+    pub fn script_rotate(&self, outcomes: Vec<SubmitOutcome>) {
+        self.inner.lock().expect("poisoned").rotate_script = outcomes.into();
     }
 
     /// Read this state file when `re_push_anchor` is called and keep what it
@@ -274,6 +286,9 @@ impl AnSubmitter for MockAnSubmitter {
         bundle: &RotateProofBundle,
     ) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if let Some(scripted) = inner.rotate_script.pop_front() {
+            return Ok(scripted);
+        }
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "ZKHALO2VERIFYWITHVK rejected the rotate proof".into(),
@@ -826,7 +841,7 @@ fn tvm_account_hex(s: &str) -> Option<String> {
 /// none. The same shapes `acki-nacki-interface` emits; kept local because that
 /// crate's parser lives behind the `tvm-sdk` feature, which the default build
 /// and the tests do not enable.
-fn parsed_exit_code(msg: &str) -> Option<i32> {
+pub(crate) fn parsed_exit_code(msg: &str) -> Option<i32> {
     for marker in [
         "exit_code=Some(",
         "exit_code=",

@@ -67,10 +67,14 @@ assigns it when the release is tagged.
   instruction instead of the `EthKeccak` software implementation, and
   `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
   64.68M gas before and costs 4,722 now. Measured on a locally built node
-  against the 10M per-transaction limit: 715,066 gas for a 5-header span,
-  1,230,602 for 17 headers and 1,942,271 for a full 33-header span, where the
-  old software walk extrapolated to ~2.07G. Measured end to end, compute and
-  action phase both, not compute alone. On-chain ancestry therefore works: a deposit in a
+  against the 10M per-transaction limit: 738,280 gas for a 5-header span and
+  1,966,282 for a full 33-header span, where the old software walk
+  extrapolated to ~2.07G. Both include the two anchor hashes the call now does
+  before `tvm.accept()`, which cost about 24,000 of that. Measured end to end,
+  compute and action phase both, not compute alone. A span whose far end is
+  not an anchor costs the light client nothing at all: it is refused before
+  `accept`, no transaction is committed and the balance does not move.
+  On-chain ancestry therefore works: a deposit in a
   non-checkpoint block is covered without the owner key, as long as the
   checkpoints bracketing it are both proven and no more than a span apart. A
   checkpoint the daemon skipped can be late-registered through `submitUpdate`

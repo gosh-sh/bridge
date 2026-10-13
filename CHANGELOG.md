@@ -78,7 +78,7 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `37ea44d6…489fae8d`, and `getVersion` reports 1.4.5 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
+  code hash moves `314ac6b8…6092f5` → `0b100f00…93396607`, and `getVersion` reports 1.4.6 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
@@ -149,6 +149,23 @@ assigns it when the release is tagged.
   the next rotation. `getCommitteeState` gains a `prevCommittee`
   output; no other function or event changes, and the ABI's `fields` section
   gains `_prevCommittee`.
+
+- **A `submitRotate` hand-off can no longer be labelled with a period far
+  beyond the proven head.** The rotate circuit loads its period as a free
+  witness, so monotonicity (`pi.period > _committeePeriod`) was not a replay
+  guard: anyone could take a genuine hand-off, label it `type(uint64).max` and
+  submit it — the call is permissionless — after which every later rotation
+  failed `ERR_STALE_PERIOD` (245) for good. With `disableOwnerRotation`
+  already run, `setCommitteeCommitment` is closed, so nothing but an owner
+  `reAnchorCommittee` every period could carry the committee at all, and
+  trustless rotation could not be restored. The label must now also satisfy
+  `pi.period <= finalizedSlot / 8192 + 2` (`ERR_PERIOD_TOO_FAR`, 253), which
+  ties it to a slot the step circuit reads out of a signed header. Two periods
+  of slack leave an honest hand-off working while the head is a period behind,
+  and the ceiling rises as the head advances, so a bad label now costs a wait
+  rather than the rotation path. This defect is in the deployed 1.4.1 as well;
+  constraining the period in the circuit is the complete fix and is not in
+  this change.
 
 - **The deposit-prover verification key is rotated again, for Amsterdam
   block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch

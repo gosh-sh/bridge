@@ -55,7 +55,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.5";
+    string constant version = "1.4.6";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -96,6 +96,7 @@ contract EthBeaconLightClient {
     uint16 constant ERR_BAD_ANCESTRY       = 250;
     uint16 constant ERR_ANCESTRY_TOO_LONG  = 251;
     uint16 constant ERR_NOT_PROVEN         = 252;
+    uint16 constant ERR_PERIOD_TOO_FAR     = 253;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -404,6 +405,20 @@ contract EthBeaconLightClient {
         require(pi.currentCommitteeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
         // Monotonic period — reject stale / replayed hand-offs.
         require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
+        // The circuit does not constrain this period (`rotate_aggregation`
+        // loads it as a free witness), so monotonicity alone is not a replay
+        // guard: a genuine hand-off labelled `type(uint64).max` would make
+        // every later rotation fail `ERR_STALE_PERIOD` for good, and after
+        // `disableOwnerRotation` only the owner could carry the committee at
+        // all. Tie the label to the head instead, which the step circuit
+        // reads out of a signed header. Two periods of slack keeps an honest
+        // hand-off working while the head is a period behind, and the ceiling
+        // rises as the head advances, so a bad label costs at most a wait
+        // rather than the rotation path.
+        require(
+            pi.period <= _finalizedSlot / SLOTS_PER_PERIOD + 2,
+            ERR_PERIOD_TOO_FAR
+        );
 
         tvm.accept();
         require(

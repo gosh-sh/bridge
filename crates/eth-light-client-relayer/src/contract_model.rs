@@ -39,6 +39,7 @@ pub enum LcError {
     BadAncestry,
     AncestryTooLong,
     WrongCommittee,
+    PeriodTooFar,
 }
 
 impl LcError {
@@ -55,6 +56,7 @@ impl LcError {
             Self::BadAncestry => 250,
             Self::AncestryTooLong => 251,
             Self::NotProven => 252,
+            Self::PeriodTooFar => 253,
         }
     }
 }
@@ -269,6 +271,12 @@ impl LightClient {
         }
         if period <= self.period {
             return Err(LcError::StalePeriod);
+        }
+        // The circuit leaves this period unconstrained, so the ceiling comes
+        // from the proven head: a label far in the future would otherwise
+        // close the rotation path for good.
+        if period > self.finalized_slot / SLOTS_PER_PERIOD + 2 {
+            return Err(LcError::PeriodTooFar);
         }
         self.prev_committee = self.committee;
         self.prev_committee_head_slot = self.finalized_slot;
@@ -534,6 +542,25 @@ mod tests {
             c.finalized_slot, 64,
             "late registration must not move the head"
         );
+    }
+
+    /// The rotate period is a free witness in the circuit, so monotonicity
+    /// alone is not a replay guard: one genuine hand-off labelled far in the
+    /// future would close the rotation path for good. The ceiling comes from
+    /// the proven head, so a bad label costs a wait, not the path.
+    #[test]
+    fn a_rotation_cannot_be_labelled_far_beyond_the_proven_head() {
+        let mut c = LightClient::bootstrap([0xC0; 32], 1);
+        c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
+            .unwrap();
+        assert_eq!(
+            c.rotate([0xC1; 32], u64::MAX).unwrap_err(),
+            LcError::PeriodTooFar,
+            "a label far in the future must not be able to shut the path"
+        );
+        // The honest label still passes, and so does one period of slack.
+        c.rotate([0xC1; 32], 2).unwrap();
+        assert_eq!(c.period, 2);
     }
 
     /// The replaced committee may only sign around the head it left behind.

@@ -10,9 +10,9 @@
 //! update the daemon checks `getAnchorConfig().lightClient` against
 //! `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchors` +
 //! `disableOwnerRotation`. With `ETH_RPC_URL` each accepted tick then
-//! `rePushAnchor`s the checkpoint and runs `link_headers` locally. On-chain
-//! `submitAncestry` is `--submit-ancestry` (default off) until a keccak builtin
-//! makes the call executable.
+//! `rePushAnchor`s the checkpoint and runs `link_headers` locally on the span
+//! back to the previous checkpoint. On-chain `submitAncestry` is
+//! `--submit-ancestry` (default off).
 
 pub mod an_config;
 pub mod ancestry;

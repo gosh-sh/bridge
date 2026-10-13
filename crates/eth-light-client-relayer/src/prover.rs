@@ -179,8 +179,8 @@ impl SubprocessProofGenerator {
             .map_err(|e| RelayerError::ProofGeneration(format!("read proof: {e}")))?;
         let (expected, parsed) = pack_step_public_inputs(update, [0u8; 32]);
         let parsed = if pi.len() == expected.len() {
-            // Live prove fills committee_commitment in-circuit; keep slots/hashes
-            // from the beacon update for logging.
+            // Live prove fills committee_commitment in-circuit; keep
+            // slots/hashes from the beacon update for logging.
             crate::types::StepPublicInputs {
                 committee_commitment: {
                     let mut c = [0u8; 32];

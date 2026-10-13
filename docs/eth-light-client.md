@@ -42,7 +42,7 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. Everything else is the same code — both carry `_piForm`, `provenQueue` and the rotate decider — so the only things this repo hands over are fixes and comments, as `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch`; `scripts/check_eth_beacon_lc_sources.sh` asserts neither of them carries the local sink wiring. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The rest is the same code — both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is no longer a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale, so `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch` edit files the placing overwrites and no longer apply to anything. `scripts/check_eth_beacon_lc_sources.sh` does not look at the placed sources at all: it reads the two patch files and `contracts/an/EthKeccak.sol`, and asserts the patches touch only `contracts/exchange/` paths. Nothing checks the files `place.json` places. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
 | `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge (`deployLightClient`), and the bridge derives its address from that code (`getAnchorConfig().lightClient`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash`. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
@@ -77,7 +77,7 @@ flowchart LR
     DR["deposit-relayer / user"]
   end
   BN -- "finality_update, updates,<br/>genesis, config/spec" --> D
-  EN -. "eth_getBlockByHash x32<br/>(ancestry)" .-> D
+  EN -. "eth_getBlockByHash per span header<br/>(ancestry)" .-> D
   D -- "witness JSON + env" --> P
   P -- "proof + public inputs" --> D
   D --- S
@@ -121,15 +121,19 @@ sequenceDiagram
   LC-->>R: HeadUpdated event
   opt ETH_RPC_URL set
     R->>LC: rePushAnchor(execHash)
-    R->>LC: submitAncestry(headerRlps, up to 32)
-    LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(key)) for each parent
+    R->>LC: submitAncestry(headerRlps, oldest first, 3 to 33)
+    LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(key)) per block between the anchors
   end
 ```
 
-What the contract checks, in order (`contracts/an/EthBeaconLightClient.sol:248`): the public
-inputs parse; at least 342 of 512 committee members signed (also enforced in-circuit); the
-proof's committee commitment equals the anchored one; the finalized slot moves the head forward
-(or back-fills a skipped checkpoint of the current committee); then `tvm.accept()` and the opcode.
+What the contract checks, in order (`contracts/an/exchange/EthBeaconLightClient.sol`, the copy
+shellnet runs): the public inputs parse; at least 342 of 512 committee members signed (also
+enforced in-circuit); the finalized slot moves the head forward, or back-fills a skipped
+checkpoint; then the proof's
+committee commitment equals the one in force, or the one a rotation replaced and only for a
+back-fill inside its slot window; then `tvm.accept()` and the opcode. The slot test comes before
+the committee test, so a stale update from a wrong committee fails `ERR_STALE_UPDATE` (244), not
+`ERR_WRONG_COMMITTEE` (242).
 The contract pays for the verification itself, which is why it holds a balance and why a bad
 proof only wastes the contract's gas. `submitUpdate` is permissionless: the proof is the
 authorization.
@@ -191,23 +195,39 @@ flowchart TD
 A step proves one execution block per epoch, the checkpoint. The contract records it in its own
 `_provenEthSlot` map (hash → Ethereum slot) and pushes it into `USDCBridge` through an internal message
 (`_pushExecHash`, `_notifySink`). A hash older than one year behind head is not live. Deposits in the other 31
-blocks of the epoch are *meant* to be covered by **ancestry**: the daemon fetches the epoch's execution
-headers over JSON-RPC, and `submitAncestry(headerRlps)` (`EthBeaconLightClient.sol:369`)
-keccak-hashes each RLP header in the VM and walks `parentHash` from the proven checkpoint
-backwards, pushing every hash on the way. With `ETH_RPC_URL` set the daemon fetches this after
-every accepted update and runs `link_headers` locally (`src/relayer.rs`). On-chain
-`submitAncestry` is `--submit-ancestry` (default off).
+blocks of the epoch are covered by **ancestry**: the daemon fetches those execution headers over
+JSON-RPC, and `submitAncestry(headerRlps)` hashes each RLP header with the `gosh.keccak256`
+builtin and links them by RLP `parentHash`. The payload is the span between two anchors, oldest
+first, 3 to 33 headers: `headerRlps[0]` and the last header must each already be proven, and only
+the blocks between them are pushed. With `ETH_RPC_URL` set the daemon fetches the span back to the
+previous checkpoint after every accepted update and runs `link_headers` locally
+(`src/relayer.rs`). On-chain `submitAncestry` is `--submit-ancestry` (default off).
 
-**Ancestry does not work on Acki Nacki today, and not for a reason a patch fixes.** `EthKeccak`
-now computes correctly (three `sold` defects fixed — see CHANGELOG), but it is software keccak;
-one permutation measured **12.93M gas** against the **10M** per-transaction limit (p20/p21), so
-a single header already blows the budget. Measured on a real VM 2026-09-14: 2 headers
-**129.7 M**, slope 64.65 M/header, a 32-header walk OOG at 1e9 (≈2.07 G extrapolated). The
-daemon therefore does not send the call unless `--submit-ancestry` is set. Closing this needs a
-keccak-256 builtin in the node, the way `ZKHALO2VERIFYWITHVK` was added, or the parent chain
-proven in-circuit. Until then **only checkpoint blocks are usable for deposits**, 1 of 32, and a
-deposit in any other block needs the owner's `setAcceptedBlockHash`. First defects found on
-shellnet 2026-09-11 ([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
+**Ancestry now fits the gas limit.** The software `EthKeccak.hash` is gone; one 642-byte Sepolia
+header cost **64.68 M** gas through it and costs **4,722** through the `KECCAK256` instruction
+(opcode `0xC7 0x4B`). Measured on a locally built node, compute and action phase both, with the
+client at exactly its `MIN_BALANCE` floor: **748,015** gas for a 5-header span and **1,976,017**
+for a full 33-header span, against the **10 M** per-transaction limit (p20/p21). Both include the
+two anchor hashes the call does before `tvm.accept()`. A span whose far end is not a proven anchor
+is refused inside that pre-accept credit and costs the light client nothing; one whose *middle* is
+forged still costs it the walk (1,917,462 gas measured), the same exposure `submitUpdate` has
+carried since 1.4.1.
+This needs a node whose VM carries the instruction and a `sold` built against that SDK; against
+an older node the light client throws on an unknown opcode. `EthKeccak.sol` keeps only
+`rlpParentHash`, which is now where most of the gas goes.
+
+**What a span needs.** Both of its ends have to be proven checkpoints no more than 32 blocks
+apart. The head only moves forward, but the contract still accepts a skipped checkpoint of the
+committee behind the head, with its own proof and its own slot — the signer may be the committee in force or the one the last rotation replaced, so a skip at a period edge is not lost — which is what would put
+the bracketing anchors back within a span's reach. **Nothing in this repository performs that
+late registration today:** the daemon proves only the latest finality update and no subcommand
+proves an older one. A step proof takes longer than an epoch (§6), so accepted checkpoints are
+routinely two or more epochs apart, `ancestry_span` reports the older anchor as out of reach, and
+those blocks stay uncovered. A deposit in them fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK`
+(224) and needs the owner's `setAcceptedBlockHash`. Do not call `disableOwnerAnchors` until
+something late-registers the skipped checkpoints. First
+`EthKeccak` defects found on shellnet 2026-09-11
+([PR #36](https://github.com/gosh-sh/bridge/pull/36)).
 
 `rePushAnchor` (`EthBeaconLightClient.sol:404`) re-sends an already proven hash to the bridge.
 The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) emits
@@ -260,8 +280,8 @@ anything. After the flip nothing but a valid proof adds a block hash. There is n
 only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on chain.
 
 **Do not flip yet.** After `disableOwnerAnchors` the light client is the only writer of
-`_acceptedBlockHash`, and today it writes one block per epoch of one chain: the checkpoint of its
-`l1ChainId`. Ancestry does not fit the gas limit (§3.4), and the light client proves no L2.
+`_acceptedBlockHash`, and the blocks it can write are the checkpoints of its `l1ChainId` —
+late-registered ones included — plus the spans ancestry fills between them (§3.4). No L2.
 `_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
 the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
 chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
@@ -313,7 +333,7 @@ flowchart LR
 | relayer → beacon node | HTTPS 443 (public), HTTP on the client's REST port when self-hosted | `GET /eth/v1/beacon/light_client/finality_update` | every poll | `src/source.rs:1` |
 | | | `GET /eth/v1/beacon/light_client/updates?start_period=&count=1` | once per period, before a prove | `src/source.rs:248` |
 | | | `GET /eth/v1/beacon/genesis`, `GET /eth/v1/config/spec` | once, cached | `src/source.rs:218` |
-| relayer → execution node | HTTPS 443 (public), 8545 self-hosted default | JSON-RPC `eth_getBlockByHash` | ancestry, 32 calls per checkpoint | `src/source.rs:340` |
+| relayer → execution node | HTTPS 443 (public), 8545 self-hosted default | JSON-RPC `eth_getBlockByHash` | ancestry, one call per span header | `src/source.rs:340` |
 | relayer → Acki Nacki | HTTPS 443 | `/graphql` on the network gateway (`AN_GRAPHQL_URL`); tvm_client sends signed external messages and reads accounts | every submit | `src/an_config.rs:15` |
 | operator → Acki Nacki | HTTPS 443 | `tvm-cli --url <gateway host>` (REST) for deploy, funding, getters | deploy kit | `deploy/shellnet-shadow/lib.sh` |
 | self-hosted Acki Nacki node | TCP 8600 Block Keeper API (`api_addr`), UDP 10000 gossip, UDP 8500 node QUIC, gql-server TCP 3000 (`--listen`) | | | `acki-nacki` repo: `node/src/config/network_config.rs`, `gql-server/src/defaults.rs:4` |
@@ -355,7 +375,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `AN_LIGHT_CLIENT`, `AN_SENDER` | light client address as `dapp_id::account_id` (self-rooted deploy: both halves equal) | | |
 | `AN_USDC_BRIDGE`, `AN_USDC_ABI_PATH` | `USDCBridge` address and slim ABI | set | empty |
 | `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
-| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain (will OOG until keccak builtin) | unset | unset |
+| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain for the span between consecutive checkpoints | unset | unset |
 | daemon flags | | none (rotate on, flip off; `--flip-owner` only once §3.5 no longer applies) | `--no-rotate --no-flip-owner --owner-hop` |
 
 ### 4.5 Procedure
@@ -411,7 +431,10 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 
 - `getHead()` (`EthBeaconLightClient.sol:583`) returns `finalizedSlot`, `finalizedBeaconRoot`,
   `executionBlockHash`, `committeeCommitment`, `updatesApplied`; `getCommitteeState()`
-  (`:619`) returns the committee, period, `ownerRotationEnabled`, `reAnchorsApplied`.
+  returns the committee, **`prevCommittee`**, period, `ownerRotationEnabled`, `reAnchorsApplied` —
+  five values, with `prevCommittee` second, so read them by name and not by position. The period
+  is derived from the proven head, not taken from a rotate proof, and is approximate while the
+  head lags.
 - Roots come back in the contract's encoding: `(hi << 128) | lo` over little-endian 16-byte
   halves. For `executionBlockHash` that is the *stored* key, not the word `finalizeDeposit`
   looks up: the bridge holds the Ethereum-order hash (§3.4). Byte-reverse each half of a `getHead` root to get the

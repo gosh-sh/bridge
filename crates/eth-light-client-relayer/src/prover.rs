@@ -221,6 +221,13 @@ impl SubprocessProofGenerator {
         to_period: u64,
         chain: Option<crate::types::BeaconChainParams>,
     ) -> Result<RotateProofBundle, RelayerError> {
+        let fixture_period = fixture_rotate_period(&self.cfg.prover_dir);
+        if fixture_period != to_period {
+            return Err(RelayerError::ProofGeneration(format!(
+                "rotate_tree_n8 proves the committed fixture (period {fixture_period}), not live \
+                 period {to_period}; prove the hand-off on n14 and submit-rotate"
+            )));
+        }
         let work = tempfile::tempdir()
             .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
         let tree_out = work.path().join("rotate_tree");
@@ -277,6 +284,41 @@ impl SubprocessProofGenerator {
     }
 }
 
+/// Period `rotate_tree_n8` will prove: attested slot of the first
+/// `fixtures/mainnet/update_period_*.json`, else the synthetic committee
+/// at slot `9412 × 8192` (period 9413). It does not take a live update.
+pub(crate) fn fixture_rotate_period(prover_dir: &std::path::Path) -> u64 {
+    const SYNTHETIC_PERIOD: u64 = 9413;
+    let dir = prover_dir.join("fixtures/mainnet");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return SYNTHETIC_PERIOD;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("update_period_") || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let slot = v["data"]["attested_header"]["beacon"]["slot"]
+            .as_u64()
+            .or_else(|| {
+                v["data"]["attested_header"]["beacon"]["slot"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+            });
+        if let Some(slot) = slot {
+            return slot / crate::types::SLOTS_PER_SYNC_PERIOD + 1;
+        }
+    }
+    SYNTHETIC_PERIOD
+}
+
 #[async_trait]
 impl ProofGenerator for SubprocessProofGenerator {
     async fn generate_step(
@@ -324,6 +366,30 @@ mod tests {
         match err {
             RelayerError::ProofGeneration(m) => {
                 assert!(m.contains("committee_json empty"), "{m}");
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixture_rotate_period_is_synthetic_without_an_update_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(fixture_rotate_period(dir.path()), 9413);
+    }
+
+    #[tokio::test]
+    async fn run_rotate_refuses_a_live_period_before_spawning() {
+        let gen = SubprocessProofGenerator::new(SubprocessProverConfig {
+            prover_dir: ".".into(),
+            srs_path: ".".into(),
+            timeout: Duration::from_secs(1),
+            log_dir: None,
+        });
+        let err = gen.generate_rotate(1, None).await.unwrap_err();
+        match err {
+            RelayerError::ProofGeneration(m) => {
+                assert!(m.contains("committed fixture"), "{m}");
+                assert!(m.contains("not live period 1"), "{m}");
             },
             other => panic!("{other:?}"),
         }

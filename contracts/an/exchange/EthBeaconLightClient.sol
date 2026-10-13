@@ -399,7 +399,8 @@ contract EthBeaconLightClient {
         // The signer is the committee in force, or the one a rotation
         // replaced and that one for late registration only, inside a band of
         // slots around the head it left. There is no test against the attested
-        // slot's period, and there cannot be one here: see the header comment.
+        // slot's period; gating the step on `_committeePeriod` is possible
+        // (see the header comment) and this version does not do it.
         // The band is what keeps a replaced committee from signing anywhere in
         // the one-year window; it is not a period boundary.
         bool currentSigner = pi.committeeCommitment == _currentCommittee;

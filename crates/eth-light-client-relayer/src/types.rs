@@ -34,9 +34,10 @@ pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 /// not change). `None` leaves the prover on its own environment, whose default
 /// is mainnet Fulu.
 ///
-/// `gloas_fork_slot` (`GLOAS_FORK_EPOCH × SLOTS_PER_EPOCH`) goes out as
-/// `BEACON_GLOAS_FORK_SLOT`. It picks the Merkle indices the step proof reads
-/// the update at, and it is a public input the contract pins.
+/// `gloas_fork_slot` goes out as `BEACON_GLOAS_FORK_SLOT`. The daemon
+/// overwrites the beacon-spec value with `getGloasForkSlot()` before prove:
+/// the contract requires `pi.gloasForkSlot == _gloasForkSlot`. The beacon
+/// value is kept only to refuse a prove whose gindices would disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeaconChainParams {
     pub fork_version: [u8; 4],

@@ -406,6 +406,9 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    11296768` on Sepolia, `--slot 18446744073709551615` on mainnet (Gloas not scheduled). Until
    `getGloasForkSlot` reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
    `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell instead.
+   The daemon reads that getter before every prove and uses it, not the beacon
+   spec's `GLOAS_FORK_EPOCH`. A published epoch the contract does not hold
+   would otherwise spend a full step prove and come back 255.
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
 7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
    flag, after the first accepted update the daemon checks `getAnchorConfig().lightClient`

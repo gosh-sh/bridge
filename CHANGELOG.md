@@ -65,11 +65,19 @@ assigns it when the release is tagged.
   it in `CommitteeRotated`; nothing gates on it. This is part of the rotate
   verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
   rotate proofs made before it do not verify. `eth-lc-relayer` refuses a
-  rotate proof whose period is not the one it is rotating into.
-  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is rebuilt
-  with both changes (same `sold` as before, built against a tvm-sdk with
-  `KECCAK256`): the light client's code hash moves `8d49b996…cca292` →
-  `8d2ec6dc…ae5336`, and its ABI does not change.
+  rotate proof whose period is not the one it is rotating into, and it
+  does not start `rotate_tree_n8` for a live period that tree cannot
+  prove (the tree is a committed fixture, period 9413 without an
+  `update_period_*.json`). Prove the hand-off on n14 and `submit-rotate`.
+  The daemon reads `getGloasForkSlot` before every prove and uses that
+  slot, not the beacon spec: a published `GLOAS_FORK_EPOCH` that the
+  contract does not hold would otherwise spend a full step prove and
+  come back 255. `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc`
+  is rebuilt with both changes (same `sold` as before, built against a
+  tvm-sdk with `KECCAK256`): the light client's code hash moves
+  `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
+  `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
+  fields.
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block

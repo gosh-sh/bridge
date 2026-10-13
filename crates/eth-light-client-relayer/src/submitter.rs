@@ -72,6 +72,10 @@ pub trait AnSubmitter: Send + Sync {
     /// `updateCode` with an empty user cell; until it runs, every
     /// `submitUpdate` / `submitRotate` reverts 256.
     async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError>;
+
+    /// `(gloasForkSlot, isSet)` from `getGloasForkSlot`. The daemon proves
+    /// against this value, not the beacon spec's `GLOAS_FORK_EPOCH`.
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -123,6 +127,8 @@ struct MockInner {
     /// Answers for the next `submit_rotate` calls, oldest first. Empty means
     /// the default behaviour.
     rotate_script: std::collections::VecDeque<SubmitOutcome>,
+    gloas_fork_slot: u64,
+    gloas_fork_slot_set: bool,
 }
 
 impl MockAnSubmitter {
@@ -145,8 +151,17 @@ impl MockAnSubmitter {
                 watch_state: None,
                 state_at_re_push: None,
                 rotate_script: std::collections::VecDeque::new(),
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
+                gloas_fork_slot_set: true,
             }),
         }
+    }
+
+    /// What `getGloasForkSlot` returns. Default is set / `GLOAS_NOT_SCHEDULED`.
+    pub fn set_gloas_fork(&self, slot: u64, is_set: bool) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.gloas_fork_slot = slot;
+        inner.gloas_fork_slot_set = is_set;
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -382,16 +397,23 @@ impl AnSubmitter for MockAnSubmitter {
         })
     }
 
-    async fn set_gloas_fork_slot(&self, _slot: u64) -> Result<SubmitOutcome, RelayerError> {
-        let inner = self.inner.lock().expect("poisoned");
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "setGloasForkSlot rejected".into(),
             });
         }
+        inner.gloas_fork_slot = slot;
+        inner.gloas_fork_slot_set = true;
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
+    }
+
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
+        let inner = self.inner.lock().expect("poisoned");
+        Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
     }
 
     async fn set_committee_commitment(
@@ -827,6 +849,34 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         self.call("setGloasForkSlot", json!({ "gloasForkSlot": slot }))
             .await
     }
+
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getGloasForkSlot", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        let slot = json_u64(v.get("gloasForkSlot"))
+            .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing gloasForkSlot"))?;
+        let is_set = json_bool(v.get("isSet"))
+            .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing isSet"))?;
+        Ok((slot, is_set))
+    }
+}
+
+fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
+    let v = v?;
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn json_bool(v: Option<&serde_json::Value>) -> Option<bool> {
+    let v = v?;
+    v.as_bool().or_else(|| match v.as_u64() {
+        Some(0) => Some(false),
+        Some(_) => Some(true),
+        None => None,
+    })
 }
 
 /// Compare a TVM `address` getter (`0:<hex>` / `0x<hex>` / `dapp::account`)

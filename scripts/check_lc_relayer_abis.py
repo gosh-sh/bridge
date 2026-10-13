@@ -45,6 +45,7 @@ PAIRS = [
             "disableOwnerRotation",
             "setCommitteeCommitment",
             "setGloasForkSlot",
+            "getGloasForkSlot",
         ],
     ),
 ]

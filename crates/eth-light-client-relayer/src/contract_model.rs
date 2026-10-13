@@ -39,7 +39,7 @@ pub enum LcError {
     BadAncestry,
     AncestryTooLong,
     WrongCommittee,
-    PeriodTooFar,
+    SelfRotation,
 }
 
 impl LcError {
@@ -56,7 +56,7 @@ impl LcError {
             Self::BadAncestry => 250,
             Self::AncestryTooLong => 251,
             Self::NotProven => 252,
-            Self::PeriodTooFar => 253,
+            Self::SelfRotation => 253,
         }
     }
 }
@@ -84,6 +84,11 @@ pub struct LightClient {
     /// The hash each `_notifySink` / `rePushAnchor` sends (including first
     /// insert), in Ethereum byte order.
     pub sink_notifies: Vec<[u8; 32]>,
+    /// Header links the walk has checked. The contract pays gas for each one
+    /// after `tvm.accept()`, so where the two-end check sits is visible only
+    /// here: both placements refuse the same payloads, and only the work done
+    /// tells them apart.
+    pub walk_steps: u64,
     /// The hash each `_forgetSink` after eviction sends, in Ethereum byte
     /// order.
     pub sink_forgets: Vec<[u8; 32]>,
@@ -103,6 +108,7 @@ impl LightClient {
             proven: HashMap::new(),
             queue: VecDeque::new(),
             sink_notifies: Vec::new(),
+            walk_steps: 0,
             sink_forgets: Vec::new(),
         }
     }
@@ -228,6 +234,7 @@ impl LightClient {
         // before the whole payload has passed. Walk once to check, then write.
         let mut between = Vec::new();
         for (i, rlp) in header_rlps.iter().enumerate().skip(1) {
+            self.walk_steps += 1;
             if rlp_parent_hash(rlp).map_err(|_| LcError::BadAncestry)? != prev {
                 return Err(LcError::BadAncestry);
             }
@@ -270,19 +277,20 @@ impl LightClient {
         if self.committee == [0; 32] {
             return Err(LcError::CommitteeUnset);
         }
-        if period <= self.period {
-            return Err(LcError::StalePeriod);
+        // A hand-off that changes nothing exists for every period boundary and
+        // would only evict the previous committee.
+        if next == self.committee {
+            return Err(LcError::SelfRotation);
         }
-        // The circuit leaves this period unconstrained, so the ceiling comes
-        // from the proven head: a label far in the future would otherwise
-        // close the rotation path for good.
-        if self.finalized_slot != 0 && period > self.finalized_slot / SLOTS_PER_PERIOD + 2 {
-            return Err(LcError::PeriodTooFar);
-        }
+        // No test on `period`: the circuit loads it as a free witness, so it
+        // is not a proven fact and every guard built on it was a way to brick
+        // the call. The committee chain above is the replay guard.
+        let _ = period;
         self.prev_committee = self.committee;
         self.prev_committee_head_slot = self.finalized_slot;
         self.committee = next;
-        self.period = period;
+        // Derived from the proven head, never taken from the proof.
+        self.period = self.finalized_slot / SLOTS_PER_PERIOD + 1;
         Ok(())
     }
 
@@ -545,23 +553,61 @@ mod tests {
         );
     }
 
-    /// The rotate period is a free witness in the circuit, so monotonicity
-    /// alone is not a replay guard: one genuine hand-off labelled far in the
-    /// future would close the rotation path for good. The ceiling comes from
-    /// the proven head, so a bad label costs a wait, not the path.
+    /// The rotate period is a free witness in the circuit, so nothing may gate
+    /// on it. Any label the sender types — including `u64::MAX` and a stale one
+    /// — must leave the rotation path open, and what lands in storage must come
+    /// from the proven head.
     #[test]
-    fn a_rotation_cannot_be_labelled_far_beyond_the_proven_head() {
+    fn no_label_on_a_hand_off_can_shut_the_rotation_path() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
+
+        // A genuine hand-off with an absurd label is accepted and records the
+        // derived period, not the label.
+        c.rotate([0xC1; 32], u64::MAX).unwrap();
         assert_eq!(
-            c.rotate([0xC1; 32], u64::MAX).unwrap_err(),
-            LcError::PeriodTooFar,
-            "a label far in the future must not be able to shut the path"
+            c.period, 2,
+            "the stored period must be derived from the head, not from the proof"
         );
-        // The honest label still passes, and so does one period of slack.
+        assert_eq!(c.committee, [0xC1; 32]);
+
+        // And the next genuine hand-off still goes through, which is what the
+        // old monotonicity check made impossible after a relabelled one.
+        c.submit_update_at(
+            2 * SLOTS_PER_PERIOD,
+            2 * SLOTS_PER_PERIOD,
+            [0xAB; 32],
+            [0xC1; 32],
+        )
+        .unwrap();
+        c.rotate([0xC2; 32], 0)
+            .expect("a stale label must not block a genuine hand-off");
+        assert_eq!(c.committee, [0xC2; 32]);
+        assert_eq!(c.period, 3);
+    }
+
+    /// Reachable for every period boundary: the last header of a period is
+    /// signed in the next one and still carries the signer as its
+    /// `next_sync_committee`. Accepting it would change nothing visible and
+    /// evict the committee whose stragglers are still being registered.
+    #[test]
+    fn a_hand_off_that_does_not_change_the_committee_is_refused() {
+        let mut c = LightClient::bootstrap([0xC0; 32], 1);
+        c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
+            .unwrap();
         c.rotate([0xC1; 32], 2).unwrap();
-        assert_eq!(c.period, 2);
+        assert_eq!(c.prev_committee, [0xC0; 32]);
+
+        assert_eq!(
+            c.rotate([0xC1; 32], 3).unwrap_err(),
+            LcError::SelfRotation,
+            "a hand-off onto the committee already in force must be refused"
+        );
+        assert_eq!(
+            c.prev_committee, [0xC0; 32],
+            "the previous committee must survive the attempt"
+        );
     }
 
     /// The replaced committee may only sign around the head it left behind.
@@ -707,6 +753,41 @@ mod tests {
             &c.sink_notifies[before..],
             &[keccak256(&chain[1]), keccak256(&chain[2])],
             "ancestry must notify the sink in Ethereum byte order, oldest first"
+        );
+    }
+
+    /// Where the two-end check sits is a gas property, not an outcome: a
+    /// payload with an unproven far end is refused either way. On chain the
+    /// difference was 1,917,462 gas charged to the light client per message
+    /// versus nothing at all, so the walk must not start until both ends are
+    /// known.
+    #[test]
+    fn an_unproven_far_end_is_refused_before_the_walk_does_any_work() {
+        let mut c = lc();
+        let chain = dummy_linked_chain(33);
+        // Only the near end is an anchor — the shape a griefer sends.
+        c.submit_update(32, pi_form(&keccak256(&chain[0])), [0xC0; 32])
+            .unwrap();
+
+        let before = c.walk_steps;
+        assert_eq!(
+            c.submit_ancestry(&chain).unwrap_err(),
+            LcError::UnknownCheckpoint
+        );
+        assert_eq!(
+            c.walk_steps, before,
+            "the walk must not run a single link before both ends are proven"
+        );
+
+        // And an honest payload still walks: the check is a gate, not a wall.
+        let mut honest = lc();
+        let chain = anchored_span(&mut honest, 5);
+        let before = honest.walk_steps;
+        honest.submit_ancestry(&chain).unwrap();
+        assert_eq!(
+            honest.walk_steps,
+            before + 4,
+            "an accepted span walks every link exactly once"
         );
     }
 

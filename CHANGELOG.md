@@ -48,7 +48,11 @@ assigns it when the release is tagged.
   `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` on
   1.8.0, and `getAnchorConfig().ownerAnchorsEnabled` on 1.7.0 (that
   getter does not exist there, and retrying it would hang). An L1 flip
-  does not refuse L2 deposits.
+  does not refuse L2 deposits **on a CLI from this branch**. Released
+  CLIs still read `getAnchorConfig().ownerAnchorsEnabled` as the
+  deposit's own mode, so after the flip they treat an L2 deposit as
+  light-client and refuse it (`LcFailure::Network`). Ship this CLI
+  before flipping.
   A flip through `disableOwnerAnchorsOn` is the same switch: the CLI
   recognises that call in the bridge's history, and the bundled ABI
   matches the compiled 1.8.0 one so it can decode it.

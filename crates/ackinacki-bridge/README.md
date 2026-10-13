@@ -1184,9 +1184,12 @@ Preflight, in order:
 - **Acki Nacki** (`--gql-endpoint`): REST `/v2/` and GraphQL both answer; the
   bridge's `getVersion()` is at least the [minimum bridge
   version](#minimum-bridge-version); `isPaused()` is `false`;
-  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getAnchorConfig()` says
-  who anchors blocks, and with owner anchors off the light client must pass
-  its [readiness checks](#when-only-the-light-client-anchors);
+  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getAnchorConfig()` names
+  the light client; `isOwnerAnchorsEnabled(chainId)` says whether the owner
+  still anchors this deposit's chain (on 1.7.0 that flag is still
+  `getAnchorConfig().ownerAnchorsEnabled`, one bool for every chain); and
+  with owner anchors off the light client must pass its
+  [readiness checks](#when-only-the-light-client-anchors);
   `getDepositVoucherCodeHash()` is the voucher code this build carries
   (otherwise the CLI cannot compute the voucher's address, and a newer CLI is
   needed); and the recipient: an active account must live in the dapp `--to`

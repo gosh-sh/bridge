@@ -268,16 +268,24 @@ pub async fn run_with(
     }
     let cfg = get("getAnchorConfig", json!({})).await;
     let light_client = cfg["lightClient"].as_str().and_then(parse_an_address);
-    // After this PR `getAnchorConfig().ownerAnchorsEnabled` is the light
-    // client's L1 only. The deposit's own chain is `isOwnerAnchorsEnabled`.
-    let per_chain = get(
-        "isOwnerAnchorsEnabled",
-        json!({ "chainId": chain_id.to_string() }),
-    )
-    .await;
-    let owner_anchors_enabled = per_chain["value0"]
-        .as_bool()
-        .ok_or_else(|| refuse(format!("isOwnerAnchorsEnabled answered {per_chain}")))?;
+    // 1.8.0: `getAnchorConfig().ownerAnchorsEnabled` is the light client's
+    // L1 only. The deposit's own chain is `isOwnerAnchorsEnabled`. 1.7.0
+    // has no such getter — calling it through `transient` would retry
+    // forever — and its `ownerAnchorsEnabled` is still the global flag.
+    let owner_anchors_enabled = if version >= BridgeVersion(1, 8, 0) {
+        let per_chain = get(
+            "isOwnerAnchorsEnabled",
+            json!({ "chainId": chain_id.to_string() }),
+        )
+        .await;
+        per_chain["value0"]
+            .as_bool()
+            .ok_or_else(|| refuse(format!("isOwnerAnchorsEnabled answered {per_chain}")))?
+    } else {
+        cfg["ownerAnchorsEnabled"]
+            .as_bool()
+            .ok_or_else(|| refuse(format!("getAnchorConfig answered {cfg}")))?
+    };
     let ch = get("getDepositVoucherCodeHash", json!({})).await;
     let mut voucher_code_hash = [0u8; 32];
     hex::decode_to_slice(
@@ -354,9 +362,6 @@ mod tests {
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "getAnchorConfig", vec![
             json!({ "lightClient": format!("0:{}", "20".repeat(32)), "ownerAnchorsEnabled": true }),
-        ]);
-        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
-            json!({ "value0": true }),
         ]);
         an.getter(
             BRIDGE,
@@ -527,6 +532,33 @@ mod tests {
         let p = go(&healthy(), [0; 32]).await.unwrap();
         assert_eq!(p.light_client, Some([0x20; 32]));
         assert!(p.owner_anchors_enabled);
+    }
+
+    #[tokio::test]
+    async fn a_1_7_0_bridge_without_the_per_chain_getter_still_passes() {
+        let an = healthy();
+        an.failing_getters
+            .lock()
+            .unwrap()
+            .insert("isOwnerAnchorsEnabled".into());
+        let p = go(&an, [0; 32]).await.unwrap();
+        assert!(p.owner_anchors_enabled);
+    }
+
+    #[tokio::test]
+    async fn a_1_8_0_bridge_reads_the_per_chain_flag() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.8.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(BRIDGE, "getAnchorConfig", vec![
+            json!({ "lightClient": format!("0:{}", "20".repeat(32)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
+            json!({ "value0": false }),
+        ]);
+        let p = go(&an, [0; 32]).await.unwrap();
+        assert!(!p.owner_anchors_enabled);
     }
 
     #[tokio::test]

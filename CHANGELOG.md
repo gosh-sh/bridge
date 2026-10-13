@@ -32,15 +32,21 @@ assigns it when the release is tagged.
   `_ownerAnchorsDisabled` only for the chain `deployLightClient` stored;
   any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
   `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
-  `isOwnerAnchorsEnabled(chainId)` is the per-chain view. L2 deposits keep
-  `setAcceptedBlockHash`. The no-argument ABI the relayer already calls
-  is unchanged. The bridge reports 1.8.0. Rebuild `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade
-  the premined 1.7.0 bridge; `onCodeUpgrade` still does not carry the mapping
-  or the stored L1 id, so an upgraded bridge starts with the owner
-  writer on for every chain. `disableOwnerAnchors` then reverts 226
-  until `deployLightClient` runs again and stores the L1 id.
-  `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` for
-  the deposit's chain, so an L1 flip does not refuse L2 deposits.
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
+  `getLightClientL1ChainId()` is the stored L1 id (0 until
+  `deployLightClient`). The new storage field is `_lightClientL1ChainId`.
+  L2 deposits keep `setAcceptedBlockHash`. The no-argument ABI the
+  relayer already calls is unchanged. The bridge reports 1.8.0. Rebuild
+  `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade the premined 1.7.0
+  bridge; `onCodeUpgrade` resets storage and does not migrate
+  `_lightClient` or the L1 id, so both `disableOwnerAnchors` and
+  `deployLightClient` revert 226 until `setLightClientCode` runs again.
+  Then `deployLightClient` stores the L1 id — the constructor message
+  bounces if the light client is already at that address.
+  `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` on
+  1.8.0, and `getAnchorConfig().ownerAnchorsEnabled` on 1.7.0 (that
+  getter does not exist there, and retrying it would hang). An L1 flip
+  does not refuse L2 deposits.
   A flip through `disableOwnerAnchorsOn` is the same switch: the CLI
   recognises that call in the bridge's history, and the bundled ABI
   matches the compiled 1.8.0 one so it can decode it.

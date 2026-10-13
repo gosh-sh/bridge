@@ -30,13 +30,18 @@ verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Two writers fill
 the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which needs a deployed light client first and
-turns the owner writer off only for that client's L1 (`ERR_NOT_LIGHT_CLIENT_CHAIN`
-(227) on any other id); the light client adds and ages out hashes with
+until `disableOwnerAnchors()`, which needs `setLightClientCode` (so
+`_lightClient` is non-zero) and a stored L1 id from `deployLightClient`
+(`ERR_LIGHT_CLIENT_UNSET` (226) until both); it does not check that the
+light-client account is Active. The call turns the owner writer off only
+for that client's L1 (`ERR_NOT_LIGHT_CLIENT_CHAIN` (227) on any other id);
+the light client adds and ages out hashes with
 `acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient`. L2
 source chains on the deposit allowlist keep the owner writer. `getAnchorConfig()`
 returns the light client and whether the owner may still write that L1;
-`isOwnerAnchorsEnabled(chainId)` is the per-chain view. No function turns owner
+`isOwnerAnchorsEnabled(chainId)` is the per-chain view;
+`getLightClientL1ChainId()` is the stored L1 id (0 until
+`deployLightClient`). No function turns owner
 anchors back on, but the owner keeps two ways around it: `updateCode` does
 (`onCodeUpgrade` leaves every chain owner-writable), and `setLightClientCode`
 still replaces the light client afterwards.

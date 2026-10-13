@@ -99,17 +99,12 @@ contract AckiNackiBridgeAaveForkTest is Test {
         if (supplied + 1_000 * UsdcTestLib.UNIT < capWhole * UsdcTestLib.UNIT) return;
 
         console.log("Sepolia USDC reserve is at its supply cap; lifting it inside the fork");
-        address configurator = IAaveAddressesProvider(
-                IAaveConfigurablePool(AAVE_V3_POOL).ADDRESSES_PROVIDER()
-            ).getPoolConfigurator();
+        IAaveConfigurablePool pool = IAaveConfigurablePool(AAVE_V3_POOL);
+        IAaveAddressesProvider provider = IAaveAddressesProvider(pool.ADDRESSES_PROVIDER());
+        address configurator = provider.getPoolConfigurator();
+        uint256 uncapped = cfg & ~(SUPPLY_CAP_MASK << SUPPLY_CAP_SHIFT);
         vm.prank(configurator);
-        IAaveConfigurablePool(AAVE_V3_POOL)
-            .setConfiguration(
-                USDC,
-                IAavePool.ReserveConfigurationMap({
-                    data: cfg & ~(SUPPLY_CAP_MASK << SUPPLY_CAP_SHIFT)
-                })
-            );
+        pool.setConfiguration(USDC, IAavePool.ReserveConfigurationMap(uncapped));
     }
 
     function _fundUserFromFaucet(address to, uint256 amount) internal {

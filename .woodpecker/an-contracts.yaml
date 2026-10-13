@@ -1,4 +1,4 @@
-# The Acki Nacki contracts under contracts/an/ carry four invariants the
+# The Acki Nacki contracts under contracts/an/ carry five invariants the
 # compiler does not check:
 #
 #   * eccUSDCBridge embeds DepositVoucher's code, and the voucher calls back
@@ -11,6 +11,12 @@
 #   * The trimmed ABIs eth-lc-relayer ships (crates/eth-light-client-relayer/
 #     abi/) must match the compiled contracts and hold every function the
 #     relayer calls.
+#   * The on-AN USDCBridge ABI ships in two runtime copies — one the Rust CLI
+#     embeds with include_str!, one tvm-cli reads from the python helper — and
+#     they must stay byte-identical. The python copy had fallen 14 functions
+#     behind (the whole anchor, source-allowlist and pause surface) and carried
+#     a confirmDeposit without chainId, because the guard below existed but no
+#     pipeline ran it.
 #
 # The zerostate module's own unit tests (contracts/an/zerostate_init.py) also
 # run here.
@@ -25,6 +31,12 @@ steps:
     image: python:3-alpine
     commands:
       - python3 scripts/check_voucher_abi_consistency.py
+  bridge-abi-in-sync:
+    image: alpine
+    depends_on: [ ]
+    commands:
+      - apk add --no-cache bash diffutils
+      - bash scripts/check_bridge_abi_in_sync.sh
   deposit-vk-blob:
     image: python:3-alpine
     depends_on: [ ]

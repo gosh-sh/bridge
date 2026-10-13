@@ -22,6 +22,33 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `USDCBridge` ABI the python tooling reads is back in sync with the
+  contract.** `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`
+  was 14 functions behind the deployed `eccUSDCBridge` — it held none of the
+  anchor surface (`getAnchorConfig`, `isAcceptedBlockHash`,
+  `setAcceptedBlockHash`, `getLightClient`, `disableOwnerAnchors`,
+  `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient`,
+  `deployLightClient`, `setLightClientCode`), none of the source-chain
+  allowlist (`isTrustedL1Bridge`, `getTrustedL1Bridges`, `setTrustedL1Bridge`)
+  and neither pause call (`isPaused`, `setPaused`), and its `confirmDeposit`
+  was missing the `chainId` argument the contract has carried since deposit
+  identity gained the source chain. Anything driving the bridge through
+  `python/helper/bridge_e2e.py` could not call those functions at all, and a
+  `confirmDeposit` encoded from this file would not match the contract. The
+  file is now byte-identical to the copy the Rust CLI embeds and to
+  `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json`.
+
+### Changed
+
+- **`scripts/check_bridge_abi_in_sync.sh` now runs in CI.** The guard against
+  exactly the drift above was already in the tree but wired into no pipeline
+  and no `Makefile` target, so nothing ran it. It is now a
+  `bridge-abi-in-sync` step in `.woodpecker/an-contracts.yaml`, on pull
+  requests and on pushes to `main`. A branch that updates one copy of
+  `USDCBridge.abi.json` and not the other now fails CI instead of landing.
+
 ### Documentation
 
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code

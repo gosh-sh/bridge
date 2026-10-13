@@ -32,6 +32,11 @@
 #                              and the AN side must trust the new address
 #                              (docs/aave-yield.md, "Launching a Sepolia stand
 #                              with AAVE"). Default: false.
+#   DEMO_AAVE                  true: keep DeployShellnetE2EBridge and Circle USDC,
+#                              and wire the bridge to a fresh DemoAavePool owned
+#                              by PRIVATE_KEY; yield is whatever that key pays in
+#                              with accrueYield (docs/aave-yield.md, "A demo pool
+#                              on Sepolia"). Excludes USE_AAVE. Default: false.
 set -euo pipefail
 set +x
 umask 077
@@ -51,8 +56,17 @@ SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
 BRIDGE_GQL_ENDPOINT="${BRIDGE_GQL_ENDPOINT:-https://shellnet.ackinacki.org/graphql}"
 BRIDGE_BK_SET_CONFIG="${BRIDGE_BK_SET_CONFIG:-./bk_set.shellnet.json}"
 USE_AAVE="${USE_AAVE:-false}"
+DEMO_AAVE="${DEMO_AAVE:-false}"
 [[ "$USE_AAVE" == true || "$USE_AAVE" == false ]] || {
   echo "USE_AAVE must be true or false" >&2
+  exit 2
+}
+[[ "$DEMO_AAVE" == true || "$DEMO_AAVE" == false ]] || {
+  echo "DEMO_AAVE must be true or false" >&2
+  exit 2
+}
+[[ "$USE_AAVE" == false || "$DEMO_AAVE" == false ]] || {
+  echo "USE_AAVE and DEMO_AAVE exclude each other" >&2
   exit 2
 }
 
@@ -98,11 +112,12 @@ if [[ "$USE_AAVE" == true ]]; then
   EXPECTED_AAVE_LINE="EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951"
 else
   DEPLOY_SCRIPT=DeployShellnetE2EBridge
+  export DEMO_AAVE
   EXPECTED_USDC_LINE="EXPECTED_USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
   EXPECTED_AAVE_LINE="(leave EXPECTED_AAVE_POOL unset: DeployShellnetE2EBridge wires no pool)"
 fi
 
-echo ">>> forge script $DEPLOY_SCRIPT (chain 11155111, USE_AAVE=$USE_AAVE)"
+echo ">>> forge script $DEPLOY_SCRIPT (chain 11155111, USE_AAVE=$USE_AAVE, DEMO_AAVE=$DEMO_AAVE)"
 forge script "script/$DEPLOY_SCRIPT.s.sol:$DEPLOY_SCRIPT" \
   --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow
 
@@ -115,6 +130,16 @@ BRIDGE_ADDRESS="$(jq -r '
 ' "$BROADCAST" | tail -n 1)"
 : "${BRIDGE_ADDRESS:?failed to extract AckiNackiBridge address from $BROADCAST}"
 echo ">>> Deployed BRIDGE_ADDRESS = $BRIDGE_ADDRESS"
+if [[ "$DEMO_AAVE" == true ]]; then
+  DEMO_POOL="$(jq -r '
+    .transactions[]
+    | select(.contractName=="DemoAavePool" and .transactionType=="CREATE")
+    | .contractAddress
+  ' "$BROADCAST" | tail -n 1)"
+  : "${DEMO_POOL:?failed to extract DemoAavePool address from $BROADCAST}"
+  echo ">>> Deployed DemoAavePool = $DEMO_POOL"
+  EXPECTED_AAVE_LINE="EXPECTED_AAVE_POOL=$DEMO_POOL"
+fi
 # The block that CREATE landed in: where the relayer's and the CLI's
 # `LayerAnchorAppended` scan stops (BRIDGE_DEPLOY_BLOCK). Never fatal: the
 # bridge is on-chain by now, and a broadcast record without a matching
@@ -150,7 +175,7 @@ BRIDGE_ANCHOR_LEVEL=$LEVEL
 # $EXPECTED_AAVE_LINE
 EOF
 echo ">>> Wrote $CFG_DIR/env"
-if [[ "$USE_AAVE" == true ]]; then
+if [[ "$USE_AAVE" == true || "$DEMO_AAVE" == true ]]; then
   echo ">>> AAVE stand: add $BRIDGE_ADDRESS to the AN bridge with setTrustedL1Bridge before the first deposit"
 fi
 

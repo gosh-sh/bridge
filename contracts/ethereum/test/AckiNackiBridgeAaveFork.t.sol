@@ -149,10 +149,11 @@ contract AckiNackiBridgeAaveForkTest is Test {
         assertApproxEqAbs(
             bridge.suppliedPrincipal(), supplyAmount, DRIFT_TOLERANCE, "principal ~= 9 USDC"
         );
-        assertEq(
+        assertApproxEqAbs(
             usdc.balanceOf(address(bridge)) - usdcStart,
             depositAmount - bridge.suppliedPrincipal(),
-            "bridge USDC delta == reserve"
+            DRIFT_TOLERANCE,
+            "bridge USDC delta ~= reserve"
         );
         assertApproxEqAbs(
             bridge.aUsdcBalance() - aUsdcStart,

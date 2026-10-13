@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import "forge-std/Script.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/MockBlockHeaderOracle.sol";
+import "../src/DemoAavePool.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
@@ -27,12 +28,11 @@ contract DeployShellnetE2EBridge is Script {
     // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
     // `0x94a9D9AC…E4C8` is the AAVE V3 Sepolia *underlying* USDC (aToken
     // `0x16dA4541…EB80`). `DeployRealBridge` always wires that underlying as
-    // `usdc` on Sepolia; `USE_AAVE` only fills the pool and aToken. This script
-    // does not wire AAVE: Circle's token is not a reserve on that pool, and
-    // `aavePool` is immutable, so a later `setAaveEnabled(true)` would revert
-    // `InvalidAaveAddress`. A stand that must earn yield is a `DeployRealBridge`
-    // redeploy with `USE_AAVE=true` and the stand's withdraw aliases
-    // (`WITHDRAW_ALT_*` = 1 / 11155111 / 3), not this script.
+    // `usdc` on Sepolia; `USE_AAVE` only fills the pool and aToken. Circle's token
+    // is not a reserve on that pool, so this script never wires the real one.
+    // `DEMO_AAVE=true` deploys a `DemoAavePool` over Circle USDC instead, owned
+    // by the deployer, and wires the bridge to it; without it `aavePool` is
+    // zero, immutably, and `setAaveEnabled(true)` reverts `InvalidAaveAddress`.
     address constant USDC_SEPOLIA = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
 
     struct VerifyBlockWiring {
@@ -82,11 +82,21 @@ contract DeployShellnetE2EBridge is Script {
             require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
         }
 
+        bool demoAave = vm.envOr("DEMO_AAVE", false);
+        require(!demoAave || block.chainid != 1, "DEMO_AAVE is testnet-only");
+
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
 
         MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
         console.log("MockBlockHeaderOracle:", address(oracle));
+
+        DemoAavePool pool;
+        if (demoAave) {
+            pool = new DemoAavePool(USDC_SEPOLIA, vm.addr(deployerPrivateKey));
+            console.log("DemoAavePool:", address(pool));
+            console.log("DemoAToken:", address(pool.aToken()));
+        }
 
         (vb.primary, vb.fallback_, vb.layerHashes) = _deployProductionVerifyBlockTriple();
         console.log("PrimaryAggregatorVerifier:", address(vb.primary));
@@ -101,7 +111,7 @@ contract DeployShellnetE2EBridge is Script {
             console.log("withdrawByProof DISABLED - set WIRE_WITHDRAW_BY_PROOF=true + C4 .bin (M4)");
         }
 
-        AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
+        AckiNackiBridge bridge = _deployBridge(address(oracle), pool, vb, wd);
 
         vm.stopBroadcast();
 
@@ -124,15 +134,18 @@ contract DeployShellnetE2EBridge is Script {
         return (v.primary, v.fallback_, v.layerHashes);
     }
 
-    function _deployBridge(address oracle, VerifyBlockWiring memory vb, WithdrawWiring memory wd)
-        internal
-        returns (AckiNackiBridge)
-    {
+    function _deployBridge(
+        address oracle,
+        DemoAavePool pool,
+        VerifyBlockWiring memory vb,
+        WithdrawWiring memory wd
+    ) internal returns (AckiNackiBridge) {
+        bool wired = address(pool) != address(0);
         return new AckiNackiBridge(
             oracle,
             USDC_SEPOLIA,
-            address(0),
-            address(0),
+            address(pool),
+            wired ? address(pool.aToken()) : address(0),
             AckiNackiBridge.VerifyBlockConfig({
                 primaryVerifier: vb.primary,
                 fallbackVerifier: vb.fallback_,

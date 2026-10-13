@@ -29,6 +29,11 @@ assigns it when the release is tagged.
   block cutoff in the same code so past deposits stop going through. The
   current contracts need no such restriction — the voucher's code is installed
   by the zerostate and `updateCode` is called with an empty `userCell`.
+- `scripts/ursus/flip_deposit_to_light_client.md` and
+  `scripts/ursus/eth_lc_shellnet_e2e.md` pin the Gloas fork slot with
+  `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
+  deploy rejects every `submitUpdate` / `submitRotate` with 254 until it
+  runs.
 
 ### Breaking Changes
 
@@ -308,7 +313,10 @@ assigns it when the release is tagged.
 - `submitRotate` accepts only the next period (`pi.period == _committeePeriod +
   1`). A rotate proof cannot jump `_committeePeriod` to `type(uint64).max` and
   freeze trustless rotation; a skip of more than one period still goes through
-  `reAnchorCommittee`.
+  `reAnchorCommittee`. The rotate prover labels `period` with the destination
+  (`signature_slot / 8192 + 1`), and
+  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc` is rebuilt
+  so the deployed code carries the check.
 
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki

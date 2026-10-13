@@ -436,20 +436,20 @@ fn parse_exec_link(json: &str) -> Result<ExecLink, RelayerError> {
         serde_json::from_str(json).map_err(|e| RelayerError::beacon(format!("block JSON: {e}")))?;
     let body = &v["data"]["message"]["body"];
     let payload = &body["execution_payload"];
-    // Gloas beacon blocks carry a payload bid instead of the payload. The
-    // light client stores the bid's `parent_block_hash` (the EL block that
-    // slot built on); `block_hash` on the bid is that same stored hash when
-    // the node fills it.
+    // Gloas beacon blocks carry a payload bid instead of the payload.
+    // `block_hash` is the EL block this slot produced; `parent_block_hash`
+    // is the EL block it built on. Do not treat `parent_block_hash` as both
+    // ends — that made every Gloas slot a self-loop and stopped
+    // `ancestry-one` one step past the checkpoint.
     let bid = &body["signed_execution_payload_bid"]["message"];
     let block_hash = hex32_exec(
         payload["block_hash"]
             .as_str()
-            .or_else(|| bid["parent_block_hash"].as_str())
             .or_else(|| bid["block_hash"].as_str())
             .ok_or_else(|| {
                 RelayerError::beacon(
                     "missing execution_payload.block_hash / \
-                     signed_execution_payload_bid.message.parent_block_hash",
+                     signed_execution_payload_bid.message.block_hash",
                 )
             })?,
     )?;
@@ -527,12 +527,13 @@ mod tests {
     fn parse_exec_link_reads_gloas_payload_bid() {
         let json = r#"{
           "data":{"message":{"body":{"signed_execution_payload_bid":{"message":{
-            "parent_block_hash":"0x3333333333333333333333333333333333333333333333333333333333333333"
+            "block_hash":"0x1111111111111111111111111111111111111111111111111111111111111111",
+            "parent_block_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"
           }}}}}
         }"#;
         let link = parse_exec_link(json).unwrap();
-        assert_eq!(link.block_hash, [0x33; 32]);
-        assert_eq!(link.parent_hash, [0x33; 32]);
+        assert_eq!(link.block_hash, [0x11; 32]);
+        assert_eq!(link.parent_hash, [0x22; 32]);
     }
 
     // Trimmed `GET /eth/v1/config/spec` of Sepolia (2026-09-04): Fulu live,

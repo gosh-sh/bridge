@@ -41,9 +41,14 @@ pub struct RotateFixture {
 }
 
 impl RotateFixture {
-    /// Sync-committee period the update rotates INTO (`signature_slot / 8192`).
+    /// Sync-committee period the update rotates INTO.
+    ///
+    /// `signature_slot / 8192` is the period of the committee that signed;
+    /// `submitRotate` stores the destination and requires
+    /// `pi.period == _committeePeriod + 1`, so the proven label is that
+    /// signing period plus one.
     pub fn period(&self) -> u64 {
-        self.signature_slot / SLOTS_PER_SYNC_PERIOD
+        self.signature_slot / SLOTS_PER_SYNC_PERIOD + 1
     }
 
     /// The branch in the layout `RotateGlueWitness` takes, read at the index of

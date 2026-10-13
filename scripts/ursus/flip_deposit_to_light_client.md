@@ -24,10 +24,15 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    `contracts/an/EthBeaconLightClient.sol` — is not the one the bridge listens
    to, and the flip refuses it. `getAnchorConfig().lightClient` returns
    `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`.
-3. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
+3. Pin the Gloas fork slot. The constructor does not set it, and
+   `submitUpdate` / `submitRotate` revert 254 until it is set:
+   `eth-lc-relayer set-gloas-fork-slot --slot 11296768` on Sepolia,
+   `--slot 18446744073709551615` on mainnet while Gloas is unscheduled.
+   The daemon does not call this itself.
+4. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
    `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`). `--flip-owner`
    refuses to start without them.
-4. Run `eth-lc-relayer daemon --flip-owner` (`--features live-submit`, no
+5. Run `eth-lc-relayer daemon --flip-owner` (`--features live-submit`, no
    `--dry-run` / `--mock-prove` / `--no-rotate`). After the first accepted
    `submitUpdate` it calls, in order:
 

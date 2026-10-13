@@ -41,10 +41,13 @@ assigns it when the release is tagged.
   until `deployLightClient` runs again and stores the L1 id.
   `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` for
   the deposit's chain, so an L1 flip does not refuse L2 deposits.
-  Do not flip until `submitAncestry` fits
-  the gas limit: the light client still covers 1 of 32 L1 blocks, and
-  `eth-lc-relayer` still leaves the flip off unless started with
-  `--flip-owner`.
+  A flip through `disableOwnerAnchorsOn` is the same switch: the CLI
+  recognises that call in the bridge's history, and the bundled ABI
+  matches the compiled 1.8.0 one so it can decode it.
+  Do not flip until something late-registers skipped checkpoints so
+  consecutive proven anchors sit within one ancestry span: accepted
+  checkpoints are often two or more epochs apart, and `eth-lc-relayer`
+  still leaves the flip off unless started with `--flip-owner`.
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block
@@ -681,8 +684,9 @@ assigns it when the release is tagged.
 - `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
   `docs/eth-light-client.md` §3.5, and
   `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
-  the owner writer; L1 still covers 1 of 32 blocks until `submitAncestry`
-  fits the gas limit.
+  the owner writer; L1 still covers 1 of 32 blocks when accepted
+  checkpoints sit more than a span apart, because nothing late-registers
+  the ones the daemon skipped.
 
 ### Added
 

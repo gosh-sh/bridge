@@ -284,11 +284,12 @@ the owner key. There is no way back on that L1; the only recovery from a stalled
 client's L1 (`disableOwnerAnchorsOn(chainId)` refuses any other id with `ERR_NOT_LIGHT_CLIENT_CHAIN`
 (227)). L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining
 hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and the spans
-ancestry fills between them (§3.4). Until ancestry is cheap enough to run, a deposit from
-any of the other 31 blocks of an epoch fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK`
-(224), and `deposit-relayer`, which delivers deposits in order, stops at the first such
-deposit unless `--skip-after-attempts` is set. That is why the daemon does not flip unless
-told to.
+ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
+that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
+nothing late-registers the skipped ones. A deposit from any of those uncovered blocks
+fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
+delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts`
+is set. That is why the daemon does not flip unless told to.
 
 ## 4. Deployment
 

@@ -299,6 +299,8 @@ mod tests {
             "getDepositVoucherCodeHash",
             "getVersion",
             "disableOwnerAnchors",
+            "disableOwnerAnchorsOn",
+            "getLightClientL1ChainId",
         ] {
             assert!(
                 sig(&deployed, f).is_some(),

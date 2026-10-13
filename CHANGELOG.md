@@ -48,12 +48,16 @@ assigns it when the release is tagged.
   bridge; the stand's treasury is only what the operator deposits for the
   test. Wait a proving window before `pause()` on the live bridge —
   `ackinacki-bridge withdraw` can take hours, and `withdrawByProof`
-  reverts `whenNotPaused`. `EVM-contracts-spec.md` §7.2 says the same:
-  a withdrawal proof cannot be replayed on another chain, but on one
-  chain any unpaused bridge with the same identity pays it. The runbook's
-  supply-cap check now uses Python 256-bit arithmetic — bash
-  `$((CFG >> 116))` printed 16 for a 2 000 000 000 cap. `preflight`
-  writes `$BRIDGE_STATE_DIR/bridge_address` and does not inspect leftover
+  reverts `whenNotPaused`. After leftover deposits finalize, Acki Nacki
+  is paused again so no one can burn; circulating ECC[3] stays frozen
+  until `unpause()` on the live bridge (a burn the stand already paid
+  is then payable there again). The stand is paused and untrusted in
+  teardown — `deposit()` is public, the CLI will finalize against any
+  trusted address. `EVM-contracts-spec.md` §7.2 says a withdrawal proof
+  cannot be replayed on another chain, but on one chain any unpaused
+  bridge with the same identity pays it. The launch runbook's supply-cap
+  check uses Python 256-bit arithmetic. `preflight` writes
+  `$BRIDGE_STATE_DIR/bridge_address` and does not inspect leftover
   `relayer-state.json`; `daemon-live` does, so the whole `L2_config` is
   moved aside. The verifyBlock runbook no longer calls that preflight
   read-only.
@@ -322,14 +326,16 @@ assigns it when the release is tagged.
   Circle's. **It is a test stand and must not run next to the live
   bridge or take user deposits**: with the same withdraw identity, one
   Acki Nacki burn is payable on both, and a user deposit into the stand
-  is the treasury a replay would take. Pause Acki Nacki and the live L1
-  bridge, wait a proving window so in-flight CLI withdrawals can finish,
-  deploy the stand while Acki Nacki is still paused, then reopen it so
-  leftover live-bridge deposits can finalize. Keep `deposit-relayer` on
-  the old bridge until those deposits finalize, then stop it — do not
-  point it or the user CLI at the stand. Trust the stand with
+  is the treasury a replay would take. Pause Acki Nacki, wait a proving
+  window so in-flight CLI withdrawals can finish, then `pause()` the
+  live L1 bridge. Deploy the stand while Acki Nacki is still paused.
+  Briefly reopen Acki Nacki so leftover live-bridge deposits can
+  finalize, then pause it again. Keep `deposit-relayer` on the old
+  bridge until those deposits finalize, then stop it — do not point it
+  or the user CLI at the stand. Trust the stand with
   `setTrustedL1Bridge(11155111, <bridge>, true)` so the operator's test
-  deposit can finalize. The steps are in `docs/aave-yield.md`,
+  deposit can finalize; pause the stand and take it out of the trusted
+  set when the test is done. The steps are in `docs/aave-yield.md`,
   *Launching a Sepolia stand with AAVE*. Without `USE_AAVE` the script
   behaves as before.
 - **A demo AAVE pool for Sepolia stands.** New contract
@@ -757,8 +763,10 @@ assigns it when the release is tagged.
   file names another bridge than `BRIDGE_ADDRESS`. A state directory from
   before this file existed is adopted, unless the bridge is still at
   `BRIDGE_BOOTSTRAP_SEQNO` — a fresh bridge next to existing state — which it
-  also refuses. Pointing the runtime env at a new bridge therefore needs an
-  empty state directory; move the old one aside.
+  also refuses. Pointing the runtime env at a new bridge therefore needs
+  an empty `L2_config`: move the old directory aside, not only
+  `state/`. `daemon-live` still reads leftover `relayer-state.json`
+  and exits on startup drift if that file is from another bridge.
 - **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
   the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
   cold run on the test host, system-wide and sampled every 5 s; the CLI

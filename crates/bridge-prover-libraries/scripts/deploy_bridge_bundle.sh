@@ -178,18 +178,25 @@ BRIDGE_ANCHOR_LEVEL=$LEVEL
 EOF
 echo ">>> Wrote $CFG_DIR/env"
 if [[ "$USE_AAVE" == true || "$DEMO_AAVE" == true ]]; then
-  echo ">>> AAVE stand: it replaces the live bridge, which must already be paused (docs/aave-yield.md, step 2)."
-  echo ">>> Trust $BRIDGE_ADDRESS on the AN bridge with setTrustedL1Bridge before the first deposit."
+  echo ">>> AAVE test stand: the live bridge must already be paused (docs/aave-yield.md, step 2)."
+  echo ">>> Trust $BRIDGE_ADDRESS on the AN bridge with setTrustedL1Bridge before the first deposit; untrust it in teardown."
 fi
 
 # ─── 5. Archive stale state so the new bridge cold-start remains recoverable ─
-STATE_ARCHIVE="$CFG_DIR/state.pre_deploy_$(date -u +%Y%m%dT%H%M%SZ)"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+STATE_ARCHIVE="$CFG_DIR/state.pre_deploy_$STAMP"
 if compgen -G "$CFG_DIR/state/*.json" >/dev/null; then
   mkdir -p "$STATE_ARCHIVE"
   mv -- "$CFG_DIR/state"/*.json "$STATE_ARCHIVE/"
   echo ">>> Archived prior state in $STATE_ARCHIVE"
 else
   echo ">>> No prior state JSON to archive"
+fi
+# daemon-live compares last_observed_on_chain in this file with the new
+# contract and exits on drift. preflight does not look at it.
+if [[ -f "$CFG_DIR/relayer-state.json" ]]; then
+  mv -- "$CFG_DIR/relayer-state.json" "$CFG_DIR/relayer-state.pre_deploy_$STAMP.json"
+  echo ">>> Archived leftover relayer-state.json"
 fi
 
 cat <<EOF

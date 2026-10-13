@@ -98,6 +98,12 @@ pub enum TickOutcome {
 /// the life of the daemon.
 const SPAN_FETCH_GRACE_S: u64 = 15 * 60;
 
+/// How many spans may wait at once. A daemon that cannot send for a long
+/// time would otherwise grow the queue without bound; past this the oldest is
+/// given up, which is the one whose anchors are most likely out of the
+/// one-year window anyway.
+const MAX_OWED_SPANS: usize = 64;
+
 /// How many paid submissions one ancestry span may cost before it is written
 /// off. Failed header fetches are not counted: they cost nothing on chain, and
 /// an execution RPC that is briefly unavailable must not spend the budget.
@@ -143,7 +149,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     }
 
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
-        self.cover_pending_span().await;
+        self.cover_front_span().await;
         let update = self.source.fetch_finality().await?;
         self.guard_network(&update)?;
         if let Some(lag) = self.ws_lag(&update) {
@@ -302,7 +308,6 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         bundle: crate::types::StepProofBundle,
     ) -> Result<TickOutcome, RelayerError> {
         let old_head = self.state.last_execution_block_hash;
-        let pending = self.state.ancestry_anchor.filter(|c| Some(*c) != old_head);
         match self.submitter.submit_update(&bundle).await? {
             SubmitOutcome::Accepted {
                 tx_hash,
@@ -316,14 +321,6 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 self.persist()?;
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
                 self.maybe_flip_owner().await?;
-                // Settle whatever the cursor still owes against the head it
-                // was measured from, before the new checkpoint moves the head
-                // on. Pairing a lagging cursor with the new checkpoint spans
-                // two epochs, which no call can carry, and would write both
-                // spans off at once.
-                if let (Some(cursor), Some(head)) = (pending, old_head) {
-                    self.cover_span(cursor, head).await;
-                }
                 self.maybe_cover_epoch(old_head, update.execution_block_hash)
                     .await;
                 Ok(TickOutcome::SubmittedUpdate {
@@ -397,7 +394,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// `rePushAnchor` belongs here and not to a retry: it is a paid call tied
     /// to this checkpoint, and resending it every tick would burn the light
     /// client's balance for an anchor the bridge already has.
-    async fn maybe_cover_epoch(&mut self, prev_anchor: Option<[u8; 32]>, checkpoint: [u8; 32]) {
+    /// After a proven checkpoint: re-push the hash to USDCBridge (the first
+    /// push often bounced because the light client was not yet the sink
+    /// writer), and queue the span back to the head it replaced. The span is
+    /// only queued here, never sent — one tick works one span, so a
+    /// checkpoint cannot push a second submission into the same tick.
+    async fn maybe_cover_epoch(&mut self, prev_head: Option<[u8; 32]>, checkpoint: [u8; 32]) {
         match self.submitter.re_push_anchor(checkpoint).await {
             Ok(SubmitOutcome::Accepted {
                 ..
@@ -414,180 +416,162 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 warn!(error = %e, "rePushAnchor failed");
             },
         }
-        let Some(older) = prev_anchor else {
-            self.advance_ancestry_anchor(checkpoint);
-            info!("no previous anchor on record; epoch ancestry needs one at each end");
+        let Some(older) = prev_head else {
+            info!("no previous checkpoint on record; a span needs an anchor at each end");
             return;
         };
-        self.cover_span(older, checkpoint).await;
-    }
-
-    /// Send the span between two anchors, and decide what the cursor does
-    /// next. Settles the cursor on every outcome that will not change by
-    /// trying again — sent, not wanted, no execution source, out of reach, a
-    /// broken chain — and leaves it behind the head only for an outcome a
-    /// later tick could still get through, up to [`MAX_SPAN_ATTEMPTS`].
-    async fn cover_span(&mut self, older: [u8; 32], newer: [u8; 32]) {
-        if older == newer {
+        if older == checkpoint {
             return;
         }
-        let Some(rpc) = &self.execution else {
-            // Nothing will ever fetch the headers, so holding the cursor back
-            // would only repeat this forever.
-            self.advance_ancestry_anchor(newer);
+        if self.state.owed_spans.len() >= MAX_OWED_SPANS {
+            let dropped = self.state.owed_spans.remove(0);
+            warn!(
+                from = %hex::encode(dropped.older),
+                to = %hex::encode(dropped.newer),
+                "owed-span queue full: dropping the oldest, those blocks need \
+                 setAcceptedBlockHash"
+            );
+        }
+        self.state.owed_spans.push(crate::state::OwedSpan {
+            older,
+            newer: checkpoint,
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        if let Err(e) = self.persist() {
+            warn!(error = %e, "could not persist the owed-span queue");
+        }
+    }
+
+    /// Work the span at the front of the queue, if any. Exactly one span per
+    /// tick: the pair was fixed when it was queued, so it can never be
+    /// re-paired with a later checkpoint, and its accounting is its own.
+    async fn cover_front_span(&mut self) {
+        let Some(front) = self.state.owed_spans.first().cloned() else {
             return;
         };
-        let headers = match rpc.ancestry_span(newer, older, 33).await {
+        let Some(rpc) = &self.execution else {
+            // Nothing will ever fetch the headers, so holding the queue would
+            // only repeat this for ever.
+            self.settle_front("no execution source configured", false);
+            return;
+        };
+        let headers = match rpc.ancestry_span(front.newer, front.older, 33).await {
             Ok(Some(h)) => h,
             Ok(None) => {
-                self.advance_ancestry_anchor(newer);
-                warn!(
-                    from = %hex::encode(older),
-                    to = %hex::encode(newer),
+                self.settle_front(
                     "no span joins these two anchors — further apart than one call carries, not \
-                     on one chain, or adjacent: these blocks need setAcceptedBlockHash"
+                     on one chain, or adjacent",
+                    true,
                 );
                 return;
             },
             Err(e) => {
-                // A fetch error costs nothing on chain and says nothing about
-                // the span: an execution RPC that rate-limits or times out for
-                // half a minute would otherwise spend the whole budget
-                // between two ticks and write the span off with nothing sent.
-                self.retry_span_fetch(e.to_string(), newer);
+                self.retry_front_fetch(e.to_string());
                 return;
             },
         };
         if let Err(e) = crate::header_rlp::link_headers(&headers) {
-            self.advance_ancestry_anchor(newer);
-            warn!(error = %e, "epoch ancestry failed local link_headers");
+            self.settle_front(&format!("local link_headers refused the span: {e}"), true);
             return;
         }
         if !self.config.submit_ancestry {
-            self.advance_ancestry_anchor(newer);
             info!(
                 n = headers.len(),
-                "epoch ancestry linked locally; on-chain submitAncestry skipped \
-                 (--submit-ancestry, default off)"
+                "span linked locally; on-chain submitAncestry skipped (--submit-ancestry, default \
+                 off)"
             );
+            self.settle_front("--submit-ancestry is off", false);
             return;
         }
         match self.submitter.submit_ancestry(&headers).await {
             Ok(SubmitOutcome::Accepted {
                 ..
             }) => {
-                self.advance_ancestry_anchor(newer);
                 info!(n = headers.len(), "submitAncestry accepted");
+                self.settle_front("sent", false);
             },
             Ok(other) => {
-                self.retry_span_later(format!("{other:?}"), newer);
+                self.retry_front_paid(format!("{other:?}"));
             },
             Err(e) => {
-                self.retry_span_later(e.to_string(), newer);
+                self.retry_front_paid(e.to_string());
             },
         }
     }
 
-    /// Retry the span a previous tick could not send. Coverage is driven from
-    /// here as well as from an accepted update, because the next accepted
-    /// checkpoint can be two epochs away — by then the span the cursor still
-    /// points at would be out of reach and both epochs would be lost. Only the
-    /// span is retried: `rePushAnchor` stays with the checkpoint that earned
-    /// it.
-    async fn cover_pending_span(&mut self) {
-        let (Some(cursor), Some(head)) = (
-            self.state.ancestry_anchor,
-            self.state.last_execution_block_hash,
-        ) else {
-            return;
-        };
-        if cursor == head {
+    /// Take the front span off the queue. `uncovered` marks the blocks as
+    /// needing the owner, which is worth a warning; a span that was sent, or
+    /// one nobody asked to send, is not.
+    fn settle_front(&mut self, reason: &str, uncovered: bool) {
+        if self.state.owed_spans.is_empty() {
             return;
         }
-        info!(
-            from = %hex::encode(cursor),
-            to = %hex::encode(head),
-            attempt = self.state.span_attempts + 1,
-            "retrying the ancestry span the cursor is still behind"
-        );
-        self.cover_span(cursor, head).await;
+        let span = self.state.owed_spans.remove(0);
+        if uncovered {
+            warn!(
+                from = %hex::encode(span.older),
+                to = %hex::encode(span.newer),
+                reason,
+                "span given up: these blocks need setAcceptedBlockHash"
+            );
+        } else {
+            info!(
+                from = %hex::encode(span.older),
+                to = %hex::encode(span.newer),
+                reason,
+                "span settled"
+            );
+        }
+        if let Err(e) = self.persist() {
+            warn!(error = %e, "could not persist the owed-span queue");
+        }
     }
 
-    /// Leave the cursor behind the head so a later tick tries the span again,
-    /// until [`MAX_SPAN_ATTEMPTS`] is spent. Only a submission the light
-    /// client paid for is counted — a failed header fetch retries for free and
-    /// does not touch the budget — so the budget is what keeps one span from
-    /// being resubmitted without end. The budget is per span, not per daemon:
-    /// a condition that will not change — an old contract refusing the new
-    /// payload, a node without `KECCAK256` — costs that many attempts again
-    /// on the next span, because nothing here can tell a permanent refusal
-    /// from a long outage.
-    /// A header fetch costs nothing on chain, so it must not spend the budget
-    /// that exists to stop paid resubmissions — an execution RPC that
-    /// rate-limits for a few polls would otherwise write the span off with
-    /// nothing sent. It cannot retry for ever either: an older anchor that is
-    /// not an ancestor at all, or a hash no RPC will serve, never becomes
-    /// fetchable. Bound it by wall time instead of by ticks, so the bound does
-    /// not move with the poll interval.
-    fn retry_span_fetch(&mut self, reason: String, newer: [u8; 32]) {
-        let now = crate::state::now_secs();
-        let since = self.state.span_fetch_since.unwrap_or(now);
-        if self.state.span_fetch_since.is_none() {
-            self.state.span_fetch_since = Some(now);
-            if let Err(e) = self.persist() {
-                warn!(error = %e, "could not persist the span fetch deadline");
-            }
+    /// A paid submission the chain refused. Bounded, because each try costs
+    /// the light client and an old contract or a node without `KECCAK256`
+    /// will refuse this span for ever.
+    fn retry_front_paid(&mut self, reason: String) {
+        let Some(front) = self.state.owed_spans.first_mut() else {
+            return;
+        };
+        front.paid_attempts = front.paid_attempts.saturating_add(1);
+        let spent = front.paid_attempts;
+        if spent >= MAX_SPAN_ATTEMPTS {
+            self.settle_front(&format!("refused {spent} times: {reason}"), true);
+            return;
         }
+        warn!(reason, attempt = spent, "span not sent; will retry");
+        if let Err(e) = self.persist() {
+            warn!(error = %e, "could not persist the owed-span queue");
+        }
+    }
+
+    /// A header fetch costs nothing on chain, so it must not spend the paid
+    /// budget — an execution RPC that rate-limits for a few polls would
+    /// otherwise cost coverage. It cannot retry for ever either, so the bound
+    /// is wall time, which does not move with the poll interval.
+    fn retry_front_fetch(&mut self, reason: String) {
+        let now = crate::state::now_secs();
+        let Some(front) = self.state.owed_spans.first_mut() else {
+            return;
+        };
+        let since = *front.fetch_since.get_or_insert(now);
         let waited = now.saturating_sub(since);
         if waited >= SPAN_FETCH_GRACE_S {
-            self.advance_ancestry_anchor(newer);
-            warn!(
-                reason,
-                waited_s = waited,
-                "the headers for this span never became fetchable: these blocks need \
-                 setAcceptedBlockHash"
+            self.settle_front(
+                &format!("headers unfetchable for {waited}s: {reason}"),
+                true,
             );
             return;
         }
         warn!(
             reason,
             waited_s = waited,
-            "epoch ancestry fetch failed; will retry for free"
+            "span headers did not fetch; will retry for free"
         );
-    }
-
-    fn retry_span_later(&mut self, reason: String, newer: [u8; 32]) {
-        self.state.span_attempts = self.state.span_attempts.saturating_add(1);
-        if self.state.span_attempts >= MAX_SPAN_ATTEMPTS {
-            self.state.span_attempts = 0;
-            self.advance_ancestry_anchor(newer);
-            warn!(
-                reason,
-                attempts = MAX_SPAN_ATTEMPTS,
-                "giving up on this ancestry span: these blocks need setAcceptedBlockHash"
-            );
-            return;
-        }
         if let Err(e) = self.persist() {
-            warn!(error = %e, "could not persist the span attempt count");
-        }
-        warn!(
-            reason,
-            attempt = self.state.span_attempts,
-            "ancestry span not sent; will retry"
-        );
-    }
-
-    /// Move the span cursor up to `hash`. Called only where the span is done
-    /// with — sent, not wanted, or impossible because the gap is wider than
-    /// one call — so that a transient failure leaves the cursor behind the
-    /// head and the next tick retries it.
-    fn advance_ancestry_anchor(&mut self, hash: [u8; 32]) {
-        self.state.ancestry_anchor = Some(hash);
-        self.state.span_attempts = 0;
-        self.state.span_fetch_since = None;
-        if let Err(e) = self.persist() {
-            warn!(error = %e, "could not persist the ancestry cursor");
+            warn!(error = %e, "could not persist the owed-span queue");
         }
     }
 
@@ -1167,68 +1151,60 @@ mod tests {
         (r, mock, chain)
     }
 
-    /// A cursor left behind by a failed span must not be paired with the next
-    /// checkpoint: that pairing spans two epochs, which no call can carry, and
-    /// used to write off the failed span and the new one together.
+    /// The sequence that lost spans in every earlier version: a span is
+    /// refused, the next checkpoint lands, and the new span succeeds. The
+    /// refused one must still be waiting, not silently dropped.
     #[tokio::test]
-    async fn a_lagging_cursor_does_not_take_the_next_span_down_with_it() {
+    async fn a_refused_span_is_not_dropped_when_the_next_one_succeeds() {
         let (mut r, mock, chain) = three_checkpoint_relayer();
         let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
 
-        r.tick().await.unwrap();
+        r.tick().await.unwrap(); // checkpoint 0, nothing owed yet
+        mock.reject_ancestry();
+        r.tick().await.unwrap(); // checkpoint 3 accepted, span 0..3 queued
+        r.tick().await.unwrap(); // works 0..3, refused
+        assert_eq!(mock.ancestry_attempts(), 1, "one refused submission");
+        mock.accept_ancestry();
+        r.tick().await.unwrap(); // works 0..3 again, sent
+
+        assert!(
+            mock.is_proven(&k(1)),
+            "the refused span must be sent, not dropped"
+        );
+        assert!(mock.is_proven(&k(2)));
+        assert!(
+            r.state.owed_spans.iter().all(|sp| sp.older != k(0)),
+            "span 0..3 must be off the queue once sent"
+        );
+    }
+
+    /// Two owed spans must not be merged into one impossible request, and
+    /// must not share a budget.
+    #[tokio::test]
+    async fn two_owed_spans_keep_their_own_pairing_and_budget() {
+        let (mut r, mock, chain) = three_checkpoint_relayer();
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+
         mock.reject_ancestry();
         r.tick().await.unwrap();
-        assert_eq!(mock.ancestry_count(), 0, "span 0..3 was refused");
+        r.tick().await.unwrap(); // 0..3 queued
+        r.tick().await.unwrap(); // 0..3 refused once
+        r.tick().await.unwrap(); // checkpoint 6 accepted, 3..6 queued too
+        assert_eq!(r.state.owed_spans.len(), 2, "both spans wait separately");
+        assert_eq!(r.state.owed_spans[0].older, k(0));
+        assert_eq!(r.state.owed_spans[1].older, k(3));
         assert_eq!(
-            r.state.ancestry_anchor,
-            Some(k(0)),
-            "cursor still owes 0..3"
+            r.state.owed_spans[1].paid_attempts, 0,
+            "the second span must not inherit the first span's attempts"
         );
 
         mock.accept_ancestry();
         r.tick().await.unwrap();
-        assert_eq!(
-            mock.ancestry_count(),
-            2,
-            "both the owed span 0..3 and the new 3..6 must be sent, got {}",
-            mock.ancestry_count()
-        );
-        assert_eq!(r.state.ancestry_anchor, Some(k(6)));
+        r.tick().await.unwrap();
         for i in [1, 2, 4, 5] {
             assert!(mock.is_proven(&k(i)), "header {i} was never anchored");
         }
-    }
-
-    /// A header fetch costs nothing on chain, so it must not spend the budget
-    /// that exists to stop paid resubmissions.
-    #[tokio::test]
-    async fn a_failing_fetch_does_not_spend_the_submission_budget() {
-        let (mut r, mock, chain) = span_relayer(true);
-        r.tick().await.unwrap();
-        r.tick().await.unwrap();
-        assert_eq!(mock.ancestry_count(), 1);
-
-        // Move the head to a hash the execution source has no span for: every
-        // fetch for that span errors, the way a rate-limited RPC does.
-        let cursor = crate::header_rlp::keccak256(&chain[0]);
-        r.state.ancestry_anchor = Some(cursor);
-        r.state.last_execution_block_hash = Some([0x5A; 32]);
-        for _ in 0..(super::MAX_SPAN_ATTEMPTS + 4) {
-            r.tick().await.unwrap();
-        }
-        assert_eq!(
-            r.state.span_attempts, 0,
-            "a fetch failure must not be counted"
-        );
-        assert_eq!(
-            r.state.ancestry_anchor,
-            Some(cursor),
-            "the cursor must keep waiting for the fetch to work, not be written off"
-        );
-        assert!(
-            r.state.span_fetch_since.is_some(),
-            "the grace period must be running"
-        );
+        assert!(r.state.owed_spans.is_empty(), "both spans settled");
     }
 
     #[tokio::test]
@@ -1238,100 +1214,26 @@ mod tests {
         assert_eq!(
             mock.ancestry_count(),
             0,
-            "first checkpoint has no older anchor yet"
+            "the first checkpoint owes nothing"
         );
-        r.tick().await.unwrap();
+        r.tick().await.unwrap(); // second checkpoint queues the span
+        r.tick().await.unwrap(); // and this tick sends it
         assert_eq!(mock.re_push_count(), 2);
         assert_eq!(mock.ancestry_count(), 1);
         assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
         assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[2])));
+        assert!(r.state.owed_spans.is_empty());
     }
 
-    /// The span the daemon could not send is sent on a later tick, without
-    /// waiting for the next checkpoint — by then the gap would be too wide.
-    #[tokio::test]
-    async fn a_refused_span_is_sent_on_a_later_tick() {
-        let (mut r, mock, chain) = span_relayer(true);
-        mock.reject_ancestry();
-        r.tick().await.unwrap();
-        r.tick().await.unwrap();
-        assert_eq!(mock.ancestry_count(), 0, "both sends were refused");
-        assert_eq!(
-            r.state.ancestry_anchor,
-            Some(crate::header_rlp::keccak256(&chain[0])),
-            "the cursor stays on the older anchor while the span is unsent"
-        );
-
-        mock.accept_ancestry();
-        r.tick().await.unwrap();
-        assert_eq!(
-            mock.ancestry_count(),
-            1,
-            "the retry must actually send the span"
-        );
-        assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
-        assert!(mock.is_proven(&crate::header_rlp::keccak256(&chain[2])));
-        assert_eq!(
-            r.state.ancestry_anchor,
-            Some(crate::header_rlp::keccak256(&chain[3])),
-            "a sent span moves the cursor to the head"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_sent_span_moves_the_cursor_to_the_head() {
-        let (mut r, mock, chain) = span_relayer(true);
-        r.tick().await.unwrap();
-        r.tick().await.unwrap();
-        assert_eq!(mock.ancestry_count(), 1);
-        assert_eq!(
-            r.state.ancestry_anchor,
-            Some(crate::header_rlp::keccak256(&chain[3]))
-        );
-    }
-
-    /// Without an execution source nothing can ever fetch the headers, so the
-    /// cursor must settle instead of making every tick pay for a rePushAnchor.
-    #[tokio::test]
-    async fn no_execution_source_settles_the_cursor_and_pays_nothing() {
-        let (mut r, mock, _chain) = span_relayer(true);
-        r.tick().await.unwrap();
-        r.tick().await.unwrap();
-        r.execution = None;
-        r.state.ancestry_anchor = Some([0x77; 32]);
-        let pushes = mock.re_push_count();
-        r.tick().await.unwrap();
-        r.tick().await.unwrap();
-        assert_eq!(
-            mock.re_push_count(),
-            pushes,
-            "the retry path must not rePushAnchor"
-        );
-        assert_eq!(
-            r.state.ancestry_anchor, r.state.last_execution_block_hash,
-            "the cursor must settle on the head"
-        );
-    }
-
-    /// A span the contract will never accept must stop costing submissions.
+    /// A span the chain will never accept must stop costing submissions.
     #[tokio::test]
     async fn a_span_refused_for_good_is_written_off_after_the_attempt_budget() {
-        let (mut r, mock, chain) = span_relayer(true);
+        let (mut r, mock, _chain) = span_relayer(true);
         mock.reject_ancestry();
-        r.tick().await.unwrap();
-        r.tick().await.unwrap();
-        for _ in 0..8 {
+        for _ in 0..(super::MAX_SPAN_ATTEMPTS + 6) {
             r.tick().await.unwrap();
         }
-        assert_eq!(
-            r.state.ancestry_anchor,
-            Some(crate::header_rlp::keccak256(&chain[3])),
-            "the cursor must be written off to the head once the budget is spent"
-        );
-        assert_eq!(
-            r.state.span_attempts, 0,
-            "the counter resets with the cursor"
-        );
+        assert!(r.state.owed_spans.is_empty(), "the span must be given up");
         assert!(
             mock.ancestry_attempts() <= super::MAX_SPAN_ATTEMPTS,
             "sent {} submissions for a span that can never land",
@@ -1339,19 +1241,83 @@ mod tests {
         );
     }
 
-    /// An out-of-reach span is not a transient failure: no retry, no budget.
+    /// A header fetch costs nothing on chain, so it must not spend the paid
+    /// budget: the span keeps waiting instead of being given up.
     #[tokio::test]
-    async fn an_out_of_reach_span_is_written_off_at_once() {
-        let (mut r, mock, _chain) = span_relayer(true);
+    async fn a_failing_fetch_does_not_spend_the_submission_budget() {
+        let (mut r, mock, chain) = span_relayer(true);
         r.tick().await.unwrap();
         r.tick().await.unwrap();
-        r.state.ancestry_anchor = Some([0x99; 32]);
-        let attempts = mock.ancestry_attempts();
+        r.tick().await.unwrap();
+        assert_eq!(mock.ancestry_count(), 1);
+
+        // Queue a span whose newer end the execution source has no headers
+        // for: every fetch for it errors, the way a rate-limited RPC does.
+        r.state.owed_spans.push(crate::state::OwedSpan {
+            older: crate::header_rlp::keccak256(&chain[0]),
+            newer: [0x5A; 32],
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        for _ in 0..(super::MAX_SPAN_ATTEMPTS + 4) {
+            r.tick().await.unwrap();
+        }
+        let front = r
+            .state
+            .owed_spans
+            .first()
+            .expect("the span must still wait");
+        assert_eq!(
+            front.paid_attempts, 0,
+            "a fetch failure must not be counted"
+        );
+        assert!(
+            front.fetch_since.is_some(),
+            "the grace period must be running"
+        );
+    }
+
+    /// Without an execution source nothing can ever fetch the headers, so the
+    /// queue must drain instead of making every tick pay for a rePushAnchor.
+    #[tokio::test]
+    async fn no_execution_source_drains_the_queue_and_pays_nothing() {
+        let (mut r, mock, chain) = span_relayer(true);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.execution = None;
+        r.state.owed_spans.push(crate::state::OwedSpan {
+            older: crate::header_rlp::keccak256(&chain[0]),
+            newer: [0x77; 32],
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        let pushes = mock.re_push_count();
+        r.tick().await.unwrap();
         r.tick().await.unwrap();
         assert_eq!(
-            r.state.ancestry_anchor, r.state.last_execution_block_hash,
-            "an unreachable older anchor is written off immediately"
+            mock.re_push_count(),
+            pushes,
+            "the span path must not rePushAnchor"
         );
+        assert!(r.state.owed_spans.is_empty(), "the queue must drain");
+    }
+
+    /// An out-of-reach pair is not a transient failure: given up at once.
+    #[tokio::test]
+    async fn an_out_of_reach_span_is_given_up_at_once() {
+        let (mut r, mock, chain) = span_relayer(true);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        let attempts = mock.ancestry_attempts();
+        r.state.owed_spans.push(crate::state::OwedSpan {
+            older: [0x99; 32],
+            newer: crate::header_rlp::keccak256(&chain[3]),
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        r.tick().await.unwrap();
+        assert!(r.state.owed_spans.is_empty(), "given up immediately");
         assert_eq!(mock.ancestry_attempts(), attempts, "nothing was submitted");
     }
 
@@ -1360,8 +1326,13 @@ mod tests {
         let (mut r, mock, chain) = span_relayer(false);
         r.tick().await.unwrap();
         r.tick().await.unwrap();
+        r.tick().await.unwrap();
         assert_eq!(mock.re_push_count(), 2);
         assert_eq!(mock.ancestry_count(), 0);
         assert!(!mock.is_proven(&crate::header_rlp::keccak256(&chain[1])));
+        assert!(
+            r.state.owed_spans.is_empty(),
+            "nothing to send, nothing owed"
+        );
     }
 }

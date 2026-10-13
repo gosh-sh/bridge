@@ -96,16 +96,23 @@ assigns it when the release is tagged.
   revert with `ERR_BAD_ANCESTRY`: it built the payload newest-first and capped
   it at 32.
 
-  What an operator sees from the daemon. A span is sent only between two
-  consecutive checkpoints, and it is retried at the start of every poll while
-  it is still owed, not only after the next checkpoint arrives. A span the
-  chain refuses is written off after three paid submissions, logged as "giving
-  up on this ancestry span"; a span whose headers will not fetch retries for
-  free and is written off only after 15 minutes of failures, so an execution
-  RPC that rate-limits does not cost coverage. Written off means those blocks
-  need `setAcceptedBlockHash` from the owner. The state file gains
-  `ancestry_anchor`, `span_attempts` and `span_fetch_since`; all three default
-  to empty, so an existing state file is read as before.
+  What an operator sees from the daemon. Each accepted checkpoint queues the
+  span back to the checkpoint it replaced; one poll works the span at the
+  front of that queue, and the entry leaves only when it is settled — sent, or
+  given up with "span given up: these blocks need setAcceptedBlockHash". A
+  span the chain refuses is given up after three paid submissions. One whose
+  headers will not fetch retries for free and is given up only after 15
+  minutes of failures, so an execution RPC that rate-limits costs no coverage.
+  The queue holds at most 64 spans; past that the oldest is given up, since
+  its anchors are the ones most likely outside the one-year window.
+
+  The pair is fixed when the span is queued and each entry carries its own
+  accounting, which is what earlier versions of this change got wrong: a
+  single cursor and a single counter cannot represent two owed spans, so one
+  was dropped silently, or both were merged into a request spanning two epochs
+  that no call can carry, or a refusal of one spent the other's budget. The
+  state file gains `owed_spans`, which defaults to empty, so an existing state
+  file is read as before.
 
 - **A checkpoint skipped near the end of a sync-committee period can still be
   registered after the rotation.** `submitUpdate` keeps the commitment the

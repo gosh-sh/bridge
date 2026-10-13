@@ -476,7 +476,10 @@ mod tests {
         c.submit_update(32, [0xBB; 32], old_committee)
             .expect("the skipped checkpoint must still be registrable");
         assert!(c.is_live(&[0xBB; 32]));
-        assert_eq!(c.finalized_slot, 64, "late registration must not move the head");
+        assert_eq!(
+            c.finalized_slot, 64,
+            "late registration must not move the head"
+        );
     }
 
     /// The old committee is for catching up only: it must never move the head.

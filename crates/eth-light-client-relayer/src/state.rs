@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::RelayerError;
 
+/// One span of execution headers the daemon still owes the light client.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwedSpan {
+    /// The older anchor: the checkpoint the head stood on before.
+    pub older: [u8; 32],
+    /// The newer anchor: the checkpoint that moved the head.
+    pub newer: [u8; 32],
+    /// Submissions this span has already cost the light client.
+    #[serde(default)]
+    pub paid_attempts: u32,
+    /// When its headers first failed to fetch; unset while fetching works.
+    #[serde(default)]
+    pub fetch_since: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayerState {
     pub last_finalized_slot: Option<u64>,
@@ -21,18 +36,14 @@ pub struct RelayerState {
     pub updates_applied: u64,
     /// Period the daemon refused to cross without a rotate proof.
     pub rotate_pending_period: Option<u64>,
-    /// Newest hash an accepted `submitAncestry` span reached, or the newest
-    /// checkpoint when none was needed. A failed span leaves this behind the
-    /// head so the next tick retries it instead of losing those blocks.
+    /// Spans still owed to `submitAncestry`, oldest first. A pair is fixed
+    /// when its newer end is accepted, so a span is never re-paired with a
+    /// later checkpoint, and each carries its own accounting — one cursor and
+    /// one counter cannot represent two owed spans, which is how earlier
+    /// versions lost them. An entry leaves only when it is settled: sent, or
+    /// written off with a warning.
     #[serde(default)]
-    pub ancestry_anchor: Option<[u8; 32]>,
-    /// When the headers for the pending span first failed to fetch. Unset
-    /// while fetching works; cleared whenever the cursor settles.
-    #[serde(default)]
-    pub span_fetch_since: Option<u64>,
-    /// Paid submissions spent on the span the cursor is behind.
-    #[serde(default)]
-    pub span_attempts: u32,
+    pub owed_spans: Vec<OwedSpan>,
     /// Relayer already issued the one-way owner flip.
     #[serde(default)]
     pub owner_flip_done: bool,

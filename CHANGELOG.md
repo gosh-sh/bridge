@@ -35,6 +35,14 @@ assigns it when the release is tagged.
   only); a yield stand also has to set the shellnet withdraw aliases;
   `supplyToAave` / `harvestYield` are `onlyOwner`. `EVM-contracts-spec.md`
   §12.1–12.2 and the `DeployShellnetE2EBridge` comment say the same.
+- `docs/aave-yield.md` no longer says `harvestYield` takes `type(uint256).max`
+  for "all of it". It does not: anything above `accruedYield()` reverts
+  `NoYield`, which reads as "no yield". Pass `accruedYield()`. Only
+  `skimExcessUsdc` takes the max.
+- `live_withdrawByProof_runbook.md` no longer says AAVE is never a payout
+  source: on a bridge with a pool, `withdrawByProof` withdraws from AAVE the
+  part of a payout the USDC on the contract does not cover. AAVE still cannot
+  cover a `WithdrawTreasuryShortfall`.
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
   is part of replay protection, and that an upgrade changing it has to ship a
   block cutoff in the same code so past deposits stop going through. The
@@ -281,6 +289,45 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **A Sepolia stand with AAVE can be deployed with the bundle script.**
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh` takes
+  `USE_AAVE=true`: it runs `DeployRealBridge` instead of
+  `DeployShellnetE2EBridge`, defaults `WITHDRAW_ALT_DST_CHAIN_ID` /
+  `WITHDRAW_ALT_DST_HOST_CHAIN_ID` / `WITHDRAW_ALT_TOKEN_ID` to the shellnet
+  `1` / `11155111` / `3`, and writes the `EXPECTED_USDC_ADDRESS` and
+  `EXPECTED_AAVE_POOL` values for the relayer into `L<LEVEL>_config/env` as
+  comments. Such a bridge takes the AAVE pool's USDC (`0x94a9D9AC…E4C8`), not
+  Circle's, and Acki Nacki refuses its deposits until the AN bridge owner calls
+  `setTrustedL1Bridge(11155111, <bridge>, true)`. The steps are in
+  `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*. Without
+  `USE_AAVE` the script behaves as before.
+- **A demo AAVE pool for Sepolia stands.** New contract
+  `contracts/ethereum/src/DemoAavePool.sol` answers the AAVE V3 Pool calls the
+  bridge makes (`supply`, `withdraw`, `getReserveData`) over any token, holds
+  it 1:1 against a non-transferable `DemoAToken`, and has no borrowing, supply
+  cap or interest rate. Yield is only what its owner pays in with
+  `accrueYield(holder, amount)`, which pulls real USDC, so receipts are always
+  redeemable. `DeployShellnetE2EBridge` takes `DEMO_AAVE=true` (refused on
+  mainnet): it deploys the pool over Circle USDC, owned by the deployer, and
+  wires the bridge to it; Circle USDC, the faucet and the withdraw aliases stay
+  as on the shellnet stand. `deploy_bridge_bundle.sh` passes `DEMO_AAVE=true`
+  through and writes the pool address as `EXPECTED_AAVE_POOL`. A demo stand is
+  a new bridge: Acki Nacki needs `setTrustedL1Bridge` for it, and the relayers
+  and CLI need its address. Steps in `docs/aave-yield.md`, *A demo pool on
+  Sepolia*.
+- `DeployRealBridge` with `USE_AAVE=true` checks the pool before deploying: it
+  stops if the pool does not list the USDC under the hard-coded aToken, and it
+  prints the reserve's supply cap and total supply, with a warning when the cap
+  is reached. On 2026-10-13 the Sepolia USDC reserve was over its cap, so
+  `supplyToAave` on any bridge reverts with AAVE error `51` until AAVE raises
+  it. The same reserve had only about 11 000 USDC free to withdraw, so even
+  with a higher cap a bridge that supplied there could not get its USDC back,
+  and payouts above the USDC on the bridge would revert;
+  `docs/aave-yield.md` says when this pool is usable.
+- The shellnet-l2 `preflight.sh` takes an optional `EXPECTED_AAVE_POOL`: when
+  set, it refuses a bridge whose `aavePool()` differs and warns when
+  `aaveEnabled()` is false. `runtime.env.example` lists it, and the AAVE USDC
+  address to put in `EXPECTED_USDC_ADDRESS` for such a bridge.
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
   bridge's `isPaused()`. Either one refuses with exit 2 before the burn.

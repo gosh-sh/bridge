@@ -234,6 +234,13 @@ owner=$(call_word "$BRIDGE_ADDRESS" 'owner()(address)')
 [[ "${owner,,}" == "${RELAYER_ADDRESS,,}" ]] || die "bridge owner $owner != expected EOA $RELAYER_ADDRESS"
 usdc=$(call_word "$BRIDGE_ADDRESS" 'usdc()(address)')
 [[ "${usdc,,}" == "${EXPECTED_USDC_ADDRESS,,}" ]] || die "bridge USDC $usdc != $EXPECTED_USDC_ADDRESS"
+if [[ -n "${EXPECTED_AAVE_POOL:-}" ]]; then
+  aave_pool=$(call_word "$BRIDGE_ADDRESS" 'aavePool()(address)')
+  [[ "${aave_pool,,}" == "${EXPECTED_AAVE_POOL,,}" ]] || die "bridge AAVE pool $aave_pool != $EXPECTED_AAVE_POOL"
+  aave_enabled=$(call_word "$BRIDGE_ADDRESS" 'aaveEnabled()(bool)')
+  [[ "$aave_enabled" == true ]] || warn "AAVE pool is wired but aaveEnabled() is false; supplyToAave reverts until setAaveEnabled(true)"
+  ok "AAVE pool $aave_pool aaveEnabled=$aave_enabled"
+fi
 
 last_seen=$(call_word "$BRIDGE_ADDRESS" 'storedLastSeenBlockSeqNo()(uint64)')
 (( last_seen >= BRIDGE_BOOTSTRAP_SEQNO )) || die "on-chain cursor $last_seen is behind bootstrap"

@@ -51,6 +51,7 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/AxiomBlockHeaderOracle.sol` | 186 | Axiom V2 Core–backed oracle implementation. |
 | `src/MockBlockHeaderOracle.sol` | 76 | Test/E2E oracle (owner-settable hashes + `blockhash()` fallback). |
 | `src/IAavePool.sol`, `src/IERC20.sol` | 47 / 12 | Minimal external interfaces. |
+| `src/DemoAavePool.sol` | 110 | Testnet stand-in for the AAVE V3 Pool (`DEMO_AAVE=true`): 1:1 custody, non-transferable `DemoAToken`, yield only via the owner's backed `accrueYield`. |
 | `verifiers/*.bin` | — | Production SHPLONK Yul **creation** bytecode (4 circuits). |
 | `verifiers/*_calldata.bin` | — | Reference `instances ‖ proof` calldata fixtures. |
 | `verifiers/{Primary,Fallback,LayerHashes}AggregatorVerifier.sol` | 82–92 KB | Generated `Halo2Verifier` Yul-in-Solidity sources (reference; the `.bin` is what deploys). |
@@ -663,7 +664,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | Script | Purpose |
 |---|---|
 | `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, **no AAVE**, Circle Sepolia USDC (`0x1c7D4B19…7238`). That token is not a reserve on the Sepolia AAVE V3 pool, and `aavePool` is immutable, so this script cannot grow a yield position later. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`DeployShellnetE2EBridge.s.sol` `wireWithdraw` guard). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
+| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, Circle Sepolia USDC (`0x1c7D4B19…7238`). That token is not a reserve on the Sepolia AAVE V3 pool, so the script never wires the real pool, and `aavePool` is immutable. By default it wires none; `DEMO_AAVE=true` (refused on mainnet) deploys a `DemoAavePool` over Circle USDC, owned by the deployer, and wires the bridge to it (`docs/aave-yield.md`, *A demo pool on Sepolia*). `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`DeployShellnetE2EBridge.s.sol` `wireWithdraw` guard). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
@@ -676,7 +677,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 |---|---|---|
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle`, else mock. |
-| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. Default **false**. Does not pick the USDC: on Sepolia `_resolveTokenAddresses` always sets `usdc` to the pool's underlying `0x94a9D9AC…E4C8`; the flag only fills the pool and aToken. Mainnet uses canonical `0xA0b86991…eB48`. Mainnet and Sepolia only; any other chain reverts. The live Sepolia bridges were deployed with `DeployShellnetE2EBridge` (Circle USDC, no pool), so they have `aavePool = 0` and cannot be flipped on. |
+| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. Default **false**. Does not pick the USDC: on Sepolia `_resolveTokenAddresses` always sets `usdc` to the pool's underlying `0x94a9D9AC…E4C8`; the flag only fills the pool and aToken. Mainnet uses canonical `0xA0b86991…eB48`. Mainnet and Sepolia only; any other chain reverts. The live Sepolia bridges were deployed with `DeployShellnetE2EBridge` (Circle USDC, no pool), so they have `aavePool = 0` and cannot be flipped on. Before broadcasting, `_checkAaveReserve` requires `getReserveData(usdc).aTokenAddress` to equal the hard-coded aUSDC and logs the reserve's supply cap. `deploy_bridge_bundle.sh` passes it through as `USE_AAVE=true` (`docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*). |
 | `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
@@ -687,6 +688,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
+| `DEMO_AAVE` | Shellnet | `true` ⇒ deploy a `DemoAavePool` over Circle USDC and wire the bridge to it. Default **false**; refused on chain id 1. |
 
 When a verification key rotates, deploy the new Yul verifier (and confirm its
 `extcodehash` against `ShplonkDeployLib`) **before** pointing the live bridge at
@@ -733,7 +735,9 @@ was written in, so the suite was read, not executed).
 | File | Focus |
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
-| `AckiNackiBridgeAaveFork.t.sol` (4) | Mainnet-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`). |
+| `AckiNackiBridgeAaveFork.t.sol` (4) | Sepolia-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`); lifts the reserve's supply cap inside the fork when it is reached. |
+| `DemoAavePool.t.sol` (8) | `DemoAavePool` on its own, and the bridge on top of it: supply, backed `accrueYield`, harvest, emergency unwind and skim. |
+| `DemoAavePoolFork.t.sol` (1) | Sepolia fork: the `DEMO_AAVE` stand on Circle's FiatToken, supply → yield → harvest → unwind. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |

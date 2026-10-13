@@ -875,8 +875,16 @@ grown by users bridging IN (`deposit()`), and payouts on the AN→ETH leg
 draw from that pool. Shellnet demos usually burn on the AN side without a
 prior ETH→AN deposit — so the treasury never funds itself organically.
 `AckiNackiBridge.sol:1188` enforces `pub.amount > treasuryBalance` →
-revert; there is no admin bypass and no auto-supply from AAVE (the AAVE
-integration is a yield sink for surplus, not a payout source).
+revert; there is no admin bypass. AAVE cannot help with this one: on a
+bridge with a pool, `withdrawByProof` pulls from AAVE only the gap between
+the USDC on the contract and `pub.amount`, and only for money that is
+already in `treasuryBalance`.
+
+On a bridge deployed with `DeployRealBridge` and `USE_AAVE=true` the token
+is the AAVE pool's USDC (`0x94a9D9AC…E4C8`), not Circle's. Fund the wallet
+from the AAVE faucet instead of Circle's (`docs/aave-yield.md`, *Launching
+a Sepolia stand with AAVE*); the approve and deposit steps below are the
+same with `USDC` set to that address.
 
 **Fix — fund the wallet from Circle's Sepolia faucet, then deposit.**
 `DeployShellnetE2EBridge.s.sol` wires the bridge against Circle

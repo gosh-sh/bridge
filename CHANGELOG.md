@@ -77,7 +77,7 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `f5bf3dd3…9ee34109`, and `getVersion` reports 1.4.2 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
+  code hash moves `314ac6b8…6092f5` → `a15d08d2…79426f1e`, and `getVersion` reports 1.4.3 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
@@ -106,6 +106,39 @@ assigns it when the release is tagged.
   need `setAcceptedBlockHash` from the owner. The state file gains
   `ancestry_anchor`, `span_attempts` and `span_fetch_since`; all three default
   to empty, so an existing state file is read as before.
+
+- **A checkpoint skipped near the end of a sync-committee period can still be
+  registered after the rotation.** `submitUpdate` keeps the commitment the
+  rotation replaced (`_prevCommittee`) and accepts a proof signed by it for
+  late registration only — never to move the head, which still needs the
+  committee in force. Before this, a checkpoint the daemon had not proven by
+  the time `submitRotate` landed was unanchorable for good: its proof carries
+  the old commitment and `ERR_WRONG_COMMITTEE` (242) refused it for ever, so
+  the 32 blocks of that epoch could only be admitted by the owner's
+  `setAcceptedBlockHash`, and not at all after `disableOwnerAnchors`. A period
+  is about 27 hours and a step proof takes longer than an epoch, so a skip at
+  the edge of a period was the likely case, not a corner one. The same applies
+  to the owner hatches: `setCommitteeCommitment` and `reAnchorCommittee` also
+  keep what they replace.
+
+  `_prevCommittee` is carried through `updateCode`, so the migration cell has
+  one more field; the ABI's function and event surface is unchanged, its
+  `fields` section gains `_prevCommittee`. A client upgraded in place starts
+  with it empty, which only means no catch-up across the rotation that is
+  already behind it.
+
+- **The deposit-prover verification key is rotated again, for Amsterdam
+  block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
+  353024; Hoodi and mainnet not yet scheduled) execution headers carry 23
+  fields, `blockAccessListHash` and `slotNumber` after `requestsHash`, and
+  the previous key could not prove a deposit in such a block. The circuit
+  now accepts headers of 16 to 24 fields up to 792 bytes, so one key covers
+  mainnet before and after the fork, Sepolia, and the L2s the bridge reads
+  (Arbitrum 16 fields, Blast 20, Base, OP, Mantle and World Chain 21), with
+  one spare slot for the next appended field. A header padded with junk is
+  still rejected. The deposit-prover encoder (`rlp_utils`) and
+  `eth-lc-relayer` (`header_rlp`, used with `--submit-ancestry`) emit the
+  two new fields. Rebuild both binaries from this source.
 
   Post-fork Sepolia blocks still cannot be anchored by the light client:
   the step circuit and its witness builder have not followed Gloas

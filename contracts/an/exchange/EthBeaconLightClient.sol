@@ -51,7 +51,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.2";
+    string constant version = "1.4.3";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -193,6 +193,12 @@ contract EthBeaconLightClient {
     // the join that pins the aggregated signers to the chain-anchored committee.
     // Fail-closed: 0 rejects all updates until bootstrapped.
     uint256 _currentCommittee;
+    // The commitment `_currentCommittee` replaced. A checkpoint skipped near
+    // the end of a period would otherwise be lost the moment the committee
+    // rotates: its proof carries the old commitment, and late registration
+    // would reject it for ever. Accepted for late registration only, never to
+    // move the head forward. 0 before the first rotation.
+    uint256 _prevCommittee;
 
     // The sync-committee period `_currentCommittee` belongs to. Monotonic —
     // `submitRotate` only advances to a strictly later period. Bootstrapped with
@@ -280,11 +286,10 @@ contract EthBeaconLightClient {
         // Fail-closed until bootstrapped, and pin the signers to the anchored
         // committee (rotate ↔ step join).
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
-        require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
         // Head only moves forward. A slot behind the head is still admitted
         // when its execution hash is not yet in the proven set (late-register
-        // a skipped checkpoint of the *current* committee). Same-slot replay
-        // and already-proven hashes revert ERR_STALE_UPDATE.
+        // a skipped checkpoint). Same-slot replay and already-proven hashes
+        // revert ERR_STALE_UPDATE.
         bool advancing = pi.finalizedSlot > _finalizedSlot;
         bool late = pi.finalizedSlot < _finalizedSlot
             && !_isLive(pi.executionBlockHash);
@@ -292,6 +297,16 @@ contract EthBeaconLightClient {
         if (late) {
             require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
+        // Moving the head needs the committee in force. Late registration also
+        // takes the one it replaced: a checkpoint skipped near the end of a
+        // period is signed by that committee, and without this it would be
+        // unanchorable the moment the rotation lands — 32 blocks whose
+        // deposits only the owner could admit.
+        require(
+            pi.committeeCommitment == _currentCommittee
+                || (late && _prevCommittee != 0 && pi.committeeCommitment == _prevCommittee),
+            ERR_WRONG_COMMITTEE
+        );
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -380,6 +395,7 @@ contract EthBeaconLightClient {
         ensureBalance();
 
         uint256 from = _currentCommittee;
+        _prevCommittee = from;
         _currentCommittee = pi.nextCommitteeCommitment;
         _committeePeriod = pi.period;
 
@@ -556,6 +572,7 @@ contract EthBeaconLightClient {
     {
         require(_ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();
+        _prevCommittee = _currentCommittee;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
     }
@@ -602,6 +619,7 @@ contract EthBeaconLightClient {
         );
         ensureBalance();
         uint256 from = _currentCommittee;
+        _prevCommittee = from;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
         _reAnchorsApplied += 1;
@@ -624,6 +642,7 @@ contract EthBeaconLightClient {
             _finalizedExecutionBlockHash,
             _updatesApplied,
             _currentCommittee,
+            _prevCommittee,
             _committeePeriod,
             _ownerRotationEnabled,
             _reAnchorsApplied,
@@ -649,6 +668,7 @@ contract EthBeaconLightClient {
          uint256 finalizedExecutionBlockHash,
          uint64 updatesApplied,
          uint256 currentCommittee,
+         uint256 prevCommittee,
          uint64 committeePeriod,
          bool ownerRotationEnabled,
          uint64 reAnchorsApplied,
@@ -659,7 +679,7 @@ contract EthBeaconLightClient {
          TvmCell userCell)
             = abi.decode(cell, (
                 uint256, uint256, uint64, uint256, uint256, uint64,
-                uint256, uint64, bool, uint64,
+                uint256, uint256, uint64, bool, uint64,
                 mapping(uint256 => uint64), mapping(uint64 => uint256), uint64, uint64,
                 TvmCell
             ));
@@ -670,6 +690,7 @@ contract EthBeaconLightClient {
         _finalizedExecutionBlockHash = finalizedExecutionBlockHash;
         _updatesApplied = updatesApplied;
         _currentCommittee = currentCommittee;
+        _prevCommittee = prevCommittee;
         _committeePeriod = committeePeriod;
         _ownerRotationEnabled = ownerRotationEnabled;
         _reAnchorsApplied = reAnchorsApplied;

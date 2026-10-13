@@ -129,7 +129,7 @@ sequenceDiagram
 What the contract checks, in order (`contracts/an/EthBeaconLightClient.sol:248`): the public
 inputs parse; at least 342 of 512 committee members signed (also enforced in-circuit); the
 proof's committee commitment equals the anchored one; the finalized slot moves the head forward
-(or back-fills a skipped checkpoint of the current committee); then `tvm.accept()` and the opcode.
+(or back-fills a skipped checkpoint, signed by the committee in force or by the one a rotation replaced); then `tvm.accept()` and the opcode.
 The contract pays for the verification itself, which is why it holds a balance and why a bad
 proof only wastes the contract's gas. `submitUpdate` is permissionless: the proof is the
 authorization.
@@ -210,7 +210,7 @@ an older node the light client throws on an unknown opcode. `EthKeccak.sol` keep
 
 **What a span needs.** Both of its ends have to be proven checkpoints no more than 32 blocks
 apart. The head only moves forward, but the contract still accepts a skipped checkpoint of the
-current committee behind the head, with its own proof and its own slot — which is what would put
+committee behind the head, with its own proof and its own slot — the signer may be the committee in force or the one the last rotation replaced, so a skip at a period edge is not lost — which is what would put
 the bracketing anchors back within a span's reach. **Nothing in this repository performs that
 late registration today:** the daemon proves only the latest finality update and no subcommand
 proves an older one. A step proof takes longer than an epoch (§6), so accepted checkpoints are

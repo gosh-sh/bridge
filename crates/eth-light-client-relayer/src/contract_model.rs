@@ -62,6 +62,10 @@ pub struct LightClient {
     pub finalized_slot: u64,
     pub exec_hash: [u8; 32],
     pub committee: [u8; 32],
+    /// The commitment `committee` replaced; accepted for late registration
+    /// only, so a checkpoint skipped near a period boundary is not lost when
+    /// the rotation lands.
+    pub prev_committee: [u8; 32],
     pub period: u64,
     pub owner_rotation_enabled: bool,
     pub re_anchors_applied: u64,
@@ -83,6 +87,7 @@ impl LightClient {
             finalized_slot: 0,
             exec_hash: [0; 32],
             committee,
+            prev_committee: [0; 32],
             period,
             owner_rotation_enabled: true,
             re_anchors_applied: 0,
@@ -147,13 +152,15 @@ impl LightClient {
         if self.committee == [0; 32] {
             return Err(LcError::CommitteeUnset);
         }
-        if committee != self.committee {
-            return Err(LcError::WrongCommittee);
-        }
         let advancing = slot > self.finalized_slot;
         let late = slot < self.finalized_slot && !self.is_live(&exec);
         if !advancing && !late {
             return Err(LcError::StaleUpdate);
+        }
+        let signer_ok = committee == self.committee
+            || (late && self.prev_committee != [0; 32] && committee == self.prev_committee);
+        if !signer_ok {
+            return Err(LcError::WrongCommittee);
         }
         if late && !self.within_year(slot) {
             return Err(LcError::StaleUpdate);
@@ -228,6 +235,7 @@ impl LightClient {
         if !self.owner_rotation_enabled {
             return Err(LcError::OwnerRotationDisabled);
         }
+        self.prev_committee = self.committee;
         self.committee = commitment;
         self.period = period;
         Ok(())
@@ -258,6 +266,7 @@ impl LightClient {
         if commitment == self.committee && period == self.period {
             return Err(LcError::ReanchorNoop);
         }
+        self.prev_committee = self.committee;
         self.committee = commitment;
         self.period = period;
         self.re_anchors_applied += 1;
@@ -447,6 +456,44 @@ mod tests {
         c.submit_update(32, older, [0xC0; 32]).unwrap();
         c.submit_update(64, newer, [0xC0; 32]).unwrap();
         chain
+    }
+
+    /// A checkpoint skipped near the end of a period is signed by the
+    /// committee that the rotation then replaces. Without accepting that
+    /// signer for late registration, those 32 blocks are unanchorable for
+    /// good and only the owner can admit their deposits.
+    #[test]
+    fn a_checkpoint_skipped_before_a_rotation_can_still_be_registered() {
+        let old_committee = [0xC0; 32];
+        let new_committee = [0xC1; 32];
+        let mut c = LightClient::bootstrap(old_committee, 1);
+        c.submit_update(64, [0xAA; 32], old_committee).unwrap();
+
+        // Slot 32 was never proven, and the committee rotates before it is.
+        c.set_committee(new_committee, 2).unwrap();
+        assert_eq!(c.committee, new_committee);
+
+        c.submit_update(32, [0xBB; 32], old_committee)
+            .expect("the skipped checkpoint must still be registrable");
+        assert!(c.is_live(&[0xBB; 32]));
+        assert_eq!(c.finalized_slot, 64, "late registration must not move the head");
+    }
+
+    /// The old committee is for catching up only: it must never move the head.
+    #[test]
+    fn the_previous_committee_cannot_advance_the_head() {
+        let old_committee = [0xC0; 32];
+        let new_committee = [0xC1; 32];
+        let mut c = LightClient::bootstrap(old_committee, 1);
+        c.submit_update(64, [0xAA; 32], old_committee).unwrap();
+        c.set_committee(new_committee, 2).unwrap();
+
+        assert_eq!(
+            c.submit_update(96, [0xCC; 32], old_committee).unwrap_err(),
+            LcError::WrongCommittee
+        );
+        assert_eq!(c.finalized_slot, 64);
+        assert!(!c.is_live(&[0xCC; 32]));
     }
 
     #[test]

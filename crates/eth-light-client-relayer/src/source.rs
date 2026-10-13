@@ -386,9 +386,15 @@ impl EthExecutionRpc {
     /// because `submitAncestry` requires both ends to be proven anchors. It
     /// covers three cases the caller cannot tell apart: `older` is further
     /// back than `max` headers, `older` is not an ancestor of `newer` at all,
-    /// and the two are adjacent with nothing in between. An `Err` is a
-    /// transport failure — the distinction matters, because the caller retries
-    /// an `Err` for free and gives up on a `None`.
+    /// and the two are adjacent with nothing in between.
+    ///
+    /// An `Err` is usually a transport failure, which the caller retries for
+    /// free, but not always: a header whose RLP does not hash back to the hash
+    /// it was fetched for, and an encoder that is behind the current fork, come
+    /// back the same way and fail identically on every attempt. Such a span is
+    /// held for the whole fetch grace under a "will retry" warning and then
+    /// given up as unfetchable, which is the right end state but a misleading
+    /// log on the way to it.
     pub async fn ancestry_span(
         &self,
         newer: [u8; 32],

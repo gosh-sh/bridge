@@ -189,7 +189,8 @@ contract EthBeaconLightClient {
     ///               to the committee proven to sit in the signed state's
     ///               `next_sync_committee` slot; becomes the new trusted one
     ///           [14] period                        — the sync-committee period the
-    ///               hand-off advances into (monotonic anti-replay)
+    ///               hand-off installs, derived from the proven head — the
+    ///               proof's own label is not stored and nothing gates on it
     ///
     ///         ⚠ The 12 accumulator limbs are the recursion's KZG accumulator.
     ///         `ZKHALO2VERIFYWITHVK` verifies the aggregation proof with a plain
@@ -221,8 +222,10 @@ contract EthBeaconLightClient {
     uint64  _updatesApplied;
 
     // The trusted sync-committee Poseidon commitment for the current period.
-    // Every step proof's committee_commitment (PI #5) must equal this — that is
-    // the join that pins the aggregated signers to the chain-anchored committee.
+    // A step proof's committee_commitment (PI #5) must equal this, or — for a
+    // late registration only, inside the window below — the commitment this
+    // one replaced. That is the join that pins the aggregated signers to a
+    // chain-anchored committee.
     // Fail-closed: 0 rejects all updates until bootstrapped.
     uint256 _currentCommittee;
     // The commitment `_currentCommittee` replaced. A checkpoint skipped near
@@ -254,9 +257,14 @@ contract EthBeaconLightClient {
     // boundary needs the circuit to bind the hand-off to a slot.
     uint64 _prevCommitteeHeadSlot;
 
-    // The sync-committee period `_currentCommittee` belongs to. Monotonic —
-    // `submitRotate` only advances to a strictly later period. Bootstrapped with
-    // the weak-subjectivity checkpoint's period.
+    // The sync-committee period `_currentCommittee` belongs to, as a report
+    // for operators: `submitRotate` derives it from the proven head and
+    // nothing gates on it. Not monotonic any more. A client bootstrapped at a
+    // real period and rotated before its first accepted update stores 1, which
+    // is lower than the bootstrap value, and `CommitteeRotated` reports that.
+    // `reAnchorCommittee` compares its argument against this derived number,
+    // so the owner's "do not go backwards" guard is only as good as the head.
+    // Bootstrapped with the weak-subjectivity checkpoint's period.
     uint64 _committeePeriod;
 
     // Whether the owner may still advance the committee directly via
@@ -293,7 +301,8 @@ contract EthBeaconLightClient {
     ///                                to leave unset (rejects all updates until
     ///                                `setCommitteeCommitment`).
     /// @param bootstrapPeriod       — the sync-committee period `bootstrapCommittee`
-    ///                                belongs to (the rotate monotonicity baseline).
+    ///                                belongs to (recorded as-is on this owner
+    ///                                path; `submitRotate` derives its own).
     constructor(
         uint256 pubkey,
         uint256 l1ChainId,
@@ -369,13 +378,12 @@ contract EthBeaconLightClient {
         if (late) {
             require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
-        // The signer must be the committee that served the attested slot's
-        // period. The one in force covers its own period; the one a rotation
-        // replaced covers the period before it, and only for late
-        // registration. Without the period test a replaced committee could
-        // sign any slot in the one-year window — including slots of the
-        // period after it, which it never attested — and mint-backing hashes
-        // would follow from a committee that has left office.
+        // The signer is the committee in force, or the one a rotation
+        // replaced and that one for late registration only, inside a band of
+        // slots around the head it left. There is no test against the attested
+        // slot's period, and there cannot be one here: see the header comment.
+        // The band is what keeps a replaced committee from signing anywhere in
+        // the one-year window; it is not a period boundary.
         bool currentSigner = pi.committeeCommitment == _currentCommittee;
         bool prevSigner = late
             && _prevCommittee != 0
@@ -394,7 +402,7 @@ contract EthBeaconLightClient {
             ERR_INVALID_ZKPROOF
         );
 
-        // `_evictExpired` can queue `MAX_EVICT_PER_TX` forgets and the push one
+        // `_evictExpired` can queue `MAX_FORGETS_PER_TX` forgets and the push one
         // notify, which is more than the bare floor; see
         // `ensureBalanceForSinks`.
         ensureBalanceForSinks(MAX_FORGETS_PER_TX + 1);
@@ -702,7 +710,9 @@ contract EthBeaconLightClient {
     ///         is emitted). `disableOwnerRotation()` turns this off permanently,
     ///         leaving the rotate proof as the only committee-advance path.
     /// @param committeeCommitment — the period's sync-committee Poseidon commitment.
-    /// @param period             — the period it belongs to (rotate monotonicity baseline).
+    /// @param period             — the period it belongs to, recorded as-is:
+    ///                             this is an owner path, and `submitRotate`
+    ///                             derives its own period from the head.
     function setCommitteeCommitment(uint256 committeeCommitment, uint64 period)
         public onlyOwnerPubkey accept
     {

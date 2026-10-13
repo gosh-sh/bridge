@@ -15,6 +15,10 @@ pub const SLOTS_PER_PERIOD: u64 = 8192;
 /// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
 pub const MAX_EVICT_PER_TX: usize = 128;
 
+/// Matches `EthBeaconLightClient.MAX_FORGETS_PER_TX`: the separate cap on sink
+/// messages, which is what has to fit under the balance floor.
+pub const MAX_FORGETS_PER_TX: usize = 32;
+
 /// `EthBeaconLightClient._piForm` over big-endian bytes: each 16-byte half
 /// reversed. The step circuit reads each half of a hash little-endian, so the
 /// contract keys its proven set by this form of the Ethereum-order hash, while
@@ -130,7 +134,12 @@ impl LightClient {
 
     fn evict_expired(&mut self) {
         let mut n = 0usize;
-        while !self.queue.is_empty() && n < MAX_EVICT_PER_TX {
+        let mut dropped = 0usize;
+        // Two caps, as the contract has: examinations, and separately the
+        // forgets — each of those is a message the light client pays for in
+        // the action phase, and the worst case one call can queue has to fit
+        // under its balance floor.
+        while !self.queue.is_empty() && n < MAX_EVICT_PER_TX && dropped < MAX_FORGETS_PER_TX {
             let h = self.queue.pop_front().expect("non-empty");
             n += 1;
             match self.proven.get(&h).copied() {
@@ -138,6 +147,7 @@ impl LightClient {
                 Some(_) => {
                     self.proven.remove(&h);
                     self.sink_forgets.push(pi_form(&h));
+                    dropped += 1;
                 },
                 None => {},
             }
@@ -753,6 +763,40 @@ mod tests {
             &c.sink_notifies[before..],
             &[keccak256(&chain[1]), keccak256(&chain[2])],
             "ancestry must notify the sink in Ethereum byte order, oldest first"
+        );
+    }
+
+    /// Forgets are capped per call separately from examinations, because each
+    /// one is a message the light client pays for in the action phase and the
+    /// worst case has to fit under its balance floor. A cluster of expiries
+    /// therefore comes out over several calls instead of aborting one.
+    #[test]
+    fn a_cluster_of_expiries_is_forgotten_in_capped_batches() {
+        let mut c = lc();
+        let n = MAX_FORGETS_PER_TX + 8;
+        for i in 1..=n {
+            let mut h = [0u8; 32];
+            h[0] = i as u8;
+            h[1] = 0xEE;
+            c.submit_update(32 * i as u64, h, [0xC0; 32]).unwrap();
+        }
+        assert!(c.sink_forgets.is_empty(), "nothing has expired yet");
+
+        // Jump the head a year past all of them: every one is now outside the
+        // window, and the next call compacts.
+        let far = SLOTS_PER_YEAR + 32 * n as u64 + 32;
+        c.submit_update(far, [0xFF; 32], [0xC0; 32]).unwrap();
+        assert_eq!(
+            c.sink_forgets.len(),
+            MAX_FORGETS_PER_TX,
+            "one call must forget at most the cap, not the whole cluster"
+        );
+
+        c.submit_update(far + 32, [0xFE; 32], [0xC0; 32]).unwrap();
+        assert_eq!(
+            c.sink_forgets.len(),
+            n,
+            "the rest must come out on the following calls, not be dropped"
         );
     }
 

@@ -125,8 +125,11 @@ assigns it when the release is tagged.
   submit-ancestry` takes a new required `--older-anchor-hash` next to
   `--checkpoint-hash` (the newer anchor), and `--max-headers` now defaults to
   33. Without this change every `submitAncestry` the old relayer sent would
-  revert with `ERR_BAD_ANCESTRY`: it built the payload newest-first and capped
-  it at 32.
+  be refused: it built the payload newest-first and capped it at 32, so its
+  last header is not a proven anchor and the call fails the two-end check with
+  `ERR_UNKNOWN_CHECKPOINT` (249) — before `tvm.accept()`, so the message is
+  rejected outright rather than reverting on chain and costing the client
+  gas.
 
   What an operator sees from the daemon. Each checkpoint the chain confirms —
   whether this call put it on the head or an earlier one did and its
@@ -169,7 +172,8 @@ assigns it when the release is tagged.
   where it used to be up to 128, and more transactions to work through a large
   expiry cluster. Measured on a locally built node: a 33-header span with the
   client at exactly 100 vmshell now completes with action code 0 and all 31
-  blocks anchored, where 1.4.7 aborted. The mint is not what makes this safe:
+  blocks anchored; with the old 128-forget bound the same call aborts in the
+  action phase at that balance. The mint is not what makes this safe:
   `gosh.mintshellq` is clamped to the dapp's credit and quietly yields nothing
   when that is spent — on a self-rooted test deployment it yields nothing at
   all — which is why the bound, not the mint, is the fix.
@@ -214,9 +218,13 @@ assigns it when the release is tagged.
   the next rotation, and the late path stays closed until both are non-zero.
 
   `getCommitteeState` gains a `prevCommittee` output and no other function or
-  event changes — but it is inserted **second**, so anything reading those
-  outputs positionally shifts. The in-repo readers (`status.sh`,
-  `deploy-contract.sh`, the relayer's embedded ABI) take them by name. The
+  event changes. **Every caller of that getter has to take the new ABI**, not
+  just positional ones: the compiled ABI is version 2.4 with no explicit
+  function id, so the id is derived from the signature including its outputs,
+  and an added `uint256` output changes it. A caller still holding the 1.4.1
+  ABI sends an id this code does not dispatch and the getter simply fails. In
+  this repository `status.sh`, `deploy-contract.sh` and the relayer's embedded
+  copy are all updated. The
   ABI's `fields` section gains `_prevCommittee` and `_prevCommitteeHeadSlot`
   at positions 11 and 12, so account data decoded with the 1.4.1 ABI reads
   rubbish from `_committeePeriod` onward: anything decoding this client's state
@@ -254,8 +262,7 @@ assigns it when the release is tagged.
   operators, approximate while the head lags, and nothing gates on it.
 
   `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
-  (`ERR_SELF_ROTATION`, 253 — the code `ERR_PERIOD_TOO_FAR` held in earlier
-  commits of this branch, which never shipped). A genuine proof with
+  (`ERR_SELF_ROTATION`, 253). A genuine proof with
   `next == current` exists for every period boundary: the last header of a
   period is signed in the next one and its state still carries the signer as
   `next_sync_committee`. It would have passed, changed nothing visible, and

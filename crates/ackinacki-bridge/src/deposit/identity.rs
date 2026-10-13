@@ -293,6 +293,7 @@ mod tests {
             "confirmDeposit",
             "isPaused",
             "getAnchorConfig",
+            "isOwnerAnchorsEnabled",
             "isAcceptedBlockHash",
             "isTrustedL1Bridge",
             "getDepositVoucherCodeHash",

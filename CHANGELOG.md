@@ -37,7 +37,11 @@ assigns it when the release is tagged.
   is unchanged. The bridge reports 1.8.0. Rebuild `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade
   the premined 1.7.0 bridge; `onCodeUpgrade` still does not carry the mapping
   or the stored L1 id, so an upgraded bridge starts with the owner
-  writer on for every chain. Do not flip until `submitAncestry` fits
+  writer on for every chain. `disableOwnerAnchors` then reverts 226
+  until `deployLightClient` runs again and stores the L1 id.
+  `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` for
+  the deposit's chain, so an L1 flip does not refuse L2 deposits.
+  Do not flip until `submitAncestry` fits
   the gas limit: the light client still covers 1 of 32 L1 blocks, and
   `eth-lc-relayer` still leaves the flip off unless started with
   `--flip-owner`.

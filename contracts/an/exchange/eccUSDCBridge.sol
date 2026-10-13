@@ -648,8 +648,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         deposit allowlist) keep `setAcceptedBlockHash`. This is the
     ///         call that turns the L1 trust assumption from "the owner key"
     ///         into "a proof of Ethereum finality".
-    /// @dev One-way, with no re-enable. Requires a deployed light client,
-    ///      so this cannot brick the only working writer on L1. Idempotent.
+    /// @dev One-way, with no re-enable. Requires `setLightClientCode` (so
+    ///      `_lightClient` is non-zero) and a stored L1 id from
+    ///      `deployLightClient`. It does not check that the light-client
+    ///      account is Active; flipping after `setLightClientCode` and
+    ///      before a successful deploy leaves that L1 with no writer until
+    ///      `deployLightClient` runs again. Idempotent.
     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
         _disableOwnerAnchors(_lightClientL1ChainId);
     }
@@ -711,7 +715,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Anchor-path configuration: the light client and whether the
     ///         owner may still admit anchors on the light client's L1.
     ///         Other chain ids keep the owner writer; query
-    ///         `ownerAnchorsEnabled(chainId)` for those.
+    ///         `isOwnerAnchorsEnabled(chainId)` for those.
     function getAnchorConfig() external view returns (address lightClient, bool ownerAnchorsEnabled) {
         return (_lightClient, _lightClientL1ChainId == 0 || !_ownerAnchorsDisabled[_lightClientL1ChainId]);
     }

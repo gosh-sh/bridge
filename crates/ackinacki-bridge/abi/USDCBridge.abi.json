@@ -171,6 +171,15 @@
 			]
 		},
 		{
+			"name": "isOwnerAnchorsEnabled",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
 			"name": "isPaused",
 			"inputs": [
 			],

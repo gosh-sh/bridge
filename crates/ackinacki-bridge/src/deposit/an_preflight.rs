@@ -268,9 +268,16 @@ pub async fn run_with(
     }
     let cfg = get("getAnchorConfig", json!({})).await;
     let light_client = cfg["lightClient"].as_str().and_then(parse_an_address);
-    let owner_anchors_enabled = cfg["ownerAnchorsEnabled"]
+    // After this PR `getAnchorConfig().ownerAnchorsEnabled` is the light
+    // client's L1 only. The deposit's own chain is `isOwnerAnchorsEnabled`.
+    let per_chain = get(
+        "isOwnerAnchorsEnabled",
+        json!({ "chainId": chain_id.to_string() }),
+    )
+    .await;
+    let owner_anchors_enabled = per_chain["value0"]
         .as_bool()
-        .ok_or_else(|| refuse(format!("getAnchorConfig answered {cfg}")))?;
+        .ok_or_else(|| refuse(format!("isOwnerAnchorsEnabled answered {per_chain}")))?;
     let ch = get("getDepositVoucherCodeHash", json!({})).await;
     let mut voucher_code_hash = [0u8; 32];
     hex::decode_to_slice(
@@ -347,6 +354,9 @@ mod tests {
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "getAnchorConfig", vec![
             json!({ "lightClient": format!("0:{}", "20".repeat(32)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
+            json!({ "value0": true }),
         ]);
         an.getter(
             BRIDGE,

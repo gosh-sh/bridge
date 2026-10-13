@@ -1703,15 +1703,19 @@ does this in a released binary.
 ### When only the light client anchors
 
 `getAnchorConfig()` returns the light client and whether owner anchors are
-enabled.
+still enabled on the light client's L1. The deposit's own chain is
+`isOwnerAnchorsEnabled(chainId)`: after an L1 flip, L2 deposits keep the
+owner writer.
 
-- **Owner anchors enabled** (the shellnet deploy): the owner anchors the
-  deposit's block by hand, with no time limit. The light client may anchor it
-  too; preflight checks whether it could, but only to word the status line.
-- **Owner anchors disabled**: only the light client anchors, and the owner can
-  no longer help. Preflight lets a deposit through only if the light client
-  demonstrably anchors blocks a deposit can use, and otherwise refuses with
-  exit 2, naming the first check that failed:
+- **Owner anchors enabled on this chain** (the shellnet deploy, and every
+  L2 after an L1 flip): the owner anchors the deposit's block by hand, with
+  no time limit. The light client may anchor it too; preflight checks
+  whether it could, but only to word the status line.
+- **Owner anchors disabled on this chain** (the light client's L1 after
+  `disableOwnerAnchors`): only the light client anchors, and the owner can
+  no longer help on that L1. Preflight lets a deposit through only if the
+  light client demonstrably anchors blocks a deposit can use, and otherwise
+  refuses with exit 2, naming the first check that failed:
   1. the light client follows the deposit's chain (`getConfig().l1ChainId`) —
      never the case for an L2, which the light client does not cover;
   2. the bridge accepts the light client's head block under its real hash;

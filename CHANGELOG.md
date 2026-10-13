@@ -78,7 +78,7 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `1335cee5…6894a5d5`, and `getVersion` reports 1.4.4 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
+  code hash moves `314ac6b8…6092f5` → `37ea44d6…489fae8d`, and `getVersion` reports 1.4.5 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
@@ -109,21 +109,24 @@ assigns it when the release is tagged.
   its anchors are the ones most likely outside the one-year window.
 
   The pair is fixed when the span is queued and each entry carries its own
-  accounting, which is what earlier versions of this change got wrong: a
-  single cursor and a single counter cannot represent two owed spans, so one
-  was dropped silently, or both were merged into a request spanning two epochs
-  that no call can carry, or a refusal of one spent the other's budget. The
-  state file gains `owed_spans`, which defaults to empty, so an existing state
-  file is read as before.
+  accounting, so a span is never re-paired with a later checkpoint and one
+  span's refusal cannot spend another's budget. The state file gains
+  `owed_spans`, which defaults to empty, so an existing state file is read as
+  before.
 
 - **A checkpoint skipped near the end of a sync-committee period can still be
   registered after the rotation.** `submitUpdate` keeps the commitment a
   `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
   for late registration only — never to move the head, which still needs the
-  committee in force. The signer must match the period of the attested slot:
-  the committee in force covers its own period, the replaced one covers the
-  period before it and nothing else, so a committee that has left office
-  cannot write hashes for slots it never attested. The owner hatches
+  committee in force. The replaced committee may sign only around
+  the head it left behind: the attested slot must be at or before the
+  finalized slot recorded when the rotation landed, and no more than one
+  period before it. The bound is a slot and not the period label on purpose —
+  the rotate circuit loads its period as a free witness
+  (`rotate_aggregation.rs`), so a valid hand-off can be labelled with any
+  later period, and a window measured in periods could be moved onto slots the
+  replaced committee never attested. A finalized slot is read out of the
+  signed header by the step circuit, so it cannot be relabelled. The owner hatches
   (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
   rather than carrying it: they replace a committee the owner is rejecting, or
   jump several periods, so neither is a hand-off. `getCommitteeState` returns
@@ -133,9 +136,7 @@ assigns it when the release is tagged.
   the 32 blocks of that epoch could only be admitted by the owner's
   `setAcceptedBlockHash`, and not at all after `disableOwnerAnchors`. A period
   is about 27 hours and a step proof takes longer than an epoch, so a skip at
-  the edge of a period was the likely case, not a corner one. The same applies
-  to the owner hatches: `setCommitteeCommitment` and `reAnchorCommittee` also
-  keep what they replace.
+  the edge of a period was the likely case, not a corner one.
 
   `_prevCommittee` is **not** in the `updateCode` migration cell, and must not
   be: that cell is built by the code being replaced, so a live 1.4.1 client
@@ -144,8 +145,9 @@ assigns it when the release is tagged.
   `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
   upgraded client therefore starts with no previous committee, which only
   means no catch-up across the rotation already behind it; the field fills on
-  the next rotation. The ABI's function and event surface is unchanged, its
-  `fields` section gains `_prevCommittee`.
+  the next rotation. `getCommitteeState` gains a `prevCommittee`
+  output; no other function or event changes, and the ABI's `fields` section
+  gains `_prevCommittee`.
 
 - **The deposit-prover verification key is rotated again, for Amsterdam
   block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch

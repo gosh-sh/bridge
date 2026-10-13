@@ -68,6 +68,10 @@ pub struct LightClient {
     /// only, so a checkpoint skipped near a period boundary is not lost when
     /// the rotation lands.
     pub prev_committee: [u8; 32],
+    /// The finalized slot the head stood on when `prev_committee` left
+    /// office. The window is measured from this, not from the period label,
+    /// which the rotate circuit does not constrain.
+    pub prev_committee_head_slot: u64,
     pub period: u64,
     pub owner_rotation_enabled: bool,
     pub re_anchors_applied: u64,
@@ -90,6 +94,7 @@ impl LightClient {
             exec_hash: [0; 32],
             committee,
             prev_committee: [0; 32],
+            prev_committee_head_slot: 0,
             period,
             owner_rotation_enabled: true,
             re_anchors_applied: 0,
@@ -173,17 +178,21 @@ impl LightClient {
         if !advancing && !late {
             return Err(LcError::StaleUpdate);
         }
+        // The contract tests the year window before the committee, so a stale
+        // update signed by the wrong committee reports StaleUpdate, not
+        // WrongCommittee. The order is part of what this replica pins.
+        if late && !self.within_year(slot) {
+            return Err(LcError::StaleUpdate);
+        }
         let prev_ok = late
             && self.prev_committee != [0; 32]
             && committee == self.prev_committee
-            && self.period > 0
-            && attested_slot / SLOTS_PER_PERIOD == self.period - 1;
+            && self.prev_committee_head_slot != 0
+            && attested_slot <= self.prev_committee_head_slot
+            && attested_slot + SLOTS_PER_PERIOD >= self.prev_committee_head_slot;
         let signer_ok = committee == self.committee || prev_ok;
         if !signer_ok {
             return Err(LcError::WrongCommittee);
-        }
-        if late && !self.within_year(slot) {
-            return Err(LcError::StaleUpdate);
         }
         if advancing {
             self.finalized_slot = slot;
@@ -262,6 +271,7 @@ impl LightClient {
             return Err(LcError::StalePeriod);
         }
         self.prev_committee = self.committee;
+        self.prev_committee_head_slot = self.finalized_slot;
         self.committee = next;
         self.period = period;
         Ok(())
@@ -272,6 +282,7 @@ impl LightClient {
             return Err(LcError::OwnerRotationDisabled);
         }
         self.prev_committee = [0; 32];
+        self.prev_committee_head_slot = 0;
         self.committee = commitment;
         self.period = period;
         Ok(())
@@ -303,6 +314,7 @@ impl LightClient {
             return Err(LcError::ReanchorNoop);
         }
         self.prev_committee = [0; 32];
+        self.prev_committee_head_slot = 0;
         self.committee = commitment;
         self.period = period;
         self.re_anchors_applied += 1;
@@ -310,9 +322,14 @@ impl LightClient {
     }
 
     /// `updateCode` / `onCodeUpgrade` keep committee, head, proven set, hatch
-    /// counter.
+    /// counter — but not the previous committee: the migration cell is built
+    /// by the code being replaced, so the field is absent and the upgraded
+    /// client starts with no window.
     pub fn snapshot(&self) -> Self {
-        self.clone()
+        let mut next = self.clone();
+        next.prev_committee = [0; 32];
+        next.prev_committee_head_slot = 0;
+        next
     }
 }
 
@@ -510,7 +527,7 @@ mod tests {
         assert_eq!(c.committee, new_committee);
 
         // Attested inside the period the old committee served.
-        c.submit_update_at(32, SLOTS_PER_PERIOD, [0xBB; 32], old_committee)
+        c.submit_update_at(32, 64, [0xBB; 32], old_committee)
             .expect("the skipped checkpoint must still be registrable");
         assert!(c.is_live(&[0xBB; 32]));
         assert_eq!(
@@ -519,11 +536,12 @@ mod tests {
         );
     }
 
-    /// The replaced committee may only sign the period it actually served.
-    /// Without this it could sign any slot in the one-year window, including
-    /// slots of the period after it, and the hashes it wrote would back mints.
+    /// The replaced committee may only sign around the head it left behind.
+    /// Without that bound it could sign any slot in the one-year window,
+    /// including slots it never attested, and the hashes it wrote would back
+    /// mints.
     #[test]
-    fn the_replaced_committee_cannot_sign_outside_its_own_period() {
+    fn the_replaced_committee_cannot_sign_past_the_head_it_left() {
         let old_committee = [0xC0; 32];
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
@@ -550,6 +568,29 @@ mod tests {
         assert!(!c.is_live(&[0xDD; 32]));
     }
 
+    /// Nor anything more than one period before that head.
+    #[test]
+    fn the_replaced_committee_cannot_sign_long_before_its_window() {
+        let old_committee = [0xC0; 32];
+        let new_committee = [0xC1; 32];
+        let mut c = LightClient::bootstrap(old_committee, 1);
+        c.submit_update_at(
+            3 * SLOTS_PER_PERIOD,
+            3 * SLOTS_PER_PERIOD,
+            [0xAA; 32],
+            old_committee,
+        )
+        .unwrap();
+        c.rotate(new_committee, 4).unwrap();
+
+        assert_eq!(
+            c.submit_update_at(100, 100, [0xDD; 32], old_committee)
+                .unwrap_err(),
+            LcError::WrongCommittee
+        );
+        assert!(!c.is_live(&[0xDD; 32]));
+    }
+
     /// The owner hatches replace a committee the owner is rejecting, so it
     /// must not keep the late-registration window.
     #[test]
@@ -564,8 +605,7 @@ mod tests {
             "the rejected committee is not kept"
         );
         assert_eq!(
-            c.submit_update_at(32, SLOTS_PER_PERIOD, [0xBB; 32], bad)
-                .unwrap_err(),
+            c.submit_update_at(32, 64, [0xBB; 32], bad).unwrap_err(),
             LcError::WrongCommittee
         );
     }
@@ -661,6 +701,34 @@ mod tests {
         assert_eq!(
             c.submit_ancestry(&too_long).unwrap_err(),
             LcError::AncestryTooLong
+        );
+    }
+
+    /// The migration cell is built by the code being replaced, so it carries
+    /// no previous committee: an upgraded client must start with no window
+    /// rather than inherit one that is not in the cell.
+    #[test]
+    fn upgrade_clears_the_previous_committee_window() {
+        let mut c = LightClient::bootstrap([0xC0; 32], 1);
+        c.submit_update(64, [0xAA; 32], [0xC0; 32]).unwrap();
+        c.rotate([0xC1; 32], 2).unwrap();
+        assert_ne!(c.prev_committee, [0; 32], "the rotation armed the window");
+        assert_ne!(c.prev_committee_head_slot, 0);
+
+        let restored = c.snapshot();
+        assert_eq!(restored.prev_committee, [0; 32]);
+        assert_eq!(restored.prev_committee_head_slot, 0);
+        assert_eq!(
+            restored.committee, [0xC1; 32],
+            "the committee in force survives"
+        );
+        assert_eq!(
+            restored
+                .clone()
+                .submit_update_at(32, 64, [0xBB; 32], [0xC0; 32])
+                .unwrap_err(),
+            LcError::WrongCommittee,
+            "no window after the upgrade"
         );
     }
 

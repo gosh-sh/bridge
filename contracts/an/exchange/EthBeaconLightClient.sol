@@ -55,7 +55,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.4";
+    string constant version = "1.4.5";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -205,6 +205,14 @@ contract EthBeaconLightClient {
     // would reject it for ever. Accepted for late registration only, never to
     // move the head forward. 0 before the first rotation.
     uint256 _prevCommittee;
+    // The finalized slot the head stood on when `_prevCommittee` left office.
+    // The window is measured from this and not from `_committeePeriod`: the
+    // rotate circuit takes its period as a free witness (`rotate_aggregation`
+    // loads it unconstrained), so a valid hand-off can be labelled with any
+    // later period, which would move the window onto a period the replaced
+    // committee never served. A finalized slot comes from the step circuit,
+    // where it is read out of the signed header, so it cannot be relabelled.
+    uint64 _prevCommitteeHeadSlot;
 
     // The sync-committee period `_currentCommittee` belongs to. Monotonic —
     // `submitRotate` only advances to a strictly later period. Bootstrapped with
@@ -314,8 +322,9 @@ contract EthBeaconLightClient {
         bool prevSigner = late
             && _prevCommittee != 0
             && pi.committeeCommitment == _prevCommittee
-            && _committeePeriod > 0
-            && pi.attestedSlot / SLOTS_PER_PERIOD == _committeePeriod - 1;
+            && _prevCommitteeHeadSlot != 0
+            && pi.attestedSlot <= _prevCommitteeHeadSlot
+            && pi.attestedSlot + SLOTS_PER_PERIOD >= _prevCommitteeHeadSlot;
         require(currentSigner || prevSigner, ERR_WRONG_COMMITTEE);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
@@ -406,6 +415,7 @@ contract EthBeaconLightClient {
 
         uint256 from = _currentCommittee;
         _prevCommittee = from;
+        _prevCommitteeHeadSlot = _finalizedSlot;
         _currentCommittee = pi.nextCommitteeCommitment;
         _committeePeriod = pi.period;
 
@@ -585,6 +595,7 @@ contract EthBeaconLightClient {
         // A correction, not a hand-off: the committee being replaced is the
         // one the owner is rejecting, so it must not keep write access.
         _prevCommittee = 0;
+        _prevCommitteeHeadSlot = 0;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
     }
@@ -634,6 +645,7 @@ contract EthBeaconLightClient {
         // Same reasoning as `setCommitteeCommitment`, and a re-anchor may jump
         // over several periods, so what it replaces is not the period before.
         _prevCommittee = 0;
+        _prevCommitteeHeadSlot = 0;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
         _reAnchorsApplied += 1;
@@ -709,6 +721,7 @@ contract EthBeaconLightClient {
         // with no previous committee, which only means no catch-up across the
         // rotation already behind it.
         _prevCommittee = 0;
+        _prevCommitteeHeadSlot = 0;
         _committeePeriod = committeePeriod;
         _ownerRotationEnabled = ownerRotationEnabled;
         _reAnchorsApplied = reAnchorsApplied;

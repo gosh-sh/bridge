@@ -233,6 +233,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             } => Ok(TickOutcome::AnPending {
                 reason,
             }),
+            // Nothing reached the chain, so the next tick simply tries again.
+            SubmitOutcome::NotSent {
+                reason,
+            } => Ok(TickOutcome::AnPending {
+                reason,
+            }),
         }
     }
 
@@ -350,6 +356,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             } => Ok(TickOutcome::AnPending {
                 reason,
             }),
+            // Nothing reached the chain, so the next tick simply tries again.
+            SubmitOutcome::NotSent {
+                reason,
+            } => Ok(TickOutcome::AnPending {
+                reason,
+            }),
         }
     }
 
@@ -457,7 +469,19 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             return;
         };
         let headers = match rpc.ancestry_span(front.newer, front.older, 33).await {
-            Ok(Some(h)) => h,
+            Ok(Some(h)) => {
+                // The headers arrived, so the grace period starts over if a
+                // later fetch fails; leaving the old start time would give the
+                // span up on the first error after it elapsed.
+                if let Some(f) = self.state.owed_spans.first_mut() {
+                    if f.fetch_since.take().is_some() {
+                        if let Err(e) = self.persist() {
+                            warn!(error = %e, "could not persist the owed-span queue");
+                        }
+                    }
+                }
+                h
+            },
             Ok(None) => {
                 self.settle_front(
                     "no span joins these two anchors — further apart than one call carries, not \
@@ -491,11 +515,25 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 info!(n = headers.len(), "submitAncestry accepted");
                 self.settle_front("sent", false);
             },
+            // Nothing reached the chain, or it may still land: either way the
+            // light client has not paid for a refusal, so the budget that
+            // exists to stop paid resubmissions must not move.
+            Ok(SubmitOutcome::NotSent {
+                reason,
+            })
+            | Ok(SubmitOutcome::Pending {
+                reason,
+            }) => {
+                warn!(
+                    reason,
+                    "submitAncestry did not reach the chain; will retry for free"
+                );
+            },
             Ok(other) => {
                 self.retry_front_paid(format!("{other:?}"));
             },
             Err(e) => {
-                self.retry_front_paid(e.to_string());
+                warn!(error = %e, "submitAncestry call failed before sending; will retry for free");
             },
         }
     }

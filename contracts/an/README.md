@@ -2,7 +2,7 @@
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 `exchange/` — `eccUSDCBridge` at version 1.7.0, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.4.4:
+`EthBeaconLightClient` at 1.4.5:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through

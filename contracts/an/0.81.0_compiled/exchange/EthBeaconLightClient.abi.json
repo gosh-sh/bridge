@@ -247,6 +247,7 @@
 		{"init":false,"name":"_updatesApplied","type":"uint64"},
 		{"init":false,"name":"_currentCommittee","type":"uint256"},
 		{"init":false,"name":"_prevCommittee","type":"uint256"},
+		{"init":false,"name":"_prevCommitteeHeadSlot","type":"uint64"},
 		{"init":false,"name":"_committeePeriod","type":"uint64"},
 		{"init":false,"name":"_ownerRotationEnabled","type":"bool"},
 		{"init":false,"name":"_reAnchorsApplied","type":"uint64"},

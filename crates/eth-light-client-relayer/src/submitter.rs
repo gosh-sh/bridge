@@ -14,10 +14,22 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub enum SubmitOutcome {
-    Accepted { tx_hash: Option<[u8; 32]> },
+    Accepted {
+        tx_hash: Option<[u8; 32]>,
+    },
     AlreadyOnHead,
-    Rejected { reason: String },
-    Pending { reason: String },
+    Rejected {
+        reason: String,
+    },
+    Pending {
+        reason: String,
+    },
+    /// The call never reached the chain — the endpoint was unreachable, the
+    /// request timed out. Nothing was sent and nothing was paid for, so a
+    /// caller that budgets paid attempts must not count this.
+    NotSent {
+        reason: String,
+    },
 }
 
 #[async_trait]
@@ -756,6 +768,28 @@ fn tvm_account_hex(s: &str) -> Option<String> {
 fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
     if msg.contains("244") || msg.contains("STALE_UPDATE") {
         return SubmitOutcome::AlreadyOnHead;
+    }
+    // A transport failure is not a refusal: the chain never saw the call. Told
+    // apart so a caller budgeting paid attempts does not spend them on an
+    // unreachable endpoint.
+    let transport = [
+        "Connection",
+        "connect",
+        "timed out",
+        "timeout",
+        "dns",
+        "DNS",
+        "unreachable",
+        "reset by peer",
+        "sending request",
+        "502",
+        "503",
+        "504",
+    ];
+    if transport.iter().any(|m| msg.contains(m)) {
+        return SubmitOutcome::NotSent {
+            reason: format!("{function}: {msg}"),
+        };
     }
     SubmitOutcome::Rejected {
         reason: format!("{function} failed: {msg}"),

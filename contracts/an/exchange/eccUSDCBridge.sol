@@ -615,7 +615,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Deploys the beacon light client. The bridge is the only account
     ///         allowed to do so: the contract's constructor refuses any other
-    ///         sender, so nothing else can occupy that address.
+    ///         sender, so nothing else can occupy that address. Always writes
+    ///         `l1ChainId` into `_lightClientL1ChainId`, even if the
+    ///         constructor message bounces because the account already exists.
     function deployLightClient(
         uint256 pubkey,
         uint256 l1ChainId,

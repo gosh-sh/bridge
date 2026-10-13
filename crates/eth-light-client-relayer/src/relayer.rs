@@ -168,10 +168,23 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
         }
 
-        if self.state.last_finalized_slot == Some(update.finalized_slot) {
-            return Ok(TickOutcome::Unchanged {
-                finalized_slot: update.finalized_slot,
-            });
+        // Not just equality. A beacon node restarting into sync serves a
+        // finalized slot behind the one on record, and proving it would end in
+        // `ERR_STALE_UPDATE` — which this daemon reads as "already on the
+        // head" and would record, moving its own head backwards and pairing
+        // the next span with the wrong end.
+        if let Some(recorded) = self.state.last_finalized_slot {
+            if update.finalized_slot < recorded {
+                warn!(
+                    reported = update.finalized_slot,
+                    recorded, "beacon source reports a finalized slot behind the one on record"
+                );
+            }
+            if update.finalized_slot <= recorded {
+                return Ok(TickOutcome::Unchanged {
+                    finalized_slot: update.finalized_slot,
+                });
+            }
         }
 
         self.submit_step(update).await
@@ -318,19 +331,24 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Accepted {
                 tx_hash,
             } => {
+                // The head and the span it owes land in one write, and a write
+                // that fails leaves the state as it was: otherwise memory
+                // would hold a head the file does not, the next tick would
+                // read it as unchanged, and the span would be owed by nobody.
+                let before = self.state.clone();
                 self.state.record_update(
                     update.finalized_slot,
                     update.period(),
                     update.execution_block_hash,
                     update.attested_slot,
                 );
-                self.persist()?;
+                self.queue_span(old_head, update.execution_block_hash);
+                if let Err(e) = self.persist() {
+                    self.state = before;
+                    return Err(e);
+                }
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
-                // Queue the span before anything that can return early: the
-                // head has been persisted, so a span not queued here is a span
-                // no later tick can reconstruct.
-                self.maybe_cover_epoch(old_head, update.execution_block_hash)
-                    .await;
+                self.re_push_checkpoint(update.execution_block_hash).await;
                 self.maybe_flip_owner().await?;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
@@ -338,20 +356,25 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 })
             },
             SubmitOutcome::AlreadyOnHead => {
+                // The update is on the head whether this call put it there or
+                // an earlier one did whose outcome never came back. Either way
+                // the head has moved, so the span behind it is owed — queuing
+                // it here is what keeps a lost confirmation from silently
+                // costing those blocks their anchors, and it goes into the
+                // same write as the head.
+                let before = self.state.clone();
                 self.state.record_update(
                     update.finalized_slot,
                     update.period(),
                     update.execution_block_hash,
                     update.attested_slot,
                 );
-                self.persist()?;
-                // The update is on the head whether this call put it there or
-                // an earlier one did whose outcome never came back. Either way
-                // the head has moved, so the span behind it is owed — queuing
-                // it only here is what keeps a lost confirmation from silently
-                // costing those blocks their anchors.
-                self.maybe_cover_epoch(old_head, update.execution_block_hash)
-                    .await;
+                self.queue_span(old_head, update.execution_block_hash);
+                if let Err(e) = self.persist() {
+                    self.state = before;
+                    return Err(e);
+                }
+                self.re_push_checkpoint(update.execution_block_hash).await;
                 Ok(TickOutcome::AlreadyOnHead {
                     finalized_slot: update.finalized_slot,
                 })
@@ -416,28 +439,17 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// `rePushAnchor` belongs here and not to a retry: it is a paid call tied
     /// to this checkpoint, and resending it every tick would burn the light
     /// client's balance for an anchor the bridge already has.
-    /// After a proven checkpoint: re-push the hash to USDCBridge (the first
-    /// push often bounced because the light client was not yet the sink
-    /// writer), and queue the span back to the head it replaced. The span is
-    /// only queued here, never sent — one tick works one span, so a
-    /// checkpoint cannot push a second submission into the same tick.
-    async fn maybe_cover_epoch(&mut self, prev_head: Option<[u8; 32]>, checkpoint: [u8; 32]) {
-        match self.submitter.re_push_anchor(checkpoint).await {
-            Ok(SubmitOutcome::Accepted {
-                ..
-            }) => {
-                info!(
-                    hash = %hex::encode(checkpoint),
-                    "rePushAnchor accepted"
-                );
-            },
-            Ok(other) => {
-                warn!(?other, "rePushAnchor did not accept");
-            },
-            Err(e) => {
-                warn!(error = %e, "rePushAnchor failed");
-            },
-        }
+    /// Queue the span back to the checkpoint the head stood on before. State
+    /// only, no await: the caller persists it in the same write as the head it
+    /// belongs to. That is the whole point of keeping this synchronous — a span
+    /// queued after an await is a span a dropped tick loses, and the head is
+    /// already on file by then, so no later tick reconstructs it. `tick` runs
+    /// inside a `select!` against shutdown, so Ctrl-C drops the future at the
+    /// first await, not only a crash.
+    ///
+    /// The span is never sent here: one tick works one span, so a checkpoint
+    /// cannot push a second submission into the same tick.
+    fn queue_span(&mut self, prev_head: Option<[u8; 32]>, checkpoint: [u8; 32]) {
         let Some(older) = prev_head else {
             info!("no previous checkpoint on record; a span needs an anchor at each end");
             return;
@@ -460,8 +472,28 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             paid_attempts: 0,
             fetch_since: None,
         });
-        if let Err(e) = self.persist() {
-            warn!(error = %e, "could not persist the owed-span queue");
+    }
+
+    /// Re-push the proven hash to USDCBridge. The first push often bounced
+    /// because the light client was not yet the sink writer. Nothing here
+    /// touches the state file, so losing this call costs nothing a later
+    /// `rePushAnchor` cannot redo.
+    async fn re_push_checkpoint(&mut self, checkpoint: [u8; 32]) {
+        match self.submitter.re_push_anchor(checkpoint).await {
+            Ok(SubmitOutcome::Accepted {
+                ..
+            }) => {
+                info!(
+                    hash = %hex::encode(checkpoint),
+                    "rePushAnchor accepted"
+                );
+            },
+            Ok(other) => {
+                warn!(?other, "rePushAnchor did not accept");
+            },
+            Err(e) => {
+                warn!(error = %e, "rePushAnchor failed");
+            },
         }
     }
 
@@ -1301,10 +1333,201 @@ mod tests {
             r.tick().await.unwrap();
         }
         assert!(r.state.owed_spans.is_empty(), "the span must be given up");
+        assert_eq!(
+            mock.ancestry_attempts(),
+            super::MAX_SPAN_ATTEMPTS,
+            "a refused span must cost exactly the budget: not more, and not fewer, or the budget \
+             is not what decides"
+        );
+    }
+
+    /// The head and the span it owes have to become durable together. `tick`
+    /// runs inside a `select!` against shutdown, so Ctrl-C — not only a crash
+    /// — drops the tick future at its first await. If the head is on disk and
+    /// the span is not, the next tick reads the head as unchanged and those
+    /// blocks are owed by nobody, with no warning naming them.
+    #[tokio::test]
+    async fn the_owed_span_is_durable_before_the_first_await_after_the_head_moves() {
+        let chain = crate::header_rlp::dummy_linked_chain(4);
+        let older = crate::header_rlp::keccak256(&chain[0]);
+        let newer = crate::header_rlp::keccak256(&chain[3]);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cfg = RelayerConfig::new(path.clone());
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.watch_state_file(path.clone());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update_with_exec(100, 96, older),
+                update_with_exec(132, 128, newer),
+            ])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+
+        let seen = mock
+            .state_at_re_push()
+            .expect("rePushAnchor must have been called with a state file on disk");
+        let on_disk: crate::state::RelayerState =
+            serde_json::from_str(&seen).expect("the captured state file must parse");
         assert!(
-            mock.ancestry_attempts() <= super::MAX_SPAN_ATTEMPTS,
-            "sent {} submissions for a span that can never land",
-            mock.ancestry_attempts()
+            on_disk
+                .owed_spans
+                .iter()
+                .any(|s| s.older == older && s.newer == newer),
+            "the span was not on disk yet when the first await ran: {:?}",
+            on_disk.owed_spans
+        );
+        assert_eq!(
+            on_disk.last_finalized_slot,
+            Some(128),
+            "the head it belongs to must be in the same file"
+        );
+    }
+
+    /// A beacon node restarting into sync serves a finalized slot behind the
+    /// one on record. Proving it ends in `ERR_STALE_UPDATE`, which this daemon
+    /// reads as "already on the head" and would record — moving its own head
+    /// backwards and pairing the next span with an end the chain never took.
+    /// It has to be refused before a proof is even built.
+    #[tokio::test]
+    async fn a_finalized_slot_behind_the_record_is_neither_proved_nor_recorded() {
+        let chain = crate::header_rlp::dummy_linked_chain(4);
+        let older = crate::header_rlp::keccak256(&chain[0]);
+        let newer = crate::header_rlp::keccak256(&chain[3]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update_with_exec(132, 128, newer),
+                update_with_exec(100, 96, older),
+            ])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+
+        r.tick().await.unwrap();
+        assert_eq!(r.state.last_finalized_slot, Some(128));
+        let proven = mock.proven_count();
+        let spans = r.state.owed_spans.len();
+
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::Unchanged { .. }),
+            "a slot behind the record must be left alone, got {out:?}"
+        );
+        assert_eq!(
+            r.state.last_finalized_slot,
+            Some(128),
+            "the head must not move backwards"
+        );
+        assert_eq!(r.state.last_execution_block_hash, Some(newer));
+        assert_eq!(
+            mock.proven_count(),
+            proven,
+            "nothing may be submitted for a stale slot"
+        );
+        assert_eq!(
+            r.state.owed_spans.len(),
+            spans,
+            "and no span may be queued against it"
+        );
+    }
+
+    /// The free-retry arm has to end somewhere. A span whose headers never
+    /// fetch is given up once the grace is spent, naming the blocks an
+    /// operator has to anchor; otherwise it sits at the front of the queue for
+    /// ever and blocks every span behind it.
+    #[tokio::test]
+    async fn a_span_whose_headers_never_fetch_is_given_up_when_the_grace_runs_out() {
+        let (mut r, mock, _chain) = span_relayer(true);
+        r.state.owed_spans.clear();
+        // An end the execution source does not know: every fetch errors.
+        r.state.owed_spans.push(crate::state::OwedSpan {
+            older: [0xA1; 32],
+            newer: [0xA2; 32],
+            paid_attempts: 0,
+            fetch_since: Some(crate::state::now_secs() - super::SPAN_FETCH_GRACE_S - 1),
+        });
+        r.cover_front_span().await;
+        assert!(
+            r.state.owed_spans.is_empty(),
+            "the span must be given up once the grace is spent"
+        );
+        assert_eq!(
+            mock.ancestry_attempts(),
+            0,
+            "nothing was ever sent, so nothing may have been charged"
+        );
+    }
+
+    /// And not one tick early: inside the grace the span stays, and a fetch
+    /// that failed costs no paid attempt.
+    #[tokio::test]
+    async fn a_span_inside_the_fetch_grace_is_kept_and_costs_nothing() {
+        let (mut r, mock, _chain) = span_relayer(true);
+        r.state.owed_spans.clear();
+        r.state.owed_spans.push(crate::state::OwedSpan {
+            older: [0xA1; 32],
+            newer: [0xA2; 32],
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        r.cover_front_span().await;
+        assert_eq!(r.state.owed_spans.len(), 1, "still inside the grace");
+        assert_eq!(
+            r.state.owed_spans[0].paid_attempts, 0,
+            "a fetch failure is free"
+        );
+        assert!(
+            r.state.owed_spans[0].fetch_since.is_some(),
+            "the grace has to start counting from the first failure"
+        );
+        assert_eq!(mock.ancestry_attempts(), 0);
+    }
+
+    /// The queue is bounded, and when it overflows the span dropped is the
+    /// oldest — its anchors are the ones closest to leaving the one-year
+    /// window, so it is the one least likely to be sendable at all.
+    #[test]
+    fn the_queue_cap_drops_the_oldest_span_and_keeps_the_newest() {
+        let (mut r, _mock, _chain) = span_relayer(false);
+        r.state.owed_spans.clear();
+        for i in 0..super::MAX_OWED_SPANS {
+            r.state.owed_spans.push(crate::state::OwedSpan {
+                older: [i as u8; 32],
+                newer: [(i + 1) as u8; 32],
+                paid_attempts: 0,
+                fetch_since: None,
+            });
+        }
+        let oldest = r.state.owed_spans[0].newer;
+        r.queue_span(Some([0xF0; 32]), [0xF1; 32]);
+        assert_eq!(
+            r.state.owed_spans.len(),
+            super::MAX_OWED_SPANS,
+            "the cap must hold"
+        );
+        assert_ne!(
+            r.state.owed_spans[0].newer, oldest,
+            "the oldest span is the one that must go"
+        );
+        assert_eq!(
+            r.state.owed_spans.last().expect("non-empty").newer,
+            [0xF1; 32],
+            "the new span must be queued"
         );
     }
 

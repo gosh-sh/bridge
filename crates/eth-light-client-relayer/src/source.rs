@@ -380,9 +380,15 @@ impl EthExecutionRpc {
     }
 
     /// The span from `older` to `newer` inclusive, oldest first, at most `max`
-    /// headers (3 to 33). Walks parents from `newer` and stops on `older`; a
-    /// gap wider than `max` is an error rather than a truncated payload,
-    /// because `submitAncestry` requires both ends to be proven anchors.
+    /// headers (3 to 33). Walks parents from `newer` and stops on `older`.
+    ///
+    /// `Ok(None)` means no payload exists to send, never a truncated one,
+    /// because `submitAncestry` requires both ends to be proven anchors. It
+    /// covers three cases the caller cannot tell apart: `older` is further
+    /// back than `max` headers, `older` is not an ancestor of `newer` at all,
+    /// and the two are adjacent with nothing in between. An `Err` is a
+    /// transport failure — the distinction matters, because the caller retries
+    /// an `Err` for free and gives up on a `None`.
     pub async fn ancestry_span(
         &self,
         newer: [u8; 32],

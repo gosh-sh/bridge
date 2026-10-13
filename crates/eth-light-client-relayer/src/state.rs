@@ -147,6 +147,56 @@ mod tests {
 
     use super::*;
 
+    /// Every field this version added has to be optional on the way in, or a
+    /// daemon started on a state file written by the previous build refuses to
+    /// load it and stops dead.
+    #[test]
+    fn a_state_file_written_before_the_queue_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(
+            &path,
+            br#"{"last_finalized_slot":100,"last_committee_period":0,
+                 "last_execution_block_hash":null,"last_attested_slot":120,
+                 "updates_applied":3,"rotate_pending_period":null}"#,
+        )
+        .unwrap();
+        let s = RelayerState::load(&path).unwrap().expect("must load");
+        assert_eq!(s.last_finalized_slot, Some(100));
+        assert_eq!(s.updates_applied, 3);
+        assert!(s.owed_spans.is_empty(), "no spans were owed in that file");
+        assert!(!s.owner_flip_done);
+    }
+
+    /// And a queue has to come back as it went in: this is the only record of
+    /// what the light client is owed, so losing it across a restart loses the
+    /// coverage with it.
+    #[test]
+    fn the_owed_queue_survives_a_save_and_a_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = RelayerState::default();
+        s.record_update(200, 1, [9u8; 32], 232);
+        s.owed_spans.push(OwedSpan {
+            older: [1u8; 32],
+            newer: [2u8; 32],
+            paid_attempts: 2,
+            fetch_since: Some(1_700_000_000),
+        });
+        s.owed_spans.push(OwedSpan {
+            older: [2u8; 32],
+            newer: [3u8; 32],
+            paid_attempts: 0,
+            fetch_since: None,
+        });
+        s.save(&path).unwrap();
+
+        let back = RelayerState::load(&path).unwrap().expect("must load");
+        assert_eq!(back.owed_spans, s.owed_spans);
+        assert_eq!(back.owed_spans[0].paid_attempts, 2);
+        assert_eq!(back.owed_spans[0].fetch_since, Some(1_700_000_000));
+    }
+
     #[test]
     fn roundtrip() {
         let dir = tempdir().unwrap();

@@ -107,6 +107,12 @@ struct MockInner {
     owner_rotation_enabled: bool,
     re_push_count: u32,
     ancestry_count: u32,
+    /// A state file to read when `re_push_anchor` is called, and what it held.
+    /// The one observable that tells apart "the span was persisted with the
+    /// head" from "the span was persisted after this call": a tick dropped at
+    /// this await must already have the span on disk.
+    watch_state: Option<std::path::PathBuf>,
+    state_at_re_push: Option<String>,
 }
 
 impl MockAnSubmitter {
@@ -124,8 +130,24 @@ impl MockAnSubmitter {
                 owner_rotation_enabled: true,
                 re_push_count: 0,
                 ancestry_count: 0,
+                watch_state: None,
+                state_at_re_push: None,
             }),
         }
+    }
+
+    /// Read this state file when `re_push_anchor` is called and keep what it
+    /// said, so a test can see what was already durable at that moment.
+    pub fn watch_state_file(&self, path: std::path::PathBuf) {
+        self.inner.lock().expect("poisoned").watch_state = Some(path);
+    }
+
+    pub fn state_at_re_push(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .state_at_re_push
+            .clone()
     }
 
     /// Refuse only `submitAncestry`, so an update still lands.
@@ -281,6 +303,9 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if let Some(path) = inner.watch_state.clone() {
+            inner.state_at_re_push = std::fs::read_to_string(&path).ok();
+        }
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "rePushAnchor rejected".into(),
@@ -771,14 +796,54 @@ fn tvm_account_hex(s: &str) -> Option<String> {
     }
 }
 
+/// The exit code out of an error string, or `None` when the message carries
+/// none. The same shapes `acki-nacki-interface` emits; kept local because that
+/// crate's parser lives behind the `tvm-sdk` feature, which the default build
+/// and the tests do not enable.
+fn parsed_exit_code(msg: &str) -> Option<i32> {
+    for marker in [
+        "exit_code=Some(",
+        "exit_code=",
+        "local_exit_code=",
+        "\"exit_code\":",
+    ] {
+        if let Some(rest) = msg.split(marker).nth(1) {
+            let digits: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
 fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
-    if msg.contains("244") || msg.contains("STALE_UPDATE") {
+    // An exit code means the chain ran the call, so the outcome is a refusal
+    // and never a transport failure. It is parsed out of `exit_code=N`, not
+    // matched as a substring: the message carries the account address and
+    // timestamps, and a `244` anywhere in those would have turned any refusal
+    // into "already on head" — recording a head the chain never took, which
+    // then costs the span behind it its anchors as well.
+    if let Some(code) = parsed_exit_code(msg) {
+        if code == 244 {
+            return SubmitOutcome::AlreadyOnHead;
+        }
+        return SubmitOutcome::Rejected {
+            reason: format!("{function} failed: {msg}"),
+        };
+    }
+    if msg.contains("STALE_UPDATE") {
         return SubmitOutcome::AlreadyOnHead;
     }
-    // A transport failure is not a refusal: the chain never saw the call. Told
-    // apart so a caller budgeting paid attempts does not spend them on an
-    // unreachable endpoint.
-    let transport = [
+    // No exit code: the chain did not execute the call. Transport failures and
+    // an expired message are free retries — a caller budgeting paid attempts
+    // must not spend one here. Matched on words rather than on bare status
+    // numbers, for the same reason as above.
+    let not_sent = [
         "Connection",
         "connect",
         "timed out",
@@ -788,17 +853,79 @@ fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
         "unreachable",
         "reset by peer",
         "sending request",
-        "502",
-        "503",
-        "504",
+        "Bad Gateway",
+        "Service Unavailable",
+        "Gateway Timeout",
+        "was not executed",
+        "Message expired",
     ];
-    if transport.iter().any(|m| msg.contains(m)) {
+    if not_sent.iter().any(|m| msg.contains(m)) {
         return SubmitOutcome::NotSent {
             reason: format!("{function}: {msg}"),
         };
     }
     SubmitOutcome::Rejected {
         reason: format!("{function} failed: {msg}"),
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// The error text carries the account address and timestamps. A 64-hex
+    /// address holding `244` must not turn a refusal into "already on head":
+    /// the daemon would record a head the chain refused, never resubmit that
+    /// slot, and pay out the span behind it against an unproven anchor.
+    #[test]
+    fn digits_inside_the_address_are_not_read_as_a_refusal_code() {
+        let msg = "Contract execution was terminated with error \
+                   (account=244be1a9c3d05507f0e1b2449f3cc8a7d4e5f60718293a4b5c6d7e8f90a1b2c3) \
+                   data={\"exit_code\":220}";
+        let out = classify_call_error("submitUpdate", msg);
+        assert!(
+            matches!(out, SubmitOutcome::Rejected { .. }),
+            "a 244 in the address must not be read as ERR_STALE_UPDATE: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_parsed_exit_code_244_is_already_on_head() {
+        let msg = "tvm error (account=0abc) (exit_code=244)";
+        assert!(matches!(
+            classify_call_error("submitUpdate", msg),
+            SubmitOutcome::AlreadyOnHead
+        ));
+    }
+
+    #[test]
+    fn another_parsed_exit_code_is_a_refusal_not_a_transport_failure() {
+        // The address holds 503; without the exit code this used to be read as
+        // an unreachable endpoint and retried for free, forever.
+        let msg = "tvm error (account=503f1a2b) (exit_code=249)";
+        assert!(matches!(
+            classify_call_error("submitAncestry", msg),
+            SubmitOutcome::Rejected { .. }
+        ));
+    }
+
+    /// SDK 507. The chain never ran it, so it must not cost a paid attempt.
+    #[test]
+    fn an_expired_message_was_never_sent() {
+        let msg = "Message expired. Contract was not executed on chain.";
+        assert!(matches!(
+            classify_call_error("submitAncestry", msg),
+            SubmitOutcome::NotSent { .. }
+        ));
+    }
+
+    #[test]
+    fn a_refusal_with_no_exit_code_and_no_transport_word_is_a_refusal() {
+        let msg = "unexpected failure (account=502aa1)";
+        assert!(matches!(
+            classify_call_error("submitAncestry", msg),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 }
 

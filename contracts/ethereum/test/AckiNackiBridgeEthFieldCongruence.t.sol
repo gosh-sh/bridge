@@ -316,30 +316,16 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         IBridgeWithdrawalVerifier verifier,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub
     ) internal returns (AckiNackiBridge bridge) {
-        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
-        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
-        MockPrimaryVerifier primary = new MockPrimaryVerifier();
-        MockFallbackVerifier fallback_ = new MockFallbackVerifier();
         MockLayerHashesMovementVerifier layer = new MockLayerHashesMovementVerifier();
-        primary.setShouldAccept(true);
-        fallback_.setShouldAccept(true);
         layer.setShouldAccept(true);
-
-        bridge = new AckiNackiBridge(
-            address(oracle),
-            address(usdc),
-            address(0),
-            address(0),
-            VerifyBlockConfigLib.with(
-                IPrimaryVerifier(address(primary)),
-                IFallbackVerifier(address(fallback_)),
-                ILayerHashesMovementVerifier(address(layer)),
-                BK_SET,
-                GENESIS_PREV
+        AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdrawShellnet(
+            verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
+        );
+        bridge = _deployBridge(
+            _acceptingVerifyBlockConfig(
+                ILayerHashesMovementVerifier(address(layer)), BK_SET, GENESIS_PREV
             ),
-            VerifyBlockConfigLib.withWithdrawShellnet(
-                    verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
-                )
+            bw
         );
     }
 
@@ -348,26 +334,42 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         uint256 genesisBkSet,
         uint256 genesisPrev
     ) internal returns (AckiNackiBridge bridge) {
-        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
-        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        bridge = _deployBridge(
+            _acceptingVerifyBlockConfig(lh, genesisBkSet, genesisPrev),
+            VerifyBlockConfigLib.disabledWithdraw()
+        );
+    }
+
+    /// @dev Primary and fallback verifiers that accept everything; `lh` is the caller's.
+    function _acceptingVerifyBlockConfig(
+        ILayerHashesMovementVerifier lh,
+        uint256 genesisBkSet,
+        uint256 genesisPrev
+    ) internal returns (AckiNackiBridge.VerifyBlockConfig memory) {
         MockPrimaryVerifier primary = new MockPrimaryVerifier();
         MockFallbackVerifier fallback_ = new MockFallbackVerifier();
         primary.setShouldAccept(true);
         fallback_.setShouldAccept(true);
+        return VerifyBlockConfigLib.with(
+            IPrimaryVerifier(address(primary)),
+            IFallbackVerifier(address(fallback_)),
+            lh,
+            genesisBkSet,
+            genesisPrev
+        );
+    }
 
-        bridge = new AckiNackiBridge(
-            address(oracle),
-            address(usdc),
+    function _deployBridge(
+        AckiNackiBridge.VerifyBlockConfig memory vb,
+        AckiNackiBridge.BridgeWithdrawConfig memory bw
+    ) internal returns (AckiNackiBridge) {
+        return new AckiNackiBridge(
+            address(new MockBlockHeaderOracle()),
+            address(new MockERC20("Mock USDC", "mUSDC", 6)),
             address(0),
             address(0),
-            VerifyBlockConfigLib.with(
-                IPrimaryVerifier(address(primary)),
-                IFallbackVerifier(address(fallback_)),
-                lh,
-                genesisBkSet,
-                genesisPrev
-            ),
-            VerifyBlockConfigLib.disabledWithdraw()
+            vb,
+            bw
         );
     }
 

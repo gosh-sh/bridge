@@ -122,6 +122,7 @@ contract EthBeaconLightClient {
     uint16 constant ERR_ANCESTRY_TOO_LONG  = 251;
     uint16 constant ERR_NOT_PROVEN         = 252;
     uint16 constant ERR_SELF_ROTATION      = 253;
+    uint16 constant ERR_ZERO_PUBKEY        = 254;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -310,6 +311,7 @@ contract EthBeaconLightClient {
         uint64  bootstrapPeriod
     ) accept {
         require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
         _currentCommittee = bootstrapCommittee;
@@ -699,6 +701,7 @@ contract EthBeaconLightClient {
     // ========================================================
 
     function setPubkey(uint256 pubkey) public onlyOwnerPubkey accept {
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         ensureBalance();
         _ownerPubkey = pubkey;
     }
@@ -833,6 +836,7 @@ contract EthBeaconLightClient {
                 mapping(uint256 => uint64), mapping(uint64 => uint256), uint64, uint64,
                 TvmCell
             ));
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
         _finalizedSlot = finalizedSlot;

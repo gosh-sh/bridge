@@ -385,6 +385,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint256 pubkey,
         address usdcWallet
     ) accept {
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _usdcWallet = usdcWallet;
     }
@@ -823,6 +824,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Replaces the owner public key. Only callable by the current owner.
     /// @param pubkey — new owner public key (uint256)
     function setPubkey(uint256 pubkey) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         ensureBalance();
         _ownerPubkey = pubkey;
     }
@@ -901,6 +903,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             = abi.decode(cell, (uint256, address, uint128, uint64, uint64,
                                 mapping(uint32 => uint128), mapping(uint32 => uint128),
                                 TvmCell, TvmCell));
+        require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _usdcWallet = usdcWallet;
         _totalMinted = totalMinted;

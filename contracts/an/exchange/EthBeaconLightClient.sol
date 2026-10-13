@@ -642,7 +642,6 @@ contract EthBeaconLightClient {
             _finalizedExecutionBlockHash,
             _updatesApplied,
             _currentCommittee,
-            _prevCommittee,
             _committeePeriod,
             _ownerRotationEnabled,
             _reAnchorsApplied,
@@ -668,7 +667,6 @@ contract EthBeaconLightClient {
          uint256 finalizedExecutionBlockHash,
          uint64 updatesApplied,
          uint256 currentCommittee,
-         uint256 prevCommittee,
          uint64 committeePeriod,
          bool ownerRotationEnabled,
          uint64 reAnchorsApplied,
@@ -679,7 +677,7 @@ contract EthBeaconLightClient {
          TvmCell userCell)
             = abi.decode(cell, (
                 uint256, uint256, uint64, uint256, uint256, uint64,
-                uint256, uint256, uint64, bool, uint64,
+                uint256, uint64, bool, uint64,
                 mapping(uint256 => uint64), mapping(uint64 => uint256), uint64, uint64,
                 TvmCell
             ));
@@ -690,7 +688,13 @@ contract EthBeaconLightClient {
         _finalizedExecutionBlockHash = finalizedExecutionBlockHash;
         _updatesApplied = updatesApplied;
         _currentCommittee = currentCommittee;
-        _prevCommittee = prevCommittee;
+        // Not in the migration cell: the cell is built by the code being
+        // replaced, and the live 1.4.1 client knows nothing of this field.
+        // Adding it here would read 256 bits from where the period and the
+        // flags sit and corrupt the trust root. An upgraded client starts
+        // with no previous committee, which only means no catch-up across the
+        // rotation already behind it.
+        _prevCommittee = 0;
         _committeePeriod = committeePeriod;
         _ownerRotationEnabled = ownerRotationEnabled;
         _reAnchorsApplied = reAnchorsApplied;

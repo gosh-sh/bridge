@@ -77,7 +77,7 @@ assigns it when the release is tagged.
   This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
   tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
   older node the light client throws on an unknown opcode. The light client's
-  code hash moves `314ac6b8…6092f5` → `a15d08d2…79426f1e`, and `getVersion` reports 1.4.3 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
+  code hash moves `314ac6b8…6092f5` → `2b30ad8f…9a34e068`, and `getVersion` reports 1.4.3 instead of 1.4.1, which is how an operator tells a client that takes the new payload from one that does not. On a live network
   the owner upgrades the deployed client in place with `updateCode`, which
   keeps its address, head, committee and proven set. **Do not call
   `setLightClientCode` after that upgrade:** it stores the code *and*
@@ -121,11 +121,15 @@ assigns it when the release is tagged.
   to the owner hatches: `setCommitteeCommitment` and `reAnchorCommittee` also
   keep what they replace.
 
-  `_prevCommittee` is carried through `updateCode`, so the migration cell has
-  one more field; the ABI's function and event surface is unchanged, its
-  `fields` section gains `_prevCommittee`. A client upgraded in place starts
-  with it empty, which only means no catch-up across the rotation that is
-  already behind it.
+  `_prevCommittee` is **not** in the `updateCode` migration cell, and must not
+  be: that cell is built by the code being replaced, so a live 1.4.1 client
+  writes the old 15 fields and a decode expecting 16 would read 256 bits from
+  where the period and the flags sit, corrupting the trust root after
+  `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
+  upgraded client therefore starts with no previous committee, which only
+  means no catch-up across the rotation already behind it; the field fills on
+  the next rotation. The ABI's function and event surface is unchanged, its
+  `fields` section gains `_prevCommittee`.
 
 - **The deposit-prover verification key is rotated again, for Amsterdam
   block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch

@@ -14,18 +14,26 @@ polls shellnet, proves key blocks with some specified cadence (not each
 key block!), and posts `verifyBlock` to Sepolia; when the chain rotates
 its BK set, the daemon detects the rotation off-chain, submits
 `applyBkSetUpdate`, and keeps proving against the right (incoming or
-outgoing) BK set per the ETH-36 two-slot model.
+outgoing) BK set per the contract's two-slot model
+(`storedBkSetCommitment` / `storedPrevBkSetCommitment`).
 
 **Scope of this runbook.** Bundle-only path:
 
 - Circuit 1A/1B (attestation) + Circuit 2 (layer hashes), aggregated by
   SHPLONK, submitted via `verifyBlock`.
-- BK-set rotation: Circuit 3 (BkSetUpdateChecker) proof submitted via
-  `applyBkSetUpdate`, with ETH-36 two-slot semantics (an `applyBkSetUpdate`
-  may land ahead of the layer cursor; `verifyBlock` accepts
-  `storedPrevBkSetCommitment` for `seqNo <= N` where `N =
-  storedLastBkSetUpdateSeqNo`; the prover-side ack is deferred until the
-  next bundle target passes `N`).
+- BK-set rotation via `applyBkSetUpdate`. There is no rotation circuit:
+  the daemon proves the rotation block's attestation with Circuit 1A/1B
+  against the **outgoing** BK set (wrapped and aggregated exactly like
+  the attestation half of a bundle) and submits it together with the
+  block's block-id tree leaves L2 (old BK-set commitment) and L3 (new
+  commitment) plus three SHA-256 siblings. The contract folds L2/L3 up
+  the depth-4 / 16-leaf tree and requires the root (mod BN254 r) to equal
+  the attested `blockId` — see
+  [`docs/EVM-contracts-spec.md` §7.3](../../../docs/EVM-contracts-spec.md#73-applybksetupdate--rotate-the-bk-set-commitment).
+  Two-slot semantics: an `applyBkSetUpdate` may land ahead of the layer
+  cursor; `verifyBlock` accepts `storedPrevBkSetCommitment` for
+  `seqNo <= N` where `N = storedLastBkSetUpdateSeqNo`; the prover-side
+  ack is deferred until the next bundle target passes `N`.
 
 Event-level withdrawal proofs (Circuit 4 / `withdrawByProof`) are **out
 of scope** — see the withdraw-side runbook.
@@ -79,7 +87,7 @@ With 5 active BKs the gate is `activeBK - 1 >= minBK`:
 | `minBK` | effect on 5-BK shellnet | relayer sees |
 |---:|:---|:---|
 | **5** | A BK cannot leave the epoch — gate fails. No rotations ever fire. | `storedLastBkSetUpdateSeqNo` stays 0 forever. |
-| **4** | After each epoch (~660 s + cliff/wait) one BK may rotate out; a candidate (if any is queued) rotates in. | Shellnet publishes a BK-set update; the daemon detects it, proves Circuit 3, submits `applyBkSetUpdate`. |
+| **4** | After each epoch (~660 s + cliff/wait) one BK may rotate out; a candidate (if any is queued) rotates in. | Shellnet publishes a BK-set update; the daemon detects it, proves the rotation block's attestation (Circuit 1A/1B), submits `applyBkSetUpdate`. |
 
 `minBK` is set by calling `setConfig` on `BlockKeeperContractRoot` with
 the owner key (`config/BlockKeeperContractRoot.keys.json`). `setConfig`
@@ -288,8 +296,9 @@ cargo build --release --locked -p bridge-relayer-daemon --bin relayer
 
 `daemon-live` does **not** auto-download SRS on first launch. The full
 live bundle path needs K=17,19,20,21,22; K=22 is specifically required
-by the layer outer aggregator; K=21 is required by Circuit 3
-(BkSetUpdateChecker) wrap+aggregate when a rotation lands.
+by the layer outer aggregator; K=21 by the attestation outer aggregator
+(every `verifyBlock` bundle and every `applyBkSetUpdate`) and by
+Circuit 1B (fallback) proving.
 
 ```bash
 # 3a. Manually fetch K=21 (~2.4 GB). Hermez trusted-setup mirror.
@@ -692,7 +701,6 @@ INFO bridge_prover_lib::keys::primary:     loaded primary VK from cache
 INFO bridge_prover_lib::keys::fallback:    loaded fallback VK from cache
 INFO bridge_prover_lib::keys::layer:       loaded layer VK from cache
 INFO bridge_prover_lib::keys::event:       loaded event VK from cache
-INFO bridge_prover_lib::keys::bk_update:   loaded BkSetUpdateChecker VK from cache
 INFO bridge_prover_lib::bk_set_bootstrap:  chain-config check OK: ./bk_set.shellnet.json matches prover_bk_set.commitment
 INFO relayer: LiveProverDriver seed policy seed_policy=Explicit(<BRIDGE_BOOTSTRAP_SEQNO>)
 INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq_no=<N>, height=<N>, layers=<1 for L1 | 2 for L2>
@@ -791,8 +799,9 @@ Once bootstrapped, cadence is **per bundle**, not per key-block:
 - **L2** — bundle every `W² = 16384` seq_nos (~91 min chain-time).
   Chain is the limiter; effective cadence **~91 min per bundle**.
 
-Overlapping with that, independently and asynchronously, the Phase 1
-rotation lane fires whenever shellnet publishes a new BK-set update
+Interleaved with that (Phase 1 of the same relayer tick, before the
+`verifyBlock` lane), the rotation lane fires whenever shellnet publishes
+a new BK-set update
 AND the previous rotation (if any) is already covered by `verifyBlock`
 (see [Case 8](#case-8--observed-bk-set-rotation-routine-no-action-required)
 for the signatures and the deferred-ack mechanics).
@@ -801,8 +810,7 @@ for the signatures and the deferred-ack mechanics).
 
 | Path | Written by | Trigger |
 |---|---|---|
-| `submissions/verifyBlock_seq<N>_fin<T>_<ts>.json` | `bridge.rs:679-724` (env-gated by `BRIDGE_DUMP_SUBMISSIONS_DIR`) | Every `verifyBlock` submit attempt |
-| `submissions/applyBkSetUpdate_seq<N>_<ts>.json` | same path, same env gate | Every `applyBkSetUpdate` submit attempt |
+| `submissions/verifyBlock_seq<N>_fin<T>_<ts>.json` | `bridge.rs:679-724` (env-gated by `BRIDGE_DUMP_SUBMISSIONS_DIR`) | Every `verifyBlock` submit attempt (`applyBkSetUpdate` is not dumped) |
 | `$BRIDGE_CONFIG_DIR/relayer-state.json` | `relayer.rs` | Every on-chain observation cycle (~every block) |
 | `$BRIDGE_CONFIG_DIR/state/prover_state.json` + `$BRIDGE_CONFIG_DIR/state/prover_bk_set.json` | `live_source.rs:141-157` (`persist_driver`) | Every successful `ack_last_bundle` or `ack_bk_update` after on-chain confirmation |
 
@@ -832,14 +840,23 @@ INFO bridge_relayer_daemon::relayer: verifyBlock confirmed  seq_no=<N>  block=<s
 **Progress signature (per successful `applyBkSetUpdate` cycle):**
 
 ```
-INFO bridge_prover_lib::live_driver::bk_update: BkSetUpdateChecker proof generated in <ms>
-INFO bridge_relayer_daemon::aggregated_source: aggregated_source: wrap+aggregate bk_update
-INFO bridge_relayer_daemon::bridge: dumped applyBkSetUpdate submission to submissions/applyBkSetUpdate_seq<N>_<ts>.json
+INFO bridge_prover_lib::live_driver::bk_update: === bk-update drain: processing event at seq_no <N> ===
+INFO bridge_prover_lib::live_driver::bk_update: bk-update <N>: PRIMARY path → Circuit 1a (transcript=Poseidon)
+INFO bridge_prover_lib::live_driver::bk_update: bk-update <N>: primary proof generated in <ms> ms
+INFO bridge_relayer_daemon::aggregated_source: aggregated_source: wrap+aggregate bk-update attestation (Poseidon) seq_no=<N> last_seen=<L>
+INFO bridge_relayer_daemon::aggregator: aggregate_attestation (PrimaryAggregatorVerifier) total <ms> ms, calldata=<bytes> bytes
 INFO bridge_relayer_daemon::relayer: bk-set update applied seq_no=<N> tx=<hash>
 ```
 
-Absence of the last line for >5 min after a `dumped ...` line =
-transport / receipt lag — go to
+A rotation block finalized through the fallback path logs
+`FALLBACK path → Circuit 1b`, `fallback proof generated` and
+`FallbackAggregatorVerifier` instead. `<L>` is the layer cursor the
+attestation was proven against (`attestationLastSeen`); it must be
+below `<N>`.
+
+Absence of the last line for >5 min after the `dumped ...` line
+(`verifyBlock`) or the `aggregate_attestation ... total` line
+(`applyBkSetUpdate`) = transport / receipt lag — go to
 [Case 4](#case-4--restart-after-rpc-induced-hard-abort).
 
 ---
@@ -969,8 +986,10 @@ hard-aborts on the next transport blip in either lane.
 Same as [Case 3](#case-3--clean-restart-no-state-loss). Expect
 `seed_policy=Resume`. First cycle regenerates the pending proof from
 scratch (prior proof was in RAM, lost on exit) — ~13 min to next
-`verifyBlock` submit; a pending rotation re-runs Circuit 3 (~3–5 min
-at K=21) before the next `applyBkSetUpdate` submit.
+`verifyBlock` submit; a pending rotation re-proves the rotation block's
+Circuit 1A/1B attestation and re-aggregates it (~3.5–5 min on the
+primary path, per [`daemon_live_performance.md`](daemon_live_performance.md))
+before the next `applyBkSetUpdate` submit.
 
 **If it dies again from RPC:** switch `RPC_URL` to a stable
 authenticated endpoint and repeat the nonce/cursor/state checks.
@@ -993,15 +1012,20 @@ problem, not a transport blip:
 
 | Selector | Error | Lane | Root cause pattern |
 |---|---|---|---|
-| `0x87bf1c06` | `AttestationProofRejected()` | verifyBlock | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. |
-| `0x...PrevAnchorMismatch` | `PrevAnchorMismatch(supplied, stored)` | verifyBlock | Local prev-anchor state diverged from on-chain `expectedPrevAnchor(numLayers)`. |
-| `0x...BkSetCommitmentMismatch` | `BkSetCommitmentMismatch(supplied, stored)` | verifyBlock | Proof baked against the wrong BK-set slot. Common causes: (a) `prover_bk_set.json` stale after a rotation we missed; (b) prover was acked onto the incoming set too early (deferred-ack bug); (c) another actor applied a rotation we don't know about. See [Case 10](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation). |
-| `0x...BlockSeqNoNotMonotonic` | `BlockSeqNoNotMonotonic(supplied, stored)` | verifyBlock | Submitting `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |
-| `0x...BkUpdateSeqNoNotMonotonic` | `BkUpdateSeqNoNotMonotonic(supplied, stored)` | applyBkSetUpdate | Submitting a rotation at `block_seq_no ≤ storedLastBkSetUpdateSeqNo`. Means another actor applied this rotation already, or the off-chain `BkUpdateSource` returned a stale `block_seq_no`. |
-| `0x...PrevSlotStillOwedForBundle(uint64,uint64)` (contract line AckiNackiBridge.sol — see §7.3 of `docs/EVM-contracts-spec.md`) | `BkUpdate second rotation crosses an unverified bundle boundary` | applyBkSetUpdate | Attempt to apply a rotation when `nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. **Should never leave Phase 1** — the relayer defers in-process (see [Case 9](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary)). If this fires on-chain, another actor is bypassing the deferral. The two revert fields are `last_bk_set_update_seq_no` and `next_owed_boundary`. |
-| `0x...BkUpdateProofRejected` | adapter equality check failed on Circuit 3 PI | applyBkSetUpdate | Proof baked against wrong `old_commitment` / `new_commitment` / `block_seq_no`. Compare the dumped submission to the chain state. |
+| `0x87bf1c06` | `AttestationProofRejected()` | both | Adapter equality check on a public input failed. **Bug class: BN254 Fr canonicalization** — if this fires on `blockId`, the client fix in `bridge-relayer-daemon/src/types.rs:83` (`U256::from_be_bytes(b.block_id_be) % BN254_FR_MODULUS`) is missing/reverted. On `applyBkSetUpdate` the instances are `(blockId, oldCommitmentL2, blockSeqNo, attestationLastSeen)`: the rotation block's attestation must be proven against the outgoing BK set. |
+| `0xe57f07c1` | `PrevAnchorMismatch(supplied, stored)` | verifyBlock | Local prev-anchor state diverged from on-chain `expectedPrevAnchor(numLayers)`. |
+| `0xc3438e78` | `BkSetCommitmentMismatch(supplied, stored)` | verifyBlock | Proof baked against the wrong BK-set slot. Common causes: (a) `prover_bk_set.json` stale after a rotation we missed; (b) prover was acked onto the incoming set too early (deferred-ack bug); (c) another actor applied a rotation we don't know about. See [Case 10](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation). |
+| `0x33af5682` | `BlockSeqNoNotMonotonic(supplied, stored)` | verifyBlock | Submitting `seq_no ≤ storedLastSeenBlockSeqNo`. Almost always: state loss + wrong `BRIDGE_BOOTSTRAP_SEQNO`. |
+| `0x703a55ba` | `StaleBkSetCommitment(supplied, stored)` | applyBkSetUpdate | `oldCommitmentL2` (leaf L2 of the rotation block) is not `storedBkSetCommitment`. The daemon checks this before sending: a local trip logs `reason=off-chain old_commitment … != on-chain …` and broadcasts nothing, so an on-chain hit means the commitment moved between read and send (another actor applied a rotation). A local trip that repeats means the contract's commitment does not match the chain's BK set (stale genesis commitment, see deploy §3, or a skipped rotation) — see [Case 10](#case-10--bk_setshellnetjson-has-gone-stale-after-the-first-rotation). |
+| `0xc942350c` | `BkUpdateSeqNoNotMonotonic(supplied, stored)` | applyBkSetUpdate | Submitting a rotation at `block_seq_no ≤ storedLastBkSetUpdateSeqNo`. Means another actor applied this rotation already, or the off-chain `BkUpdateSource` returned a stale `block_seq_no`. |
+| `0x4613e279` | `PrevSlotStillOwedForBundle(lastBkSetUpdateSeqNo, nextOwedBoundary)` | applyBkSetUpdate | A second rotation would cross an unverified bundle boundary: `nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. **Should never leave Phase 1** — the relayer defers in-process (see [Case 9](#case-9--rotation-deferred-second-rotation-crosses-an-unverified-bundle-boundary)). If this fires on-chain, another actor is bypassing the deferral. See §7.3 of `docs/EVM-contracts-spec.md`. |
+| `0x5e38623e` | `AttestationLastSeenNotBeforeSeqNo(lastSeen, blockSeqNo)` | applyBkSetUpdate | Circuit 1A/1B proves `block_seq_no > last_seen`, and the rotation's attestation was proven with the layer cursor already at or past the rotation's seq_no — e.g. a rotation at bundle target `N` proven after `verifyBlock(N)`. AN must announce such a rotation before that bundle is proven; see the operator rule in §7.3 of `docs/EVM-contracts-spec.md`. |
+| `0x24f0a1fa` | `BkUpdateMerkleMismatch(computedRoot, blockId)` | applyBkSetUpdate | The L2/L3 + three-sibling fold, reduced mod BN254 r, is not `blockId`. The leaves or siblings do not belong to the attested block, or a byte-order regression: the contract hashes L2/L3 as little-endian `Fr::to_repr()` and the siblings as-is. |
+| `0x56048090` | `BkUpdateDisabled()` | applyBkSetUpdate | `primaryVerifier` or `fallbackVerifier` is unset — the bridge was deployed without the attestation verifiers. Redeploy. |
 
-Decode via `cast 4byte $SELECTOR` or dry-run the failing submission:
+Decode via `cast 4byte $SELECTOR`, or decode the whole revert payload,
+arguments included, with `cast decode-error --sig '<signature>' <data>`.
+Dry-run the failing `verifyBlock` submission:
 
 ```bash
 # verifyBlock dry-run
@@ -1018,16 +1042,23 @@ cast call $BRIDGE \
   "[$(jq -r '.layer_hashes_uint256 | join(",")' "$LATEST")]" \
   $(jq -r '.prev_max_level_layer_hash_uint256' "$LATEST") \
   --rpc-url $RPC
+```
 
-# applyBkSetUpdate dry-run (one Circuit 3 proof + 4 public inputs)
-LATEST=$(ls -t crates/bridge-prover-libraries/submissions/applyBkSetUpdate_seq*.json | head -1)
-cast call $BRIDGE \
-  "applyBkSetUpdate(bytes,uint256,uint256,uint64)" \
-  $(jq -r '.bk_update_proof_hex'       "$LATEST") \
-  $(jq -r '.old_commitment_uint256'    "$LATEST") \
-  $(jq -r '.new_commitment_uint256'    "$LATEST") \
-  $(jq -r '.block_seq_no'              "$LATEST") \
-  --rpc-url $RPC
+`applyBkSetUpdate` is not dumped, so there is no submission to replay.
+Its calldata is one Circuit 1A/1B attestation proof of the rotation
+block plus the open Merkle data —
+`applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)`:
+`finType`, `attestationProof`, `blockId`, `blockSeqNo`,
+`attestationLastSeen`, `oldCommitmentL2`, `newCommitmentL3`,
+`siblingH01`, `siblingH4_7`, `siblingH8_15`. Every guard revert except
+`AttestationProofRejected` carries the values it compared; read the
+on-chain side with:
+
+```bash
+cast call $BRIDGE 'storedBkSetCommitment()(uint256)'     --rpc-url $RPC   # must equal the rotation's L2 (StaleBkSetCommitment)
+cast call $BRIDGE 'storedLastBkSetUpdateSeqNo()(uint64)' --rpc-url $RPC   # N; the rotation's seq_no must be above it (BkUpdateSeqNoNotMonotonic)
+cast call $BRIDGE 'storedLastSeenBlockSeqNo()(uint64)'   --rpc-url $RPC   # last_seen
+cast call $BRIDGE 'bundleStride()(uint64)'               --rpc-url $RPC   # stride; with N > 0, PrevSlotStillOwedForBundle if (last_seen / stride + 1) * stride <= N
 ```
 
 **Do NOT** just reset the counter and restart — the proof itself is
@@ -1205,7 +1236,10 @@ and "stale BK-set file"
 
 1. **Pre-check.** `bk_target = on_chain.last_bk_set_update_seq_no + 1`.
    Ask `BkUpdateSource::fetch_bk_update(bk_target)` whether a candidate
-   rotation exists at or after that seq_no.
+   rotation exists at or after that seq_no. Under `daemon-live` this call
+   also proves it — Circuit 1A/1B over the rotation block against the
+   outgoing set, then attestation wrap+aggregate — so those log lines
+   come before the guards below.
 2. **Deferral guard.** If `on_chain.last_bk_set_update_seq_no != 0` and
    `!prover_rotation_may_ack(&on_chain, bundle_stride)` — i.e. the
    bundle-aware boundary check would revert — the daemon computes
@@ -1244,9 +1278,9 @@ and "stale BK-set file"
 **Expected log signature (routine rotation, both lanes shown):**
 
 ```
-INFO relayer: Phase 1: fetched bk_update bk_target=<N+1> upd_block_seq_no=<N'>
-INFO relayer: submit_bk_set_update dispatched block_seq_no=<N'>
-INFO relayer: dumped applyBkSetUpdate submission to submissions/applyBkSetUpdate_seq<N'>_<ts>.json
+INFO bridge_prover_lib::live_driver::bk_update: === bk-update drain: processing event at seq_no <N'> ===
+INFO bridge_prover_lib::live_driver::bk_update: bk-update <N'>: primary proof generated in <ms> ms
+INFO bridge_relayer_daemon::aggregated_source: aggregated_source: wrap+aggregate bk-update attestation (Poseidon) seq_no=<N'> last_seen=<L>
 INFO relayer: bk-set update applied seq_no=<N'> tx=0x…
 INFO relayer: deferring prover ack until next bundle target passes <N'>
 ...
@@ -1709,13 +1743,16 @@ stat -f "%Sm  %N" "crates/bridge-prover-libraries/$BRIDGE_CONFIG_DIR/state/prove
 ls -t crates/bridge-prover-libraries/submissions/verifyBlock_seq*.json 2>/dev/null | head -1 \
   | xargs -I {} sh -c 'jq -r "\"verifyBlock seq_no=\" + (.block_seq_no|tostring)" {}'
 
-# Last submitted BK update (Phase 1 lane)
-ls -t crates/bridge-prover-libraries/submissions/applyBkSetUpdate_seq*.json 2>/dev/null | head -1 \
-  | xargs -I {} sh -c 'jq -r "\"applyBkSetUpdate seq_no=\" + (.block_seq_no|tostring)" {}'
+# Last applied BK update (Phase 1 lane). This lane writes no submission
+# dump; the seq_no is `last_bk_update` in the on-chain snapshot above, and
+# the daemon log carries the timestamp.
+ls -tr crates/bridge-prover-libraries/logs/live_*.log 2>/dev/null \
+  | xargs grep -h 'bk-set update applied' 2>/dev/null | tail -1
 
-# Cadence — deltas between latest 5 submissions in each lane
+# Cadence — latest 5 entries in each lane
 ls -lt crates/bridge-prover-libraries/submissions/verifyBlock_seq*.json 2>/dev/null | head -5
-ls -lt crates/bridge-prover-libraries/submissions/applyBkSetUpdate_seq*.json 2>/dev/null | head -5
+ls -tr crates/bridge-prover-libraries/logs/live_*.log 2>/dev/null \
+  | xargs grep -h 'bk-set update applied' 2>/dev/null | tail -5
 ```
 
 **Wallet balance:**
@@ -1732,7 +1769,7 @@ cast balance $RELAYER_ADDR --rpc-url $RPC --ether
 ```bash
 # Approximate — count rotations observed on-chain in the last hour
 cast logs --address $BRIDGE --from-block $(($(cast block-number --rpc-url $RPC) - 300)) \
-  'BkSetUpdateApplied(uint64,uint256,uint256)' --rpc-url $RPC | grep -c '^transactionHash' || true
+  'BkSetUpdated(uint256,uint256,uint64)' --rpc-url $RPC --json | jq length
 # Expected on shellnet@minBK=4: ~5-6 per hour (one per epoch); 0 means
 # either rotation is off (minBK=5) or the chain is paused.
 ```
@@ -1758,7 +1795,7 @@ crates/bridge-prover-libraries/
 │   └── work_dir/                    ← per-mode enriched witnesses + shplonk-snark scratch
 ├── L2_config/                       ← same layout as L1_config
 ├── bk_set.shellnet.json             ← bootstrap-only BK-set (5 signers at genesis); stale after first rotation
-├── submissions/                     ← calldata dumps for verifyBlock AND applyBkSetUpdate
+├── submissions/                     ← verifyBlock calldata dumps (BRIDGE_DUMP_SUBMISSIONS_DIR); applyBkSetUpdate is not dumped
 ├── logs/                            ← daemon stdout+stderr
 ├── params/                          ← SRS + circuit VKs/PKs (~17 GB, DO NOT WIPE)
 └── target/release/relayer           ← the binary
@@ -1841,9 +1878,10 @@ Scope of *this* deployment:
    and keep its key/RPC credentials only in root-owned env files
    outside the clone. Never reuse the tracked development burner.
 3. **SRS + toolchain** — provision K=17,19,20,21,22, generate the
-   inner PK/VK/config set (including the Circuit 3 BkSetUpdateChecker
-   PK/VK), then seal and hash the static artifact manifest. Keep the
-   outer `pk_cache` writable on a bind mount.
+   inner PK/VK/config set (BK-set rotations reuse the primary/fallback
+   attestation keys; there is no separate rotation circuit or key), then
+   seal and hash the static artifact manifest. Keep the outer `pk_cache`
+   writable on a bind mount.
 4. **BK-set bootstrap decision.** Before deploy:
    - `storedLastBkSetUpdateSeqNo == 0` on the shellnet (either `minBK=5`
      or `minBK=4` but no rotation has landed yet) → commit the
@@ -1900,6 +1938,7 @@ n14 sizing / core scaling: n14 is adequate for the measured L2 cadence.
 Stages run sequentially, but individual Halo2 stages are multi-core;
 extra cores improve those stages rather than multiplying independent
 bundles. Live acceptance peaked near 23 GiB RAM (`verifyBlock` lane)
-and produced an outer cache around 17 GiB. Add ~2–3 GiB headroom for
-the Circuit 3 wrap+aggregate path when the BK-set lane fires in
-parallel with layer-hashes proving.
+and produced an outer cache around 17 GiB. The BK-set lane adds no
+concurrent load: a rotation is proven in the same process, through the
+same Circuit 1A/1B prover and attestation aggregator as a bundle, and
+never in parallel with layer-hashes proving.

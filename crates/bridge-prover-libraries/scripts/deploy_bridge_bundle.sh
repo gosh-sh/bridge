@@ -26,6 +26,12 @@
 #                              (relative to crates/bridge-prover-libraries)
 #   WITHDRAW_ACC_FR            authoritative AN bridge account field element;
 #                              required and immutable after deployment
+#   USE_AAVE                   true: deploy with DeployRealBridge instead, wired
+#                              to the AAVE V3 Sepolia pool. The bridge then takes
+#                              the pool's USDC (0x94a9D9AC…E4C8), not Circle's,
+#                              and the AN side must trust the new address
+#                              (docs/aave-yield.md, "Launching a Sepolia stand
+#                              with AAVE"). Default: false.
 set -euo pipefail
 set +x
 umask 077
@@ -44,6 +50,11 @@ umask 077
 SEPOLIA_RPC_URL="${SEPOLIA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 BRIDGE_GQL_ENDPOINT="${BRIDGE_GQL_ENDPOINT:-https://shellnet.ackinacki.org/graphql}"
 BRIDGE_BK_SET_CONFIG="${BRIDGE_BK_SET_CONFIG:-./bk_set.shellnet.json}"
+USE_AAVE="${USE_AAVE:-false}"
+[[ "$USE_AAVE" == true || "$USE_AAVE" == false ]] || {
+  echo "USE_AAVE must be true or false" >&2
+  exit 2
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PROVER_DIR="$REPO_ROOT/crates/bridge-prover-libraries"
@@ -75,12 +86,28 @@ export PRIVATE_KEY
 export WIRE_WITHDRAW_BY_PROOF=true
 export WITHDRAW_ACC_FR
 
-echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
-forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
+if [[ "$USE_AAVE" == true ]]; then
+  DEPLOY_SCRIPT=DeployRealBridge
+  # DeployRealBridge defaults the withdraw aliases to 0; the shellnet AN side
+  # emits dstChainId=1 / tokenId=3, which only these aliases accept.
+  export USE_AAVE WIRE_VERIFY_BLOCK=true
+  export WITHDRAW_ALT_DST_CHAIN_ID="${WITHDRAW_ALT_DST_CHAIN_ID:-1}"
+  export WITHDRAW_ALT_DST_HOST_CHAIN_ID="${WITHDRAW_ALT_DST_HOST_CHAIN_ID:-11155111}"
+  export WITHDRAW_ALT_TOKEN_ID="${WITHDRAW_ALT_TOKEN_ID:-3}"
+  EXPECTED_USDC_LINE="EXPECTED_USDC_ADDRESS=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8"
+  EXPECTED_AAVE_LINE="EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951"
+else
+  DEPLOY_SCRIPT=DeployShellnetE2EBridge
+  EXPECTED_USDC_LINE="EXPECTED_USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  EXPECTED_AAVE_LINE="(leave EXPECTED_AAVE_POOL unset: DeployShellnetE2EBridge wires no pool)"
+fi
+
+echo ">>> forge script $DEPLOY_SCRIPT (chain 11155111, USE_AAVE=$USE_AAVE)"
+forge script "script/$DEPLOY_SCRIPT.s.sol:$DEPLOY_SCRIPT" \
   --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow
 
 # ─── 3. Extract BRIDGE_ADDRESS from the broadcast record ──────────────────────
-BROADCAST="$CONTRACTS_DIR/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json"
+BROADCAST="$CONTRACTS_DIR/broadcast/$DEPLOY_SCRIPT.s.sol/11155111/run-latest.json"
 BRIDGE_ADDRESS="$(jq -r '
   .transactions[]
   | select(.contractName=="AckiNackiBridge" and .transactionType=="CREATE")
@@ -118,8 +145,14 @@ BRIDGE_ADDRESS=$BRIDGE_ADDRESS
 $deploy_block_line
 BRIDGE_BOOTSTRAP_SEQNO=$GENESIS_SEED_SEQNO
 BRIDGE_ANCHOR_LEVEL=$LEVEL
+# For the shellnet-l2 runtime env (preflight.sh):
+# $EXPECTED_USDC_LINE
+# $EXPECTED_AAVE_LINE
 EOF
 echo ">>> Wrote $CFG_DIR/env"
+if [[ "$USE_AAVE" == true ]]; then
+  echo ">>> AAVE stand: add $BRIDGE_ADDRESS to the AN bridge with setTrustedL1Bridge before the first deposit"
+fi
 
 # ─── 5. Archive stale state so the new bridge cold-start remains recoverable ─
 STATE_ARCHIVE="$CFG_DIR/state.pre_deploy_$(date -u +%Y%m%dT%H%M%SZ)"

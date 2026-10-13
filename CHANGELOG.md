@@ -35,6 +35,10 @@ assigns it when the release is tagged.
   only); a yield stand also has to set the shellnet withdraw aliases;
   `supplyToAave` / `harvestYield` are `onlyOwner`. `EVM-contracts-spec.md`
   §12.1–12.2 and the `DeployShellnetE2EBridge` comment say the same.
+- `live_withdrawByProof_runbook.md` no longer says AAVE is never a payout
+  source: on a bridge with a pool, `withdrawByProof` withdraws from AAVE the
+  part of a payout the USDC on the contract does not cover. AAVE still cannot
+  cover a `WithdrawTreasuryShortfall`.
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
   is part of replay protection, and that an upgrade changing it has to ship a
   block cutoff in the same code so past deposits stop going through. The
@@ -281,6 +285,28 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **A Sepolia stand with AAVE can be deployed with the bundle script.**
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh` takes
+  `USE_AAVE=true`: it runs `DeployRealBridge` instead of
+  `DeployShellnetE2EBridge`, defaults `WITHDRAW_ALT_DST_CHAIN_ID` /
+  `WITHDRAW_ALT_DST_HOST_CHAIN_ID` / `WITHDRAW_ALT_TOKEN_ID` to the shellnet
+  `1` / `11155111` / `3`, and writes the `EXPECTED_USDC_ADDRESS` and
+  `EXPECTED_AAVE_POOL` values for the relayer into `L<LEVEL>_config/env` as
+  comments. Such a bridge takes the AAVE pool's USDC (`0x94a9D9AC…E4C8`), not
+  Circle's, and Acki Nacki refuses its deposits until the AN bridge owner calls
+  `setTrustedL1Bridge(11155111, <bridge>, true)`. The steps are in
+  `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*. Without
+  `USE_AAVE` the script behaves as before.
+- `DeployRealBridge` with `USE_AAVE=true` checks the pool before deploying: it
+  stops if the pool does not list the USDC under the hard-coded aToken, and it
+  prints the reserve's supply cap and total supply, with a warning when the cap
+  is reached. On 2026-10-13 the Sepolia USDC reserve was over its cap, so
+  `supplyToAave` on any bridge reverts with AAVE error `51` until AAVE raises
+  it; deposits and payouts are not affected.
+- The shellnet-l2 `preflight.sh` takes an optional `EXPECTED_AAVE_POOL`: when
+  set, it refuses a bridge whose `aavePool()` differs and warns when
+  `aaveEnabled()` is false. `runtime.env.example` lists it, and the AAVE USDC
+  address to put in `EXPECTED_USDC_ADDRESS` for such a bridge.
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
   bridge's `isPaused()`. Either one refuses with exit 2 before the burn.

@@ -11,6 +11,10 @@ import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 import "./ShplonkDeployLib.sol";
 
+interface IATokenSupply {
+    function totalSupply() external view returns (uint256);
+}
+
 /**
  * @title DeployRealBridge
  * @notice Deployment script for the production bridge contract.
@@ -156,6 +160,7 @@ contract DeployRealBridge is Script {
         returns (DeployResult memory r)
     {
         (address usdcAddr, address aavePool, address aUSDC) = _resolveTokenAddresses(w.useAave);
+        if (w.useAave) _checkAaveReserve(usdcAddr, aavePool, aUSDC);
 
         AckiNackiBridge.VerifyBlockConfig memory vb = _buildVerifyBlockConfig(
             w.wireVerifyBlock, w.genesisBkSetCommitment, w.genesisPrevAnchor
@@ -247,6 +252,23 @@ contract DeployRealBridge is Script {
             return (usdcAddr, aavePool, aUSDC);
         }
         revert("USDC/AAVE wiring only supported on mainnet (1) or Sepolia (11155111)");
+    }
+
+    /// @dev `aavePool` and `aUSDC` are immutable on the bridge, so a pool that no longer lists
+    ///      `usdc` under this aToken would ship a bridge that can never supply.
+    function _checkAaveReserve(address usdcAddr, address aavePool, address aUSDC) internal view {
+        IAavePool.ReserveData memory r = IAavePool(aavePool).getReserveData(usdcAddr);
+        require(r.aTokenAddress == aUSDC, "AAVE pool does not list USDC under the hard-coded aUSDC");
+
+        uint256 capWhole = (r.configuration.data >> 116) & ((1 << 36) - 1);
+        uint256 supplied = IATokenSupply(aUSDC).totalSupply();
+        console.log("AAVE USDC reserve: supply cap (whole USDC)", capWhole);
+        console.log("AAVE USDC reserve: total supplied (6 dp)", supplied);
+        if (capWhole != 0 && supplied >= capWhole * 1e6) {
+            console.log(
+                "  ** WARNING: reserve is at its supply cap - supplyToAave reverts with AAVE error 51 until it is raised **"
+            );
+        }
     }
 
     function _buildVerifyBlockConfig(

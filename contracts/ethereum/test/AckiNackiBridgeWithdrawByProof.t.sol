@@ -16,6 +16,7 @@ import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
+import "./mocks/MockAave.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./helpers/Bn254FrLib.sol";
 
@@ -983,6 +984,45 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(
             _dummyProof(), _defaultPub(huge, Bn254FrLib.toFr(uint256(keccak256("shortfall"))))
         );
+    }
+
+    /// @dev Payouts on an AAVE-wired bridge: once most of the treasury is supplied,
+    ///      a withdrawal larger than the liquid reserve is topped up from the pool.
+    function test_withdrawByProof_pullsShortfallFromAave() public {
+        MockAUSDC aToken = new MockAUSDC();
+        MockAavePool pool = new MockAavePool(address(usdc), address(aToken));
+        bridge = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(pool),
+            address(aToken),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            VerifyBlockConfigLib.withWithdraw(
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+            )
+        );
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
+        seedAnchor = _seedFirstBlock();
+
+        bridge.supplyToAave(type(uint256).max);
+        assertEq(usdc.balanceOf(address(bridge)), 5 * UsdcTestLib.UNIT, "10% stays liquid");
+        assertEq(bridge.suppliedPrincipal(), 45 * UsdcTestLib.UNIT, "90% supplied");
+
+        uint256 amount = 20 * UsdcTestLib.UNIT;
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("aave-pull")));
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+
+        assertEq(usdc.balanceOf(RECIPIENT), amount, "recipient paid in full");
+        assertEq(usdc.balanceOf(address(bridge)), 0, "liquid reserve spent first");
+        assertEq(bridge.suppliedPrincipal(), 30 * UsdcTestLib.UNIT, "only the shortfall pulled");
+        assertEq(bridge.treasuryBalance(), 30 * UsdcTestLib.UNIT, "treasury decremented");
+        assertEq(bridge.totalAssets(), bridge.treasuryBalance(), "still fully backed");
     }
 
     function test_withdrawByProof_verifierRejects_revertsAndDoesNotMutateState() public {

@@ -24,13 +24,14 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the light
-  client's L1 can be flipped.** The previous bool `_ownerAnchorsEnabled`
-  turned the owner writer off for every source chain at once, so a flip
-  left the six L2s on the deposit allowlist with no writer. The call
-  (and `disableOwnerAnchorsOn(uint256 chainId)`) now sets
-  `_ownerAnchorsDisabled` only for the chain `deployLightClient` stored;
-  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
+  id `deployLightClient` stored can be flipped.** The previous bool
+  `_ownerAnchorsEnabled` turned the owner writer off for every source
+  chain at once, so a flip left the six L2s on the deposit allowlist
+  with no writer. The call (and `disableOwnerAnchorsOn(uint256 chainId)`)
+  now sets `_ownerAnchorsDisabled` only for `_lightClientL1ChainId`;
+  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The bridge
+  does not read the light client's own `getConfig().l1ChainId`.
   `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
   `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
   `getLightClientL1ChainId()` is the stored L1 id (0 until
@@ -41,8 +42,9 @@ assigns it when the release is tagged.
   bridge; `onCodeUpgrade` resets storage and does not migrate
   `_lightClient` or the L1 id, so both `disableOwnerAnchors` and
   `deployLightClient` revert 226 until `setLightClientCode` runs again.
-  Then `deployLightClient` stores the L1 id — the constructor message
-  bounces if the light client is already at that address.
+  Then `deployLightClient` stores the L1 id it is given — the constructor
+  message bounces if the light client is already at that address, so
+  pass the same id that client was constructed with.
   `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` on
   1.8.0, and `getAnchorConfig().ownerAnchorsEnabled` on 1.7.0 (that
   getter does not exist there, and retrying it would hang). An L1 flip

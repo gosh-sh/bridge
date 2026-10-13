@@ -34,8 +34,9 @@ until `disableOwnerAnchors()`, which needs `setLightClientCode` (so
 `_lightClient` is non-zero) and a stored L1 id from `deployLightClient`
 (`ERR_LIGHT_CLIENT_UNSET` (226) until both); it does not check that the
 light-client account is Active. The call turns the owner writer off only
-for that client's L1 (`ERR_NOT_LIGHT_CLIENT_CHAIN` (227) on any other id);
-the light client adds and ages out hashes with
+for the stored L1 id (`ERR_NOT_LIGHT_CLIENT_CHAIN` (227) on any other id);
+the bridge does not read the light client's own `getConfig().l1ChainId`.
+The light client adds and ages out hashes with
 `acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient`. L2
 source chains on the deposit allowlist keep the owner writer. `getAnchorConfig()`
 returns the light client and whether the owner may still write that L1;

@@ -659,10 +659,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Same as `disableOwnerAnchors()`, for an explicit chain id.
-    ///         The id must be the light client's L1; any other chain (an
-    ///         L2, or an L1 the light client does not follow) reverts
-    ///         `ERR_NOT_LIGHT_CLIENT_CHAIN` (227), because there would be
-    ///         no proof-writer left for it. Sold does not allow a public
+    ///         The id must equal `_lightClientL1ChainId`, the argument
+    ///         last passed to `deployLightClient`. The bridge does not
+    ///         read the light client's own `_l1ChainId`. Any other id
+    ///         (an L2, or a different L1) reverts
+    ///         `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). After an upgrade
+    ///         re-run, pass the same id the existing light client was
+    ///         constructed with — a constructor bounce still stores
+    ///         whatever was passed. Sold does not allow a public
     ///         overload of `disableOwnerAnchors`.
     function disableOwnerAnchorsOn(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept {
         _disableOwnerAnchors(chainId);

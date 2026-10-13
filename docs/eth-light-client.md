@@ -280,12 +280,14 @@ anything. After the flip nothing but a valid proof adds an L1 block hash; L2 has
 the owner key. There is no way back on that L1; the only recovery from a stalled relayer is
 `reAnchorCommittee`, which is logged on chain.
 
-**Do not flip yet.** `disableOwnerAnchors` now turns the owner writer off only for the light
-client's L1 (`disableOwnerAnchorsOn(chainId)` refuses any other id with `ERR_NOT_LIGHT_CLIENT_CHAIN`
-(227)). After an upgrade, `onCodeUpgrade` clears `_lightClient` and the stored L1 id:
-`setLightClientCode` has to run first, then `deployLightClient` stores the id
-(`getLightClientL1ChainId()`; 0 until then). `disableOwnerAnchors` reverts 226 until
-both are set. L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining
+**Do not flip yet.** `disableOwnerAnchors` now turns the owner writer off only for the L1
+id `deployLightClient` stored (`disableOwnerAnchorsOn(chainId)` refuses any other id with
+`ERR_NOT_LIGHT_CLIENT_CHAIN` (227)). The bridge does not read the light client's own
+`getConfig().l1ChainId`. After an upgrade, `onCodeUpgrade` clears `_lightClient` and the
+stored L1 id: `setLightClientCode` has to run first, then `deployLightClient` stores the
+id it is given (`getLightClientL1ChainId()`; 0 until then) — pass the same id the
+existing client was constructed with, because a constructor bounce still writes it.
+`disableOwnerAnchors` reverts 226 until both are set. L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining
 hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and the spans
 ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
 that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and

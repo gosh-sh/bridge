@@ -7,6 +7,17 @@ citations below are re-anchored to that commit — the two-line-number-bases spl
 previous revisions of this document carried is gone. When editing the spec, either
 re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
 
+> **Drift note, 2026-10-14** (branch `feature/bk-set-updates-flow-test-fixes`, after merging
+> `main`): `src/AckiNackiBridge.sol` has grown since `4021c68` — the pause switch on `main`, then
+> this branch's bundle-aware `applyBkSetUpdate` rule, `bundleStride` and
+> `genesisLastBkSetUpdateSeqNo` — and no re-anchoring pass has been run since. Citations below that
+> were not re-checked point too early: by about 30 lines around `HistoryWindow` (`:259` → `:289`)
+> and by about 100–160 from `deposit` on (`:672` → `:772`, `applyBkSetUpdate` `:898` → `:1011`,
+> `transferOwnership` `:1565` → `:1720`). Checked against the current source: §4.1's storage table
+> (slots with `forge inspect`), the `whenNotPaused` and `pause()` / `unpause()` citations (`:536`,
+> `:1685`, `:1692`), §4.2's `bundleStride` row (`:234`), §4's `InvalidBundleStride` (`:714`), and
+> §7.3's description of the rotation gate.
+
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -144,8 +155,8 @@ relying on them for a storage-level migration.
 | 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
 | 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
 | 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
-| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 269 | `withdrawByProof` |
-| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 288 | `_appendLayer` |
+| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 284 | `withdrawByProof` |
+| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 303 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -157,6 +168,7 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `usdc` | `IERC20` | 117 | Deposit/payout token. Must be non-zero. |
 | `aavePool`, `aUSDC` | `IAavePool`, `IERC20` | 120, 123 | Both zero ⇒ AAVE disabled; exactly one zero ⇒ constructor reverts. |
 | `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` | interfaces | 159, 165, 171 | Any zero ⇒ `verifyBlock` disabled. |
+| `bundleStride` | `uint64` | 234 | Prover bundle width in block seq-nos (L1 = 1024, L2 = 16384); divisor in the `applyBkSetUpdate` boundary invariant. Mandatory when the verifier triple is wired; may be zero when `verifyBlock` is disabled. L1↔L2 switch requires a redeploy. |
 | `storedPrevMaxLevelLayerHash` | `uint256` | 204 | **Genesis seed only** since storage v2.0 (2026-08-04). Read exclusively by `_expectedPrevAnchor` when no layer window is populated (`:1118`). |
 | `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
@@ -197,7 +209,12 @@ constructor(
 ```
 
 `VerifyBlockConfig` (`:495-516`): `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier`,
-`genesisBkSetCommitment`, `genesisPrevMaxLevelLayerHash`, `genesisLastSeenBlockSeqNo`.
+`genesisBkSetCommitment`, `genesisPrevMaxLevelLayerHash`, `genesisLastSeenBlockSeqNo`,
+`bundleStride`. `bundleStride` is the prover's bundle width in block seq-nos (W·P = 1024 for L1,
+W² = 16384 for L2) and is immutable after construction; `applyBkSetUpdate` divides by it to detect
+whether a second rotation would cross an unverified bundle boundary. When the verifier triple is
+wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); when the triple is
+unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
 `altDstHostChainId`, `altTokenId`.
@@ -226,7 +243,7 @@ emitted (`:637-643`).
 function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant whenNotPaused  // :672
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
 
 Sequence (`:673-681`):
 
@@ -277,7 +294,7 @@ function verifyBlock(
 ) external nonReentrant whenNotPaused                     // :739-857
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
 
 Permissionless. Order of operations is deliberately cheap-checks-first, then crypto, then effects:
 
@@ -341,7 +358,7 @@ function withdrawByProof(
 ) external nonReentrant whenNotPaused returns (bool success)  // :1295-1383
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
 
@@ -402,7 +419,7 @@ function applyBkSetUpdate(
 ) external nonReentrant whenNotPaused                     // :898-1004
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
 
 Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:909`, note
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
@@ -431,6 +448,19 @@ Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:
 5. Effects: `storedBkSetCommitment = newCommitmentL3`, `storedLastBkSetUpdateSeqNo = blockSeqNo`,
    `emit BkSetUpdated(old, new, blockSeqNo)` (`:1000-1003`).
 
+Before step 5, the contract enforces the **bundle-boundary invariant**: if
+`storedLastBkSetUpdateSeqNo != 0`, compute
+`nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride`
+and revert `PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary)` when
+`nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. The guard only trips when the previous
+rotation's seq-no sits at or past the next bundle target the chain still owes; the incoming
+rotation's own seq-no plays no part. Rotations therefore apply back-to-back until one lands at
+or past that target, and the next one reverts until `verifyBlock` has advanced
+`storedLastSeenBlockSeqNo` to the last boundary at or below that previous seq-no. With
+`bundleStride = 16384` and the cursor at 0: N1 = 10 then N2 = 16389 both apply, although N2
+crosses a boundary; N1 = 16394 then N2 = 16397 lie in one window, yet N2 reverts until
+`verifyBlock(16384)`.
+
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
 **Operator rule.** Attestation `lastSeen` is the word the Circuit 1A/1B
@@ -438,13 +468,14 @@ proof was baked against (`block_seq_no > last_seen`). That is the layer
 cursor at prove time, typically the previous key block — not
 `storedLastSeenBlockSeqNo` after `verifyBlock(N)`, which equals N and
 makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` selects
-the set and gates the next rotation. Relayers apply a rotation as soon
-as the previous one is covered; `verifyBlock` accepts the outgoing set
-for `seqNo <= N`. AN must announce a rotation at bundle target N
+the set and gates the next rotation. A rotation can be applied before
+the layer cursor reaches N; `verifyBlock` accepts the outgoing set for
+`seqNo <= N`. AN must announce a rotation at bundle target N
 *before* that bundle is proven: a proof that already baked
-`last_seen = N` cannot satisfy `attestationLastSeen < N`. Two
-rotations with no bundle target in `[N1, N2]` (inclusive) stall
-permanently.
+`last_seen = N` cannot satisfy `attestationLastSeen < N`. A burst of
+rotations applies in order until one lands at or past the next owed
+bundle target; the rest wait for `verifyBlock` to reach the last
+boundary at or below it — usually just that one bundle.
 
 ### 7.4 Read surface for AN state
 
@@ -583,7 +614,7 @@ Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal`
 | `acceptOwnership` | `pendingOwner` |
 | everything else | view/pure |
 
-The owner can **pause** the bridge (`pause()` / `unpause()`, `:1611`, `:1618`; a call that would not
+The owner can **pause** the bridge (`pause()` / `unpause()`, `:1685`, `:1692`; a call that would not
 change the state reverts `AlreadyInThatPauseState()`). While `paused` is true, `deposit`,
 `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert `BridgePaused()`; the owner's AAVE
 functions stay available, so funds can be moved out of AAVE during a pause. There is **no owner path
@@ -644,7 +675,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `LayerHashTailNonZero`, `LayerHashActiveZero`, `LayerOutOfRange`, `NonMonotonicLayerHeight`.
 
 `applyBkSetUpdate`: `BkUpdateDisabled`, `StaleBkSetCommitment`, `BkUpdateSeqNoNotMonotonic`,
-`BkUpdateMerkleMismatch`, `VerifyBlockLagBehindRotation`, `AttestationLastSeenNotBeforeSeqNo`.
+`BkUpdateMerkleMismatch`, `PrevSlotStillOwedForBundle`, `AttestationLastSeenNotBeforeSeqNo`.
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
@@ -680,7 +711,9 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
-| `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned**. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
+| `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned** at L1; under L2 anchoring it must be a multiple of `BUNDLE_STRIDE` = 16384. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
+| `GENESIS_LAST_BK_SET_UPDATE_SEQNO` | same | Initial `storedLastBkSetUpdateSeqNo`: the last `bkSetUpdates.height` at or below the seed, printed by `compute_bridge_anchors`. `vm.envOr` default `0` (a chain without rotations). |
+| `BUNDLE_STRIDE` | same | Immutable `bundleStride`: the relayer's bundle width in block seq-nos, 16384 (W²) for L2. `vm.envUint` with no default, so the deploy fails without it; `0` with the verifier triple wired reverts `InvalidBundleStride`. Must equal the relayer's anchor-level stride. `deploy_bridge_bundle.sh` takes it from `compute_bridge_anchors` (`AnchorMode::stride()` for the level); the other scripts take it as set. `daemon-live` refuses to start when the deployed `bundleStride()` differs from its stride, and only a redeploy fixes such a bridge. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |

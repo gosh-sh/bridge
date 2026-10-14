@@ -2,6 +2,12 @@
 # BRIDGE_BOOTSTRAP_SEQNO; re-run the script to regenerate anchors.
 source "$(dirname "${BASH_SOURCE[0]}")/../shellnet.common"
 
-BRIDGE_ADDRESS=0x8d9190666128ab897c5abd8c107239a197e08467
-BRIDGE_BOOTSTRAP_SEQNO=12681216
+BRIDGE_ADDRESS=0xb733a57c393214254506bde7e9950a1b57e06fb4
+BRIDGE_DEPLOY_BLOCK=11910592
+BRIDGE_BOOTSTRAP_SEQNO=23887872
 BRIDGE_ANCHOR_LEVEL=2
+# Historical bk-update cursor used at deploy (constructor arg
+# genesisLastBkSetUpdateSeqNo). Preserved here for operator forensics and
+# so a cold-start daemon can cross-check its own GQL-derived value against
+# what the on-chain `storedLastBkSetUpdateSeqNo` actually got.
+GENESIS_LAST_BK_SET_UPDATE_SEQNO=23886566

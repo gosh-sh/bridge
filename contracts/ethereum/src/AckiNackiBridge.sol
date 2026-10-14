@@ -184,7 +184,7 @@ contract AckiNackiBridge {
     /// @notice Highest AN block sequence number whose BK-set rotation has been
     ///         applied on-chain via `applyBkSetUpdate`. Selects the set
     ///         `verifyBlock` must see (`_expectedBkSetFor`) and gates the
-    ///         next rotation (`VerifyBlockLagBehindRotation`). Not only a
+    ///         next rotation (`PrevSlotStillOwedForBundle`). Not only a
     ///         monotonicity cursor.
     uint64 public storedLastBkSetUpdateSeqNo;
 
@@ -217,6 +217,21 @@ contract AckiNackiBridge {
     ///      `storedLayerHashes[10]` flat cache — indexers migrate to
     ///      `getLatestPerLayer()` and `_highestActiveLayer()`.
     uint256 public immutable storedPrevMaxLevelLayerHash;
+
+    /// @notice Prover bundle stride in AN seq_nos (same as the daemon's
+    ///         `AnchorMode::stride()` — `W·P` for L1, `W²` for L2). Set once
+    ///         at construction from `VerifyBlockConfig.bundleStride` and
+    ///         never mutated post-deploy.
+    /// @dev    Load-bearing: `applyBkSetUpdate` uses it to compute the next
+    ///         bundle boundary the current `storedPrevBkSetCommitment` is
+    ///         still responsible for signing. Overwriting the prev slot
+    ///         before that boundary is covered by `verifyBlock` strands it
+    ///         (no live BK-set can prove the next bundle). Zero when the
+    ///         verifyBlock triple is unwired (`applyBkSetUpdate` is disabled
+    ///         anyway via `BkUpdateDisabled`); otherwise strictly positive.
+    ///         Switching anchor level (L1↔L2) changes the stride and
+    ///         therefore requires a redeploy.
+    uint64 public immutable bundleStride;
 
     // ---------------------------------------------------------------------
     // Storage: Circuit 4 (Bridge Withdrawal) — AN→ETH payout
@@ -428,23 +443,23 @@ contract AckiNackiBridge {
     /// @notice A zero `newCommitmentL3` would force every later
     ///         `verifyBlock` to attest a zero BK-set commitment.
     error ZeroBkSetCommitment();
-    /// @notice A second `applyBkSetUpdate` is blocked until `verifyBlock`
-    ///         has covered the previous rotation
-    ///         (`storedLastBkSetUpdateSeqNo <= storedLastSeenBlockSeqNo`).
-    ///         Only one outgoing set is kept (`storedPrevBkSetCommitment`);
-    ///         applying N2 while the cursor is still behind N1 would need
-    ///         a third commitment. The first rotation
-    ///         (`storedLastBkSetUpdateSeqNo == 0`) is always allowed —
-    ///         `verifyBlock` then accepts the previous set for
-    ///         `blockSeqNo <= N` so an off-boundary N is not a deadlock.
-    ///         Two rotations with no bundle target in `[N1, N2]`
-    ///         (inclusive) deadlock permanently: N2 waits on a bundle
-    ///         after N1, that bundle is signed by a third set, and
-    ///         `verifyBlock` cannot move either. The first field is the
-    ///         previous N already stored, not the `blockSeqNo` being
-    ///         applied. AN must not place two rotations with no bundle
-    ///         target between them (ends included).
-    error VerifyBlockLagBehindRotation(uint64 rotationSeqNo, uint64 lastSeenBlockSeqNo);
+    /// @notice A further `applyBkSetUpdate` is blocked while the current
+    ///         `storedPrevBkSetCommitment` is still owed a `verifyBlock` for
+    ///         the next bundle boundary strictly past
+    ///         `storedLastSeenBlockSeqNo`. Only one outgoing set is kept, so
+    ///         overwriting it before that boundary is covered would strand
+    ///         it: the only set that could sign that boundary disappears.
+    ///         The check looks only at the previous N, not at the incoming
+    ///         one: it reverts iff that next boundary is at or below
+    ///         `storedLastBkSetUpdateSeqNo`. Rotations therefore apply
+    ///         back-to-back (AN can emit several between two prover bundles)
+    ///         until one lands at or past the boundary; the next one then
+    ///         waits until `verifyBlock` reaches the last boundary at or
+    ///         below it, and `daemon-live` does not submit it before. The
+    ///         first field is the previous N (`storedLastBkSetUpdateSeqNo`),
+    ///         the second the next bundle boundary strictly greater than
+    ///         `storedLastSeenBlockSeqNo`.
+    error PrevSlotStillOwedForBundle(uint64 lastBkSetUpdateSeqNo, uint64 nextOwedBoundary);
     /// @notice Circuit 1A/1B range-checks `block_seq_no > last_seen`.
     ///         Passing the live layer cursor after `verifyBlock(N)` as
     ///         `attestationLastSeen` for `applyBkSetUpdate(N)` is
@@ -489,6 +504,13 @@ contract AckiNackiBridge {
     /// @notice verifyBlock is all-or-nothing. Partial wiring (1 or 2 of
     ///         the three verifier addresses set) is rejected at construction.
     error PartialVerifyBlockWiring();
+    /// @notice `VerifyBlockConfig.bundleStride` must be strictly positive
+    ///         when the verifyBlock triple is wired — `applyBkSetUpdate`
+    ///         divides by it to compute the next owed bundle boundary.
+    ///         Legitimate values are the daemon's `AnchorMode::stride()`:
+    ///         `W·P` for L1 and `W²` for L2. Switching anchor level
+    ///         requires a redeploy.
+    error InvalidBundleStride();
     error WithdrawTransferFailed(address recipient, uint256 amount);
     /// @notice Bridge holds less USDC than the proof asks for. Should be
     ///         unreachable in steady state because deposits flow into
@@ -553,6 +575,31 @@ contract AckiNackiBridge {
         ///         instance[15] (the proof's baked-in `last_seen`) will not
         ///         match `storedLastSeenBlockSeqNo`.
         uint64 genesisLastSeenBlockSeqNo;
+        /// @notice Prover bundle stride in AN seq_nos — `W·P` for L1, `W²`
+        ///         for L2 (matches `AnchorMode::stride()` on the daemon
+        ///         side). Required when verifier addresses are non-zero;
+        ///         `applyBkSetUpdate` uses it to compute the next bundle
+        ///         boundary strictly past `storedLastSeenBlockSeqNo` the
+        ///         current `storedPrevBkSetCommitment` is still responsible
+        ///         for signing. Pass `0` only if `verifyBlock` is disabled
+        ///         (`applyBkSetUpdate` reverts with `BkUpdateDisabled`
+        ///         anyway in that case). Switching anchor level (L1↔L2)
+        ///         requires a redeploy.
+        uint64 bundleStride;
+        /// @notice Initial `storedLastBkSetUpdateSeqNo`. Highest
+        ///         `bkSetUpdates.height` ≤ `genesisLastSeenBlockSeqNo` observed
+        ///         by `compute_bridge_anchors` at deploy time. Pass `0` on
+        ///         chains with no historical rotations in the GQL retention
+        ///         window (fresh devnet, local). On a chain whose GQL retains
+        ///         rotations that pre-date the bootstrap seed, pass the
+        ///         highest such height so `applyBkSetUpdate` skips those
+        ///         already-folded events — the rotations ≤ this cursor are
+        ///         already encoded in `genesisBkSetCommitment`, re-applying
+        ///         them would move the stored commitment *away* from the
+        ///         live chain state. The daemon's `BootstrapSeed` mirrors
+        ///         this value as `last_bk_set_update_seq_no`; the drift
+        ///         check compares them field-for-field.
+        uint64 genesisLastBkSetUpdateSeqNo;
     }
 
     /// @notice Argument bundle for the AN→ETH Circuit 4
@@ -659,6 +706,12 @@ contract AckiNackiBridge {
                 if (_vb.genesisBkSetCommitment == 0) revert ZeroBkSetCommitment();
                 _requireCanonicalFr(_vb.genesisBkSetCommitment);
                 _requireCanonicalFr(_vb.genesisPrevMaxLevelLayerHash);
+                // `bundleStride` is only consulted by `applyBkSetUpdate`,
+                // which also requires the verifyBlock triple to be wired
+                // (otherwise it reverts with `BkUpdateDisabled`). Enforce
+                // the pairing at construction so an operator cannot wire
+                // verifyBlock without declaring the stride.
+                if (_vb.bundleStride == 0) revert InvalidBundleStride();
             }
         }
         primaryVerifier = _vb.primaryVerifier;
@@ -667,6 +720,13 @@ contract AckiNackiBridge {
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
         storedLastSeenBlockSeqNo = _vb.genesisLastSeenBlockSeqNo;
+        // Historical bk-update cursor: see
+        // `VerifyBlockConfig.genesisLastBkSetUpdateSeqNo` for why this is
+        // non-zero on chains with pre-bootstrap rotations in GQL. On a fresh
+        // chain this is simply `0` and `applyBkSetUpdate` fires on the first
+        // rotation past the seed as usual.
+        storedLastBkSetUpdateSeqNo = _vb.genesisLastBkSetUpdateSeqNo;
+        bundleStride = _vb.bundleStride;
         bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
         bridgeWithdrawalDappFr = _bw.dappFr;
         bridgeWithdrawalAccFr = _bw.accFr;
@@ -970,16 +1030,30 @@ contract AckiNackiBridge {
         if (blockSeqNo <= storedLastBkSetUpdateSeqNo) {
             revert BkUpdateSeqNoNotMonotonic(blockSeqNo, storedLastBkSetUpdateSeqNo);
         }
-        // One outgoing set only. A second rotation while the layer
-        // cursor is still behind the previous N would drop the set that
-        // still has to sign `verifyBlock` for those seqnos. The first
-        // rotation (storedLastBkSetUpdateSeqNo == 0) always proceeds;
-        // `verifyBlock` accepts `storedPrevBkSetCommitment` for
-        // `blockSeqNo <= N` so an off-boundary N is not a deadlock.
-        if (storedLastBkSetUpdateSeqNo > storedLastSeenBlockSeqNo) {
-            revert VerifyBlockLagBehindRotation(
-                storedLastBkSetUpdateSeqNo, storedLastSeenBlockSeqNo
-            );
+        // One outgoing set only. Overwriting `storedPrevBkSetCommitment`
+        // while that set is still owed a `verifyBlock` for an unverified
+        // bundle boundary past the live cursor would strand that boundary
+        // — no live set could later sign it. The check is on the previous
+        // N only: revert iff the next boundary after the cursor is at or
+        // below it. Rotations thus apply back-to-back (AN emits bursts of
+        // rotations between bundles on shellnet) until one lands at or
+        // past that boundary; the next one waits until `verifyBlock`
+        // reaches the last boundary at or below it. `verifyBlock` accepts
+        // `storedPrevBkSetCommitment` for `blockSeqNo <=
+        // storedLastBkSetUpdateSeqNo`, so an off-boundary N is not a
+        // deadlock. The first rotation past the
+        // genesis cursor always proceeds — "first" is literal only on a
+        // chain that was fresh at deploy time (`storedLastBkSetUpdateSeqNo
+        // == 0`); on chains whose GQL retention window still exposed
+        // historical rotations at deploy, `storedLastBkSetUpdateSeqNo`
+        // was seeded by `genesisLastBkSetUpdateSeqNo` to the highest
+        // such pre-bootstrap height, and this branch skips to the first
+        // *post-genesis-cursor* rotation.
+        if (storedLastBkSetUpdateSeqNo != 0) {
+            uint64 nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride;
+            if (nextOwedBoundary <= storedLastBkSetUpdateSeqNo) {
+                revert PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary);
+            }
         }
         // Circuit 1A/1B proves `block_seq_no > last_seen`. After
         // `verifyBlock(N)` the live cursor is N, which cannot be the
@@ -1287,9 +1361,9 @@ contract AckiNackiBridge {
     ///      against an already-advanced contract — the scenario a
     ///      fresh install, a co-tester's daemon, or a mid-run machine
     ///      handoff hit when only `getLatestPerLayer()` was exposed
-    ///      (heads-only). See
-    ///      `crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`
-    ///      Case 6 (Chain-resurrect).
+    ///      (heads-only). See §5.4 (New machine, contract already
+    ///      advanced) of
+    ///      `crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md`.
     ///
     ///      Struct return uses the ABI encoder v2 default in Solidity 0.8
     ///      and copies storage → memory; adds no hot-path cost since

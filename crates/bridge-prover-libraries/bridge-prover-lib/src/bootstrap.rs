@@ -38,7 +38,15 @@ use crate::bridge_state::BridgeState;
 /// on cold-restart. Manual migration:
 /// `mv state state.pre_L2_$(date +%Y%m%d_%H%M%S)` then re-bootstrap with
 /// `BRIDGE_ANCHOR_LEVEL` set explicitly.
-pub const SEED_SCHEMA_VERSION: u32 = 2;
+///
+/// **v3 (2026-10-12)**: added
+/// [`BootstrapSeed::last_bk_set_update_seq_no`]. Mirrors the Solidity
+/// constructor arg `genesisLastBkSetUpdateSeqNo`: cold-starts on chains
+/// whose GQL retention window straddles historical BK rotations seed
+/// their drain cursor past them. v2 seeds fail the schema-version check
+/// and must be regenerated — same `mv state state.pre_v3_$(…)` migration
+/// pattern as the v1→v2 bump.
+pub const SEED_SCHEMA_VERSION: u32 = 3;
 
 /// Default path for the persisted seed. Daemons may override but typically
 /// both read/write the same `<state_dir>/bootstrap_seed.json`. The
@@ -78,6 +86,18 @@ pub struct BootstrapSeed {
     /// with `jq`; loader has an explicit backfill hook.
     #[serde(default = "default_seed_anchor_level")]
     pub anchor_level: u8,
+    /// Highest `bkSetUpdates.height ≤ block_seq_no` observed via GQL at
+    /// seed time. Written verbatim to
+    /// `BridgeState::stored_last_bk_set_update_seq_no` by [`Self::apply`]
+    /// so the daemon's bk-update drain only ever considers rotations past
+    /// the seed. Must match the Solidity constructor arg
+    /// `genesisLastBkSetUpdateSeqNo`. `0` on chains with no historical
+    /// rotations in the GQL retention window — same as the pre-v3
+    /// implicit default. `#[serde(default)]` keeps the loader
+    /// error-message friendly for v2 files (schema check still rejects
+    /// them, but the parse itself does not blow up on the missing field).
+    #[serde(default)]
+    pub last_bk_set_update_seq_no: u64,
 }
 
 /// Default `anchor_level` for seeds deserialized from a v1 file. v1 always
@@ -110,6 +130,11 @@ impl BootstrapSeed {
         // uninitialized) but before any subsequent bundle append could
         // observe it. See `BridgeState::anchor_level` docstring.
         state.anchor_level = self.anchor_level;
+        // Seed the bk-update drain cursor past any historical rotations
+        // already folded into `bk_set_commitment`. Mirrors the Solidity
+        // constructor's `storedLastBkSetUpdateSeqNo = _vb.genesisLastBkSetUpdateSeqNo;`
+        // (one-shot write at genesis).
+        state.stored_last_bk_set_update_seq_no = self.last_bk_set_update_seq_no;
         Ok(())
     }
 
@@ -202,6 +227,7 @@ pub async fn fetch_from_node(
     first_key_seqno: u64,
     bk_set_commitment: [u8; 32],
     anchor_level: u8,
+    last_bk_set_update_seq_no: u64,
 ) -> anyhow::Result<BootstrapSeed> {
     let block = gql
         .query_proof_block_by_seqno(first_key_seqno)
@@ -219,6 +245,82 @@ pub async fn fetch_from_node(
         block_seq_no: first_key_seqno,
         bk_set_commitment,
         anchor_level,
+        last_bk_set_update_seq_no,
+    })
+}
+
+/// BK-set commitment the chain records as active at the seed block.
+///
+/// Every block carries the commitment of the BK set that signs it in leaf 2
+/// of its block-id tree (the bundle path cross-checks exactly this leaf). A
+/// rotation block also carries the incoming set in leaf 3, so when the seed
+/// block is itself the highest rotation `≤ seed`
+/// (`last_bk_set_update_seq_no == seed_seqno`), the set in force after the
+/// seed — the one the bridge is genesis-stamped with — is leaf 3.
+pub fn expected_seed_bk_commitment(
+    leaves: &[[u8; 32]; crate::block_id_tree::BLOCK_ID_TREE_LEAF_COUNT],
+    seed_seqno: u64,
+    last_bk_set_update_seq_no: u64,
+) -> [u8; 32] {
+    if last_bk_set_update_seq_no == seed_seqno { leaves[3] } else { leaves[2] }
+}
+
+/// [`fetch_from_node`] plus a chain cross-check of `bk_set_commitment`.
+///
+/// `fetch_from_node` stamps whatever commitment the caller derived from its
+/// BK-set file. A file folded to a different rotation than
+/// `last_bk_set_update_seq_no` (e.g. written before a rotation that landed
+/// below the seed) makes the seed inconsistent: the bridge is stamped with one
+/// set while its rotation cursor skips to another, and the daemon only finds
+/// out at the first drained rotation (`L2 != prover_bk_set.commitment`). This
+/// variant compares the commitment with [`expected_seed_bk_commitment`] and
+/// refuses to build the seed on mismatch.
+pub async fn fetch_from_node_verified(
+    gql: &bridge_gql_fetcher::gql_client::GqlClient,
+    first_key_seqno: u64,
+    bk_set_commitment: [u8; 32],
+    anchor_level: u8,
+    last_bk_set_update_seq_no: u64,
+) -> anyhow::Result<BootstrapSeed> {
+    let block = gql
+        .query_proof_block_by_seqno(first_key_seqno)
+        .await
+        .with_context(|| {
+            format!("could not fetch first key block at seq_no={}", first_key_seqno)
+        })?;
+    let leaves = block.block_merkle_tree_leaves.as_ref().with_context(|| {
+        format!(
+            "seed block at seq_no={} has no block_merkle_tree_leaves — cannot check the \
+             BK-set commitment against the chain",
+            first_key_seqno
+        )
+    })?;
+    let chain_commitment =
+        expected_seed_bk_commitment(leaves, first_key_seqno, last_bk_set_update_seq_no);
+    anyhow::ensure!(
+        chain_commitment == bk_set_commitment,
+        "BK-set commitment {} does not match the chain's {} at seed seq_no={} (leaf {} of the \
+         seed block; last rotation <= seed at {}). The BK-set file is not the set active at \
+         the seed: rebuild it by folding bkSetUpdates up to the seed \
+         (`seed_prover_bk_set --cap-height {}`, then `jq .pubkeys_hex`) and retry.",
+        hex::encode(bk_set_commitment),
+        hex::encode(chain_commitment),
+        first_key_seqno,
+        if last_bk_set_update_seq_no == first_key_seqno { 3 } else { 2 },
+        last_bk_set_update_seq_no,
+        first_key_seqno,
+    );
+    let block_height = block.height;
+    let layer_hashes = build_layer_hashes_for_seed(&block.history_proofs, anchor_level)
+        .with_context(|| format!("seed block at seq_no={}", first_key_seqno))?;
+    Ok(BootstrapSeed {
+        schema_version: SEED_SCHEMA_VERSION,
+        layer_hashes,
+        block_height,
+        block_seq_no: first_key_seqno,
+        bk_set_commitment,
+        anchor_level,
+        last_bk_set_update_seq_no,
     })
 }
 
@@ -236,6 +338,7 @@ mod tests {
             block_seq_no: 8,
             bk_set_commitment: [9u8; 32],
             anchor_level: 1,
+            last_bk_set_update_seq_no: 0,
         };
         assert!(!state.initialized);
         seed.apply(&mut state).unwrap();
@@ -246,6 +349,34 @@ mod tests {
         assert_eq!(state.window(1).data_len, 1);
         assert_eq!(state.window(1).latest(), Some([7u8; 32]));
         assert_eq!(state.anchor_level, 1, "apply must stamp anchor_level onto state");
+        assert_eq!(
+            state.stored_last_bk_set_update_seq_no, 0,
+            "apply must stamp last_bk_set_update_seq_no onto state"
+        );
+    }
+
+    /// A seed carrying a non-zero `last_bk_set_update_seq_no` must stamp
+    /// `BridgeState::stored_last_bk_set_update_seq_no` to that exact value,
+    /// mirroring the Solidity constructor's one-shot `storedLastBkSetUpdateSeqNo =
+    /// _vb.genesisLastBkSetUpdateSeqNo` write. Without this the daemon's
+    /// bk-update drain would still start at 0 on a chain whose GQL retention
+    /// window holds pre-bootstrap rotations, and `apply_bk_update` would
+    /// halt on the first drained event with
+    /// `prover_bk_set.commitment != event.L2.before` (prover out of sync).
+    #[test]
+    fn apply_stamps_last_bk_set_update_seq_no_onto_state() {
+        let mut state = BridgeState::new(8);
+        let seed = BootstrapSeed {
+            schema_version: SEED_SCHEMA_VERSION,
+            layer_hashes: vec![([7u8; 32], 2)],
+            block_height: 16_384,
+            block_seq_no: 16_384,
+            bk_set_commitment: [9u8; 32],
+            anchor_level: 2,
+            last_bk_set_update_seq_no: 23_461_596,
+        };
+        seed.apply(&mut state).unwrap();
+        assert_eq!(state.stored_last_bk_set_update_seq_no, 23_461_596);
     }
 
     #[test]
@@ -263,6 +394,7 @@ mod tests {
             block_seq_no: 16_384,
             bk_set_commitment: [9u8; 32],
             anchor_level: 2,
+            last_bk_set_update_seq_no: 0,
         };
         seed.apply(&mut state).unwrap();
         assert!(state.initialized);
@@ -282,6 +414,7 @@ mod tests {
             block_seq_no: 8,
             bk_set_commitment: [9u8; 32],
             anchor_level: 1,
+            last_bk_set_update_seq_no: 0,
         };
         seed.apply(&mut state).unwrap();
         // Second apply must fail — the commitment stamp is genesis-only.
@@ -303,11 +436,16 @@ mod tests {
             block_seq_no: 8,
             bk_set_commitment: [3u8; 32],
             anchor_level: 2,
+            last_bk_set_update_seq_no: 23_461_596,
         };
         seed.save(path_s).unwrap();
         let loaded = BootstrapSeed::load(path_s).unwrap().unwrap();
         assert_eq!(seed, loaded);
         assert_eq!(loaded.anchor_level, 2, "anchor_level must round-trip");
+        assert_eq!(
+            loaded.last_bk_set_update_seq_no, 23_461_596,
+            "last_bk_set_update_seq_no must round-trip"
+        );
     }
 
     #[test]
@@ -340,7 +478,7 @@ mod tests {
         let err = BootstrapSeed::load(path_s).unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("schema_version=1") && msg.contains("expects 2"),
+            msg.contains("schema_version=1") && msg.contains("expects 3"),
             "v1 rejection message should name both versions, got: {msg}"
         );
     }
@@ -369,5 +507,29 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|(root, l)| *l == 2 && *root == [0x22; 32]));
         assert!(out.iter().any(|(root, l)| *l == 1 && *root == [0x11; 32]));
+    }
+
+    fn leaves_with_bk_commitments() -> [[u8; 32]; crate::block_id_tree::BLOCK_ID_TREE_LEAF_COUNT] {
+        let mut leaves = [[0u8; 32]; crate::block_id_tree::BLOCK_ID_TREE_LEAF_COUNT];
+        leaves[2] = [0x22; 32];
+        leaves[3] = [0x33; 32];
+        leaves
+    }
+
+    /// Off a rotation the seed block's signing set (leaf 2) is the set in
+    /// force — also on a chain with no rotations at all (cursor 0).
+    #[test]
+    fn expected_seed_bk_commitment_reads_leaf_2_when_seed_is_not_a_rotation() {
+        let leaves = leaves_with_bk_commitments();
+        assert_eq!(expected_seed_bk_commitment(&leaves, 16_384, 16_000), [0x22; 32]);
+        assert_eq!(expected_seed_bk_commitment(&leaves, 16_384, 0), [0x22; 32]);
+    }
+
+    /// When the seed block is itself the last rotation `<= seed`, the
+    /// incoming set (leaf 3) is in force after it.
+    #[test]
+    fn expected_seed_bk_commitment_reads_leaf_3_when_seed_is_the_rotation() {
+        let leaves = leaves_with_bk_commitments();
+        assert_eq!(expected_seed_bk_commitment(&leaves, 16_384, 16_384), [0x33; 32]);
     }
 }

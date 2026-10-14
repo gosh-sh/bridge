@@ -1,7 +1,7 @@
 # `probe_bk_updates` — quickstart
 
 Read-only cadence probe for the AN `bkSetUpdates` stream.
-Source: `src/bin/probe_bk_updates.rs`. Spec: `bridge-prover-libraries/docs/bk_set_update_no_circuit3_plan.md` §Phase 2.
+Source: `src/bin/probe_bk_updates.rs`.
 
 ## Build
 
@@ -56,7 +56,7 @@ bursts (gap<=100 seqno): 3 clusters, largest=5
 
 ## What the numbers tell you
 
-- **Median / p90 gap** → typical inter-rotation seq_no distance. Compared to `W·P` window (128×4 = 512 seq_no on the current test config), tells you whether one-at-a-time drain is fine (median ≫ W·P) or you need to plan for batching (median ≤ W·P).
+- **Median / p90 gap** → typical inter-rotation seq_no distance. Compare it with the bundle stride (`W·P` = 1024 at L1, `W²` = 16384 at L2): rotations that land before the next owed bundle boundary apply back-to-back, while a rotation that follows one at or past that boundary waits for the `verifyBlock` covering it ([EVM spec §7.3](../../../../docs/EVM-contracts-spec.md)).
 - **Max gap** → longest quiet period. Sanity check that the fetcher's pagination reach is enough (with default 500-page pages, we're fine up to ~5M rotations).
 - **Bursts** → how often multiple rotations arrive close together. If `largest_burst_len > 1` and clusters are common, drain loop needs to handle back-to-back events without falling behind.
 

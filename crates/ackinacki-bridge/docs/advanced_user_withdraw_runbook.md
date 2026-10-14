@@ -82,7 +82,8 @@ Key scalars:
 - `W·P` (L1 stride): 1024 seq_nos ≈ 5.7 min chain-time at ~3 seq/s
 - `W²` (L2 stride): 16 384 seq_nos ≈ 91 min chain-time
 - Bundle prover wall-time: ~12 min (warm PK cache)
-- Circuit-4 event proof: ~5 min warm PK, ~20 min cold
+- Stage 5, Circuit-4 proof and aggregation: ~3 min warm (2 min 37 s and 2 min 41 s on the test
+  host), ~8 min cold (8 min 12 s)
 - Enricher wait-for-coverage timeout: 120 min
 - Capture (`WithdrawalInitiated` poll) timeout: 300 s
 
@@ -537,9 +538,10 @@ the recovery gist; jump here for the diagnostic commands.
 
 ### Case 3a — Capture timeout — advanced diagnostics
 
-**Scenario:** CLI exited 11. Either the event was never observed
-(poll expired) or the enricher blocked waiting for the covering
-bundle. Distinguish via:
+**Scenario:** CLI exited 11 — the event was never observed (the capture
+poll expired) — or exited 12 with a refusal that starts
+`wait_for_coverage:` — the event was captured, and the covering bundle
+did not land within the wait. Distinguish via:
 
 ```bash
 # `--work-dir` is required plumbing with no default, so substitute the
@@ -731,6 +733,12 @@ tvm-cli -j account "$WITHDRAW_FROM"          # ECC[3] balance: did it drop?
       `status` to `burned`, and re-run with `--allow-retry` so the run
       resumes at capture instead of re-burning.
 
+  The CLI checks the hash you wrote: after capture it compares the
+  event's amount, recipient, chain, token and sender with the withdrawal
+  it is running, and refuses with exit 10, naming what differs, before
+  anything is proved. A hash from another withdrawal of the same multisig
+  is caught there rather than paid out under this record.
+
   The ExtOut is the only unambiguous evidence. Stopping one hop earlier
   — at "the multisig transaction succeeded" — is what would let you mark
   a bounced call as `burned`, after which the resumed run waits forever
@@ -859,21 +867,44 @@ submit — a few minutes.
 
 **Symptom (CLI exit 12):** Failure in the CLI's only subprocess —
 `aggregate-proof` (SHPLONK aggregation over the in-process Poseidon
-C4 SNARK). Failures surface via `SubprocessAggregator`
-(`crates/bridge-relayer-daemon/src/aggregator.rs:438-455`):
+C4 SNARK). Its own lines are in the CLI's log as it runs, each starting
+`aggregate-proof:`. Failures surface via `SubprocessAggregator`
+(`crates/bridge-relayer-daemon/src/aggregator.rs`):
 
 ```
-ERROR aggregate-proof timed out after <duration>
+aggregate-proof timed out after <duration> and was killed. … raise it with --prover-timeout-s.
+aggregate-proof said last:
+<its error, or its last 40 lines>
    OR
-ERROR aggregate-proof exited with <status>: <stderr>
+aggregate-proof exited with <status>: <its error, or its last 40 lines>
    OR
-ERROR failed to spawn aggregate-proof: <err>
+failed to spawn aggregate-proof: <err>
 ```
+
+An `exited with` whose error says `making the aggregated proof failed
+(assertion failed: accept)` and `The key was read from the pk cache` means
+that key, or the ceremony file the error names, is damaged in place. Its
+slot is set aside when it can be — the error says which — and removing the
+`.pk` and the `.meta.json.damaged` it names frees their space before
+`--allow-retry`; otherwise remove the `.pk` and `.meta.json` it names. If it
+says the run generated the key itself, check the ceremony file it names.
+
+The CLI itself, right before the proof, refuses a binary that changed after
+preflight:
+
+```
+<aggregator-dir>/target/release/aggregate-proof is not the aggregate-proof preflight checked: …
+```
+
+Re-run with `--allow-retry`, and do not rebuild it while a withdrawal waits
+at stage 4b.
 
 In-process Circuit-4 failures surface a level up as
 `Circuit4ShplonkPipeline::prove failed` (no subprocess involved).
 
-**Trigger conditions:** Out of disk, OOM, RAM swap-thrash.
+**Trigger conditions:** Out of disk, OOM, RAM swap-thrash, a cold keygen
+that waited for another one in the same pk cache, a damaged cached key, an
+`aggregate-proof` rebuilt after preflight.
 
 A missing, truncated or non-Hermez ceremony no longer reaches this stage:
 since the stage-1 prover-artifact checks landed, it is refused before the
@@ -884,16 +915,24 @@ older build.
 **Checks:**
 
 ```bash
-du -sh ../bridge-prover-libraries/params/   # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
+du -sh ../bridge-prover-libraries/params/   # ~9.5 GB withdraw-only after the first run; more if this host also runs the bundle relayer
 # Free space for a cold run, on the ONE filesystem that holds both:
 #   3 GiB  event_pk.bin + vk + config (~2.65 GB measured, rounded up)
-#   1 GiB  outer SHPLONK aggregator PK (~800 MB measured, rounded up;
+#   7 GiB  outer SHPLONK aggregator PK (~6.85 GB measured, rounded up;
 #          pk_cache lives inside params/ in the shipped profile)
 #   -----
-#   4 GiB = ~4.3 GB as df reports it — preflight sums these constants
+#  10 GiB = ~10.7 GB as df reports it — preflight sums these constants
 #          and refuses below the total
+# A warm run loads both keys and reserves neither: the aggregator key
+# counts as cached when the last proof (params/pk_cache/.withdraw-slot.json)
+# ran with this Circuit-4 key and this aggregate-proof, and the key it used
+# and its .meta.json are still in pk_cache/. The first run after an upgrade
+# reserves the 7 GiB again, and 3 GiB more when it brings a new Circuit-4
+# key (README Step 0).
 df -h ../bridge-prover-libraries/params/
-# RAM headroom: C4 K=19 needs ~40 GB peak — this, not disk, is what sizes the host
+# RAM headroom: a cold run peaked at ~19 GB system-wide on the test host (the CLI reached
+# 9.5 GB RSS in Circuit 4, the aggregate-proof it waits on 12.6 GB); install.sh warns
+# below 24 GB with swap
 ```
 
 **Remediation:**
@@ -922,9 +961,23 @@ df -h ../bridge-prover-libraries/params/
 
 - If the log shows swap thrash, the OOM is real — don't just extend
   timeout. Move to a bigger host or shrink another workload.
-- If first-bundle `.pk` write ENOSPC-truncated the file, delete the
-  truncated `pk_cache` entry and re-run. Verify ≥20 GB free in
-  `params_dir` before doing so.
+- An `aggregate-proof` that ran out of disk while writing its key removes
+  its `<stem>.pk.partial-…` file and never leaves a truncated `<stem>.pk`;
+  one killed mid-write leaves the partial file. The next `aggregate-proof`
+  that takes the cache's lock removes it, but preflight names it and
+  counts it as used space first: if preflight refuses for want of room,
+  remove it by hand while no `aggregate-proof` is running. Free the space
+  preflight asks for and re-run with `--allow-retry`. A published key that
+  is not whole fails the aggregator with `cached aggregator key … is
+  damaged`, and the aggregator sets its slot aside — after any other
+  `aggregate-proof` holding the cache lock has finished: the `.meta.json`
+  becomes `<stem>.meta.json.damaged`, and the next run that needs the slot
+  removes both files and generates the key again. Remove them by hand first to free the key's ~6.85 GB: preflight
+  reserves room for a new key and does not count the set-aside one.
+  Preflight refuses — with exit 2, or exit 10 when it resumes a recorded
+  burn, as `--allow-retry` does — a key whose `.meta.json` records another
+  length or degree, and one this user cannot read with advice to fix its
+  permissions.
 
 ---
 
@@ -1288,7 +1341,7 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — veri
 
 **Safe to prune between demos:**
 
-- `work_dir/` — regeneration is deterministic; ~5 min per proof with
+- `work_dir/` — regeneration is deterministic; ~3 min per proof with
   warm PK cache.
 - `withdraw-state/<sha256>.json` files with status `Confirmed` —
   keep for audit; `Failed` — safe to prune once reconciled.
@@ -1306,5 +1359,5 @@ contracts/ethereum/verifiers/                  ← BRIDGE_VERIFIERS_DIR — veri
 
 **Do NOT touch between demos:**
 
-- `params/` and `params/pk_cache/` — cold cache costs ~20 min per
-  proof; warm cache is ~5 min.
+- `params/` and `params/pk_cache/` — cold cache costs ~8 min per
+  proof; warm cache is ~3 min.

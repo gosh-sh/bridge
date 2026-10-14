@@ -93,6 +93,7 @@ pub struct RelayerMetrics {
     pub ticks_total: AtomicU64,
     pub finalized_total: AtomicU64,
     pub already_finalized_total: AtomicU64,
+    pub unprovable_total: AtomicU64,
     pub not_yet_available_total: AtomicU64,
     pub proof_failed_total: AtomicU64,
     pub an_rejected_total: AtomicU64,
@@ -111,6 +112,7 @@ impl RelayerMetrics {
             ticks: self.ticks_total.load(Ordering::Relaxed),
             finalized: self.finalized_total.load(Ordering::Relaxed),
             already_finalized: self.already_finalized_total.load(Ordering::Relaxed),
+            unprovable: self.unprovable_total.load(Ordering::Relaxed),
             not_yet_available: self.not_yet_available_total.load(Ordering::Relaxed),
             proof_failed: self.proof_failed_total.load(Ordering::Relaxed),
             an_rejected: self.an_rejected_total.load(Ordering::Relaxed),
@@ -127,6 +129,7 @@ pub struct RelayerMetricsSnapshot {
     pub ticks: u64,
     pub finalized: u64,
     pub already_finalized: u64,
+    pub unprovable: u64,
     pub not_yet_available: u64,
     pub proof_failed: u64,
     pub an_rejected: u64,
@@ -141,6 +144,7 @@ pub struct DaemonRunSummary {
     pub ticks: u64,
     pub finalized: u64,
     pub already_finalized: u64,
+    pub unprovable: u64,
     pub not_yet_available: u64,
     pub proof_failed: u64,
     pub an_rejected: u64,
@@ -159,6 +163,7 @@ pub enum LastOutcome {
     AnRejected { deposit_id: u64 },
     AnPending { deposit_id: u64 },
     Skipped { deposit_id: u64 },
+    Unprovable { deposit_id: u64 },
     TickError,
 }
 
@@ -293,6 +298,25 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         deposit_id,
                     })
                 },
+                Ok(TickOutcome::Unprovable {
+                    deposit_id,
+                    reason,
+                }) => {
+                    if let Some(m) = &metrics {
+                        m.unprovable_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    summary.unprovable += 1;
+                    warn!(
+                        deposit_id,
+                        reason = %reason,
+                        "daemon: deposit cannot be proven; recorded in unprovable_deposit_ids. \
+                         finalize-one cannot help; only the EVM bridge operator can return its \
+                         funds",
+                    );
+                    (true, LastOutcome::Unprovable {
+                        deposit_id,
+                    })
+                },
                 Err(e) => {
                     if let Some(m) = &metrics {
                         m.tick_errors_total.fetch_add(1, Ordering::Relaxed);
@@ -351,6 +375,9 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
         Ok(TickOutcome::Skipped {
             ..
         }) => "skipped",
+        Ok(TickOutcome::Unprovable {
+            ..
+        }) => "unprovable",
         Err(_) => "error",
     }
 }
@@ -552,5 +579,43 @@ mod tests {
         let snap = metrics.snapshot();
         assert!(snap.not_yet_available >= 4);
         assert_eq!(snap.finalized, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn daemon_counts_an_unprovable_deposit_apart_from_finalized() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let cfg = RelayerConfig {
+            poll_interval: Duration::from_millis(0),
+            ..RelayerConfig::new(dir.path().join("state.json"))
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::unprovable_on(0)),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        let metrics = RelayerMetrics::new();
+        let (tx, rx) = oneshot::channel::<()>();
+        tx.send(()).unwrap();
+        let summary = relayer
+            .run_until_shutdown(fast_backoff(), Some(metrics.clone()), async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary.unprovable, 1, "{summary:?}");
+        assert_eq!(summary.already_finalized, 0, "{summary:?}");
+        assert_eq!(summary.finalized, 0, "{summary:?}");
+        assert_eq!(metrics.snapshot().unprovable, 1);
+        assert_eq!(metrics.snapshot().already_finalized, 0);
+        assert!(matches!(
+            summary.last_outcome,
+            Some(LastOutcome::Unprovable {
+                deposit_id: 0
+            })
+        ));
     }
 }

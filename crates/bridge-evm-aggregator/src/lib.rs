@@ -41,6 +41,7 @@ pub mod aggregator;
 pub mod aggregator_cache;
 pub mod eip170;
 pub mod evm_export;
+pub mod logging;
 pub mod multiply;
 pub mod srs_guard;
 pub mod verifier_source;

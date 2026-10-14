@@ -65,7 +65,410 @@ assigns it when the release is tagged.
   persists it into the generated `$CFG_DIR/env` next to
   `BRIDGE_BOOTSTRAP_SEQNO`. Operators do not need to set the var by
   hand; the forge script already consumes it through `vm.envOr(..., 0)`.
+- **`submitAncestry` fills the span between two proven anchors instead of
+  walking back from one.** The headers go in oldest first, and both ends are
+  checked: `headerRlps[0]` and the last header must each hash to a block
+  already in the proven set (`ERR_UNKNOWN_CHECKPOINT`, 249), and only the
+  headers between them are anchored. The array holds 3 to 33 entries — two
+  anchors and the 31 blocks of an epoch. `submitUpdate` keeps its shape: the head
+  still only moves forward, and a skipped checkpoint can still be
+  late-registered with its own proof and its own slot, which is what keeps
+  consecutive anchors within a span's reach. Which committee may sign it is a
+  change of its own, below.
 
+  Before, the walk started from one proven checkpoint and anchored that
+  block's *parents*, with the checkpoint's slot attached. Anyone could chain
+  the calls backwards: each run made 31 more hashes live, every one of them a
+  valid starting point for the next, and the one-year window never expired
+  them because they carried a fresh slot. History could be replayed in
+  indefinitely and the client's state grew with it, and expired keys that the
+  FIFO had not yet passed stayed live while they carried a fresh slot. A chain
+  in the old order, or one whose far end is not an anchor, is now refused.
+
+  Both ends are checked *before* `tvm.accept()`, inside the pre-accept gas
+  credit, so a span that cannot admit anything is refused without the light
+  client paying for the walk: a payload starting at a real anchor and ending
+  nowhere costs it nothing at all, because the message never reaches `accept`.
+
+  **This does not make `submitAncestry` cheap to abuse.** The call is
+  permissionless, the contract pays for everything after `accept`, and a
+  transaction that throws still spends the gas it used. A payload whose two
+  ends are both real anchors with forged headers between them — they link to
+  each other and break only at the last link — costs the light client
+  1,917,462 gas and admits nothing, measured on a local node. No cheap check
+  bounds this, because verifying the chain is the work the gas pays for. The
+  same exposure has been in `submitUpdate` since 1.4.1, where `accept` has to
+  precede the halo2 verify. What keeps it from stranding the client is that
+  the client mints its own gas: `rePushAnchor` is permissionless, cheap and
+  reaches `ensureBalance`, so anyone can restore the balance floor. Operators
+  should expect a griefer to be able to burn the client's minted balance, and
+  should watch `getBalance` rather than assume the floor holds.
+
+  Callers have to be updated: headers oldest first, and the span must end on a
+  proven anchor. `AncestryAccepted.checkpointHash` still carries the newest
+  anchor of the span, as it always did.
+
+- **`EthBeaconLightClient` hashes execution headers with the TVM `KECCAK256`
+  instruction instead of the `EthKeccak` software implementation, and
+  `submitAncestry` fits the gas limit.** One 642-byte Sepolia header cost
+  64.68M gas before and costs 4,722 now. Measured on a locally built node
+  against the 10M per-transaction limit, with the client sitting at exactly
+  its `MIN_BALANCE` floor: 748,015 gas for a 5-header span and 1,976,017 for a
+  full 33-header span, where the old software walk extrapolated to ~2.07G.
+  Both include the two anchor hashes the call now does before `tvm.accept()`,
+  about 24,000 of that. Measured end to end, compute and action phase both,
+  not compute alone. A span whose far end is not an anchor costs the light
+  client nothing at all: it is refused before `accept`, no transaction is
+  committed and the balance does not move.
+  On-chain ancestry therefore works: a deposit in a
+  non-checkpoint block is covered without the owner key, as long as the
+  checkpoints bracketing it are both proven and no more than a span apart. A
+  checkpoint the daemon skipped can be late-registered through `submitUpdate`
+  with its own proof, which brings the bracketing anchors back within reach —
+  but **the daemon does not do it on its own**: it proves only the latest
+  finality update. An operator who kept the update's JSON can late-register it
+  by hand — `eth-lc-relayer prove-one --finality-json <file>` proves whatever
+  it is handed and `submit-one --bundle-dir` sends it — but nothing watches for
+  a skip and nothing fetches an older update from the beacon node. Since a
+  step proof takes longer than an epoch, accepted checkpoints are often two or
+  more epochs apart, the span is then wider than one call can carry, and those
+  blocks need `setAcceptedBlockHash` from the owner until something
+  late-registers the checkpoint between them. Do not call
+  `disableOwnerAnchors` while that is still true.
+
+  This needs a node whose VM has the instruction (opcode `0xC7 0x4B`,
+  tvmlabs/tvm-sdk `8b108bac`) and a `sold` built against that SDK; against an
+  older node the light client throws on an unknown opcode. The light client's
+  code hash moves `314ac6b8…6092f5` → `1078d5f1…64945a`, and `getVersion`
+  reports 1.4.8 instead of 1.4.1, which is how an operator tells a client that
+  takes the new payload from one that does not. On a live network
+  the owner upgrades the deployed client in place with `updateCode`, which
+  keeps its address, head, committee and proven set. **Do not call
+  `setLightClientCode` after that upgrade:** it stores the code *and*
+  re-derives `_lightClient` from it, and the bridge accepts anchor pushes only
+  from that address, so the live client would start failing
+  `ERR_INVALID_SENDER` (207) against an address where nothing is deployed. It
+  belongs to a fresh `deployLightClient`, not to an in-place upgrade. `getCommitteeState` gains a
+  `prevCommittee` return value and the ABI's `fields` gain `_prevCommittee`;
+  no other function or event changes. `EthKeccak.sol` keeps only `rlpParentHash`, the RLP
+  reader, which is now what the walk spends most of its gas on.
+
+- **The relayer builds ancestry payloads in the new shape, and the
+  `submit-ancestry` one-shot needs the older anchor.** `eth-lc-relayer
+  submit-ancestry` takes a new required `--older-anchor-hash` next to
+  `--checkpoint-hash` (the newer anchor), and `--max-headers` now defaults to
+  33. Without this change every `submitAncestry` the old relayer sent would
+  be refused: it built the payload newest-first and capped it at 32, so its
+  last header is not a proven anchor and the call fails the two-end check with
+  `ERR_UNKNOWN_CHECKPOINT` (249) — before `tvm.accept()`, so the message is
+  rejected outright rather than reverting on chain and costing the client
+  gas.
+
+  What an operator sees from the daemon. Each checkpoint the chain confirms —
+  whether this call put it on the head or an earlier one did and its
+  confirmation was lost — queues the span back to the checkpoint it replaced; one poll works the span at the
+  front of that queue, and the entry leaves only when it is settled — sent, or
+  given up with "span given up: these blocks need setAcceptedBlockHash". A
+  span the chain refuses is given up after three paid submissions, and so is
+  one whose submission ends in an unknown outcome — a wait timeout or a
+  dropped connection comes after the message was broadcast, so it may have
+  been executed and charged, and the daemon counts it rather than resending
+  for ever. One whose *headers* will not fetch retries for free and is given up
+  only after 15 minutes of failures, because nothing of that reaches the
+  chain, so an execution RPC that rate-limits costs no coverage.
+  The queue holds at most 64 spans; past that the oldest is given up, since
+  its anchors are the ones most likely outside the one-year window.
+
+  The pair is fixed when the span is queued and each entry carries its own
+  accounting, so a span is never re-paired with a later checkpoint and one
+  span's refusal cannot spend another's budget. The state file gains
+  `owed_spans`, which defaults to empty, so an existing state file is read as
+  before.
+
+- **A transaction can no longer queue more sink messages than its balance
+  floor covers, which was losing honest ancestry spans.** Every hash the light
+  client anchors or forgets is an internal message carrying `SINK_VALUE`
+  (1 vmshell). One call could queue `MAX_EVICT_PER_TX` = 128 forgets plus up
+  to 31 pushes: 159 vmshell against a `MIN_BALANCE` of 100. Messages are paid
+  in the action phase in creation order, and `ensureBalance` was called after
+  them, so the mint was too late to help — the first send that crossed the
+  balance failed with action code 37 and the whole transaction aborted after a
+  compute phase that had reported success, with the gas spent and nothing
+  written. The relayer then resent the same valid payload until its budget ran
+  out and gave the span up, so blocks that were covered became blocks needing
+  `setAcceptedBlockHash`. No attacker needed: expired keys are contiguous in
+  the FIFO, so the first time a year's worth comes due the forgets arrive in
+  full batches.
+
+  Two changes. Forgets per transaction are now capped separately at 32
+  (`MAX_FORGETS_PER_TX`), so the worst case one call can queue is 32 + 33 = 65
+  vmshell and fits under the floor with the gas of a full span inside it;
+  examinations stay at 128, so compaction keeps its rate and only the messages
+  are bounded. And the mint is now taken before anything is queued, sized for
+  that worst case. An operator sees `AnchorsExpired` in batches of at most 32
+  where it used to be up to 128, and more transactions to work through a large
+  expiry cluster. Measured on a locally built node: a 33-header span with the
+  client at exactly 100 vmshell now completes with action code 0 and all 31
+  blocks anchored; with the old 128-forget bound the same call aborts in the
+  action phase at that balance. The mint is not what makes this safe:
+  `gosh.mintshellq` is clamped to the dapp's credit and quietly yields nothing
+  when that is spent — on a self-rooted test deployment it yields nothing at
+  all — which is why the bound, not the mint, is the fix.
+
+- **A checkpoint skipped near the end of a sync-committee period can still be
+  registered after the rotation.** `submitUpdate` keeps the commitment a
+  `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
+  for late registration only — never to move the head, which still needs the
+  committee in force. The replaced committee may sign only around
+  the head it left behind: the attested slot must be within one period either
+  side of the finalized slot recorded when the rotation landed. The slack on
+  the later side is what makes the feature work at all — that recorded slot is
+  the last head the leaving committee moved, not the end of its period, so the
+  checkpoint it skipped is attested *after* it and an upper bound at the
+  recorded slot itself would exclude exactly the skips this exists for. The
+  bound is a slot and not the period label on purpose —
+  the rotate circuit loads its period as a free witness
+  (`rotate_aggregation.rs`), so a valid hand-off can be labelled with any
+  later period, and a window measured in periods could be moved onto slots the
+  replaced committee never attested. A finalized slot is read out of the
+  signed header by the step circuit, so it cannot be relabelled. The owner hatches
+  (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
+  rather than carrying it: they replace a committee the owner is rejecting, or
+  jump several periods, so neither is a hand-off. `getCommitteeState` returns
+  `prevCommittee` so an operator can see what is trusted. Before this, a checkpoint the daemon had not proven by
+  the time `submitRotate` landed was unanchorable for good: its proof carries
+  the old commitment and `ERR_WRONG_COMMITTEE` (242) refused it for ever, so
+  the 32 blocks of that epoch could only be admitted by the owner's
+  `setAcceptedBlockHash`, and not at all after `disableOwnerAnchors`. A period
+  is about 27 hours and a step proof takes longer than an epoch, so a skip at
+  the edge of a period was the likely case, not a corner one.
+
+  `_prevCommittee` is **not** in the `updateCode` migration cell, and must not
+  be: that cell is built by the code being replaced, so a live 1.4.1 client
+  writes the old 15 fields and a decode expecting 16 would read 256 bits from
+  where the period and the flags sit, corrupting the trust root after
+  `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
+  upgraded client therefore starts with no previous committee, which only
+  means no catch-up across the rotation already behind it; the field fills on
+  the next rotation. The same goes for `_prevCommitteeHeadSlot`, the second new
+  field, a `uint64` next to it: also set to 0 on the upgrade, also filled by
+  the next rotation, and the late path stays closed until both are non-zero.
+
+  `getCommitteeState` gains a `prevCommittee` output and no other function or
+  event changes. **Every caller of that getter has to take the new ABI**, not
+  just positional ones: the compiled ABI is version 2.4 with no explicit
+  function id, so the id is derived from the signature including its outputs,
+  and an added `uint256` output changes it. A caller still holding the 1.4.1
+  ABI sends an id this code does not dispatch and the getter simply fails. The
+  relayer's embedded copy of the ABI is updated here. The shadow kit's
+  `status.sh` and `deploy-contract.sh` read whatever `AN_LC_ABI_PATH` points
+  at, so they need the new ABI file beside them and no change of their own.
+  The
+  ABI's `fields` section gains `_prevCommittee` and `_prevCommitteeHeadSlot`
+  at positions 11 and 12, so account data decoded with the 1.4.1 ABI reads
+  rubbish from `_committeePeriod` onward: anything decoding this client's state
+  off-chain needs the new ABI.
+
+  The window is slack around a proven slot, not a period boundary. When the
+  head is near the end of its period at the rotation it reaches into the next
+  one, and an early hand-off puts it wherever the sender put the head. Signing
+  there needs a supermajority of the retired committee's keys — the long-range
+  assumption this design already carries — but the contract does not and
+  cannot enforce "the committee of the attested slot's period" while the
+  period is a free witness in the circuit.
+
+- **`submitRotate` no longer decides anything by the period on the proof, and
+  refuses a hand-off that does not change the committee.** The rotate circuit
+  loads its period as a free witness (`rotate_aggregation`: `ctx.load_witness`),
+  so the label is a number the sender types. Monotonicity
+  (`pi.period > _committeePeriod`) was therefore not a replay guard but a way
+  to brick the call: anyone could take a genuine hand-off, label it
+  `type(uint64).max` and submit it — the call is permissionless — after which
+  every later rotation failed `ERR_STALE_PERIOD` (245) for good. With
+  `disableOwnerRotation` already run, nothing but an owner `reAnchorCommittee`
+  every period could carry the committee at all. No bound on the label fixes
+  this, because any bound still lets a genuine hand-off be labelled at its own
+  edge and shut the path there.
+
+  What prevents replay is the committee chain, which was already there:
+  `pi.currentCommitteeCommitment == _currentCommittee`, so once a rotation
+  lands the same proof no longer matches, and the hand-off out of a given
+  committee is unique. So the period is now out of the decision entirely: the
+  monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
+  the owner's `reAnchorCommittee`. `_committeePeriod` is
+  derived from the proven head (`finalizedSlot / 8192 + 1`) instead of being
+  taken from the proof, so an unproven label can no longer reach storage at
+  all; `CommitteeRotated` carries that derived number. It is a report for
+  operators, approximate while the head lags, and nothing gates on it.
+
+  `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
+  (`ERR_SELF_ROTATION`, 253). A genuine proof with
+  `next == current` exists for every period boundary: the last header of a
+  period is signed in the next one and its state still carries the signer as
+  `next_sync_committee`. It would have passed, changed nothing visible, and
+  overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
+  every checkpoint the replaced committee had not registered yet.
+
+  **Still open, and not fixable here.** Nothing binds a committee to a period
+  except that free label, so a genuine hand-off submitted early — the next
+  committee is in the headers of the current period, so the proof exists from
+  its first slot — installs a committee that has signed nothing yet. The head
+  then cannot move until the chain reaches that committee's period (up to ~27
+  h), and the replaced committee's unregistered checkpoints are stranded. This
+  is permissionless, repeatable once per period, and true of the deployed
+  1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
+  circuit, which is not in this change.
+
+- **A rotate whose confirmation is lost no longer stops the daemon for
+  good.** `call_contract` broadcasts the message and waits for it in one
+  call, so a wait that times out can leave the rotation on the chain while
+  the daemon records nothing. Every later poll then re-entered the period
+  jump, re-proved the same rotation and was refused — the proof starts from a
+  committee the chain has already replaced (`ERR_WRONG_COMMITTEE`, 242) —
+  and the light-client head stopped advancing until an operator edited the
+  state file. The state file gains `rotate_in_flight_period`, which defaults
+  to unset, so an existing file is read as before: a rotate sent with an
+  unknown outcome is written down there, and a 242 or `ERR_SELF_ROTATION`
+  (253) refusal of that same period is read as "the earlier attempt landed",
+  recorded, and the daemon goes back to submitting updates. Without an
+  attempt of its own on record those codes are still a plain refusal — then
+  the chain is on a committee this daemon cannot rotate from, which needs an
+  operator.
+
+- **The deposit-prover verification key is rotated again, for Amsterdam
+  block headers.** Since the Glamsterdam fork (Sepolia 2026-10-06, epoch
+  353024; Hoodi and mainnet not yet scheduled) execution headers carry 23
+  fields, `blockAccessListHash` and `slotNumber` after `requestsHash`, and
+  the previous key could not prove a deposit in such a block. The circuit
+  now accepts headers of 16 to 24 fields up to 792 bytes, so one key covers
+  mainnet before and after the fork, Sepolia, and the L2s the bridge reads
+  (Arbitrum 16 fields, Blast 20, Base, OP, Mantle and World Chain 21), with
+  one spare slot for the next appended field. A header padded with junk is
+  still rejected. The deposit-prover encoder (`rlp_utils`) and
+  `eth-lc-relayer` (`header_rlp`, used with `--submit-ancestry`) emit the
+  two new fields. Rebuild both binaries from this source.
+
+  Post-fork Sepolia blocks still cannot be anchored by the light client:
+  the step circuit and its witness builder have not followed Gloas
+  (`execution_payload` became `signed_execution_payload_bid`). Until that
+  change lands, a post-fork block is accepted only if the owner writes it
+  with `setAcceptedBlockHash`. After `disableOwnerAnchors` those deposits
+  cannot be finalized. No deposit is stuck today: no bridge contract on
+  Sepolia has had an event since the fork.
+
+  `eccUSDCBridge` embeds the new key, reports `version` 1.7.0, and
+  `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with sold 0.80.0;
+  the ABI is unchanged. Operators: deploy that tvc and, at the same time,
+  rebuild the `deposit-prover` examples (`cargo build --release
+  --examples`) on every relayer host and anywhere `ackinacki-bridge
+  deposit` proves. Proofs made with the previous key (bridge 1.6.0) stop
+  verifying, and a stale `target/release/examples/<name>` produces proofs
+  the new key rejects. `ackinacki-bridge deposit` refuses a bridge older
+  than 1.7.0.
+
+- **The deposit-prover verification key is rotated, and the rotation
+  closes two forgeries.** Under the previous key — and every earlier one
+  built from `main`'s circuit — the circuit did not tie the
+  fields it reads out of the `Deposit` log to the log's bytes, and it
+  did not require the log index to point at one of the receipt's logs:
+  a slot past the receipt's last log (the circuit holds 20) carried
+  whatever bytes the prover put there. Either way a prover holding any
+  real receipt in an accepted block could choose the `depositId`,
+  `sender`, `amount` (below 2^128), AN recipient and bridge address,
+  and `finalizeDeposit` would mint against them. Nothing in the bridge
+  bounded the damage. Deploy the new bridge as soon as possible.
+
+  The enclosing transaction may be EIP-2930 (type 1) or EIP-1559 (type 2), with
+  calldata up to 2048 bytes. Type 2 access-list payload is up to
+  512 bytes (RLP header excluded); type 1's access list shares a
+  field slot with type 2 calldata, so it may be up to 2048 bytes,
+  but a type 1 transaction's calldata and access list together
+  must fit its ~2805-byte leaf. Each receipt log's payload may be
+  at most 2211 bytes (2048 of data with four topics; more data if
+  there are fewer topics), at most 20 logs. That is what lets a SafeL2
+  `SafeMultiSigTransaction` through, including a two-signer
+  MultiSend of `approve` + `deposit` (~1152 B of log data). The
+  keccak pin is 128 permutations (~17 KB of preimages, header and
+  both MPT paths included): a receipt of up to about 13.5 KB fits,
+  i.e. about six logs at 2048 bytes, fewer with a large type 1
+  transaction. A typical Safe or 4337 receipt fits. Deposits in a
+  transaction of any other type (legacy 0, blob 3, EIP-7702 4, an L2
+  system type) are neither provable nor refundable: send again as
+  type 1 or 2.
+
+  Proofs made for the previous key stop verifying. That includes a
+  `proof.bin` / `public_inputs.bin` that `ackinacki-bridge deposit`
+  left in its work directory (`--resume` reuses it, and the bridge
+  refuses it with 220, exit 33) and any `prove-one` bundle made
+  before the upgrade. Relayers must
+  finish or drain such deposits before the bridge is upgraded, or
+  prove them again after.
+
+  Those constraints first shipped as bridge 1.6.0. The tree now carries
+  the 1.7.0 tvc of the Amsterdam entry above, which includes them.
+  Operators deploy that tvc, not a 1.6.0 artefact. On every relayer host
+  rebuild the `deposit-prover` examples (`cargo build --release
+  --examples`) and do **not** pass `--max-data-byte-len 256` — the
+  default is now 2048 and is part of the key. With a leftover
+  `--max-data-byte-len 256` (or any `--degree`, `--max-log-num`
+  other than 18 and 20) the proofs it makes are rejected by the
+  embedded key, and a deposit that does not fit the smaller shape
+  is refused with a retryable exit 1 naming the flags, never the
+  final exit 3. The relayer prefers `target/release/examples/<name>`
+  when the file exists and does not check it matches the source.
+  A cached `data/*.pk` is not reused: its file name carries a
+  fingerprint of the circuit, and the first proof after the upgrade
+  generates the new ~3.4 GB key and then deletes the old one, so
+  `data/` briefly needs room for both. `ackinacki-bridge deposit`
+  installs get the prover tools from a release (`install.sh`), so
+  they need a new release; this CLI refuses a bridge older than
+  1.7.0, whose key its proofs do not match.
+
+  The prover now refuses a deposit it cannot prove before loading
+  the SRS or the key. `fetch_deposit_data` exits 3 when the
+  enclosing transaction is any type other than 1 or 2 (legacy 0,
+  blob 3, EIP-7702 4, an L2 system type such as OP-stack 0x7e), or
+  its leaf, calldata or
+  access list is over the circuit's cap — that refusal used to be
+  exit 1, which the relayer retried forever. `export_blake2b_proof`
+  and `export_vk_blob` check the log count, every log's topics and
+  data, the receipt and header length, the MPT depths and the
+  keccak budget, and also exit 3 — but only under the key's own
+  shape (the default flags); under other flags they exit 1. `deposit` ends such an operation
+  at exit 35 instead of a resumable 32. `deposit-relayer daemon`
+  skips such a deposit at once, whatever `--skip-after-attempts`
+  says, instead of retrying it forever: the tick is counted as
+  `deposit_relayer_ticks_total{outcome="unprovable"}`, the id goes
+  to a new `state.json` field `unprovable_deposit_ids` (gauge
+  `deposit_relayer_unprovable_deposits`), and the log says only
+  the EVM bridge operator can return its funds. `finalize-one`
+  cannot help these. `parked_deposit_ids` and
+  `deposit_relayer_parked_deposits` keep holding only deposits
+  parked by `--skip-after-attempts`. An existing `state.json` loads
+  unchanged. Deposits parked or given up on under the previous key
+  (the 256-byte log shape) should be re-driven after this deploy:
+  the new key can prove the Safe and 4337 receipts that the old
+  one refused.
+
+  The tvm-sdk opcode fixtures and the acki-nacki copy of
+  `deposit-prover/fixtures/deposit_10proofs` carry the old blob
+  and must be refreshed from this repository's fixtures.
+
+- **`ackinacki-bridge withdraw` needs the `aggregate-proof` of its own
+  release.** Stage 5 passes `aggregate-proof --slot-report`, which an older
+  build refuses, after the burn; preflight now refuses an `aggregate-proof`
+  whose `--help` does not name it, and one it cannot read to hash — with exit 2,
+  or exit 10 on a run that resumes a recorded burn. Upgrade the two together: on
+  an install made by `scripts/install.sh`, download the script again and run it
+  — this one counts an `aggregate-proof` without `--slot-report` as missing and
+  replaces it from the latest release, while an older copy calls it ok; from a
+  checkout, rebuild `aggregate-proof` (`cargo build --release --bin
+  aggregate-proof` in `crates/bridge-evm-aggregator`). Do not rebuild or replace
+  it while a withdrawal is between preflight and its proof — the anchor wait at
+  stage 4b can last up to 120 min, and the wait for the prove lock has no bound:
+  stage 5 refuses with exit 12 an `aggregate-proof` that is not the binary
+  preflight hashed, and the way on is `--allow-retry`, whose preflight checks
+  the new one.
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the
@@ -76,6 +479,7 @@ assigns it when the release is tagged.
   an RPC without historical state skips the check with its error in a
   warning. `runtime.env.example` and the kit README document it together
   with the two optional scan knobs.
+
 - `applyBkSetUpdate` takes `attestationLastSeen` after `blockSeqNo`
   (selector `0x2a2c14a0` → `0xdcb4c795`) and adds
   `storedPrevBkSetCommitment` at slot 11. Redeploy the bridge first,
@@ -310,11 +714,18 @@ assigns it when the release is tagged.
 ### Added
 
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
-  takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key block (`compute_bridge_anchors
-  --seed-seqno`; it must be a multiple of the level's stride and at or
-  below chain head) instead of the newest boundary at deploy time
-  (`--at-head`). Use it with a BK-set file built for the same seed.
-
+  takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key
+  block (`compute_bridge_anchors --seed-seqno`; it must be a multiple of
+  the level's stride and at or below chain head) instead of the newest
+  boundary at deploy time (`--at-head`). Use it with a BK-set file built
+  for the same seed.
+- `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
+  neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
+  bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
+  Before, a paused Acki Nacki bridge bounced the burn and the run waited out
+  the capture (exit 11); a paused EVM bridge let the burn through and the run
+  failed in stage 4b or 6. A resume over a recorded burn checks only the EVM
+  side and refuses with exit 10, naming `--allow-retry`.
 - **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
   account.** The wallet signs `approve` and `deposit` from a QR code —
   WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681
@@ -376,9 +787,9 @@ assigns it when the release is tagged.
     unchanged.
   - **Requirements.** `--state-dir` and the prover directory must be on a
     filesystem with `flock`: unlike `withdraw`, `deposit` refuses without it
-    (exit 2). The prover needs ~4.4 GB of RAM and ~1.3 GB of disk, the
-    proving key it writes on its first proof; a proof takes under a minute
-    on a 20-thread host. The RPC must serve every receipt and raw
+    (exit 2). The prover needs ~10 GB of RAM and ~3.4 GB of disk, the
+    proving key it writes on its first proof; a proof takes one to two
+    minutes on a 20-thread host. The RPC must serve every receipt and raw
     transaction of a block, and the `--gql-endpoint` host must serve
     GraphQL and `POST /v2/messages`.
   - **Refusals before any transaction:** Safe and other smart-contract
@@ -438,7 +849,8 @@ assigns it when the release is tagged.
   `BRIDGE_DEPOSIT_CONFIRMATIONS`. Over an installation from before
   deposits, it downloads the bundle again and appends those three keys to
   the existing profile, changing nothing else in it; `--check` reports such
-  a profile as missing them. It now wants ~8 GB free instead of ~6 GB.
+  a profile as missing them. It now wants ~13 GB free instead of ~6 GB
+  (withdrawal keys ~9.5 GB and the deposit proving key ~3.4 GB).
 
 - **`deposit` draws its QR codes as images on terminals that can show them:**
   kitty graphics (kitty, Ghostty, Konsole from 22.04), iTerm2 inline images
@@ -470,7 +882,8 @@ assigns it when the release is tagged.
   calls are no-ops without one. Names are operator API, listed with their
   meaning in `deposit_relayer_daemon::metrics`:
   `deposit_relayer_ticks_total{outcome}` (finalized, already_finalized,
-  not_yet_available, proof_failed, an_rejected, an_pending, skipped, error),
+  not_yet_available, proof_failed, an_rejected, an_pending, skipped,
+  unprovable, error),
   `deposit_relayer_stage_duration_seconds{stage}` (is_finalized, fetch_event,
   prove, submit, tick), `deposit_relayer_prover_stage_duration_seconds{example}`
   and `deposit_relayer_prover_stage_failures_total{example}` per
@@ -484,6 +897,7 @@ assigns it when the release is tagged.
   `deposit_relayer_last_finalized_timestamp_seconds`,
   `deposit_relayer_last_tick_timestamp_seconds`,
   `deposit_relayer_attempts_since_progress`, `deposit_relayer_parked_deposits`,
+  `deposit_relayer_unprovable_deposits`,
   `deposit_relayer_backoff_seconds`, `deposit_relayer_build_info{version}` and
   `deposit_relayer_start_timestamp_seconds`. The in-process `RelayerMetrics`
   counters and the shutdown snapshot are unchanged.
@@ -711,20 +1125,47 @@ assigns it when the release is tagged.
 - **The bridge deploy and `daemon-live`'s cold start refuse a BK-set file
   that is not the chain's set at the seed.** `compute_bridge_anchors`
   (run by `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`)
-  and the daemon's bootstrap compare the file's Poseidon commitment with the one the seed block records
-  (block-id tree leaf 2, or leaf 3 when the seed block is itself the last
-  rotation at or below the seed) and stop with
+  and the daemon's bootstrap compare the file's Poseidon commitment with
+  the one the seed block records (block-id tree leaf 2, or leaf 3 when the
+  seed block is itself the last rotation at or below the seed) and stop
+  with
   `BK-set commitment … does not match the chain's … at seed seq_no=…`.
   Before, a file built for an earlier height deployed without complaint,
   and the daemon failed only at the first rotation with
   `prover out of sync`. Build the file for the exact seed:
   `seed_prover_bk_set --cap-height <seed>`, then `jq .pubkeys_hex`.
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
-  broadcasts legacy transactions at a fixed 2 gwei** (`--legacy --with-gas-price 2000000000`) with a 12×
-  gas-limit estimate (`--gas-estimate-multiplier 1200`). The deploying
+  broadcasts legacy transactions at a fixed 2 gwei** (`--legacy
+  --with-gas-price 2000000000`) with a 12× gas-limit estimate
+  (`--gas-estimate-multiplier 1200`). The deploying
   account must cover the larger upfront reservation (~0.6 ETH for the
   whole bundle on Sepolia); on a congested network, raise the price in
   the script.
+- **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
+  the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
+  cold run on the test host, system-wide and sampled every 5 s; the CLI
+  reached 9.5 GB RSS in Circuit 4, and the `aggregate-proof` it waits on
+  12.6 GB while the CLI still held part of its own. They said ~40 GB, which no
+  measurement backed.
+- `ackinacki-bridge withdraw` exit 11 and exit 12 end with the AN burn's hash,
+  the path of the withdrawal's record and the command that carries on (the same
+  command with `--allow-retry`, which skips the burn and resumes at capture).
+  Exit 11 also says when not to: a bounced burn emits no event, and the
+  advanced runbook's Case 3a applies.
+- `ackinacki-bridge withdraw` checks the `WithdrawalInitiated` event it
+  captures against the withdrawal it is running — amount, recipient,
+  destination chain, token (USDC) and sender multisig — before proving it. A
+  mismatch refuses with exit 10 and lists what differs; the record is left as
+  it was. Before, a resume whose record carried another withdrawal's burn hash
+  (written in by hand during reconciliation) proved and paid out that other
+  withdrawal and marked this record confirmed.
+- `ackinacki-bridge withdraw` exit 13 names the `AckiNackiBridge` custom error
+  a `withdrawByProof` dry run or submit reverted with, with its arguments
+  (`NullifierAlreadyUsed(nullifier: 0x…)`, `BridgePaused()`,
+  `WithdrawTreasuryShortfall(requested: …, available: …)`), and for the common
+  ones what to do next. Before, it printed the node's raw text, which on public
+  Sepolia RPCs reads "tried to decode error from abi but failed" followed by
+  the selector.
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
   per-slot window heights from `LayerAnchorAppended` logs. The scan walks
@@ -1054,6 +1495,136 @@ assigns it when the release is tagged.
   serves an older snapshot, not a different timeline. Validated on the
   Sepolia Deploy #8 shellnet replay: five BK rotations and one bundle
   applied in 24 minutes with no false-positive drift errors.
+- **A zero owner key can no longer be installed in `eccUSDCBridge` or
+  `EthBeaconLightClient`.** Both gate their admin calls on
+  `msg.pubkey() == _ownerPubkey`, and an unsigned external message carries
+  `msg.pubkey() == 0`, so an owner key of zero let anyone through that gate —
+  on the bridge that is `setPaused`, `setTrustedL1Bridge`,
+  `setLightClientCode`, `setAcceptedBlockHash` and `updateCode`; on the light
+  client the committee and code-upgrade calls. All three ways in now refuse
+  it, each with a new error code — the constructor, `onCodeUpgrade` (so an
+  upgrade whose migration cell carries a zero key aborts instead of opening
+  the contract up) and `setPubkey`: `ERR_ZERO_PUBKEY` 232 on the bridge, 254
+  on both light-client variants. Deployments and upgrades that pass a real key are
+  unaffected; the zerostate already installs one read from a keyfile.
+  The compiled bridge and exchange light client include these guards.
+  For an existing deployment, install their rebuilt code with `updateCode`;
+  the owner key and migration-cell layout are unchanged.
+  `DepositVoucher` code is unchanged, so its replay-protection addresses
+  stay the same.
+- An `aggregate-proof` run that hits its timeout (`--prover-timeout-s` in
+  `ackinacki-bridge withdraw` and `relayer withdraw-e2e`, a fixed 30 min in
+  `relayer daemon-live` and `relayer prove-withdraw-shplonk`) is killed.
+  Before, it kept running after the caller gave up — holding its memory and
+  still writing the pk cache — beside the proof the next run started. Since a
+  killed keygen starts over on the next run, the error of a command with
+  `--prover-timeout-s` says to raise it rather than retry with the same
+  budget. For scale: a cold withdrawal `aggregate-proof`, keygen included,
+  took ~2 min on the test host.
+- `aggregate-proof` logs to stderr, at `info` unless `RUST_LOG` says
+  otherwise, and `ackinacki-bridge withdraw` and the relayer put each of its
+  lines into their own log as it comes, prefixed `aggregate-proof:` and at
+  the level it was logged with — among them the pk cache's notices: waiting
+  for another keygen, a filesystem without locks, leftovers removed, a slot
+  loaded or generated — and the lines of an error it prints, `Caused by:` and
+  all, at `error`. They do not pass their own `RUST_LOG` on to it, and a
+  `RUST_LOG` of yours must let `bridge_relayer_daemon=info` through to show
+  its lines — `RUST_LOG=ackinacki_bridge=info` alone, as the 0.2.0 notes
+  suggest, hides them. A failed or timed-out run's error quotes its error
+  message — up to its backtrace — or, without one, its last 40 lines. Before,
+  it logged only errors, to stdout, which the callers discarded, a failure
+  quoted the whole of its stderr, and a timeout quoted nothing.
+- `aggregate-proof` writes a new pk-cache slot under
+  `<stem>.pk.partial-<pid>-<random>` /
+  `<stem>.meta.json.partial-<pid>-<random>`, syncs each file to disk and renames
+  it into place, so neither a keygen killed mid-write (a timeout, the OOM
+  killer) nor a host crash just after it leaves a truncated `<stem>.pk` that
+  every later run panicked on until it was deleted by hand. A write that fails —
+  a full disk — removes its own partial file. A `.pk` without its `.meta.json`
+  is regenerated rather than read. The `.meta.json` now records the key's length
+  (`pk_bytes`) — a slot published before gets it once a run that can take the
+  cache's lock, and owns the `.meta.json`, has read its key back whole — and a
+  key is read in halo2's checked `RawBytes` format, which reads the same bytes,
+  after its header's `k` is checked against the degree the `.meta.json` records.
+  A key whose length or `k` is not the recorded one, that ends early, or whose
+  wrong bytes are not field elements, or a `.meta.json` that is not whole, fails
+  the run with `cached aggregator key … is damaged` (or `cache meta … is
+  damaged`); one that cannot be read for another reason — a permission — says so
+  without telling anyone to remove it. A key of the right length whose wrong
+  bytes are field elements still reads, and the proof made with it fails the
+  check the SDK runs on every proof it makes: the run fails with `making the
+  aggregated proof failed (…)`, saying that the key read from the cache, or the
+  ceremony file it names, is damaged — or, for a key the run generated itself,
+  that the ceremony is damaged or keygen and prover disagree. In these cases the
+  slot is set aside when it can be: its `.meta.json` is renamed to
+  `<stem>.meta.json.damaged`, which unpublishes it, the next run that needs it
+  removes both files and generates the key again, and the error says that
+  removing them by hand frees the key's ~6.85 GB at once — preflight reserves
+  room for the new key and cannot count the old one's. It waits for another
+  `aggregate-proof` that holds the cache lock to finish first; with the
+  `.meta.json` replaced since it was read, or a rename that fails, the slot
+  stays published and the error names the two files to remove. `ackinacki-bridge
+  withdraw` preflight names a set-aside slot with a warning, and, when the
+  aggregator is to generate its key, refuses — with exit 2, or exit 10 on a run
+  that resumes a recorded burn — a key without its `.meta.json` this user cannot
+  remove, since stage 5 removes it first. Before, a key that could not be opened
+  was regenerated over the published name without the lock, and a truncated one
+  panicked. A process generating a key holds `<pk-cache>/.keygen.lock` (`flock`)
+  until the slot is published, so cold keygens on one cache run one at a time
+  and a process that waited loads the slot its predecessor published. Partial
+  files are removed only by a holder of that lock, so never one another process,
+  on the host or in a container sharing the cache, is still writing. A lock file
+  another user created is opened read-only. Only a filesystem without `flock`
+  lets a keygen run unlocked, and it then removes no partial file; any other
+  failure to take the lock fails the run. With `--pk-cache-dir`,
+  `aggregate-proof --slot-report <path>` writes the stem of the slot it used to
+  `<path>` once its calldata is written. `ackinacki-bridge withdraw` preflight
+  names any partial file in the pk cache before it measures free space, and
+  refuses with exit 2 (exit 10 on a resume) a withdrawal slot whose key is not
+  the length its `.meta.json` records or whose header is not a key's at the
+  degree it records, whose `.meta.json` is not whole or not one the aggregator
+  wrote (a field missing or of the wrong type), or that this user cannot read —
+  the last with advice to fix its permissions, not to remove it.
+- `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
+  `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
+  `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,
+  `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert while paused.
+  It said the bridge had no pause switch. Its storage table is regenerated
+  from `forge inspect`: `pendingOwner` (slot 6), `paused` (slot 7, offset 20)
+  and `storedPrevBkSetCommitment` (slot 11) were missing, and the slots after
+  them were off.
+- Two `ackinacki-bridge withdraw` runs with one `--snark-dir` prove one at a
+  time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
+  it waits, then reads the bridge's state again and re-checks the Circuit-4
+  proving key before it proves, so the anchor it binds to is still in the
+  window and the key is the one preflight verified. Preflight tries this
+  lock without waiting — and the aggregator's `<pk-cache>/.keygen.lock` when
+  the aggregator will generate its key (a file another user owns is opened
+  read-only) — and refuses with exit 2 when one cannot be opened or locked —
+  on NFS, a read-only lock file — instead of failing with exit 12 after the
+  burn. A lock another run holds passes with a warning; the wait for
+  `.keygen.lock` counts against `--prover-timeout-s`.
+  Before, both runs wrote the snark directory's fixed-name files at once and
+  one failed with exit 12 ("calldata instance … != public input …").
+- `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator
+  proving key instead of 1 GiB: the key a cold run writes into the pk cache is
+  ~6.85 GB. A cold run now asks for ~10.7 GB free on the filesystem that holds
+  `--params-dir` and `--pk-cache-dir` (one filesystem in the shipped profile)
+  and refuses with exit 2 below that; before, a host with 4–9 GB free passed
+  preflight and failed in stage 5, after the burn. `scripts/install.sh` now
+  wants 13 GB free. A withdrawal whose aggregator key is already in the pk
+  cache reserves nothing for it: after a proof, `withdraw` notes in
+  `<pk-cache>/.withdraw-slot.json` the aggregator key the proof used, which
+  `aggregate-proof` names in `<snark-dir>/aggregator-slot`
+  (`--slot-report`), with the Circuit-4 key and the `aggregate-proof` it ran
+  with as preflight verified them, and a later preflight that finds both
+  digests unchanged and that key and its `.meta.json` still there skips the
+  7 GiB (see Breaking Changes for what this asks of an upgrade). The first
+  withdrawal after an upgrade reserves room again while
+  the previous keys are still on disk: budget ~17 GB for a new
+  `aggregate-proof`, ~20 GB when it also brings a new Circuit-4 key, or
+  remove the previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk` and its
+  `.meta.json` first.
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had
@@ -1245,7 +1816,7 @@ assigns it when the release is tagged.
   byte-identical to this file modulo its pragma, so `EthKeccak_sold_fixes.patch`
   carries the same change there — it applies cleanly to the head of
   gosh-sh/acki-nacki#2618 and moves the light client's code hash from
-  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry still cannot run: see Known
+  `78905cf7…9ed532` to `812f2b9f…da6dab`. Ancestry's residual limit: see Known
   issues.
 
 - `submitAncestry` and `rePushAnchor` were rejected by the light client
@@ -1314,24 +1885,43 @@ assigns it when the release is tagged.
 
 ### Known issues
 
-- **Epoch ancestry cannot run on Acki Nacki**, so the light client anchors only
-  the epoch checkpoint — 1 execution block of 32 — and a deposit in any other
-  block still needs the owner's `setAcceptedBlockHash`. Gas is now the only
-  reason: with the `sold` defects fixed (see below) `EthKeccak` computes the
-  right hashes, but it is software keccak — one permutation is 12.93M gas and
-  the real 642-byte Sepolia header of block 11683168 is 64.68M, against a 10M
-  per-transaction limit (p20/p21). Hashing the empty string is already over the
-  limit, so no input size makes `submitAncestry` callable, and a 32-header walk
-  is ~2e9 gas. Closing this needs a keccak-256 builtin in the node, the way
-  `ZKHALO2VERIFYWITHVK` was added, or the parent chain proven in-circuit.
-  Defects found on shellnet 2026-09-11; gas re-measured offline in
-  tvm-debugger 3.0.6 on 2026-09-13; a full 32-header walk measured on a real
-  VM (tvm-debugger from `v3.0.6.an` and tvm-sdk#284) 2026-09-14: 2 headers
-  129.7 M, slope 64.65 M/header, 32 headers OOG at 1e9, ≈2.07 G extrapolated
-  against 10 M `gas_limit`. The daemon therefore does **not** send
-  `submitAncestry` unless `--submit-ancestry` is set; `ETH_RPC_URL` still
-  fetches the epoch and runs `link_headers` locally. `submitUpdate`,
-  `submitRotate` and `rePushAnchor` are unaffected; so are withdrawals.
+- **The FIFO compaction walk is not measured against a full proven set.**
+  `_evictExpired` re-queues every still-live hash it examines, which advances
+  the queue head, so the loop runs its full examination cap on every
+  `submitUpdate` and `submitAncestry` whether anything has expired or not.
+  With ancestry on, the proven set grows from one hash per epoch to one per
+  execution block — roughly 2.6M entries over a year instead of ~82K — and
+  each examination is a dictionary read, delete and write whose cost grows
+  with that depth. The numbers in Breaking Changes were measured on an
+  essentially empty map. Before mainnet this wants measuring against a
+  populated one, together with the eviction lag it implies: the bridge forgets
+  a hash only when the tail passes it, so `finalizeDeposit` can still accept a
+  deposit whose block is older than a year by as much as one full rotation of
+  the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
+  is the light client's own `_isLive`, not the bridge's map.
+
+- **A genuine committee hand-off can be submitted early and freeze the head.**
+  Permissionless, repeatable once per period, and present in the deployed
+  1.4.1; see the `submitRotate` entry in Breaking Changes. The fix belongs in
+  the rotate circuit, which has to bind the hand-off to a slot.
+
+- **A deposit is only covered once both checkpoints bracketing its block are
+  proven and within a span of each other.** Gas is no longer the obstacle —
+  the `KECCAK256` instruction brought a full 33-header span to 1,976,017 gas
+  against the 10M per-transaction limit (see Breaking Changes) — and a
+  checkpoint the daemon skipped can be late-registered through `submitUpdate`,
+  which closes the gap without the owner key — but the daemon never does it by
+  itself, so today those blocks need `setAcceptedBlockHash` unless an operator
+  late-registers the checkpoint by hand. What is left is ordering: until the
+  skipped checkpoint is late-registered and the span sent, a deposit in those
+  blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and on a
+  bridge with `disableOwnerAnchors` already called there is no owner fallback
+  to bridge the wait. `submitRotate` and `rePushAnchor` are unaffected; so are
+  withdrawals. The earlier software-keccak measurements that made ancestry
+  impossible outright (one permutation 12.93M gas, a real 642-byte Sepolia
+  header 64.68M, a 32-header walk ≈2.07G) are kept here for the record:
+  shellnet 2026-09-11, re-measured in tvm-debugger 3.0.6 on 2026-09-13 and on
+  a real VM 2026-09-14.
 
 - `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
   message to `addr_none` when no `USDCBridge` was configured: the unset

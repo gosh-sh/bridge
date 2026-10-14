@@ -38,15 +38,15 @@ use alloy::{
 };
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    check_startup_drift, classify_withdraw_revert, discover_event_proofs, run_withdraw_e2e_once,
-    BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource,
-    BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
-    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
-    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
-    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
-    WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    GET_LOGS_CHUNK_BLOCKS,
+    check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs,
+    run_withdraw_e2e_once, BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource,
+    BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome,
+    EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource, InProcessCircuit4SnarkProver,
+    LiveBlockSource, LogScanConfig, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer,
+    RelayerConfig, RelayerError, RelayerMetrics, StatePaths, SubprocessAggregator,
+    SubprocessAggregatorConfig, SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig,
+    TickOutcome, WithdrawBridge, WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome,
+    WithdrawalProver, GET_LOGS_CHUNK_BLOCKS,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -2266,6 +2266,26 @@ async fn run_daemon_live(
              the first Circuit 2 bundle"
         );
     }
+    // The contract's `bundleStride` must be the stride this daemon proves at:
+    // `applyBkSetUpdate` derives the owed bundle boundary from it, so a bridge
+    // deployed with another value refuses rotations this daemon expects to
+    // land, a stall only a redeploy clears. A bridge older than the field
+    // cannot answer; it is let through with a warning.
+    match bridge_probe.bundle_stride().await {
+        Ok(chain_stride) if chain_stride != anchor_mode.stride() => anyhow::bail!(
+            "bridge {bridge_address} has bundleStride={chain_stride}, but this daemon runs at L{} \
+             with stride {} (BRIDGE_ANCHOR_LEVEL / --anchor-level). Run the daemon at the level \
+             the bridge was deployed with, or redeploy.",
+            anchor_mode.level(),
+            anchor_mode.stride(),
+        ),
+        Ok(chain_stride) => info!(chain_stride, "startup: bridge bundleStride matches"),
+        Err(e) => warn!(
+            error = %e,
+            "startup: could not read bundleStride() — a bridge deployed before the field; stride \
+             not checked"
+        ),
+    }
     let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {
         local: &state,
         chain: &chain_full,
@@ -2453,11 +2473,23 @@ where
     U: bridge_relayer_daemon::source::BkUpdateSource + 'static,
     B: bridge_relayer_daemon::bridge::BridgeClient + 'static,
 {
+    let bundle_stride = cfg.bundle_stride;
     let mut relayer = Relayer::new(cfg, source, bk_update_source, bridge)?;
 
+    // Startup audit: since the last snapshot the chain may only have moved
+    // the way Check B allows between two ticks — a transaction of ours that
+    // landed without its receipt being read, or a sibling relayer within the
+    // forward gap. A rewind, a jump, a rotation the contract could not have
+    // accepted or another contract needs an operator.
     if let Some(remembered) = relayer.state().last_observed_on_chain.clone() {
-        let actual = relayer.bridge().read_state().await?;
-        check_startup_drift(&remembered, &actual).map_err(|d| {
+        let actual = relayer.bridge().read_state_pinned().await?;
+        check_chain_monotonicity_with_stride(
+            &remembered,
+            &actual,
+            relayer.max_forward_gap(),
+            bundle_stride,
+        )
+        .map_err(|d| {
             anyhow::anyhow!(
                 "startup on-chain drift vs last_observed_on_chain: {d} — operator must reconcile"
             )

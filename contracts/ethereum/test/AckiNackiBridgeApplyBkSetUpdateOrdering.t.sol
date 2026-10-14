@@ -306,6 +306,44 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         assertEq(bridge.storedLastBkSetUpdateSeqNo(), n2);
     }
 
+    /// @notice The shellnet burst as it lands: several rotations before the
+    ///         next owed boundary, none of them at or past it, apply one after
+    ///         another with the cursor never moving — no `verifyBlock` between
+    ///         them.
+    function test_applyBkSetUpdate_burstBeforeBoundary_appliesAtUnmovedCursor() public {
+        _rebuildBridgeWithStride(STRIDE);
+        uint256 l4 = 0xC0DE;
+        uint256 l5 = 0xD00D;
+
+        _applyPrimary(_merkleRoot(L2, L3), 10, L2, L3);
+        _applyPrimary(_merkleRoot(L3, l4), 13, L3, l4);
+        _applyPrimary(_merkleRoot(l4, l5), STRIDE - 1, l4, l5);
+
+        assertEq(bridge.storedLastSeenBlockSeqNo(), 0);
+        assertEq(bridge.storedBkSetCommitment(), l5);
+        assertEq(bridge.storedPrevBkSetCommitment(), l4);
+        assertEq(bridge.storedLastBkSetUpdateSeqNo(), STRIDE - 1);
+    }
+
+    /// @notice With the verifier triple wired, a zero `bundleStride` is
+    ///         refused at construction: the gate would divide by it.
+    function test_constructor_zeroBundleStride_revertsInvalidBundleStride() public {
+        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
+        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        MockLayerHashesMovementVerifier layer = new MockLayerHashesMovementVerifier();
+        AckiNackiBridge.VerifyBlockConfig memory vb = VerifyBlockConfigLib.withStride(
+            IPrimaryVerifier(address(primary)),
+            IFallbackVerifier(address(fallbackVerifier)),
+            ILayerHashesMovementVerifier(address(layer)),
+            L2,
+            0,
+            0
+        );
+        AckiNackiBridge.BridgeWithdrawConfig memory wd = VerifyBlockConfigLib.disabledWithdraw();
+        vm.expectRevert(AckiNackiBridge.InvalidBundleStride.selector);
+        new AckiNackiBridge(address(oracle), address(usdc), address(0), address(0), vb, wd);
+    }
+
     /// @notice A rotation crossing an unverified bundle boundary is
     ///         deferred with `PrevSlotStillOwedForBundle`. After
     ///         `verifyBlock` covers that boundary, the apply proceeds.

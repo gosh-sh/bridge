@@ -32,16 +32,18 @@ pub use aggregator::{
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
-    classify_withdraw_revert, BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState,
-    DryRunOutcome, EthBridgeClient, LogScanConfig, MockBridgeClient, SubmitOutcome, WithdrawBridge,
-    WithdrawRevertKind, WithdrawSubmitOutcome, GET_LOGS_CHUNK_BLOCKS,
+    classify_withdraw_revert, is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome,
+    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig,
+    MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
+    GET_LOGS_CHUNK_BLOCKS,
 };
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };
 pub use error::RelayerError;
 pub use history_consistency::{
-    check_chain_monotonicity, check_history_consistency, check_startup_drift, HistoryDrift,
+    check_chain_monotonicity, check_chain_monotonicity_with_stride, check_history_consistency,
+    check_startup_drift, HistoryDrift,
 };
 pub use live_source::{LiveBlockSource, StatePaths};
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};

@@ -713,6 +713,13 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`daemon-live` checks the bridge's `bundleStride` at startup.** It reads
+  `bundleStride()` and refuses to start when it differs from the stride of
+  its anchor level: `bridge … has bundleStride=…, but this daemon runs at
+  L… with stride … (BRIDGE_ANCHOR_LEVEL / --anchor-level)`. A bridge
+  deployed with a different `BUNDLE_STRIDE` reverts rotations the daemon
+  expects to land, and only a redeploy clears that. A bridge deployed
+  before the field existed is let through with a warning.
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
   takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key
   block (`compute_bridge_anchors --seed-seqno`; it must be a multiple of
@@ -1112,6 +1119,15 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **A chain that stays below the relayer's last confirmed write is reported
+  after 10 minutes.** `daemon-live` retries a `_rewound` signal as
+  read-after-write lag (`WARN transient RPC read-after-write lag — will
+  retry next tick`) for at most 10 minutes, then reports it as drift:
+  `ERROR chain still below our last confirmed write — not RPC lag (a reorg
+  that dropped our transaction?)`, counted in `tick_errors_total` and
+  `history_drift_detected_total`, retried with backoff like every other
+  drift. Before, it was retried silently and without limit, so a reorg that
+  dropped the relayer's transaction never surfaced.
 - **The shellnet L2 bridge was redeployed.** `AckiNackiBridge` is now
   `0x00e4b69d25f4526c768552ea217dad85e4b7963a` (Sepolia block 11909355),
   seeded at shellnet seq_no 23855104 (`BRIDGE_BOOTSTRAP_SEQNO`) with
@@ -1475,6 +1491,45 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`daemon-live` no longer jams after a burst of BK rotations when a
+  receipt read fails.** The relayer's per-tick comparison with its last
+  snapshot of the bridge (Check B) rejected a second rotation while the
+  previous one was ahead of the layer cursor
+  (`last_bk_set_update_seq_no_uncovered`), although `applyBkSetUpdate`
+  accepts it whenever the next bundle boundary is above the previous N.
+  The relayer's own sends refreshed the snapshot and hid this, but a
+  rotation that landed while its receipt read failed left every later tick
+  failing with `chain drift`, and the startup audit refused a restart until
+  `relayer-state.json` was edited by hand. Check B now applies the
+  contract's rule, and the startup audit accepts the moves Check B accepts
+  instead of requiring an exact match.
+- **A failed RPC call no longer stops `daemon-live`.** A `verifyBlock` or
+  `applyBkSetUpdate` whose send the RPC refused (rate limit, connection,
+  nonce) or whose receipt never came is logged as `… not confirmed — RPC
+  failure, not counted toward the abort threshold` and retried; the next
+  tick re-reads the chain, so a transaction that landed anyway is picked
+  up. Ticks that find no bundle yet count in `polls_since_progress`, a new
+  field of `relayer-state.json`, instead of `attempts_since_progress`.
+  Before, the ~90-minute wait for an L2 bundle ran that counter far past
+  the abort threshold of 3, so the first failed send after a wait stopped
+  the daemon with `daemon: stuck — hard aborting`. Reverts the node
+  simulates (`execution reverted`) and failed post-submit checks still
+  count, and still stop the daemon at the third.
+- **Check B allows four bundles of the daemon's own stride between two
+  snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
+  L2 bundle the relayer did not see land — its own `verifyBlock` whose
+  receipt read failed, or a sibling relayer's — failed every later tick
+  with `last_seen_block_seq_no_jumped`.
+- **The relayer reads the bridge's state at one block.** The per-tick read
+  and the startup audit take `eth_blockNumber` and pin all five view calls
+  to it; on a load-balanced RPC the calls could land on backends at
+  different heights and report a false `bk_set_commitment_without_update`.
+- **`applyBkSetUpdate` waits at most 180 s for its receipt and is checked
+  after it**, as `verifyBlock` already was. Before, a dropped transaction
+  hung the daemon on the receipt indefinitely, and a transaction mined but
+  reverted was taken as applied. Now the chain must hold the submitted N
+  and commitment at the receipt's block, or the outcome is a revert
+  (`post-submit drift: …`).
 - `daemon-live` logged `ERROR chain monotonicity drift — halting` and
   failed its ticks seconds after a successful `applyBkSetUpdate` or
   `verifyBlock` tx on load-balanced public RPCs (observed on publicnode's

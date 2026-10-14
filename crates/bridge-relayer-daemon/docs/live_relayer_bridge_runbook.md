@@ -254,6 +254,7 @@ Within ~10 s the log shows (abridged):
 ```
 INFO bridge_prover_lib::bk_set_bootstrap: BK-set bootstrap: mode=file, loaded 5 signers from ./bk_set.shellnet.live.json
 INFO relayer: startup: read on-chain state for routing chain_last_seen=<S> chain_bk_upd=<C> local_last_seen=0 local_bk_upd=0 local_initialized=false anchor_level=2 bundle_stride=16384
+INFO relayer: startup: bridge bundleStride matches chain_stride=16384
 INFO relayer: startup: Cold — contract at genesis, bootstrapping policy=Explicit(<S>)
 INFO relayer: daemon-live starting gql=https://shellnet.ackinacki.org/graphql params=./params prover_state=./L2_config/state
 INFO bridge_prover_lib::live_driver: live_driver: cold-start bk-update cursor resolved — last_bk_set_update_seq_no=<C> (seed_seqno=<S>)
@@ -267,6 +268,9 @@ INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq
   rebuild it ([§3.2](#32-build-the-bk-set-at-s)).
 - `Resurrect` or `WarmResume` instead of `Cold` means old local state was
   not archived.
+- A daemon at another anchor level than the bridge's stops with
+  `bridge … has bundleStride=…, but this daemon runs at L… with stride …`;
+  check `BRIDGE_ANCHOR_LEVEL`.
 
 **Timing.** The seed is trusted, not proven. Rotations after S are proven and
 applied as they appear. The first `verifyBlock` comes once the chain passes
@@ -313,7 +317,8 @@ c 'storedLastBkSetUpdateSeqNo()(uint64)'    # last applied rotation
 c 'layerWindowLen(uint8)(uint16)' 2         # history kept, up to 128 entries per layer
 jq '{seen: .last_observed_on_chain.last_seen_block_seq_no,
      bkN: .last_observed_on_chain.last_bk_set_update_seq_no,
-     attempts_since_progress, bk_update_attempts_since_progress}' \
+     attempts_since_progress, polls_since_progress,
+     bk_update_attempts_since_progress}' \
   "$BRIDGE_CONFIG_DIR/relayer-state.json"
 pgrep -fl 'relayer .*daemon-live'
 ```
@@ -340,11 +345,15 @@ and redone (~10–14 min for a bundle, ~3.5–5 min per pending rotation).
 
 ### 5.2 Hard abort after failed submissions
 
-`daemon: stuck — hard aborting` follows the third failed submission, and
-transport errors (`… send failed: error sending request`,
-`tx confirmation error`) count as failures. The same counter also counts
-every tick that found no bundle yet, so after a normal wait the **first**
-failed `verifyBlock` send already aborts.
+`daemon: stuck — hard aborting` follows the third submission in a row the
+contract refused: a revert the node simulated before sending
+(`execution reverted`, see [§5.3](#53-hard-abort-after-an-on-chain-revert))
+or a failed post-submit check (`post-submit drift: …`). RPC failures do not
+count — a send the RPC refused (rate limit, connection, nonce) or a receipt
+that never came is logged as `… not confirmed — RPC failure, not counted
+toward the abort threshold` and retried, and the next tick re-reads the chain,
+so a transaction that landed anyway is picked up. Ticks that only wait for the
+next bundle count in `polls_since_progress`, not toward the abort.
 
 ```bash
 ADDR=$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")
@@ -360,13 +369,23 @@ restart ([§5.1](#51-clean-restart)):
 ```bash
 jq '.last_attempt_seqno = .last_processed_seqno
   | .attempts_since_progress = 0
+  | .polls_since_progress = 0
   | .bk_update_attempts_since_progress = 0' \
   "$BRIDGE_CONFIG_DIR/relayer-state.json" > /tmp/relayer-state.json \
   && mv /tmp/relayer-state.json "$BRIDGE_CONFIG_DIR/relayer-state.json"
 ```
 
-If transport errors keep recurring, point `RPC_URL` at an authenticated
-endpoint.
+If `not confirmed` warnings keep recurring, point `RPC_URL` at an
+authenticated endpoint.
+
+`chain drift` errors are not aborts: the daemon keeps retrying, and only an
+operator can clear them. `chain still below our last confirmed write` means the
+chain has stayed behind the relayer's last confirmed transaction for 10 minutes
+— a reorg that dropped it, or another chain behind `RPC_URL`; a lag of a few
+seconds is retried silently. `last_seen_block_seq_no_jumped`,
+`bk_set_commitment_without_update` or `last_bk_set_update_seq_no_uncovered`
+mean the contract moved in a way this relayer did not cause: another sender, or
+another contract behind `BRIDGE_ADDRESS`.
 
 ### 5.3 Hard abort after an on-chain revert
 
@@ -381,7 +400,7 @@ cause before resetting counters:
 | `0x33af5682` | `BlockSeqNoNotMonotonic(supplied, stored)` | verifyBlock | The block is at or below `storedLastSeenBlockSeqNo` — usually a state reset against an advanced contract. |
 | `0x703a55ba` | `StaleBkSetCommitment(supplied, stored)` | applyBkSetUpdate | The rotation's old set is not the contract's current set. The daemon pre-checks this and sends nothing (`off-chain old_commitment … != on-chain …`); on-chain it means someone else applied a rotation. |
 | `0xc942350c` | `BkUpdateSeqNoNotMonotonic(supplied, stored)` | applyBkSetUpdate | The rotation is already applied. |
-| `0x4613e279` | `PrevSlotStillOwedForBundle(lastBkSetUpdateSeqNo, nextOwedBoundary)` | applyBkSetUpdate | A rotation past an unverified bundle boundary. The daemon defers these itself, so on-chain it means another sender. |
+| `0x4613e279` | `PrevSlotStillOwedForBundle(lastBkSetUpdateSeqNo, nextOwedBoundary)` | applyBkSetUpdate | A rotation while the previous one is at or past the next owed bundle boundary. The daemon holds these back itself, so on-chain it means another sender. |
 | `0x5e38623e` | `AttestationLastSeenNotBeforeSeqNo(lastSeen, blockSeqNo)` | applyBkSetUpdate | The rotation was proven only after a bundle at or past its seq_no had been verified. |
 | `0x24f0a1fa` | `BkUpdateMerkleMismatch(computedRoot, blockId)` | applyBkSetUpdate | The leaves or siblings do not belong to the attested block, or a byte-order regression. |
 | `0x56048090` | `BkUpdateDisabled()` | applyBkSetUpdate | The bridge was deployed without the attestation verifiers — redeploy. |

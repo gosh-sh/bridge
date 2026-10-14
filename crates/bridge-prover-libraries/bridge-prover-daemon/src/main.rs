@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     // rotation when the previous one still owes an unverified bundle
     // boundary: rotations before that boundary, and the first one past
     // it, apply back-to-back; a further one waits until verifyBlock
-    // advances the cursor past the boundary.
+    // reaches the last boundary at or below the previous rotation.
     // This slot holds the already-verified rotation artifacts returned
     // by the verifier daemon when `driver.ack_bk_update` refused to
     // rotate `prover_bk_set` because the bundle lane hasn't yet covered

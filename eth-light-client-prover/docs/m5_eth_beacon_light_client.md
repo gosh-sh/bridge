@@ -67,7 +67,8 @@ getter on the light client. Instead the light client **writes** the proven hash
 into `USDCBridge._acceptedBlockHash` (the exact set `finalizeDeposit` already
 gates on) via the new authorized writer. The write is authorized solely by being
 the configured `_lightClient` — no human asserts canonicality, the proof does.
-This is independent of `_ownerAnchorsEnabled` (which governs the owner path); the
+This is independent of the per-chain owner-anchor map
+(`_ownerAnchorsDisabled` / `isOwnerAnchorsEnabled`); the
 owner's one remaining action is granting trust once, which on `eccUSDCBridge` is
 installing the light-client code (`setLightClientCode`).
 

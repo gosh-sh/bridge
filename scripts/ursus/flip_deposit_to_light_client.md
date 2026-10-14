@@ -5,12 +5,13 @@
 (`acceptBlockHashFromLightClient`); the owner writes the rest with
 `setAcceptedBlockHash`. The flip turns the owner path off.
 
-**Do not flip yet.** Today the light client admits one block per epoch — the
-checkpoint of its own chain — and no L2. After the flip every other deposit
-block has no writer: deposits from the L2s on the allowlist and from the other
-31 blocks of an epoch fail `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224).
-The daemon therefore does not flip unless started with `--flip-owner`. See
-`docs/eth-light-client.md` §3.4 and §3.5.
+**Do not flip yet.** `disableOwnerAnchors` turns the owner writer off only for
+the light client's L1; L2s on the allowlist keep `setAcceptedBlockHash`. The
+light client writes checkpoints and the ancestry spans between them
+(`docs/eth-light-client.md` §3.4). A block no span covers — accepted
+checkpoints are often two or more epochs apart — fails
+`finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224). The daemon therefore does
+not flip unless started with `--flip-owner`. See §3.5.
 
 The **relayer** issues the owner calls. Relayer keys (`AN_KEYS_PATH`) must be
 the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
@@ -59,7 +60,7 @@ $ETH_RPC_URL --checkpoint-hash 0x<newer> --older-anchor-hash 0x<older>` fills
 the blocks between two proven anchors (`docs/eth-light-client.md` §3.4). A
 deposit in a block no span covers — one whose bracketing anchors are further
 apart than a span — needs the owner's `setAcceptedBlockHash`, which the flip
-turns off.
+turns off for that L1. L2 deposits keep the owner writer.
 
 Period jumps: the daemon rotates by default. After `disableOwnerRotation()`, a
 lag past one sync-committee period (~27 h) is `reAnchorCommittee`, not

@@ -18,6 +18,7 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_UNKNOWN_BLOCK = 224;
     uint16 constant ERR_OWNER_ANCHORS_DISABLED = 225;
     uint16 constant ERR_LIGHT_CLIENT_UNSET = 226;
+    uint16 constant ERR_NOT_LIGHT_CLIENT_CHAIN = 227;
     uint16 constant ERR_ZERO_RECIPIENT = 230;
     uint16 constant ERR_PAUSED = 231;
     uint16 constant ERR_ZERO_PUBKEY = 232;

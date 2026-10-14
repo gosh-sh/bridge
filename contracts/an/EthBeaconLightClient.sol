@@ -215,7 +215,7 @@ contract EthBeaconLightClient {
     // checkpoint); `disableOwnerRotation()` clears it permanently, which is the
     // step that reduces the committee-chain trust assumption from "owner key" to
     // "the rotate proof". One-way on purpose (mirrors USDCBridge's
-    // `_ownerAnchorsEnabled`): a re-enable switch would leave the owner key on
+    // per-chain `_ownerAnchorsDisabled`): a re-enable switch would leave the owner key on
     // the path regardless.
     bool _ownerRotationEnabled = true;
 

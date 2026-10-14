@@ -1184,9 +1184,12 @@ Preflight, in order:
 - **Acki Nacki** (`--gql-endpoint`): REST `/v2/` and GraphQL both answer; the
   bridge's `getVersion()` is at least the [minimum bridge
   version](#minimum-bridge-version); `isPaused()` is `false`;
-  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getAnchorConfig()` says
-  who anchors blocks, and with owner anchors off the light client must pass
-  its [readiness checks](#when-only-the-light-client-anchors);
+  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getAnchorConfig()` names
+  the light client; `isOwnerAnchorsEnabled(chainId)` says whether the owner
+  still anchors this deposit's chain (on 1.7.0 that flag is still
+  `getAnchorConfig().ownerAnchorsEnabled`, one bool for every chain); and
+  with owner anchors off the light client must pass its
+  [readiness checks](#when-only-the-light-client-anchors);
   `getDepositVoucherCodeHash()` is the voucher code this build carries
   (otherwise the CLI cannot compute the voucher's address, and a newer CLI is
   needed); and the recipient: an active account must live in the dapp `--to`
@@ -1690,7 +1693,7 @@ already. Independently of that minimum, preflight also refuses a bridge
 older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.7.0`) gets a warning.
+than the newest this build was checked against (`1.8.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it
@@ -1703,21 +1706,26 @@ does this in a released binary.
 ### When only the light client anchors
 
 `getAnchorConfig()` returns the light client and whether owner anchors are
-enabled.
+still enabled on the light client's L1. The deposit's own chain is
+`isOwnerAnchorsEnabled(chainId)`: after an L1 flip, L2 deposits keep the
+owner writer.
 
-- **Owner anchors enabled** (the shellnet deploy): the owner anchors the
-  deposit's block by hand, with no time limit. The light client may anchor it
-  too; preflight checks whether it could, but only to word the status line.
-- **Owner anchors disabled**: only the light client anchors, and the owner can
-  no longer help. Preflight lets a deposit through only if the light client
-  demonstrably anchors blocks a deposit can use, and otherwise refuses with
-  exit 2, naming the first check that failed:
+- **Owner anchors enabled on this chain** (the shellnet deploy, and every
+  L2 after an L1 flip): the owner anchors the deposit's block by hand, with
+  no time limit. The light client may anchor it too; preflight checks
+  whether it could, but only to word the status line.
+- **Owner anchors disabled on this chain** (the light client's L1 after
+  `disableOwnerAnchors`): only the light client anchors, and the owner can
+  no longer help on that L1. Preflight lets a deposit through only if the
+  light client demonstrably anchors blocks a deposit can use, and otherwise
+  refuses with exit 2, naming the first check that failed:
   1. the light client follows the deposit's chain (`getConfig().l1ChainId`) —
      never the case for an L2, which the light client does not cover;
   2. the bridge accepts the light client's head block under its real hash;
   3. ancestry works and reaches the bridge after the switch: a block between
-     two checkpoints, newer than the last `disableOwnerAnchors`, is anchored in
-     the bridge; the light client's head is at most 1536 s behind the EVM
+     two checkpoints, newer than the last `disableOwnerAnchors` or
+     `disableOwnerAnchorsOn`, is anchored in the bridge; the light
+     client's head is at most 1536 s behind the EVM
      chain's finalized head; its latest ancestry checkpoint is at most 768 s
      behind its head. The bounds are build constants, not flags.
 

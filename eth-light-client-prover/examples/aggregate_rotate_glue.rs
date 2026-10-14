@@ -4,8 +4,8 @@
 //! + aggregated a real shard snark) with the actual committee glue:
 //! [`RotateAggregationCircuit`] snark-verifies the shard proof **and** runs
 //! `node_from_hilo` (range-checked) → `sync_committee_root_from_subtrees` →
-//! `verify_merkle_branch(gindex 87)` → `combine_committee_commitment`, exposing the
-//! rotate PIs `[current_commit, next_commit, period]` after the 12-limb accumulator.
+//! `verify_merkle_branch_either(gindex 87 | 2946)` → `combine_committee_commitment`, exposing the
+//! rotate PIs `[current_commit, next_commit, period, gloas_fork_slot]` after the 12-limb accumulator.
 //!
 //! For N=1 the "committee" is a single 64-pubkey shard (a `merkleize` of one leaf is
 //! the leaf itself), with a self-consistent synthetic branch/state_root — a faithful
@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eth_light_client_prover::committee::{native_committee_subtree_root, PUBKEYS_PER_SHARD};
-use eth_light_client_prover::rotate::NEXT_SYNC_COMMITTEE_GINDEX;
+use eth_light_client_prover::fork::GLOAS_NOT_SCHEDULED;
 use eth_light_client_prover::rotate_aggregation::{
     RotateAggregationCircuit, RotateGlueWitness, NUM_ACCUMULATOR_INSTANCES,
     NUM_ROTATE_PUBLIC_INPUTS,
@@ -144,13 +144,13 @@ fn main() -> anyhow::Result<()> {
     let witness = RotateGlueWitness::synthetic(
         vec![native_subtree; n],
         aggregate,
-        NEXT_SYNC_COMMITTEE_GINDEX,
+        9_412u64 * 8192,
+        GLOAS_NOT_SCHEDULED,
         Fr::from(0x1234_5678u64),
-        9_412u64,
     );
     println!(
-        "glue witness: {n} subtree root(s), gindex={}, branch depth={}\n",
-        witness.gindex,
+        "glue witness: {n} subtree root(s), attested slot={}, branch nodes={}\n",
+        witness.attested_slot,
         witness.branch.len()
     );
 

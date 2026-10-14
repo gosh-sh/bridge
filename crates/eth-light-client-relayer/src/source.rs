@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::{
     ancestry::ExecLink,
     error::RelayerError,
-    types::{parse_finality_update, BeaconChainParams, FinalityUpdate},
+    types::{parse_finality_update, BeaconChainParams, FinalityUpdate, GLOAS_NOT_SCHEDULED},
 };
 
 #[async_trait]
@@ -83,8 +83,10 @@ impl ExecutionSource for InMemoryExecution {
     }
 }
 
-/// Network constants that never change for a beacon node: cached after the
-/// first successful fetch.
+/// Network constants of a beacon node. Genesis root and `SLOTS_PER_EPOCH`
+/// do not change. `gloas_fork_slot` does, when a fork that was
+/// `FAR_FUTURE_EPOCH` gets a real epoch: a cached
+/// [`GLOAS_NOT_SCHEDULED`] is therefore fetched again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainSpec {
     pub genesis_validators_root: [u8; 32],
@@ -92,6 +94,8 @@ pub struct ChainSpec {
     /// (`FAR_FUTURE_EPOCH`) are dropped.
     pub fork_schedule: Vec<(u64, [u8; 4])>,
     pub slots_per_epoch: u64,
+    /// First Gloas slot, [`GLOAS_NOT_SCHEDULED`] if the network has none.
+    pub gloas_fork_slot: u64,
 }
 
 impl ChainSpec {
@@ -107,8 +111,29 @@ impl ChainSpec {
         Ok(BeaconChainParams {
             fork_version: self.fork_version_at_slot(slot)?,
             genesis_validators_root: self.genesis_validators_root,
+            gloas_fork_slot: self.gloas_fork_slot,
         })
     }
+}
+
+/// `GET /eth/v1/config/spec` → first slot of the Gloas fork
+/// (`GLOAS_FORK_EPOCH × SLOTS_PER_EPOCH`); [`GLOAS_NOT_SCHEDULED`] when the
+/// epoch is absent or `FAR_FUTURE_EPOCH`.
+pub fn parse_gloas_fork_slot(spec_json: &str, slots_per_epoch: u64) -> Result<u64, RelayerError> {
+    let v: Value = serde_json::from_str(spec_json)
+        .map_err(|e| RelayerError::beacon(format!("spec JSON: {e}")))?;
+    let epoch = match &v["data"]["GLOAS_FORK_EPOCH"] {
+        Value::String(s) => Some(
+            s.parse::<u64>()
+                .map_err(|e| RelayerError::beacon(format!("spec: GLOAS_FORK_EPOCH={s}: {e}")))?,
+        ),
+        Value::Number(n) => n.as_u64(),
+        _ => None,
+    };
+    Ok(epoch
+        .filter(|e| *e != u64::MAX)
+        .and_then(|e| e.checked_mul(slots_per_epoch))
+        .unwrap_or(GLOAS_NOT_SCHEDULED))
 }
 
 /// `GET /eth/v1/beacon/genesis` → `data.genesis_validators_root`.
@@ -233,10 +258,15 @@ impl HttpBeaconSource {
         Ok(body)
     }
 
-    /// Genesis root + fork schedule of the connected network (cached).
+    /// Genesis root + fork schedule of the connected network. A spec whose
+    /// Gloas slot is still [`GLOAS_NOT_SCHEDULED`] is fetched again so a
+    /// daemon started before the epoch was published picks it up without a
+    /// restart.
     pub async fn chain_spec(&self) -> Result<ChainSpec, RelayerError> {
         if let Some(s) = self.spec.lock().expect("poisoned").as_ref() {
-            return Ok(s.clone());
+            if spec_cache_holds(s) {
+                return Ok(s.clone());
+            }
         }
         let genesis = self
             .get_text(&format!("{}/eth/v1/beacon/genesis", self.base_url))
@@ -244,10 +274,12 @@ impl HttpBeaconSource {
         let spec = self
             .get_text(&format!("{}/eth/v1/config/spec", self.base_url))
             .await?;
+        let slots_per_epoch = parse_slots_per_epoch(&spec);
         let resolved = ChainSpec {
             genesis_validators_root: parse_genesis_validators_root(&genesis)?,
             fork_schedule: parse_fork_schedule(&spec)?,
-            slots_per_epoch: parse_slots_per_epoch(&spec),
+            slots_per_epoch,
+            gloas_fork_slot: parse_gloas_fork_slot(&spec, slots_per_epoch)?,
         };
         *self.spec.lock().expect("poisoned") = Some(resolved.clone());
         Ok(resolved)
@@ -310,6 +342,16 @@ impl HttpBeaconSource {
     /// `GET /eth/v2/beacon/blocks/{slot}` → execution `block_hash` /
     /// `parent_hash`.
     pub async fn fetch_exec_link_at_slot(&self, slot: u64) -> Result<ExecLink, RelayerError> {
+        parse_exec_link(&self.fetch_block_json(slot).await?)
+    }
+
+    /// The execution hash the light client anchors for the block at `slot`
+    /// ([`parse_anchored_exec_hash`]).
+    pub async fn fetch_anchored_exec_hash(&self, slot: u64) -> Result<[u8; 32], RelayerError> {
+        parse_anchored_exec_hash(&self.fetch_block_json(slot).await?)
+    }
+
+    async fn fetch_block_json(&self, slot: u64) -> Result<String, RelayerError> {
         let url = format!("{}/eth/v2/beacon/blocks/{slot}", self.base_url);
         let resp = self
             .client
@@ -329,7 +371,7 @@ impl HttpBeaconSource {
                 body.chars().take(200).collect::<String>()
             )));
         }
-        parse_exec_link(&body)
+        Ok(body)
     }
 }
 
@@ -452,21 +494,68 @@ fn hex32_exec(s: &str) -> Result<[u8; 32], RelayerError> {
 fn parse_exec_link(json: &str) -> Result<ExecLink, RelayerError> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| RelayerError::beacon(format!("block JSON: {e}")))?;
-    let payload = &v["data"]["message"]["body"]["execution_payload"];
+    let body = &v["data"]["message"]["body"];
+    let payload = &body["execution_payload"];
+    // Gloas beacon blocks carry a payload bid instead of the payload.
+    // `block_hash` is the EL block this slot produced; `parent_block_hash`
+    // is the EL block it built on. Do not treat `parent_block_hash` as both
+    // ends — that made every Gloas slot a self-loop and stopped
+    // `ancestry-one` one step past the checkpoint.
+    let bid = &body["signed_execution_payload_bid"]["message"];
     let block_hash = hex32_exec(
         payload["block_hash"]
             .as_str()
-            .ok_or_else(|| RelayerError::beacon("missing execution_payload.block_hash"))?,
+            .or_else(|| bid["block_hash"].as_str())
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing execution_payload.block_hash / \
+                     signed_execution_payload_bid.message.block_hash",
+                )
+            })?,
     )?;
     let parent_hash = hex32_exec(
         payload["parent_hash"]
             .as_str()
-            .ok_or_else(|| RelayerError::beacon("missing execution_payload.parent_hash"))?,
+            .or_else(|| bid["parent_block_hash"].as_str())
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing execution_payload.parent_hash / \
+                     signed_execution_payload_bid.message.parent_block_hash",
+                )
+            })?,
     )?;
     Ok(ExecLink {
         block_hash,
         parent_hash,
     })
+}
+
+/// A cached spec is only reusable once Gloas has a real slot. Until then
+/// `/eth/v1/config/spec` is fetched on every tick.
+fn spec_cache_holds(s: &ChainSpec) -> bool {
+    s.gloas_fork_slot != GLOAS_NOT_SCHEDULED
+}
+
+/// What `submitUpdate` anchors when this block is the finalized one: the
+/// payload's `block_hash` before Gloas, and from Gloas the bid's
+/// `parent_block_hash` — the bid's own `block_hash` is not proven yet.
+fn parse_anchored_exec_hash(json: &str) -> Result<[u8; 32], RelayerError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| RelayerError::beacon(format!("block JSON: {e}")))?;
+    let body = &v["data"]["message"]["body"];
+    hex32_exec(
+        body["execution_payload"]["block_hash"]
+            .as_str()
+            .or_else(|| {
+                body["signed_execution_payload_bid"]["message"]["parent_block_hash"].as_str()
+            })
+            .ok_or_else(|| {
+                RelayerError::beacon(
+                    "missing execution_payload.block_hash / \
+                     signed_execution_payload_bid.message.parent_block_hash",
+                )
+            })?,
+    )
 }
 
 /// Test source: pop from a queue of updates.
@@ -522,6 +611,31 @@ mod tests {
         assert!(parse_exec_link(r#"{"data":{}}"#).is_err());
     }
 
+    #[test]
+    fn parse_exec_link_reads_gloas_payload_bid() {
+        let json = r#"{
+          "data":{"message":{"body":{"signed_execution_payload_bid":{"message":{
+            "block_hash":"0x1111111111111111111111111111111111111111111111111111111111111111",
+            "parent_block_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"
+          }}}}}
+        }"#;
+        let link = parse_exec_link(json).unwrap();
+        assert_eq!(link.block_hash, [0x11; 32]);
+        assert_eq!(link.parent_hash, [0x22; 32]);
+        assert_eq!(parse_anchored_exec_hash(json).unwrap(), [0x22; 32]);
+    }
+
+    #[test]
+    fn anchored_exec_hash_before_gloas_is_the_payload_hash() {
+        let json = r#"{
+          "data":{"message":{"body":{"execution_payload":{
+            "block_hash":"0x1111111111111111111111111111111111111111111111111111111111111111",
+            "parent_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"
+          }}}}
+        }"#;
+        assert_eq!(parse_anchored_exec_hash(json).unwrap(), [0x11; 32]);
+    }
+
     // Trimmed `GET /eth/v1/config/spec` of Sepolia (2026-09-04): Fulu live,
     // Gloas/Heze unscheduled (FAR_FUTURE_EPOCH).
     const SEPOLIA_SPEC: &str = r#"{"data":{
@@ -561,13 +675,29 @@ mod tests {
     }
 
     #[test]
+    fn an_unscheduled_gloas_slot_is_not_kept() {
+        let pending = ChainSpec {
+            genesis_validators_root: [0; 32],
+            fork_schedule: Vec::new(),
+            slots_per_epoch: 32,
+            gloas_fork_slot: GLOAS_NOT_SCHEDULED,
+        };
+        assert!(!spec_cache_holds(&pending));
+        let mut scheduled = pending.clone();
+        scheduled.gloas_fork_slot = 11_296_768;
+        assert!(spec_cache_holds(&scheduled));
+    }
+
+    #[test]
     fn chain_spec_resolves_params_at_signature_slot() {
         let spec = ChainSpec {
             genesis_validators_root: [0xd8; 32],
             fork_schedule: parse_fork_schedule(SEPOLIA_SPEC).unwrap(),
             slots_per_epoch: parse_slots_per_epoch(SEPOLIA_SPEC),
+            gloas_fork_slot: parse_gloas_fork_slot(SEPOLIA_SPEC, 32).unwrap(),
         };
         assert_eq!(spec.slots_per_epoch, 32);
+        assert_eq!(spec.gloas_fork_slot, GLOAS_NOT_SCHEDULED);
         // Sepolia slot 11_065_463 → epoch 345_795 → Fulu.
         let p = spec.params_at_slot(11_065_463).unwrap();
         assert_eq!(p.fork_version_hex(), "0x90000075");
@@ -575,6 +705,32 @@ mod tests {
         // Last Electra slot: 272640*32 - 1.
         let p = spec.params_at_slot(272_640 * 32 - 1).unwrap();
         assert_eq!(p.fork_version_hex(), "0x90000074");
+    }
+
+    /// Sepolia after Gloas was scheduled for epoch 353_024.
+    #[test]
+    fn gloas_fork_slot_and_version_after_scheduling() {
+        let spec_json = SEPOLIA_SPEC.replace(
+            r#""GLOAS_FORK_EPOCH":"18446744073709551615""#,
+            r#""GLOAS_FORK_EPOCH":"353024""#,
+        );
+        let spec = ChainSpec {
+            genesis_validators_root: [0xd8; 32],
+            fork_schedule: parse_fork_schedule(&spec_json).unwrap(),
+            slots_per_epoch: 32,
+            gloas_fork_slot: parse_gloas_fork_slot(&spec_json, 32).unwrap(),
+        };
+        assert_eq!(spec.gloas_fork_slot, 353_024 * 32);
+        let p = spec.params_at_slot(11_335_777).unwrap();
+        assert_eq!(p.fork_version_hex(), "0x90000076");
+        assert_eq!(p.gloas_fork_slot, 11_296_768);
+        let p = spec.params_at_slot(353_024 * 32 - 1).unwrap();
+        assert_eq!(p.fork_version_hex(), "0x90000075");
+        assert!(parse_gloas_fork_slot(r#"{"data":{"GLOAS_FORK_EPOCH":"x"}}"#, 32).is_err());
+        assert_eq!(
+            parse_gloas_fork_slot(r#"{"data":{}}"#, 32).unwrap(),
+            GLOAS_NOT_SCHEDULED
+        );
     }
 
     #[test]

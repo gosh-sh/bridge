@@ -1717,6 +1717,9 @@ impl World {
         an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
             serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": true }),
         ]);
+        an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
+            serde_json::json!({ "value0": true }),
+        ]);
         an.getter(W_BRIDGE_ACC, "getDepositVoucherCodeHash", vec![
             serde_json::json!({ "value0": format!("0x{}", hex::encode(crate::deposit::identity::EXPECTED_VOUCHER_CODE_HASH)) }),
         ]);
@@ -1824,6 +1827,9 @@ impl World {
     pub fn owner_anchors(&self, enabled: bool) {
         self.an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
             serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": enabled }),
+        ]);
+        self.an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
+            serde_json::json!({ "value0": enabled }),
         ]);
     }
 

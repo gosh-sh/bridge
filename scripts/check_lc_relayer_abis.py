@@ -44,6 +44,9 @@ PAIRS = [
             "rePushAnchor",
             "disableOwnerRotation",
             "setCommitteeCommitment",
+            "setGloasForkSlot",
+            "getGloasForkSlot",
+            "getCommitteeState",
         ],
     ),
 ]

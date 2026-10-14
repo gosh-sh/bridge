@@ -6,20 +6,19 @@
 //! ```
 //!
 //! Uses the **real** attested/finalized `BeaconBlockHeader`s and the **real**
-//! `finality_branch` from the fixture (so the SSZ signing-root + finality-branch
+//! `finality_branch` from the fixture (mainnet Fulu and Sepolia Gloas) (so the SSZ signing-root + finality-branch
 //! paths run on live consensus data), plus a **synthetic-but-valid** 512-member
 //! committee that actually signs the real `signing_root`. This proves the whole
 //! step circuit is satisfiable and sound end-to-end without needing to fetch the
 //! exact mainnet sync committee (that comes in the M6 testnet E2E).
 
-use eth_light_client_prover::bls_core::{signing_root_to_g2, verify_native};
-use eth_light_client_prover::execution::ExecutionPayloadVals;
-use eth_light_client_prover::signing::{
-    native_sync_committee_signing_root, FORK_VERSION_FULU, MAINNET_GENESIS_VALIDATORS_ROOT,
+use eth_light_client_prover::fork::{
+    EXECUTION_BRANCH_LEN, FINALITY_BRANCH_LEN, GLOAS_NOT_SCHEDULED, SEPOLIA_GLOAS_FORK_SLOT,
 };
+use eth_light_client_prover::live_witness::{synthetic_step_witness, update_headers, ChainParams};
 use eth_light_client_prover::ssz::load_node;
 use eth_light_client_prover::step::{
-    pack_step_instances, verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN,
+    pack_step_instances, verify_step, StepWitness, STEP_GLOAS_FORK_SLOT_INDEX, STEP_INSTANCE_LEN,
 };
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
@@ -27,147 +26,51 @@ use halo2_base::gates::circuit::CircuitBuilderStage;
 use halo2_base::gates::flex_gate::threads::SinglePhaseCoreManager;
 use halo2_base::gates::{RangeChip, RangeInstructions};
 use halo2_base::halo2_proofs::dev::MockProver;
-use halo2_base::halo2_proofs::halo2curves::bls12_381::{G1Affine, G2Affine, G1, G2};
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::ff::Field;
-use halo2_base::halo2_proofs::halo2curves::group::{Curve, Group};
 use halo2_base::halo2_proofs::plonk::{keygen_pk, keygen_vk};
 use halo2_base::halo2_proofs::SerdeFormat;
 use halo2_base::utils::fs::gen_srs;
 use halo2_base::utils::testing::{check_proof_with_instances, gen_proof_with_instances};
 use halo2_base::AssignedValue;
-use rand::rngs::OsRng;
-use serde_json::Value;
 use std::time::Instant;
 
 const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
+/// Live Sepolia `finality_update` after the Gloas fork (attested and finalized
+/// headers both Gloas).
+const SEPOLIA_GLOAS_FIXTURE: &str = include_str!("../fixtures/sepolia/finality_update_gloas.json");
 
-fn h32(s: &str) -> [u8; 32] {
-    hex::decode(s.trim_start_matches("0x")).unwrap().try_into().unwrap()
+fn witness_for(fixture: &str, params: &ChainParams) -> StepWitness {
+    synthetic_step_witness(update_headers(fixture, params.gloas_fork_slot).unwrap(), params)
 }
 
-fn hexv(s: &str) -> Vec<u8> {
-    hex::decode(s.trim_start_matches("0x")).unwrap()
-}
-
-fn u64s(v: &Value) -> u64 {
-    v.as_str().unwrap().parse().unwrap()
-}
-
-fn u256_le(s: &str) -> [u8; 32] {
-    let val: u128 = s.parse().unwrap();
-    let mut out = [0u8; 32];
-    out[..16].copy_from_slice(&val.to_le_bytes());
-    out
-}
-
-fn header(v: &Value, which: &str) -> HeaderVals {
-    let b = &v["data"][which]["beacon"];
-    HeaderVals {
-        slot: b["slot"].as_str().unwrap().parse().unwrap(),
-        proposer_index: b["proposer_index"].as_str().unwrap().parse().unwrap(),
-        parent_root: h32(b["parent_root"].as_str().unwrap()),
-        state_root: h32(b["state_root"].as_str().unwrap()),
-        body_root: h32(b["body_root"].as_str().unwrap()),
-    }
-}
-
-fn execution(v: &Value, which: &str) -> ExecutionPayloadVals {
-    let e = &v["data"][which]["execution"];
-    ExecutionPayloadVals {
-        parent_hash: h32(e["parent_hash"].as_str().unwrap()),
-        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap()).try_into().unwrap(),
-        state_root: h32(e["state_root"].as_str().unwrap()),
-        receipts_root: h32(e["receipts_root"].as_str().unwrap()),
-        logs_bloom: hexv(e["logs_bloom"].as_str().unwrap()),
-        prev_randao: h32(e["prev_randao"].as_str().unwrap()),
-        block_number: u64s(&e["block_number"]),
-        gas_limit: u64s(&e["gas_limit"]),
-        gas_used: u64s(&e["gas_used"]),
-        timestamp: u64s(&e["timestamp"]),
-        extra_data: hexv(e["extra_data"].as_str().unwrap()),
-        base_fee_per_gas: u256_le(e["base_fee_per_gas"].as_str().unwrap()),
-        block_hash: h32(e["block_hash"].as_str().unwrap()),
-        transactions_root: h32(e["transactions_root"].as_str().unwrap()),
-        withdrawals_root: h32(e["withdrawals_root"].as_str().unwrap()),
-        blob_gas_used: u64s(&e["blob_gas_used"]),
-        excess_blob_gas: u64s(&e["excess_blob_gas"]),
-    }
-}
-
-fn execution_branch(v: &Value, which: &str) -> Vec<[u8; 32]> {
-    v["data"][which]["execution_branch"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| h32(e.as_str().unwrap()))
-        .collect()
-}
-
+/// Mainnet Fulu: the Electra/Deneb indices.
 fn build_witness() -> StepWitness {
-    let v: Value = serde_json::from_str(FIXTURE).unwrap();
-    let attested = header(&v, "attested_header");
-    let finalized = header(&v, "finalized_header");
-    let finality_branch: Vec<[u8; 32]> = v["data"]["finality_branch"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| h32(e.as_str().unwrap()))
-        .collect();
+    witness_for(FIXTURE, &ChainParams::MAINNET_FULU)
+}
 
-    // The exact message the committee must sign.
-    let signing_root = native_sync_committee_signing_root(
-        attested.slot,
-        attested.proposer_index,
-        &attested.parent_root,
-        &attested.state_root,
-        &attested.body_root,
-        &FORK_VERSION_FULU,
-        &MAINNET_GENESIS_VALIDATORS_ROOT,
-    );
-    let msg_hash = signing_root_to_g2(&signing_root);
-    let hm = G2::from(msg_hash);
-
-    // Synthetic valid committee: 512 signers, all participating.
-    let mut pubkeys: Vec<G1Affine> = Vec::with_capacity(512);
-    let mut agg = G1::identity();
-    let mut sig = G2::identity();
-    for _ in 0..512 {
-        let sk = <G1 as Group>::Scalar::random(OsRng);
-        pubkeys.push((G1::generator() * sk).to_affine());
-        agg += G1::generator() * sk;
-        sig += hm * sk;
-    }
-    let signature: G2Affine = sig.to_affine();
-    assert!(verify_native(&signature, &agg.to_affine(), &msg_hash), "synthetic committee must verify");
-
-    // Compressed encodings for the decode-bind + Poseidon commitment.
-    let pubkeys_compressed: Vec<[u8; 48]> = pubkeys.iter().map(|p| p.to_compressed_be()).collect();
-    let aggregate_pubkey = agg.to_affine().to_compressed_be();
-
-    StepWitness {
-        attested,
-        finalized,
-        finality_branch,
-        fork_version: FORK_VERSION_FULU,
-        genesis_validators_root: MAINNET_GENESIS_VALIDATORS_ROOT,
-        pubkeys,
-        pubkeys_compressed,
-        aggregate_pubkey,
-        bits: vec![true; 512],
-        signature,
-        finalized_execution: execution(&v, "finalized_header"),
-        execution_branch: execution_branch(&v, "finalized_header"),
-    }
+/// Sepolia Gloas: the Gloas indices.
+fn build_gloas_witness() -> StepWitness {
+    witness_for(SEPOLIA_GLOAS_FIXTURE, &ChainParams::SEPOLIA_GLOAS)
 }
 
 #[test]
 fn native_step_witness_is_consistent() {
-    let w = build_witness();
-    assert_eq!(w.pubkeys.len(), 512);
-    assert_eq!(w.pubkeys_compressed.len(), 512);
-    assert_eq!(w.finality_branch.len(), 7);
-    assert_eq!(w.execution_branch.len(), 4);
+    for w in [build_witness(), build_gloas_witness()] {
+        assert_eq!(w.pubkeys.len(), 512);
+        assert_eq!(w.pubkeys_compressed.len(), 512);
+        assert_eq!(w.finality_branch.len(), FINALITY_BRANCH_LEN);
+        assert_eq!(w.execution_branch.len(), EXECUTION_BRANCH_LEN);
+    }
+    assert_eq!(build_witness().gloas_fork_slot, GLOAS_NOT_SCHEDULED);
+    assert_eq!(build_gloas_witness().gloas_fork_slot, SEPOLIA_GLOAS_FORK_SLOT);
+}
+
+/// Reading the Sepolia Gloas update at the pre-Gloas indices must fail natively:
+/// its 9-node finality branch has no zero padding to strip.
+#[test]
+fn gloas_update_does_not_parse_at_electra_indices() {
+    assert!(update_headers(SEPOLIA_GLOAS_FIXTURE, GLOAS_NOT_SCHEDULED).is_err());
 }
 
 /// Build a circuit with one instance column, run `build` to produce the instance
@@ -206,6 +109,7 @@ const SYNTH_ATTESTED_SLOT: u64 = 7_000_001;
 const SYNTH_FINALIZED_SLOT: u64 = 7_000_000;
 const SYNTH_PARTICIPATION: u64 = 400;
 const SYNTH_COMMIT: u64 = 0xdead_beef_dead_beef;
+const SYNTH_GLOAS_FORK_SLOT: u64 = 11_296_768;
 
 fn synth_fbr() -> [u8; 32] {
     core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(1))
@@ -243,6 +147,7 @@ fn native_instances() -> Vec<Fr> {
         le16(&bh[16..32]),
         le16(&asr[0..16]),
         le16(&asr[16..32]),
+        Fr::from(SYNTH_GLOAS_FORK_SLOT),
     ]
 }
 
@@ -259,7 +164,8 @@ fn build_synth_instances(
     let fbr = load_node(ctx, &synth_fbr());
     let bh = load_node(ctx, &synth_bh());
     let asr = load_node(ctx, &synth_asr());
-    pack_step_instances(ctx, gate, a, f, &fbr, p, c, &bh, &asr)
+    let g = ctx.load_witness(Fr::from(SYNTH_GLOAS_FORK_SLOT));
+    pack_step_instances(ctx, gate, a, f, &fbr, p, c, &bh, &asr, g)
 }
 
 /// Fast test: the instance layout is exactly [`STEP_INSTANCE_LEN`] elements in the
@@ -388,10 +294,7 @@ fn step_real_proof_k19() {
     );
 }
 
-#[test]
-#[ignore = "full step circuit (BLS + SSZ + subgroup + fusion) with instance column; run on n14, tune k"]
-fn step_verifies_on_real_fixture() {
-    let w = build_witness();
+fn mock_prove_step(w: &StepWitness, instances_override: Option<Vec<Fr>>) -> Result<(), String> {
     let k = 23u32;
     let lb = 22usize;
 
@@ -400,13 +303,63 @@ fn step_verifies_on_real_fixture() {
     let range = RangeChip::new(lb, builder.lookup_manager().clone());
     let sha = Sha256Chip::new(&range);
 
-    let pi = verify_step(builder.pool(0), &range, &sha, &w);
+    let pi = verify_step(builder.pool(0), &range, &sha, w);
     assert_eq!(pi.instances.len(), STEP_INSTANCE_LEN);
-    let vals: Vec<Fr> = pi.instances.iter().map(|c| *c.value()).collect();
+    let vals = instances_override.unwrap_or_else(|| pi.instances.iter().map(|c| *c.value()).collect());
     builder.assigned_instances[0] = pi.instances.clone();
 
     builder.config_params.lookup_bits = Some(lb);
     builder.calculate_params(Some(9));
 
-    MockProver::run(k, &builder, vec![vals]).unwrap().assert_satisfied();
+    MockProver::run(k, &builder, vec![vals]).unwrap().verify().map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+#[ignore = "full step circuit (BLS + SSZ + subgroup + fusion) with instance column; run on n14, tune k"]
+fn step_verifies_on_real_fixture() {
+    mock_prove_step(&build_witness(), None).unwrap();
+}
+
+/// The live Sepolia Gloas update, at gindices 735 (finality) and 2856
+/// (execution block hash).
+#[test]
+#[ignore = "full step circuit on the Sepolia Gloas fixture; run on n14"]
+fn step_verifies_on_sepolia_gloas_fixture() {
+    let w = build_gloas_witness();
+    mock_prove_step(&w, None).unwrap();
+}
+
+/// A Gloas witness claiming Gloas has not started: the circuit reads the
+/// branches at the Electra/Deneb indices and must reject them.
+#[test]
+#[ignore = "full step circuit, negative; run on n14"]
+fn step_rejects_gloas_branches_under_a_wrong_fork_slot() {
+    let mut w = build_gloas_witness();
+    w.gloas_fork_slot = GLOAS_NOT_SCHEDULED;
+    assert!(mock_prove_step(&w, None).is_err());
+}
+
+/// A pre-Gloas witness claiming Gloas started at genesis: rejected likewise.
+#[test]
+#[ignore = "full step circuit, negative; run on n14"]
+fn step_rejects_fulu_branches_under_a_wrong_fork_slot() {
+    let mut w = build_witness();
+    w.gloas_fork_slot = 0;
+    assert!(mock_prove_step(&w, None).is_err());
+}
+
+/// The fork slot is a public input: the proof does not verify against another.
+#[test]
+#[ignore = "full step circuit, negative; run on n14"]
+fn step_binds_the_gloas_fork_slot_instance() {
+    let w = build_gloas_witness();
+    let mut vals = {
+        let mut b = BaseCircuitBuilder::<Fr>::default().use_k(23).use_lookup_bits(22).use_instance_columns(1);
+        let range = RangeChip::new(22, b.lookup_manager().clone());
+        let sha = Sha256Chip::new(&range);
+        verify_step(b.pool(0), &range, &sha, &w).instances.iter().map(|c| *c.value()).collect::<Vec<_>>()
+    };
+    assert_eq!(vals[STEP_GLOAS_FORK_SLOT_INDEX], Fr::from(SEPOLIA_GLOAS_FORK_SLOT));
+    vals[STEP_GLOAS_FORK_SLOT_INDEX] += Fr::ONE;
+    assert!(mock_prove_step(&w, Some(vals)).is_err());
 }

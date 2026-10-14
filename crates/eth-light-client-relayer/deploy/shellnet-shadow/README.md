@@ -72,6 +72,14 @@ printed `AN_LIGHT_CLIENT` / `AN_SENDER` / key and ABI paths:
 $K/deploy-contract.sh                # genaddr -> giver funding -> deployx -> getters
 ```
 
+Pin the network's Gloas fork slot (`GLOAS_FORK_EPOCH × 32`). Until it is set,
+`submitUpdate` and `submitRotate` revert 256:
+
+```bash
+set -a; source $ETH_LC_ROOT/config/eth-lc-relayer.env; set +a
+$ETH_LC_ROOT/bin/eth-lc-relayer set-gloas-fork-slot --slot 11296768   # Sepolia
+```
+
 Bootstrap the committee (weak-subjectivity anchor). The first proof exposes
 the commitment of the committee that signed the attested header; the owner
 writes it on-chain and the state file records the period:

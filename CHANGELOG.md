@@ -29,6 +29,11 @@ assigns it when the release is tagged.
   block cutoff in the same code so past deposits stop going through. The
   current contracts need no such restriction — the voucher's code is installed
   by the zerostate and `updateCode` is called with an empty `userCell`.
+- `scripts/ursus/flip_deposit_to_light_client.md` and
+  `scripts/ursus/eth_lc_shellnet_e2e.md` pin the Gloas fork slot with
+  `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
+  deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
+  runs.
 
 ### Breaking Changes
 
@@ -70,13 +75,105 @@ assigns it when the release is tagged.
   the existing voucher code by passing an empty `userCell`. The voucher code
   and its replay-protection addresses are unchanged.
 
-  `eccUSDCBridge` reports 1.7.1. Its `.tvc` and ABI are rebuilt with `sold`
+  `eccUSDCBridge` retains main's version 1.8.0. Its `.tvc` and ABI are rebuilt with `sold`
   0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
   Existing event formats and call signatures stay the same. Use the release
   `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
   wire format of `WithdrawalInitiated` even when the event ABI is identical,
   which would break the withdrawal proof's message-layout assumptions.
 
+- **The beacon light client's step and rotate verification keys are rotated
+  for Gloas (ePBS), and both proofs gain a public input.** From Gloas the
+  beacon `finalized_checkpoint`, the sync committees and the execution block
+  hash sit at different generalized indices (finality 169 → 735, next sync
+  committee 87 → 2946, execution block hash 812 → 2856), so the circuits pick
+  the index per header from its slot against a Gloas fork slot that is now a
+  public input: the step proof has 11 inputs (`gloasForkSlot` at index 10) and
+  the rotate proof 16 (`gloasForkSlot` after `period`). Step and rotate proofs
+  made for the previous circuits no longer verify — regenerate them, and
+  replace `EthBeaconLightClient` code (step VkBlob sha256 `581910a739788e1e4269c9cbf848c29f57a9e9a49e60f5e0178cc1ed67f397db`,
+  rotate VkBlob sha256 `4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54`) with `updateCode`, passing
+  `abi.encode(uint64 gloasForkSlot)` as the user cell, or call
+  `setGloasForkSlot` after an upgrade with an empty cell. Until the slot is
+  set, `submitUpdate` and `submitRotate` reject everything with exit code 256;
+  a proof made for a different slot fails with 255. The value is
+  `GLOAS_FORK_EPOCH × 32`: `11296768` on Sepolia, `type(uint64).max` (Gloas
+  not scheduled) on mainnet. The owner can change it while unset or while
+  owner rotation is still enabled; after `disableOwnerRotation` only
+  `updateCode` can. Later `updateCode` calls with an empty user cell keep the
+  current value. Constructors and `deployLightClient` are unchanged.
+  From Gloas, `submitUpdate` anchors the payload bid's `parent_block_hash`
+  rather than the checkpoint slot's own execution hash.
+  `eth-lc-relayer ancestry-one` starts its walk at that anchored hash
+  and scans `checkpoint_slot - 32 ..= checkpoint_slot` (33 slots), so a
+  deposit inside a Gloas checkpoint's own payload is not reported as
+  covered by that checkpoint.
+- **The rotate proof's `period` is proven.** The rotate circuit computes it
+  as the attested slot's period plus one (`attested_slot / 8192 + 1`, the
+  period the proven next committee serves) instead of loading it as a free
+  witness, so a hand-off can no longer be submitted under a period of the
+  sender's choosing. `submitRotate` stores it in `_committeePeriod` and emits
+  it in `CommitteeRotated`; nothing gates on it. This is part of the rotate
+  verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
+  rotate proofs made before it do not verify. `eth-lc-relayer` refuses a
+  rotate proof whose period is not the one it is rotating into, and it
+  does not start `rotate_tree_n8` for a live period that tree cannot
+  prove (the tree is a committed fixture, period 9413 without an
+  `update_period_*.json`; that file may be the beacon `/updates`
+  array). Prove the hand-off on n14 and `submit-rotate`.   `--dry-run`
+  pins the Gloas slot from the beacon spec (the mock submitter has no
+  contract).   A live daemon reads `getGloasForkSlot` before a prove (not on an
+  idle tick) and uses that slot: a published `GLOAS_FORK_EPOCH` that the contract
+  does not hold would otherwise spend a full step prove and come back
+  255. A daemon that started while Gloas was still `FAR_FUTURE_EPOCH`
+  re-fetches `/eth/v1/config/spec` until the beacon publishes a real
+  slot, so it does not freeze on `u64::MAX` and stop at the fork.
+  After a manual `submit-rotate` the next tick reads
+  `getCommitteeState` and continues; `submit-rotate --state` also
+  writes `last_committee_period` for a restart. `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc`
+  is rebuilt with both changes (same `sold` as before, built against a
+  tvm-sdk with `KECCAK256`): the light client's code hash moves
+  `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
+  `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
+  fields.
+### Breaking Changes
+
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
+  id `deployLightClient` stored can be flipped.** The previous bool
+  `_ownerAnchorsEnabled` turned the owner writer off for every source
+  chain at once, so a flip left the six L2s on the deposit allowlist
+  with no writer. The call (and `disableOwnerAnchorsOn(uint256 chainId)`)
+  now sets `_ownerAnchorsDisabled` only for `_lightClientL1ChainId`;
+  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The bridge
+  does not read the light client's own `getConfig().l1ChainId`.
+  `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
+  `getLightClientL1ChainId()` is the stored L1 id (0 until
+  `deployLightClient`). The new storage field is `_lightClientL1ChainId`.
+  L2 deposits keep `setAcceptedBlockHash`. The no-argument ABI the
+  relayer already calls is unchanged. The bridge reports 1.8.0. Rebuild
+  `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade the premined 1.7.0
+  bridge; `onCodeUpgrade` resets storage and does not migrate
+  `_lightClient` or the L1 id, so both `disableOwnerAnchors` and
+  `deployLightClient` revert 226 until `setLightClientCode` runs again.
+  Then `deployLightClient` stores the L1 id it is given — the constructor
+  message bounces if the light client is already at that address, so
+  pass the same id that client was constructed with.
+  `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` on
+  1.8.0, and `getAnchorConfig().ownerAnchorsEnabled` on 1.7.0 (that
+  getter does not exist there, and retrying it would hang). An L1 flip
+  does not refuse L2 deposits **on a CLI from this branch**. Released
+  CLIs still read `getAnchorConfig().ownerAnchorsEnabled` as the
+  deposit's own mode, so after the flip they treat an L2 deposit as
+  light-client and refuse it (`LcFailure::Network`). Ship this CLI
+  before flipping.
+  A flip through `disableOwnerAnchorsOn` is the same switch: the CLI
+  recognises that call in the bridge's history, and the bundled ABI
+  matches the compiled 1.8.0 one so it can decode it.
+  Do not flip until something late-registers skipped checkpoints so
+  consecutive proven anchors sit within one ancestry span: accepted
+  checkpoints are often two or more epochs apart, and `eth-lc-relayer`
+  still leaves the flip off unless started with `--flip-owner`.
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block
@@ -238,12 +335,8 @@ assigns it when the release is tagged.
   the last head the leaving committee moved, not the end of its period, so the
   checkpoint it skipped is attested *after* it and an upper bound at the
   recorded slot itself would exclude exactly the skips this exists for. The
-  bound is a slot and not the period label on purpose —
-  the rotate circuit loads its period as a free witness
-  (`rotate_aggregation.rs`), so a valid hand-off can be labelled with any
-  later period, and a window measured in periods could be moved onto slots the
-  replaced committee never attested. A finalized slot is read out of the
-  signed header by the step circuit, so it cannot be relabelled. The owner hatches
+  bound is a slot, read out of the signed header by the step circuit, not the
+  rotate proof's period label. The owner hatches
   (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
   rather than carrying it: they replace a committee the owner is rejecting, or
   jump several periods, so neither is a hand-off. `getCommitteeState` returns
@@ -285,14 +378,13 @@ assigns it when the release is tagged.
   head is near the end of its period at the rotation it reaches into the next
   one, and an early hand-off puts it wherever the sender put the head. Signing
   there needs a supermajority of the retired committee's keys — the long-range
-  assumption this design already carries — but the contract does not and
-  cannot enforce "the committee of the attested slot's period" while the
-  period is a free witness in the circuit.
+  assumption this design already carries — but the contract does not
+  enforce "the committee of the attested slot's period".
 
 - **`submitRotate` no longer decides anything by the period on the proof, and
   refuses a hand-off that does not change the committee.** The rotate circuit
-  loads its period as a free witness (`rotate_aggregation`: `ctx.load_witness`),
-  so the label is a number the sender types. Monotonicity
+  loaded its period as a free witness (`rotate_aggregation`: `ctx.load_witness`),
+  so the label was a number the sender typed. Monotonicity
   (`pi.period > _committeePeriod`) was therefore not a replay guard but a way
   to brick the call: anyone could take a genuine hand-off, label it
   `type(uint64).max` and submit it — the call is permissionless — after which
@@ -307,11 +399,10 @@ assigns it when the release is tagged.
   lands the same proof no longer matches, and the hand-off out of a given
   committee is unique. So the period is now out of the decision entirely: the
   monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
-  the owner's `reAnchorCommittee`. `_committeePeriod` is
-  derived from the proven head (`finalizedSlot / 8192 + 1`) instead of being
-  taken from the proof, so an unproven label can no longer reach storage at
-  all; `CommitteeRotated` carries that derived number. It is a report for
-  operators, approximate while the head lags, and nothing gates on it.
+  the owner's `reAnchorCommittee`. `_committeePeriod` and `CommitteeRotated`
+  carry the rotate proof's period, which the circuit now binds to the attested
+  slot (the rotate verification key entry above). It is a report for
+  operators, and nothing gates on it.
 
   `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
   (`ERR_SELF_ROTATION`, 253). A genuine proof with
@@ -360,13 +451,11 @@ assigns it when the release is tagged.
   `eth-lc-relayer` (`header_rlp`, used with `--submit-ancestry`) emit the
   two new fields. Rebuild both binaries from this source.
 
-  Post-fork Sepolia blocks still cannot be anchored by the light client:
-  the step circuit and its witness builder have not followed Gloas
-  (`execution_payload` became `signed_execution_payload_bid`). Until that
-  change lands, a post-fork block is accepted only if the owner writes it
-  with `setAcceptedBlockHash`. After `disableOwnerAnchors` those deposits
-  cannot be finalized. No deposit is stuck today: no bridge contract on
-  Sepolia has had an event since the fork.
+  Post-fork Sepolia blocks are anchored by this branch's light client:
+  the step circuit picks Gloas generalized indices from `gloasForkSlot`
+  (see the Breaking entry above). A deploy that has not set the slot
+  still refuses every update with 256; a proof made for a different
+  slot fails with 255.
 
   `eccUSDCBridge` embeds the new key, reports `version` 1.7.0, and
   `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with sold 0.80.0;
@@ -703,8 +792,39 @@ assigns it when the release is tagged.
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
 
+### Documentation
+
+- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
+  is part of replay protection, and that an upgrade changing it has to ship a
+  block cutoff in the same code so past deposits stop going through. The
+  current contracts need no such restriction — the voucher's code is installed
+  by the zerostate and `updateCode` is called with an empty `userCell`.
+- `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
+  `docs/eth-light-client.md` §3.5, and
+  `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
+  the owner writer; L1 still covers only the blocks a span reaches when
+  accepted checkpoints sit more than a span apart, because nothing
+  late-registers the ones the daemon skipped. Check 3 of the deposit
+  CLI names both `disableOwnerAnchors` and `disableOwnerAnchorsOn` as
+  the switch-off.
+
 ### Added
 
+- Gloas (ePBS) support in the beacon light client. `eth-lc-relayer` reads
+  `GLOAS_FORK_EPOCH` from the beacon node's `/eth/v1/config/spec` and hands
+  the fork slot to the step and rotate provers as `BEACON_GLOAS_FORK_SLOT`;
+  run by hand, the provers default to the network's own value (Sepolia
+  `11296768`, mainnet not scheduled) and take the variable as an override. It
+  must equal the contract's slot. From Gloas the beacon block carries a
+  payload bid instead of the payload, so the hash the light client stores for
+  a finalized block is the bid's `parent_block_hash`, the execution block that
+  block built on, read from `finalized_header.execution_block_hash`; before
+  Gloas it is still the payload's own `block_hash`.
+- `EthBeaconLightClient.setGloasForkSlot(uint64)` (owner) and
+  `getGloasForkSlot() → (uint64 gloasForkSlot, bool isSet)`; errors 255 (proof made for
+  a different Gloas fork slot) and 256 (fork slot not set). `eth-lc-relayer
+  set-gloas-fork-slot --slot …` is the operator call; a fresh deploy rejects
+  every submission with 256 until it runs.
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
   bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
@@ -1024,8 +1144,10 @@ assigns it when the release is tagged.
   not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
   `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
   `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
-  unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
-  default, `--no-rotate` opts out). The owner flip is **off** by default: only
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`). Rotate
+  of the committed fixture is on by default; a live period jump is
+  `RotateRequired` — prove on n14 and `submit-rotate`. `--no-rotate`
+  opts out of even the fixture path. The owner flip is **off** by default: only
   `daemon --flip-owner` runs it, after the first accepted `submitUpdate`, and
   the daemon refuses to start with the flag unless `AN_USDC_BRIDGE` and
   `AN_USDC_ABI_PATH` are set. The flip reads `getAnchorConfig()` on the bridge
@@ -1409,8 +1531,9 @@ assigns it when the release is tagged.
 - `prove-one` and the daemon keep the prover transcript
   (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
   stderr tail on failure instead of a bare exit status.
-- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`);
-  `--no-rotate` is the shadow/laptop opt-out. The owner flip runs only with
+- `eth-lc-relayer daemon` auto-rotates only the committed fixture period;
+  a live period jump is `RotateRequired` (prove on n14 and
+  `submit-rotate`). `--no-rotate` is the shadow/laptop opt-out. The owner flip runs only with
   `--flip-owner` (see the `eth-lc-relayer` entry under Added). With
   `ETH_RPC_URL` each accepted `submitUpdate` then `rePushAnchor`s
   the checkpoint and runs `link_headers` locally. On-chain `submitAncestry`

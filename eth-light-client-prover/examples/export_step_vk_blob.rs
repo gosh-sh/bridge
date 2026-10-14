@@ -55,11 +55,10 @@
 use std::{fs, path::Path, time::Instant};
 
 use eth_light_client_prover::{
-    bls_core::{signing_root_to_g2, verify_native},
-    execution::ExecutionPayloadVals,
-    live_witness::{step_witness_from_beacon_with_params, ChainParams},
-    signing::native_sync_committee_signing_root,
-    step::{verify_step, HeaderVals, StepWitness, STEP_INSTANCE_LEN},
+    live_witness::{
+        step_witness_from_beacon_with_params, synthetic_step_witness, update_headers, ChainParams,
+    },
+    step::{verify_step, StepWitness, STEP_INSTANCE_LEN},
 };
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::{
@@ -69,12 +68,7 @@ use halo2_base::{
     },
     halo2_proofs::{
         halo2curves::{
-            bls12_381::{
-                G1Affine as BlsG1Affine, G2Affine as BlsG2Affine, G1 as BlsG1, G2 as BlsG2,
-            },
             bn256::{Bn256, Fr, G1Affine},
-            ff::Field,
-            group::{Curve, Group},
             serde::SerdeObject,
         },
         plonk::{keygen_pk, keygen_vk, verify_proof, VerifyingKey},
@@ -91,8 +85,6 @@ use halo2_base::{
     },
     utils::testing::gen_proof_with_instances,
 };
-use rand::rngs::OsRng;
-use serde_json::Value;
 
 const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
 
@@ -105,72 +97,11 @@ const K: u32 = 19;
 const LOOKUP_BITS: usize = 18;
 
 // ---------------------------------------------------------------------------
-// Fixture → StepWitness (mirrors tests/step_mock_prover.rs::build_witness).
+// Fixture → StepWitness.
 // The VK is witness-independent (its shape depends only on the constraint
 // system), so the synthetic-committee witness yields the production VK; the
 // emitted proof is a valid sample over that witness.
 // ---------------------------------------------------------------------------
-
-fn h32(s: &str) -> [u8; 32] {
-    hex::decode(s.trim_start_matches("0x"))
-        .unwrap()
-        .try_into()
-        .unwrap()
-}
-fn hexv(s: &str) -> Vec<u8> {
-    hex::decode(s.trim_start_matches("0x")).unwrap()
-}
-fn u64s(v: &Value) -> u64 {
-    v.as_str().unwrap().parse().unwrap()
-}
-fn u256_le(s: &str) -> [u8; 32] {
-    let val: u128 = s.parse().unwrap();
-    let mut out = [0u8; 32];
-    out[..16].copy_from_slice(&val.to_le_bytes());
-    out
-}
-fn header(v: &Value, which: &str) -> HeaderVals {
-    let b = &v["data"][which]["beacon"];
-    HeaderVals {
-        slot: b["slot"].as_str().unwrap().parse().unwrap(),
-        proposer_index: b["proposer_index"].as_str().unwrap().parse().unwrap(),
-        parent_root: h32(b["parent_root"].as_str().unwrap()),
-        state_root: h32(b["state_root"].as_str().unwrap()),
-        body_root: h32(b["body_root"].as_str().unwrap()),
-    }
-}
-fn execution(v: &Value, which: &str) -> ExecutionPayloadVals {
-    let e = &v["data"][which]["execution"];
-    ExecutionPayloadVals {
-        parent_hash: h32(e["parent_hash"].as_str().unwrap()),
-        fee_recipient: hexv(e["fee_recipient"].as_str().unwrap())
-            .try_into()
-            .unwrap(),
-        state_root: h32(e["state_root"].as_str().unwrap()),
-        receipts_root: h32(e["receipts_root"].as_str().unwrap()),
-        logs_bloom: hexv(e["logs_bloom"].as_str().unwrap()),
-        prev_randao: h32(e["prev_randao"].as_str().unwrap()),
-        block_number: u64s(&e["block_number"]),
-        gas_limit: u64s(&e["gas_limit"]),
-        gas_used: u64s(&e["gas_used"]),
-        timestamp: u64s(&e["timestamp"]),
-        extra_data: hexv(e["extra_data"].as_str().unwrap()),
-        base_fee_per_gas: u256_le(e["base_fee_per_gas"].as_str().unwrap()),
-        block_hash: h32(e["block_hash"].as_str().unwrap()),
-        transactions_root: h32(e["transactions_root"].as_str().unwrap()),
-        withdrawals_root: h32(e["withdrawals_root"].as_str().unwrap()),
-        blob_gas_used: u64s(&e["blob_gas_used"]),
-        excess_blob_gas: u64s(&e["excess_blob_gas"]),
-    }
-}
-fn execution_branch(v: &Value, which: &str) -> Vec<[u8; 32]> {
-    v["data"][which]["execution_branch"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| h32(e.as_str().unwrap()))
-        .collect()
-}
 
 fn fixture_json() -> anyhow::Result<String> {
     match std::env::var("FINALITY_UPDATE_PATH") {
@@ -195,60 +126,7 @@ fn build_witness() -> anyhow::Result<StepWitness> {
         "WARN: COMMITTEE_JSON_PATH/BOOTSTRAP_PATH unset — synthetic 512-committee (VK emit only, \
          not chain-valid)"
     );
-    let v: Value = serde_json::from_str(&finality)?;
-    let attested = header(&v, "attested_header");
-    let finalized = header(&v, "finalized_header");
-    let finality_branch: Vec<[u8; 32]> = v["data"]["finality_branch"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| h32(e.as_str().unwrap()))
-        .collect();
-
-    let signing_root = native_sync_committee_signing_root(
-        attested.slot,
-        attested.proposer_index,
-        &attested.parent_root,
-        &attested.state_root,
-        &attested.body_root,
-        &params.fork_version,
-        &params.genesis_validators_root,
-    );
-    let msg_hash = signing_root_to_g2(&signing_root);
-    let hm = BlsG2::from(msg_hash);
-
-    let mut pubkeys: Vec<BlsG1Affine> = Vec::with_capacity(512);
-    let mut agg = BlsG1::identity();
-    let mut sig = BlsG2::identity();
-    for _ in 0..512 {
-        let sk = <BlsG1 as Group>::Scalar::random(OsRng);
-        pubkeys.push((BlsG1::generator() * sk).to_affine());
-        agg += BlsG1::generator() * sk;
-        sig += hm * sk;
-    }
-    let signature: BlsG2Affine = sig.to_affine();
-    assert!(
-        verify_native(&signature, &agg.to_affine(), &msg_hash),
-        "synthetic committee must verify"
-    );
-
-    let pubkeys_compressed: Vec<[u8; 48]> = pubkeys.iter().map(|p| p.to_compressed_be()).collect();
-    let aggregate_pubkey = agg.to_affine().to_compressed_be();
-
-    Ok(StepWitness {
-        attested,
-        finalized,
-        finality_branch,
-        fork_version: params.fork_version,
-        genesis_validators_root: params.genesis_validators_root,
-        pubkeys,
-        pubkeys_compressed,
-        aggregate_pubkey,
-        bits: vec![true; 512],
-        signature,
-        finalized_execution: execution(&v, "finalized_header"),
-        execution_branch: execution_branch(&v, "finalized_header"),
-    })
+    Ok(synthetic_step_witness(update_headers(&finality, params.gloas_fork_slot)?, &params))
 }
 
 // ---------------------------------------------------------------------------

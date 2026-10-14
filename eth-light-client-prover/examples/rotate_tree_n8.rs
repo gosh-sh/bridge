@@ -11,7 +11,8 @@
 //!   2 ×  ▼  (fold 2 L1 accumulators → 24 inst = 12 acc + 12 passthrough)
 //!        │  ROOT: RotateAggregationCircuit — fold 2 L2 + committee glue
 //!   1 ×  ▼  (8 subtree roots surface as prev[12..]; SHA top → merkle branch
-//!           gindex 87 → Poseidon commit; emit [acc12, current, next, period])
+//!           gindex 87 | 2946 → Poseidon commit; emit [acc12, current, next, period,
+//!           gloas_fork_slot])
 //! ```
 //!
 //! The 8 leaves are **distinct** (`shard_{0..7}_*` from `export_shard_snark`):
@@ -19,7 +20,7 @@
 //! (falls back to 8 distinct synthetic slices when no fixture is present). The
 //! root glues the **8 distinct subtree roots** and binds the recomposed committee
 //! SSZ root to the beacon `state_root` via the **real `next_sync_committee_branch`**
-//! @ gindex 87 — the full, faithful committee path.
+//! @ gindex 87 (2946 from Gloas) — the full, faithful committee path.
 //!
 //! ## Run (n14, capture peak RSS across all levels)
 //!
@@ -38,8 +39,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eth_light_client_prover::committee::{native_committee_subtree_root, COMMITTEE_SHARDS};
-use eth_light_client_prover::mainnet::committee_source;
-use eth_light_client_prover::rotate::{NEXT_SYNC_COMMITTEE_GINDEX, SHARD_INSTANCE_LEN};
+use eth_light_client_prover::mainnet::{committee_source, SLOTS_PER_SYNC_PERIOD};
+use eth_light_client_prover::live_witness::ChainParams;
+use eth_light_client_prover::rotate::SHARD_INSTANCE_LEN;
 use eth_light_client_prover::step::STEP_INSTANCE_LEN;
 use eth_light_client_prover::rotate_aggregation::{
     RotateAggregationCircuit, RotateGlueWitness, NUM_ACCUMULATOR_INSTANCES, NUM_ROTATE_PUBLIC_INPUTS,
@@ -274,35 +276,38 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(source.shards.len() == COMMITTEE_SHARDS, "committee source != 8 shards");
     let subtree_roots: Vec<[u8; 32]> =
         source.shards.iter().map(|s| native_committee_subtree_root(s)).collect();
+    // Must match the folded step proof's (BEACON_GLOAS_FORK_SLOT, default per network).
+    let gloas_fork_slot = ChainParams::from_env()?.gloas_fork_slot;
     let witness = match &source.update {
         Some(fx) => {
-            anyhow::ensure!(fx.branch.len() == 6, "next_sync_committee_branch depth != 6");
             RotateGlueWitness {
                 subtree_roots: subtree_roots.clone(),
                 aggregate: source.aggregate,
-                branch: fx.branch.clone(),
+                branch: fx.glue_branch(gloas_fork_slot)?,
                 state_root: fx.state_root,
-                gindex: NEXT_SYNC_COMMITTEE_GINDEX,
+                attested_slot: fx.attested_slot,
+                gloas_fork_slot,
                 // R2 passthrough: bound by a BLS/finality proof later (id: bls-bind).
                 current_commit: Fr::from(0x1234_5678u64),
-                period: fx.period(),
             }
         }
         None => RotateGlueWitness::synthetic(
             subtree_roots.clone(),
             source.aggregate,
-            NEXT_SYNC_COMMITTEE_GINDEX,
+            9_412u64 * SLOTS_PER_SYNC_PERIOD,
+            gloas_fork_slot,
             Fr::from(0x1234_5678u64),
-            9_412u64,
         ),
     };
     println!(
-        "committee: {} — {} distinct subtree roots, gindex={}, branch depth={}, period={}\n",
+        "committee: {} — {} distinct subtree roots, attested slot={}, gloas fork slot={}, branch \
+         nodes={}, period={}\n",
         source.label,
         witness.subtree_roots.len(),
-        witness.gindex,
+        witness.attested_slot,
+        witness.gloas_fork_slot,
         witness.branch.len(),
-        witness.period
+        witness.period()
     );
 
     let outer_srs = std::env::var("OUTER_SRS")
@@ -541,7 +546,7 @@ fn main() -> anyhow::Result<()> {
     println!(
         "Full N=8 committee proved via 2-to-1 tree at k={k} (8 shards → 4 L1 → 2 L2 → 1 root).\n\
          Root folded 2 accumulator-carrying L2 snarks{}, surfaced all 8 subtree roots,\n\
-         ran committee glue (SHA top → merkle branch gindex 87 → Poseidon commit), and\n\
+         ran committee glue (SHA top → merkle branch gindex 87|2946 → Poseidon commit), and\n\
          emitted rotate PIs [current, next, period] after the 12 accumulator limbs\n\
          (root = {root_inst} inst). Peak RSS from `/usr/bin/time -v` — NOT the k=23 monolith.",
         if bound_current { " + 1 step snark (current_commit BOUND to its committee_commitment)" } else { "" }

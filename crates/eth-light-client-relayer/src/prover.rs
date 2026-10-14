@@ -10,7 +10,7 @@ use crate::{
     error::RelayerError,
     types::{
         pack_step_public_inputs, FinalityUpdate, RotateProofBundle, StepProofBundle,
-        ROTATE_INSTANCE_LEN,
+        ROTATE_INSTANCE_LEN, ROTATE_PERIOD_INDEX,
     },
 };
 
@@ -19,7 +19,11 @@ pub trait ProofGenerator: Send + Sync {
     async fn generate_step(&self, update: &FinalityUpdate)
         -> Result<StepProofBundle, RelayerError>;
 
-    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError>;
+    async fn generate_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError>;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,15 +61,24 @@ impl ProofGenerator for MockProofGenerator {
         })
     }
 
-    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
+    async fn generate_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError> {
         if self.fail_rotate {
             return Err(RelayerError::ProofGeneration(
                 "mock configured to fail rotate".into(),
             ));
         }
         let mut public_inputs = vec![0u8; ROTATE_INSTANCE_LEN * 32];
-        let off = (ROTATE_INSTANCE_LEN - 1) * 32;
+        let off = ROTATE_PERIOD_INDEX * 32;
         public_inputs[off..off + 8].copy_from_slice(&to_period.to_le_bytes());
+        if let Some(chain) = chain {
+            let fork_off = crate::types::ROTATE_GLOAS_FORK_SLOT_INDEX * 32;
+            public_inputs[fork_off..fork_off + 8]
+                .copy_from_slice(&chain.gloas_fork_slot.to_le_bytes());
+        }
         Ok(RotateProofBundle {
             public_inputs,
             proof: vec![0xCD; 64],
@@ -131,6 +144,10 @@ impl SubprocessProofGenerator {
             .env(
                 crate::types::BeaconChainParams::ENV_GENESIS_VALIDATORS_ROOT,
                 chain.genesis_validators_root_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GLOAS_FORK_SLOT,
+                chain.gloas_fork_slot.to_string(),
             );
         }
         let output = cmd
@@ -199,13 +216,24 @@ impl SubprocessProofGenerator {
         })
     }
 
-    async fn run_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
+    async fn run_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError> {
+        let fixture_period = fixture_rotate_period(&self.cfg.prover_dir);
+        if fixture_period != to_period {
+            return Err(RelayerError::ProofGeneration(format!(
+                "rotate_tree_n8 proves the committed fixture (period {fixture_period}), not live \
+                 period {to_period}; prove the hand-off on n14 and submit-rotate"
+            )));
+        }
         let work = tempfile::tempdir()
             .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
         let tree_out = work.path().join("rotate_tree");
         std::fs::create_dir_all(&tree_out)?;
-        let status = Command::new("cargo")
-            .current_dir(&self.cfg.prover_dir)
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(&self.cfg.prover_dir)
             .args([
                 "run",
                 "--release",
@@ -216,7 +244,22 @@ impl SubprocessProofGenerator {
             ])
             .env("EMIT_VKBLOB", "1")
             .env("TREE_OUT", &tree_out)
-            .env("STEP_SRS", &self.cfg.srs_path)
+            .env("STEP_SRS", &self.cfg.srs_path);
+        if let Some(chain) = &chain {
+            cmd.env(
+                crate::types::BeaconChainParams::ENV_FORK_VERSION,
+                chain.fork_version_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GENESIS_VALIDATORS_ROOT,
+                chain.genesis_validators_root_hex(),
+            )
+            .env(
+                crate::types::BeaconChainParams::ENV_GLOAS_FORK_SLOT,
+                chain.gloas_fork_slot.to_string(),
+            );
+        }
+        let status = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -230,10 +273,55 @@ impl SubprocessProofGenerator {
                 "rotate_tree_n8 exited {child}"
             )));
         }
-        let mut bundle = RotateProofBundle::from_dir(&tree_out)?;
-        bundle.period = to_period;
+        let bundle = RotateProofBundle::from_dir(&tree_out)?;
+        if bundle.period != to_period {
+            return Err(RelayerError::ProofGeneration(format!(
+                "rotate proof is for period {}, not {to_period}",
+                bundle.period
+            )));
+        }
         Ok(bundle)
     }
+}
+
+/// Period `rotate_tree_n8` will prove: attested slot of the first
+/// `fixtures/mainnet/update_period_*.json`, else the synthetic committee
+/// at slot `9412 × 8192` (period 9413). It does not take a live update.
+pub(crate) fn fixture_rotate_period(prover_dir: &std::path::Path) -> u64 {
+    const SYNTHETIC_PERIOD: u64 = 9413;
+    let dir = prover_dir.join("fixtures/mainnet");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return SYNTHETIC_PERIOD;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("update_period_") || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let data = if v.is_array() {
+            &v[0]["data"]
+        } else {
+            &v["data"]
+        };
+        let slot = data["attested_header"]["beacon"]["slot"]
+            .as_u64()
+            .or_else(|| {
+                data["attested_header"]["beacon"]["slot"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+            });
+        if let Some(slot) = slot {
+            return slot / crate::types::SLOTS_PER_SYNC_PERIOD + 1;
+        }
+    }
+    SYNTHETIC_PERIOD
 }
 
 #[async_trait]
@@ -245,8 +333,12 @@ impl ProofGenerator for SubprocessProofGenerator {
         self.run_step(update).await
     }
 
-    async fn generate_rotate(&self, to_period: u64) -> Result<RotateProofBundle, RelayerError> {
-        self.run_rotate(to_period).await
+    async fn generate_rotate(
+        &self,
+        to_period: u64,
+        chain: Option<crate::types::BeaconChainParams>,
+    ) -> Result<RotateProofBundle, RelayerError> {
+        self.run_rotate(to_period, chain).await
     }
 }
 
@@ -279,6 +371,43 @@ mod tests {
         match err {
             RelayerError::ProofGeneration(m) => {
                 assert!(m.contains("committee_json empty"), "{m}");
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixture_rotate_period_is_synthetic_without_an_update_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(fixture_rotate_period(dir.path()), 9413);
+    }
+
+    #[test]
+    fn fixture_rotate_period_reads_the_beacon_updates_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let mainnet = dir.path().join("fixtures/mainnet");
+        std::fs::create_dir_all(&mainnet).unwrap();
+        std::fs::write(
+            mainnet.join("update_period_1835.json"),
+            r#"[{"data":{"attested_header":{"beacon":{"slot":"15032320"}}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(fixture_rotate_period(dir.path()), 1836);
+    }
+
+    #[tokio::test]
+    async fn run_rotate_refuses_a_live_period_before_spawning() {
+        let gen = SubprocessProofGenerator::new(SubprocessProverConfig {
+            prover_dir: ".".into(),
+            srs_path: ".".into(),
+            timeout: Duration::from_secs(1),
+            log_dir: None,
+        });
+        let err = gen.generate_rotate(1, None).await.unwrap_err();
+        match err {
+            RelayerError::ProofGeneration(m) => {
+                assert!(m.contains("committed fixture"), "{m}");
+                assert!(m.contains("not live period 1"), "{m}");
             },
             other => panic!("{other:?}"),
         }

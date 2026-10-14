@@ -34,21 +34,18 @@ use crate::{
     state::RelayerState,
 };
 
-/// Max seq_no gap another actor may advance between ticks before we halt
-/// (Check B). Expressed in bundles rather than seq_nos, and derived from the
-/// stride rather than restating it: the literal 2048 was written when `P` was 4
-/// and the stride 512, so it meant "four bundles". `P` is 8 now
-/// (`THINNING_FACTOR_P`), the stride 1024, and the same literal had quietly
-/// become two — a sibling relayer that advanced three bundles between our ticks
-/// would halt this one with `HistoryDrift` for no reason.
+/// How far `last_seen` may move between the remembered snapshot and a fresh
+/// read before Check B halts, in bundles of the configured stride
+/// ([`Relayer::max_forward_gap`]). Bundles, not seq_nos: the literal 2048 was
+/// written when `P` was 4 and the stride 512, so it meant "four bundles"; at
+/// `P` = 8 the same literal had quietly become two, and a sibling relayer that
+/// advanced three bundles between our ticks halted this one with
+/// `HistoryDrift` for no reason.
 const MAX_FORWARD_GAP_BUNDLES: u64 = 4;
-const MAX_FORWARD_GAP: u64 = MAX_FORWARD_GAP_BUNDLES * BUNDLE_STRIDE_L1;
 
-// The invariant behind the number, checked at build time rather than in a test:
-// tolerate at least the three-bundle advance from the finding. A future `P`
-// bump cannot silently narrow this, and re-hardcoding the literal breaks the
-// build.
-const _: () = assert!(MAX_FORWARD_GAP >= 3 * BUNDLE_STRIDE_L1);
+// The invariant behind the number, checked at build time rather than in a
+// test: tolerate at least the three-bundle advance from that finding.
+const _: () = assert!(MAX_FORWARD_GAP_BUNDLES >= 3);
 
 /// How long a `_rewound` Check B signal may last before it is reported as
 /// drift. Read-after-write lag on a load-balanced RPC lasts seconds; a chain
@@ -78,10 +75,11 @@ pub struct RelayerConfig {
     /// applyBkSetUpdate lane (`bk_update_attempts_since_progress`).
     #[serde(default = "default_max_attempts_abort")]
     pub max_attempts_abort: u32,
-    /// Bundle stride the live prover uses (`AnchorMode::stride()`).
-    /// The deferred-ack rule must use this, not a hardcoded L1 1024:
-    /// in L2 the next target is 16384.
-    #[serde(default = "default_bundle_stride")]
+    /// The bridge's bundle stride: 1024 at L1, 16384 at L2. Check B's
+    /// forward bound, the rotation gate, the deferred ack and the stall
+    /// warning all scale with it, so it has no default; each command takes
+    /// it from the bridge or the anchor level (see
+    /// [`crate::bundle_stride`]).
     pub bundle_stride: u64,
 }
 
@@ -94,20 +92,18 @@ fn default_max_attempts_warn() -> u32 {
 fn default_max_attempts_abort() -> u32 {
     3
 }
-fn default_bundle_stride() -> u64 {
-    BUNDLE_STRIDE_L1
-}
 
 impl RelayerConfig {
-    /// Sensible defaults: 2-second polling, warn after 16 polls without a
-    /// bundle per L1-sized stride, hard-abort after 3 rejected submissions.
-    pub fn new(state_path: impl Into<PathBuf>) -> Self {
+    /// Defaults for the rest: 2-second polling, warn after 16 polls without
+    /// a bundle per L1-sized stride, hard-abort after 3 rejected
+    /// submissions.
+    pub fn new(state_path: impl Into<PathBuf>, bundle_stride: u64) -> Self {
         Self {
             state_path: state_path.into(),
             poll_interval: default_poll_interval(),
             max_attempts_warn: default_max_attempts_warn(),
             max_attempts_abort: default_max_attempts_abort(),
-            bundle_stride: default_bundle_stride(),
+            bundle_stride,
         }
     }
 }
@@ -182,10 +178,12 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         self
     }
 
-    /// Check B's forward-gap bound: [`MAX_FORWARD_GAP_BUNDLES`] bundles of the
-    /// configured stride (4096 seq_nos at L1, 65536 at L2). A sibling relayer,
-    /// or our own transaction whose receipt we never read, may advance the
-    /// chain that far between two snapshots.
+    /// Check B's bound on how far `last_seen` may move between two snapshots:
+    /// [`MAX_FORWARD_GAP_BUNDLES`] bundles of the configured stride (4096
+    /// seq_nos at L1, 65536 at L2). A sibling relayer, or our own
+    /// `verifyBlock` whose receipt we never read, moves it one bundle at a
+    /// time. The rotation cursor has no such bound (see
+    /// [`check_chain_monotonicity_with_stride`]).
     pub fn max_forward_gap(&self) -> u64 {
         MAX_FORWARD_GAP_BUNDLES * self.config.bundle_stride.max(1)
     }

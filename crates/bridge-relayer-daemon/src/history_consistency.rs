@@ -119,9 +119,9 @@ pub fn check_history_consistency(
 pub fn check_chain_monotonicity(
     remembered: &BridgeOnChainState,
     actual: &BridgeOnChainState,
-    // Max gap (in seq_no) another actor may advance between our ticks
-    // before we halt. Caller derives it from the bundle stride (W·P = 1024 at
-    // W=128, P=8); see `MAX_FORWARD_GAP`.
+    // Max gap (in seq_no) either cursor may advance between the snapshot and
+    // a fresh read before we halt; the relayer's own check bounds only
+    // `last_seen`, by four bundles (`Relayer::max_forward_gap`).
     max_forward_gap: u64,
 ) -> Result<(), HistoryDrift> {
     if actual.last_seen_block_seq_no < remembered.last_seen_block_seq_no {
@@ -198,47 +198,81 @@ fn next_owed_boundary(last_seen: u64, bundle_stride: u64) -> u64 {
     ((last_seen / stride) + 1) * stride
 }
 
-/// Check B as the relayer runs it: [`check_chain_monotonicity`] with the
-/// rotation check replaced by the contract's own gate.
+/// Check B as the relayer runs it, with the contract's own rotation gate.
 ///
-/// `applyBkSetUpdate` reverts `PrevSlotStillOwedForBundle` iff the previous
-/// N is non-zero and the next bundle boundary after the cursor is at or below
-/// it. The cursor only moves forward, so if the chain shows a rotation newer
-/// than the remembered N, the first of them was accepted at a cursor at or
-/// below `actual.last_seen`; it is contract-impossible only when even
-/// `actual.last_seen` leaves the next boundary at or below the remembered N.
-/// A burst of rotations ahead of the cursor — which the relayer may miss in
-/// its snapshot when a receipt read fails after the transaction landed — is
-/// therefore accepted, as the contract accepts it.
-///
-/// `last_bk_set_update_seq_no_uncovered` is the last check
-/// [`check_chain_monotonicity`] makes, so every other check has passed when it
-/// is the one returned and replacing it is exact.
+/// - `last_seen` never moves back (`_rewound`, transient on a lagging RPC) and
+///   moves at most `max_forward_gap` between the snapshot and a fresh read
+///   (`_jumped`). A `verifyBlock` moves it one bundle, so one that landed
+///   without its receipt leaves the snapshot one bundle behind.
+/// - The commitment changes only with a rotation.
+/// - The rotation cursor never moves back, and moves forward any distance:
+///   rotations follow Acki Nacki's epochs, not bundles, so a rotation that
+///   landed without its receipt can be far past the remembered one (the first
+///   one after a deploy with a genesis cursor of 0 is the whole chain height
+///   away). A forward move is drift only when the contract could not have
+///   accepted it. `applyBkSetUpdate` reverts `PrevSlotStillOwedForBundle` iff
+///   the previous N is non-zero and the next bundle boundary after the cursor
+///   is at or below it. The cursor only moves forward, so the first rotation
+///   newer than the remembered N was accepted at a cursor at or below
+///   `actual.last_seen`; it is contract-impossible only when even
+///   `actual.last_seen` leaves the next boundary at or below the remembered N.
+///   A burst of rotations ahead of the cursor is therefore accepted, as the
+///   contract accepts it.
 pub fn check_chain_monotonicity_with_stride(
     remembered: &BridgeOnChainState,
     actual: &BridgeOnChainState,
     max_forward_gap: u64,
     bundle_stride: u64,
 ) -> Result<(), HistoryDrift> {
-    match check_chain_monotonicity(remembered, actual, max_forward_gap) {
-        Err(d) if d.field == "last_bk_set_update_seq_no_uncovered" => {
-            let next = next_owed_boundary(actual.last_seen_block_seq_no, bundle_stride);
-            if next > remembered.last_bk_set_update_seq_no {
-                Ok(())
-            } else {
-                Err(drift(
-                    "last_bk_set_update_seq_no_uncovered",
-                    format!(
-                        "previous N={} at or past the next owed boundary {next} (last_seen={}, \
-                         bundle_stride={bundle_stride})",
-                        remembered.last_bk_set_update_seq_no, actual.last_seen_block_seq_no
-                    ),
-                    actual.last_bk_set_update_seq_no.to_string(),
-                ))
-            }
-        },
-        other => other,
+    if actual.last_seen_block_seq_no < remembered.last_seen_block_seq_no {
+        return Err(drift(
+            "last_seen_block_seq_no_rewound",
+            remembered.last_seen_block_seq_no.to_string(),
+            actual.last_seen_block_seq_no.to_string(),
+        ));
     }
+    let gap = actual.last_seen_block_seq_no - remembered.last_seen_block_seq_no;
+    if gap > max_forward_gap {
+        return Err(drift(
+            "last_seen_block_seq_no_jumped",
+            format!(
+                "{} (gap≤{max_forward_gap})",
+                remembered.last_seen_block_seq_no
+            ),
+            format!("{} (gap={gap})", actual.last_seen_block_seq_no),
+        ));
+    }
+    if actual.bk_set_commitment != remembered.bk_set_commitment
+        && actual.last_bk_set_update_seq_no == remembered.last_bk_set_update_seq_no
+    {
+        return Err(drift(
+            "bk_set_commitment_without_update",
+            format!("{:#x}", remembered.bk_set_commitment),
+            format!("{:#x}", actual.bk_set_commitment),
+        ));
+    }
+    if actual.last_bk_set_update_seq_no < remembered.last_bk_set_update_seq_no {
+        return Err(drift(
+            "last_bk_set_update_seq_no_rewound",
+            remembered.last_bk_set_update_seq_no.to_string(),
+            actual.last_bk_set_update_seq_no.to_string(),
+        ));
+    }
+    if actual.last_bk_set_update_seq_no > remembered.last_bk_set_update_seq_no {
+        let next = next_owed_boundary(actual.last_seen_block_seq_no, bundle_stride);
+        if next <= remembered.last_bk_set_update_seq_no {
+            return Err(drift(
+                "last_bk_set_update_seq_no_uncovered",
+                format!(
+                    "previous N={} at or past the next owed boundary {next} (last_seen={}, \
+                     bundle_stride={bundle_stride})",
+                    remembered.last_bk_set_update_seq_no, actual.last_seen_block_seq_no
+                ),
+                actual.last_bk_set_update_seq_no.to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Startup audit: remembered vs live chain must match exactly (no auto-heal).
@@ -425,6 +459,43 @@ mod tests {
                 .unwrap_err()
                 .field,
             "bk_set_commitment_without_update"
+        );
+    }
+
+    #[test]
+    fn strided_check_accepts_a_rotation_far_past_the_remembered_one() {
+        // A rotation that landed without its receipt is one rotation ahead of
+        // the snapshot, and rotations follow AN epochs, not bundles: after a
+        // deploy with a genesis cursor of 0 the first one is the chain height
+        // away. The old check calls anything past four bundles a jump, and the
+        // relayer then failed every tick and every restart.
+        let remembered = snapshot(23_887_872, 0, 2);
+        let actual = snapshot(23_887_872, 23_897_426, 3);
+        assert_eq!(
+            check_chain_monotonicity(&remembered, &actual, 4 * 16_384)
+                .unwrap_err()
+                .field,
+            "last_bk_set_update_seq_no_jumped"
+        );
+        assert!(
+            check_chain_monotonicity_with_stride(&remembered, &actual, 4 * 16_384, 16_384).is_ok()
+        );
+
+        // Two rotations a day apart, on a network that rotates daily.
+        let remembered = snapshot(23_887_872, 23_886_566, 2);
+        let next_day = snapshot(23_887_872, 23_886_566 + 259_200, 3);
+        assert!(
+            check_chain_monotonicity_with_stride(&remembered, &next_day, 4 * 16_384, 16_384)
+                .is_ok()
+        );
+
+        // Backwards is still drift.
+        let rewound = snapshot(23_887_872, 23_886_000, 3);
+        assert_eq!(
+            check_chain_monotonicity_with_stride(&remembered, &rewound, 4 * 16_384, 16_384)
+                .unwrap_err()
+                .field,
+            "last_bk_set_update_seq_no_rewound"
         );
     }
 }

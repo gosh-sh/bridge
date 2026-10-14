@@ -13,7 +13,7 @@
 //! the daemon uses on cold start:
 //!   `bk_set_fetcher::load_bk_set_from_config`
 //!   → `bridge_poseidon::compute_bk_set_poseidon`
-//!   → `bridge_prover_lib::bootstrap::fetch_from_node`
+//!   → `bridge_prover_lib::bootstrap::fetch_from_node_verified`
 //!
 //! Sibling of `bootstrap_hermez_srs.rs` (per the "add a sibling, don't mutate"
 //! rule). Prints env-var lines consumed by `scripts/deploy_bridge_bundle.sh`

@@ -91,6 +91,11 @@ enum Cmd {
         /// canned fixture).
         #[arg(long, default_value_t = 1)]
         max_ticks: usize,
+        /// Anchor level (1 or 2) of a bridge deployed before `bundleStride()`
+        /// existed. The stride is read from the bridge; this is the fallback,
+        /// and it must agree with the bridge when both are known.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL")]
+        anchor_level: Option<u8>,
     },
     /// Long-running daemon mode. Drives `Relayer::tick` forever with
     /// exponential backoff until SIGINT/SIGTERM. The fixture source is
@@ -126,6 +131,11 @@ enum Cmd {
         /// Backoff multiplier (next = min(current × multiplier, max)).
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+        /// Anchor level (1 or 2) of a bridge deployed before `bundleStride()`
+        /// existed. The stride is read from the bridge; this is the fallback,
+        /// and it must agree with the bridge when both are known.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL")]
+        anchor_level: Option<u8>,
     },
     /// Read-only pre-flight check. Loads a fixture, reads the on-chain
     /// bridge anchors over RPC, then (by default) `eth_call`-simulates
@@ -329,6 +339,11 @@ enum Cmd {
         /// `verifyBlock` (there is no dry-run for the anchor advance).
         #[arg(long)]
         dry_run: bool,
+        /// Anchor level (1 or 2) of a bridge deployed before `bundleStride()`
+        /// existed. The stride is read from the bridge; this is the fallback,
+        /// and it must agree with the bridge when both are known.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL")]
+        anchor_level: Option<u8>,
     },
     /// Live AN→ETH daemon: GraphQL + `LiveProverDriver` → `verifyBlock` /
     /// `applyBkSetUpdate` (Alina live-integration plan).
@@ -580,6 +595,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
+            anchor_level,
         } => smoke_fixture(
             args.state,
             fixtures_dir,
@@ -588,6 +604,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
+            anchor_level,
         )
         .await
         .map_err(|e| {
@@ -621,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
+            anchor_level,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -635,6 +653,7 @@ async fn main() -> anyhow::Result<()> {
                 bridge_address,
                 private_key,
                 backoff,
+                anchor_level,
             )
             .await
             .map_err(|e| {
@@ -762,6 +781,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_max_secs,
             backoff_multiplier,
             dry_run,
+            anchor_level,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -777,6 +797,7 @@ async fn main() -> anyhow::Result<()> {
                 Duration::from_secs(poll_secs),
                 backoff,
                 dry_run,
+                anchor_level,
             )
             .await
             .map_err(|e| {
@@ -949,6 +970,37 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// The bundle stride `smoke-fixture`, `daemon` and `daemon-bridge` run at:
+/// the bridge's own `bundleStride()`, or the stride of `--anchor-level` /
+/// `BRIDGE_ANCHOR_LEVEL` for a bridge deployed before that field. With neither
+/// the command does not start: Check B and the stall warning scale with the
+/// stride, and the L1 stride these commands used to assume halted them on an
+/// L2 bridge after one lost receipt.
+async fn submitting_stride<P, N>(
+    bridge: &EthBridgeClient<P, N>,
+    bridge_address: Address,
+    anchor_level: Option<u8>,
+) -> anyhow::Result<u64>
+where
+    P: Provider<N> + Clone,
+    N: alloy::network::Network,
+{
+    let configured = anchor_level
+        .map(|level| bridge_prover_lib::AnchorMode::from_level(level).map(|mode| mode.stride()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --anchor-level / BRIDGE_ANCHOR_LEVEL: {e}"))?;
+    let chain = bridge.bundle_stride().await.map_err(|e| e.to_string());
+    let stride = bridge_relayer_daemon::stride_for_submitting(chain, configured).map_err(|e| {
+        anyhow::anyhow!(
+            "bridge {bridge_address}: {e}. Set --anchor-level / BRIDGE_ANCHOR_LEVEL (1 or 2) to \
+             the level of its anchors."
+        )
+    })?;
+    info!(bundle_stride = stride, "bundle stride");
+    Ok(stride)
+}
+
+#[allow(clippy::too_many_arguments)] // CLI surface; each arg maps to a flag
 async fn smoke_fixture(
     state_path: PathBuf,
     fixtures_dir: PathBuf,
@@ -957,6 +1009,7 @@ async fn smoke_fixture(
     bridge_address: Address,
     private_key: String,
     max_ticks: usize,
+    anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
     // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
     // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
@@ -977,7 +1030,8 @@ async fn smoke_fixture(
         verifiers_dir.as_deref(),
     )?);
 
-    let cfg = RelayerConfig::new(state_path);
+    let stride = submitting_stride(&bridge, bridge_address, anchor_level).await?;
+    let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
 
     let history = relayer
@@ -998,6 +1052,7 @@ async fn run_daemon(
     bridge_address: Address,
     private_key: String,
     backoff: BackoffConfig,
+    anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
     let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
@@ -1012,7 +1067,8 @@ async fn run_daemon(
         &fixtures_dir,
         verifiers_dir.as_deref(),
     )?);
-    let cfg = RelayerConfig::new(state_path);
+    let stride = submitting_stride(&bridge, bridge_address, anchor_level).await?;
+    let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
 
@@ -1739,6 +1795,7 @@ async fn run_bridge_daemon(
     poll_interval: Duration,
     backoff: BackoffConfig,
     dry_run: bool,
+    anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
     let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
@@ -1751,7 +1808,8 @@ async fn run_bridge_daemon(
     // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
     let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
     let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
-    let cfg = RelayerConfig::new(state_path);
+    let stride = submitting_stride(&prover_bridge, bridge_address, anchor_level).await?;
+    let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
 
     // Withdraw leg: shares the SAME provider (one nonce source; the two
@@ -2270,20 +2328,31 @@ async fn run_daemon_live(
     // `applyBkSetUpdate` derives the owed bundle boundary from it, so a bridge
     // deployed with another value refuses rotations this daemon expects to
     // land, a stall only a redeploy clears. A bridge older than the field
-    // cannot answer; it is let through with a warning.
-    match bridge_probe.bundle_stride().await {
-        Ok(chain_stride) if chain_stride != anchor_mode.stride() => anyhow::bail!(
+    // cannot answer and still applies the old rotation gate, which this daemon
+    // does not follow; it is refused too.
+    let chain_stride = bridge_probe
+        .bundle_stride()
+        .await
+        .map_err(|e| e.to_string());
+    match bridge_relayer_daemon::check_stride_for_rotations(chain_stride, anchor_mode.stride()) {
+        Ok(()) => info!(
+            chain_stride = anchor_mode.stride(),
+            "startup: bridge bundleStride matches"
+        ),
+        Err(bridge_relayer_daemon::BundleStrideError::Mismatch {
+            bridge: chain_stride,
+            ..
+        }) => anyhow::bail!(
             "bridge {bridge_address} has bundleStride={chain_stride}, but this daemon runs at L{} \
              with stride {} (BRIDGE_ANCHOR_LEVEL / --anchor-level). Run the daemon at the level \
              the bridge was deployed with, or redeploy.",
             anchor_mode.level(),
             anchor_mode.stride(),
         ),
-        Ok(chain_stride) => info!(chain_stride, "startup: bridge bundleStride matches"),
-        Err(e) => warn!(
-            error = %e,
-            "startup: could not read bundleStride() — a bridge deployed before the field; stride \
-             not checked"
+        Err(e) => anyhow::bail!(
+            "bridge {bridge_address}: {e}. A bridge from before bundleStride reverts the \
+             rotations daemon-live applies until the daemon aborts: redeploy it (runbook §5.5). \
+             If the RPC failed, start again."
         ),
     }
     let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {
@@ -2406,8 +2475,7 @@ async fn run_daemon_live(
         // state — see the top-of-decide gate in `startup_decide.rs`.
     }
 
-    let mut cfg = RelayerConfig::new(&state_path);
-    cfg.bundle_stride = anchor_mode.stride();
+    let cfg = RelayerConfig::new(&state_path, anchor_mode.stride());
 
     // Wrap the live source so the two proof-byte fields in AnBlockData carry
     // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.

@@ -185,6 +185,8 @@ cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin re
 # daemon-live proves in-process.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
+# daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();
+# a bridge deployed before that field also needs --anchor-level 1|2 (BRIDGE_ANCHOR_LEVEL).
 # The fixture commands read bound_scenario.json from --fixtures-dir and the R15 calldata from
 # --verifiers-dir. Left out, --verifiers-dir is searched for among the ancestors of --fixtures-dir,
 # which finds it only when that path is absolute.

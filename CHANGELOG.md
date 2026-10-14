@@ -41,6 +41,18 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`daemon`, `daemon-bridge` and `smoke-fixture` take the bundle stride
+  from the bridge.** They read `bundleStride()`; for a bridge deployed
+  before that field, set `--anchor-level` / `BRIDGE_ANCHOR_LEVEL` (1 or 2)
+  to the level of its anchors, or the command does not start (`bridge …:
+  the bridge cannot report bundleStride() (…) and no anchor level is
+  configured`). When both are known they must agree. These commands used to
+  assume the L1 stride: on an L2 bridge Check B let `last_seen` move 4 096
+  instead of 65 536, so one `verifyBlock` whose receipt was lost stopped
+  the anchor leg for good, and the stall warning came after 16 polls. The
+  server template `scripts/ursus/bridge-relayer.env.example` sets
+  `BRIDGE_ANCHOR_LEVEL=2`. `RelayerConfig::new` takes the stride; it has
+  no default.
 - **`VerifyBlockConfig` gained `uint64 genesisLastBkSetUpdateSeqNo`.** All
   callers that build the struct directly (`DeployShellnetE2EBridge`,
   `DeployRealBridge`, `DeployReuseVerifiersBridge`,
@@ -728,7 +740,10 @@ assigns it when the release is tagged.
   L… with stride … (BRIDGE_ANCHOR_LEVEL / --anchor-level)`. A bridge
   deployed with a different `BUNDLE_STRIDE` reverts rotations the daemon
   expects to land, and only a redeploy clears that. A bridge deployed
-  before the field existed is let through with a warning.
+  before the field existed is refused too (`bridge …: the bridge cannot
+  report bundleStride() (…)`): it still applies the old rotation gate
+  (`VerifyBlockLagBehindRotation`), which the daemon no longer follows, so
+  its rotations would revert until the daemon aborted.
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
   takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key
   block (`compute_bridge_anchors --seed-seqno`; it must be a multiple of
@@ -1539,7 +1554,12 @@ assigns it when the release is tagged.
   failing with `chain drift`, and the startup audit refused a restart until
   `relayer-state.json` was edited by hand. Check B now applies the
   contract's rule, and the startup audit accepts the moves Check B accepts
-  instead of requiring an exact match.
+  instead of requiring an exact match. It also no longer bounds how far the
+  rotation cursor moves: rotations follow Acki Nacki's epochs, not bundles,
+  so a rotation that landed without its receipt could be more than four
+  bundles past the remembered one (after a deploy with a genesis cursor of
+  0 the first one always is), and every tick and every restart failed with
+  `last_bk_set_update_seq_no_jumped`.
 - **A failed RPC call no longer stops `daemon-live`.** A `verifyBlock` or
   `applyBkSetUpdate` whose send the RPC refused (rate limit, connection,
   nonce) or whose receipt never came is logged as `… not confirmed — RPC

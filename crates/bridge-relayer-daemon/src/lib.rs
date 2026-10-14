@@ -9,6 +9,7 @@
 pub mod aggregated_source;
 pub mod aggregator;
 pub mod bridge;
+pub mod bundle_stride;
 pub mod daemon;
 pub mod error;
 pub mod history_consistency;
@@ -37,6 +38,7 @@ pub use bridge::{
     MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
     GET_LOGS_CHUNK_BLOCKS,
 };
+pub use bundle_stride::{check_stride_for_rotations, stride_for_submitting, BundleStrideError};
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };

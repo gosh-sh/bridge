@@ -271,6 +271,10 @@ INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq
 - A daemon at another anchor level than the bridge's stops with
   `bridge … has bundleStride=…, but this daemon runs at L… with stride …`;
   check `BRIDGE_ANCHOR_LEVEL`.
+- A bridge deployed before `bundleStride()` existed stops it with
+  `bridge …: the bridge cannot report bundleStride() (…)`: such a bridge
+  still applies the old rotation rule, which the daemon does not follow.
+  Redeploy ([§5.5](#55-when-to-redeploy)); if the RPC failed, start again.
 
 **Timing.** The seed is trusted, not proven. Rotations after S are proven and
 applied as they appear. The first `verifyBlock` comes once the chain passes

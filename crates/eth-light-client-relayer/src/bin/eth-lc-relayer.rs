@@ -1018,7 +1018,8 @@ async fn run_daemon(
     cfg.submit_ancestry = submit_ancestry;
 
     if dry_run {
-        info!("dry-run: MockAnSubmitter (no AN tx)");
+        info!("dry-run: MockAnSubmitter (no AN tx); Gloas slot from the beacon spec");
+        cfg.pin_fork_slot_from_beacon = true;
         if mock_prove {
             let relayer = Relayer::new(
                 cfg,

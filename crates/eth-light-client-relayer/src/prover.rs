@@ -305,10 +305,15 @@ pub(crate) fn fixture_rotate_period(prover_dir: &std::path::Path) -> u64 {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        let slot = v["data"]["attested_header"]["beacon"]["slot"]
+        let data = if v.is_array() {
+            &v[0]["data"]
+        } else {
+            &v["data"]
+        };
+        let slot = data["attested_header"]["beacon"]["slot"]
             .as_u64()
             .or_else(|| {
-                v["data"]["attested_header"]["beacon"]["slot"]
+                data["attested_header"]["beacon"]["slot"]
                     .as_str()
                     .and_then(|s| s.parse().ok())
             });
@@ -375,6 +380,19 @@ mod tests {
     fn fixture_rotate_period_is_synthetic_without_an_update_file() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(fixture_rotate_period(dir.path()), 9413);
+    }
+
+    #[test]
+    fn fixture_rotate_period_reads_the_beacon_updates_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let mainnet = dir.path().join("fixtures/mainnet");
+        std::fs::create_dir_all(&mainnet).unwrap();
+        std::fs::write(
+            mainnet.join("update_period_1835.json"),
+            r#"[{"data":{"attested_header":{"beacon":{"slot":"15032320"}}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(fixture_rotate_period(dir.path()), 1836);
     }
 
     #[tokio::test]

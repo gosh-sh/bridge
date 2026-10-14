@@ -57,6 +57,12 @@ assigns it when the release is tagged.
   owner rotation is still enabled; after `disableOwnerRotation` only
   `updateCode` can. Later `updateCode` calls with an empty user cell keep the
   current value. Constructors and `deployLightClient` are unchanged.
+  From Gloas, `submitUpdate` anchors the payload bid's `parent_block_hash`
+  rather than the checkpoint slot's own execution hash.
+  `eth-lc-relayer ancestry-one` starts its walk at that anchored hash
+  and scans `checkpoint_slot - 32 ..= checkpoint_slot` (33 slots), so a
+  deposit inside a Gloas checkpoint's own payload is not reported as
+  covered by that checkpoint.
 - **The rotate proof's `period` is proven.** The rotate circuit computes it
   as the attested slot's period plus one (`attested_slot / 8192 + 1`, the
   period the proven next committee serves) instead of loading it as a free
@@ -68,11 +74,13 @@ assigns it when the release is tagged.
   rotate proof whose period is not the one it is rotating into, and it
   does not start `rotate_tree_n8` for a live period that tree cannot
   prove (the tree is a committed fixture, period 9413 without an
-  `update_period_*.json`). Prove the hand-off on n14 and `submit-rotate`.
-  The daemon reads `getGloasForkSlot` before every prove and uses that
-  slot, not the beacon spec: a published `GLOAS_FORK_EPOCH` that the
-  contract does not hold would otherwise spend a full step prove and
-  come back 255. `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc`
+  `update_period_*.json`; that file may be the beacon `/updates`
+  array). Prove the hand-off on n14 and `submit-rotate`. `--dry-run`
+  pins the Gloas slot from the beacon spec (the mock submitter has no
+  contract). A live daemon reads `getGloasForkSlot` before every prove
+  and uses that slot: a published `GLOAS_FORK_EPOCH` that the contract
+  does not hold would otherwise spend a full step prove and come back
+  255. `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc`
   is rebuilt with both changes (same `sold` as before, built against a
   tvm-sdk with `KECCAK256`): the light client's code hash moves
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
@@ -355,13 +363,11 @@ assigns it when the release is tagged.
   `eth-lc-relayer` (`header_rlp`, used with `--submit-ancestry`) emit the
   two new fields. Rebuild both binaries from this source.
 
-  Post-fork Sepolia blocks still cannot be anchored by the light client:
-  the step circuit and its witness builder have not followed Gloas
-  (`execution_payload` became `signed_execution_payload_bid`). Until that
-  change lands, a post-fork block is accepted only if the owner writes it
-  with `setAcceptedBlockHash`. After `disableOwnerAnchors` those deposits
-  cannot be finalized. No deposit is stuck today: no bridge contract on
-  Sepolia has had an event since the fork.
+  Post-fork Sepolia blocks are anchored by this branch's light client:
+  the step circuit picks Gloas generalized indices from `gloasForkSlot`
+  (see the Breaking entry above). A deploy that has not set the slot
+  still refuses every update with 256; a proof made for a different
+  slot fails with 255.
 
   `eccUSDCBridge` embeds the new key, reports `version` 1.7.0, and
   `0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with sold 0.80.0;

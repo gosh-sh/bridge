@@ -44,6 +44,11 @@ pub struct RelayerConfig {
     /// wider than a span. `ETH_RPC_URL` still attaches an execution source so
     /// the daemon can run `link_headers` locally without sending the tx.
     pub submit_ancestry: bool,
+    /// Use the beacon spec's Gloas slot instead of `getGloasForkSlot`.
+    /// `--dry-run` sets this: `MockAnSubmitter` has no contract, and on
+    /// Sepolia its default `GLOAS_NOT_SCHEDULED` would refuse every live
+    /// update (`gloas_under_beacon` is already true).
+    pub pin_fork_slot_from_beacon: bool,
 }
 
 impl RelayerConfig {
@@ -55,6 +60,7 @@ impl RelayerConfig {
             flip_owner: false,
             owner_hop: false,
             submit_ancestry: false,
+            pin_fork_slot_from_beacon: false,
         }
     }
 }
@@ -322,6 +328,9 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// spend a full step prove and come back 255. An update that is still
     /// Electra under both values proceeds with the contract slot.
     async fn pin_gloas_fork_slot(&self, update: &mut FinalityUpdate) -> Result<(), TickOutcome> {
+        if self.config.pin_fork_slot_from_beacon {
+            return Ok(());
+        }
         let (contract_slot, is_set) = match self.submitter.get_gloas_fork_slot().await {
             Ok(v) => v,
             Err(e) => {
@@ -1248,6 +1257,35 @@ mod tests {
                 finalized_slot, ..
             } => {
                 assert_eq!(finalized_slot, 96);
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_uses_the_beacon_gloas_slot() {
+        let sepolia = 11_296_768;
+        let mut u = with_chain(update(sepolia + 32, sepolia), 0xd8);
+        if let Some(c) = u.chain.as_mut() {
+            c.gloas_fork_slot = sepolia;
+        }
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.pin_fork_slot_from_beacon = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![u])),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        match r.tick().await.unwrap() {
+            TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } => {
+                assert_eq!(finalized_slot, sepolia);
             },
             other => panic!("{other:?}"),
         }

@@ -7,11 +7,11 @@
 
 **Do not flip yet.** `disableOwnerAnchors` turns the owner writer off only for
 the light client's L1; L2s on the allowlist keep `setAcceptedBlockHash`. The
-light client still admits one block per epoch — the checkpoint of its own
-chain — so after the flip the other 31 blocks of an epoch fail
+light client writes checkpoints and the ancestry spans between them
+(`docs/eth-light-client.md` §3.4). A block no span covers — accepted
+checkpoints are often two or more epochs apart — fails
 `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224). The daemon therefore does
-not flip unless started with `--flip-owner`. See `docs/eth-light-client.md`
-§3.4 and §3.5.
+not flip unless started with `--flip-owner`. See §3.5.
 
 The **relayer** issues the owner calls. Relayer keys (`AN_KEYS_PATH`) must be
 the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.

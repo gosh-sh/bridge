@@ -1723,8 +1723,9 @@ owner writer.
      never the case for an L2, which the light client does not cover;
   2. the bridge accepts the light client's head block under its real hash;
   3. ancestry works and reaches the bridge after the switch: a block between
-     two checkpoints, newer than the last `disableOwnerAnchors`, is anchored in
-     the bridge; the light client's head is at most 1536 s behind the EVM
+     two checkpoints, newer than the last `disableOwnerAnchors` or
+     `disableOwnerAnchorsOn`, is anchored in the bridge; the light
+     client's head is at most 1536 s behind the EVM
      chain's finalized head; its latest ancestry checkpoint is at most 768 s
      behind its head. The bounds are build constants, not flags.
 

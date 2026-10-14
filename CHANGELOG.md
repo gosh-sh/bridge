@@ -696,9 +696,11 @@ assigns it when the release is tagged.
 - `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
   `docs/eth-light-client.md` §3.5, and
   `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
-  the owner writer; L1 still covers 1 of 32 blocks when accepted
-  checkpoints sit more than a span apart, because nothing late-registers
-  the ones the daemon skipped.
+  the owner writer; L1 still covers only the blocks a span reaches when
+  accepted checkpoints sit more than a span apart, because nothing
+  late-registers the ones the daemon skipped. Check 3 of the deposit
+  CLI names both `disableOwnerAnchors` and `disableOwnerAnchorsOn` as
+  the switch-off.
 
 ### Added
 

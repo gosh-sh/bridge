@@ -115,6 +115,7 @@ assigns it when the release is tagged.
   attached ECC with 0.1 vmshell, committing the refund before reporting 233.
   **`ensureBalance()` is free.** It replenishes SHELL with
   `gosh.mintshellq(MIN_BALANCE)`. The bridge is a system contract in DApp 0.
+  On mainnet, DApp 0 has a deployed DApp config with an unlimited configuration.
   **Non-system contracts cannot exist in DApp 0.** User withdrawal messages
   therefore arrive from another DApp ID. The 0.1 vmshell attached to the return
   message is burned on the cross-DApp return; the user receives the refunded

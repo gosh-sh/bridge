@@ -206,7 +206,8 @@ full attached ECC, with forwarding fees paid separately and no native reserve.
 
 **`ensureBalance()` is free.** It replenishes SHELL with
 `gosh.mintshellq(MIN_BALANCE)` before the refund. The bridge is a system contract
-in DApp 0. **Non-system contracts cannot exist in DApp 0.** User withdrawal
+in DApp 0. On mainnet, DApp 0 has a deployed DApp config with an unlimited
+configuration. **Non-system contracts cannot exist in DApp 0.** User withdrawal
 messages therefore arrive from another DApp ID. The 0.1 vmshell attached to the
 return message is burned when it crosses back to that DApp; the user receives
 the refunded ECC.

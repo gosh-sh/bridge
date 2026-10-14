@@ -29,7 +29,7 @@
 //!   params/kzg_bn254_17.srs   (~16 MB)   — Circuit 2 (layer) proving
 //!   params/kzg_bn254_19.srs   (~64 MB)   — Circuit 4 (event) proving
 //!   params/kzg_bn254_20.srs   (~128 MB)  — Circuit 1A (primary) + all keygen
-//!   params/kzg_bn254_21.srs   (~256 MB)  — Circuit 3 (fallback) proving
+//!   params/kzg_bn254_21.srs   (~256 MB)  — Circuit 1B (fallback) proving
 //!   params/kzg_bn254_22.srs   (~512 MB)  — LayerHashes outer aggregator (opt-in)
 //!
 //! K=21 uses its own ptau at

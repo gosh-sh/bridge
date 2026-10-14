@@ -24,6 +24,15 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- The prover and circuit docs describe BK-set rotation as it works:
+  `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
+  and its opened L2/L3 leaves, no circuit of its own. Gone are the
+  "Circuit 3 (BK Set Update)" future-work item, references to a plan
+  document that does not exist, and the claims that shellnet rotation is off
+  (it has been on since 2026-10-08) and that the daemons take the BK set from
+  GraphQL (they read the file at `BRIDGE_BK_SET_CONFIG`; on shellnet it must
+  be the set at the seed) — in `crates/bridge-prover-libraries/TECHNICAL_README.md`,
+  the prover daemon and circuits READMEs and `PROBE_BK_UPDATES.md`.
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
   is part of replay protection, and that an upgrade changing it has to ship a
   block cutoff in the same code so past deposits stop going through. The

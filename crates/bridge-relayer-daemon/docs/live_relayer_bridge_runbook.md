@@ -457,7 +457,8 @@ Rotation is controlled by `minBlockKeepers` on `BlockKeeperContractRoot`
 and `4` enables them; `setConfig` (owner key in
 `config/BlockKeeperContractRoot.keys.json`) overwrites all six config fields
 at once, so read the live values (`getConfig`) before calling it. Rotations
-have been on since the evening of 2026-10-08.
+have been on since the evening of 2026-10-08. Step by step, with rollback:
+[`turn_on_bk_sets_on_shellnet.md`](../../../turn_on_bk_sets_on_shellnet.md).
 
 ### Server deployment and handoff
 

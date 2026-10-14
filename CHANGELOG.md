@@ -44,8 +44,9 @@ assigns it when the release is tagged.
   whose GQL still exposes pre-bootstrap rotations, pass the highest
   such `bkSetUpdates.height` — `compute_bridge_anchors` now emits it as
   `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and
-  `scripts/deploy_bridge_bundle.sh` sources it in automatically via
-  `vm.envOr(..., 0)` in `DeployShellnetE2EBridge.s.sol`. Without this
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  sources it in automatically via `vm.envOr(..., 0)` in
+  `DeployShellnetE2EBridge.s.sol`. Without this
   cursor, a daemon cold-started against such a chain halts on its first
   tick with `prover out of sync` because the drain picks up a historical
   rotation whose pre-state no longer matches the live BK-set commitment.
@@ -59,7 +60,8 @@ assigns it when the release is tagged.
   startup drift check will refuse to open the daemon until seed and
   state agree.
 - **`compute_bridge_anchors` emits a new env line
-  `GENESIS_LAST_BK_SET_UPDATE_SEQNO`.** `scripts/deploy_bridge_bundle.sh`
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO`.**
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
   persists it into the generated `$CFG_DIR/env` next to
   `BRIDGE_BOOTSTRAP_SEQNO`. Operators do not need to set the var by
   hand; the forge script already consumes it through `vm.envOr(..., 0)`.
@@ -110,8 +112,8 @@ assigns it when the release is tagged.
   `verifyBlock` is disabled the field is unused and may be zero.
   Switching anchor level (L1 ↔ L2) requires a redeploy. Deploy scripts
   read `BUNDLE_STRIDE` from the env; the shellnet-E2E deploy script
-  (`scripts/deploy_bridge_bundle.sh`) sets it from `LEVEL=1|2`
-  automatically.
+  (`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`)
+  sets it from `LEVEL=1|2` automatically.
 
 - **`aggregate-proof` self-checks the verifier source, so every verifiers
   directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
@@ -307,8 +309,8 @@ assigns it when the release is tagged.
 
 ### Added
 
-- **`scripts/deploy_bridge_bundle.sh` takes `BRIDGE_SEED_SEQNO`.** When
-  set, the bridge is seeded at that key block (`compute_bridge_anchors
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key block (`compute_bridge_anchors
   --seed-seqno`; it must be a multiple of the level's stride and at or
   below chain head) instead of the newest boundary at deploy time
   (`--at-head`). Use it with a BK-set file built for the same seed.
@@ -696,10 +698,20 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **The shellnet L2 bridge was redeployed.** `AckiNackiBridge` is now
+  `0x00e4b69d25f4526c768552ea217dad85e4b7963a` (Sepolia block 11909355),
+  seeded at shellnet seq_no 23855104 (`BRIDGE_BOOTSTRAP_SEQNO`) with
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO=23853771`;
+  `crates/bridge-prover-libraries/L2_config/env` now points at it instead
+  of `0x9f993772af91d9b1e61d210eaae903eb43655498` (Deploy #8). A relayer
+  set up for the old address needs the new `BRIDGE_ADDRESS` and
+  `BRIDGE_DEPLOY_BLOCK`, and a cold start with its `relayer-state.json`
+  and `state/*.json` archived first (§3.5 of
+  [the live relayer runbook](crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md)).
 - **The bridge deploy and `daemon-live`'s cold start refuse a BK-set file
-  that is not the chain's set at the seed.** `compute_bridge_anchors` (run
-  by `scripts/deploy_bridge_bundle.sh`) and the daemon's bootstrap compare
-  the file's Poseidon commitment with the one the seed block records
+  that is not the chain's set at the seed.** `compute_bridge_anchors`
+  (run by `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`)
+  and the daemon's bootstrap compare the file's Poseidon commitment with the one the seed block records
   (block-id tree leaf 2, or leaf 3 when the seed block is itself the last
   rotation at or below the seed) and stop with
   `BK-set commitment … does not match the chain's … at seed seq_no=…`.
@@ -707,8 +719,8 @@ assigns it when the release is tagged.
   and the daemon failed only at the first rotation with
   `prover out of sync`. Build the file for the exact seed:
   `seed_prover_bk_set --cap-height <seed>`, then `jq .pubkeys_hex`.
-- **`scripts/deploy_bridge_bundle.sh` broadcasts legacy transactions at a
-  fixed 2 gwei** (`--legacy --with-gas-price 2000000000`) with a 12×
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  broadcasts legacy transactions at a fixed 2 gwei** (`--legacy --with-gas-price 2000000000`) with a 12×
   gas-limit estimate (`--gas-estimate-multiplier 1200`). The deploying
   account must cover the larger upfront reservation (~0.6 ETH for the
   whole bundle on Sepolia); on a congested network, raise the price in

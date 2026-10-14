@@ -222,16 +222,14 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
 
         // ── Phase 1: apply a rotation when overwriting
         // `storedPrevBkSetCommitment` will not strand an unverified bundle
-        // boundary. The contract's `PrevSlotStillOwedForBundle` gate is
-        // bundle-aware: a second rotation that would cross a bundle
-        // boundary the current prev-slot is still responsible for signing
-        // is deferred (the daemon then runs `verifyBlock` for that
-        // boundary and retries). Rotations landing inside the same
-        // `bundleStride` window as the previous one are allowed — AN
-        // emits bursts of rotations between bundles on shellnet, and
-        // nothing else can sign the boundary past them. No permanent
-        // stall: `verifyBlock` always drains the window, so a deferred
-        // apply retries on a later tick.
+        // boundary. The contract's `PrevSlotStillOwedForBundle` gate looks
+        // only at the previous N: it reverts while the next bundle boundary
+        // after the cursor is at or below that N. Rotations therefore apply
+        // back-to-back (AN emits bursts of rotations between bundles on
+        // shellnet) until one lands at or past that boundary; the next one
+        // waits until `verifyBlock` reaches the last boundary at or below
+        // it. No permanent stall: `verifyBlock` keeps advancing the cursor,
+        // so a waiting rotation is applied on a later tick.
         let bk_target = on_chain.last_bk_set_update_seq_no.saturating_add(1);
         if let Some(upd) = self.bk_update_source.fetch_bk_update(bk_target).await? {
             let prev_slot_still_owed = on_chain.last_bk_set_update_seq_no != 0

@@ -12,8 +12,9 @@ re-run the re-anchoring pass or leave a fresh dated note here calling out the dr
 > `src/AckiNackiBridge.sol`, and no re-anchoring pass has been run since. Its citations below
 > point too early by a few lines near the top (`storedBkSetCommitment` `:176` → `:182`), about 30
 > around `HistoryWindow` (`:259` → `:289`) and about 110–130 from `applyBkSetUpdate` on (`:898` →
-> `:1010`, `_frToLeBytes` `:1017` → `:1143`). §4's `InvalidBundleStride` citation and §7.3's
-> operator rule were corrected in this edit.
+> `:1011`, `_frToLeBytes` `:1017` → `:1145`). Corrected in this edit and citing the current
+> source: §4.2's `bundleStride` row (`:234`), §4's `InvalidBundleStride` (`:714`), and §7.3's
+> description of the rotation gate.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -162,7 +163,7 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `usdc` | `IERC20` | 117 | Deposit/payout token. Must be non-zero. |
 | `aavePool`, `aUSDC` | `IAavePool`, `IERC20` | 120, 123 | Both zero ⇒ AAVE disabled; exactly one zero ⇒ constructor reverts. |
 | `primaryVerifier`, `fallbackVerifier`, `layerHashesVerifier` | interfaces | 159, 165, 171 | Any zero ⇒ `verifyBlock` disabled. |
-| `bundleStride` | `uint64` | — | Prover bundle width in block seq-nos (L1 = 1024, L2 = 16384); divisor in the `applyBkSetUpdate` boundary invariant. Mandatory when the verifier triple is wired; may be zero when `verifyBlock` is disabled. L1↔L2 switch requires a redeploy. |
+| `bundleStride` | `uint64` | 234 | Prover bundle width in block seq-nos (L1 = 1024, L2 = 16384); divisor in the `applyBkSetUpdate` boundary invariant. Mandatory when the verifier triple is wired; may be zero when `verifyBlock` is disabled. L1↔L2 switch requires a redeploy. |
 | `storedPrevMaxLevelLayerHash` | `uint256` | 204 | **Genesis seed only** since storage v2.0 (2026-08-04). Read exclusively by `_expectedPrevAnchor` when no layer window is populated (`:1118`). |
 | `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
@@ -207,7 +208,7 @@ constructor(
 `bundleStride`. `bundleStride` is the prover's bundle width in block seq-nos (W·P = 1024 for L1,
 W² = 16384 for L2) and is immutable after construction; `applyBkSetUpdate` divides by it to detect
 whether a second rotation would cross an unverified bundle boundary. When the verifier triple is
-wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:713`); when the triple is
+wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); when the triple is
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
@@ -439,11 +440,13 @@ Before step 5, the contract enforces the **bundle-boundary invariant**: if
 `nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride`
 and revert `PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary)` when
 `nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. The guard only trips when the previous
-rotation's seq-no sits at or past the next bundle target the chain still owes, i.e. when
-applying this rotation would leave an unverified bundle boundary straddling the stored prev
-slot. Multiple rotations whose seq-nos share the same bundle window
-`[k·bundleStride, (k+1)·bundleStride)` apply back-to-back; rotations that cross a boundary
-defer until `verifyBlock` advances `storedLastSeenBlockSeqNo` past that boundary.
+rotation's seq-no sits at or past the next bundle target the chain still owes; the incoming
+rotation's own seq-no plays no part. Rotations therefore apply back-to-back until one lands at
+or past that target, and the next one reverts until `verifyBlock` has advanced
+`storedLastSeenBlockSeqNo` to the last boundary at or below that previous seq-no. With
+`bundleStride = 16384` and the cursor at 0: N1 = 10 then N2 = 16389 both apply, although N2
+crosses a boundary; N1 = 16394 then N2 = 16397 lie in one window, yet N2 reverts until
+`verifyBlock(16384)`.
 
 `storedLastSeenBlockSeqNo` is **not** advanced by a rotation.
 
@@ -456,10 +459,10 @@ the set and gates the next rotation. A rotation can be applied before
 the layer cursor reaches N; `verifyBlock` accepts the outgoing set for
 `seqNo <= N`. AN must announce a rotation at bundle target N
 *before* that bundle is proven: a proof that already baked
-`last_seen = N` cannot satisfy `attestationLastSeen < N`. Rotation
-bursts within one bundle window apply in order with no on-chain stall;
-cross-window pairs defer the second rotation until the owed
-`verifyBlock(k·bundleStride)` lands.
+`last_seen = N` cannot satisfy `attestationLastSeen < N`. A burst of
+rotations applies in order until one lands at or past the next owed
+bundle target; the rest wait for `verifyBlock` to reach the last
+boundary at or below it — usually just that one bundle.
 
 ### 7.4 Read surface for AN state
 

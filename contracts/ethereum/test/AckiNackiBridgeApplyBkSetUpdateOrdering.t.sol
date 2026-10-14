@@ -19,9 +19,9 @@ import "./mocks/MockERC20.sol";
 /// @notice After `applyBkSetUpdate(N)`, `verifyBlock` accepts the previous
 ///         BK-set for `blockSeqNo <= N`. The first rotation may land
 ///         before the layer cursor covers N (off-boundary rotations have
-///         no bundle at N). A second rotation is blocked until
-///         `storedLastSeenBlockSeqNo >=` the previous N — only one
-///         outgoing set is stored.
+///         no bundle at N). A further rotation is blocked while the next
+///         bundle boundary after `storedLastSeenBlockSeqNo` is at or below
+///         the previous N — only one outgoing set is stored.
 ///
 /// @dev The pre-existing `AckiNackiBridgeApplyBkSetUpdate.t.sol` covers the
 ///      other rotation invariants (canonicity, Merkle fold, monotonicity, ...).
@@ -254,12 +254,11 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
     // bursts of several key-blocks within one bundle window (`W² = 16384`
     // seq_nos under L2). These tests stand up a fresh bridge with a
     // production-ish stride and verify that:
-    //  * Two rotations landing inside the same window apply back-to-back
-    //    without an intervening verifyBlock (the deadlock from
-    //    `feature/bk-set-updates-flow-test-fixes`).
-    //  * A rotation that would cross an unverified bundle boundary is
-    //    deferred with `PrevSlotStillOwedForBundle`, lifted after
-    //    `verifyBlock` covers that boundary.
+    //  * the gate looks only at the previous N: once a rotation is applied
+    //    at or past the next owed boundary, the following one reverts with
+    //    `PrevSlotStillOwedForBundle`;
+    //  * the block lifts once the cursor reaches the last boundary at or
+    //    below that N (`_primeLayerCursor` stands in for `verifyBlock`).
 
     uint64 internal constant STRIDE = 16384;
 
@@ -286,9 +285,11 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         );
     }
 
-    /// @notice Two rotations in the same bundle window apply without an
-    ///         intervening verifyBlock. Mirrors the shellnet 2026-10-08
-    ///         burst that previously deadlocked.
+    /// @notice Two rotations in one bundle window, both past the next owed
+    ///         boundary: the second applies once the cursor reaches that
+    ///         boundary (`_primeLayerCursor(STRIDE)` stands in for
+    ///         `verifyBlock`). Mirrors the shellnet 2026-10-08 burst that
+    ///         previously deadlocked.
     function test_applyBkSetUpdate_sameBundleWindow_appliesBackToBack() public {
         _rebuildBridgeWithStride(STRIDE);
         uint64 n1 = STRIDE + 10;

@@ -9,5 +9,5 @@ BRIDGE_ANCHOR_LEVEL=2
 # Historical bk-update cursor used at deploy (constructor arg
 # genesisLastBkSetUpdateSeqNo). Preserved here for operator forensics and
 # so a cold-start daemon can cross-check its own GQL-derived value against
-# what the on-chain  actually got.
+# what the on-chain `storedLastBkSetUpdateSeqNo` actually got.
 GENESIS_LAST_BK_SET_UPDATE_SEQNO=23853771

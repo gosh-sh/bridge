@@ -62,13 +62,14 @@ pub struct ReceiptProof {
 /// Transaction-trie MPT proof for the enclosing deposit tx (chain-id binding).
 ///
 /// Wire format is the typed-tx blob as stored in the transactions trie
-/// (`0x02 || RLP(eip1559_fields)` for EIP-1559). Used by Track 2 of
+/// (`0x01 || RLP(...)` or `0x02 || RLP(...)`). Used by Track 2 of
 /// the proven `chainId` public input.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransactionProof {
     /// Typed-tx wire bytes (MPT leaf value)
     pub tx_bytes: Vec<u8>,
-    /// Merkle-Patricia Trie proof nodes for `rlp(tx_index)` under `transactionsRoot`
+    /// Merkle-Patricia Trie proof nodes for `rlp(tx_index)` under
+    /// `transactionsRoot`
     pub proof_nodes: Vec<Vec<u8>>,
     /// `transactionsRoot` from the same block header as [`ReceiptProof`]
     pub transactions_root: [u8; 32],
@@ -81,8 +82,8 @@ pub struct DepositProofInput {
     pub event_data: DepositEventData,
     /// Receipt proof (private - proves event exists in Ethereum state)
     pub receipt_proof: ReceiptProof,
-    /// Transaction proof (private — proves enclosing EIP-1559 tx + `chain_id`).
-    /// Required for chain-binding; regenerate fixtures via
+    /// Transaction proof (private — proves enclosing EIP-2930 / EIP-1559 tx +
+    /// `chain_id`). Required for chain-binding; regenerate fixtures via
     /// `generate_transaction_proof` / `fetch_deposit_proof`.
     /// `#[serde(default)]` keeps pre-Track-2 JSON loadable; the circuit asserts
     /// non-empty `tx_bytes` before proving.
@@ -99,7 +100,7 @@ pub struct DepositProofInput {
 
 impl DepositProofInput {
     /// The `chain_id` the circuit will bind, decoded from the enclosing
-    /// EIP-1559 transaction's RLP.
+    /// EIP-2930 / EIP-1559 transaction's RLP.
     pub fn witness_chain_id(&self) -> anyhow::Result<u64> {
         crate::rlp_utils::typed_tx_chain_id(&self.tx_proof.tx_bytes)
     }
@@ -117,8 +118,8 @@ impl DepositProofInput {
         let actual = self.witness_chain_id()?;
         if actual != expected {
             anyhow::bail!(
-                "witness proves chain_id {actual}, but --chain-id says {expected}; \
-                 re-fetch the witness or pass --chain-id {actual}"
+                "witness proves chain_id {actual}, but --chain-id says {expected}; re-fetch the \
+                 witness or pass --chain-id {actual}"
             );
         }
         Ok(())
@@ -126,22 +127,22 @@ impl DepositProofInput {
 
     /// Resolve which chain this run is about, and check it is one we accept.
     ///
-    /// `selected` is the optional `--chain-id` flag. When it is absent the chain
-    /// is taken from the witness, which is the only correct default: the flag
-    /// used to default to Sepolia while `require_chain_id` ran unconditionally,
-    /// so a perfectly valid Base or Arbitrum witness was rejected by a tool that
-    /// had simply guessed the wrong network — and the relayer never passes the
-    /// flag at all, which made that the production path for every chain except
-    /// Sepolia.
+    /// `selected` is the optional `--chain-id` flag. When it is absent the
+    /// chain is taken from the witness, which is the only correct default:
+    /// the flag used to default to Sepolia while `require_chain_id` ran
+    /// unconditionally, so a perfectly valid Base or Arbitrum witness was
+    /// rejected by a tool that had simply guessed the wrong network — and
+    /// the relayer never passes the flag at all, which made that the
+    /// production path for every chain except Sepolia.
     pub fn resolve_chain_id(&self, selected: Option<u64>) -> anyhow::Result<u64> {
         let chain_id = match selected {
             Some(expected) => {
                 self.require_chain_id(expected)?;
                 expected
-            }
+            },
             None if self.tx_proof.tx_bytes.is_empty() => anyhow::bail!(
-                "witness has no tx_proof.tx_bytes, so its chain_id cannot be read; \
-                 re-fetch it with fetch_deposit_data (Track 2) or pass --chain-id"
+                "witness has no tx_proof.tx_bytes, so its chain_id cannot be read; re-fetch it \
+                 with fetch_deposit_data (Track 2) or pass --chain-id"
             ),
             None => self.witness_chain_id()?,
         };
@@ -214,7 +215,7 @@ mod tests {
     use crate::supported_chains::{CHAIN_ID_BASE, CHAIN_ID_SEPOLIA};
 
     /// Minimal witness carrying only what the chain-id logic reads: an
-    /// EIP-1559 typed-tx prefix whose RLP field 0 is `chain_id`.
+    /// typed-tx prefix whose RLP field 0 is `chain_id`.
     fn input_for_chain(chain_id: u64) -> DepositProofInput {
         let mut rlp = vec![0x02u8, 0xc0 + 5, 0x84];
         rlp.extend_from_slice(&(chain_id as u32).to_be_bytes());

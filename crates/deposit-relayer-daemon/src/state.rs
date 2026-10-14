@@ -78,6 +78,11 @@ pub struct RelayerState {
     /// Operators must finalise these manually via `finalize-one`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked_deposit_ids: Vec<u64>,
+    /// Deposit ids the circuit cannot prove, advanced past at once.
+    /// `finalize-one` cannot help these; only the EVM bridge operator can
+    /// return their funds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unprovable_deposit_ids: Vec<u64>,
 }
 
 impl RelayerState {
@@ -199,6 +204,19 @@ impl RelayerState {
         if !self.parked_deposit_ids.contains(&deposit_id) {
             self.parked_deposit_ids.push(deposit_id);
         }
+        self.advance_past(deposit_id);
+    }
+
+    /// Record a deposit the circuit cannot prove and advance the cursor past
+    /// it. The id goes to `unprovable_deposit_ids`, not `parked_deposit_ids`.
+    pub fn record_unprovable(&mut self, deposit_id: u64) {
+        if !self.unprovable_deposit_ids.contains(&deposit_id) {
+            self.unprovable_deposit_ids.push(deposit_id);
+        }
+        self.advance_past(deposit_id);
+    }
+
+    fn advance_past(&mut self, deposit_id: u64) {
         self.last_processed_deposit_id = Some(deposit_id);
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = 0;
@@ -336,7 +354,41 @@ mod tests {
         assert_eq!(s.last_processed_deposit_id, Some(3));
         assert_eq!(s.next_target(0), 4);
         assert_eq!(s.parked_deposit_ids, vec![3]);
+        assert!(s.unprovable_deposit_ids.is_empty());
         assert_eq!(s.attempts_since_progress, 0);
+    }
+
+    #[test]
+    fn record_unprovable_advances_without_parking() {
+        let mut s = RelayerState::default();
+        s.record_attempt(3);
+        s.record_unprovable(3);
+        assert_eq!(s.next_target(0), 4);
+        assert_eq!(s.unprovable_deposit_ids, vec![3]);
+        assert!(s.parked_deposit_ids.is_empty());
+        assert_eq!(s.attempts_since_progress, 0);
+    }
+
+    #[test]
+    fn a_file_with_only_parked_ids_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_processed_deposit_id":6,"last_attempt_deposit_id":6,
+                "attempts_since_progress":0,"parked_deposit_ids":[4,6]}"#,
+        )
+        .unwrap();
+
+        let mut loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.parked_deposit_ids, vec![4, 6]);
+        assert!(loaded.unprovable_deposit_ids.is_empty());
+
+        loaded.record_unprovable(7);
+        loaded.save(&path).unwrap();
+        let reloaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(reloaded.parked_deposit_ids, vec![4, 6]);
+        assert_eq!(reloaded.unprovable_deposit_ids, vec![7]);
     }
 
     #[test]

@@ -157,5 +157,7 @@ excessUsdc() > 0 across a collection cycle        # uncollected surplus; the nex
 capped at 50 % (`:67`). Ours, not an AAVE convention. `setAaveEnabled` — gate on new supplies;
 `emergencyWithdrawAll` turns it off, and only an explicit call turns it back on.
 
-The owner cannot reduce `treasuryBalance`, cannot pause the bridge (no pause exists), and cannot
-replace a verifier — those bindings are immutable.
+The owner cannot reduce `treasuryBalance` and cannot replace a verifier — those bindings are
+immutable. The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
+`applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield controls above stay
+available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec.md`, §10.1).

@@ -450,6 +450,13 @@ pub enum DryRunOutcome {
 #[async_trait]
 pub trait BridgeClient: Send + Sync {
     async fn read_state(&self) -> Result<BridgeOnChainState, RelayerError>;
+    /// [`Self::read_state`] with every slot read at one block, so a
+    /// load-balanced RPC cannot answer the five calls from backends at
+    /// different heights. Defaults to [`Self::read_state`] for clients with
+    /// a single consistent view (the mock).
+    async fn read_state_pinned(&self) -> Result<BridgeOnChainState, RelayerError> {
+        self.read_state().await
+    }
     async fn submit_block(&self, block: &AnBlockData) -> Result<SubmitOutcome, RelayerError>;
     async fn submit_bk_set_update(
         &self,
@@ -537,6 +544,14 @@ struct MockBridgeInner {
     bk_set_commitment: U256,
     prev_bk_set_commitment: U256,
     last_bk_set_update_seq_no: u64,
+    /// Mirrors the on-chain `immutable bundleStride`. Consumed by the
+    /// bundle-aware `PrevSlotStillOwedForBundle` gate in
+    /// [`BridgeClient::submit_bk_set_update`]. Must be strictly positive
+    /// — the ordering suites that need a non-trivial window exercise it
+    /// explicitly; the default of `1` keeps every other suite's
+    /// consecutive-seqno semantics intact (each `verifyBlock` covers the
+    /// previous rotation).
+    bundle_stride: u64,
     /// Storage v2.0 (2026-08-04): immutable genesis seed set by
     /// [`MockBridgeClient::with_genesis`]. Corresponds to the on-chain
     /// `immutable storedPrevMaxLevelLayerHash`.
@@ -555,9 +570,24 @@ struct MockBridgeInner {
 
 impl MockBridgeClient {
     /// Construct with the genesis anchors set by the bridge constructor.
+    /// Uses `bundle_stride = 1` — matches the test-helper default in
+    /// `VerifyBlockConfigLib.with(...)`. Suites that need a non-trivial
+    /// window (ordering tests exercising `PrevSlotStillOwedForBundle`)
+    /// call [`MockBridgeClient::with_genesis_stride`].
     pub fn with_genesis(
         bk_set_commitment: U256,
         prev_max_level_layer_hash: U256,
+        verifier: VerifierDecision,
+    ) -> Self {
+        Self::with_genesis_stride(bk_set_commitment, prev_max_level_layer_hash, 1, verifier)
+    }
+
+    /// Construct with an explicit bundle stride. Only the bk-update
+    /// ordering suites need a non-trivial stride.
+    pub fn with_genesis_stride(
+        bk_set_commitment: U256,
+        prev_max_level_layer_hash: U256,
+        bundle_stride: u64,
         verifier: VerifierDecision,
     ) -> Self {
         Self {
@@ -566,6 +596,7 @@ impl MockBridgeClient {
                 bk_set_commitment,
                 prev_bk_set_commitment: U256::ZERO,
                 last_bk_set_update_seq_no: 0,
+                bundle_stride,
                 genesis_prev_max_level_layer_hash: prev_max_level_layer_hash,
                 latest_per_layer: [U256::ZERO; MAX_LAYER_HASHES],
                 highest_active_layer: 0,
@@ -735,13 +766,17 @@ impl BridgeClient for MockBridgeClient {
                 ),
             });
         }
-        if inner.last_bk_set_update_seq_no > inner.last_seen_block_seq_no {
-            return Ok(BkSetUpdateSubmitOutcome::Reverted {
-                reason: format!(
-                    "VerifyBlockLagBehindRotation(rotation={}, last_seen={})",
-                    inner.last_bk_set_update_seq_no, inner.last_seen_block_seq_no
-                ),
-            });
+        if inner.last_bk_set_update_seq_no != 0 {
+            let stride = inner.bundle_stride.max(1);
+            let next_owed_boundary = ((inner.last_seen_block_seq_no / stride) + 1) * stride;
+            if next_owed_boundary <= inner.last_bk_set_update_seq_no {
+                return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!(
+                        "PrevSlotStillOwedForBundle(last_bk_set_update={}, next_owed_boundary={})",
+                        inner.last_bk_set_update_seq_no, next_owed_boundary
+                    ),
+                });
+            }
         }
         if update.attestation_last_seen >= update.block_seq_no {
             return Ok(BkSetUpdateSubmitOutcome::Reverted {
@@ -812,6 +847,8 @@ mod sol_bindings {
             function storedBkSetCommitment() external view returns (uint256);
             function storedPrevBkSetCommitment() external view returns (uint256);
             function storedLastBkSetUpdateSeqNo() external view returns (uint64);
+            /// Prover bundle width the `applyBkSetUpdate` gate divides by.
+            function bundleStride() external view returns (uint64);
             /// Storage v2.0 (2026-08-04): immutable genesis seed. Retained
             /// so historical indexers reading the constructor value keep
             /// working. Use `expectedPrevAnchor(numLayers)` for the anchor
@@ -874,12 +911,15 @@ mod sol_bindings {
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
 
-            /// Custom errors `AckiNackiBridge.withdrawByProof` can revert with.
-            /// Listed here so the sol! macro emits `SELECTOR` constants — the
-            /// relayer withdraw scan uses them to distinguish permanent
+            /// Custom errors `AckiNackiBridge.withdrawByProof` can revert with:
+            /// its own checks, the `whenNotPaused` and `nonReentrant`
+            /// modifiers, and the treasury helpers it calls. Listed here so
+            /// the sol! macro emits `SELECTOR` constants — the relayer
+            /// withdraw scan uses them to distinguish permanent
             /// (proof-intrinsic) reverts from transient ones (e.g. anchor
             /// not yet registered by the verifyBlock lane) so a permanently
-            /// bad proof does not hold up the whole queue.
+            /// bad proof does not hold up the whole queue — and so
+            /// `decode_withdraw_revert` can name them.
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
             error NullifierAlreadyUsed(uint256 nullifier);
@@ -892,6 +932,12 @@ mod sol_bindings {
             error UnsupportedTokenId(uint256 tokenId);
             error InvalidRecipient();
             error WithdrawTreasuryShortfall(uint256 requested, uint256 available);
+            error BridgePaused();
+            error Reentrancy();
+            error LayerOutOfRange(uint8 layer);
+            error InsufficientTreasury();
+            error AaveWithdrawFailed(uint256 requested, uint256 received);
+            error WithdrawTransferFailed(address recipient, uint256 amount);
 
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
@@ -1119,6 +1165,16 @@ where
             .map_err(map_contract_err)
     }
 
+    /// The contract's immutable `bundleStride`. Fails on a bridge deployed
+    /// before the field existed.
+    pub async fn bundle_stride(&self) -> Result<u64, RelayerError> {
+        self.contract
+            .bundleStride()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
     /// Direct access to the underlying contract (escape hatch for
     /// tests that want to attach event-stream subscriptions etc.).
     pub fn contract(&self) -> &AckiNackiBridge::AckiNackiBridgeInstance<P, N> {
@@ -1220,7 +1276,54 @@ where
         &self,
         update: &BkSetUpdateData,
     ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
-        self.send_bk_set_update(update).await
+        self.send_bk_set_update_checked(update).await
+    }
+
+    /// [`Self::send_bk_set_update`] with the guards `submit_block` already
+    /// has: a bound on the wait for the receipt ([`BK_UPDATE_RECEIPT_TIMEOUT`];
+    /// alloy waits forever by default, which would hang the daemon on a
+    /// dropped transaction) and a post-submit check that the slots the
+    /// rotation writes now hold what was submitted. The receipt's status is
+    /// not checked anywhere else, so a transaction mined but reverted would
+    /// otherwise come back as `Applied`.
+    async fn send_bk_set_update_checked(
+        &self,
+        update: &BkSetUpdateData,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        let outcome =
+            match tokio::time::timeout(BK_UPDATE_RECEIPT_TIMEOUT, self.send_bk_set_update(update))
+                .await
+            {
+                Ok(outcome) => outcome?,
+                Err(_) => {
+                    return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                        reason: format!(
+                            "tx confirmation error: no receipt within {} s",
+                            BK_UPDATE_RECEIPT_TIMEOUT.as_secs()
+                        ),
+                    });
+                },
+            };
+        if let BkSetUpdateSubmitOutcome::Applied {
+            new_state, ..
+        } = &outcome
+        {
+            if new_state.last_bk_set_update_seq_no != update.block_seq_no
+                || new_state.bk_set_commitment != update.new_commitment_l3
+            {
+                return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!(
+                        "post-submit drift: chain last_bk_set_update_seq_no={} \
+                         bk_set_commitment={:#x} != submitted N={} new commitment={:#x}",
+                        new_state.last_bk_set_update_seq_no,
+                        new_state.bk_set_commitment,
+                        update.block_seq_no,
+                        update.new_commitment_l3
+                    ),
+                });
+            }
+        }
+        Ok(outcome)
     }
 
     async fn send_bk_set_update(
@@ -1865,6 +1968,106 @@ pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     WithdrawRevertKind::Transient
 }
 
+/// A `withdrawByProof` revert decoded into the bridge's custom error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeRevert {
+    /// The Solidity error's name, e.g. `NullifierAlreadyUsed`.
+    pub name: &'static str,
+    /// `Name(argument: value, …)`: field elements and hashes in 32-byte hex,
+    /// amounts and chain ids in decimal.
+    pub rendered: String,
+}
+
+/// Find the revert data in `reason` — the text
+/// [`EthBridgeClient::dry_run_withdraw`] and
+/// [`EthBridgeClient::submit_withdraw`] report, the same text
+/// [`classify_withdraw_revert`] reads — and decode it as one of
+/// `AckiNackiBridge`'s custom errors.
+///
+/// Nodes put the data in different places (`data: "0x…"`, or inline after
+/// `execution reverted:`), so every `0x`-prefixed run of at least four
+/// bytes is tried and the first that decodes wins. `None` when nothing
+/// decodes: a transport failure, or a revert raised by something other than
+/// the bridge.
+pub fn decode_withdraw_revert(reason: &str) -> Option<BridgeRevert> {
+    use alloy::sol_types::SolInterface;
+    hex_runs(reason).find_map(|bytes| {
+        AckiNackiBridge::AckiNackiBridgeErrors::abi_decode(&bytes)
+            .ok()
+            .map(render_bridge_error)
+    })
+}
+
+/// Every `0x`-prefixed run of hex digits in `text` that is a whole number of
+/// bytes and at least a selector long, decoded.
+fn hex_runs(text: &str) -> impl Iterator<Item = Vec<u8>> + '_ {
+    text.match_indices("0x").filter_map(move |(i, _)| {
+        let digits: String = text[i + 2..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .collect();
+        if digits.len() < 8 || !digits.len().is_multiple_of(2) {
+            return None;
+        }
+        hex::decode(&digits).ok()
+    })
+}
+
+/// Name a decoded error and its arguments. Exhaustive on purpose: an error
+/// added to the `sol!` block above does not compile until it is named here.
+fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRevert {
+    use AckiNackiBridge::AckiNackiBridgeErrors as E;
+    let word = |v: U256| format!("0x{v:064x}");
+    let (name, args) = match e {
+        E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
+        E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
+        E::NullifierAlreadyUsed(x) => (
+            "NullifierAlreadyUsed",
+            format!("nullifier: {}", word(x.nullifier)),
+        ),
+        E::FieldElementOutOfRange(x) => (
+            "FieldElementOutOfRange",
+            format!("value: {}", word(x.value)),
+        ),
+        E::DstChainIdMismatch(x) => (
+            "DstChainIdMismatch",
+            format!("supplied: {}, expected: {}", x.supplied, x.expected),
+        ),
+        E::RecipientHalfOutOfRange(x) => (
+            "RecipientHalfOutOfRange",
+            format!("value: {}", word(x.value)),
+        ),
+        E::WithdrawIdentityMismatch(_) => ("WithdrawIdentityMismatch", String::new()),
+        E::UnknownAnchor(x) => ("UnknownAnchor", format!("finalRoot: {}", word(x.finalRoot))),
+        E::InvalidNumLayers(x) => (
+            "InvalidNumLayers",
+            format!("anchorLayer: {}", x.anchorLayer),
+        ),
+        E::UnsupportedTokenId(x) => ("UnsupportedTokenId", format!("tokenId: {}", x.tokenId)),
+        E::InvalidRecipient(_) => ("InvalidRecipient", String::new()),
+        E::WithdrawTreasuryShortfall(x) => (
+            "WithdrawTreasuryShortfall",
+            format!("requested: {}, available: {}", x.requested, x.available),
+        ),
+        E::BridgePaused(_) => ("BridgePaused", String::new()),
+        E::Reentrancy(_) => ("Reentrancy", String::new()),
+        E::LayerOutOfRange(x) => ("LayerOutOfRange", format!("layer: {}", x.layer)),
+        E::InsufficientTreasury(_) => ("InsufficientTreasury", String::new()),
+        E::AaveWithdrawFailed(x) => (
+            "AaveWithdrawFailed",
+            format!("requested: {}, received: {}", x.requested, x.received),
+        ),
+        E::WithdrawTransferFailed(x) => (
+            "WithdrawTransferFailed",
+            format!("recipient: {}, amount: {}", x.recipient, x.amount),
+        ),
+    };
+    BridgeRevert {
+        name,
+        rendered: format!("{name}({args})"),
+    }
+}
+
 /// See [`classify_withdraw_revert`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WithdrawRevertKind {
@@ -1882,6 +2085,31 @@ pub enum BkSetUpdateSubmitOutcome {
     Reverted {
         reason: String,
     },
+}
+
+/// Bound on the wait for an `applyBkSetUpdate` receipt — the same 180 s
+/// (~15 Sepolia blocks) `submit_block` allows `verifyBlock`.
+pub const BK_UPDATE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// `true` when a `verifyBlock` or `applyBkSetUpdate` failure says nothing
+/// about the transaction itself: the RPC refused or dropped the request
+/// (rate limit, connection, nonce, fee) or the receipt never came. The
+/// transaction may still have landed; the next tick re-reads the chain and
+/// finds out. A revert the node simulated before sending (`execution
+/// reverted`, JSON-RPC error 3) and a failed post-submit check are not
+/// unconfirmed: they say the contract refused, and count toward the abort
+/// threshold.
+pub fn is_unconfirmed_submit_failure(reason: &str) -> bool {
+    if reason.starts_with("tx confirmation error:") {
+        return true;
+    }
+    let send_failed = reason.starts_with("verifyBlock send failed:")
+        || reason.starts_with("applyBkSetUpdate send failed:");
+    if !send_failed {
+        return false;
+    }
+    let lowered = reason.to_ascii_lowercase();
+    !(lowered.contains("revert") || lowered.contains("error code 3:"))
 }
 
 fn to_sol_withdrawal_pub(
@@ -2143,7 +2371,7 @@ where
         &self,
         update: &BkSetUpdateData,
     ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
-        self.send_bk_set_update(update).await
+        self.send_bk_set_update_checked(update).await
     }
 
     async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError> {
@@ -2152,6 +2380,16 @@ where
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    async fn read_state_pinned(&self) -> Result<BridgeOnChainState, RelayerError> {
+        let head = self
+            .contract
+            .provider()
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
+        self.read_state_at(BlockId::from(head)).await
     }
 }
 
@@ -2172,6 +2410,37 @@ mod tests {
 
     fn always_accept() -> VerifierDecision {
         Arc::new(|_| true)
+    }
+
+    #[test]
+    fn unconfirmed_submit_failures_are_rpc_and_receipt_failures_only() {
+        // The RPC refused or dropped the request: nothing is known about the
+        // transaction, so it must not count toward the abort threshold.
+        for reason in [
+            "verifyBlock send failed: server returned an error response: error code -32005: rate \
+             limit exceeded",
+            "applyBkSetUpdate send failed: HTTP error 429 with body: Too Many Requests",
+            "applyBkSetUpdate send failed: error sending request for url (https://rpc): \
+             connection closed",
+            "verifyBlock send failed: server returned an error response: error code -32000: nonce \
+             too low",
+            "tx confirmation error: no receipt within 180 s",
+            "tx confirmation error: Timeout",
+        ] {
+            assert!(is_unconfirmed_submit_failure(reason), "{reason}");
+        }
+        // The contract refused: a simulated revert or a post-submit mismatch.
+        for reason in [
+            "verifyBlock send failed: server returned an error response: error code 3: execution \
+             reverted, data: \"0x87bf1c06\"",
+            "applyBkSetUpdate send failed: server returned an error response: error code -32000: \
+             execution reverted",
+            "post-submit drift: chain last_seen_block_seq_no=1 != submitted=2",
+            "BkSetCommitmentMismatch(supplied=0x1, stored=0x2)",
+            "off-chain old_commitment 0x1 != on-chain 0x2",
+        ] {
+            assert!(!is_unconfirmed_submit_failure(reason), "{reason}");
+        }
     }
 
     fn block(seq: u64, prev_anchor: U256) -> AnBlockData {
@@ -2401,7 +2670,7 @@ mod tests {
             BkSetUpdateSubmitOutcome::Reverted {
                 reason,
             } => {
-                assert!(reason.contains("VerifyBlockLagBehindRotation"), "{reason}");
+                assert!(reason.contains("PrevSlotStillOwedForBundle"), "{reason}");
             },
             other => panic!("second rotation must revert while N1 is uncovered, got {other:?}"),
         }
@@ -2587,5 +2856,177 @@ mod tests {
         assert!(get_logs_error_is_retryable(&rate));
         let transport = alloy::transports::TransportErrorKind::custom_str("connection reset");
         assert!(get_logs_error_is_retryable(&transport));
+    }
+
+    /// The text a public Sepolia RPC returned for the dry run of a withdrawal
+    /// whose nullifier was already spent.
+    const NULLIFIER_REVERT: &str =
+        "server returned an error response: error code 3: execution reverted: tried to decode \
+         error from abi but failed: Error: Failed to slice index abi_decoded_error_data when \
+         getting message from revert data, data: \
+         \"0xdc215c0a2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb\"";
+
+    #[test]
+    fn a_spent_nullifier_is_named_with_its_argument() {
+        let r = decode_withdraw_revert(NULLIFIER_REVERT).expect("the bridge's own error");
+        assert_eq!(r.name, "NullifierAlreadyUsed");
+        assert_eq!(
+            r.rendered,
+            "NullifierAlreadyUsed(nullifier: \
+             0x2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb)"
+        );
+        // The daemon's classification reads the same text and must not change.
+        assert_eq!(
+            classify_withdraw_revert(NULLIFIER_REVERT),
+            WithdrawRevertKind::Permanent
+        );
+    }
+
+    #[test]
+    fn revert_data_is_found_wherever_the_node_put_it() {
+        use alloy::sol_types::SolError;
+        let paused = hex::encode(AckiNackiBridge::BridgePaused::SELECTOR);
+        // Inline after the message, no `data:` key, and an address before it
+        // that must not be taken for the error.
+        let inline = format!(
+            "execution reverted: from 0x400bb825ca9ca7dddfcb25f39c1ec073a91246b3: 0x{paused}"
+        );
+        assert_eq!(
+            decode_withdraw_revert(&inline).map(|r| r.rendered),
+            Some("BridgePaused()".to_string())
+        );
+        let shortfall = AckiNackiBridge::WithdrawTreasuryShortfall {
+            requested: U256::from(1_000_000u64),
+            available: U256::from(20u64),
+        }
+        .abi_encode();
+        let quoted = format!("custom error: data: \"0x{}\"", hex::encode(shortfall));
+        assert_eq!(
+            decode_withdraw_revert(&quoted).map(|r| r.rendered),
+            Some("WithdrawTreasuryShortfall(requested: 1000000, available: 20)".to_string())
+        );
+    }
+
+    #[test]
+    fn text_without_a_bridge_error_decodes_to_nothing() {
+        assert_eq!(
+            decode_withdraw_revert("error sending request: connection refused"),
+            None
+        );
+        // `Error(string)`: a revert raised by something other than the bridge.
+        let foreign =
+            "execution reverted, data: \
+             \"0x08c379a00000000000000000000000000000000000000000000000000000000000000020\"";
+        assert_eq!(decode_withdraw_revert(foreign), None);
+    }
+
+    #[test]
+    fn every_error_withdraw_by_proof_can_raise_is_decodable() {
+        use alloy::{primitives::Address, sol_types::SolError};
+        use AckiNackiBridge as B;
+        let one = U256::from(1u64);
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (B::BridgePaused {}.abi_encode(), "BridgePaused"),
+            (B::Reentrancy {}.abi_encode(), "Reentrancy"),
+            (
+                B::WithdrawByProofDisabled {}.abi_encode(),
+                "WithdrawByProofDisabled",
+            ),
+            (
+                B::WithdrawIdentityMismatch {}.abi_encode(),
+                "WithdrawIdentityMismatch",
+            ),
+            (
+                B::DstChainIdMismatch {
+                    supplied: one,
+                    expected: one,
+                }
+                .abi_encode(),
+                "DstChainIdMismatch",
+            ),
+            (
+                B::UnsupportedTokenId {
+                    tokenId: one,
+                }
+                .abi_encode(),
+                "UnsupportedTokenId",
+            ),
+            (
+                B::RecipientHalfOutOfRange {
+                    value: one,
+                }
+                .abi_encode(),
+                "RecipientHalfOutOfRange",
+            ),
+            (B::InvalidRecipient {}.abi_encode(), "InvalidRecipient"),
+            (
+                B::FieldElementOutOfRange {
+                    value: one,
+                }
+                .abi_encode(),
+                "FieldElementOutOfRange",
+            ),
+            (
+                B::NullifierAlreadyUsed {
+                    nullifier: one,
+                }
+                .abi_encode(),
+                "NullifierAlreadyUsed",
+            ),
+            (
+                B::LayerOutOfRange {
+                    layer: 11,
+                }
+                .abi_encode(),
+                "LayerOutOfRange",
+            ),
+            (
+                B::UnknownAnchor {
+                    finalRoot: one,
+                }
+                .abi_encode(),
+                "UnknownAnchor",
+            ),
+            (
+                B::WithdrawalProofRejected {}.abi_encode(),
+                "WithdrawalProofRejected",
+            ),
+            (
+                B::WithdrawTreasuryShortfall {
+                    requested: one,
+                    available: one,
+                }
+                .abi_encode(),
+                "WithdrawTreasuryShortfall",
+            ),
+            (
+                B::AaveWithdrawFailed {
+                    requested: one,
+                    received: one,
+                }
+                .abi_encode(),
+                "AaveWithdrawFailed",
+            ),
+            (
+                B::InsufficientTreasury {}.abi_encode(),
+                "InsufficientTreasury",
+            ),
+            (
+                B::WithdrawTransferFailed {
+                    recipient: Address::repeat_byte(7),
+                    amount: one,
+                }
+                .abi_encode(),
+                "WithdrawTransferFailed",
+            ),
+        ];
+        for (data, name) in cases {
+            let text = format!("data: \"0x{}\"", hex::encode(&data));
+            assert_eq!(
+                decode_withdraw_revert(&text).map(|r| r.name),
+                Some(name),
+                "{text}"
+            );
+        }
     }
 }

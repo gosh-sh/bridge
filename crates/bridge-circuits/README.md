@@ -5,7 +5,7 @@ A zero-knowledge proof system bridging Acki Nacki blockchain state to Ethereum. 
 1. **Block finalization** — Acki Nacki blocks were signed by a supermajority of validators (Circuits 1A/1B + 2).
 2. **Withdrawal authenticity** — a `WithdrawalInitiated` event was committed to a finalized block (Circuit 4).
 
-> **BK-set updates are tracked off-circuit.** Rotations of the validator set are handled in the open: the verifier opens the L2/L3 leaves of the block-id Merkle tree (old/new BK-set Poseidon commitments) with two SHA-256 siblings against the `block_id` already verified by Circuit 1A/1B, then advances `storedBkSetCommitment` directly. No Circuit 3 is in the production path.
+> **BK-set updates have no circuit of their own.** A rotation of the validator set is applied by the contract's `applyBkSetUpdate`: a Circuit 1A/1B attestation of the rotation block, proven against the outgoing set, plus that block's L2/L3 leaves of the block-id Merkle tree (old/new BK-set Poseidon commitments) and the three SHA-256 siblings the contract folds back to the block's `block_id`; the contract then advances `storedBkSetCommitment` (`docs/EVM-contracts-spec.md` §7.3).
 
 Block-finalization proofs feed the contract a rolling commitment to Acki Nacki history (the layer-hash windows of `GlobalHistoryData`). Withdrawal proofs publish a single `final_root` that the contract matches against any cell in those windows.
 
@@ -144,7 +144,7 @@ Depth-4 binary SHA-256 tree with 16 leaves; `block_id` = root. This is the canon
 
 The contract:
 
-1. **`verifyBlock`** — accepts a (Circuit 1A/1B + Circuit 2) bundle per thinned key block; verifies each proof; cross-checks shared `block_id` and `bk_set_poseidon_hash`; calls `appendLayer(L, root, blockHeight)` for each layer the bundle publishes; advances `storedLastSeenBlockSeqNo` and `storedLastSeenBlockHeight`. BK-set rotations are applied separately via `applyBkSetUpdate(L2, L3, …)`, which the verifier daemon (and eventually the contract) calls with the two open SHA-256 siblings against an already-verified `block_id` — `storedBkSetCommitment` is rolled forward there, not in `verifyBlock`.
+1. **`verifyBlock`** — accepts a (Circuit 1A/1B + Circuit 2) bundle per thinned key block; verifies each proof; cross-checks shared `block_id` and `bk_set_poseidon_hash`; calls `appendLayer(L, root, blockHeight)` for each layer the bundle publishes; advances `storedLastSeenBlockSeqNo`. BK-set rotations are applied separately by `applyBkSetUpdate`, which the relayer calls with a Circuit 1A/1B attestation of the rotation block, its opened L2/L3 leaves and three SHA-256 siblings — `storedBkSetCommitment` is rolled forward there, not in `verifyBlock`.
 
 2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 11 public-instance Frs. The contract verifies the SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan. On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
 
@@ -277,7 +277,7 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 #### Step 2 — Sync `bk_set.json` to the chain's BLS pubkeys
 
-The verifier prefers GQL `bkSetUpdates` but falls back to `./bk_set.json` when the startup race loses. Mismatched keys are the #1 cause of Circuit 1A failing with ~96 BLS-pairing constraint violations.
+Both daemons read the BK set from the file at `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`); GraphQL serves only the rotation log, not the current set. Mismatched keys are the #1 cause of Circuit 1A failing with ~96 BLS-pairing constraint violations.
 
 **Local devnet** — match the cluster's `block_keeper{0..4}_bls.keys.json`. If the chain branch is unchanged since your last run, restore the backup:
 
@@ -299,15 +299,15 @@ print(json.dumps(out, indent=2))
 ' > bk_set.json
 ```
 
-**Shellnet** — GQL almost always wins (it's a live chain), so `./bk_set.json` is a safety net only. Sanity-check the endpoint:
+**Shellnet** — the file must hold the set at your bootstrap seed. `crates/bridge-prover-libraries/bk_set.shellnet.json` is the committee from before rotations began on 2026-10-08; fold the rotations up to the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)). The newest rotation the chain reports:
 
 ```bash
 curl -s -X POST -H 'Content-Type: application/json' \
-     -d '{"query":"{ bkSetUpdates(last:1){edges{node{height nodeId}}}}"}' \
+     -d '{"query":"{ blockchain { bkSetUpdates(last: 1) { edges { node { height block_id } } } } }"}' \
      https://shellnet.ackinacki.org/graphql
 ```
 
-If you have a shellnet-specific backup, copy it in; otherwise let the daemon fetch over GQL and watch for `loaded BK set from GraphQL: N signers` in the startup log.
+The startup log shows `BK-set bootstrap: mode=file, loaded N signers from <path>`.
 
 #### Step 3 — Generate keys (first run only)
 

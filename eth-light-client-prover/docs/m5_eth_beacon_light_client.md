@@ -67,7 +67,8 @@ getter on the light client. Instead the light client **writes** the proven hash
 into `USDCBridge._acceptedBlockHash` (the exact set `finalizeDeposit` already
 gates on) via the new authorized writer. The write is authorized solely by being
 the configured `_lightClient` — no human asserts canonicality, the proof does.
-This is independent of `_ownerAnchorsEnabled` (which governs the owner path); the
+This is independent of the per-chain owner-anchor map
+(`_ownerAnchorsDisabled` / `isOwnerAnchorsEnabled`); the
 owner's one remaining action is granting trust once, which on `eccUSDCBridge` is
 installing the light-client code (`setLightClientCode`).
 
@@ -86,8 +87,8 @@ deposits whose block the light client has anchored.
 ## VK_BLOB embed
 
 `bytes constant VK_BLOB` = `eth-light-client-prover/fixtures/step_vkblob/step_vk_blob.bin`
-(17 573 B, Base **v1** Blake2b, **10 PI** — 2-level committee commitment at [5] +
-attested `state_root` at [8|9], sha256 `2d66c205…7d320fab`). Rotate with:
+(12 452 B, Base **v1** Blake2b, **11 PI** — 2-level committee commitment at [5] +
+attested `state_root` at [8|9] + `gloas_fork_slot` at [10], sha256 `581910a7…67f397db`). Rotate with:
 
 ```bash
 cd eth-light-client-prover && cargo run --release --example export_step_vk_blob   # re-emit
@@ -98,9 +99,9 @@ scripts/embed_step_vk_blob.py --check ../acki-nacki/contracts/exchange/EthBeacon
 ```
 
 `bytes constant ROTATE_VK_BLOB` = `fixtures/rotate_vkblob/rotate_vk_blob.bin`
-(3 232 B, Base **v1** Blake2b, **15 PI** — 12 KZG accumulator limbs +
-[current, next, period], `accumulator_limbs=12` in the header so the opcode runs
-the decider, sha256 `037cd274…4c57b81e`). Rotate with
+(3 232 B, Base **v1** Blake2b, **16 PI** — 12 KZG accumulator limbs +
+[current, next, period, gloas_fork_slot], `accumulator_limbs=12` in the header so the opcode runs
+the decider, sha256 `4dc3f0a7…71d4cf54`). Rotate with
 `EMIT_VKBLOB=1 cargo run --release --features aggregation --example rotate_tree_n8`
 (big-RAM host), then `scripts/embed_rotate_vk_blob.py` +
 `scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`. tvm-sdk#284 **co-deploys
@@ -164,23 +165,38 @@ check, E2E runbook, audit scope, and the `finalizeDeposit` flip procedure are
 
 **Deposits in non-checkpoint blocks (31/32).** `submitUpdate` records
 `finalized_execution.block_hash` — one execution hash per epoch (~6.4 min).
-`submitAncestry(bytes[] headerRlps)` walks that checkpoint's execution
-parent-hash chain (`keccak256(header RLP)` + RLP `parentHash`, ≤ 31 parents)
-and pushes each hash into `USDCBridge._acceptedBlockHash`. Operator:
-`eth-lc-relayer submit-ancestry`.
+`submitAncestry(bytes[] headerRlps)` fills the span between two checkpoints
+that are already proven: headers oldest first, 3 to 33 of them, hashed with the
+`gosh.keccak256` builtin and linked by RLP `parentHash`. The blocks between the
+two anchors go into `USDCBridge._acceptedBlockHash`. Operator:
+`eth-lc-relayer submit-ancestry --checkpoint-hash <newer>
+--older-anchor-hash <older>`.
 
 **Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
-be submitted without the skipped ones. A skipped checkpoint **of the current
-committee** can still be late-registered: `submitUpdate` verifies the proof,
-records the exec hash (and pushes it to `USDCBridge`), and does **not** move
-the head back. Same-slot replay and already-proven hashes still revert.
+be submitted without the skipped ones. A skipped checkpoint can still be
+late-registered, signed by the committee in force or by the one a
+`submitRotate` replaced, so a skip at a period edge is not lost in the honest
+case. `submitUpdate` verifies the proof, records the exec hash (and pushes it
+to `USDCBridge`), and does **not** move the head back. Same-slot replay and
+already-proven hashes still revert. The owner hatches
+(`setCommitteeCommitment`, `reAnchorCommittee`) leave no window to the
+committee they replace.
+
+The replaced committee's window is a band of slots around the head it left,
+and **not** a binding to the period it served. The rotate proof's period is
+bound in-circuit to its attested slot and stored as `_committeePeriod`, but the
+window does not use it. When the head sits near the end of its period at the rotation the
+band reaches into the next one, and a hand-off submitted early puts the band
+wherever the sender put the head. Signing inside it still needs a
+supermajority of the retired committee's keys. Measuring the window from
+`_committeePeriod` is what would make this exact.
 
 - Head liveness does **not** require every 6.4 min update — jumping to the
   latest checkpoint is enough to keep the committee/WS clock moving.
 - 1/32 deposit coverage: catch up later in the same period by late-registering
-  the skipped checkpoint proofs. After `submitRotate` the previous committee
-  is no longer accepted (`ERR_WRONG_COMMITTEE`), so a gap that spans a
-  rotation waits for ancestry.
+  the skipped checkpoint proofs. One rotation later that window closes: the
+  committee two periods back is no longer accepted (`ERR_WRONG_COMMITTEE`),
+  so a gap older than that waits for ancestry.
 - Intended cadence (M0 §7 / M5 relayer): ≥ 1 update per period (~27 h) for
   weak-subjectivity safety, plus on-demand so a pending deposit's checkpoint
   is anchored.

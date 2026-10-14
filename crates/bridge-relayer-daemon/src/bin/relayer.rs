@@ -38,9 +38,10 @@ use alloy::{
 };
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    check_startup_drift, classify_withdraw_revert, discover_event_proofs, run_withdraw_e2e_once,
-    BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource,
-    BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs,
+    rpc_http_client, rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig,
+    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
+    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
     FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
     PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
     RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
@@ -91,6 +92,11 @@ enum Cmd {
         /// canned fixture).
         #[arg(long, default_value_t = 1)]
         max_ticks: usize,
+        /// Anchor level (1 or 2) of a bridge deployed before `bundleStride()`
+        /// existed. The stride is read from the bridge; this is the fallback,
+        /// and it must agree with the bridge when both are known.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL")]
+        anchor_level: Option<u8>,
     },
     /// Long-running daemon mode. Drives `Relayer::tick` forever with
     /// exponential backoff until SIGINT/SIGTERM. The fixture source is
@@ -126,6 +132,11 @@ enum Cmd {
         /// Backoff multiplier (next = min(current × multiplier, max)).
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
+        /// Anchor level (1 or 2) of a bridge deployed before `bundleStride()`
+        /// existed. The stride is read from the bridge; this is the fallback,
+        /// and it must agree with the bridge when both are known.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL")]
+        anchor_level: Option<u8>,
     },
     /// Read-only pre-flight check. Loads a fixture, reads the on-chain
     /// bridge anchors over RPC, then (by default) `eth_call`-simulates
@@ -329,6 +340,11 @@ enum Cmd {
         /// `verifyBlock` (there is no dry-run for the anchor advance).
         #[arg(long)]
         dry_run: bool,
+        /// Anchor level (1 or 2) of a bridge deployed before `bundleStride()`
+        /// existed. The stride is read from the bridge; this is the fallback,
+        /// and it must agree with the bridge when both are known.
+        #[arg(long, env = "BRIDGE_ANCHOR_LEVEL")]
+        anchor_level: Option<u8>,
     },
     /// Live AN→ETH daemon: GraphQL + `LiveProverDriver` → `verifyBlock` /
     /// `applyBkSetUpdate` (Alina live-integration plan).
@@ -394,9 +410,9 @@ enum Cmd {
         verifiers_dir: PathBuf,
         /// Persistent outer-PK cache directory for the `aggregate-proof`
         /// subprocess (`--pk-cache-dir`). Without this, every bundle re-runs
-        /// the full K=21 outer keygen (~3–5 min); with it, only the first
-        /// bundle pays keygen and subsequent bundles hit the disk cache
-        /// (~15–60 s). Defaults to `<params_dir>/pk_cache`.
+        /// the full K=21 outer keygen; with it, only the first bundle pays
+        /// keygen and later bundles load the key from disk. Defaults to
+        /// `<params_dir>/pk_cache`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
         /// Anchor level for the LiveProverDriver step math and bundle
@@ -526,8 +542,8 @@ enum Cmd {
         /// Optional dir to persist `proof_event_{seq:06}.json`.
         #[arg(long)]
         prover_out_dir: Option<PathBuf>,
-        /// Aggregator subprocess timeout, in seconds. Circuit-4 outer
-        /// keygen from a cold PK cache is a few minutes.
+        /// Aggregator subprocess timeout, in seconds. A cold run — the outer
+        /// keygen and the proof — took ~2 min on the test host.
         #[arg(long, default_value_t = 1800)]
         prover_timeout_s: u64,
         /// Seqno stamped into witness/proof filenames.
@@ -580,6 +596,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
+            anchor_level,
         } => smoke_fixture(
             args.state,
             fixtures_dir,
@@ -588,6 +605,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_address,
             private_key,
             max_ticks,
+            anchor_level,
         )
         .await
         .map_err(|e| {
@@ -621,6 +639,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
+            anchor_level,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -635,6 +654,7 @@ async fn main() -> anyhow::Result<()> {
                 bridge_address,
                 private_key,
                 backoff,
+                anchor_level,
             )
             .await
             .map_err(|e| {
@@ -762,6 +782,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_max_secs,
             backoff_multiplier,
             dry_run,
+            anchor_level,
         } => {
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -777,6 +798,7 @@ async fn main() -> anyhow::Result<()> {
                 Duration::from_secs(poll_secs),
                 backoff,
                 dry_run,
+                anchor_level,
             )
             .await
             .map_err(|e| {
@@ -949,6 +971,44 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// HTTP client for `--rpc-url`: each request fails after
+/// `BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60) instead of waiting on a
+/// connection that went silent.
+fn rpc_http() -> anyhow::Result<alloy::transports::http::reqwest::Client> {
+    rpc_http_client(rpc_request_timeout_from_env()?)
+}
+
+/// The bundle stride `smoke-fixture`, `daemon` and `daemon-bridge` run at:
+/// the bridge's own `bundleStride()`, or the stride of `--anchor-level` /
+/// `BRIDGE_ANCHOR_LEVEL` for a bridge deployed before that field. With neither
+/// the command does not start: Check B and the stall warning scale with the
+/// stride, and the L1 stride these commands used to assume halted them on an
+/// L2 bridge after one lost receipt.
+async fn submitting_stride<P, N>(
+    bridge: &EthBridgeClient<P, N>,
+    bridge_address: Address,
+    anchor_level: Option<u8>,
+) -> anyhow::Result<u64>
+where
+    P: Provider<N> + Clone,
+    N: alloy::network::Network,
+{
+    let configured = anchor_level
+        .map(|level| bridge_prover_lib::AnchorMode::from_level(level).map(|mode| mode.stride()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --anchor-level / BRIDGE_ANCHOR_LEVEL: {e}"))?;
+    let chain = bridge.bundle_stride().await.map_err(|e| e.to_string());
+    let stride = bridge_relayer_daemon::stride_for_submitting(chain, configured).map_err(|e| {
+        anyhow::anyhow!(
+            "bridge {bridge_address}: {e}. Set --anchor-level / BRIDGE_ANCHOR_LEVEL (1 or 2) to \
+             the level of its anchors."
+        )
+    })?;
+    info!(bundle_stride = stride, "bundle stride");
+    Ok(stride)
+}
+
+#[allow(clippy::too_many_arguments)] // CLI surface; each arg maps to a flag
 async fn smoke_fixture(
     state_path: PathBuf,
     fixtures_dir: PathBuf,
@@ -957,6 +1017,7 @@ async fn smoke_fixture(
     bridge_address: Address,
     private_key: String,
     max_ticks: usize,
+    anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
     // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
     // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
@@ -964,12 +1025,12 @@ async fn smoke_fixture(
     // signer's chain ID is derived from the RPC endpoint to mirror the
     // ethers behaviour (which called `get_chainid` before `with_chain_id`).
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe_provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe_provider.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
     let source = Arc::new(FixturesBlockSource::open(
@@ -977,7 +1038,8 @@ async fn smoke_fixture(
         verifiers_dir.as_deref(),
     )?);
 
-    let cfg = RelayerConfig::new(state_path);
+    let stride = submitting_stride(&bridge, bridge_address, anchor_level).await?;
+    let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
 
     let history = relayer
@@ -998,21 +1060,23 @@ async fn run_daemon(
     bridge_address: Address,
     private_key: String,
     backoff: BackoffConfig,
+    anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe_provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe_provider.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
 
     let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
     let source = Arc::new(FixturesBlockSource::open(
         &fixtures_dir,
         verifiers_dir.as_deref(),
     )?);
-    let cfg = RelayerConfig::new(state_path);
+    let stride = submitting_stride(&bridge, bridge_address, anchor_level).await?;
+    let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)?;
     let metrics = RelayerMetrics::new();
 
@@ -1074,7 +1138,7 @@ async fn verify_fixture(
     bridge_address: Address,
     simulate: bool,
 ) -> anyhow::Result<()> {
-    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let source = FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?;
 
@@ -1240,7 +1304,7 @@ async fn submit_verify_block(
         .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
 
     if dry_run {
-        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_block(&block).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: verifyBlock would succeed"),
@@ -1254,12 +1318,12 @@ async fn submit_verify_block(
     }
 
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge.submit_block(&block).await? {
@@ -1292,7 +1356,7 @@ async fn verify_prover_proof(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
 
-    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let on_chain = bridge.read_state().await?;
 
@@ -1656,12 +1720,12 @@ async fn run_withdraw_daemon(
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     let shutdown = shutdown_signal();
@@ -1739,19 +1803,21 @@ async fn run_bridge_daemon(
     poll_interval: Duration,
     backoff: BackoffConfig,
     dry_run: bool,
+    anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
 
     // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
     let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
     let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
-    let cfg = RelayerConfig::new(state_path);
+    let stride = submitting_stride(&prover_bridge, bridge_address, anchor_level).await?;
+    let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
 
     // Withdraw leg: shares the SAME provider (one nonce source; the two
@@ -1877,7 +1943,7 @@ async fn submit_withdraw(
     let pub_inputs = bundle.public_inputs()?;
 
     if dry_run {
-        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
@@ -1891,12 +1957,12 @@ async fn submit_withdraw(
     }
 
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge.submit_withdraw(&proof, &pub_inputs).await? {
@@ -1967,6 +2033,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         pk_cache_dir: args.pk_cache_dir,
         prover_out_dir: args.prover_out_dir,
         prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        slot_report: None,
         prover_seq_no: args.prover_seq_no,
         replay_latest: args.replay_latest,
     };
@@ -2002,7 +2069,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
     let pub_inputs = summary.proof.public_inputs()?;
 
     if args.dry_run {
-        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
@@ -2014,12 +2081,12 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
     }
 
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
@@ -2068,12 +2135,12 @@ async fn submit_bk_update(
         .ok_or_else(|| anyhow::anyhow!("no bkupd bundle for seq_no={block_seq_no}"))?;
 
     let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let chain_id = probe.get_chain_id().await?;
     let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_http(rpc_url.parse()?);
+        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
     let bridge = EthBridgeClient::new(bridge_address, provider);
 
     match bridge.submit_bk_set_update(&update).await? {
@@ -2234,14 +2301,18 @@ async fn run_daemon_live(
     // both the old 3-arm seed_policy match AND the late "startup
     // drift" bail below — a shared test bridge that a co-tester has
     // advanced now cleanly resurrects instead of aborting.
+    info!(
+        request_timeout_secs = rpc_request_timeout_from_env()?.as_secs(),
+        "daemon-live: Ethereum RPC",
+    );
     let bridge_probe = {
         let signer: PrivateKeySigner = private_key.parse()?;
-        let probe = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
         let chain_id = probe.get_chain_id().await?;
         let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
         let provider = ProviderBuilder::new()
             .wallet(wallet)
-            .connect_http(rpc_url.parse()?);
+            .connect_reqwest(rpc_http()?, rpc_url.parse()?);
         EthBridgeClient::with_scan_config(bridge_address, provider, scan)
     };
     let chain_full = bridge_probe
@@ -2264,6 +2335,37 @@ async fn run_daemon_live(
             "L2 anchoring (shellnet operational default since Deploy #12); watch for layers=2 on \
              the first Circuit 2 bundle"
         );
+    }
+    // The contract's `bundleStride` must be the stride this daemon proves at:
+    // `applyBkSetUpdate` derives the owed bundle boundary from it, so a bridge
+    // deployed with another value refuses rotations this daemon expects to
+    // land, a stall only a redeploy clears. A bridge older than the field
+    // cannot answer and still applies the old rotation gate, which this daemon
+    // does not follow; it is refused too.
+    let chain_stride = bridge_probe
+        .bundle_stride()
+        .await
+        .map_err(|e| e.to_string());
+    match bridge_relayer_daemon::check_stride_for_rotations(chain_stride, anchor_mode.stride()) {
+        Ok(()) => info!(
+            chain_stride = anchor_mode.stride(),
+            "startup: bridge bundleStride matches"
+        ),
+        Err(bridge_relayer_daemon::BundleStrideError::Mismatch {
+            bridge: chain_stride,
+            ..
+        }) => anyhow::bail!(
+            "bridge {bridge_address} has bundleStride={chain_stride}, but this daemon runs at L{} \
+             with stride {} (BRIDGE_ANCHOR_LEVEL / --anchor-level). Run the daemon at the level \
+             the bridge was deployed with, or redeploy.",
+            anchor_mode.level(),
+            anchor_mode.stride(),
+        ),
+        Err(e) => anyhow::bail!(
+            "bridge {bridge_address}: {e}. A bridge from before bundleStride reverts the \
+             rotations daemon-live applies until the daemon aborts: redeploy it (runbook §5.5). \
+             If the RPC failed, start again."
+        ),
     }
     let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {
         local: &state,
@@ -2385,8 +2487,7 @@ async fn run_daemon_live(
         // state — see the top-of-decide gate in `startup_decide.rs`.
     }
 
-    let mut cfg = RelayerConfig::new(&state_path);
-    cfg.bundle_stride = anchor_mode.stride();
+    let cfg = RelayerConfig::new(&state_path, anchor_mode.stride());
 
     // Wrap the live source so the two proof-byte fields in AnBlockData carry
     // Poseidon R15 SHPLONK calldata instead of the daemon's raw halo2 bytes.
@@ -2452,11 +2553,23 @@ where
     U: bridge_relayer_daemon::source::BkUpdateSource + 'static,
     B: bridge_relayer_daemon::bridge::BridgeClient + 'static,
 {
+    let bundle_stride = cfg.bundle_stride;
     let mut relayer = Relayer::new(cfg, source, bk_update_source, bridge)?;
 
+    // Startup audit: since the last snapshot the chain may only have moved
+    // the way Check B allows between two ticks — a transaction of ours that
+    // landed without its receipt being read, or a sibling relayer within the
+    // forward gap. A rewind, a jump, a rotation the contract could not have
+    // accepted or another contract needs an operator.
     if let Some(remembered) = relayer.state().last_observed_on_chain.clone() {
-        let actual = relayer.bridge().read_state().await?;
-        check_startup_drift(&remembered, &actual).map_err(|d| {
+        let actual = relayer.bridge().read_state_pinned().await?;
+        check_chain_monotonicity_with_stride(
+            &remembered,
+            &actual,
+            relayer.max_forward_gap(),
+            bundle_stride,
+        )
+        .map_err(|d| {
             anyhow::anyhow!(
                 "startup on-chain drift vs last_observed_on_chain: {d} — operator must reconcile"
             )

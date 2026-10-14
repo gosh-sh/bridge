@@ -112,6 +112,11 @@ pub enum TickOutcome {
     /// The deposit was parked after `--skip-after-attempts`; cursor advanced
     /// for liveness. Operator must run `finalize-one` manually.
     Skipped { deposit_id: u64, reason: String },
+    /// The circuit cannot prove this deposit. Recorded in
+    /// `unprovable_deposit_ids` and advanced past at once; there is no
+    /// bundle, so `finalize-one` cannot help. Only the EVM bridge operator
+    /// can return the funds.
+    Unprovable { deposit_id: u64, reason: String },
 }
 
 /// Single relayer instance. Holds a [`DepositSource`], a [`ProofGenerator`]
@@ -220,6 +225,24 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         timer.finish();
         let bundle = match generated {
             Ok(b) => b,
+            // The same deposit gets the same answer every time: no retry
+            // holds the queue behind it.
+            Err(RelayerError::Unprovable(reason)) => {
+                self.state.record_unprovable(target);
+                self.persist_state()?;
+                error!(
+                    deposit_id = target,
+                    reason = %reason,
+                    unprovable = ?self.state.unprovable_deposit_ids,
+                    "deposit cannot be proven; recorded in unprovable_deposit_ids and skipped at \
+                     once. finalize-one cannot help; only the EVM bridge operator can return its \
+                     funds",
+                );
+                return Ok(TickOutcome::Unprovable {
+                    deposit_id: target,
+                    reason: format!("unprovable: {reason}"),
+                });
+            },
             Err(e) => {
                 if let Some(outcome) =
                     self.record_failure(target, &format!("proof generation: {e}"))?
@@ -344,6 +367,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             target,
             self.state.attempts_since_progress,
             self.state.parked_deposit_ids.len(),
+            self.state.unprovable_deposit_ids.len(),
             self.state.scan_done_through_block,
         );
     }
@@ -922,6 +946,43 @@ mod tests {
             other => panic!("expected Skipped, got {other:?}"),
         }
         assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Finalized {
+                deposit_id: 1,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unprovable_deposit_is_skipped_at_once_even_without_a_skip_limit() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        source.insert(deposit(1));
+        let mut relayer = Relayer::new(
+            RelayerConfig {
+                poll_interval: Duration::from_millis(0),
+                ..RelayerConfig::new(dir.path().join("state.json"))
+            },
+            source,
+            Arc::new(MockProofGenerator::unprovable_on(0)),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Unprovable {
+                deposit_id,
+                reason,
+            } => {
+                assert_eq!(deposit_id, 0);
+                assert!(reason.starts_with("unprovable: "), "{reason}");
+            },
+            other => panic!("expected Unprovable, got {other:?}"),
+        }
+        assert_eq!(relayer.state().unprovable_deposit_ids, vec![0]);
+        assert!(relayer.state().parked_deposit_ids.is_empty());
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::Finalized {

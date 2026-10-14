@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Copy the ETH light-client recursive `rotate` ZKHALO2VERIFYWITHVK *consumer*
 # fixtures from eth-light-client-prover into tvm-sdk. Three-operand ABI only:
-#   vk_cell            ← rotate_vk_blob.bin   (VkBlob v1 Base, Blake2b, 15 PI)
-#   public_inputs_cell ← rotate_public_inputs.bin (15 × 32 B LE Fr:
-#                          12 KZG accumulator limbs + [current, next, period])
+#   vk_cell            ← rotate_vk_blob.bin   (VkBlob v1 Base, Blake2b, 16 PI)
+#   public_inputs_cell ← rotate_public_inputs.bin (16 × 32 B LE Fr:
+#                          12 KZG accumulator limbs + [current, next, period, gloas_fork_slot])
 #   proof_cell         ← rotate_proof.bin     (Blake2b SHPLONK, Hermez k=21)
 #
 # The root proof is a 2-to-1 recursion tree over 8 committee shards + a step

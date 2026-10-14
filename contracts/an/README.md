@@ -1,8 +1,8 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.5.0, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.4.1:
+`exchange/` — `eccUSDCBridge` at version 1.8.0, `DepositVoucher` at 1.4.0 and
+`EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -30,13 +30,22 @@ verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Two writers fill
 the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which needs a light client first; the light
-client adds and ages out hashes with `acceptBlockHashFromLightClient` and
-`forgetBlockHashFromLightClient`. `getAnchorConfig()` returns the light client
-and whether the owner may still write. No function turns owner anchors back on,
-but the owner keeps two ways around it: `updateCode` does (`onCodeUpgrade` sets
-the flag back to true), and `setLightClientCode` still replaces the light
-client afterwards.
+until `disableOwnerAnchors()`, which needs `setLightClientCode` (so
+`_lightClient` is non-zero) and a stored L1 id from `deployLightClient`
+(`ERR_LIGHT_CLIENT_UNSET` (226) until both); it does not check that the
+light-client account is Active. The call turns the owner writer off only
+for the stored L1 id (`ERR_NOT_LIGHT_CLIENT_CHAIN` (227) on any other id);
+the bridge does not read the light client's own `getConfig().l1ChainId`.
+The light client adds and ages out hashes with
+`acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient`. L2
+source chains on the deposit allowlist keep the owner writer. `getAnchorConfig()`
+returns the light client and whether the owner may still write that L1;
+`isOwnerAnchorsEnabled(chainId)` is the per-chain view;
+`getLightClientL1ChainId()` is the stored L1 id (0 until
+`deployLightClient`). No function turns owner
+anchors back on, but the owner keeps two ways around it: `updateCode` does
+(`onCodeUpgrade` leaves every chain owner-writable), and `setLightClientCode`
+still replaces the light client afterwards.
 
 | Path | Contents |
 |------|----------|
@@ -80,8 +89,11 @@ Any other compiler changes the code hash, so the `Makefile` builds each contract
 with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
 unset or the binary reports a different version.
 
-`sold` 0.81.0 reproduces `DepositVoucher.tvc`, `EthBeaconLightClient.tvc` and
-all three ABIs byte for byte, but not `eccUSDCBridge.tvc`. `sold` 0.82.0 does not
+`sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
+but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` needs more than the
+version: the source calls `gosh.keccak256`, so `SOLD_0_81` has to be a `sold`
+built against a tvm-sdk that carries the `KECCAK256` instruction. A stock
+0.81.0 emits the mnemonic its assembler does not know. `sold` 0.82.0 does not
 compile the bridge. The bridge keeps the voucher's code in its data, and the
 zerostate installs the light client's code into the bridge, so replace the
 rebuilt artefacts together.

@@ -23,12 +23,20 @@ library VerifyBlockConfigLib {
             layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
             genesisBkSetCommitment: 0,
             genesisPrevMaxLevelLayerHash: 0,
-            genesisLastSeenBlockSeqNo: 0
+            genesisLastSeenBlockSeqNo: 0,
+            bundleStride: 0,
+            genesisLastBkSetUpdateSeqNo: 0
         });
     }
 
     /// @notice Build a `VerifyBlockConfig` with the supplied verifier triple
     ///         and genesis anchors. Used by the Phase 4 verifyBlock suite.
+    /// @dev `bundleStride` defaults to `1` so that the Phase 4 unit suite
+    ///      — which rotates and verifies at consecutive single-step seqnos
+    ///      rather than at real production bundle boundaries — keeps its
+    ///      "every verifyBlock covers the previous rotation" semantics.
+    ///      Production deploys use `W·P` / `W²` (see
+    ///      `VerifyBlockConfig.bundleStride` NatSpec).
     function with(
         IPrimaryVerifier primary,
         IFallbackVerifier fallback_,
@@ -42,8 +50,34 @@ library VerifyBlockConfigLib {
             layerHashesVerifier: layerHashes,
             genesisBkSetCommitment: genesisBkSetCommitment,
             genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
-            genesisLastSeenBlockSeqNo: 0
+            genesisLastSeenBlockSeqNo: 0,
+            bundleStride: 1,
+            genesisLastBkSetUpdateSeqNo: 0
         });
+    }
+
+    /// @notice Variant of `with` that lets the caller choose the bundle
+    ///         stride — needed by the ordering suite to exercise the
+    ///         bundle-aware `PrevSlotStillOwedForBundle` gate at a
+    ///         non-trivial stride.
+    function withStride(
+        IPrimaryVerifier primary,
+        IFallbackVerifier fallback_,
+        ILayerHashesMovementVerifier layerHashes,
+        uint256 genesisBkSetCommitment,
+        uint256 genesisPrevAnchor,
+        uint64 bundleStride
+    ) internal pure returns (AckiNackiBridge.VerifyBlockConfig memory) {
+        return AckiNackiBridge.VerifyBlockConfig({
+                primaryVerifier: primary,
+                fallbackVerifier: fallback_,
+                layerHashesVerifier: layerHashes,
+                genesisBkSetCommitment: genesisBkSetCommitment,
+                genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
+                genesisLastSeenBlockSeqNo: 0,
+                bundleStride: bundleStride,
+                genesisLastBkSetUpdateSeqNo: 0
+            });
     }
 
     /// @notice All-zero `BridgeWithdrawConfig` — Circuit 4 `withdrawByProof`

@@ -126,6 +126,14 @@
 			]
 		},
 		{
+			"name": "disableOwnerAnchorsOn",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "setPaused",
 			"inputs": [
 				{"name":"paused","type":"bool"}
@@ -168,6 +176,23 @@
 			"outputs": [
 				{"name":"lightClient","type":"address"},
 				{"name":"ownerAnchorsEnabled","type":"bool"}
+			]
+		},
+		{
+			"name": "isOwnerAnchorsEnabled",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "getLightClientL1ChainId",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"uint256"}
 			]
 		},
 		{
@@ -347,7 +372,8 @@
 		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},
 		{"init":false,"name":"_lightClientCode","type":"cell"},
 		{"init":false,"name":"_lightClient","type":"address"},
-		{"init":false,"name":"_ownerAnchorsEnabled","type":"bool"},
+		{"init":false,"name":"_lightClientL1ChainId","type":"uint256"},
+		{"init":false,"name":"_ownerAnchorsDisabled","type":"map(uint256,bool)"},
 		{"init":false,"name":"_paused","type":"bool"}
 	]
 }

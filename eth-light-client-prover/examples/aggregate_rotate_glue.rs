@@ -5,7 +5,7 @@
 //! [`RotateAggregationCircuit`] snark-verifies the shard proof **and** runs
 //! `node_from_hilo` (range-checked) → `sync_committee_root_from_subtrees` →
 //! `verify_merkle_branch_either(gindex 87 | 2946)` → `combine_committee_commitment`, exposing the
-//! rotate PIs `[current_commit, next_commit, period]` after the 12-limb accumulator.
+//! rotate PIs `[current_commit, next_commit, period, gloas_fork_slot]` after the 12-limb accumulator.
 //!
 //! For N=1 the "committee" is a single 64-pubkey shard (a `merkleize` of one leaf is
 //! the leaf itself), with a self-consistent synthetic branch/state_root — a faithful
@@ -147,7 +147,6 @@ fn main() -> anyhow::Result<()> {
         9_412u64 * 8192,
         GLOAS_NOT_SCHEDULED,
         Fr::from(0x1234_5678u64),
-        9_412u64,
     );
     println!(
         "glue witness: {n} subtree root(s), attested slot={}, branch nodes={}\n",

@@ -83,8 +83,10 @@ impl ExecutionSource for InMemoryExecution {
     }
 }
 
-/// Network constants that never change for a beacon node: cached after the
-/// first successful fetch.
+/// Network constants of a beacon node. Genesis root and `SLOTS_PER_EPOCH`
+/// do not change. `gloas_fork_slot` does, when a fork that was
+/// `FAR_FUTURE_EPOCH` gets a real epoch: a cached
+/// [`GLOAS_NOT_SCHEDULED`] is therefore fetched again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainSpec {
     pub genesis_validators_root: [u8; 32],
@@ -256,10 +258,15 @@ impl HttpBeaconSource {
         Ok(body)
     }
 
-    /// Genesis root + fork schedule of the connected network (cached).
+    /// Genesis root + fork schedule of the connected network. A spec whose
+    /// Gloas slot is still [`GLOAS_NOT_SCHEDULED`] is fetched again so a
+    /// daemon started before the epoch was published picks it up without a
+    /// restart.
     pub async fn chain_spec(&self) -> Result<ChainSpec, RelayerError> {
         if let Some(s) = self.spec.lock().expect("poisoned").as_ref() {
-            return Ok(s.clone());
+            if spec_cache_holds(s) {
+                return Ok(s.clone());
+            }
         }
         let genesis = self
             .get_text(&format!("{}/eth/v1/beacon/genesis", self.base_url))
@@ -523,6 +530,12 @@ fn parse_exec_link(json: &str) -> Result<ExecLink, RelayerError> {
     })
 }
 
+/// A cached spec is only reusable once Gloas has a real slot. Until then
+/// `/eth/v1/config/spec` is fetched on every tick.
+fn spec_cache_holds(s: &ChainSpec) -> bool {
+    s.gloas_fork_slot != GLOAS_NOT_SCHEDULED
+}
+
 /// What `submitUpdate` anchors when this block is the finalized one: the
 /// payload's `block_hash` before Gloas, and from Gloas the bid's
 /// `parent_block_hash` — the bid's own `block_hash` is not proven yet.
@@ -659,6 +672,20 @@ mod tests {
             fork_version_at_epoch(&s, u64::MAX - 1),
             Some([0x90, 0, 0, 0x75])
         );
+    }
+
+    #[test]
+    fn an_unscheduled_gloas_slot_is_not_kept() {
+        let pending = ChainSpec {
+            genesis_validators_root: [0; 32],
+            fork_schedule: Vec::new(),
+            slots_per_epoch: 32,
+            gloas_fork_slot: GLOAS_NOT_SCHEDULED,
+        };
+        assert!(!spec_cache_holds(&pending));
+        let mut scheduled = pending.clone();
+        scheduled.gloas_fork_slot = 11_296_768;
+        assert!(spec_cache_holds(&scheduled));
     }
 
     #[test]

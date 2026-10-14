@@ -38,9 +38,11 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    parent chain of a checkpoint; coverage also needs both ends of the span
    proven and the span sent (`docs/eth-light-client.md` §3.4).
 8. Period boundary: prove `rotate_tree_n8` `EMIT_VKBLOB=1` on n14 against
-   the live hand-off, then `eth-lc-relayer submit-rotate`. The daemon
-   does not rotate a live period — `rotate_tree_n8` is a committed
-   fixture, and a mismatch returns `RotateRequired` without proving.
+   the live hand-off, then `eth-lc-relayer submit-rotate --state
+   ./eth-lc-relayer-state.json`. The daemon does not rotate a live
+   period — `rotate_tree_n8` is a committed fixture, and a mismatch
+   returns `RotateRequired` without proving. The next tick reads
+   `getCommitteeState` and continues; `--state` is for a restart.
 9. Owner flip, only on purpose: `eth-lc-relayer daemon --flip-owner` issues it
    after step 4, or run `eth-lc-relayer flip-owner`. After it, deposits outside
    checkpoint blocks and from L2s have no anchor writer; read

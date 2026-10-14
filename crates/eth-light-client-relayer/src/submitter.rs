@@ -76,6 +76,11 @@ pub trait AnSubmitter: Send + Sync {
     /// `(gloasForkSlot, isSet)` from `getGloasForkSlot`. The daemon proves
     /// against this value, not the beacon spec's `GLOAS_FORK_EPOCH`.
     async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError>;
+
+    /// `_committeePeriod` from `getCommitteeState`. After a manual
+    /// `submit-rotate` the daemon reads this so the next tick submits a
+    /// step instead of staying in `RotateRequired`.
+    async fn get_committee_period(&self) -> Result<u64, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -162,6 +167,12 @@ impl MockAnSubmitter {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.gloas_fork_slot = slot;
         inner.gloas_fork_slot_set = is_set;
+    }
+
+    /// What `getCommitteeState.committeePeriod` returns. Used to pretend a
+    /// manual `submit-rotate` already landed.
+    pub fn set_committee_period(&self, period: u64) {
+        self.inner.lock().expect("poisoned").period = Some(period);
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -414,6 +425,10 @@ impl AnSubmitter for MockAnSubmitter {
     async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
         let inner = self.inner.lock().expect("poisoned");
         Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
+    }
+
+    async fn get_committee_period(&self) -> Result<u64, RelayerError> {
+        Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
     }
 
     async fn set_committee_commitment(
@@ -861,6 +876,16 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         let is_set = json_bool(v.get("isSet"))
             .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing isSet"))?;
         Ok((slot, is_set))
+    }
+
+    async fn get_committee_period(&self) -> Result<u64, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getCommitteeState", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        json_u64(v.get("committeePeriod"))
+            .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))
     }
 }
 

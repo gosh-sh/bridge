@@ -175,7 +175,20 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let period = update.period();
         if let Some(last_p) = self.state.last_committee_period {
             if period > last_p {
-                return self.handle_period_jump(update, last_p, period).await;
+                // A manual `submit-rotate` lands on chain without writing
+                // this process's state. Read the contract so the next tick
+                // submits a step instead of staying in RotateRequired.
+                match self.submitter.get_committee_period().await {
+                    Ok(on_chain) if on_chain >= period => {
+                        self.state.record_rotate(on_chain);
+                        self.persist()?;
+                        info!(
+                            on_chain,
+                            last_p, "committee already rotated on chain; recording it"
+                        );
+                    },
+                    _ => return self.handle_period_jump(update, last_p, period).await,
+                }
             }
         }
 
@@ -1174,6 +1187,36 @@ mod tests {
             } => assert_eq!(period, 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `submit-rotate` is a one-shot against the contract. The running
+    /// daemon only learns the new period by reading `getCommitteeState`.
+    #[tokio::test]
+    async fn a_manual_submit_rotate_is_picked_up_on_the_next_tick() {
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        mock.set_committee_period(1);
+        match r.tick().await.unwrap() {
+            TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } => {
+                assert_eq!(finalized_slot, 8192);
+            },
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(r.state().last_committee_period, Some(1));
     }
 
     #[tokio::test]

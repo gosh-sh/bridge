@@ -75,12 +75,17 @@ assigns it when the release is tagged.
   does not start `rotate_tree_n8` for a live period that tree cannot
   prove (the tree is a committed fixture, period 9413 without an
   `update_period_*.json`; that file may be the beacon `/updates`
-  array). Prove the hand-off on n14 and `submit-rotate`. `--dry-run`
+  array). Prove the hand-off on n14 and `submit-rotate`.   `--dry-run`
   pins the Gloas slot from the beacon spec (the mock submitter has no
   contract). A live daemon reads `getGloasForkSlot` before every prove
   and uses that slot: a published `GLOAS_FORK_EPOCH` that the contract
   does not hold would otherwise spend a full step prove and come back
-  255. `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc`
+  255. A daemon that started while Gloas was still `FAR_FUTURE_EPOCH`
+  re-fetches `/eth/v1/config/spec` until the beacon publishes a real
+  slot, so it does not freeze on `u64::MAX` and stop at the fork.
+  After a manual `submit-rotate` the next tick reads
+  `getCommitteeState` and continues; `submit-rotate --state` also
+  writes `last_committee_period` for a restart. `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc`
   is rebuilt with both changes (same `sold` as before, built against a
   tvm-sdk with `KECCAK256`): the light client's code hash moves
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,

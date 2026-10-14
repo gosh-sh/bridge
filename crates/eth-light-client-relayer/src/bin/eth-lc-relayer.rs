@@ -30,6 +30,8 @@ use eth_light_client_relayer::{
     StateLock, SubprocessProofGenerator, SubprocessProverConfig,
 };
 #[cfg(feature = "live-submit")]
+use eth_light_client_relayer::RelayerState;
+#[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
 use tracing::info;
 #[cfg(feature = "live-submit")]
@@ -127,9 +129,13 @@ enum Cmd {
         an_sender: String,
     },
     /// Submit `submitRotate` from a `rotate_tree_n8` EMIT_VKBLOB directory.
+    /// Records the period in `--state` so a stopped daemon resumes; a
+    /// running daemon reads `getCommitteeState` on the next tick.
     SubmitRotate {
         #[arg(long)]
         bundle_dir: PathBuf,
+        #[arg(long, default_value = "./eth-lc-relayer-state.json")]
+        state: PathBuf,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -357,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::SubmitRotate {
             bundle_dir,
+            state,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
@@ -365,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             submit_rotate(
                 bundle_dir,
+                state,
                 an_graphql_url,
                 an_keys_path,
                 an_lc_abi_path,
@@ -788,6 +796,7 @@ async fn submit_one(
 #[cfg(not(feature = "live-submit"))]
 async fn submit_rotate(
     _bundle_dir: PathBuf,
+    _state: PathBuf,
     _an_graphql_url: String,
     _an_keys_path: String,
     _an_lc_abi_path: String,
@@ -800,6 +809,7 @@ async fn submit_rotate(
 #[cfg(feature = "live-submit")]
 async fn submit_rotate(
     bundle_dir: PathBuf,
+    state: PathBuf,
     an_graphql_url: String,
     an_keys_path: String,
     an_lc_abi_path: String,
@@ -831,6 +841,15 @@ async fn submit_rotate(
         },
         other => anyhow::bail!("submitRotate: {other:?}"),
     }
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
+    st.last_committee_period = Some(bundle.period);
+    st.rotate_pending_period = None;
+    st.save(&state)?;
+    info!(
+        state = %state.display(),
+        period = bundle.period,
+        "state file records the committee period"
+    );
     Ok(())
 }
 

@@ -24,6 +24,15 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- The prover and circuit docs describe BK-set rotation as it works:
+  `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
+  and its opened L2/L3 leaves, no circuit of its own. Gone are the
+  "Circuit 3 (BK Set Update)" future-work item, references to a plan
+  document that does not exist, and the claims that shellnet rotation is off
+  (it has been on since 2026-10-08) and that the daemons take the BK set from
+  GraphQL (they read the file at `BRIDGE_BK_SET_CONFIG`; on shellnet it must
+  be the set at the seed) — in `crates/bridge-prover-libraries/TECHNICAL_README.md`,
+  the prover daemon and circuits READMEs and `PROBE_BK_UPDATES.md`.
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
   is part of replay protection, and that an upgrade changing it has to ship a
   block cutoff in the same code so past deposits stop going through. The
@@ -91,8 +100,6 @@ assigns it when the release is tagged.
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
   `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
   fields.
-### Breaking Changes
-
 - **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
   id `deployLightClient` stored can be flipped.** The previous bool
   `_ownerAnchorsEnabled` turned the owner writer off for every source
@@ -129,6 +136,51 @@ assigns it when the release is tagged.
   consecutive proven anchors sit within one ancestry span: accepted
   checkpoints are often two or more epochs apart, and `eth-lc-relayer`
   still leaves the flip off unless started with `--flip-owner`.
+- **`daemon`, `daemon-bridge` and `smoke-fixture` take the bundle stride
+  from the bridge.** They read `bundleStride()`; for a bridge deployed
+  before that field, set `--anchor-level` / `BRIDGE_ANCHOR_LEVEL` (1 or 2)
+  to the level of its anchors, or the command does not start (`bridge …:
+  the bridge cannot report bundleStride() (…) and no anchor level is
+  configured`). When both are known they must agree. These commands used to
+  assume the L1 stride: on an L2 bridge Check B let `last_seen` move 4 096
+  instead of 65 536, so one `verifyBlock` whose receipt was lost stopped
+  the anchor leg for good, and the stall warning came after 16 polls. The
+  server template `scripts/ursus/bridge-relayer.env.example` sets
+  `BRIDGE_ANCHOR_LEVEL=2`. `RelayerConfig::new` takes the stride; it has
+  no default.
+- **`VerifyBlockConfig` gained `uint64 genesisLastBkSetUpdateSeqNo`.** All
+  callers that build the struct directly (`DeployShellnetE2EBridge`,
+  `DeployRealBridge`, `DeployReuseVerifiersBridge`,
+  `DeployGenesisCursorBridge`, `DeployTestBridge`, `GenDepositSetup`, and
+  any custom deploy script) must supply the new field. The constructor
+  writes it verbatim to `storedLastBkSetUpdateSeqNo`, seeding the
+  on-chain bk-update cursor past rotations already folded into
+  `genesisBkSetCommitment`. On chains with no historical rotations in
+  the GQL retention window (fresh devnet, local) pass `0`; on a chain
+  whose GQL still exposes pre-bootstrap rotations, pass the highest
+  such `bkSetUpdates.height` — `compute_bridge_anchors` now emits it as
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  sources it in automatically via `vm.envOr(..., 0)` in
+  `DeployShellnetE2EBridge.s.sol`. Without this
+  cursor, a daemon cold-started against such a chain halts on its first
+  tick with `prover out of sync` because the drain picks up a historical
+  rotation whose pre-state no longer matches the live BK-set commitment.
+- **`BootstrapSeed` schema bumped v2 → v3** (added
+  `last_bk_set_update_seq_no: u64`). v2 seed files fail
+  `BootstrapSeed::load` with the same schema-version diagnostic as the
+  v1→v2 bump. Manual migration mirrors it:
+  `mv state state.pre_v3_$(date +%Y%m%d_%H%M%S) && mkdir state`, then
+  cold-restart the prover daemon so it writes a fresh v3 seed. The
+  verifier daemon then picks up the new file on its next startup; the
+  startup drift check will refuse to open the daemon until seed and
+  state agree.
+- **`compute_bridge_anchors` emits a new env line
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO`.**
+  `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  persists it into the generated `$CFG_DIR/env` next to
+  `BRIDGE_BOOTSTRAP_SEQNO`. Operators do not need to set the var by
+  hand; the forge script already consumes it through `vm.envOr(..., 0)`.
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block
@@ -549,11 +601,31 @@ assigns it when the release is tagged.
 - `applyBkSetUpdate(N)` no longer waits for `verifyBlock` to cover N.
   It stores the outgoing set in `storedPrevBkSetCommitment` and
   `verifyBlock` accepts that set for `blockSeqNo <= N`. A second
-  rotation is blocked until the layer cursor covers the previous N
-  (`VerifyBlockLagBehindRotation`; the first field is that previous N,
-  not the seq being applied). Off-boundary rotations can apply as soon
-  as they are discovered. Two rotations with no bundle target in
-  `[N1, N2]` (inclusive) stall permanently and stop `verifyBlock` too.
+  rotation is blocked only when applying it would cross an unverified
+  bundle boundary — the contract computes
+  `nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride`
+  and reverts `PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary)`
+  when `nextOwedBoundary <= storedLastBkSetUpdateSeqNo`. Rotation bursts
+  that land before the next unverified bundle boundary apply
+  back-to-back, and so does the first rotation past it; a further
+  rotation is refused until `verifyBlock` advances the layer cursor past
+  that boundary. No permanent stall. `daemon-live` does not run into the
+  revert: while a rotation it applied past the boundary is still waiting
+  for its prover ack, the relayer does not pick up the next one, and
+  applies it right after the next `verifyBlock`. Nothing is logged for
+  the waiting rotation.
+
+- **`AckiNackiBridge` constructor adds `bundleStride` to
+  `VerifyBlockConfig`.** The field is the prover's bundle width in block
+  seq-nos — L1 (W·P) = 1024, L2 (W²) = 16384 (with W=128, P=8) — and is
+  immutable after construction; it feeds the `applyBkSetUpdate`
+  boundary invariant above. When the verifier triple is wired a zero
+  `bundleStride` is rejected (`InvalidBundleStride`); when
+  `verifyBlock` is disabled the field is unused and may be zero.
+  Switching anchor level (L1 ↔ L2) requires a redeploy. Deploy scripts
+  read `BUNDLE_STRIDE` from the env; the shellnet-E2E deploy script
+  (`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`)
+  sets it from `LEVEL=1|2` automatically.
 
 - **`aggregate-proof` self-checks the verifier source, so every verifiers
   directory now needs `<name>.sol` beside `<name>.bin`.** It used to compile
@@ -780,6 +852,22 @@ assigns it when the release is tagged.
   a different Gloas fork slot) and 256 (fork slot not set). `eth-lc-relayer
   set-gloas-fork-slot --slot …` is the operator call; a fresh deploy rejects
   every submission with 256 until it runs.
+- **`daemon-live` checks the bridge's `bundleStride` at startup.** It reads
+  `bundleStride()` and refuses to start when it differs from the stride of
+  its anchor level: `bridge … has bundleStride=…, but this daemon runs at
+  L… with stride … (BRIDGE_ANCHOR_LEVEL / --anchor-level)`. A bridge
+  deployed with a different `BUNDLE_STRIDE` reverts rotations the daemon
+  expects to land, and only a redeploy clears that. A bridge deployed
+  before the field existed is refused too (`bridge …: the bridge cannot
+  report bundleStride() (…)`): it still applies the old rotation gate
+  (`VerifyBlockLagBehindRotation`), which the daemon no longer follows, so
+  its rotations would revert until the daemon aborted.
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key
+  block (`compute_bridge_anchors --seed-seqno`; it must be a multiple of
+  the level's stride and at or below chain head) instead of the newest
+  boundary at deploy time (`--at-head`). Use it with a BK-set file built
+  for the same seed.
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
   bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
@@ -1175,6 +1263,70 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **A retried submission reuses its aggregated proof.** `daemon-live` ran
+  `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
+  refused send or missing receipt cost one more aggregation, and a rotation
+  deferred until the next `verifyBlock` was aggregated on every tick. The
+  calldata of the last bundle and of the last rotation is now kept with a
+  digest of every input it was built from, and reused while the inputs
+  match: `aggregated_source: same proof and inputs as the last attempt;
+  reusing its aggregated calldata`. A contract rejection and a successful
+  submission drop it, so a refused proof is aggregated anew.
+- **The relayer no longer reports an ordinary wait between bundles as a
+  stall.** `WARN block source still has no data; relayer is stalled` came
+  after 16 polls without a new bundle, which at L2 (about 90 minutes between
+  bundles) was most of every wait. The threshold now scales with the bundle
+  stride, 16 polls per L1-sized stride (256 at L2, about four hours), and the
+  warning reads `no new bundle for much longer than a bundle interval; check
+  the prover and the chain`. Until then every 16th poll logs `INFO waiting
+  for the next bundle`.
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh` takes
+  `BUNDLE_STRIDE` from `compute_bridge_anchors`.** `compute_bridge_anchors`
+  prints `BUNDLE_STRIDE`, `AnchorMode::stride()` for its `--level`: the value
+  `daemon-live` checks against `bundleStride()` at startup. The script
+  deploys with it instead of the 1024 and 16384 it had written in, and
+  ignores a `BUNDLE_STRIDE` set in the caller's shell.
+- **A chain that stays below the relayer's last confirmed write is reported
+  after 10 minutes.** `daemon-live` retries a `_rewound` signal as
+  read-after-write lag (`WARN transient RPC read-after-write lag — will
+  retry next tick`) for at most 10 minutes, then reports it as drift:
+  `ERROR chain still below our last confirmed write — not RPC lag (a reorg
+  that dropped our transaction?)`, counted in `tick_errors_total` and
+  `history_drift_detected_total`, retried with backoff like every other
+  drift. Before, it was retried silently and without limit, so a reorg that
+  dropped the relayer's transaction never surfaced.
+- **The shellnet L2 bridge was redeployed.** `AckiNackiBridge` is now
+  `0xb733a57c393214254506bde7e9950a1b57e06fb4` (Sepolia block 11910592),
+  seeded at shellnet seq_no 23887872 (`BRIDGE_BOOTSTRAP_SEQNO`) with
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO=23886566`;
+  `crates/bridge-prover-libraries/L2_config/env` now points at it instead
+  of `0x8d9190666128ab897c5abd8c107239a197e08467`. The bridges deployed for
+  the BK-rotation tests in between, `0x9f993772af91d9b1e61d210eaae903eb43655498`
+  (Deploy #8) and `0x00e4b69d25f4526c768552ea217dad85e4b7963a`, are retired
+  too. A relayer
+  set up for the old address needs the new `BRIDGE_ADDRESS` and
+  `BRIDGE_DEPLOY_BLOCK`, and a cold start with its `relayer-state.json`
+  and `state/*.json` archived first (§3.5 of
+  [the live relayer runbook](crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md)).
+- **The bridge deploy and `daemon-live`'s cold start refuse a BK-set file
+  that is not the chain's set at the seed.** `compute_bridge_anchors`
+  (run by `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`)
+  and the daemon's bootstrap compare the file's Poseidon commitment with
+  the one the seed block records (block-id tree leaf 2, or leaf 3 when the
+  seed block is itself the last rotation at or below the seed) and stop
+  with
+  `BK-set commitment … does not match the chain's … at seed seq_no=…`.
+  Before, a file built for an earlier height deployed without complaint,
+  and the daemon failed only at the first rotation with
+  `prover out of sync`. Build the file for the exact seed:
+  `seed_prover_bk_set --cap-height <seed>`, then `jq .pubkeys_hex`.
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  broadcasts legacy transactions at a fixed 2 gwei** (`--legacy
+  --with-gas-price 2000000000`) with a 12× gas-limit estimate
+  (`--gas-estimate-multiplier 1200`). The deploying
+  account must cover the larger upfront reservation (~0.6 ETH for the
+  whole bundle on Sepolia); on a congested network, raise the price in
+  the script.
 - **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
   the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
   cold run on the test host, system-wide and sampled every 5 s; the CLI
@@ -1241,8 +1393,11 @@ assigns it when the release is tagged.
   catch up.
 - **The shellnet profile's `RPC_URL` is `https://rpc.sepolia.ethpandaops.io`**
   (was `https://ethereum-sepolia-rpc.publicnode.com`); the relayer-side
-  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common` is
-  `https://sepolia.gateway.tenderly.co` (was publicnode too). The
+  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common` is the same
+  endpoint (was publicnode too): Tenderly's public gateway, which has the
+  history too, answered `daemon-live`'s `applyBkSetUpdate` sends with
+  `-32005` (rate limit), even one at a time. The server template
+  `scripts/ursus/bridge-relayer.env.example` points at it too. The
   window-heights read needs `eth_getLogs` back to the bridge's oldest held
   anchor; publicnode keeps only the newest ~10 000 blocks of logs and
   answers an empty set for older ones, so on it the read comes up short
@@ -1250,8 +1405,7 @@ assigns it when the release is tagged.
   withdrawal is refused in preflight. `deposit` needs every receipt of a
   block and `eth_getRawTransactionByHash` from the same `RPC_URL`, and the
   raw transactions Tenderly's public gateway does not serve (`deposit` is
-  refused in preflight on it, as it is in a shell that sourced
-  `shellnet.common`); the EF DevOps endpoint serves both, with full log
+  refused in preflight on it); the EF DevOps endpoint serves both, with full log
   history, and takes a 10 000-block span. When a short log set is met and
   the deploy block itself answers with no logs, the error also says the RPC
   may not serve history that far back, and no re-read is spent on it; with
@@ -1344,18 +1498,17 @@ assigns it when the release is tagged.
   `_calldata.bin` that is not exactly 3 680 B is refused. 3 648 B is the
   pre-binding blob.
 
-- The AN→ETH relayer applies `applyBkSetUpdate` as soon as the previous
-  rotation is covered, even if the layer cursor is still behind this N.
-  It only defers a second rotation, and it does not abort the tick.
-  After an apply, `daemon-live` does **not** ack the live prover until
-  the next bundle target (the driver's stride: 1024 at L1, 16384 at L2)
-  is above N, so the outgoing set can still sign `verifyBlock` for
-  `seqNo <= N`. `daemon-bridge` does not apply rotations. Two rotations
-  with no bundle target in `[N1, N2]` (inclusive) cannot land: only one
-  outgoing set is stored, and the stall is permanent. AN must announce
-  a rotation before the bundle at the same seq is proven — a bundle at
-  N acked first bakes `last_seen = N` and the rotation becomes
-  unsatisfiable.
+- The AN→ETH relayer applies `applyBkSetUpdate` even if the layer cursor
+  is still behind this N, under the bundle-aware rule above: rotations
+  before the next unverified bundle boundary, and the first one past it,
+  go out back-to-back; the next one waits until that bundle is verified.
+  It does not abort the tick. After an apply, `daemon-live` does **not**
+  ack the live prover until the next bundle target (the driver's stride:
+  1024 at L1, 16384 at L2) is above N, so the outgoing set can still
+  sign `verifyBlock` for `seqNo <= N`. `daemon-bridge` does not apply
+  rotations. AN must announce a rotation before the bundle at the same
+  seq is proven — a bundle at N acked first bakes `last_seen = N` and
+  the rotation becomes unsatisfiable.
 
 - **The halo2 circuit crates are vendored under `crates/bridge-circuits/`;
   building the prover or the CLI no longer needs read access to a private
@@ -1511,6 +1664,78 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **`daemon-live` no longer jams after a burst of BK rotations when a
+  receipt read fails.** The relayer's per-tick comparison with its last
+  snapshot of the bridge (Check B) rejected a second rotation while the
+  previous one was ahead of the layer cursor
+  (`last_bk_set_update_seq_no_uncovered`), although `applyBkSetUpdate`
+  accepts it whenever the next bundle boundary is above the previous N.
+  The relayer's own sends refreshed the snapshot and hid this, but a
+  rotation that landed while its receipt read failed left every later tick
+  failing with `chain drift`, and the startup audit refused a restart until
+  `relayer-state.json` was edited by hand. Check B now applies the
+  contract's rule, and the startup audit accepts the moves Check B accepts
+  instead of requiring an exact match. It also no longer bounds how far the
+  rotation cursor moves: rotations follow Acki Nacki's epochs, not bundles,
+  so a rotation that landed without its receipt could be more than four
+  bundles past the remembered one (after a deploy with a genesis cursor of
+  0 the first one always is), and every tick and every restart failed with
+  `last_bk_set_update_seq_no_jumped`.
+- **A failed RPC call no longer stops `daemon-live`.** A `verifyBlock` or
+  `applyBkSetUpdate` whose send the RPC refused (rate limit, connection,
+  nonce) or whose receipt never came is logged as `… not confirmed — RPC
+  failure, not counted toward the abort threshold` and retried; the next
+  tick re-reads the chain, so a transaction that landed anyway is picked
+  up. Ticks that find no bundle yet count in `polls_since_progress`, a new
+  field of `relayer-state.json`, instead of `attempts_since_progress`.
+  Before, the ~90-minute wait for an L2 bundle ran that counter far past
+  the abort threshold of 3, so the first failed send after a wait stopped
+  the daemon with `daemon: stuck — hard aborting`. Reverts the node
+  simulates (`execution reverted`) and failed post-submit checks still
+  count, and still stop the daemon at the third.
+- **An RPC request that gets no answer no longer holds the relayer.** The
+  Ethereum RPC client of every `relayer` command had no timeout, so a
+  request on a connection that went silent waited until the OS dropped the
+  connection. `daemon-live` once waited 9.5 minutes on one
+  `eth_blockNumber`, and a BK rotation that had landed on Acki Nacki waited
+  with it. A request now fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`):
+  the daemon logs `tick failed, will back off` and retries, and a send that
+  times out is an RPC failure, not counted toward the abort threshold.
+- **Check B allows four bundles of the daemon's own stride between two
+  snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
+  L2 bundle the relayer did not see land — its own `verifyBlock` whose
+  receipt read failed, or a sibling relayer's — failed every later tick
+  with `last_seen_block_seq_no_jumped`.
+- **The relayer reads the bridge's state at one block.** The per-tick read
+  and the startup audit take `eth_blockNumber` and pin all five view calls
+  to it; on a load-balanced RPC the calls could land on backends at
+  different heights and report a false `bk_set_commitment_without_update`.
+- **`applyBkSetUpdate` waits at most 180 s for its receipt and is checked
+  after it**, as `verifyBlock` already was. Before, a dropped transaction
+  hung the daemon on the receipt indefinitely, and a transaction mined but
+  reverted was taken as applied. Now the chain must hold the submitted N
+  and commitment at the receipt's block, or the outcome is a revert
+  (`post-submit drift: …`).
+- `daemon-live` logged `ERROR chain monotonicity drift — halting` and
+  failed its ticks seconds after a successful `applyBkSetUpdate` or
+  `verifyBlock` tx on load-balanced public RPCs (observed on publicnode's
+  Sepolia gateway). It did not exit: every failed tick was logged as
+  `tick failed, will back off` and retried, counting toward
+  `tick_errors_total` and `history_drift_detected_total`.
+  The post-write snapshot used receipt-pinned reads, but the next tick's
+  consistency check read `latest` through the balancer and sometimes
+  landed on a backend that had not yet propagated the write — producing
+  a `last_seen_block_seq_no_rewound` or `last_bk_set_update_seq_no_rewound`
+  signal that the tick treated as a timeline divergence. Those
+  two rewind signals are now classified as transient RPC
+  read-after-write lag: the tick returns `NotYetAvailable` with a `WARN
+  transient RPC read-after-write lag — will retry next tick` log, counts
+  toward `not_yet_available_total` instead of `history_drift_detected_total`,
+  and the daemon continues on the next backoff. Jumps, orphan commitments
+  and uncovered rotations keep their fatal semantics — a stale backend
+  serves an older snapshot, not a different timeline. Validated on the
+  Sepolia Deploy #8 shellnet replay: five BK rotations and one bundle
+  applied in 24 minutes with no false-positive drift errors.
 - **A zero owner key can no longer be installed in `eccUSDCBridge` or
   `EthBeaconLightClient`.** Both gate their admin calls on
   `msg.pubkey() == _ownerPubkey`, and an unsigned external message carries

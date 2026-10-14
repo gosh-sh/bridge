@@ -9,9 +9,11 @@
 //!   (e.g. another relayer instance advanced the bridge past us).
 //! - `last_attempt_seqno` records the seqno of the most recent attempt,
 //!   regardless of outcome. Used for metrics and to spot persistent failures.
-//! - `attempts_since_progress` increments on every non-success outcome and
-//!   resets after a successful submission; it caps the relayer's willingness to
-//!   spin on one block.
+//! - `attempts_since_progress` increments on every rejected or refused
+//!   submission and resets after a successful one; it caps the relayer's
+//!   willingness to spin on one block. Polls that find no block yet count in
+//!   `polls_since_progress` instead, and a submission whose outcome the RPC
+//!   never confirmed counts in neither.
 //!
 //! Concurrency note: the relayer is intended to be a single-process
 //! daemon; the state file is overwritten atomically (write-temp-then-
@@ -33,9 +35,14 @@ pub struct RelayerState {
     /// Most recent seqno attempted (may be ahead of `last_processed_seqno`
     /// if the latest attempt failed).
     pub last_attempt_seqno: Option<u64>,
-    /// Consecutive non-success outcomes for the current target. Reset
-    /// to 0 on every accepted block.
+    /// Consecutive rejected or refused submissions for the current target.
+    /// Reset to 0 on every accepted block.
     pub attempts_since_progress: u32,
+    /// Consecutive polls that found no block to submit yet. Reset to 0 on
+    /// every accepted block. Not counted toward the abort threshold: waiting
+    /// for the next bundle is the normal state between bundles.
+    #[serde(default)]
+    pub polls_since_progress: u32,
 
     /// Last BK-update seqno applied on-chain.
     #[serde(default)]
@@ -80,6 +87,13 @@ impl RelayerState {
         self.last_processed_seqno = Some(seqno);
         self.last_attempt_seqno = Some(seqno);
         self.attempts_since_progress = 0;
+        self.polls_since_progress = 0;
+    }
+
+    /// Mark a poll that found no block for `seqno` yet.
+    pub fn record_poll(&mut self, seqno: u64) {
+        self.last_attempt_seqno = Some(seqno);
+        self.polls_since_progress = self.polls_since_progress.saturating_add(1);
     }
 
     /// Mark an attempt that did not advance the on-chain anchor (could be
@@ -161,5 +175,18 @@ mod tests {
         assert_eq!(loaded.last_processed_seqno, Some(1));
         assert!(loaded.last_observed_on_chain.is_none());
         assert_eq!(loaded.last_bk_update_processed_seqno, None);
+        assert_eq!(loaded.polls_since_progress, 0);
+    }
+
+    #[test]
+    fn polls_do_not_touch_the_attempt_counter() {
+        let mut s = RelayerState::default();
+        s.record_poll(5);
+        s.record_poll(5);
+        assert_eq!(s.polls_since_progress, 2);
+        assert_eq!(s.attempts_since_progress, 0);
+        assert_eq!(s.last_attempt_seqno, Some(5));
+        s.record_progress(5);
+        assert_eq!(s.polls_since_progress, 0);
     }
 }

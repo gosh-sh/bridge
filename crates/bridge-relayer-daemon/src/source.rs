@@ -55,6 +55,11 @@ pub trait BlockSource: Send + Sync {
     async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
         None
     }
+
+    /// The contract rejected the proof submitted for `seq_no`: drop any copy
+    /// of it the source kept, so the next attempt builds it again. Default
+    /// no-op (sources that keep nothing).
+    async fn discard_rejected_proof(&self, _seq_no: u64) {}
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -575,6 +580,10 @@ pub trait BkUpdateSource: Send + Sync {
     async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<(), RelayerError> {
         Ok(())
     }
+
+    /// The contract rejected the `applyBkSetUpdate` proof for `seq_no`: drop
+    /// any copy of it the source kept. Default no-op.
+    async fn discard_rejected_bk_update_proof(&self, _seq_no: u64) {}
 }
 
 #[async_trait]

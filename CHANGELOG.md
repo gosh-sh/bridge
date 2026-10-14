@@ -50,11 +50,13 @@ assigns it when the release is tagged.
   `ackinacki-bridge withdraw` can take hours, and `withdrawByProof`
   reverts `whenNotPaused`.   After leftover deposits finalize, Acki Nacki
   is paused again so no one can burn. The stand is paused on deploy
-  and trusted only after the operator deposit is already on it, then
-  untrusted. Circulating ECC[3] stays frozen until teardown restores
-  `unpause()` on the live bridge, Acki Nacki, its trust bit, and its
-  AN→ETH relayer (a burn the stand already paid is then payable
-  there again). `EVM-contracts-spec.md` §7.2 says a withdrawal proof
+  and is never trusted: the operator deposit is not finalized, so no
+  faucet USDC becomes ECC[3]. Circulating ECC[3] stays frozen until
+  teardown restores `unpause()` on the live bridge, Acki Nacki, its
+  trust bit, the AN→ETH relayer, `deposit-relayer`, and the
+  `shellnet-l2.env` values (a burn the stand already paid is then
+  payable there again). If anyone finalized a stand deposit, teardown
+  does not restore payouts. `EVM-contracts-spec.md` §7.2 says a withdrawal proof
   cannot be replayed on another chain, but on one chain any unpaused
   bridge with the same identity pays it. The launch runbook's supply-cap
   check uses Python 256-bit arithmetic. `preflight` writes
@@ -333,11 +335,14 @@ assigns it when the release is tagged.
   Pause the stand on deploy. Briefly reopen Acki Nacki so leftover
   live-bridge deposits can finalize (stand paused and not trusted),
   then pause it again. Keep `deposit-relayer` on the old bridge until
-  those deposits finalize, then stop it. Trust the stand only after
-  the operator deposit is already on the paused stand, finalize that
-  deposit, then untrust. The steps are in `docs/aave-yield.md`,
-  *Launching a Sepolia stand with AAVE*. Without `USE_AAVE` the script
-  behaves as before.
+  those deposits finalize, then stop it. Do not trust the stand and
+  do not finalize — faucet USDC must not become ECC[3]. The steps are
+  in `docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*. The
+  script archives leftover `L<LEVEL>_config/relayer-state.json` on
+  every run (AAVE or not). Without `USE_AAVE` it still writes the
+  same env and still starts `daemon-live` in its "Next" block; with
+  `USE_AAVE`/`DEMO_AAVE` that block tells the operator to pause and
+  not to start the relayer.
 - **A demo AAVE pool for Sepolia stands.** New contract
   `contracts/ethereum/src/DemoAavePool.sol` answers the AAVE V3 Pool calls the
   bridge makes (`supply`, `withdraw`, `getReserveData`) over any token, holds

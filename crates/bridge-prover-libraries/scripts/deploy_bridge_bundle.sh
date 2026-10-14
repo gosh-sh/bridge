@@ -179,7 +179,7 @@ EOF
 echo ">>> Wrote $CFG_DIR/env"
 if [[ "$USE_AAVE" == true || "$DEMO_AAVE" == true ]]; then
   echo ">>> AAVE test stand: the live bridge must already be paused (docs/aave-yield.md, step 2)."
-  echo ">>> Trust $BRIDGE_ADDRESS on the AN bridge with setTrustedL1Bridge before the first deposit; untrust it in teardown."
+  echo ">>> Pause $BRIDGE_ADDRESS now (cast send pause). Do not trust it. Do not finalize any deposit into it. Do not start daemon-live until after step 7 (docs/aave-yield.md)."
 fi
 
 # ─── 5. Archive stale state so the new bridge cold-start remains recoverable ─
@@ -199,7 +199,16 @@ if [[ -f "$CFG_DIR/relayer-state.json" ]]; then
   echo ">>> Archived leftover relayer-state.json"
 fi
 
-cat <<EOF
+if [[ "$USE_AAVE" == true || "$DEMO_AAVE" == true ]]; then
+  cat <<EOF
+
+>>> Done. Next (docs/aave-yield.md):
+    cast send $BRIDGE_ADDRESS 'pause()' --rpc-url \$SEPOLIA_RPC_URL --private-key \$OWNER_PK
+    # do not trust this address; do not finalize; do not start daemon-live
+    # leftover OLD_BRIDGE finalize is step 5, still on the old bridge
+EOF
+else
+  cat <<EOF
 
 >>> Done. Next:
     cd $PROVER_DIR
@@ -207,3 +216,4 @@ cat <<EOF
     set -a && source "\$BRIDGE_CONFIG_DIR/env" && set +a
     ./target/release/relayer --state "\$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live
 EOF
+fi

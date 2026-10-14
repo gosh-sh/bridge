@@ -252,9 +252,9 @@ teardown.
 cast send $BRIDGE 'pause()' --rpc-url $RPC --private-key $OWNER_PK
 ```
 
-Do not trust the stand yet. Trust is only the operator-finalize window
-in step 7, after the stand is paused again with only that deposit on
-it.
+Do not trust the stand. A finalize would mint ECC[3] from faucet USDC,
+and teardown would make that ECC[3] redeemable as Circle USDC on
+`OLD_BRIDGE`. Step 7 deposits only so `supplyToAave` has a treasury.
 
 ### 4. Point the AN→ETH relayer at the stand
 
@@ -272,15 +272,15 @@ In `/etc/gosh-bridge-relayer/shellnet-l2.env` set `BRIDGE_ADDRESS`,
 withdraw values you deployed with,
 `EXPECTED_USDC_ADDRESS=0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` and
 `EXPECTED_AAVE_POOL=0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`, then run
-`preflight` and start the service. `preflight` writes
+`preflight` **only**. Do not start the service. `preflight` writes
 `$BRIDGE_STATE_DIR/bridge_address` and stops if **that file** names another
 bridge. It does not look at leftover `L2_config/relayer-state.json`.
 `daemon-live` does, and it will drift if that file is still from
 `OLD_BRIDGE` — that is why the whole `L2_config` is moved aside above,
 not only `state/`. `verifyBlock` is `whenNotPaused`: leave the stand
-paused and the relayer stopped until after step 7 (stand untrusted,
-Acki Nacki paused). Then you may unpause the stand for `verifyBlock`
-only; pause it again afterwards. Do not trust it for that.
+paused and the relayer stopped. After step 7 (stand still untrusted,
+Acki Nacki paused) you may unpause the stand for `verifyBlock` only;
+pause it again afterwards. Do not trust it for that.
 
 ### 5. Finish leftover deposits, then pause Acki Nacki again
 
@@ -320,12 +320,20 @@ $AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
   -m setTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<OLD_BRIDGE>","allowed":false}'
 ```
 
-### 7. Fund the stand, then trust it only to finalize that deposit
+### 7. Fund the stand. Do not finalize.
 
-Unpause the stand, deposit, pause it again **before** trusting. Then
-the only deposit that can mint is the operator's:
+Unpause, deposit the operator's test USDC, pause again. **Do not trust
+the stand and do not finalize.** A finalize would mint ECC[3] from
+faucet USDC; teardown would then make that ECC[3] redeemable as Circle
+USDC on `OLD_BRIDGE`. `supplyToAave` / `harvestYield` are `onlyOwner`
+and not `whenNotPaused` — they run on the paused stand and do not mint.
+
+`deposit()` is public during the unpause window. Count deposits before
+and after; if `depositCounter()` moved by more than one, leave the
+stand untrusted forever.
 
 ```bash
+BEFORE=$(cast call $BRIDGE 'depositCounter()(uint256)' --rpc-url $RPC)
 cast send $BRIDGE 'unpause()' --rpc-url $RPC --private-key $OWNER_PK
 FAUCET=0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D   # permissionless, 10 000 USDC per call
 cast send $FAUCET 'mint(address,address,uint256)' $USDC $WALLET 10000000000 \
@@ -334,21 +342,12 @@ cast send $USDC 'approve(address,uint256)' $BRIDGE 10000000000 --rpc-url $RPC --
 cast send $BRIDGE 'deposit(uint256,int8,bytes32)' 10000000000 0 <AN account> \
   --rpc-url $RPC --private-key $WALLET_PK
 cast send $BRIDGE 'pause()' --rpc-url $RPC --private-key $OWNER_PK
-
-$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
-  -m setTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<stand address>","allowed":true}'
-$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
-  -m setPaused '{"paused":false}'
-# finalize that deposit only
-$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
-  -m setPaused '{"paused":true}'
-$AN callx --abi $ABI --addr $AN_BRIDGE --keys <owner keys of the AN bridge> \
-  -m setTrustedL1Bridge '{"chainId":"11155111","l1Bridge":"<stand address>","allowed":false}'
+AFTER=$(cast call $BRIDGE 'depositCounter()(uint256)' --rpc-url $RPC)
+# AFTER must be BEFORE+1. A larger jump is a third-party deposit; do not trust.
 ```
 
-Never leave the stand trusted while Acki Nacki is open and
-`deposit()` is live. `supplyToAave` / `harvestYield` are `onlyOwner`
-and not `whenNotPaused` — run them on the paused stand:
+Never trust the stand. Never point `deposit-relayer` or the user CLI
+at it. Then:
 
 ```bash
 cast send $BRIDGE 'supplyToAave(uint256)' $(cast max-uint) --rpc-url $RPC --private-key $OWNER_PK
@@ -362,15 +361,19 @@ Collect yield with `harvestYield(accruedYield())` (below), after pointing
 ### 8. Tear the stand down
 
 The stand is already paused and untrusted. If you unpaused it for
-`verifyBlock`, pause it again.
+`verifyBlock`, pause it again. If anyone finalized a stand deposit,
+**stop** — that ECC[3] is unbacked Circle-USDC debt on `OLD_BRIDGE`.
+Keep Acki Nacki paused and do not restore payouts.
 
-To restore circulating ECC[3] payouts on `OLD_BRIDGE` you need all four
-of the pieces the earlier steps took apart:
+Otherwise restore every piece the earlier steps took apart:
 
 1. `unpause()` on `OLD_BRIDGE` — `withdrawByProof` is `whenNotPaused`.
 2. `setPaused(false)` on Acki Nacki — holders cannot `initiateWithdrawal` while it is paused.
 3. `setTrustedL1Bridge(11155111, OLD_BRIDGE, true)` — step 6 removed it; new deposits otherwise finalize nowhere.
-4. Restore the AN→ETH relayer's `L2_config.$OLD_BRIDGE` (step 4 moved it) so anchors keep moving.
+4. Move the stand's `L2_config` aside, then restore `L2_config.$OLD_BRIDGE` (step 4).
+5. Revert `/etc/gosh-bridge-relayer/shellnet-l2.env` to the `OLD_BRIDGE` values (step 4 overwrote `BRIDGE_ADDRESS`, `BRIDGE_DEPLOY_BLOCK`, `BRIDGE_BOOTSTRAP_SEQNO`, `EXPECTED_*`, `EXPECTED_USDC_ADDRESS`, `EXPECTED_AAVE_POOL`).
+6. Restart `deposit-relayer` on `OLD_BRIDGE` (step 6 stopped it).
+7. Start the AN→ETH relayer on the restored `L2_config`.
 
 A burn the stand already paid is then payable again on `OLD_BRIDGE` —
 the nullifier map is per contract. Do not unpause `OLD_BRIDGE` while
@@ -410,11 +413,12 @@ mainnet) deploys a `DemoAavePool` over Circle USDC, owned by the `PRIVATE_KEY`
 address, and wires the bridge to it and its `DemoAToken`. The script prints the pool
 address and writes it into `L2_config/env` as `EXPECTED_AAVE_POOL`; set that and
 `EXPECTED_USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` in the relayer's
-runtime env. Steps 3–8 of the section above apply unchanged: pause the
-stand on deploy, do not trust it until the operator deposit is already
-on a paused stand, briefly reopen Acki Nacki for leftover `OLD_BRIDGE`
-deposits and for that one finalize, then untrust. Do not move the
-ETH→AN relayer or the user CLI onto the stand.
+runtime env — not the AAVE `0x94a9…` / `0x6Ae4…` pair from step 4. Pause
+the stand on deploy. Do not trust it. Do not finalize. Step 5 still
+reopens Acki Nacki only for leftover `OLD_BRIDGE` deposits. Step 7
+funds from [faucet.circle.com](https://faucet.circle.com) into Circle
+USDC, not the AAVE faucet. Do not move the ETH→AN relayer or the user
+CLI onto the stand.
 
 After deposits, supply, pay yield in, and collect it. `USDC` is Circle's token here,
 not the AAVE test USDC of step 1:

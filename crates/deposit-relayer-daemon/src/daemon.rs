@@ -440,6 +440,7 @@ mod tests {
             deployment: None,
             force_state: false,
             skip_after_attempts: None,
+            outstanding_backoff_secs: 0,
             scan_cursor: None,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()

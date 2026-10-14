@@ -75,8 +75,8 @@ assigns it when the release is tagged.
   the existing voucher code by passing an empty `userCell`. The voucher code
   and its replay-protection addresses are unchanged.
 
-  `eccUSDCBridge` retains main's version 1.8.0. Its `.tvc` and ABI are rebuilt with `sold`
-  0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
+  `eccUSDCBridge` retains main's version 1.8.0. Its `.tvc` and ABI are rebuilt
+  with `sold` 0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
   Existing event formats and call signatures stay the same. Use the release
   `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
   wire format of `WithdrawalInitiated` even when the event ABI is identical,

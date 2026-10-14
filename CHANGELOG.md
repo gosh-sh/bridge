@@ -37,6 +37,37 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The light client's constructor takes no arguments; the bridge initializes
+  it with a second call.** `EthBeaconLightClient` gains
+  `initialize(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod)`, which
+  only `USDCBridge` may call and only while the owner key is still zero
+  (`ERR_ALREADY_INITIALIZED`, 257). `deployLightClient` takes the same
+  arguments as before and now sends two messages: the deploy, then
+  `initialize` — in that order, so it is the first message the new account
+  sees. Nothing about the settings travels in the state init any more.
+
+  `onlyOwnerPubkey` on the client now also refuses while the owner key is
+  zero. An unsigned external message carries `msg.pubkey() == 0`, so without
+  that check every admin call would pass in the window between the deploy and
+  `initialize`.
+
+  **Both Acki Nacki artefacts are rebuilt, and they have to be rebuilt
+  together.** The bridge builds the client's *initial data cell* from the
+  layout compiled into it (`abi.encodeStateInit({contr: EthBeaconLightClient,
+  varInit: {}, …})`), so any change to the client's state variables makes a
+  previously built bridge binary unable to deploy it. That is not theoretical:
+  the artefact pair in this repository had drifted — the bridge binary was
+  built before the light client gained `_gloasForkSlot` and
+  `_gloasForkSlotSet`, so it built a 310-byte data cell where the client's code
+  expected 318, and on a network raised from those artefacts the client's
+  constructor aborted with `cell underflow` (exit 9), leaving an account with
+  code and no storage at the derived address. Code hashes now:
+  `eccUSDCBridge` `4d853f11…`, `EthBeaconLightClient` `29bb4233…`.
+
+  `contracts/an/EthBeaconLightClient.sol`, the standalone copy the
+  shellnet-shadow kit deploys with `tvm-cli`, keeps its four-argument
+  constructor; `deploy-contract.sh` is unchanged.
+
 - **The beacon light client's step and rotate verification keys are rotated
   for Gloas (ePBS), and both proofs gain a public input.** From Gloas the
   beacon `finalized_checkpoint`, the sync committees and the execution block

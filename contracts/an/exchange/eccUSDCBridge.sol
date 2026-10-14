@@ -634,6 +634,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             }),
             value: 10 vmshell,
             flag: 1
+        }();
+        EthBeaconLightClient(_lightClient).initialize{
+            value: 2 vmshell,
+            flag: 1
         }(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod);
         _lightClientL1ChainId = l1ChainId;
     }

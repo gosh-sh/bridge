@@ -129,6 +129,7 @@ contract EthBeaconLightClient {
     uint16 constant ERR_ZERO_PUBKEY        = 254;
     uint16 constant ERR_WRONG_FORK_SLOT    = 255;
     uint16 constant ERR_FORK_SLOT_UNSET    = 256;
+    uint16 constant ERR_ALREADY_INITIALIZED = 257;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -305,8 +306,12 @@ contract EthBeaconLightClient {
     uint64 _provenQueueTail;
 
     modifier onlyOwnerPubkey() {
-        require(msg.pubkey() == _ownerPubkey, ERR_NOT_OWNER);
+        require(_ownerPubkey != 0 && msg.pubkey() == _ownerPubkey, ERR_NOT_OWNER);
         _;
+    }
+
+    constructor() accept {
+        require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
     }
 
     /// @param pubkey                — owner key for admin / bootstrap ops.
@@ -319,13 +324,14 @@ contract EthBeaconLightClient {
     ///                                belongs to (recorded as-is on this owner
     ///                                path; `submitRotate` stores the period
     ///                                the rotate proof carries).
-    constructor(
+    function initialize(
         uint256 pubkey,
         uint256 l1ChainId,
         uint256 bootstrapCommittee,
         uint64  bootstrapPeriod
-    ) accept {
+    ) public accept {
         require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
+        require(_ownerPubkey == 0, ERR_ALREADY_INITIALIZED);
         require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;

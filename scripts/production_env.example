@@ -11,9 +11,17 @@ WIRE_VERIFY_BLOCK=true
 WIRE_WITHDRAW_BY_PROOF=false         # Phase 2 only — requires BridgeWithdrawalAggregatorVerifier.bin
 START_PAUSED=true
 
-# Genesis anchors (must match first block you will verify)
+# Genesis anchors (must match first block you will verify) — printed by
+# compute_bridge_anchors; its GENESIS_SEED_SEQNO goes into
+# GENESIS_LAST_SEEN_BLOCK_SEQNO (left unset it defaults to 0, which bricks the deploy)
 GENESIS_BK_SET_COMMITMENT=0x...
 GENESIS_PREV_MAX_LEVEL_LAYER_HASH=0x...
+GENESIS_LAST_SEEN_BLOCK_SEQNO=...
+GENESIS_LAST_BK_SET_UPDATE_SEQNO=0   # last rotation <= the seed; 0 on a chain without rotations
+
+# Bundle width in block seq_nos; must match the relayer's anchor level:
+# 16384 (W²) for L2. Required whenever WIRE_VERIFY_BLOCK=true.
+BUNDLE_STRIDE=16384
 
 # Optional: override SHPLONK artefact paths (relative to contracts/ethereum/)
 # SHPLONK_BIN_PRIMARY=verifiers/PrimaryAggregatorVerifier.bin

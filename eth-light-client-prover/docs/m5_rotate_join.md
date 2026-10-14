@@ -69,7 +69,7 @@ function setCommitteeCommitment(uint256 commitment, uint64 period) // owner, boo
     public;                                                        //   (gated by _ownerRotationEnabled)
 function disableOwnerRotation() public;                           // owner, one-way
 function reAnchorCommittee(uint256 commitment, uint64 period) public; // owner, WS hatch after disable
-function getCommitteeState() external view returns (uint256, uint64, bool, uint64);
+function getCommitteeState() external view returns (uint256, uint256, uint64, bool, uint64);
 ```
 
 `submitRotate` logic:
@@ -77,12 +77,28 @@ function getCommitteeState() external view returns (uint256, uint64, bool, uint6
 1. parse 3 PIs;
 2. `require(_currentCommittee != 0)` (fail-closed) and
    `require(currentCommitteeCommitment == _currentCommittee)` — chain to trusted;
-3. `require(period > _committeePeriod)` — monotonic anti-replay;
+3. `require(nextCommitteeCommitment != _currentCommittee)` (`ERR_SELF_ROTATION`,
+   253) — a hand-off has to move the committee; the proof for `next == current`
+   exists at every period boundary and would only evict `_prevCommittee`;
 4. `tvm.accept()` then `require(gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof))`;
-5. advance `_currentCommittee = next`, `_committeePeriod = period`; emit `CommitteeRotated`.
+5. keep the replaced commitment in `_prevCommittee` with the head it left in
+   `_prevCommitteeHeadSlot`, advance `_currentCommittee = next`, and store
+   `_committeePeriod = finalizedSlot / 8192 + 1`; emit `CommitteeRotated` with
+   that derived period.
+
+There is **no test on the proof's `period`**. The circuit loads it as a free
+witness (`rotate_aggregation.rs`: `ctx.load_witness`), so it is a number the
+sender types: monotonicity over it let a genuine hand-off labelled
+`type(uint64).max` close the rotation path for good, and a ceiling tied to the
+head only shrinks the label that does it. Replay is prevented by the committee
+chain in step 2 — after a rotation the same proof no longer matches — so the
+label is kept out of the decision and out of storage. A hand-off submitted
+early is therefore accepted, which freezes the head until the chain reaches the
+new committee's period; binding the hand-off to a slot inside the circuit is
+what would fix that (gosh-sh/bridge-audit#118).
 
 The **trust-reduction switch** mirrors `USDCBridge`'s
-`_ownerAnchorsEnabled`/`disableOwnerAnchors`: while `_ownerRotationEnabled` the
+per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotationEnabled` the
 owner may `setCommitteeCommitment` directly (checkpoint bootstrap / syncing before
 the VkBlob exists); `disableOwnerRotation()` clears it permanently, leaving
 `submitRotate` the only permissionless writer; `reAnchorCommittee` is the

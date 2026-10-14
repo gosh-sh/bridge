@@ -1070,11 +1070,35 @@ impl LiveProverDriver {
         // callers can distinguish "still waiting for chain head" from
         // "bootstrap machinery itself failed".
         let bk_hash_bytes: [u8; 32] = self.bk_set_commitment_fr.to_repr();
-        let seed = crate::bootstrap::fetch_from_node(
+        // Highest `bkSetUpdates.height ≤ seed_seqno` — the cold-start
+        // cursor past which the bk-update drain begins. The on-chain
+        // constructor received the same value via
+        // `genesisLastBkSetUpdateSeqNo`; both sides must agree or the
+        // startup drift check fires on the next restart. Returns `0` on
+        // chains with no historical rotations in the GQL retention window.
+        let last_bk_set_update_seqno = bridge_gql_fetcher::bk_set_fetcher::highest_bk_set_update_le(
+            &self.gql,
+            seed_seqno,
+        )
+        .await
+        .map_err(|e| DriverError::Bootstrapping {
+            seed_seqno,
+            chain_head_seqno: chain_head,
+            source: e,
+        })?;
+        info!(
+            "live_driver: cold-start bk-update cursor resolved — last_bk_set_update_seq_no={} (seed_seqno={})",
+            last_bk_set_update_seqno, seed_seqno,
+        );
+        // Verified variant: a bootstrap BK set that is not the chain's set at
+        // the seed fails here, naming both commitments, instead of at the
+        // first drained rotation.
+        let seed = crate::bootstrap::fetch_from_node_verified(
             &self.gql,
             seed_seqno,
             bk_hash_bytes,
             self.cfg.anchor_mode.level(),
+            last_bk_set_update_seqno,
         )
         .await
         .map_err(|e| DriverError::Bootstrapping {

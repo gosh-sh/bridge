@@ -286,9 +286,8 @@ async fn main() -> anyhow::Result<()> {
 
         // Bk-set-update bundles take priority over layer bundles. The
         // prover writes them with `seq_no` set to the bk-update block's
-        // seq_no; if a layer bundle also targets the same key block (case
-        // B in `docs/bk_set_update_no_circuit3_plan.md` §8), the contract
-        // must rotate the commitment BEFORE the next layer bundle arrives
+        // seq_no; if a layer bundle also targets the same key block, the
+        // contract must rotate the commitment BEFORE the next layer bundle arrives
         // — but the layer bundle for the bk-update block itself uses the
         // OLD commitment and so still verifies. Processing bk-update
         // bundles first preserves that order without extra coordination.

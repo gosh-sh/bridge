@@ -18,13 +18,17 @@ use eth_light_client_prover::signing::{
     beacon_header_root, native_beacon_header_root, native_sync_committee_signing_root,
     sync_committee_signing_root, FORK_VERSION_FULU, MAINNET_GENESIS_VALIDATORS_ROOT,
 };
+use eth_light_client_prover::fork::{
+    FINALITY_BRANCH_LEN, FINALIZED_ROOT_GINDEX_ELECTRA, FINALIZED_ROOT_GINDEX_GLOAS,
+};
 use eth_light_client_prover::ssz::{
-    bytes_root, load_bytes, load_node, merkleize, native_bytes_root, native_merkle_branch_root,
-    native_merkleize, verify_merkle_branch, Node,
+    branch_for_either, bytes_root, load_bytes, load_node, merkleize, native_bytes_root,
+    native_merkle_branch_root, native_merkleize, verify_merkle_branch,
+    verify_merkle_branch_either, Node,
 };
 use eth_light_client_prover::committee::native_sync_committee_root;
 use gosh_sha256_chip::Sha256Chip;
-use halo2_base::gates::RangeChip;
+use halo2_base::gates::{RangeChip, RangeInstructions};
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::utils::testing::base_test;
 use halo2_base::utils::ScalarField;
@@ -32,6 +36,7 @@ use halo2_base::{AssignedValue, Context};
 use serde_json::Value;
 
 const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
+const SEPOLIA_GLOAS_FIXTURE: &str = include_str!("../fixtures/sepolia/finality_update_gloas.json");
 
 // Electra/Fulu generalized indices (M0 spec §3).
 const FINALIZED_ROOT_GINDEX: u64 = 169;
@@ -241,4 +246,51 @@ fn bytes_root_and_merkleize_building_blocks() {
             assert_eq!(b.value().get_lower_32() as u8, native_merkle[i], "merkle byte {i}");
         }
     });
+}
+
+/// The fork-selected branch gadget on both fixtures: the mainnet Fulu finality
+/// branch at 169 (`use_b = 0`, padded to 9 nodes) and the Sepolia Gloas one at
+/// 735 (`use_b = 1`). With the wrong selector each must fail.
+fn either_finality_case(fixture_json: &str, gloas: bool, claim_gloas: bool, expect_ok: bool) {
+    let v: Value = serde_json::from_str(fixture_json).unwrap();
+    let attested = header(&v, "attested_header");
+    let finalized = header(&v, "finalized_header");
+    let gindex = if gloas { FINALIZED_ROOT_GINDEX_GLOAS } else { FINALIZED_ROOT_GINDEX_ELECTRA };
+    let branch = branch_for_either(&finality_branch(&v), gindex, FINALITY_BRANCH_LEN).unwrap();
+
+    base_test().k(20).lookup_bits(19).expect_satisfied(expect_ok).run(
+        |ctx: &mut Context<Fr>, range: &RangeChip<Fr>| {
+            let chip = Sha256Chip::new(range);
+            let (slot, proposer, parent, state, body) = load_header(ctx, &finalized);
+            let leaf = beacon_header_root(&chip, ctx, &slot, &proposer, &parent, &state, &body);
+            let branch_nodes: Vec<Node<Fr>> = branch.iter().map(|b| load_node(ctx, b)).collect();
+            let root = load_node(ctx, &attested.state_root);
+            let use_b = ctx.load_witness(Fr::from(claim_gloas as u64));
+            verify_merkle_branch_either(
+                &chip,
+                range.gate(),
+                ctx,
+                &leaf,
+                &branch_nodes,
+                FINALIZED_ROOT_GINDEX_ELECTRA,
+                FINALIZED_ROOT_GINDEX_GLOAS,
+                use_b,
+                &root,
+            );
+        },
+    );
+}
+
+#[test]
+#[ignore = "in-circuit SHA-256; run on n14"]
+fn either_branch_verifies_fulu_and_gloas_finality() {
+    either_finality_case(FIXTURE, false, false, true);
+    either_finality_case(SEPOLIA_GLOAS_FIXTURE, true, true, true);
+}
+
+#[test]
+#[ignore = "in-circuit SHA-256; run on n14"]
+fn either_branch_rejects_the_wrong_fork() {
+    either_finality_case(FIXTURE, false, true, false);
+    either_finality_case(SEPOLIA_GLOAS_FIXTURE, true, false, false);
 }

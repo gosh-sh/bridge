@@ -7,7 +7,7 @@ runtime image and keeps large proving data in bind mounts.
 This directory contains no live credentials or deployment addresses. Filled
 `.env`, deployment env and runtime env files must remain outside Git. Contract
 deployment and anchor derivation are covered by
-[`../../docs/live_relayer_bridge_verifyBlock_runbook.md`](../../docs/live_relayer_bridge_verifyBlock_runbook.md).
+[`../../docs/live_relayer_bridge_runbook.md`](../../docs/live_relayer_bridge_runbook.md#3-case-1--fresh-deploy-and-cold-start).
 
 ## Runtime model
 

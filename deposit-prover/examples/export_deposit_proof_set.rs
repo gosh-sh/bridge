@@ -4,13 +4,14 @@
 //!
 //! ## Universal VK (one deployed VK verifies every deposit proof)
 //!
-//! The deposit circuit is fixed-size: every variable-length input is padded to a
-//! constant width in-circuit (the receipt + MPT proof via axiom-eth's
+//! The deposit circuit is fixed-size: every variable-length input is padded to
+//! a constant width in-circuit (the receipt + MPT proof via axiom-eth's
 //! `value_max_byte_len` / `max_depth`; the block header via
 //! `circuit_v2::MAX_BLOCK_HEADER_BYTES`). So the constraint system — hence the
-//! verifying key — is identical for every block. We therefore run keygen **once**
-//! (from the first input), pinning `EthCircuitParams` + `RlcThreadBreakPoints` +
-//! the proving key, then build every prover circuit with those same pinned params
+//! verifying key — is identical for every block. We therefore run keygen
+//! **once** (from the first input), pinning `EthCircuitParams` +
+//! `RlcThreadBreakPoints` + the proving key, then build every prover circuit
+//! with those same pinned params
 //! + break points. Each proof is self-verified against the one shared VK
 //! (`pk.get_vk()`), which is exactly the VkBlob written to disk.
 //!
@@ -24,7 +25,7 @@
 //! `fetch_deposit_data`). Run with:
 //!   cargo run --release --example export_deposit_proof_set -- \
 //!     --set-dir fixtures/deposit_10proofs --count 10 \
-//!     --degree 18 --max-data-byte-len 256 --max-log-num 20
+//!     --degree 18 --max-data-byte-len 2048 --max-log-num 20
 
 use std::{fs, path::Path};
 
@@ -33,19 +34,13 @@ use axiom_eth::utils::{
     eth_circuit::{EthCircuitImpl, EthCircuitParams},
 };
 use clap::Parser;
-
-/// Pinned keccak promise-loader capacity. Pinning the loader capacity removes
-/// the data-dependent drift in `num_advice_per_phase` (receipt / MPT keccak
-/// work scales with depth), and dropping the `contract_address` in-circuit
-/// constant in `circuit_v2.rs` removes the address dependence — together the VK
-/// is witness-independent (no axiom-eth fork change needed; see
-/// the VK's witness-independence requirement). Must be >= every real deposit's
-/// `used_capacity` (measured: 1-node=11, 3-node=21, ~5/node; max_depth=10 worst
-/// case ~55-60), so 64 leaves a safe margin and still fits k=18.
-const FIXED_KECCAK_CAPACITY: usize = 64;
 use deposit_prover::{
-    circuit_v2::DepositEventCircuitV2,
-    prover::{get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig},
+    circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    halo2_tvm_bundle::{CircuitShape, VkBlob},
+    prover::{
+        get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig,
+        FIXED_KECCAK_CAPACITY, PRODUCTION_DEGREE,
+    },
     types::DepositProofInput,
 };
 use halo2_base::{
@@ -66,7 +61,6 @@ use halo2_base::{
         },
     },
 };
-use deposit_prover::halo2_tvm_bundle::{CircuitShape, VkBlob};
 use rand::rngs::OsRng;
 use snark_verifier_sdk::CircuitExt;
 
@@ -80,11 +74,11 @@ struct Args {
     /// Number of proofs (`proof_00`..`proof_{count-1}`).
     #[arg(long, default_value = "10")]
     count: usize,
-    #[arg(long, default_value = "18")]
+    #[arg(long, default_value_t = PRODUCTION_DEGREE)]
     degree: u32,
-    #[arg(long, default_value = "256")]
+    #[arg(long, default_value_t = PRODUCTION_MAX_DATA_BYTE_LEN)]
     max_data_byte_len: usize,
-    #[arg(long, default_value = "20")]
+    #[arg(long, default_value_t = PRODUCTION_MAX_LOG_NUM)]
     max_log_num: usize,
 
     /// Source network (not baked into VK; proven chainId is a PI). Must be in
@@ -118,7 +112,8 @@ fn main() -> anyhow::Result<()> {
         topic_num_bounds: (0, 4),
     };
 
-    let srs = load_kzg_params_from_trusted_setup(args.degree).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let srs =
+        load_kzg_params_from_trusted_setup(args.degree).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // ---- Keygen ONCE from proof_00, pinning params + break points + pk ----
     println!("Keygen (once) from proof_00/input.json ...");
@@ -189,7 +184,14 @@ fn main() -> anyhow::Result<()> {
             _,
             Blake2bWrite<Vec<u8>, G1Affine, Challenge255<G1Affine>>,
             _,
-        >(&srs, &pk, &[circuit], &[&[inst0.as_slice()]], OsRng, &mut transcript)
+        >(
+            &srs,
+            &pk,
+            &[circuit],
+            &[&[inst0.as_slice()]],
+            OsRng,
+            &mut transcript,
+        )
         .map_err(|e| anyhow::anyhow!("proof_{i:02}: create_proof: {e:?}"))?;
         let proof = transcript.finalize();
 
@@ -225,6 +227,9 @@ fn main() -> anyhow::Result<()> {
         ok += 1;
     }
 
-    println!("\nRESULT: {ok}/{} proofs verify against the single shared VkBlob.", args.count);
+    println!(
+        "\nRESULT: {ok}/{} proofs verify against the single shared VkBlob.",
+        args.count
+    );
     Ok(())
 }

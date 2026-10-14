@@ -14,10 +14,22 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub enum SubmitOutcome {
-    Accepted { tx_hash: Option<[u8; 32]> },
+    Accepted {
+        tx_hash: Option<[u8; 32]>,
+    },
     AlreadyOnHead,
-    Rejected { reason: String },
-    Pending { reason: String },
+    Rejected {
+        reason: String,
+    },
+    Pending {
+        reason: String,
+    },
+    /// The call never reached the chain — the endpoint was unreachable, the
+    /// request timed out. Nothing was sent and nothing was paid for, so a
+    /// caller that budgets paid attempts must not count this.
+    NotSent {
+        reason: String,
+    },
 }
 
 #[async_trait]
@@ -55,6 +67,20 @@ pub trait AnSubmitter: Send + Sync {
         commitment: [u8; 32],
         period: u64,
     ) -> Result<SubmitOutcome, RelayerError>;
+
+    /// Owner `setGloasForkSlot(slot)`. Required once after deploy / after
+    /// `updateCode` with an empty user cell; until it runs, every
+    /// `submitUpdate` / `submitRotate` reverts 256.
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError>;
+
+    /// `(gloasForkSlot, isSet)` from `getGloasForkSlot`. The daemon proves
+    /// against this value, not the beacon spec's `GLOAS_FORK_EPOCH`.
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError>;
+
+    /// `_committeePeriod` from `getCommitteeState`. After a manual
+    /// `submit-rotate` the daemon reads this so the next tick submits a
+    /// step instead of staying in `RotateRequired`.
+    async fn get_committee_period(&self) -> Result<u64, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -88,11 +114,27 @@ struct MockInner {
     proven: HashSet<[u8; 32]>,
     period: Option<u64>,
     reject: bool,
+    reject_ancestry: bool,
+    not_send_ancestry: bool,
+    error_ancestry: bool,
+    ancestry_attempts: u32,
     reject_flip: bool,
     owner_anchors_enabled: bool,
     owner_rotation_enabled: bool,
     re_push_count: u32,
     ancestry_count: u32,
+    /// A state file to read when `re_push_anchor` is called, and what it held.
+    /// The one observable that tells apart "the span was persisted with the
+    /// head" from "the span was persisted after this call": a tick dropped at
+    /// this await must already have the span on disk.
+    watch_state: Option<std::path::PathBuf>,
+    state_at_re_push: Option<String>,
+    /// Answers for the next `submit_rotate` calls, oldest first. Empty means
+    /// the default behaviour.
+    rotate_script: std::collections::VecDeque<SubmitOutcome>,
+    gloas_fork_slot: u64,
+    gloas_fork_slot_set: bool,
+    gloas_gets: u32,
 }
 
 impl MockAnSubmitter {
@@ -103,13 +145,95 @@ impl MockAnSubmitter {
                 proven: HashSet::new(),
                 period: None,
                 reject: false,
+                reject_ancestry: false,
+                not_send_ancestry: false,
+                error_ancestry: false,
+                ancestry_attempts: 0,
                 reject_flip: false,
                 owner_anchors_enabled: true,
                 owner_rotation_enabled: true,
                 re_push_count: 0,
                 ancestry_count: 0,
+                watch_state: None,
+                state_at_re_push: None,
+                rotate_script: std::collections::VecDeque::new(),
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
+                gloas_fork_slot_set: true,
+                gloas_gets: 0,
             }),
         }
+    }
+
+    /// What `getGloasForkSlot` returns. Default is set / `GLOAS_NOT_SCHEDULED`.
+    pub fn set_gloas_fork(&self, slot: u64, is_set: bool) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.gloas_fork_slot = slot;
+        inner.gloas_fork_slot_set = is_set;
+    }
+
+    /// What `getCommitteeState.committeePeriod` returns. Used to pretend a
+    /// manual `submit-rotate` already landed.
+    pub fn set_committee_period(&self, period: u64) {
+        self.inner.lock().expect("poisoned").period = Some(period);
+    }
+
+    pub fn gloas_gets(&self) -> u32 {
+        self.inner.lock().expect("poisoned").gloas_gets
+    }
+
+    /// Answer the next `submit_rotate` calls with these outcomes, in order.
+    /// Lets a test play the one sequence that matters: the first attempt times
+    /// out, the chain ran it anyway, and the retry is refused against the
+    /// committee that is already current.
+    pub fn script_rotate(&self, outcomes: Vec<SubmitOutcome>) {
+        self.inner.lock().expect("poisoned").rotate_script = outcomes.into();
+    }
+
+    /// Read this state file when `re_push_anchor` is called and keep what it
+    /// said, so a test can see what was already durable at that moment.
+    pub fn watch_state_file(&self, path: std::path::PathBuf) {
+        self.inner.lock().expect("poisoned").watch_state = Some(path);
+    }
+
+    pub fn state_at_re_push(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .state_at_re_push
+            .clone()
+    }
+
+    /// Refuse only `submitAncestry`, so an update still lands.
+    /// Fail the `submitAncestry` call itself, the way a transport error does
+    /// after the message has already gone out.
+    pub fn error_ancestry(&self) {
+        self.inner.lock().expect("poisoned").error_ancestry = true;
+    }
+
+    /// Answer `submitAncestry` the way a wait timeout does: the chain may or
+    /// may not have run it.
+    pub fn not_send_ancestry(&self) {
+        self.inner.lock().expect("poisoned").not_send_ancestry = true;
+    }
+
+    pub fn reject_ancestry(&self) {
+        self.inner.lock().expect("poisoned").reject_ancestry = true;
+    }
+
+    /// Every `submitAncestry` reaching the mock, refused ones included.
+    pub fn ancestry_attempts(&self) -> u32 {
+        self.inner.lock().expect("poisoned").ancestry_attempts
+    }
+
+    /// Pretend an earlier submission already moved the head to `slot`, the
+    /// way a landed message whose confirmation was lost looks to the daemon.
+    pub fn set_head_slot(&self, slot: u64) {
+        self.inner.lock().expect("poisoned").head_slot = Some(slot);
+    }
+
+    /// Stop refusing `submitAncestry`.
+    pub fn accept_ancestry(&self) {
+        self.inner.lock().expect("poisoned").reject_ancestry = false;
     }
 
     pub fn rejecting() -> Self {
@@ -199,6 +323,9 @@ impl AnSubmitter for MockAnSubmitter {
         bundle: &RotateProofBundle,
     ) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if let Some(scripted) = inner.rotate_script.pop_front() {
+            return Ok(scripted);
+        }
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "ZKHALO2VERIFYWITHVK rejected the rotate proof".into(),
@@ -219,19 +346,31 @@ impl AnSubmitter for MockAnSubmitter {
         &self,
         header_rlps: &[Vec<u8>],
     ) -> Result<SubmitOutcome, RelayerError> {
-        let checkpoint = crate::header_rlp::link_headers(header_rlps)?;
+        let (older, newer) = crate::header_rlp::link_headers(header_rlps)?;
         let mut inner = self.inner.lock().expect("poisoned");
-        if inner.reject {
+        inner.ancestry_attempts += 1;
+        if inner.error_ancestry {
+            return Err(RelayerError::other(
+                "submitAncestry: connection reset by peer",
+            ));
+        }
+        if inner.not_send_ancestry {
+            return Ok(SubmitOutcome::NotSent {
+                reason: "wait timed out".into(),
+            });
+        }
+        if inner.reject || inner.reject_ancestry {
             return Ok(SubmitOutcome::Rejected {
                 reason: "submitAncestry rejected".into(),
             });
         }
-        if !inner.proven.contains(&checkpoint) {
+        if !inner.proven.contains(&older) || !inner.proven.contains(&newer) {
             return Ok(SubmitOutcome::Rejected {
                 reason: "ERR_UNKNOWN_CHECKPOINT".into(),
             });
         }
-        for rlp in &header_rlps[1..] {
+        let last = header_rlps.len() - 1;
+        for rlp in &header_rlps[1..last] {
             inner.proven.insert(crate::header_rlp::keccak256(rlp));
         }
         inner.ancestry_count += 1;
@@ -242,6 +381,9 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if let Some(path) = inner.watch_state.clone() {
+            inner.state_at_re_push = std::fs::read_to_string(&path).ok();
+        }
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "rePushAnchor rejected".into(),
@@ -270,6 +412,30 @@ impl AnSubmitter for MockAnSubmitter {
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
+    }
+
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "setGloasForkSlot rejected".into(),
+            });
+        }
+        inner.gloas_fork_slot = slot;
+        inner.gloas_fork_slot_set = true;
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
+
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.gloas_gets += 1;
+        Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
+    }
+
+    async fn get_committee_period(&self) -> Result<u64, RelayerError> {
+        Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
     }
 
     async fn set_committee_commitment(
@@ -378,39 +544,30 @@ mod set_committee_tests {
 #[cfg(test)]
 mod ancestry_submit_tests {
     use super::*;
-    use crate::header_rlp::{keccak256, link_headers};
-
-    fn two_headers() -> (Vec<u8>, Vec<u8>) {
-        let mut p = vec![0xf8, 33, 0xa0];
-        p.extend(std::iter::repeat_n(0x01, 32));
-        let p_hash = keccak256(&p);
-        let mut c = vec![0xf8, 33, 0xa0];
-        c.extend_from_slice(&p_hash);
-        (c, p)
-    }
+    use crate::header_rlp::keccak256;
 
     #[tokio::test]
-    async fn mock_submit_ancestry_admits_parents() {
-        let (c, p) = two_headers();
-        let ckpt = keccak256(&c);
-        let parent = keccak256(&p);
+    async fn mock_submit_ancestry_admits_the_blocks_between_the_anchors() {
+        let chain = crate::header_rlp::dummy_linked_chain(4);
         let mock = MockAnSubmitter::accepting();
-        mock.mark_proven(ckpt);
-        match mock.submit_ancestry(&[c.clone(), p.clone()]).await.unwrap() {
+        mock.mark_proven(keccak256(&chain[0]));
+        mock.mark_proven(keccak256(&chain[3]));
+        match mock.submit_ancestry(&chain).await.unwrap() {
             SubmitOutcome::Accepted {
                 ..
             } => {},
             other => panic!("{other:?}"),
         }
-        assert!(mock.is_proven(&parent));
-        assert_eq!(link_headers(&[c, p]).unwrap(), ckpt);
+        assert!(mock.is_proven(&keccak256(&chain[1])));
+        assert!(mock.is_proven(&keccak256(&chain[2])));
     }
 
     #[tokio::test]
     async fn mock_submit_ancestry_unknown_checkpoint() {
-        let (c, p) = two_headers();
+        let chain = crate::header_rlp::dummy_linked_chain(4);
         let mock = MockAnSubmitter::accepting();
-        let out = mock.submit_ancestry(&[c, p]).await.unwrap();
+        mock.mark_proven(keccak256(&chain[0]));
+        let out = mock.submit_ancestry(&chain).await.unwrap();
         match out {
             SubmitOutcome::Rejected {
                 reason,
@@ -471,8 +628,9 @@ mod ancestry_submit_tests {
                 committee_commitment: [0xC0; 32],
                 execution_block_hash: [0xAA; 32],
                 attested_state_root: [0; 32],
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
             },
-            public_inputs: vec![0u8; 320],
+            public_inputs: vec![0u8; crate::types::PUBLIC_INPUT_BYTES],
             proof: vec![0xAB; 8],
         };
         mock.submit_update(&first).await.unwrap();
@@ -485,8 +643,9 @@ mod ancestry_submit_tests {
                 committee_commitment: [0xC0; 32],
                 execution_block_hash: [0xBB; 32],
                 attested_state_root: [0; 32],
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
             },
-            public_inputs: vec![0u8; 320],
+            public_inputs: vec![0u8; crate::types::PUBLIC_INPUT_BYTES],
             proof: vec![0xAB; 8],
         };
         match mock.submit_update(&late).await.unwrap() {
@@ -670,9 +829,9 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 ),
             });
         }
-        // `disableOwnerAnchors` does not revert a second call, so the getter is
-        // the only "already flipped" signal; anything but an explicit `false`
-        // sends the call.
+        // `disableOwnerAnchors` is L1-only and does not revert a second call,
+        // so the getter is the only "already flipped" signal; anything but
+        // an explicit `false` sends the call. L2 owner writers stay on.
         let already_off = cfg.get("ownerAnchorsEnabled").and_then(|v| v.as_bool()) == Some(false);
         if !already_off {
             match self
@@ -707,6 +866,49 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         )
         .await
     }
+
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        self.call("setGloasForkSlot", json!({ "gloasForkSlot": slot }))
+            .await
+    }
+
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getGloasForkSlot", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        let slot = json_u64(v.get("gloasForkSlot"))
+            .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing gloasForkSlot"))?;
+        let is_set = json_bool(v.get("isSet"))
+            .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing isSet"))?;
+        Ok((slot, is_set))
+    }
+
+    async fn get_committee_period(&self) -> Result<u64, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getCommitteeState", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        json_u64(v.get("committeePeriod"))
+            .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))
+    }
+}
+
+fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
+    let v = v?;
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn json_bool(v: Option<&serde_json::Value>) -> Option<bool> {
+    let v = v?;
+    v.as_bool().or_else(|| match v.as_u64() {
+        Some(0) => Some(false),
+        Some(_) => Some(true),
+        None => None,
+    })
 }
 
 /// Compare a TVM `address` getter (`0:<hex>` / `0x<hex>` / `dapp::account`)
@@ -741,12 +943,136 @@ fn tvm_account_hex(s: &str) -> Option<String> {
     }
 }
 
+/// The exit code out of an error string, or `None` when the message carries
+/// none. The same shapes `acki-nacki-interface` emits; kept local because that
+/// crate's parser lives behind the `tvm-sdk` feature, which the default build
+/// and the tests do not enable.
+pub(crate) fn parsed_exit_code(msg: &str) -> Option<i32> {
+    for marker in [
+        "exit_code=Some(",
+        "exit_code=",
+        "local_exit_code=",
+        "\"exit_code\":",
+    ] {
+        if let Some(rest) = msg.split(marker).nth(1) {
+            let digits: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
 fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
-    if msg.contains("244") || msg.contains("STALE_UPDATE") {
+    // An exit code means the chain ran the call, so the outcome is a refusal
+    // and never a transport failure. It is parsed out of `exit_code=N`, not
+    // matched as a substring: the message carries the account address and
+    // timestamps, and a `244` anywhere in those would have turned any refusal
+    // into "already on head" — recording a head the chain never took, which
+    // then costs the span behind it its anchors as well.
+    if let Some(code) = parsed_exit_code(msg) {
+        if code == 244 {
+            return SubmitOutcome::AlreadyOnHead;
+        }
+        return SubmitOutcome::Rejected {
+            reason: format!("{function} failed: {msg}"),
+        };
+    }
+    if msg.contains("STALE_UPDATE") {
         return SubmitOutcome::AlreadyOnHead;
+    }
+    // No exit code: the chain did not execute the call. Transport failures and
+    // an expired message are free retries — a caller budgeting paid attempts
+    // must not spend one here. Matched on words rather than on bare status
+    // numbers, for the same reason as above.
+    let not_sent = [
+        "Connection",
+        "connect",
+        "timed out",
+        "timeout",
+        "dns",
+        "DNS",
+        "unreachable",
+        "reset by peer",
+        "sending request",
+        "Bad Gateway",
+        "Service Unavailable",
+        "Gateway Timeout",
+        "was not executed",
+        "Message expired",
+    ];
+    if not_sent.iter().any(|m| msg.contains(m)) {
+        return SubmitOutcome::NotSent {
+            reason: format!("{function}: {msg}"),
+        };
     }
     SubmitOutcome::Rejected {
         reason: format!("{function} failed: {msg}"),
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// The error text carries the account address and timestamps. A 64-hex
+    /// address holding `244` must not turn a refusal into "already on head":
+    /// the daemon would record a head the chain refused, never resubmit that
+    /// slot, and pay out the span behind it against an unproven anchor.
+    #[test]
+    fn digits_inside_the_address_are_not_read_as_a_refusal_code() {
+        let msg = "Contract execution was terminated with error \
+                   (account=244be1a9c3d05507f0e1b2449f3cc8a7d4e5f60718293a4b5c6d7e8f90a1b2c3) \
+                   data={\"exit_code\":220}";
+        let out = classify_call_error("submitUpdate", msg);
+        assert!(
+            matches!(out, SubmitOutcome::Rejected { .. }),
+            "a 244 in the address must not be read as ERR_STALE_UPDATE: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_parsed_exit_code_244_is_already_on_head() {
+        let msg = "tvm error (account=0abc) (exit_code=244)";
+        assert!(matches!(
+            classify_call_error("submitUpdate", msg),
+            SubmitOutcome::AlreadyOnHead
+        ));
+    }
+
+    #[test]
+    fn another_parsed_exit_code_is_a_refusal_not_a_transport_failure() {
+        // The address holds 503; without the exit code this used to be read as
+        // an unreachable endpoint and retried for free, forever.
+        let msg = "tvm error (account=503f1a2b) (exit_code=249)";
+        assert!(matches!(
+            classify_call_error("submitAncestry", msg),
+            SubmitOutcome::Rejected { .. }
+        ));
+    }
+
+    /// SDK 507. The chain never ran it, so it must not cost a paid attempt.
+    #[test]
+    fn an_expired_message_was_never_sent() {
+        let msg = "Message expired. Contract was not executed on chain.";
+        assert!(matches!(
+            classify_call_error("submitAncestry", msg),
+            SubmitOutcome::NotSent { .. }
+        ));
+    }
+
+    #[test]
+    fn a_refusal_with_no_exit_code_and_no_transport_word_is_a_refusal() {
+        let msg = "unexpected failure (account=502aa1)";
+        assert!(matches!(
+            classify_call_error("submitAncestry", msg),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 }
 

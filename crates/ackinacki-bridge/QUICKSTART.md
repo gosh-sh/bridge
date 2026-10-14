@@ -31,12 +31,13 @@ at degree 18 for deposits — about 350 MB in total, most of it the ceremony.
 Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
 before it is written, and the deposit ceremony also against the Hermez
-[s]·G2. It wants ~12 GB free: withdrawal keys take ~9.5 GB, and the deposit
-prover writes a ~1.3 GB proving key on its first proof. Later withdrawals
-reuse those keys. The first withdrawal after an upgrade may write a new
-~6.85 GB aggregator key beside the old one, so it wants ~7.5 GB more —
-~10.7 GB when the upgrade also brings a new Circuit-4 key — or the old
-aggregator key removed first (README, Step 0).
+[s]·G2. It wants ~13 GB free: withdrawal keys take ~9.5 GB, and the deposit
+prover writes a ~3.4 GB proving key on its first proof (on an upgrade
+that rotates the key, the old one stays until the new one is written).
+Later withdrawals reuse those keys. The first withdrawal after an upgrade
+may write a new ~6.85 GB aggregator key beside the old one, so it wants
+~7.5 GB more — ~10.7 GB when the upgrade also brings a new Circuit-4 key
+— or the old aggregator key removed first (README, Step 0).
 
 `--check` reports what is missing and downloads nothing. `--prefix` installs
 somewhere other than `~/.local/share/ackinacki-bridge`. When it finishes it
@@ -189,7 +190,7 @@ Moves USDC from an EVM wallet to an Acki Nacki account, where it arrives as
 eccUSDC. Your wallet signs; the CLI never sees its key. One deposit should
 take **about 17 minutes** — an estimate from its parts, not a timed run —
 plus however long the bridge owner takes to anchor your block by hand; the
-proof itself takes under a minute.
+proof itself takes one to two minutes.
 
 **Once the deposit transaction is sent, the USDC is in the bridge.**
 Everything before it refuses instead of guessing. Everything after it can
@@ -209,7 +210,7 @@ be resumed, except the two outcomes only the bridge operator can settle
 - **The recipient**, the Acki Nacki account as `dapp_id::account_id`. If the
   account is deployed, the dapp must be the one it lives in; if it does not
   exist yet, the deposit creates it.
-- **About 5 GB of free memory** for the proof.
+- **About 10 GB of free memory** for the proof.
 
 ## 9. Set your values
 
@@ -286,7 +287,7 @@ echo "exit=$?"
 | 4 deposit request | **the USDC goes into the bridge** | a block after you confirm |
 | 5 EVM confirmation | 12 confirmations | ~2.5 min |
 | 6 block anchor | **the bridge owner anchors your block by hand** | **from ~13 min** |
-| 7 proof | on this machine | under a minute |
+| 7 proof | on this machine | 1–2 min |
 | 8 finalizeDeposit | a message to the Acki Nacki bridge; it pays the gas | seconds |
 | 9 credit | the eccUSDC reach the recipient, checked by the deposit's identity | seconds |
 
@@ -343,14 +344,15 @@ operation id.
 
 Refused before any transaction is sent (exit 20):
 
-- **Safe and other smart-contract accounts, and ERC-4337 accounts.** Their
-  transactions go through a contract or an EntryPoint, and the deposit
-  circuit cannot prove them. The CLI refuses an account that holds code, and,
+- **Safe and other smart-contract accounts, and ERC-4337 accounts.** The
+  circuit can prove their type-1 and type-2 enclosing transactions and
+  their receipts. The CLI still refuses an account that holds code, and,
   with WalletConnect, one whose signature on the check message is not made
   with the account's own key — which catches an ERC-4337 account that is not
   deployed yet. `--qr-mode eip681` has no signature check: there an
-  undeployed ERC-4337 account is not caught, and its deposit ends at exit 35
-  with the USDC in the bridge. Deposit from a plain account.
+  undeployed ERC-4337 account is not caught, and a deposit sent through
+  another contract ends at exit 35 because the CLI requires the call to
+  go straight to the bridge. Deposit from a plain account.
 
 Accepted, with a warning:
 

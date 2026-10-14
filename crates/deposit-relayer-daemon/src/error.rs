@@ -26,6 +26,16 @@ pub enum RelayerError {
     #[error("proof generation failed: {0}")]
     ProofGeneration(String),
 
+    /// The prover found the deposit unprovable (its exit
+    /// [`crate::prover::UNPROVABLE_EXIT_CODE`]): `fetch_deposit_data` on an
+    /// enclosing transaction the circuit rejects (any type but 1 or 2, oversized
+    /// leaf / calldata / access list), or `export_*` on the keccak budget,
+    /// a log or a receipt over the circuit's bounds. Final for that
+    /// deposit: the relayer skips it at once into `unprovable_deposit_ids`,
+    /// and only the operator can return the funds.
+    #[error("the deposit cannot be proven: {0}")]
+    Unprovable(String),
+
     /// The AN side rejected the finalize submission (proof verification
     /// failed, or the `depositId` nullifier was already consumed). The
     /// relayer logs and moves on without double-submitting.

@@ -1,12 +1,17 @@
 //! Epoch ancestry for 31/32 non-checkpoint deposits.
 //!
 //! A light-client `submitUpdate` anchors one execution `block_hash` (the
-//! checkpoint). Every other block in that epoch is covered iff it sits on the
-//! execution **parent-hash chain** ending at that checkpoint (at most 31
-//! parents). The Halo2 step circuit does not prove this;
-//! `EthBeaconLightClient.submitAncestry` keccak-binds the header RLPs on-chain.
-//! This module is the off-chain check (`ancestry-one`); `header_rlp` builds
-//! the payload `submit-ancestry` sends.
+//! checkpoint). Another block is covered on chain only once a
+//! `submitAncestry` span has carried it: both checkpoints bracketing it must
+//! be proven and no more than 32 blocks apart. The Halo2 step circuit does not
+//! prove the parent links; `EthBeaconLightClient.submitAncestry` keccak-binds
+//! the header RLPs on-chain.
+//!
+//! This module answers a narrower question, and `ancestry-one` reports exactly
+//! that: whether the block sits on the parent-hash chain ending at a given
+//! checkpoint. That is necessary for a span to carry it, not sufficient — the
+//! span still has to be sent and its far end proven. `header_rlp` builds the
+//! payload `submit-ancestry` sends.
 
 /// Execution payload parent link (`eth/v2/beacon/blocks` body).
 #[derive(Clone, Debug, PartialEq, Eq)]

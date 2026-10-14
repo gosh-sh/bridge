@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Copy the ETH light-client `step` ZKHALO2VERIFYWITHVK *consumer* fixtures from
 # eth-light-client-prover into tvm-sdk. The three-operand ABI only:
-#   vk_cell            ← step_vk_blob.bin   (VkBlob v1 Base, Blake2b, 10 PI)
-#   public_inputs_cell ← step_public_inputs.bin (10 × 32 B LE Fr; 2-level commit)
+#   vk_cell            ← step_vk_blob.bin   (VkBlob v1 Base, Blake2b, 11 PI)
+#   public_inputs_cell ← step_public_inputs.bin (11 × 32 B LE Fr; 2-level commit + gloas_fork_slot)
 #   proof_cell         ← step_proof.bin     (Blake2b SHPLONK, Hermez k=19)
 # Producer SRS / config archive stay in eth-light-client-prover only.
 #

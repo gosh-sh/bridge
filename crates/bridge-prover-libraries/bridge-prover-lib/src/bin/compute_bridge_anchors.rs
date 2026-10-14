@@ -13,11 +13,12 @@
 //! the daemon uses on cold start:
 //!   `bk_set_fetcher::load_bk_set_from_config`
 //!   → `bridge_poseidon::compute_bk_set_poseidon`
-//!   → `bridge_prover_lib::bootstrap::fetch_from_node`
+//!   → `bridge_prover_lib::bootstrap::fetch_from_node_verified`
 //!
 //! Sibling of `bootstrap_hermez_srs.rs` (per the "add a sibling, don't mutate"
 //! rule). Prints env-var lines consumed by `scripts/deploy_bridge_bundle.sh`
-//! (source into the forge deploy env).
+//! (source into the forge deploy env), including the level's
+//! `BUNDLE_STRIDE`, so the contract gets the stride the daemon runs at.
 //!
 //! USAGE
 //!   cargo run --release --bin compute_bridge_anchors -- \
@@ -44,7 +45,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use bridge_gql_fetcher::{bk_set_fetcher, gql_client};
 use bridge_poseidon::compute_bk_set_poseidon;
-use bridge_prover_lib::{bootstrap::fetch_from_node, AnchorMode};
+use bridge_prover_lib::{bootstrap::fetch_from_node_verified, AnchorMode};
 use halo2_base::halo2_proofs::halo2curves::group::ff::PrimeField;
 
 /// Convert a 32-byte `Fr::to_repr()` (little-endian) array to the hex-string
@@ -246,10 +247,38 @@ async fn main() -> Result<()> {
     }
     eprintln!("seed key-block seq_no = {} (boundary {})", seed_seqno, bundle_boundary);
 
-    // 3. Pull the key-block envelope, extract layer_hashes.
-    let seed = fetch_from_node(&gql, seed_seqno, bk_commit, anchor_mode.level())
-        .await
-        .context("fetch_from_node")?;
+    // 3. Resolve the historical-rotation cursor: highest
+    // `bkSetUpdates.height ≤ seed_seqno`. The on-chain `storedLastBkSetUpdateSeqNo`
+    // and the daemon's `BridgeState::stored_last_bk_set_update_seq_no` will
+    // both be seeded to this value; the bk-update drain then starts from the
+    // next rotation past the seed, skipping events whose pre-state is already
+    // folded into `bk_commit`.
+    //
+    // Returns `0` on chains with no rotations in the GQL retention window —
+    // matches the pre-v3 default (and the Solidity `vm.envOr(…, 0)` default).
+    let last_bk_set_update_seqno =
+        bk_set_fetcher::highest_bk_set_update_le(&gql, seed_seqno)
+            .await
+            .context("highest_bk_set_update_le")?;
+    eprintln!(
+        "highest bkSetUpdates.height <= seed_seqno = {}",
+        last_bk_set_update_seqno
+    );
+
+    // 4. Pull the key-block envelope, extract layer_hashes, and refuse a BK-set
+    // file whose commitment is not the one the chain records at the seed —
+    // otherwise the constructor would pin a commitment that disagrees with
+    // `last_bk_set_update_seqno` and the daemon would halt at its first
+    // drained rotation.
+    let seed = fetch_from_node_verified(
+        &gql,
+        seed_seqno,
+        bk_commit,
+        anchor_mode.level(),
+        last_bk_set_update_seqno,
+    )
+    .await
+    .context("fetch_from_node_verified")?;
 
     // 4. Anchor = layer-`level` root. Contract's genesis stamp records
     // exactly this — the on-chain `expectedPrevAnchor(level)` cell must match
@@ -315,6 +344,16 @@ async fn main() -> Result<()> {
     println!("GENESIS_SEED_SEQNO={seed_seqno}");
     println!("GENESIS_SEED_HEIGHT={}", seed.block_height);
     println!("GENESIS_ANCHOR_LEVEL={}", anchor_mode.level());
+    // Constructor arg `bundleStride` (`vm.envUint("BUNDLE_STRIDE")`): the
+    // level's `AnchorMode::stride()`, the value `daemon-live` checks against
+    // the deployed `bundleStride()` at startup.
+    println!("BUNDLE_STRIDE={bundle_boundary}");
+    // Mirrors Solidity constructor arg `genesisLastBkSetUpdateSeqNo`
+    // (consumed via `vm.envOr("GENESIS_LAST_BK_SET_UPDATE_SEQNO", 0)` in
+    // `DeployShellnetE2EBridge.s.sol`). Plain decimal `uint64` — no
+    // byte-reversal needed because this is a native unsigned integer, not an
+    // Fr scalar.
+    println!("GENESIS_LAST_BK_SET_UPDATE_SEQNO={last_bk_set_update_seqno}");
 
     Ok(())
 }

@@ -9,12 +9,14 @@
 pub mod aggregated_source;
 pub mod aggregator;
 pub mod bridge;
+pub mod bundle_stride;
 pub mod daemon;
 pub mod error;
 pub mod history_consistency;
 pub mod live_source;
 pub mod proof_validation;
 pub mod relayer;
+pub mod rpc_http;
 pub mod source;
 pub mod startup_decide;
 pub mod state;
@@ -32,19 +34,26 @@ pub use aggregator::{
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
 pub use bridge::{
-    classify_withdraw_revert, BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState,
-    DryRunOutcome, EthBridgeClient, LogScanConfig, MockBridgeClient, SubmitOutcome, WithdrawBridge,
-    WithdrawRevertKind, WithdrawSubmitOutcome, GET_LOGS_CHUNK_BLOCKS,
+    classify_withdraw_revert, is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome,
+    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig,
+    MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
+    GET_LOGS_CHUNK_BLOCKS,
 };
+pub use bundle_stride::{check_stride_for_rotations, stride_for_submitting, BundleStrideError};
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };
 pub use error::RelayerError;
 pub use history_consistency::{
-    check_chain_monotonicity, check_history_consistency, check_startup_drift, HistoryDrift,
+    check_chain_monotonicity, check_chain_monotonicity_with_stride, check_history_consistency,
+    check_startup_drift, HistoryDrift,
 };
 pub use live_source::{LiveBlockSource, StatePaths};
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
+pub use rpc_http::{
+    rpc_http_client, rpc_request_timeout_from_env, DEFAULT_RPC_REQUEST_TIMEOUT,
+    ENV_RPC_REQUEST_TIMEOUT_SECS,
+};
 pub use source::{
     BkUpdateProofsSource, BkUpdateSource, BlockSource, EmptyBkUpdateSource, FixturesBlockSource,
     InMemoryBlockSource, ProverProofsBlockSource,

@@ -7,13 +7,15 @@
 //! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
 //! - `set-committee` — owner `setCommitteeCommitment` from a proven bundle
 //!   (weak-subjectivity bootstrap / manual hop while `--no-rotate`)
+//! - `set-gloas-fork-slot` — owner `setGloasForkSlot`; required once after
+//!   deploy or `submitUpdate` / `submitRotate` revert 256
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
-//!   flip. `ETH_RPC_URL` fetches epoch headers after each accepted checkpoint
-//!   and runs `link_headers` locally. On-chain `submitAncestry` stays off
-//!   unless `--submit-ancestry` is set (the call cannot succeed until a
-//!   keccak-256 builtin lands).
+//!   flip. `ETH_RPC_URL` fetches the span between the previous checkpoint and
+//!   the new one after each accepted checkpoint and runs `link_headers`
+//!   locally. On-chain `submitAncestry` stays off unless `--submit-ancestry` is
+//!   set.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -27,6 +29,8 @@ use eth_light_client_relayer::{
     MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
     StateLock, SubprocessProofGenerator, SubprocessProverConfig,
 };
+#[cfg(feature = "live-submit")]
+use eth_light_client_relayer::RelayerState;
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
 use tracing::info;
@@ -106,10 +110,32 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
+    /// Owner `setGloasForkSlot(slot)`. After `deployLightClient` (or
+    /// `updateCode` with an empty user cell) both `submitUpdate` and
+    /// `submitRotate` revert 256 until this runs. Sepolia: `11296768`.
+    /// Mainnet (Gloas unscheduled): `18446744073709551615`.
+    SetGloasForkSlot {
+        #[arg(long)]
+        slot: u64,
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        #[arg(long, env = "AN_LC_ABI_PATH")]
+        an_lc_abi_path: String,
+        #[arg(long, env = "AN_LIGHT_CLIENT")]
+        an_light_client: String,
+        #[arg(long, env = "AN_SENDER")]
+        an_sender: String,
+    },
     /// Submit `submitRotate` from a `rotate_tree_n8` EMIT_VKBLOB directory.
+    /// Records the period in `--state` so a stopped daemon resumes; a
+    /// running daemon reads `getCommitteeState` on the next tick.
     SubmitRotate {
         #[arg(long)]
         bundle_dir: PathBuf,
+        #[arg(long, default_value = "./eth-lc-relayer-state.json")]
+        state: PathBuf,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
@@ -130,13 +156,17 @@ enum Cmd {
         #[arg(long)]
         deposit_hash: String,
     },
-    /// Fetch execution header RLPs and call `submitAncestry`.
+    /// Fetch the execution header RLPs between two proven anchors and call
+    /// `submitAncestry`. `--checkpoint-hash` is the newer anchor,
+    /// `--older-anchor-hash` the older one; both must already be proven.
     SubmitAncestry {
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: String,
         #[arg(long)]
         checkpoint_hash: String,
-        #[arg(long, default_value_t = 32)]
+        #[arg(long)]
+        older_anchor_hash: String,
+        #[arg(long, default_value_t = 33)]
         max_headers: usize,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
@@ -198,14 +228,15 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         no_flip_owner: bool,
         /// Execution JSON-RPC. When set, each accepted `submitUpdate` fetches
-        /// the epoch parent chain and runs `link_headers` locally. Does **not**
-        /// call `submitAncestry` unless `--submit-ancestry` is also set.
+        /// the span between the previous checkpoint and the new one and runs
+        /// `link_headers` locally. Does **not** call `submitAncestry` unless
+        /// `--submit-ancestry` is also set.
         #[arg(long, env = "ETH_RPC_URL")]
         eth_rpc_url: Option<String>,
-        /// Send `submitAncestry` after each checkpoint. Default **off**: two
-        /// headers already cost ~130 M gas against the 10 M limit, so the call
-        /// cannot succeed until a keccak-256 builtin lands. Needs
-        /// `--eth-rpc-url`.
+        /// Send `submitAncestry` after each checkpoint. Default **off**. The
+        /// span needs a proven anchor at both ends, so nothing is sent until a
+        /// previous checkpoint is on record, nor when the gap to it is wider
+        /// than a span. Needs `--eth-rpc-url`.
         #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
         submit_ancestry: bool,
         /// With `--no-rotate`: on a period jump, prove a step of the new
@@ -312,8 +343,27 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         },
+        Cmd::SetGloasForkSlot {
+            slot,
+            an_graphql_url,
+            an_keys_path,
+            an_lc_abi_path,
+            an_light_client,
+            an_sender,
+        } => {
+            set_gloas_fork_slot(
+                slot,
+                an_graphql_url,
+                an_keys_path,
+                an_lc_abi_path,
+                an_light_client,
+                an_sender,
+            )
+            .await
+        },
         Cmd::SubmitRotate {
             bundle_dir,
+            state,
             an_graphql_url,
             an_keys_path,
             an_lc_abi_path,
@@ -322,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             submit_rotate(
                 bundle_dir,
+                state,
                 an_graphql_url,
                 an_keys_path,
                 an_lc_abi_path,
@@ -338,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::SubmitAncestry {
             eth_rpc_url,
             checkpoint_hash,
+            older_anchor_hash,
             max_headers,
             an_graphql_url,
             an_keys_path,
@@ -348,6 +400,7 @@ async fn main() -> anyhow::Result<()> {
             submit_ancestry_cmd(
                 eth_rpc_url,
                 checkpoint_hash,
+                older_anchor_hash,
                 max_headers,
                 an_graphql_url,
                 an_keys_path,
@@ -551,6 +604,56 @@ async fn set_committee(
     Ok(())
 }
 
+#[cfg(not(feature = "live-submit"))]
+#[allow(clippy::too_many_arguments)]
+async fn set_gloas_fork_slot(
+    _slot: u64,
+    _an_graphql_url: String,
+    _an_keys_path: String,
+    _an_lc_abi_path: String,
+    _an_light_client: String,
+    _an_sender: String,
+) -> anyhow::Result<()> {
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+async fn set_gloas_fork_slot(
+    slot: u64,
+    an_graphql_url: String,
+    an_keys_path: String,
+    an_lc_abi_path: String,
+    an_light_client: String,
+    an_sender: String,
+) -> anyhow::Result<()> {
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
+    let abi =
+        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![an_graphql_url],
+        keys,
+        bridge_abi: abi,
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), eth_light_client_relayer::AnSubmitConfig {
+            from: an_sender,
+            light_client: an_light_client,
+            confirm_timeout_secs: 120,
+            usdc_bridge: None,
+        });
+    info!(slot, "setGloasForkSlot");
+    match submitter.set_gloas_fork_slot(slot).await? {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            tx_hash,
+        } => {
+            info!(tx = ?tx_hash.map(hex::encode), "setGloasForkSlot accepted");
+        },
+        other => anyhow::bail!("setGloasForkSlot: {other:?}"),
+    }
+    Ok(())
+}
+
 async fn prove_one(
     beacon_url: Option<String>,
     finality_json: Option<PathBuf>,
@@ -606,18 +709,27 @@ async fn ancestry_one(
         .try_into()
         .map_err(|_| anyhow::anyhow!("--deposit-hash must be 32 bytes"))?;
     let src = HttpBeaconSource::new(beacon_url)?;
-    let checkpoint = src.fetch_exec_link_at_slot(checkpoint_slot).await?;
-    let mut links = vec![checkpoint.clone()];
-    let start = checkpoint_slot.saturating_sub(31);
-    for slot in (start..checkpoint_slot).rev() {
-        let want = links.last().unwrap().parent_hash;
+    // From Gloas the checkpoint anchors its bid's parent, which an earlier
+    // slot produced, so the walk starts at the anchored hash, not at this
+    // slot's own block, and reaches one slot further back.
+    let anchor = src.fetch_anchored_exec_hash(checkpoint_slot).await?;
+    let mut links: Vec<eth_light_client_relayer::ExecLink> = Vec::new();
+    let mut want = anchor;
+    let start = checkpoint_slot.saturating_sub(32);
+    for slot in (start..=checkpoint_slot).rev() {
+        if links.len() == 32 {
+            break;
+        }
         match src.fetch_exec_link_at_slot(slot).await {
-            Ok(link) if link.block_hash == want => links.push(link),
+            Ok(link) if link.block_hash == want => {
+                want = link.parent_hash;
+                links.push(link);
+            },
             Ok(_) => tracing::debug!(slot, "slot hash is not the next parent"),
             Err(e) => tracing::debug!(slot, %e, "skip slot"),
         }
     }
-    eth_light_client_relayer::covers_deposit(checkpoint.block_hash, deposit, &links)
+    eth_light_client_relayer::covers_deposit(anchor, deposit, &links)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     info!(
         checkpoint = %hex::encode(links[0].block_hash),
@@ -684,6 +796,7 @@ async fn submit_one(
 #[cfg(not(feature = "live-submit"))]
 async fn submit_rotate(
     _bundle_dir: PathBuf,
+    _state: PathBuf,
     _an_graphql_url: String,
     _an_keys_path: String,
     _an_lc_abi_path: String,
@@ -696,6 +809,7 @@ async fn submit_rotate(
 #[cfg(feature = "live-submit")]
 async fn submit_rotate(
     bundle_dir: PathBuf,
+    state: PathBuf,
     an_graphql_url: String,
     an_keys_path: String,
     an_lc_abi_path: String,
@@ -727,7 +841,26 @@ async fn submit_rotate(
         },
         other => anyhow::bail!("submitRotate: {other:?}"),
     }
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
+    st.last_committee_period = Some(bundle.period);
+    st.rotate_pending_period = None;
+    st.save(&state)?;
+    info!(
+        state = %state.display(),
+        period = bundle.period,
+        "state file records the committee period"
+    );
     Ok(())
+}
+
+fn parse_anchor_pair(newer_hex: &str, older_hex: &str) -> anyhow::Result<([u8; 32], [u8; 32])> {
+    let newer: [u8; 32] = hex::decode(newer_hex.trim_start_matches("0x"))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    let older: [u8; 32] = hex::decode(older_hex.trim_start_matches("0x"))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("--older-anchor-hash must be 32 bytes"))?;
+    Ok((newer, older))
 }
 
 #[cfg(not(feature = "live-submit"))]
@@ -735,6 +868,7 @@ async fn submit_rotate(
 async fn submit_ancestry_cmd(
     eth_rpc_url: String,
     checkpoint_hash: String,
+    older_anchor_hash: String,
     max_headers: usize,
     _an_graphql_url: String,
     _an_keys_path: String,
@@ -742,16 +876,20 @@ async fn submit_ancestry_cmd(
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
-    let raw = hex::decode(checkpoint_hash.trim_start_matches("0x"))?;
-    let checkpoint: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
+    let (checkpoint, older) = parse_anchor_pair(&checkpoint_hash, &older_anchor_hash)?;
     let headers = EthExecutionRpc::new(eth_rpc_url)?
-        .ancestry_headers(checkpoint, max_headers)
-        .await?;
+        .ancestry_span(checkpoint, older, max_headers)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no span joins these two anchors: --older-anchor-hash is further back than \
+                 --max-headers allows, is not an ancestor of --checkpoint-hash, or the two are \
+                 adjacent with nothing between them"
+            )
+        })?;
     info!(
         n = headers.len(),
-        "fetched ancestry headers (rebuild with --features live-submit to submit)"
+        "fetched ancestry span (rebuild with --features live-submit to submit)"
     );
     let _ = headers;
     Err(live_submit_needs_feature())
@@ -762,6 +900,7 @@ async fn submit_ancestry_cmd(
 async fn submit_ancestry_cmd(
     eth_rpc_url: String,
     checkpoint_hash: String,
+    older_anchor_hash: String,
     max_headers: usize,
     an_graphql_url: String,
     an_keys_path: String,
@@ -769,17 +908,17 @@ async fn submit_ancestry_cmd(
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
-    let raw = hex::decode(checkpoint_hash.trim_start_matches("0x"))?;
-    let checkpoint: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("--checkpoint-hash must be 32 bytes"))?;
-    tracing::warn!(
-        "submit-ancestry is explicit, but on Acki Nacki today two headers cost ~130 M gas against \
-         a 10 M limit; this call will OOG until a keccak-256 builtin lands"
-    );
+    let (checkpoint, older) = parse_anchor_pair(&checkpoint_hash, &older_anchor_hash)?;
     let headers = EthExecutionRpc::new(eth_rpc_url)?
-        .ancestry_headers(checkpoint, max_headers)
-        .await?;
+        .ancestry_span(checkpoint, older, max_headers)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no span joins these two anchors: --older-anchor-hash is further back than \
+                 --max-headers allows, is not an ancestor of --checkpoint-hash, or the two are \
+                 adjacent with nothing between them"
+            )
+        })?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
     let abi =
         TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
@@ -898,7 +1037,8 @@ async fn run_daemon(
     cfg.submit_ancestry = submit_ancestry;
 
     if dry_run {
-        info!("dry-run: MockAnSubmitter (no AN tx)");
+        info!("dry-run: MockAnSubmitter (no AN tx); Gloas slot from the beacon spec");
+        cfg.pin_fork_slot_from_beacon = true;
         if mock_prove {
             let relayer = Relayer::new(
                 cfg,
@@ -1025,7 +1165,7 @@ where
                 info!(
                     %url,
                     "ETH_RPC_URL set with --submit-ancestry: daemon will send submitAncestry \
-                     after each checkpoint (will OOG on Acki Nacki until a keccak builtin)"
+                     for the span between consecutive checkpoints"
                 );
             } else {
                 info!(

@@ -73,6 +73,14 @@
 			]
 		},
 		{
+			"name": "setGloasForkSlot",
+			"inputs": [
+				{"name":"gloasForkSlot","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "reAnchorCommittee",
 			"inputs": [
 				{"name":"committeeCommitment","type":"uint256"},
@@ -153,9 +161,19 @@
 			],
 			"outputs": [
 				{"name":"currentCommittee","type":"uint256"},
+				{"name":"prevCommittee","type":"uint256"},
 				{"name":"committeePeriod","type":"uint64"},
 				{"name":"ownerRotationEnabled","type":"bool"},
 				{"name":"reAnchorsApplied","type":"uint64"}
+			]
+		},
+		{
+			"name": "getGloasForkSlot",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"gloasForkSlot","type":"uint64"},
+				{"name":"isSet","type":"bool"}
 			]
 		},
 		{
@@ -245,9 +263,13 @@
 		{"init":false,"name":"_finalizedExecutionBlockHash","type":"uint256"},
 		{"init":false,"name":"_updatesApplied","type":"uint64"},
 		{"init":false,"name":"_currentCommittee","type":"uint256"},
+		{"init":false,"name":"_prevCommittee","type":"uint256"},
+		{"init":false,"name":"_prevCommitteeHeadSlot","type":"uint64"},
 		{"init":false,"name":"_committeePeriod","type":"uint64"},
 		{"init":false,"name":"_ownerRotationEnabled","type":"bool"},
 		{"init":false,"name":"_reAnchorsApplied","type":"uint64"},
+		{"init":false,"name":"_gloasForkSlot","type":"uint64"},
+		{"init":false,"name":"_gloasForkSlotSet","type":"bool"},
 		{"init":false,"name":"_provenEthSlot","type":"map(uint256,uint64)"},
 		{"init":false,"name":"_provenQueue","type":"map(uint64,uint256)"},
 		{"init":false,"name":"_provenQueueHead","type":"uint64"},

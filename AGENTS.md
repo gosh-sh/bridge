@@ -185,6 +185,8 @@ cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin re
 # daemon-live proves in-process.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
+# daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();
+# a bridge deployed before that field also needs --anchor-level 1|2 (BRIDGE_ANCHOR_LEVEL).
 # The fixture commands read bound_scenario.json from --fixtures-dir and the R15 calldata from
 # --verifiers-dir. Left out, --verifiers-dir is searched for among the ancestors of --fixtures-dir,
 # which finds it only when that path is absolute.
@@ -288,14 +290,20 @@ cargo test -p attestation-bls-checker-circuit -- --ignored \
 the `an-contracts.yaml` checks, `scripts/check_verifier_sources.sh`, gitleaks or lychee.
 
 **It does not go green today.** `make aggregator-fmt` fails because
-`crates/bridge-evm-aggregator` is not formatted yet, and `make relayer-clippy` fails on
-`dead_code` for the unused test helper `FakeProver::insert_block` in
-`crates/bridge-relayer-daemon/src/relayer.rs` (#56) that the `-D warnings` gate turns into an
-error. The prior wording of this paragraph blamed a pinned circuit revision that the workspace
-could not build against; that claim was accurate when the circuits lived in a private git repo,
-but it is no longer — since the circuits were vendored, `crates/bridge-prover-libraries` reaches
-its circuit deps by path (see [Cargo workspaces](#cargo-workspaces) above), and the build failures
-that remain are the fmt drift and the one clippy warning above, not a revision mismatch.
+`crates/bridge-evm-aggregator` is not formatted yet. (`make relayer-clippy` used to fail on
+`dead_code` for the then-unused test helper `FakeProver::insert_block` in
+`crates/bridge-relayer-daemon/src/relayer.rs` (#56); a test uses it now.) The prior wording of
+this paragraph blamed a pinned circuit revision that the workspace could not build against; that
+claim was accurate when the circuits lived in a private git repo, but it is no longer — since the
+circuits were vendored, `crates/bridge-prover-libraries` reaches its circuit deps by path (see
+[Cargo workspaces](#cargo-workspaces) above), and the build failure that remains is the fmt drift
+above, not a revision mismatch.
+
+`cargo test --locked -p ackinacki-bridge` has three tests written for Linux:
+`deposit::prover::tests::{the_prover_inherits_the_prover_lock_and_no_other_deposit_lock,
+a_tool_still_open_for_writing_is_started_once_it_is_closed,
+sigkill_to_the_cli_leaves_the_lock_with_the_running_prover}` read `/proc` or rely on Linux
+refusing to run a file open for writing (`ETXTBSY`), so they fail on macOS.
 
 `forge coverage` is there for two failure modes a plain `forge test` can miss. A fuzz test whose
 `vm.assume` rejects nearly every input trips Foundry's rejection cap depending on the seed — use

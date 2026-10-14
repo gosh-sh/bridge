@@ -3,14 +3,15 @@
 #
 # Runs `compute_bridge_anchors --at-head` against live shellnet to derive
 # GENESIS_LAST_SEEN_BLOCK_SEQNO / GENESIS_PREV_MAX_LEVEL_LAYER_HASH /
-# GENESIS_BK_SET_COMMITMENT, deploys the bridge bundle via forge, extracts
-# BRIDGE_ADDRESS from the broadcast record, rewrites the non-secret
-# L${LEVEL}_config/env, and archives prior prover state.
+# GENESIS_BK_SET_COMMITMENT and the level's BUNDLE_STRIDE, deploys the
+# bridge bundle via forge, extracts BRIDGE_ADDRESS from the broadcast record,
+# rewrites the non-secret L${LEVEL}_config/env, and archives prior prover
+# state.
 #
 # NOT IDEMPOTENT: every run broadcasts a new set of contracts and spends new
 # nonces. Audit the Foundry broadcast record and latest/pending nonce before a
 # retry. This is the flow described in
-# crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md §3.
+# crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3 (Case 1).
 #
 # Usage:
 #   LEVEL=1 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh   # L1 anchor
@@ -79,22 +80,40 @@ GENESIS_ENV="$(mktemp -t genesis.XXXXXX.env)"
 trap 'rm -f "$GENESIS_ENV"' EXIT
 
 # ─── 1. Derive genesis anchors from live shellnet chain head ──────────────────
-echo ">>> Computing genesis anchors (level=$LEVEL) against $BRIDGE_GQL_ENDPOINT"
+# Optional override: BRIDGE_SEED_SEQNO pins the seed to an explicit level-aligned
+# key-block seq_no (must be a multiple of 1024 for L1 or 16384 for L2). Useful
+# when replaying a previous test setup — otherwise --at-head picks the latest
+# already-produced boundary at or below chain head.
+if [[ -n "${BRIDGE_SEED_SEQNO:-}" ]]; then
+  SEED_FLAG=(--seed-seqno "$BRIDGE_SEED_SEQNO")
+  echo ">>> Computing genesis anchors (level=$LEVEL seed=$BRIDGE_SEED_SEQNO) against $BRIDGE_GQL_ENDPOINT"
+else
+  SEED_FLAG=(--at-head)
+  echo ">>> Computing genesis anchors (level=$LEVEL at-head) against $BRIDGE_GQL_ENDPOINT"
+fi
 cd "$PROVER_DIR/bridge-prover-lib"
 BRIDGE_GQL_ENDPOINT="$BRIDGE_GQL_ENDPOINT" \
 BRIDGE_BK_SET_CONFIG="$PROVER_DIR/${BRIDGE_BK_SET_CONFIG#./}" \
 cargo run --release --quiet --bin compute_bridge_anchors -- \
-  --at-head --level "$LEVEL" \
+  "${SEED_FLAG[@]}" --level "$LEVEL" \
   > "$GENESIS_ENV"
 
 echo ">>> Derived anchors:"
 cat "$GENESIS_ENV"
+# BUNDLE_STRIDE must come from compute_bridge_anchors, not the caller's shell.
+unset BUNDLE_STRIDE
 set -a && source "$GENESIS_ENV" && set +a
 
 # CRITICAL RENAME: compute_bridge_anchors emits GENESIS_SEED_SEQNO;
 # DeployShellnetE2EBridge.s.sol reads GENESIS_LAST_SEEN_BLOCK_SEQNO via
 # vm.envOr(..., 0) — without this alias the constructor silently pins 0.
 export GENESIS_LAST_SEEN_BLOCK_SEQNO="$GENESIS_SEED_SEQNO"
+
+# BUNDLE_STRIDE comes from compute_bridge_anchors: AnchorMode::stride() for
+# this LEVEL, the value the daemon checks against bundleStride() at startup.
+# It is immutable at deploy time: applyBkSetUpdate uses it to compute the
+# next owed bundle boundary, and switching anchor level requires a redeploy.
+: "${BUNDLE_STRIDE:?compute_bridge_anchors did not print BUNDLE_STRIDE}"
 
 # ─── 2. Deploy the bundle (14 CREATEs across 6 logical components) ────────────
 cd "$CONTRACTS_DIR"
@@ -121,7 +140,8 @@ fi
 
 echo ">>> forge script $DEPLOY_SCRIPT (chain 11155111, USE_AAVE=$USE_AAVE, DEMO_AAVE=$DEMO_AAVE)"
 forge script "script/$DEPLOY_SCRIPT.s.sol:$DEPLOY_SCRIPT" \
-  --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow
+  --rpc-url "$SEPOLIA_RPC_URL" --broadcast --slow --gas-estimate-multiplier 1200 \
+  --legacy --with-gas-price 2000000000
 
 # ─── 3. Extract BRIDGE_ADDRESS from the broadcast record ──────────────────────
 BROADCAST="$CONTRACTS_DIR/broadcast/$DEPLOY_SCRIPT.s.sol/11155111/run-latest.json"
@@ -175,6 +195,11 @@ BRIDGE_ANCHOR_LEVEL=$LEVEL
 # For the shellnet-l2 runtime env (preflight.sh):
 # $EXPECTED_USDC_LINE
 # $EXPECTED_AAVE_LINE
+# Historical bk-update cursor used at deploy (constructor arg
+# genesisLastBkSetUpdateSeqNo). Preserved here for operator forensics and
+# so a cold-start daemon can cross-check its own GQL-derived value against
+# what the on-chain \`storedLastBkSetUpdateSeqNo\` actually got.
+GENESIS_LAST_BK_SET_UPDATE_SEQNO=${GENESIS_LAST_BK_SET_UPDATE_SEQNO:-0}
 EOF
 echo ">>> Wrote $CFG_DIR/env"
 if [[ "$USE_AAVE" == true || "$DEMO_AAVE" == true ]]; then

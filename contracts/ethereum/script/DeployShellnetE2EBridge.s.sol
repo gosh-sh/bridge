@@ -154,6 +154,10 @@ contract DeployShellnetE2EBridge is Script {
                 genesisPrevMaxLevelLayerHash: vb.genesisPrevMaxLevelLayerHash,
                 genesisLastSeenBlockSeqNo: uint64(
                     vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0))
+                ),
+                bundleStride: uint64(vm.envUint("BUNDLE_STRIDE")),
+                genesisLastBkSetUpdateSeqNo: uint64(
+                    vm.envOr("GENESIS_LAST_BK_SET_UPDATE_SEQNO", uint256(0))
                 )
             }),
             AckiNackiBridge.BridgeWithdrawConfig({

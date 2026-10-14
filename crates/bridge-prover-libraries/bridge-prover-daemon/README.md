@@ -204,9 +204,9 @@ cargo run --release --bin bridge-event-halo2-prover -- --selftest    # ~5 min, f
 
 ---
 
-## Step 3 — BK set fallback file
+## Step 3 — BK set file
 
-The verifier prefers GraphQL but falls back to `./bk_set.json` if the startup `bkSetUpdates` race loses.
+Both daemons read the BK set from the file at `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) on a cold start; GraphQL serves only the rotation log, not the current set. The commands below write `bk_set.json`, so point `BRIDGE_BK_SET_CONFIG` at it. The startup log shows `BK-set bootstrap: mode=file, loaded N signers from <path>`.
 
 **Local devnet** — must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`:
 
@@ -225,9 +225,9 @@ print(json.dumps(out, indent=2))
 ' > bk_set.json
 ```
 
-**Shellnet** — the GQL race normally wins (the chain is always live). Watch the startup log for `loaded BK set from GraphQL: N signers`; only refresh `bk_set.json` if you need the fallback.
+**Shellnet** — the file must hold the set at the bootstrap seed. `bk_set.shellnet.json` is the committee from before rotations began on 2026-10-08; build the set at the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)).
 
-> Rotation: if the BK set changes mid-run the prover silently skips affected key blocks (`signers [k] not in BK set, skipping`). Recovery is "restart both daemons" — keys do **not** need to be regenerated. See `BK set rotation` in `../TECHNICAL_README.md`.
+> Rotation: the prover follows rotations at runtime. It proves each `bkSetUpdates` event and switches to the new set once the bundles at or below the rotation are done; a key block signed by keepers outside its current set is held back (`signers … not in BK set — returning None so caller can drain pending bk-update or refresh the set`) until then. Keys do **not** need to be regenerated. See `BK set rotation` in `../TECHNICAL_README.md`.
 
 ---
 

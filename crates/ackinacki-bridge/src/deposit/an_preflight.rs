@@ -39,7 +39,22 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 5, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 8, 0);
+/// The first bridge that embeds the deposit key this build's prover makes
+/// proofs for. An older bridge rejects every one of them at
+/// `finalizeDeposit`, after the USDC is in the EVM bridge.
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 7, 0);
+
+/// Refuses a bridge older than the deposit key this build proves for.
+pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
+    if v < key_min {
+        return Err(format!(
+            "the bridge is version {v}; this CLI's prover makes proofs for the deposit key of \
+             bridge {key_min} and newer, which an older bridge rejects"
+        ));
+    }
+    Ok(())
+}
 
 /// Judges a bridge version: `Err` refuses, `Ok` carries the warnings.
 pub fn version_verdict(
@@ -218,6 +233,7 @@ pub async fn run_with(
         .as_str()
         .and_then(BridgeVersion::parse)
         .ok_or_else(|| refuse(format!("getVersion answered {v}")))?;
+    key_verdict(version, DEPOSIT_KEY_BRIDGE_VERSION).map_err(refuse)?;
     for w in
         version_verdict(version, min, NEWEST_KNOWN_BRIDGE_VERSION, dev_unfixed).map_err(refuse)?
     {
@@ -252,9 +268,24 @@ pub async fn run_with(
     }
     let cfg = get("getAnchorConfig", json!({})).await;
     let light_client = cfg["lightClient"].as_str().and_then(parse_an_address);
-    let owner_anchors_enabled = cfg["ownerAnchorsEnabled"]
-        .as_bool()
-        .ok_or_else(|| refuse(format!("getAnchorConfig answered {cfg}")))?;
+    // 1.8.0: `getAnchorConfig().ownerAnchorsEnabled` is the light client's
+    // L1 only. The deposit's own chain is `isOwnerAnchorsEnabled`. 1.7.0
+    // has no such getter — calling it through `transient` would retry
+    // forever — and its `ownerAnchorsEnabled` is still the global flag.
+    let owner_anchors_enabled = if version >= BridgeVersion(1, 8, 0) {
+        let per_chain = get(
+            "isOwnerAnchorsEnabled",
+            json!({ "chainId": chain_id.to_string() }),
+        )
+        .await;
+        per_chain["value0"]
+            .as_bool()
+            .ok_or_else(|| refuse(format!("isOwnerAnchorsEnabled answered {per_chain}")))?
+    } else {
+        cfg["ownerAnchorsEnabled"]
+            .as_bool()
+            .ok_or_else(|| refuse(format!("getAnchorConfig answered {cfg}")))?
+    };
     let ch = get("getDepositVoucherCodeHash", json!({})).await;
     let mut voucher_code_hash = [0u8; 32];
     hex::decode_to_slice(
@@ -325,7 +356,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.6.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -366,7 +397,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.5.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -386,9 +417,9 @@ mod tests {
         .unwrap();
         assert_eq!(ui.warnings().len(), 2);
         // The version is not relaxed: a resend is only safe on a fixed bridge.
-        an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.4.0", "value1": "eccUSDCBridge" }),
-        ]);
+        // Stay at the deposit key (1.7.0) so this hits `version_verdict`, not
+        // `key_verdict` (which refuses anything older than the key first).
+        let min = Some(BridgeVersion(1, 8, 0));
         assert!(
             run_with(&an, BRIDGE, 11_155_111, evm_bridge, &target, &ui, min, false, true)
                 .await
@@ -451,6 +482,15 @@ mod tests {
     }
 
     #[test]
+    fn a_bridge_older_than_the_deposit_key_is_refused() {
+        let key = DEPOSIT_KEY_BRIDGE_VERSION;
+        let e = key_verdict(BridgeVersion(1, 6, 0), key).unwrap_err();
+        assert!(e.contains("deposit key"), "{e}");
+        assert!(key_verdict(key, key).is_ok());
+        assert!(key_verdict(BridgeVersion(1, 7, 1), key).is_ok());
+    }
+
+    #[test]
     fn recipient_rules() {
         let t = AnTarget {
             dapp_id: [1; 32],
@@ -492,6 +532,33 @@ mod tests {
         let p = go(&healthy(), [0; 32]).await.unwrap();
         assert_eq!(p.light_client, Some([0x20; 32]));
         assert!(p.owner_anchors_enabled);
+    }
+
+    #[tokio::test]
+    async fn a_1_7_0_bridge_without_the_per_chain_getter_still_passes() {
+        let an = healthy();
+        an.failing_getters
+            .lock()
+            .unwrap()
+            .insert("isOwnerAnchorsEnabled".into());
+        let p = go(&an, [0; 32]).await.unwrap();
+        assert!(p.owner_anchors_enabled);
+    }
+
+    #[tokio::test]
+    async fn a_1_8_0_bridge_reads_the_per_chain_flag() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.8.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(BRIDGE, "getAnchorConfig", vec![
+            json!({ "lightClient": format!("0:{}", "20".repeat(32)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
+            json!({ "value0": false }),
+        ]);
+        let p = go(&an, [0; 32]).await.unwrap();
+        assert!(!p.owner_anchors_enabled);
     }
 
     #[tokio::test]

@@ -402,7 +402,7 @@ address that returns.
 ### Step L3 — Cold-start daemon under L2
 
 Follow the daemon-startup steps in
-[`../../bridge-prover-libraries/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`](../../bridge-prover-libraries/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md)
+[`crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md` §3.5](../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#35-start-the-daemon)
 under the L2 (`anchor_level=2`) configuration; expected log signature:
 
 ```

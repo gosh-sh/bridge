@@ -31,6 +31,10 @@ use crate::{
     types::{DepositEvent, DepositProofBundle, DepositPublicInputs},
 };
 
+/// The exit code of the `deposit-prover` tools for a deposit the circuit
+/// cannot prove (`deposit-prover/src/provable.rs`).
+pub const UNPROVABLE_EXIT_CODE: i32 = 3;
+
 /// Produces a [`DepositProofBundle`] for a confirmed [`DepositEvent`].
 #[async_trait]
 pub trait ProofGenerator: Send + Sync {
@@ -51,6 +55,9 @@ pub struct MockProofGenerator {
     /// When set, `generate` fails for this `deposit_id` — lets tests
     /// exercise the proof-generation-error path.
     pub fail_on: Option<u64>,
+    /// When set, `generate` answers [`RelayerError::Unprovable`] for this
+    /// `deposit_id`.
+    pub unprovable_on: Option<u64>,
     /// Config-supplied AN dApp identifier (UInt256) bound as the dappId public
     /// inputs. Defaults to zero.
     pub dapp_id: U256,
@@ -64,15 +71,22 @@ impl MockProofGenerator {
     pub fn failing_on(deposit_id: u64) -> Self {
         Self {
             fail_on: Some(deposit_id),
-            dapp_id: U256::ZERO,
+            ..Self::default()
+        }
+    }
+
+    pub fn unprovable_on(deposit_id: u64) -> Self {
+        Self {
+            unprovable_on: Some(deposit_id),
+            ..Self::default()
         }
     }
 
     /// Build a mock generator that stamps a given config dappId into the proof.
     pub fn with_dapp_id(dapp_id: U256) -> Self {
         Self {
-            fail_on: None,
             dapp_id,
+            ..Self::default()
         }
     }
 
@@ -113,6 +127,12 @@ impl MockProofGenerator {
 #[async_trait]
 impl ProofGenerator for MockProofGenerator {
     async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError> {
+        if self.unprovable_on == Some(event.deposit_id) {
+            return Err(RelayerError::Unprovable(format!(
+                "mock configured as unprovable on depositId={}",
+                event.deposit_id
+            )));
+        }
         if self.fail_on == Some(event.deposit_id) {
             return Err(RelayerError::ProofGeneration(format!(
                 "mock configured to fail on depositId={}",
@@ -162,7 +182,7 @@ impl SubprocessProverConfig {
             deposit_prover_dir: deposit_prover_dir.into(),
             rpc_url: rpc_url.into(),
             degree: 18,
-            max_data_byte_len: 256,
+            max_data_byte_len: 2048,
             max_log_num: 20,
             dapp_id: "0".to_string(),
             timeout: Duration::from_secs(900),
@@ -264,6 +284,15 @@ impl SubprocessProofGenerator {
                 RelayerError::ProofGeneration(format!("failed to spawn deposit-prover: {e}"))
             })?;
 
+        if output.status.code() == Some(UNPROVABLE_EXIT_CODE) {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = stderr
+                .lines()
+                .rev()
+                .find_map(|l| l.strip_prefix("unprovable: "))
+                .unwrap_or(stderr.trim());
+            return Err(RelayerError::Unprovable(format!("{example}: {reason}")));
+        }
         if !output.status.success() {
             return Err(RelayerError::ProofGeneration(format!(
                 "deposit-prover example {:?} exited with {}: {}",
@@ -403,6 +432,19 @@ mod tests {
         bundle.check_binds_to(&ev).unwrap();
         assert_eq!(bundle.parsed.deposit_id, U256::from(9u64));
         assert_eq!(bundle.parsed.amount, U256::from(1_000_000u64));
+    }
+
+    #[test]
+    fn the_unprovable_exit_code_matches_the_prover_source() {
+        let src = include_str!("../../../deposit-prover/src/provable.rs");
+        let line = src
+            .lines()
+            .find(|l| l.starts_with("pub const UNPROVABLE_EXIT_CODE: i32 = "))
+            .expect("UNPROVABLE_EXIT_CODE is gone from the prover source");
+        assert_eq!(
+            line,
+            format!("pub const UNPROVABLE_EXIT_CODE: i32 = {UNPROVABLE_EXIT_CODE};")
+        );
     }
 
     #[tokio::test]

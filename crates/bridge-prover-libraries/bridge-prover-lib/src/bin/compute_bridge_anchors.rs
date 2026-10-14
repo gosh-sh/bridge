@@ -17,7 +17,8 @@
 //!
 //! Sibling of `bootstrap_hermez_srs.rs` (per the "add a sibling, don't mutate"
 //! rule). Prints env-var lines consumed by `scripts/deploy_bridge_bundle.sh`
-//! (source into the forge deploy env).
+//! (source into the forge deploy env), including the level's
+//! `BUNDLE_STRIDE`, so the contract gets the stride the daemon runs at.
 //!
 //! USAGE
 //!   cargo run --release --bin compute_bridge_anchors -- \
@@ -343,6 +344,10 @@ async fn main() -> Result<()> {
     println!("GENESIS_SEED_SEQNO={seed_seqno}");
     println!("GENESIS_SEED_HEIGHT={}", seed.block_height);
     println!("GENESIS_ANCHOR_LEVEL={}", anchor_mode.level());
+    // Constructor arg `bundleStride` (`vm.envUint("BUNDLE_STRIDE")`): the
+    // level's `AnchorMode::stride()`, the value `daemon-live` checks against
+    // the deployed `bundleStride()` at startup.
+    println!("BUNDLE_STRIDE={bundle_boundary}");
     // Mirrors Solidity constructor arg `genesisLastBkSetUpdateSeqNo`
     // (consumed via `vm.envOr("GENESIS_LAST_BK_SET_UPDATE_SEQNO", 0)` in
     // `DeployShellnetE2EBridge.s.sol`). Plain decimal `uint64` — no

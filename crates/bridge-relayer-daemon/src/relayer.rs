@@ -64,8 +64,10 @@ pub struct RelayerConfig {
     /// Interval between attempts in [`Relayer::run_loop`].
     #[serde(default = "default_poll_interval")]
     pub poll_interval: Duration,
-    /// After this many consecutive failures on the same target seqNo,
-    /// emit a warning. Doesn't stop the relayer; operator-visible only.
+    /// Polls with no new bundle, per L1-sized stride, before the wait is
+    /// logged as a stall ([`Relayer::polls_before_stall_warn`]). Before
+    /// that, every `max_attempts_warn`-th poll logs the wait at INFO.
+    /// Doesn't stop the relayer; operator-visible only.
     #[serde(default = "default_max_attempts_warn")]
     pub max_attempts_warn: u32,
     /// After this many consecutive rejections on the same target seqNo,
@@ -97,8 +99,8 @@ fn default_bundle_stride() -> u64 {
 }
 
 impl RelayerConfig {
-    /// Sensible defaults: 2-second polling, warn after 16 attempts on
-    /// the same block, hard-abort after 3.
+    /// Sensible defaults: 2-second polling, warn after 16 polls without a
+    /// bundle per L1-sized stride, hard-abort after 3 rejected submissions.
     pub fn new(state_path: impl Into<PathBuf>) -> Self {
         Self {
             state_path: state_path.into(),
@@ -186,6 +188,15 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
     /// chain that far between two snapshots.
     pub fn max_forward_gap(&self) -> u64 {
         MAX_FORWARD_GAP_BUNDLES * self.config.bundle_stride.max(1)
+    }
+
+    /// Polls with no new bundle before the wait is reported as a stall:
+    /// `max_attempts_warn` per L1-sized stride, so 16 at L1 and 256 at L2.
+    /// At L2 the next bundle is ~90 minutes of chain time away, and an
+    /// ordinary wait between bundles must not read as a stall.
+    pub fn polls_before_stall_warn(&self) -> u64 {
+        let strides = (self.config.bundle_stride / BUNDLE_STRIDE_L1).max(1);
+        u64::from(self.config.max_attempts_warn).saturating_mul(strides)
     }
 
     /// Read-only access to the persisted state (useful for tests + the
@@ -397,15 +408,21 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             Some(b) => b,
             None => {
                 // Waiting for the next bundle is the normal state between
-                // bundles: a poll, not an attempt.
+                // bundles: a poll, not an attempt. Say so at INFO every
+                // `max_attempts_warn` polls; warn only once the wait runs
+                // well past a bundle interval.
                 self.state.record_poll(target);
                 self.persist_state()?;
-                if self.state.polls_since_progress >= self.config.max_attempts_warn {
+                let polls = self.state.polls_since_progress;
+                if u64::from(polls) >= self.polls_before_stall_warn() {
                     warn!(
                         seqno = target,
-                        polls = self.state.polls_since_progress,
-                        "block source still has no data; relayer is stalled",
+                        polls,
+                        "no new bundle for much longer than a bundle interval; check the prover \
+                         and the chain",
                     );
+                } else if polls.is_multiple_of(self.config.max_attempts_warn) {
+                    info!(seqno = target, polls, "waiting for the next bundle");
                 }
                 return Ok(TickOutcome::NotYetAvailable {
                     target_seq_no: target,
@@ -1466,6 +1483,32 @@ mod tests {
             "N2 must not be submitted"
         );
         assert_eq!(r.state().bk_update_attempts_since_progress, 0);
+    }
+
+    #[test]
+    fn stall_warning_scales_with_the_bundle_stride() {
+        // At L2 an ordinary wait between bundles is ~90 polls; the L1
+        // threshold of 16 warned through most of every one of them.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(InMemoryBlockSource::new());
+        let threshold = |stride| {
+            let cfg = cfg_with(dir.path().join("state.json"), stride, 3);
+            Relayer::new(
+                cfg,
+                source.clone(),
+                Arc::new(EmptyBkUpdateSource),
+                bridge.clone(),
+            )
+            .unwrap()
+            .polls_before_stall_warn()
+        };
+        assert_eq!(threshold(BUNDLE_STRIDE_L1), 16);
+        assert_eq!(threshold(bridge_prover_lib::BUNDLE_STRIDE_L2), 256);
     }
 
     #[tokio::test]

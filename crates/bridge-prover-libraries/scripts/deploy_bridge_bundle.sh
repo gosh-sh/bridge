@@ -3,9 +3,10 @@
 #
 # Runs `compute_bridge_anchors --at-head` against live shellnet to derive
 # GENESIS_LAST_SEEN_BLOCK_SEQNO / GENESIS_PREV_MAX_LEVEL_LAYER_HASH /
-# GENESIS_BK_SET_COMMITMENT, deploys the bridge bundle via forge, extracts
-# BRIDGE_ADDRESS from the broadcast record, rewrites the non-secret
-# L${LEVEL}_config/env, and archives prior prover state.
+# GENESIS_BK_SET_COMMITMENT and the level's BUNDLE_STRIDE, deploys the
+# bridge bundle via forge, extracts BRIDGE_ADDRESS from the broadcast record,
+# rewrites the non-secret L${LEVEL}_config/env, and archives prior prover
+# state.
 #
 # NOT IDEMPOTENT: every run broadcasts a new set of contracts and spends new
 # nonces. Audit the Foundry broadcast record and latest/pending nonce before a
@@ -72,6 +73,8 @@ cargo run --release --quiet --bin compute_bridge_anchors -- \
 
 echo ">>> Derived anchors:"
 cat "$GENESIS_ENV"
+# BUNDLE_STRIDE must come from compute_bridge_anchors, not the caller's shell.
+unset BUNDLE_STRIDE
 set -a && source "$GENESIS_ENV" && set +a
 
 # CRITICAL RENAME: compute_bridge_anchors emits GENESIS_SEED_SEQNO;
@@ -79,16 +82,11 @@ set -a && source "$GENESIS_ENV" && set +a
 # vm.envOr(..., 0) — without this alias the constructor silently pins 0.
 export GENESIS_LAST_SEEN_BLOCK_SEQNO="$GENESIS_SEED_SEQNO"
 
-# BUNDLE_STRIDE is immutable at deploy time and must match the daemon's
-# AnchorMode::stride() for this LEVEL — L1 (W·P) = 1024, L2 (W²) = 16384,
-# with W=128 and P=8 (see bridge-prover-lib::BUNDLE_STRIDE_L{1,2}).
-# applyBkSetUpdate uses it to compute the next owed bundle boundary;
-# switching anchor level requires a redeploy.
-if [[ "$LEVEL" == 1 ]]; then
-  export BUNDLE_STRIDE=1024
-else
-  export BUNDLE_STRIDE=16384
-fi
+# BUNDLE_STRIDE comes from compute_bridge_anchors: AnchorMode::stride() for
+# this LEVEL, the value the daemon checks against bundleStride() at startup.
+# It is immutable at deploy time: applyBkSetUpdate uses it to compute the
+# next owed bundle boundary, and switching anchor level requires a redeploy.
+: "${BUNDLE_STRIDE:?compute_bridge_anchors did not print BUNDLE_STRIDE}"
 
 # ─── 2. Deploy the bundle (14 CREATEs across 6 logical components) ────────────
 cd "$CONTRACTS_DIR"

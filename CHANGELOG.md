@@ -1128,6 +1128,20 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **The relayer no longer reports an ordinary wait between bundles as a
+  stall.** `WARN block source still has no data; relayer is stalled` came
+  after 16 polls without a new bundle, which at L2 (about 90 minutes between
+  bundles) was most of every wait. The threshold now scales with the bundle
+  stride, 16 polls per L1-sized stride (256 at L2, about four hours), and the
+  warning reads `no new bundle for much longer than a bundle interval; check
+  the prover and the chain`. Until then every 16th poll logs `INFO waiting
+  for the next bundle`.
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh` takes
+  `BUNDLE_STRIDE` from `compute_bridge_anchors`.** `compute_bridge_anchors`
+  prints `BUNDLE_STRIDE`, `AnchorMode::stride()` for its `--level`: the value
+  `daemon-live` checks against `bundleStride()` at startup. The script
+  deploys with it instead of the 1024 and 16384 it had written in, and
+  ignores a `BUNDLE_STRIDE` set in the caller's shell.
 - **A chain that stays below the relayer's last confirmed write is reported
   after 10 minutes.** `daemon-live` retries a `_rewound` signal as
   read-after-write lag (`WARN transient RPC read-after-write lag — will

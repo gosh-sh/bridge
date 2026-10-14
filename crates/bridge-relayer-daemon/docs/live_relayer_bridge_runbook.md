@@ -304,9 +304,11 @@ boundary of a bundle not yet verified — is not picked up at all until that
 bundle is verified, and nothing is logged for it meanwhile. It is proven and
 applied right after the next `verified`.
 
-Between boundaries every tick finds no bundle yet; after 16 such ticks the log
-repeats `block source still has no data; relayer is stalled` — expected until
-the chain reaches the next boundary.
+Between boundaries every tick finds no bundle yet, and every 16th such tick
+logs `INFO … waiting for the next bundle`. `WARN … no new bundle for much
+longer than a bundle interval; check the prover and the chain` comes only
+after 256 such ticks at L2 (16 at L1), about four hours: by then the prover or
+the chain is stuck.
 
 **Snapshot.**
 

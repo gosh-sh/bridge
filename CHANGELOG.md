@@ -22,16 +22,44 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
-### Documentation
-
-- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
-  is part of replay protection, and that an upgrade changing it has to ship a
-  block cutoff in the same code so past deposits stop going through. The
-  current contracts need no such restriction — the voucher's code is installed
-  by the zerostate and `updateCode` is called with an empty `userCell`.
-
 ### Breaking Changes
 
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
+  id `deployLightClient` stored can be flipped.** The previous bool
+  `_ownerAnchorsEnabled` turned the owner writer off for every source
+  chain at once, so a flip left the six L2s on the deposit allowlist
+  with no writer. The call (and `disableOwnerAnchorsOn(uint256 chainId)`)
+  now sets `_ownerAnchorsDisabled` only for `_lightClientL1ChainId`;
+  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The bridge
+  does not read the light client's own `getConfig().l1ChainId`.
+  `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
+  `getLightClientL1ChainId()` is the stored L1 id (0 until
+  `deployLightClient`). The new storage field is `_lightClientL1ChainId`.
+  L2 deposits keep `setAcceptedBlockHash`. The no-argument ABI the
+  relayer already calls is unchanged. The bridge reports 1.8.0. Rebuild
+  `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade the premined 1.7.0
+  bridge; `onCodeUpgrade` resets storage and does not migrate
+  `_lightClient` or the L1 id, so both `disableOwnerAnchors` and
+  `deployLightClient` revert 226 until `setLightClientCode` runs again.
+  Then `deployLightClient` stores the L1 id it is given — the constructor
+  message bounces if the light client is already at that address, so
+  pass the same id that client was constructed with.
+  `ackinacki-bridge deposit` reads `isOwnerAnchorsEnabled(chainId)` on
+  1.8.0, and `getAnchorConfig().ownerAnchorsEnabled` on 1.7.0 (that
+  getter does not exist there, and retrying it would hang). An L1 flip
+  does not refuse L2 deposits **on a CLI from this branch**. Released
+  CLIs still read `getAnchorConfig().ownerAnchorsEnabled` as the
+  deposit's own mode, so after the flip they treat an L2 deposit as
+  light-client and refuse it (`LcFailure::Network`). Ship this CLI
+  before flipping.
+  A flip through `disableOwnerAnchorsOn` is the same switch: the CLI
+  recognises that call in the bridge's history, and the bundled ABI
+  matches the compiled 1.8.0 one so it can decode it.
+  Do not flip until something late-registers skipped checkpoints so
+  consecutive proven anchors sit within one ancestry span: accepted
+  checkpoints are often two or more epochs apart, and `eth-lc-relayer`
+  still leaves the flip off unless started with `--flip-owner`.
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block
@@ -657,6 +685,22 @@ assigns it when the release is tagged.
   and ownership moves only when that address calls `acceptOwnership`. Any
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
+
+### Documentation
+
+- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
+  is part of replay protection, and that an upgrade changing it has to ship a
+  block cutoff in the same code so past deposits stop going through. The
+  current contracts need no such restriction — the voucher's code is installed
+  by the zerostate and `updateCode` is called with an empty `userCell`.
+- `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
+  `docs/eth-light-client.md` §3.5, and
+  `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
+  the owner writer; L1 still covers only the blocks a span reaches when
+  accepted checkpoints sit more than a span apart, because nothing
+  late-registers the ones the daemon skipped. Check 3 of the deposit
+  CLI names both `disableOwnerAnchors` and `disableOwnerAnchorsOn` as
+  the switch-off.
 
 ### Added
 

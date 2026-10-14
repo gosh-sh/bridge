@@ -71,8 +71,9 @@ eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' \
 `--no-rotate` opts out of auto `submitRotate`, which is **on** by default;
 tvm-sdk#284 co-deploys with this contract (n14 for the ~40 GB rotate prove).
 `--flip-owner` opts in to the owner flip after the first accepted update. It is
-**off** by default: after it, deposits outside checkpoint blocks and from L2s
-have no anchor writer (`scripts/ursus/flip_deposit_to_light_client.md`). It needs
+**off** by default: after it, L1 deposits outside checkpoint blocks have no
+anchor writer; L2s keep the owner path
+(`scripts/ursus/flip_deposit_to_light_client.md`). It needs
 `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`. Relayer keys must be the owner pubkey.
 
 Standalone crate (own `Cargo.lock`). Tests:

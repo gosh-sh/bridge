@@ -98,7 +98,7 @@ new committee's period; binding the hand-off to a slot inside the circuit is
 what would fix that (gosh-sh/bridge-audit#118).
 
 The **trust-reduction switch** mirrors `USDCBridge`'s
-`_ownerAnchorsEnabled`/`disableOwnerAnchors`: while `_ownerRotationEnabled` the
+per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotationEnabled` the
 owner may `setCommitteeCommitment` directly (checkpoint bootstrap / syncing before
 the VkBlob exists); `disableOwnerRotation()` clears it permanently, leaving
 `submitRotate` the only permissionless writer; `reAnchorCommittee` is the

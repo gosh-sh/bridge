@@ -44,7 +44,7 @@ different language dialect and a different chain.
 |---|---|---|---|
 | `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The rest is the same code — both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is no longer a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale, so `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch` edit files the placing overwrites and no longer apply to anything. `scripts/check_eth_beacon_lc_sources.sh` does not look at the placed sources at all: it reads the two patch files and `contracts/an/EthKeccak.sol`, and asserts the patches touch only `contracts/exchange/` paths. Nothing checks the files `place.json` places. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
-| `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge (`deployLightClient`), and the bridge derives its address from that code (`getAnchorConfig().lightClient`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash`. |
+| `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge (`deployLightClient`), and the bridge derives its address from that code (`getAnchorConfig().lightClient`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | Invoked as `cargo run --release --example export_step_vk_blob` with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
 | Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
@@ -265,8 +265,8 @@ stateDiagram-v2
   direction LR
   state "USDCBridge anchors" as UBA {
     OwnerAnchors: owner or attesters write _acceptedBlockHash
-    LightClientAnchors: only EthBeaconLightClient writes
-    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way; light client already derived from code)
+    LightClientAnchors: LC writes L1; owner still writes L2
+    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way, L1 only)
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
@@ -276,17 +276,25 @@ stateDiagram-v2
 ```
 
 Before the flip the light client is advisory: it pushes hashes, but the owner key can still push
-anything. After the flip nothing but a valid proof adds a block hash. There is no way back; the
-only recovery from a stalled relayer is `reAnchorCommittee`, which is logged on chain.
+anything. After the flip nothing but a valid proof adds an L1 block hash; L2 hashes still take
+the owner key. There is no way back on that L1; the only recovery from a stalled relayer is
+`reAnchorCommittee`, which is logged on chain.
 
-**Do not flip yet.** After `disableOwnerAnchors` the light client is the only writer of
-`_acceptedBlockHash`, and the blocks it can write are the checkpoints of its `l1ChainId` —
-late-registered ones included — plus the spans ancestry fills between them (§3.4). No L2.
-`_ownerAnchorsEnabled` covers every chain id at once. After the flip, a deposit from any L2 on
-the deposit allowlist, or from any of the other 31 blocks of an epoch on the light client's own
-chain, fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts` is
-set. That is why the daemon does not flip unless told to.
+**Do not flip yet.** `disableOwnerAnchors` now turns the owner writer off only for the L1
+id `deployLightClient` stored (`disableOwnerAnchorsOn(chainId)` refuses any other id with
+`ERR_NOT_LIGHT_CLIENT_CHAIN` (227)). The bridge does not read the light client's own
+`getConfig().l1ChainId`. After an upgrade, `onCodeUpgrade` clears `_lightClient` and the
+stored L1 id: `setLightClientCode` has to run first, then `deployLightClient` stores the
+id it is given (`getLightClientL1ChainId()`; 0 until then) — pass the same id the
+existing client was constructed with, because a constructor bounce still writes it.
+`disableOwnerAnchors` reverts 226 until both are set. L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining
+hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and the spans
+ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
+that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
+nothing late-registers the skipped ones. A deposit from any of those uncovered blocks
+fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
+delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts`
+is set. That is why the daemon does not flip unless told to.
 
 ## 4. Deployment
 
@@ -395,7 +403,7 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
 6. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
    flag, after the first accepted update the daemon checks `getAnchorConfig().lightClient`
    against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchors` and `disableOwnerRotation`; from
-   then on the bridge refuses `setAcceptedBlockHash`.
+   then on the bridge refuses `setAcceptedBlockHash` only for the light client's L1.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light
 client deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,

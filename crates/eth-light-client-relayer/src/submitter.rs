@@ -766,9 +766,9 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 ),
             });
         }
-        // `disableOwnerAnchors` does not revert a second call, so the getter is
-        // the only "already flipped" signal; anything but an explicit `false`
-        // sends the call.
+        // `disableOwnerAnchors` is L1-only and does not revert a second call,
+        // so the getter is the only "already flipped" signal; anything but
+        // an explicit `false` sends the call. L2 owner writers stay on.
         let already_off = cfg.get("ownerAnchorsEnabled").and_then(|v| v.as_bool()) == Some(false);
         if !already_off {
             match self

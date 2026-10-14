@@ -292,15 +292,13 @@ impl LightClient {
         if next == self.committee {
             return Err(LcError::SelfRotation);
         }
-        // No test on `period`: the circuit loads it as a free witness, so it
-        // is not a proven fact and every guard built on it was a way to brick
-        // the call. The committee chain above is the replay guard.
-        let _ = period;
+        // No test on `period`. The circuit binds it to the attested slot, but
+        // the committee chain above is the replay guard and nothing gates on
+        // the label.
         self.prev_committee = self.committee;
         self.prev_committee_head_slot = self.finalized_slot;
         self.committee = next;
-        // Derived from the proven head, never taken from the proof.
-        self.period = self.finalized_slot / SLOTS_PER_PERIOD + 1;
+        self.period = period;
         Ok(())
     }
 
@@ -563,27 +561,19 @@ mod tests {
         );
     }
 
-    /// The rotate period is a free witness in the circuit, so nothing may gate
-    /// on it. Any label the sender types — including `u64::MAX` and a stale one
-    /// — must leave the rotation path open, and what lands in storage must come
-    /// from the proven head.
+    /// The rotate period is proven (the attested slot's period plus one) and
+    /// stored as it is, but nothing gates on it: a hand-off goes through
+    /// whatever its label, and the committee chain is the replay guard.
     #[test]
-    fn no_label_on_a_hand_off_can_shut_the_rotation_path() {
+    fn the_rotate_label_is_stored_and_gates_nothing() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
 
-        // A genuine hand-off with an absurd label is accepted and records the
-        // derived period, not the label.
-        c.rotate([0xC1; 32], u64::MAX).unwrap();
-        assert_eq!(
-            c.period, 2,
-            "the stored period must be derived from the head, not from the proof"
-        );
+        c.rotate([0xC1; 32], 2).unwrap();
+        assert_eq!(c.period, 2, "the stored period is the proof's");
         assert_eq!(c.committee, [0xC1; 32]);
 
-        // And the next genuine hand-off still goes through, which is what the
-        // old monotonicity check made impossible after a relabelled one.
         c.submit_update_at(
             2 * SLOTS_PER_PERIOD,
             2 * SLOTS_PER_PERIOD,
@@ -592,9 +582,9 @@ mod tests {
         )
         .unwrap();
         c.rotate([0xC2; 32], 0)
-            .expect("a stale label must not block a genuine hand-off");
+            .expect("the label must not block a genuine hand-off");
         assert_eq!(c.committee, [0xC2; 32]);
-        assert_eq!(c.period, 3);
+        assert_eq!(c.period, 0);
     }
 
     /// Reachable for every period boundary: the last header of a period is

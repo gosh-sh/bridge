@@ -57,6 +57,13 @@
 			"outputs": []
 		},
 		{
+			"name": "setGloasForkSlot",
+			"inputs": [
+				{"name":"gloasForkSlot","type":"uint64"}
+			],
+			"outputs": []
+		},
+		{
 			"name": "reAnchorCommittee",
 			"inputs": [
 				{"name":"committeeCommitment","type":"uint256"},
@@ -115,6 +122,14 @@
 				{"name":"committeePeriod","type":"uint64"},
 				{"name":"ownerRotationEnabled","type":"bool"},
 				{"name":"reAnchorsApplied","type":"uint64"}
+			]
+		},
+		{
+			"name": "getGloasForkSlot",
+			"inputs": [],
+			"outputs": [
+				{"name":"gloasForkSlot","type":"uint64"},
+				{"name":"isSet","type":"bool"}
 			]
 		}
 	],

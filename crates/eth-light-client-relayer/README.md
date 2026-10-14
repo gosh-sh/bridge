@@ -13,8 +13,11 @@ checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
 parent chain, which is necessary for a span to carry it, not sufficient.
-Committee rotate: on by default (`submitRotate` on a period jump; `--no-rotate`
-opts out). tvm-sdk#284 co-deploys with this contract.
+Committee rotate: the daemon only auto-`submitRotate`s the committed
+fixture period. A live period jump returns `RotateRequired` — prove
+`rotate_tree_n8` on n14 and run `eth-lc-relayer submit-rotate --state`.
+`--no-rotate` opts out of even that. tvm-sdk#284 co-deploys with this
+contract.
 
 ## How it runs
 
@@ -48,28 +51,33 @@ eth-lc-relayer prove-one --beacon-url … \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle
 
-# 5. Submit step / rotate
-eth-lc-relayer submit-one --bundle-dir ./bundle …
-eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree …
+# 5. Pin the Gloas fork slot (required once; Sepolia 11296768, mainnet max)
+eth-lc-relayer set-gloas-fork-slot --slot 11296768 …
 
-# 6. Is this deposit's execution hash on the checkpoint parent chain?
+# 6. Submit step / rotate
+eth-lc-relayer submit-one --bundle-dir ./bundle …
+eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree --state ./eth-lc-relayer-state.json …
+
+# 7. Is this deposit's execution hash on the checkpoint parent chain?
 eth-lc-relayer ancestry-one --beacon-url … \
   --checkpoint-slot 12345678 --deposit-hash 0x…
 
-# 7. Write the blocks between two proven anchors on-chain (needs
+# 8. Write the blocks between two proven anchors on-chain (needs
 #    --submit-ancestry on the daemon, or this one-shot + live-submit)
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
   --older-anchor-hash 0x… \
   --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
 
-# 8. One-shot owner flip (the daemon does it only with --flip-owner)
+# 9. One-shot owner flip (the daemon does it only with --flip-owner)
 eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' \
   --an-usdc-abi-path ./abi/USDCBridge.abi.json …
 ```
 
-`--no-rotate` opts out of auto `submitRotate`, which is **on** by default;
-tvm-sdk#284 co-deploys with this contract (n14 for the ~40 GB rotate prove).
+`--no-rotate` opts out of even the fixture auto-rotate. A live period
+is never proved in-process: prove on n14 and `submit-rotate --state`
+(tvm-sdk#284; the rotate tree is ~40 GB). The next daemon tick reads
+`getCommitteeState` and continues.
 `--flip-owner` opts in to the owner flip after the first accepted update. It is
 **off** by default: after it, L1 deposits outside checkpoint blocks have no
 anchor writer; L2s keep the owner path

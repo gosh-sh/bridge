@@ -5,13 +5,18 @@
 //! committee, so the shard proofs' exposed subtree roots line up with the tree
 //! root's `RotateGlueWitness`. This module is the single source: it parses the
 //! `next_sync_committee` (512 pubkeys + `aggregate_pubkey`), its
-//! `next_sync_committee_branch` (6 nodes @ gindex 87), the attested `state_root`,
-//! and the `signature_slot` from a beacon `LightClientUpdate` JSON — the exact
+//! `next_sync_committee_branch` (6 nodes @ gindex 87 before Gloas, 11 @ 2946
+//! from it), the attested slot and `state_root`, and the `signature_slot` from a beacon `LightClientUpdate` JSON — the exact
 //! shape `tests/rotate_mock_prover.rs` validates against live data.
 
 use std::path::{Path, PathBuf};
 
 use crate::committee::{COMMITTEE_SHARDS, PUBKEYS_PER_SHARD, SYNC_COMMITTEE_SIZE};
+use crate::fork::{
+    is_gloas, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA, NEXT_SYNC_COMMITTEE_GINDEX_GLOAS,
+    SYNC_COMMITTEE_BRANCH_LEN,
+};
+use crate::ssz::branch_for_either;
 
 /// 32 slots/epoch × 256 epochs/period.
 pub const SLOTS_PER_SYNC_PERIOD: u64 = 32 * 256;
@@ -24,18 +29,40 @@ pub struct RotateFixture {
     pub pubkeys: Vec<[u8; 48]>,
     /// `aggregate_pubkey` (48 compressed bytes).
     pub aggregate: [u8; 48],
-    /// `next_sync_committee_branch` — 6 nodes for Electra/Fulu gindex 87.
+    /// `next_sync_committee_branch` as served — 6 nodes for Electra/Fulu gindex
+    /// 87, 11 for Gloas 2946 (or 87 front-padded to 11). See [`Self::glue_branch`].
     pub branch: Vec<[u8; 32]>,
+    /// Slot of the attested header.
+    pub attested_slot: u64,
     /// Attested beacon `state_root` the branch reconstructs.
     pub state_root: [u8; 32],
     /// `signature_slot` of the update.
     pub signature_slot: u64,
 }
 
+/// The period a hand-off installs, as the rotate circuit proves it: the state
+/// at `attested_slot` holds the committee of the period after its own.
+pub fn rotate_period(attested_slot: u64) -> u64 {
+    attested_slot / SLOTS_PER_SYNC_PERIOD + 1
+}
+
 impl RotateFixture {
-    /// Sync-committee period the update rotates INTO (`signature_slot / 8192`).
+    /// Sync-committee period the update rotates INTO ([`rotate_period`] of the
+    /// attested slot).
     pub fn period(&self) -> u64 {
-        self.signature_slot / SLOTS_PER_SYNC_PERIOD
+        rotate_period(self.attested_slot)
+    }
+
+    /// The branch in the layout `RotateGlueWitness` takes, read at the index of
+    /// the attested state's fork.
+    pub fn glue_branch(&self, gloas_fork_slot: u64) -> anyhow::Result<Vec<[u8; 32]>> {
+        let gindex = if is_gloas(self.attested_slot, gloas_fork_slot) {
+            NEXT_SYNC_COMMITTEE_GINDEX_GLOAS
+        } else {
+            NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA
+        };
+        branch_for_either(&self.branch, gindex, SYNC_COMMITTEE_BRANCH_LEN)
+            .map_err(|e| anyhow::anyhow!("next_sync_committee_branch: {e}"))
     }
 }
 
@@ -78,6 +105,12 @@ pub fn load_rotate_update(path: &Path) -> anyhow::Result<RotateFixture> {
         .map(|b| h32(b.as_str().unwrap_or_default()))
         .collect::<anyhow::Result<_>>()?;
 
+    let attested_v = &d["attested_header"]["beacon"]["slot"];
+    let attested_slot = attested_v
+        .as_u64()
+        .or_else(|| attested_v.as_str().and_then(|s| s.parse().ok()))
+        .ok_or_else(|| anyhow::anyhow!("attested_header.beacon.slot missing/unparseable"))?;
+
     let state_root = h32(
         d["attested_header"]["beacon"]["state_root"]
             .as_str()
@@ -90,7 +123,7 @@ pub fn load_rotate_update(path: &Path) -> anyhow::Result<RotateFixture> {
         .or_else(|| slot_v.as_str().and_then(|s| s.parse().ok()))
         .ok_or_else(|| anyhow::anyhow!("signature_slot missing/unparseable"))?;
 
-    Ok(RotateFixture { pubkeys, aggregate, branch, state_root, signature_slot })
+    Ok(RotateFixture { pubkeys, aggregate, branch, attested_slot, state_root, signature_slot })
 }
 
 /// Locate a committed mainnet update fixture (`fixtures/mainnet/update_period_*.json`).

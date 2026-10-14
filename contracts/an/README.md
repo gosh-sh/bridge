@@ -205,9 +205,12 @@ so the exception cannot roll it back. Before the refund, `ensureBalance()`
 replenishes operational SHELL through free `gosh.mintshellq(MIN_BALANCE)`
 minting in the AN execution model. The transfer carries 0.1 vmshell plus the
 full attached ECC, with forwarding fees paid separately. No native balance is
-reserved. The allowance is fixed even when incoming SHELL was smaller, so
-repeated rejected calls return all ECC and receive this allowance from the
-freely replenished SHELL balance.
+reserved. The allowance is fixed even when incoming SHELL was smaller.
+Withdrawal messages in the intended deployment arrive from a DApp ID different
+from the bridge's. The SHELL attached to the return message is burned when it
+crosses back to that DApp, while the sender receives the refunded ECC.
+The offline TVM harness checks the outgoing message and does not model the
+cross-DApp delivery or SHELL burn.
 
 These AN migration exceptions do not move custody or spent-nullifier state
 between Ethereum contracts. Proofs do not bind an L1 contract address, and

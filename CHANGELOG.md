@@ -116,9 +116,10 @@ assigns it when the release is tagged.
   `ensureBalance()` replenishes operational SHELL through free minting with
   `gosh.mintshellq(MIN_BALANCE)` in the AN execution model. Forwarding fees are
   paid separately and no native balance is reserved. The fixed allowance can
-  exceed incoming SHELL; repeated refused calls return the caller's full ECC
-  and receive this allowance from the freely replenished SHELL balance. This includes when the
-  incoming transfer had `bounce: false`. On Ethereum, an already-burned legacy
+  exceed incoming SHELL. In the intended deployment, withdrawal messages arrive
+  from a DApp ID different from the bridge's. The SHELL attached to the return
+  message is burned on the cross-DApp return, while the caller receives the
+  refunded ECC. This includes incoming transfers with `bounce: false`. On Ethereum, an already-burned legacy
   withdrawal over 50 USDC can be authorized by its exact proof nullifier with
   `setLegacyWithdrawal(nullifier, true)`; proof/identity/chain/recipient and
   spent-nullifier checks still apply. The authorization is consumed on payout

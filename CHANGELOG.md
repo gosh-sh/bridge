@@ -113,13 +113,13 @@ assigns it when the release is tagged.
 
   An over-cap `initiateWithdrawal` calls `ensureBalance()` and returns the
   attached ECC with 0.1 vmshell, committing the refund before reporting 233.
-  `ensureBalance()` replenishes operational SHELL through free minting with
-  `gosh.mintshellq(MIN_BALANCE)` in the AN execution model. Forwarding fees are
-  paid separately and no native balance is reserved. The fixed allowance can
-  exceed incoming SHELL. In the intended deployment, withdrawal messages arrive
-  from a DApp ID different from the bridge's. The SHELL attached to the return
-  message is burned on the cross-DApp return, while the caller receives the
-  refunded ECC. This includes incoming transfers with `bounce: false`. On Ethereum, an already-burned legacy
+  **`ensureBalance()` is free.** It replenishes SHELL with
+  `gosh.mintshellq(MIN_BALANCE)`. The bridge is a system contract in DApp 0.
+  **Non-system contracts cannot exist in DApp 0.** User withdrawal messages
+  therefore arrive from another DApp ID. The 0.1 vmshell attached to the return
+  message is burned on the cross-DApp return; the user receives the refunded
+  ECC. Forwarding fees are paid separately and no native balance is reserved.
+  This also applies to incoming transfers with `bounce: false`. On Ethereum, an already-burned legacy
   withdrawal over 50 USDC can be authorized by its exact proof nullifier with
   `setLegacyWithdrawal(nullifier, true)`; proof/identity/chain/recipient and
   spent-nullifier checks still apply. The authorization is consumed on payout

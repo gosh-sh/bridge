@@ -32,46 +32,50 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- **The bridge refuses a transfer over 50 USDC, and refuses to hold more than
-  1000 USDC of user principal.** Both caps are enforced on both chains and in
-  both directions, so a transfer above 50 USDC reverts wherever it is
-  submitted. On Ethereum `deposit` and `withdrawByProof` revert with
-  `TransferTooLarge`, and `deposit` also reverts with `TvlCapExceeded` once
-  `treasuryBalance` would pass the ceiling; both constants are public
-  (`MAX_TRANSFER_AMOUNT`, `MAX_TVL`). On Acki Nacki `finalizeDeposit` and
-  `initiateWithdrawal` throw `ERR_TRANSFER_TOO_LARGE` (233), and
-  `finalizeDeposit` throws `ERR_TVL_CAP` (234) once the outstanding bridged
-  amount would pass it. Any integration that moves more than 50 USDC at a time
-  has to split the amount, and the 1000 USDC ceiling is for the bridge as a
-  whole, not per account. `eccUSDCBridge` goes 1.7.0 to 1.7.1, so `getVersion`
-  tells a deployment with the caps from one without.
+- **New bridge transfers are capped at 50 USDC, and user principal at
+  10,000 USDC.** Ethereum `deposit` and `withdrawByProof` reject amounts over
+  `MAX_TRANSFER_AMOUNT` with `TransferTooLarge`; `deposit` rejects an increase
+  of `treasuryBalance` over `MAX_TVL` with `TvlCapExceeded`. Both constants are
+  public. Acki Nacki `initiateWithdrawal` and new `finalizeDeposit` calls reject
+  an over-limit amount with `ERR_TRANSFER_TOO_LARGE` (233). Its TVL check counts
+  outstanding bridged USDC plus deposits awaiting their voucher confirmation,
+  and refuses an over-limit deposit with `ERR_TVL_CAP` (234). Split new amounts
+  over 50 USDC; the TVL limit is global, not per account.
 
-  The Acki Nacki TVL check sits in `finalizeDeposit`, not in `confirmDeposit`
-  where the mint happens, so a refused deposit is turned away before its
-  voucher is deployed and can be finalized later once the cap frees up; at the
-  mint it would leave the voucher occupying the address and the funds locked on
-  Ethereum for good. The cost is that two deposits in flight can both pass the
-  check and together cross the ceiling. Outstanding is computed as
-  `minted - burned` with a floor at zero, because the contract keeps no
-  invariant between those counters. On a deployment whose outstanding amount is
-  already above the ceiling when the caps are installed, every deposit is
-  refused with `ERR_TVL_CAP` until burns bring it back under; withdrawals are
-  not held up by the TVL check, only by the per-transfer one.
+  On Acki Nacki, finalizing a deposit reserves its amount before dispatching
+  the voucher. Repeating the proof while its callback is pending does not
+  reserve or deploy twice. Confirmation converts the reservation into minted
+  USDC; a bounced voucher deployment releases it so the proof can be retried.
+  `getDepositLimits(chainId, l1Bridge)` returns the transfer and TVL caps,
+  outstanding amount, pending reserved amount, and legacy deposit cutoff.
+  Outstanding remains `max(minted - burned, 0)`; this does not add a supply
+  invariant or change the owner/TIP-3 mint paths.
 
-  `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with
-  `sold` 0.80.0, the compiler this contract is pinned to (release tarball
-  `sold_gosh_0.80.0_linux_x86_64`), so the caps are in the artefact a zerostate
-  or an `updateCode` carries. The code hash moves `79b43abe…0565773` →
-  `de1fa836…9c946e`; `abi.json` is unchanged, so nothing that speaks to the
-  bridge needs rebuilding. On a live network the owner installs the new code
-  with `updateCode`, which keeps the address, the owner key and the
-  migration-cell layout. That compiler is not interchangeable, and not only
-  because of the code hash: 0.80.0 emits the legacy `ext_out_msg_info$11` event
-  format, while 0.81.0 writes one extra bit after `created_at` in the message
-  info and produces a byte-identical `abi.json`, so building this contract with
-  another compiler would silently change the wire form of
-  `WithdrawalInitiated` — the message the withdrawal proof is built over, whose
-  cell layout is pinned in `bridge-event-witness` and in the proving circuit.
+  **Finish already-paid legacy deposits when upgrading a live bridge.** For
+  each old Ethereum source, record its finalized `depositCounter` before
+  activating the caps, then restore its trust entry and call
+  `setLegacyDepositCount(chainId, l1Bridge, depositCount)` on the upgraded AN
+  bridge. Only proven deposits with `depositId < depositCount` are exempt from
+  the new caps. The cutoff can be set once per source and code generation;
+  zero or a second configuration fails with `ERR_LEGACY_CONFIG` (237).
+  Proof verification, canonical anchors and voucher replay protection still
+  apply. Legacy settlements may temporarily exceed the TVL cap; new deposits
+  remain blocked until withdrawals free enough capacity. Already-dispatched
+  old voucher callbacks can also complete after the initial upgrade.
+
+  Subsequent `updateCode` calls refuse with `ERR_DEPOSITS_PENDING` (236) while
+  reservations remain. Stop new finalizations and wait for confirmations or
+  deployment bounces before upgrading; the upgrade resets legacy cutoffs,
+  trust entries and anchors, so re-seed them before accepting deposits. Keep
+  the existing voucher code by passing an empty `userCell`. The voucher code
+  and its replay-protection addresses are unchanged.
+
+  `eccUSDCBridge` reports 1.7.1. Its `.tvc` and ABI are rebuilt with `sold`
+  0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
+  Existing event formats and call signatures stay the same. Use the release
+  `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
+  wire format of `WithdrawalInitiated` even when the event ABI is identical,
+  which would break the withdrawal proof's message-layout assumptions.
 
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are

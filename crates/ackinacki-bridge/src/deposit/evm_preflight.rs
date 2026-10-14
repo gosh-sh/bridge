@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn a_deposit_within_both_ceilings_passes() {
         run(
-            &with_limits(50_000_000, 1_000_000_000, 100_000_000),
+            &with_limits(50_000_000, 10_000_000_000, 100_000_000),
             Network::Sepolia,
             BRIDGE,
             12_500_000,
@@ -314,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_deposit_of_exactly_the_per_tx_ceiling_passes() {
-        let f = with_limits(12_500_000, 1_000_000_000, 0);
+        let f = with_limits(12_500_000, 10_000_000_000, 0);
         run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
             .await
             .unwrap();
@@ -322,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_deposit_that_exactly_fills_the_tvl_ceiling_passes() {
-        let f = with_limits(50_000_000, 1_000_000_000, 987_500_000);
+        let f = with_limits(50_000_000, 10_000_000_000, 9_987_500_000);
         run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
             .await
             .unwrap();
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn a_deposit_over_the_per_tx_ceiling_is_refused_by_name() {
         let e = run(
-            &with_limits(12_499_999, 1_000_000_000, 0),
+            &with_limits(12_499_999, 10_000_000_000, 0),
             Network::Sepolia,
             BRIDGE,
             12_500_000,
@@ -348,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn a_deposit_that_crosses_the_tvl_ceiling_is_refused_with_the_room_left() {
         let e = run(
-            &with_limits(50_000_000, 1_000_000_000, 995_000_000),
+            &with_limits(50_000_000, 10_000_000_000, 9_995_000_000),
             Network::Sepolia,
             BRIDGE,
             12_500_000,

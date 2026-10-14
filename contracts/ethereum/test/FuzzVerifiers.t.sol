@@ -261,6 +261,8 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
     function test_depositsStopAtTvlCap() public {
         uint256 step = bridge.MAX_TRANSFER_AMOUNT();
         uint256 cap = bridge.MAX_TVL();
+        assertEq(step, 50 * UsdcTestLib.UNIT, "issue 98 transfer cap");
+        assertEq(cap, 10_000 * UsdcTestLib.UNIT, "issue 98 TVL cap");
         uint256 steps = cap / step;
 
         for (uint256 i = 0; i < steps; i++) {

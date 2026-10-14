@@ -58,7 +58,7 @@ contract AckiNackiBridge {
     uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
 
     /// @notice Maximum user principal the bridge may hold.
-    uint256 public constant MAX_TVL = 1000 * USDC_UNIT;
+    uint256 public constant MAX_TVL = 10000 * USDC_UNIT;
 
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;

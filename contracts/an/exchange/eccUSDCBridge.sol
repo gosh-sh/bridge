@@ -86,9 +86,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // of stripe `_totalMinted`). No invariant enforced between minted/burned —
     // intra-AN ECC distribution can outpace deposits, so on-AN withdrawal can
     // exceed historical deposits for the same token. The split is for
-    // observability / per-token analytics, not for on-chain checks.
+    // observability / per-token analytics; the volume cap uses their net
+    // difference with a floor at zero, not a supply invariant.
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
+
+    mapping(address => uint128) _pendingDepositAmounts;
+    uint128 _reservedDeposits;
+    mapping(uint256 => mapping(uint256 => uint256)) _legacyDepositCounts;
 
     // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
     TvmCell _depositVoucherCode;
@@ -573,6 +578,27 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return _trustedL1Bridge[chainId][l1Bridge];
     }
 
+    /// @notice Admits already-funded deposits without applying the new volume
+    ///         caps. depositCount is the source's finalized depositCounter
+    ///         before enabling the caps: only lower IDs are grandfathered.
+    function setLegacyDepositCount(uint256 chainId, uint256 l1Bridge, uint256 depositCount)
+        public onlyOwnerPubkey(_ownerPubkey) accept
+    {
+        require(_trustedL1Bridge[chainId][l1Bridge], ERR_UNSUPPORTED_SRC_CHAIN);
+        require(depositCount > 0 && _legacyDepositCounts[chainId][l1Bridge] == 0,
+                ERR_LEGACY_CONFIG);
+        ensureBalance();
+        _legacyDepositCounts[chainId][l1Bridge] = depositCount;
+    }
+
+    function getDepositLimits(uint256 chainId, uint256 l1Bridge)
+        external view returns (uint128 maxTransfer, uint128 maxTvl,
+                               uint128 outstanding, uint128 reserved, uint256 legacyDepositCount)
+    {
+        return (MAX_BRIDGE_TRANSFER, MAX_BRIDGE_TVL, _bridgedOutstanding(),
+                _reservedDeposits, _legacyDepositCounts[chainId][l1Bridge]);
+    }
+
     /// @notice Admits (or retracts) a source-chain block hash as canonical.
     ///         Whoever holds the owner key MUST:
     ///           * verify the block against an independent node, not against
@@ -716,13 +742,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///                         + 2 block-hash halves + promise commit). Verified
     ///                         verbatim; business fields read at fixed offsets —
     ///                         see `_parsePublicInputs`.
-    function finalizeDeposit(bytes proof, bytes publicInputs) public view {
+    function finalizeDeposit(bytes proof, bytes publicInputs) public {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         require(!_paused, ERR_PAUSED);
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
-        require(f.amount <= MAX_BRIDGE_TRANSFER, ERR_TRANSFER_TOO_LARGE);
-        require(_bridgedOutstanding() + f.amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
+        bool legacy = f.depositId < _legacyDepositCounts[f.chainId][f.contractAddr];
+        require(legacy || f.amount <= MAX_BRIDGE_TRANSFER, ERR_TRANSFER_TOO_LARGE);
         // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
         // pins which (chain, bridge contract) pairs this side trusts. The deposit
         // passes if its proven address is in the chain's trusted set — an absent
@@ -770,6 +796,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             code: _depositVoucherCode
         });
 
+        address voucher = address.makeAddrStd(0, tvm.hash(stateInit));
+        if (_pendingDepositAmounts[voucher] != 0) { return; }
+        require(legacy || _bridgedOutstanding() + _reservedDeposits + f.amount <= MAX_BRIDGE_TVL,
+                ERR_TVL_CAP);
+        _pendingDepositAmounts[voucher] = f.amount;
+        _reservedDeposits += f.amount;
+
         new DepositVoucher{
             stateInit: stateInit,
             value: 2 vmshell,
@@ -797,12 +830,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             code: _depositVoucherCode
         });
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+        uint128 reservedAmount = _pendingDepositAmounts[msg.sender];
+        // A voucher dispatched by the previous code may confirm after the
+        // upgrade. Its authenticated callback predates reservations.
+        require((reservedAmount == 0 || reservedAmount == amount) && amount > 0,
+                ERR_DEPOSIT_RESERVATION);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
 
         tvm.accept();
         ensureBalance();
 
         gosh.mintecc(uint64(amount), USDC_ECC_ID);
+        delete _pendingDepositAmounts[msg.sender];
+        _reservedDeposits -= reservedAmount;
         _totalMintedBridgeByToken[USDC_ECC_ID] += amount;
 
         mapping(uint32 => varuint32) ecc;
@@ -818,6 +858,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         emit DepositFinalized{dest: addrExtern}(
             depositId, contractAddr, dappId, chainId, amount, anAccount
         );
+    }
+
+    onBounce(TvmSlice /*body*/) external {
+        uint128 amount = _pendingDepositAmounts[msg.sender];
+        if (amount == 0) { return; }
+        delete _pendingDepositAmounts[msg.sender];
+        _reservedDeposits -= amount;
     }
 
     // DepositVoucher code rotation is intentionally not exposed as a
@@ -859,6 +906,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///        this slot once `onCodeUpgrade` is extended; today it lets the
     ///        ABI stay stable.
     function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(_reservedDeposits == 0, ERR_DEPOSITS_PENDING);
         ensureBalance();
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,

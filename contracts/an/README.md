@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.7.0, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.7.1, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -136,6 +136,51 @@ The voucher's code can also change by accident: rebuilding `DepositVoucher.tvc`
 with a different compiler yields a different code hash.
 `getDepositVoucherCodeHash()` reports what the bridge currently holds — compare
 it against the tracked artefact before and after an upgrade.
+
+### Installing the volume caps on a live bridge
+
+New transfers are limited to 50 USDC, with 10,000 USDC TVL. The AN TVL check
+includes pending deposit reservations, not just completed mints.
+`getDepositLimits(chainId, l1Bridge)` reports `maxTransfer`, `maxTvl`,
+`outstanding`, `reserved` and `legacyDepositCount`, in micro-USDC except for
+that final deposit count.
+
+Before enabling the caps, record the finalized `depositCounter` of each legacy
+L1 bridge. After upgrading AN with the existing voucher code (empty
+`userCell`), restore its trust entries and canonical anchors, and call
+`setLegacyDepositCount(chainId, l1Bridge, depositCount)` for those sources.
+This allows proven, already-paid deposits whose `depositId < depositCount` to
+finish even above 50 USDC or the TVL cap. Never use an estimated or future
+counter: the cutoff authorizes an exception for exactly those historical
+IDs. The source must already be trusted; the cutoff can be set once per
+source, cannot be extended, and resets on a later code upgrade. A fresh
+zerostate needs no legacy cutoff.
+
+Previously dispatched voucher callbacks can complete after the initial
+upgrade. For later upgrades, stop new finalizations and wait until `reserved`
+is zero: `updateCode` refuses while deposits are pending (236). A failed
+voucher deployment releases its reservation on bounce so its proof can be
+retried. A reservation mismatch in `confirmDeposit` fails with 235; zero or a
+repeated legacy-cutoff configuration fails with 237. Legacy settlements may
+raise outstanding above 10,000 USDC; new deposits then wait until withdrawals
+bring outstanding plus reserved plus the new amount within the cap.
+
+These AN migration exceptions do not move custody between Ethereum
+contracts. Keep the source contracts and their withdrawal routes available
+for the principal they already hold; Ethereum contracts are redeployed,
+not upgraded by AN's `updateCode`.
+
+Run the TVM limit regressions offline after a contract change:
+
+    SOLD_0_80=/path/to/sold-0.80.0 TVM_DEBUGGER=/path/to/tvm-debugger python3 scripts/test_an_bridge_limits.py
+
+The harness substitutes proof verification and seeds storage in a temporary
+copy; it runs reservation, callback, bounce, cutoff and upgrade logic in TVM
+with the production voucher code. It does not test Halo2 proof validity or
+network message delivery.
+Use a debugger that supports internal calls emitting events; older builds
+mistake `DepositFinalized` for the function response and abort before saving
+the updated state.
 
 ## The zerostate module
 

@@ -24,6 +24,12 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
+  USDC base units. `AckiNackiBridge.deposit` reverts `DepositTooLarge` above it;
+  `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
+  exit 214. There is no extra product minimum besides `amount > 0`, and the
+  100 USDC figure in older notes is not in the contracts —
+  `contracts/an/README.md`, `docs/EVM-custody-and-accounting.md`.
 - The prover and circuit docs describe BK-set rotation as it works:
   `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
   and its opened L2/L3 leaves, no circuit of its own. Gone are the

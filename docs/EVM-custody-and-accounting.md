@@ -66,8 +66,10 @@ State it this way rather than as "checks-effects-interactions", which this path 
 
 Two consequences worth naming:
 
-* `MAX_DEPOSIT_AMOUNT` is `type(uint64).max` (`:61`) — sized so the amount fits the AN mint path,
-  not as a TVL cap. The function is **not** `payable`; the amount is a parameter.
+* `MAX_DEPOSIT_AMOUNT` is `type(uint64).max` (`:55`) — the same ceiling the AN mint path
+  enforces on proven `fr[2]` (exit 214). It is not a TVL cap and not a 100 USDC limit.
+  There is no extra product minimum besides `amount != 0`. The function is **not**
+  `payable`; the amount is a parameter.
 * The booked figure is the **requested** `amount`, not an observed balance delta. Exact for USDC;
   it would understate custody for a fee-on-transfer token, which is why the token is fixed at
   construction.

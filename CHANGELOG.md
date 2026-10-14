@@ -1693,6 +1693,14 @@ assigns it when the release is tagged.
   the daemon with `daemon: stuck — hard aborting`. Reverts the node
   simulates (`execution reverted`) and failed post-submit checks still
   count, and still stop the daemon at the third.
+- **An RPC request that gets no answer no longer holds the relayer.** The
+  Ethereum RPC client of every `relayer` command had no timeout, so a
+  request on a connection that went silent waited until the OS dropped the
+  connection. `daemon-live` once waited 9.5 minutes on one
+  `eth_blockNumber`, and a BK rotation that had landed on Acki Nacki waited
+  with it. A request now fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`):
+  the daemon logs `tick failed, will back off` and retries, and a send that
+  times out is an RPC failure, not counted toward the abort threshold.
 - **Check B allows four bundles of the daemon's own stride between two
   snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
   L2 bundle the relayer did not see land — its own `verifyBlock` whose

@@ -16,6 +16,7 @@ pub mod history_consistency;
 pub mod live_source;
 pub mod proof_validation;
 pub mod relayer;
+pub mod rpc_http;
 pub mod source;
 pub mod startup_decide;
 pub mod state;
@@ -49,6 +50,10 @@ pub use history_consistency::{
 };
 pub use live_source::{LiveBlockSource, StatePaths};
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
+pub use rpc_http::{
+    rpc_http_client, rpc_request_timeout_from_env, DEFAULT_RPC_REQUEST_TIMEOUT,
+    ENV_RPC_REQUEST_TIMEOUT_SECS,
+};
 pub use source::{
     BkUpdateProofsSource, BkUpdateSource, BlockSource, EmptyBkUpdateSource, FixturesBlockSource,
     InMemoryBlockSource, ProverProofsBlockSource,

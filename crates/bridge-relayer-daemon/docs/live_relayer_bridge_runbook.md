@@ -124,7 +124,9 @@ itself; K=21 and K=22 come from their own ceremony files.
 
 Optional: `BRIDGE_PK_CACHE_DIR=./params/pk_cache`,
 `BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions` (saves each `verifyBlock`
-calldata for replay), `RELAYER_METRICS_ADDR`, `BRIDGE_GQL_FAILOVER_ENDPOINTS`.
+calldata for replay), `RELAYER_METRICS_ADDR`, `BRIDGE_GQL_FAILOVER_ENDPOINTS`,
+`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60: how long one request to
+`RPC_URL` may take).
 
 Check before every launch:
 
@@ -313,6 +315,11 @@ logs `INFO … waiting for the next bundle`. `WARN … no new bundle for much
 longer than a bundle interval; check the prover and the chain` comes only
 after 256 such ticks at L2 (16 at L1), about four hours: by then the prover or
 the chain is stuck.
+
+An occasional `WARN … tick failed, will back off` naming the RPC or GraphQL
+endpoint is a failed read; the next tick repeats it. A request to `RPC_URL`
+that gets no answer fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`)
+rather than holding up the ticks.
 
 **Snapshot.**
 

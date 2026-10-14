@@ -414,7 +414,10 @@ value for any bridge that will serve withdrawals and record all constructor
 values in the private deployment handoff.
 
 The essential script mechanics are shown below for review; the linked on-disk
-copy is authoritative. Re-read the warning above before any rerun.
+copy (`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`) is
+authoritative. It also handles `USE_AAVE` / `DEMO_AAVE` and archives leftover
+`relayer-state.json` so `daemon-live` does not start against the previous
+bridge. Re-read the warning above before any rerun.
 
 ```bash
 #!/usr/bin/env bash
@@ -519,6 +522,11 @@ if compgen -G "$CFG_DIR/state/*.json" >/dev/null; then
   echo ">>> Archived prior state in $STATE_ARCHIVE"
 else
   echo ">>> No prior state JSON to archive"
+fi
+# daemon-live compares last_observed_on_chain with the new contract.
+if [[ -f "$CFG_DIR/relayer-state.json" ]]; then
+  mv -- "$CFG_DIR/relayer-state.json" "$CFG_DIR/relayer-state.pre_deploy_$(date -u +%Y%m%dT%H%M%SZ).json"
+  echo ">>> Archived leftover relayer-state.json"
 fi
 
 echo

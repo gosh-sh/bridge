@@ -48,12 +48,13 @@ assigns it when the release is tagged.
   bridge; the stand's treasury is only what the operator deposits for the
   test. Wait a proving window before `pause()` on the live bridge —
   `ackinacki-bridge withdraw` can take hours, and `withdrawByProof`
-  reverts `whenNotPaused`. After leftover deposits finalize, Acki Nacki
-  is paused again so no one can burn; circulating ECC[3] stays frozen
-  until `unpause()` on the live bridge (a burn the stand already paid
-  is then payable there again). The stand is paused and untrusted in
-  teardown — `deposit()` is public, the CLI will finalize against any
-  trusted address. `EVM-contracts-spec.md` §7.2 says a withdrawal proof
+  reverts `whenNotPaused`.   After leftover deposits finalize, Acki Nacki
+  is paused again so no one can burn. The stand is paused on deploy
+  and trusted only after the operator deposit is already on it, then
+  untrusted. Circulating ECC[3] stays frozen until teardown restores
+  `unpause()` on the live bridge, Acki Nacki, its trust bit, and its
+  AN→ETH relayer (a burn the stand already paid is then payable
+  there again). `EVM-contracts-spec.md` §7.2 says a withdrawal proof
   cannot be replayed on another chain, but on one chain any unpaused
   bridge with the same identity pays it. The launch runbook's supply-cap
   check uses Python 256-bit arithmetic. `preflight` writes
@@ -329,13 +330,12 @@ assigns it when the release is tagged.
   is the treasury a replay would take. Pause Acki Nacki, wait a proving
   window so in-flight CLI withdrawals can finish, then `pause()` the
   live L1 bridge. Deploy the stand while Acki Nacki is still paused.
-  Briefly reopen Acki Nacki so leftover live-bridge deposits can
-  finalize, then pause it again. Keep `deposit-relayer` on the old
-  bridge until those deposits finalize, then stop it — do not point it
-  or the user CLI at the stand. Trust the stand with
-  `setTrustedL1Bridge(11155111, <bridge>, true)` so the operator's test
-  deposit can finalize; pause the stand and take it out of the trusted
-  set when the test is done. The steps are in `docs/aave-yield.md`,
+  Pause the stand on deploy. Briefly reopen Acki Nacki so leftover
+  live-bridge deposits can finalize (stand paused and not trusted),
+  then pause it again. Keep `deposit-relayer` on the old bridge until
+  those deposits finalize, then stop it. Trust the stand only after
+  the operator deposit is already on the paused stand, finalize that
+  deposit, then untrust. The steps are in `docs/aave-yield.md`,
   *Launching a Sepolia stand with AAVE*. Without `USE_AAVE` the script
   behaves as before.
 - **A demo AAVE pool for Sepolia stands.** New contract

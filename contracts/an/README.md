@@ -78,7 +78,18 @@ The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
 `EthBeaconLightClient.tvc`, which is why the compiled folders carry those names.
 Any other compiler changes the code hash, so the `Makefile` builds each contract
 with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
-unset or the binary reports a different version.
+unset or the binary reports a different version. `SOLD_0_80` is the release
+tarball `sold_gosh_0.80.0_linux_x86_64.tar.gz` from
+`gosh-sh/TVM-Solidity-Compiler`, tag `gosh_0.80.0`; it reproduces the tracked
+`eccUSDCBridge.tvc` byte for byte.
+
+The pin on 0.80.0 for `eccUSDCBridge` is not only about the code hash. That
+version emits the legacy `ext_out_msg_info$11` event format, while 0.81.0 writes
+one extra bit after `created_at` in the message info and produces a
+byte-identical `abi.json`. Building the bridge with another compiler therefore
+changes the wire form of `WithdrawalInitiated` — the message the withdrawal
+proof is built over, whose cell layout is pinned in `bridge-event-witness` and
+in the proving circuit — with nothing in the ABI to warn about it.
 
 `sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
 but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` needs more than the

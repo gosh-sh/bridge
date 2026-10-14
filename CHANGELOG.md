@@ -58,17 +58,20 @@ assigns it when the release is tagged.
   refused with `ERR_TVL_CAP` until burns bring it back under; withdrawals are
   not held up by the TVL check, only by the per-transfer one.
 
-  **The tracked `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` is
-  not rebuilt in this change** — it has to be built with `sold` 0.80.0, the
-  compiler this contract is pinned to, and the caps reach a zerostate or an
-  `updateCode` only once it is. The pin is not only about the code hash:
-  0.80.0 emits the legacy `ext_out_msg_info$11` event format, while 0.81.0
-  writes one extra bit after `created_at` in the message info, and the
-  `abi.json` is byte-identical either way. So building the bridge with another
-  compiler silently changes the wire form of `WithdrawalInitiated` — the
-  message the withdrawal proof is built over, whose cell layout is pinned in
-  `bridge-event-witness` and in the proving circuit — with nothing to warn
-  about it.
+  `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` is rebuilt with
+  `sold` 0.80.0, the compiler this contract is pinned to (release tarball
+  `sold_gosh_0.80.0_linux_x86_64`), so the caps are in the artefact a zerostate
+  or an `updateCode` carries. The code hash moves `79b43abe…0565773` →
+  `de1fa836…9c946e`; `abi.json` is unchanged, so nothing that speaks to the
+  bridge needs rebuilding. On a live network the owner installs the new code
+  with `updateCode`, which keeps the address, the owner key and the
+  migration-cell layout. That compiler is not interchangeable, and not only
+  because of the code hash: 0.80.0 emits the legacy `ext_out_msg_info$11` event
+  format, while 0.81.0 writes one extra bit after `created_at` in the message
+  info and produces a byte-identical `abi.json`, so building this contract with
+  another compiler would silently change the wire form of
+  `WithdrawalInitiated` — the message the withdrawal proof is built over, whose
+  cell layout is pinned in `bridge-event-witness` and in the proving circuit.
 
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are

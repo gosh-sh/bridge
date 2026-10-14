@@ -10,7 +10,7 @@
 # NOT IDEMPOTENT: every run broadcasts a new set of contracts and spends new
 # nonces. Audit the Foundry broadcast record and latest/pending nonce before a
 # retry. This is the flow described in
-# crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md §3.
+# crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3 (Case 1).
 #
 # Usage:
 #   LEVEL=1 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh   # L1 anchor
@@ -140,6 +140,11 @@ BRIDGE_ADDRESS=$BRIDGE_ADDRESS
 $deploy_block_line
 BRIDGE_BOOTSTRAP_SEQNO=$GENESIS_SEED_SEQNO
 BRIDGE_ANCHOR_LEVEL=$LEVEL
+# Historical bk-update cursor used at deploy (constructor arg
+# genesisLastBkSetUpdateSeqNo). Preserved here for operator forensics and
+# so a cold-start daemon can cross-check its own GQL-derived value against
+# what the on-chain \`storedLastBkSetUpdateSeqNo\` actually got.
+GENESIS_LAST_BK_SET_UPDATE_SEQNO=${GENESIS_LAST_BK_SET_UPDATE_SEQNO:-0}
 EOF
 echo ">>> Wrote $CFG_DIR/env"
 

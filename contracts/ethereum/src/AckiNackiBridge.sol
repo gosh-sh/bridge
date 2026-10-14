@@ -585,6 +585,20 @@ contract AckiNackiBridge {
         ///         anyway in that case). Switching anchor level (L1↔L2)
         ///         requires a redeploy.
         uint64 bundleStride;
+        /// @notice Initial `storedLastBkSetUpdateSeqNo`. Highest
+        ///         `bkSetUpdates.height` ≤ `genesisLastSeenBlockSeqNo` observed
+        ///         by `compute_bridge_anchors` at deploy time. Pass `0` on
+        ///         chains with no historical rotations in the GQL retention
+        ///         window (fresh devnet, local). On a chain whose GQL retains
+        ///         rotations that pre-date the bootstrap seed, pass the
+        ///         highest such height so `applyBkSetUpdate` skips those
+        ///         already-folded events — the rotations ≤ this cursor are
+        ///         already encoded in `genesisBkSetCommitment`, re-applying
+        ///         them would move the stored commitment *away* from the
+        ///         live chain state. The daemon's `BootstrapSeed` mirrors
+        ///         this value as `last_bk_set_update_seq_no`; the drift
+        ///         check compares them field-for-field.
+        uint64 genesisLastBkSetUpdateSeqNo;
     }
 
     /// @notice Argument bundle for the AN→ETH Circuit 4
@@ -705,6 +719,12 @@ contract AckiNackiBridge {
         storedBkSetCommitment = _vb.genesisBkSetCommitment;
         storedPrevMaxLevelLayerHash = _vb.genesisPrevMaxLevelLayerHash;
         storedLastSeenBlockSeqNo = _vb.genesisLastSeenBlockSeqNo;
+        // Historical bk-update cursor: see
+        // `VerifyBlockConfig.genesisLastBkSetUpdateSeqNo` for why this is
+        // non-zero on chains with pre-bootstrap rotations in GQL. On a fresh
+        // chain this is simply `0` and `applyBkSetUpdate` fires on the first
+        // rotation past the seed as usual.
+        storedLastBkSetUpdateSeqNo = _vb.genesisLastBkSetUpdateSeqNo;
         bundleStride = _vb.bundleStride;
         bridgeWithdrawalVerifier = _bw.bridgeWithdrawalVerifier;
         bridgeWithdrawalDappFr = _bw.dappFr;
@@ -1019,15 +1039,18 @@ contract AckiNackiBridge {
         // only rotations that would cross an unverified boundary are
         // deferred. `verifyBlock` accepts `storedPrevBkSetCommitment`
         // for `blockSeqNo <= storedLastBkSetUpdateSeqNo` so an
-        // off-boundary N is not a deadlock. The first rotation
-        // (storedLastBkSetUpdateSeqNo == 0) always proceeds.
+        // off-boundary N is not a deadlock. The first rotation past the
+        // genesis cursor always proceeds — "first" is literal only on a
+        // chain that was fresh at deploy time (`storedLastBkSetUpdateSeqNo
+        // == 0`); on chains whose GQL retention window still exposed
+        // historical rotations at deploy, `storedLastBkSetUpdateSeqNo`
+        // was seeded by `genesisLastBkSetUpdateSeqNo` to the highest
+        // such pre-bootstrap height, and this branch skips to the first
+        // *post-genesis-cursor* rotation.
         if (storedLastBkSetUpdateSeqNo != 0) {
-            uint64 nextOwedBoundary =
-                ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride;
+            uint64 nextOwedBoundary = ((storedLastSeenBlockSeqNo / bundleStride) + 1) * bundleStride;
             if (nextOwedBoundary <= storedLastBkSetUpdateSeqNo) {
-                revert PrevSlotStillOwedForBundle(
-                    storedLastBkSetUpdateSeqNo, nextOwedBoundary
-                );
+                revert PrevSlotStillOwedForBundle(storedLastBkSetUpdateSeqNo, nextOwedBoundary);
             }
         }
         // Circuit 1A/1B proves `block_seq_no > last_seen`. After

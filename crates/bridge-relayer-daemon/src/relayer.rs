@@ -3,9 +3,10 @@
 //! [`Relayer::tick`] is the testable single-step entry point. It:
 //!
 //! 1. reads the on-chain anchors (+ Check B vs last observed);
-//! 2. **Phase 1** — applies a pending BK-set update (`applyBkSetUpdate`) when
-//!    the previous rotation is already covered. The first rotation (and any
-//!    later one after the cursor passed the last N) may land ahead of the layer
+//! 2. **Phase 1** — applies a pending BK-set update (`applyBkSetUpdate`) unless
+//!    the previous one still owes an unverified bundle boundary (the contract's
+//!    bundle-aware `PrevSlotStillOwedForBundle` gate): rotations before the
+//!    next boundary, and the first one past it, may land ahead of the layer
 //!    cursor. The live prover is acked only once the next bundle target is
 //!    above N, so it keeps the outgoing set for blocks `<= N`.
 //! 3. **Phase 2** — fetches the next block and submits `verifyBlock` against
@@ -245,7 +246,8 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                     last_bk = on_chain.last_bk_set_update_seq_no,
                     last_seen = on_chain.last_seen_block_seq_no,
                     next_owed_boundary = next,
-                    "deferring applyBkSetUpdate until verifyBlock covers the next owed bundle boundary",
+                    "deferring applyBkSetUpdate until verifyBlock covers the next owed bundle \
+                     boundary",
                 );
             } else if upd.old_commitment_l2 != on_chain.bk_set_commitment {
                 self.state.record_bk_update_attempt(upd.block_seq_no);

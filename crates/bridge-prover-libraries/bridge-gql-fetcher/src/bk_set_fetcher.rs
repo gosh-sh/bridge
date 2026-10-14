@@ -95,6 +95,76 @@ pub async fn next_update_after(
     }
 }
 
+/// Highest `bkSetUpdates.height ≤ cap_seq_no` observed in the chain's GQL
+/// retention window, or `0` when the window contains no such event.
+///
+/// Paired with the Solidity constructor arg `genesisLastBkSetUpdateSeqNo`:
+/// a fresh bridge seeded at `cap_seq_no` records this cursor on-chain so
+/// the daemon's bk-update drain only ever considers rotations past the
+/// seed. The historical rotations ≤ cap are already folded into the live
+/// BK-set commitment the operator provides — re-applying them would move
+/// the prover *away* from the current chain state.
+///
+/// # Correctness
+///
+/// `query_bk_set_updates_paged(height_end = cap_seq_no, …)` returns edges
+/// in ascending `chain_order` (and therefore ascending height — see
+/// [`next_update_after`] above). Walking every page to exhaustion and
+/// taking the final page's largest-height entry is the maximum. Returns
+/// `0` when the first page is empty, which the Solidity constructor
+/// (default `vm.envOr(…, 0)`) and `BridgeState::new()` already treat as
+/// "no rotation applied yet".
+///
+/// # Cost
+///
+/// Linear in the number of events ≤ `cap_seq_no`. The 10_000-page ceiling
+/// of `next_update_after` is mirrored here as a defensive guard.
+pub async fn highest_bk_set_update_le(
+    client: &GqlClient,
+    cap_seq_no: u64,
+) -> anyhow::Result<u64> {
+    let mut after: Option<String> = None;
+    let mut pages = 0usize;
+    let mut last_height_seen: u64 = 0;
+    let mut max_height: u64 = 0;
+    loop {
+        let (page, next) = client
+            .query_bk_set_updates_paged(
+                cap_seq_no,
+                NEXT_UPDATE_PAGE_SIZE,
+                after.as_deref(),
+            )
+            .await
+            .with_context(|| format!("highest_bk_set_update_le page {}", pages))?;
+        pages += 1;
+        debug!(
+            "highest_bk_set_update_le page {}: {} events (cursor advance -> {:?})",
+            pages,
+            page.len(),
+            next,
+        );
+        assert_ascending_by_height(&page, &mut last_height_seen).with_context(|| {
+            format!("highest_bk_set_update_le page {}: order sanity", pages)
+        })?;
+        if let Some(h) = page.iter().filter_map(|u| u.height).max() {
+            if h > max_height {
+                max_height = h;
+            }
+        }
+        match next {
+            Some(c) => after = Some(c),
+            None => return Ok(max_height),
+        }
+        if pages > 10_000 {
+            bail!(
+                "highest_bk_set_update_le: refusing to paginate past 10_000 pages \
+                 (likely a server-side pagination bug) at cursor {:?}",
+                after,
+            );
+        }
+    }
+}
+
 /// Pick the smallest-height entry with `height > cursor_seq_no` from a
 /// single page. Extracted so `next_update_after`'s per-page decision is
 /// unit-testable without a live GQL server.

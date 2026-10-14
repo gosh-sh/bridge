@@ -24,7 +24,8 @@ library VerifyBlockConfigLib {
             genesisBkSetCommitment: 0,
             genesisPrevMaxLevelLayerHash: 0,
             genesisLastSeenBlockSeqNo: 0,
-            bundleStride: 0
+            bundleStride: 0,
+            genesisLastBkSetUpdateSeqNo: 0
         });
     }
 
@@ -50,7 +51,8 @@ library VerifyBlockConfigLib {
             genesisBkSetCommitment: genesisBkSetCommitment,
             genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
             genesisLastSeenBlockSeqNo: 0,
-            bundleStride: 1
+            bundleStride: 1,
+            genesisLastBkSetUpdateSeqNo: 0
         });
     }
 
@@ -67,14 +69,15 @@ library VerifyBlockConfigLib {
         uint64 bundleStride
     ) internal pure returns (AckiNackiBridge.VerifyBlockConfig memory) {
         return AckiNackiBridge.VerifyBlockConfig({
-            primaryVerifier: primary,
-            fallbackVerifier: fallback_,
-            layerHashesVerifier: layerHashes,
-            genesisBkSetCommitment: genesisBkSetCommitment,
-            genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
-            genesisLastSeenBlockSeqNo: 0,
-            bundleStride: bundleStride
-        });
+                primaryVerifier: primary,
+                fallbackVerifier: fallback_,
+                layerHashesVerifier: layerHashes,
+                genesisBkSetCommitment: genesisBkSetCommitment,
+                genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
+                genesisLastSeenBlockSeqNo: 0,
+                bundleStride: bundleStride,
+                genesisLastBkSetUpdateSeqNo: 0
+            });
     }
 
     /// @notice All-zero `BridgeWithdrawConfig` — Circuit 4 `withdrawByProof`

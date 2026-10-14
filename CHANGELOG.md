@@ -77,6 +77,14 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
+  bridged burned above bridged minted for that token, exit 233
+  (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
+  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and
+  cannot be withdrawn across the bridge against Ethereum treasury they
+  never entered. Existing ECC from those paths stays on Acki Nacki.
+  Redeploy or `updateCode` the AN bridge after this version.
+
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
   flip-owner` / `daemon --flip-owner` takes the chain id from the light

@@ -36,7 +36,10 @@ interface IShellAccumulator {
 ///            deposit is proof-bound (chainId + emitting contract) and gated by
 ///            the owner-managed `_trustedL1Bridge` allowlist.
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
-///            `_totalBurnedBridgeByToken` (mapping kept for forward-compat).
+///            `_totalBurnedBridgeByToken`. `initiateWithdrawal` refuses a
+///            burn that would take burned above minted for that token
+///            (`ERR_BURN_EXCEEDS_BRIDGED`). Owner-mint and TIP-3 mint do
+///            not increment the bridged counters.
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
@@ -82,11 +85,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     uint64 _mintNonce;
     uint64 _mintAccumulatorNonce;
 
-    // Cross-chain bridge accounting per tokenId (any external chain; independent
-    // of stripe `_totalMinted`). No invariant enforced between minted/burned —
-    // intra-AN ECC distribution can outpace deposits, so on-AN withdrawal can
-    // exceed historical deposits for the same token. The split is for
-    // observability / per-token analytics, not for on-chain checks.
+    // Cross-chain bridge accounting per tokenId (independent of stripe
+    // `_totalMinted`). `initiateWithdrawal` keeps burned <= minted for that
+    // token, so owner-minted and TIP-3-minted ECC cannot be withdrawn to
+    // Ethereum against bridged inventory they never entered.
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
 
@@ -520,6 +522,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
+        uint128 minted = _totalMintedBridgeByToken[tokenId];
+        uint128 burned = _totalBurnedBridgeByToken[tokenId];
+        require(burned <= minted, ERR_BURN_EXCEEDS_BRIDGED);
+        require(amount <= minted - burned, ERR_BURN_EXCEEDS_BRIDGED);
 
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;

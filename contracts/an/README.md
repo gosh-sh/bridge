@@ -7,11 +7,24 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
-  USDC on `initiateWithdrawal`. The owner can stop both of those with
+<<<<<<< HEAD
+  USDC on `initiateWithdrawal`. A burn that would take bridged burned
+  above bridged minted for that token throws `ERR_BURN_EXCEEDS_BRIDGED`
+  (233); owner-minted and TIP-3-minted ECC are not bridged inventory and
+  cannot be withdrawn to Ethereum. The owner can stop both of those with
   `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until it is
   lifted; nothing else the bridge does is affected. That switch is independent
   of `AckiNackiBridge.pause()` on Ethereum and of a Circle freeze of USDC —
   see *Two pause domains* below.
+=======
+  USDC on `initiateWithdrawal`. A burn that would take
+  `_totalBurnedBridgeByToken` above `_totalMintedBridgeByToken` for that token
+  throws `ERR_BURN_EXCEEDS_BRIDGED` (233); owner-minted and TIP-3-minted ECC
+  are not bridged inventory and cannot be withdrawn to Ethereum. The owner can
+  stop mint and burn with `setPaused(true)`, which makes them throw
+  `ERR_PAUSED` (231) until it is lifted; nothing else the bridge does is
+  affected.
+>>>>>>> a29f922b (Refuse AN withdrawals that burn more than bridged minted inventory.)
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
   from the deposit identity and from the voucher's own code; a second
   finalization of the same deposit collides with it and does not mint again.

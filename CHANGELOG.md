@@ -111,10 +111,11 @@ assigns it when the release is tagged.
   to release the temporary reservation. Recovery is an owner operation and
   fails with 238 unless paused. The voucher code remains unchanged.
 
-  An over-cap `initiateWithdrawal` returns attached ECC and zero SHELL, and
-  commits the refund before reporting 233. It does not call `tvm.accept()` or
-  mint SHELL; a native reserve protects the bridge's existing SHELL, so refund
-  computation and forwarding costs use the incoming value, including when the
+  An over-cap `initiateWithdrawal` calls `ensureBalance()` and returns the
+  attached ECC with 0.1 vmshell, committing the refund before reporting 233.
+  Forwarding fees are paid separately and no native balance is reserved.
+  The fixed allowance can exceed incoming SHELL: repeated refused calls can
+  consume bridge SHELL without consuming the caller's ECC. This includes when the
   incoming transfer had `bounce: false`. On Ethereum, an already-burned legacy
   withdrawal over 50 USDC can be authorized by its exact proof nullifier with
   `setLegacyWithdrawal(nullifier, true)`; proof/identity/chain/recipient and

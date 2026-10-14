@@ -201,9 +201,12 @@ Legacy settlements may exceed TVL; new deposits then wait for capacity.
 
 Over-cap withdrawals return their attached ECC before reporting code 233,
 including for incoming messages with `bounce: false`. The refund is committed
-so the exception cannot roll it back. Rejected calls do not execute
-`tvm.accept()` or mint SHELL. The refund sends zero SHELL; a native reserve
-protects the existing balance, and the incoming SHELL funds refund costs.
+so the exception cannot roll it back. Before the refund, `ensureBalance()`
+replenishes SHELL when required; the transfer carries 0.1 vmshell plus the full
+attached ECC, with forwarding fees paid separately. No native balance is
+reserved. This allowance is fixed even if the incoming SHELL value was smaller:
+repeated over-cap calls can therefore consume bridge SHELL while returning all
+ECC. The refund path must be reviewed with this subsidy in mind.
 
 These AN migration exceptions do not move custody or spent-nullifier state
 between Ethereum contracts. Proofs do not bind an L1 contract address, and

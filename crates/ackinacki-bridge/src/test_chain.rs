@@ -889,7 +889,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn repeated_over_cap_refunds_return_ecc_without_spending_bridge_shell() {
+    async fn repeated_over_cap_refunds_return_ecc_with_fixed_shell_allowance() {
         use std::str::FromStr;
 
         use tvm_block::{
@@ -919,7 +919,11 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        for bounce in [false, true, false] {
+        for (bounce, incoming) in [
+            (false, 1_000_000_000),
+            (true, 50_000_000),
+            (false, 50_000_000),
+        ] {
             let before = Account::construct_from_base64(&boc)
                 .unwrap()
                 .balance()
@@ -933,7 +937,7 @@ mod tests {
                 source.clone(),
                 destination.clone(),
                 CurrencyCollection {
-                    grams: Grams::new(1_000_000_000).unwrap(),
+                    grams: Grams::new(incoming).unwrap(),
                     other: ecc,
                 },
             );
@@ -973,19 +977,19 @@ mod tests {
                     .to_string(),
                 "50000001"
             );
-            assert_eq!(header.value.grams.as_u64().unwrap(), 0);
+            assert_eq!(header.value.grams.as_u64().unwrap(), 100_000_000);
             let after = Account::construct_from_base64(&result.account)
                 .unwrap()
                 .balance()
                 .unwrap()
                 .grams
                 .as_u128();
-            assert!(
-                after >= before && after <= before + 1_000_000_000,
-                "before={before}, after={after}, action={}, delta={}",
-                result.transaction["action"],
-                result.transaction["balance_delta"]
-            );
+            if before >= 100_000_000_000 && incoming < 100_000_000 {
+                assert!(
+                    after < before,
+                    "small incoming SHELL cannot fund the fixed allowance and forwarding fees"
+                );
+            }
             boc = result.account;
         }
     }

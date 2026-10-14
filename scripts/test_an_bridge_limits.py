@@ -111,11 +111,11 @@ class BridgeLimits(unittest.TestCase):
                                   "usdcWallet": "0:" + "00" * 32})
         self.seed(TVL - TRANSFER)
 
-    def call(self, function, args=None, *, source=None, signed=False, expect=0, ecc=None):
+    def call(self, function, args=None, *, source=None, signed=False, expect=0, ecc=None, shell=1_000_000_000):
         extra = []
         if source:
             extra = ["--internal", "--message-source", source,
-                     "--message-value", "1000000000"]
+                     "--message-value", str(shell)]
         if signed:
             extra += ["--sign", str(self.key_file)]
         if ecc is not None:
@@ -356,8 +356,18 @@ class BridgeLimits(unittest.TestCase):
                                       "--abi", str(self.abi)]))
         self.assertEqual(int(decoded["Header"]["value"]["other"]["3"]), TRANSFER + 1)
         self.assertEqual(decoded["Header"]["bounce"], "false")
-        self.assertEqual(int(decoded["Header"]["value"]["value"]), 0,
-                         "the refund must not pay any SHELL to the caller")
+        self.assertEqual(int(decoded["Header"]["value"]["value"]), 100_000_000)
+
+    def test_refund_shell_allowance_exceeds_a_small_incoming_value(self):
+        incoming = 50_000_000
+        result = self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
+                           source="0:" + "ab" * 32, ecc=TRANSFER + 1, shell=incoming, expect=233)
+        self.assertTrue(result["vm_success"])
+        decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", result["messages"][0]["boc"],
+                                      "--abi", str(self.abi)]))
+        self.assertEqual(int(decoded["Header"]["value"]["other"]["3"]), TRANSFER + 1)
+        self.assertGreater(int(decoded["Header"]["value"]["value"]), incoming,
+                           "a fixed refund allowance subsidizes repeated rejected calls")
 
 
 if __name__ == "__main__":

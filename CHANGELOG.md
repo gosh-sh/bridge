@@ -1249,8 +1249,11 @@ assigns it when the release is tagged.
   catch up.
 - **The shellnet profile's `RPC_URL` is `https://rpc.sepolia.ethpandaops.io`**
   (was `https://ethereum-sepolia-rpc.publicnode.com`); the relayer-side
-  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common` is
-  `https://sepolia.gateway.tenderly.co` (was publicnode too). The
+  `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common` is the same
+  endpoint (was publicnode too): Tenderly's public gateway, which has the
+  history too, answered `daemon-live`'s `applyBkSetUpdate` sends with
+  `-32005` (rate limit), even one at a time. The server template
+  `scripts/ursus/bridge-relayer.env.example` points at it too. The
   window-heights read needs `eth_getLogs` back to the bridge's oldest held
   anchor; publicnode keeps only the newest ~10 000 blocks of logs and
   answers an empty set for older ones, so on it the read comes up short
@@ -1258,8 +1261,7 @@ assigns it when the release is tagged.
   withdrawal is refused in preflight. `deposit` needs every receipt of a
   block and `eth_getRawTransactionByHash` from the same `RPC_URL`, and the
   raw transactions Tenderly's public gateway does not serve (`deposit` is
-  refused in preflight on it, as it is in a shell that sourced
-  `shellnet.common`); the EF DevOps endpoint serves both, with full log
+  refused in preflight on it); the EF DevOps endpoint serves both, with full log
   history, and takes a 10 000-block span. When a short log set is met and
   the deploy block itself answers with no logs, the error also says the RPC
   may not serve history that far back, and no re-read is spent on it; with

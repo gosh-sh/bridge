@@ -112,12 +112,14 @@ assigns it when the release is tagged.
   fails with 238 unless paused. The voucher code remains unchanged.
 
   An over-cap `initiateWithdrawal` calls `ensureBalance()` and returns the
-  attached ECC with 0.1 vmshell, committing the refund before reporting 233.
+  attached ECC with `math.min(msg.value, 0.1 vmshell)`, committing the refund
+  before reporting 233. The allowance is bounded by both incoming SHELL and
+  0.1 vmshell; the CLI's 1 vmshell incoming value still returns 0.1 vmshell.
   **`ensureBalance()` is free.** It replenishes SHELL with
   `gosh.mintshellq(MIN_BALANCE)`. The bridge is a system contract in DApp 0.
   On mainnet, DApp 0 has a deployed DApp config with an unlimited configuration.
   **Non-system contracts cannot exist in DApp 0.** User withdrawal messages
-  therefore arrive from another DApp ID. The 0.1 vmshell attached to the return
+  therefore arrive from another DApp ID. The SHELL attached to the return
   message is burned on the cross-DApp return; the user receives the refunded
   ECC. Forwarding fees are paid separately and no native balance is reserved.
   This also applies to incoming transfers with `bounce: false`. On Ethereum, an already-burned legacy

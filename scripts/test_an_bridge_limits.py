@@ -358,16 +358,16 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(decoded["Header"]["bounce"], "false")
         self.assertEqual(int(decoded["Header"]["value"]["value"]), 100_000_000)
 
-    def test_refund_shell_allowance_exceeds_a_small_incoming_value(self):
-        incoming = 50_000_000
-        result = self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
-                           source="0:" + "ab" * 32, ecc=TRANSFER + 1, shell=incoming, expect=233)
-        self.assertTrue(result["vm_success"])
-        decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", result["messages"][0]["boc"],
-                                      "--abi", str(self.abi)]))
-        self.assertEqual(int(decoded["Header"]["value"]["other"]["3"]), TRANSFER + 1)
-        self.assertGreater(int(decoded["Header"]["value"]["value"]), incoming,
-                           "a fixed refund allowance subsidizes repeated rejected calls")
+    def test_refund_shell_is_the_exact_minimum_of_incoming_and_cap(self):
+        for incoming in (1, 50_000_000, 100_000_000, 100_000_001, 1_000_000_000):
+            with self.subTest(incoming=incoming):
+                result = self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
+                                   source="0:" + "ab" * 32, ecc=TRANSFER + 1, shell=incoming, expect=233)
+                self.assertTrue(result["vm_success"])
+                decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", result["messages"][0]["boc"],
+                                              "--abi", str(self.abi)]))
+                self.assertEqual(int(decoded["Header"]["value"]["other"]["3"]), TRANSFER + 1)
+                self.assertEqual(int(decoded["Header"]["value"]["value"]), min(incoming, 100_000_000))
 
 
 if __name__ == "__main__":

@@ -201,14 +201,16 @@ Legacy settlements may exceed TVL; new deposits then wait for capacity.
 
 Over-cap withdrawals return their attached ECC before reporting code 233,
 including for incoming messages with `bounce: false`. The refund is committed
-so the exception cannot roll it back. The transfer carries 0.1 vmshell plus the
+so the exception cannot roll it back. The transfer carries `math.min(msg.value, 0.1 vmshell)` plus the
 full attached ECC, with forwarding fees paid separately and no native reserve.
+The SHELL amount cannot exceed the incoming value or 0.1 vmshell. With the
+CLI's 1 vmshell incoming value, the allowance remains 0.1 vmshell.
 
 **`ensureBalance()` is free.** It replenishes SHELL with
 `gosh.mintshellq(MIN_BALANCE)` before the refund. The bridge is a system contract
 in DApp 0. On mainnet, DApp 0 has a deployed DApp config with an unlimited
 configuration. **Non-system contracts cannot exist in DApp 0.** User withdrawal
-messages therefore arrive from another DApp ID. The 0.1 vmshell attached to the
+messages therefore arrive from another DApp ID. The SHELL attached to the
 return message is burned when it crosses back to that DApp; the user receives
 the refunded ECC.
 

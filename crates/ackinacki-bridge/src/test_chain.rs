@@ -889,7 +889,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn repeated_over_cap_refunds_return_ecc_with_fixed_shell_allowance() {
+    async fn repeated_over_cap_refunds_return_ecc_with_bounded_shell_allowance() {
         use std::str::FromStr;
 
         use tvm_block::{
@@ -924,12 +924,6 @@ mod tests {
             (true, 50_000_000),
             (false, 50_000_000),
         ] {
-            let before = Account::construct_from_base64(&boc)
-                .unwrap()
-                .balance()
-                .unwrap()
-                .grams
-                .as_u128();
             let mut ecc = ExtraCurrencyCollection::new();
             ecc.set(&3, &VarUInteger32::from_str("50000001").unwrap())
                 .unwrap();
@@ -977,19 +971,10 @@ mod tests {
                     .to_string(),
                 "50000001"
             );
-            assert_eq!(header.value.grams.as_u64().unwrap(), 100_000_000);
-            let after = Account::construct_from_base64(&result.account)
-                .unwrap()
-                .balance()
-                .unwrap()
-                .grams
-                .as_u128();
-            if before >= 100_000_000_000 && incoming < 100_000_000 {
-                assert!(
-                    after < before,
-                    "small incoming SHELL cannot fund the fixed allowance and forwarding fees"
-                );
-            }
+            assert_eq!(
+                header.value.grams.as_u64().unwrap(),
+                incoming.min(100_000_000)
+            );
             boc = result.account;
         }
     }

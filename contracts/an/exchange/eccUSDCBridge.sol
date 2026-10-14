@@ -533,10 +533,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         if (amount > MAX_BRIDGE_TRANSFER) {
-            // Return the ECC with a fixed SHELL allowance for the recipient.
+            // Return the ECC with at most the incoming SHELL and 0.1 vmshell.
             // ensureBalance funds this allowance and the forwarding fee.
             ensureBalance();
-            msg.sender.transfer({value: 0.1 vmshell, bounce: false, flag: 1, currencies: currencies});
+            msg.sender.transfer({value: math.min(msg.value, 0.1 vmshell), bounce: false, flag: 1, currencies: currencies});
             tvm.commit();
             revert(ERR_TRANSFER_TOO_LARGE);
         }

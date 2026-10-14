@@ -129,7 +129,7 @@ covering L2 bundle:
 |--------------------------------------------|------------------------------|
 | Capture (`WithdrawalInitiated` poll)       | up to 300 s                  |
 | Wait for covering L2 bundle on-chain       | up to ~91 min (typical ~45)  |
-| Enrich + Circuit-4 SHPLONK proof           | ~5 min warm PK, ~20 min cold |
+| Enrich + Circuit-4 SHPLONK proof           | ~3 min warm PK, ~8 min cold  |
 | `withdrawByProof` submit + receipt         | ~30 s                        |
 | **End-to-end (typical / worst case)**      | **~50 min / ~101 min**       |
 
@@ -167,7 +167,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain), `.sol` (the proof self-check) and `_calldata.bin` (word 23 is the adapter `vkDigest` pin) |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
-| `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize) |
+| `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize). Withdrawals sharing it prove one at a time (`.prove.lock` inside) |
 | `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
 | `--pk-cache-dir`        | `BRIDGE_PK_CACHE_DIR`       | Warm-start pk cache (optional; defaults to `$BRIDGE_PARAMS_DIR/pk_cache`) |
 | `--state-dir`           | `BRIDGE_WITHDRAW_STATE_DIR` | Per-withdrawal idempotency state dir (optional; defaults to `$HOME/.bridge-withdraw-state`) |
@@ -258,11 +258,34 @@ cd ../ackinacki-bridge
 > satisfy the CLI. Use the Rust bin above.
 
 The first real withdrawal then generates `event_pk.bin` (~2.65 GB) by
-keygen, and the aggregator populates `params/pk_cache/`. Budget ~4.3 GB for
-a withdraw-only machine, plus headroom — the `~17 GB` figure elsewhere in
-these docs is a `params/` shared with a bundle relayer, which also stores
-the primary/fallback/layer proving keys a withdrawal never reads. Peak RAM
-during Circuit 4 is ~40 GB.
+keygen, and the aggregator writes its ~6.85 GB key into `params/pk_cache/`.
+Budget ~10.7 GB for a withdraw-only machine, plus headroom — the figure
+preflight checks on the first run, the two keys rounded up to 3 GiB and
+7 GiB. Later withdrawals load both keys and need no room for them: after a
+proof, `withdraw` notes in `params/pk_cache/.withdraw-slot.json` which
+aggregator key the proof used — `aggregate-proof` names it in
+`<snark-dir>/aggregator-slot` — and which Circuit-4 key and
+`aggregate-proof` it ran with, and preflight reserves nothing while both are
+unchanged and that key and its `.meta.json` are still there. Stage 5
+re-checks that `aggregate-proof` is the binary preflight hashed, and
+preflight refuses an `aggregate-proof` too old to name its key: build or
+install the two together.
+
+The first withdrawal after an upgrade reserves room again, while the
+previous keys are still on disk: ~17 GB in all after an upgrade that brings
+a new `aggregate-proof` (the 7 GiB), ~20 GB when it also brings a new
+Circuit-4 key (3 GiB more). Or remove the previous
+`BridgeWithdrawalAggregatorVerifier__v3__*.pk` and the `.meta.json` beside
+it before that withdrawal; if it was still the right key, the proof
+generates it again (a cold `aggregate-proof`, keygen included, took ~2 min
+on the test host).
+
+A `params/` shared with a bundle relayer needs more: it also stores the
+primary/fallback/layer proving keys a withdrawal never reads. A cold
+withdrawal peaked at ~19 GB of RAM on the test host, system-wide and sampled
+every 5 s: the CLI reached 9.5 GB RSS in Circuit 4, and the `aggregate-proof`
+it waits on 12.6 GB while the CLI still held part of its own.
+`install.sh` warns below 24 GB of RAM and swap.
 
 **Do not wipe `params/` between runs** — keygen and the cold aggregator
 cache cost minutes each time.
@@ -602,14 +625,14 @@ claiming there is no record — it never opened one to find out.
 | Code | Meaning | Nothing broadcast? | Where to look |
 |------|---------|-------------------|---------------|
 | 0    | Success (or `--dry-run` returned OK) | — | — |
-| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, etc. | ✓ nothing, **and no record for this identity on disk** | Error scenarios § "Preflight refused" |
+| 2    | Preflight refused — key perms, `--from` not an active MS, balance short, either bridge paused, etc. | ✓ nothing, **and no record for this identity on disk** | Error scenarios § "Preflight refused" |
 | 3    | Duplicate in-flight refused — same dedup key already exists | ✓ nothing by this run | § Idempotency semantics |
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
 | 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
-**Exit 10 covers six situations, and only the first two involve this
+**Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went
 out and its outcome is unknown. The second is its mirror — the AN side
 did exactly what it was asked and the run **could not write down that
@@ -626,7 +649,12 @@ because `HOME` is unset and no `--state-dir` was given. None of the four
 broadcasts or writes anything — but in the first three a record for this
 identity is on disk, and in the fourth the run cannot say whether one
 is, which comes to the same instruction: a burn may be on the wire and
-nothing may be deleted. What the six share, and what a script should
+nothing may be deleted. The seventh comes after capture: the event the
+record's `an_tx_hash` leads to is **not this withdrawal's** — its amount,
+recipient, chain, token or sender differs, as a hash from another
+withdrawal of the same multisig written into the record by hand would.
+The refusal lists what differs; nothing is proved or submitted and the
+record is left as it was. What the seven share, and what a script should
 key on, is "do not treat this identity as untouched".
 
 Exit codes 11–13 all leave the AN burn broadcast: the USDC has left
@@ -659,6 +687,11 @@ specific reason. Common causes:
   an RPC without log history back to the deploy block (publicnode keeps only
   the newest ~10 000 blocks; the refusal says so when the deploy block
   itself answers with no logs)
+- a bridge is paused: `AckiNackiBridge.paused()` is true, or the Acki
+  Nacki bridge's `isPaused()` is. Nothing is sent; re-run once the owner
+  lifts the pause. A `--dry-run` checks both too. On a resume over a
+  recorded burn only the EVM pause is checked, and it refuses with exit 10
+  (the burn is on the wire): re-run with `--allow-retry` after `unpause()`
 
 **Remediation:** fix the specific issue, re-run. Preflight is
 side-effect-free.
@@ -710,30 +743,94 @@ owner pubkey, correct the key file itself.
 
 ### Capture timeout (exit 11)
 
-Two sub-cases, distinguishable by grepping `capture:` in the log:
+The refusal ends with the AN burn's hash, the path of this withdrawal's
+record, and the command that carries on: the same command with
+`--allow-retry`, which skips the burn and resumes at stage 4 (capture).
 
-- `capture: matched dst=…` present → capture succeeded; the enricher
-  is blocked waiting for the covering L2 bundle to land on-chain. The
-  server-side bundle relayer landed no bundle in the CLI's 120 min
-  budget. Wait for the covering bundle (monitor
-  `storedLastSeenBlockSeqNo` with the health-check snippet below);
-  once it advances past your event's `ceil(seq / 16384) * 16384`
-  boundary, re-run with `--allow-retry` (the CLI replays capture, does
-  NOT re-fire the burn).
-- `capture: polling` only, no `matched` → the burn AN tx never
-  produced a `WithdrawalInitiated` (USDCBridge internally rejected
-  the call). Should have surfaced as exit 10, not 11; see § "Burn
-  broadcast, outcome unknown".
+The burn's `WithdrawalInitiated` event was not seen within 300 s. Where
+the capture stalled is in the error text:
+
+- `stalled at stage 1` (`not visible via GQL`) → the node has not shown
+  the multisig transaction yet. Re-run with `--allow-retry` once it does;
+  the CLI replays capture and does NOT re-fire the burn.
+- `stalled at stage 2` (`dst_transaction never surfaced`), or the
+  transaction sent nothing to USDCBridge → USDCBridge may have bounced the
+  call, and then no event is coming however often the run waits. Look for
+  a bounce back to the multisig first — the advanced runbook, Case 3a —
+  and re-run with `--allow-retry` only if the bridge's transaction did
+  emit the event.
 
 ### Prover failed (exit 12)
 
+The refusal ends with the AN burn's hash, the path of this withdrawal's
+record, and the command that carries on: the same command with
+`--allow-retry`, changed only where the refusal asks — a larger
+`--prover-timeout-s`, say — which skips the burn and resumes at stage 4
+(capture).
+
 Circuit-4 in-process prover or the `aggregate-proof` subprocess
 errored. Almost always local resource pressure (disk, RAM, corrupt
-PK cache) or cold-cache slowness beyond the default timeout.
+PK cache) or cold-cache slowness beyond the default timeout. The
+aggregator's own log lines are in the CLI's log as they come, each starting
+`aggregate-proof:` and at the level it logged them with — the lines of an
+error it prints at `error` — and the refusal
+quotes its error — or, without one, its last 40 lines — on a timeout too. A
+`RUST_LOG` of your own must let `bridge_relayer_daemon=info` through to show
+them; the aggregator itself is not given it and logs at its own default. An
+`aggregate-proof` that hits `--prover-timeout-s` is killed; if it was
+writing its new key by then, it leaves `<stem>.pk.partial-<pid>-<random>`
+in the pk cache — a write that fails, on a full disk say, removes its own.
+The next `aggregate-proof` that takes the cache's lock removes a leftover,
+but preflight measures first and counts it as used space: if it refuses
+for want of room, remove the file by hand while no `aggregate-proof` is
+running. The next run generates the key from scratch again, so retry with a
+larger `--prover-timeout-s`, not the same one.
+
+A cached key that is not whole fails with `cached aggregator key … is
+damaged`. One of the right length whose wrong bytes still read fails the
+check the SDK runs on every proof it makes: `aggregate-proof` exits 1 — the
+CLI's exit 12 — with `making the aggregated proof failed (assertion failed:
+accept)`, saying the key read from the cache is damaged in place, or the
+ceremony file it names is. In both cases the aggregator sets the slot aside
+(`<stem>.meta.json.damaged`) when it can, and says so: the next run that
+needs it removes both files and generates the key again. Remove the
+`<stem>.pk` and the set-aside `.meta.json` by hand before `--allow-retry` to
+free its ~6.85 GB at once — preflight reserves room for the new key and
+cannot count the old one's, so a host sized for one key is refused for space
+until then. It waits for another `aggregate-proof` that holds the cache lock
+to finish first; with the `.meta.json` replaced since it was read, or a
+rename that fails, the slot stays published, and the error names the `.pk`
+and `.meta.json` to remove. A key the run generated itself that fails the check
+points at the ceremony file or at a keygen and prover that disagree — a bug
+or a hardware fault — and its slot is set aside too.
+
+Preflight refuses — with exit 2, or exit 10 on a run that resumes a recorded
+burn, as `--allow-retry` after an exit 12 does — a withdrawal slot whose
+`.meta.json` is not whole, is not one the aggregator wrote, or records
+another length for its key, or whose key's header is not a key's at the
+degree it records (a slot published before this version gets a length once a
+run that can take the cache's lock, and owns the `.meta.json`, has read its
+key back), and one this user cannot read, which wants its permissions fixed
+rather than removed. It names a set-aside slot with a warning, and, when the
+aggregator is to generate its key, refuses a key without its `.meta.json`
+that this user cannot remove.
+
+A refusal that says `… is not the aggregate-proof preflight checked` means
+the binary was rebuilt or replaced after preflight, which stage 5 refuses
+rather than run a binary nothing probed. Do not rebuild `aggregate-proof`
+while a withdrawal waits at stage 4b; re-run with `--allow-retry`, whose
+preflight checks the new one.
+
+Exit 12 also covers the wait for the covering bundle (stage 4b): a
+refusal that starts `wait_for_coverage:` means the server-side bundle
+relayer landed no bundle in the CLI's 120 min budget. Wait for it
+(monitor `storedLastSeenBlockSeqNo` with the health-check snippet below);
+once it advances past your event's `ceil(seq / 16384) * 16384` boundary,
+re-run with `--allow-retry`.
 
 ```bash
-du -sh ../bridge-prover-libraries/params/    # ~3 GB withdraw-only; ~17 GB if this host also runs the bundle relayer
-df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run needs ~4.3 GB (see Step 0)
+du -sh ../bridge-prover-libraries/params/    # ~9.5 GB withdraw-only after the first run; more if this host also runs the bundle relayer
+df -h ../bridge-prover-libraries/params/     # free disk headroom — a cold run needs ~10.7 GB (see Step 0)
 ```
 
 **Remediation:** free resources, re-run with `--allow-retry`. If the
@@ -752,9 +849,15 @@ deterministically against the topped-up state and the resume path
 does NOT re-fire the AN burn (this prevents double-spend on the AN
 side).
 
-Other Sepolia reverts (proof PI mismatch, anchor not found,
-withdrawal already executed) are advanced-runbook territory — see the
-selector → error table in
+The refusal names the bridge's error and its arguments first — for example
+`NullifierAlreadyUsed(nullifier: 0x2f01…)` or
+`WithdrawTreasuryShortfall(requested: 1000000, available: 20)` — and for
+`NullifierAlreadyUsed`, `BridgePaused`, `WithdrawTreasuryShortfall`,
+`UnknownAnchor` and `WithdrawalProofRejected` says what to do. The node's
+own text follows on a `node said:` line.
+
+Reverts it cannot name, and what lies behind the ones it can, are
+advanced-runbook territory — see the selector → error table in
 [docs/advanced_user_withdraw_runbook.md](docs/advanced_user_withdraw_runbook.md#case-3c--on-chain-withdrawbyproof-revert).
 
 ### Health check — is the server-side bundle daemon alive?
@@ -818,6 +921,21 @@ Golden vectors, checked against `idempotency.rs::key`
 
 Two withdrawals with identical tuples collide; anything different
 (recipient, amount, or chain) does not.
+
+**One proof per `--snark-dir`.** Withdrawals with different tuples run side
+by side, but two with one `--snark-dir` prove one at a time: stage 5 takes
+`<snark-dir>/.prove.lock`, and a second run logs "another withdrawal is
+proving in this --snark-dir; waiting for it to finish" until the first is
+done. A run that waited reads the bridge's state again and re-checks the
+proving key before it proves, so its proof binds to an anchor that is still
+in the window. Preflight tries this lock without waiting — and the
+aggregator's `<pk-cache>/.keygen.lock` too when the aggregator will generate
+its key, which then waits for any other process generating one in that cache
+— and refuses with exit 2 if one cannot be taken: another user's lock file
+this user cannot read, or, on NFS, one this user cannot write (NFS will not
+lock a file opened read-only). A lock held by another run passes with a
+warning; the wait for `.keygen.lock` counts against `--prover-timeout-s`.
+On a filesystem without `flock` it proves unlocked, with a warning.
 
 **State-file lifecycle** (each file lives at `$STATE_DIR/<sha256>.json`):
 
@@ -962,7 +1080,7 @@ crates/ackinacki-bridge/                       ← run cwd
 │   │                                             scripts/stage_deposit_prover.sh; see § Deposit
 │   ├── fetch_deposit_data, export_blake2b_proof, export_vk_blob
 │   ├── configs/circuit_params.json
-│   └── data/                                  ← kzg_params_18.srs, and the ~1.3 GB proving key
+│   └── data/                                  ← kzg_params_18.srs, and the ~3.4 GB proving key
 │                                                 the first proof writes
 ├── deposit-state/                             ← BRIDGE_DEPOSIT_STATE_DIR: <op-id>.json, deposit.lock,
 │                                                 <op-id>.lock — never delete or move while an
@@ -984,7 +1102,7 @@ $HOME/.bridge-deposit-state/                   ← deposit state dir when BRIDGE
 $HOME/.bridge-deposit-work/                    ← deposit work dir when BRIDGE_WORK_DIR is unset
 
 ../bridge-prover-libraries/                    ← halo2 sub-workspace (shared with the daemon)
-├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~3 GB withdraw-only, ~17 GB shared with the relayer)
+├── params/                                    ← BRIDGE_PARAMS_DIR (SRS + pk/vk; ~9.5 GB withdraw-only, more shared with the relayer)
 │   └── pk_cache/                              ← Circuit-4 PK cache
 └── target/release/ackinacki-bridge            ← this CLI when pre-built (cargo run --release also caches here)
 
@@ -995,7 +1113,7 @@ $HOME/.bridge-deposit-work/                    ← deposit work dir when BRIDGE_
 ```
 
 **Safe to prune between demos.** `work_dir/`, `proofs/` — regeneration
-is deterministic; ~5 min per proof with warm PK cache.
+is deterministic; ~3 min per proof with warm PK cache.
 `withdraw-state/<sha256>.json` files with status `Confirmed` — keep
 for audit; `Failed` — safe to prune once reconciled. **`Reserved` with
 no `an_tx_hash`: there is no age at which deleting one is safe, and the
@@ -1005,8 +1123,8 @@ question only sometimes, and a shorter version of the rule is how the
 wrong one keeps getting copied.
 
 **Do NOT touch between demos.** `../bridge-prover-libraries/params/`
-and its `pk_cache/` — cold cache costs ~20 min per proof; warm cache
-is ~5 min.
+and its `pk_cache/` — cold cache costs ~8 min per proof; warm cache
+is ~3 min.
 
 ## Not this CLI's job
 
@@ -1048,9 +1166,9 @@ under `--json`:
 | 2 | wallet pairing | You scan the QR code and approve the connection; if the wallet is on another network, the CLI asks it to switch, or to add the network. Then the **account check**: an account holding contract code, other than an EIP-7702 delegation, is refused, and the wallet signs a short message (`personal_sign`) whose signer must be the account itself. A failure is exit 20; nothing is sent. |
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. The read-back and the deposit's gas estimate are made at the block that holds the approve — looked up again by its receipt, so that an approve a reorg moved is followed, or, for an approve from the QR code, the block where the new allowance was seen — and the nonce the deposit is expected at counts the approve: an RPC node that has not caught up with that block is asked again, not taken for a lowered limit or a deposit that would revert. |
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(amount, 0, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
-| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2, input exactly the 100 bytes requested, an access list of at most 64 bytes RLP, sent straight to the bridge. The wallet session is closed after this step. |
+| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2 or type 1, input exactly the 100 bytes requested, an access list of at most 512 bytes payload (2048 on type 1), sent straight to the bridge; no receipt log whose payload is over 2211 bytes. The receipt must also fit the prover's keccak budget (about six logs at the 2048-byte cap; a plain deposit uses a fraction of it), which the prover checks at step 7. The wallet session is closed after this step. |
 | 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
-| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. |
+| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: an enclosing transaction of any type other than 1 or 2, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
 | 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
 
@@ -1402,10 +1520,12 @@ Exit 35 and exit 37 are final: the CLI cannot move the USDC any further. It
 prints what the operator needs, and `--resume <op-id>` prints it again from the
 record.
 
-- **Exit 35, a shape the circuit cannot prove** — a legacy or type-1
-  transaction (EIP-681 wallets may send one), longer call data, a longer access
-  list, a call routed through another contract. The USDC is in the EVM bridge,
-  which has no refund; only the operator can return it.
+- **Exit 35, a shape the circuit cannot prove** — a legacy or type-4
+  transaction (EIP-681 wallets may send a legacy one), longer call data, a
+  longer access list, a call routed through another contract, a receipt log
+  whose payload is over 2211 bytes, or, found by the prover at step 7, a receipt over
+  its keccak budget or a type-1 transaction over its leaf. The USDC is in
+  the EVM bridge, which has no refund; only the operator can return it.
 - **Exit 35, not the deposit that was requested** — `the wallet broadcast a
   deposit that differs from the request`, with the actual amount and recipient
   next to the requested ones. You changed the amount in the wallet, the wallet
@@ -1476,10 +1596,15 @@ runs, built from `deposit-prover/` as it is:
 ├── configs/circuit_params.json        read on every run, even with a cached key
 └── data/
     ├── kzg_params_18.srs              the Hermez ceremony at degree 18, ~33 MB
-    ├── deposit_prover_k18.<fingerprint>.pk       the proving key, ~1.27 GB,
+    ├── deposit_prover_k18.<fingerprint>.pk       the proving key, ~3.4 GB,
     ├── deposit_prover_k18.<fingerprint>.pk.bp.json   written by the first proof
     └── .prove.lock
 ```
+
+A proof that has to generate a new key — the first one after an upgrade
+that changed the circuit — deletes the keys of earlier shapes from `data/`
+once the new one is written, so `data/` peaks at both keys for that one
+proof and then holds one.
 
 `scripts/install.sh` installs all of it. In a source checkout,
 `scripts/stage_deposit_prover.sh ./deposit-prover` builds the tools, with
@@ -1506,16 +1631,16 @@ Whatever its source, preflight refuses a file without the Hermez [s]·G2.
 
 | | `deposit` (k = 18) | `withdraw` (Circuit 4) |
 |---|---|---|
-| Peak RAM | ~4.4 GB with a cold key cache, ~3.9 GB warm | ~40 GB |
-| Disk | ~1.3 GB in `data/` after the first proof, plus ~26 MB of tools | ~4.3 GB on a withdraw-only host (Step 0) |
-| Proof, cold key cache (keygen included) | 42 s wall, 6 min 25 s CPU | ~20 min |
-| Proof, warm key cache | 23 s wall, 4 min 31 s CPU | ~5 min |
+| Peak RAM | ~9.6 GB with a cold key cache, ~8.8 GB warm | ~19 GB with a cold key cache (sampled every 5 s) |
+| Disk | ~3.4 GB in `data/` after the first proof, plus ~26 MB of tools; the first proof after an upgrade that rotates the key briefly holds the old key too, and then deletes it | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7.5 GB more, or ~10.7 GB with a new Circuit-4 key (Step 0) |
+| Proof, cold key cache (keygen included) | 2 min 7 s wall, 16 min CPU | ~8 min (8 min 12 s on the test host) |
+| Proof, warm key cache | 56 s wall, 11 min CPU | ~3 min (2 min 37 s and 2 min 41 s on the test host) |
 
 Measured with `export_blake2b_proof` on
 `deposit-prover/fixtures/deposit_10proofs/proof_00` (`--degree 18
---max-data-byte-len 256 --max-log-num 20`, as the CLI runs it) on an Intel Core
+--max-data-byte-len 2048 --max-log-num 20`, as the CLI runs it) on an Intel Core
 i5-14600KF with 20 hardware threads and 46 GB of RAM, Ubuntu 24.04 under WSL2.
-Keygen took 20 s of the cold run. The prover uses every core, so with fewer
+The prover uses every core, so with fewer
 the wall time moves toward the CPU time; `fetch_deposit_data` adds a few RPC
 calls. The default `--prover-timeout-s 1800` leaves a wide margin.
 
@@ -1561,8 +1686,11 @@ version is the build constant `MIN_BRIDGE_VERSION`
 (`src/deposit/an_preflight.rs`). Preflight reads the bridge's `getVersion()`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
-already. A bridge newer
-than the newest this build was checked against (`1.5.0`) gets a warning.
+already. Independently of that minimum, preflight also refuses a bridge
+older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
+prover makes proofs for that key, and an older bridge rejects them at
+`finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
+than the newest this build was checked against (`1.7.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it
@@ -1593,11 +1721,19 @@ enabled.
      chain's finalized head; its latest ancestry checkpoint is at most 768 s
      behind its head. The bounds are build constants, not flags.
 
-  Ancestry does not run on Acki Nacki today — it does not fit the gas limit
-  ([docs/eth-light-client.md](../../docs/eth-light-client.md)) — so check 3
-  fails, and a bridge with owner anchors disabled takes no deposit from this
-  CLI. The CLI starts accepting them by itself once the checks pass; that
-  needs no new CLI release.
+  Ancestry runs on Acki Nacki once the light client hashes headers with the
+  `KECCAK256` instruction ([docs/eth-light-client.md](../../docs/eth-light-client.md)).
+  Check 3 does not look at the deposit's own block. It asks whether the light
+  client's own event history carries an `AncestryAccepted` with new hashes
+  since the switch-off, whether the bridge accepted the block before that
+  event's checkpoint, and whether the head and the event are fresh enough. A
+  deposit in a block no span covers passes check 3, and then `finalizeDeposit`
+  is refused with `ERR_UNKNOWN_BLOCK` (224), which `deposit/refusals.rs:85`
+  maps back to the anchor wait: the depositor gets a wait that runs to
+  `--anchor-timeout-s` and exit 31, with the funds already locked in the EVM
+  bridge. With owner anchors off nothing can admit that block until ancestry
+  covers it. The CLI starts accepting deposits by itself once the checks pass;
+  that needs no new CLI release.
 
 **The residual risk of this mode.** Preflight only shows that ancestry worked
 recently. If it stops after the deposit is made, the block is not anchored

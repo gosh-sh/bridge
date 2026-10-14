@@ -179,14 +179,14 @@ class InitializeTest(unittest.TestCase):
     def test_update_code_carries_the_encoded_cell_and_the_bridge_code(self):
         update = self.run_initialize()[1]
         self.assertIn(CELL, update)
-        self.assertIn("code-of:/placed/contracts/an/0.81.0_compiled/exchange/eccUSDCBridge.tvc", update)
+        self.assertIn("code-of:/placed/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc", update)
         self.assertIn("--sign ./config/BlockKeeperContractRoot.keys.json", update)
 
     def test_owner_calls_are_signed_with_the_bridge_key(self):
         commands = self.run_initialize()
         for cmd in commands[2:4]:
             self.assertIn("--sign ./config/USDCBridge.keys.json", cmd)
-            self.assertIn("/placed/contracts/an/0.81.0_compiled/exchange/eccUSDCBridge.abi.json", cmd)
+            self.assertIn("/placed/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json", cmd)
 
     def test_light_client_code_comes_from_the_placed_artefact(self):
         self.assertIn(

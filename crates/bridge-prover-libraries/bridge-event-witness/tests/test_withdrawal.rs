@@ -101,3 +101,21 @@ fn witness_roundtrips_through_json() {
     let _round: bridge_event_witness::schema::PrivateWitness =
         serde_json::from_str(&json).expect("deserialize");
 }
+
+#[test]
+fn decoding_the_event_alone_gives_the_fields_the_exporter_gives() {
+    let ctx = BlockContextInput {
+        block_id: [0u8; 32],
+        block_seq_no: 0,
+        account_dapp_id: [0u8; 32],
+        account_id: [0u8; 32],
+        envelope_hash: [0u8; 32],
+    };
+    let witness = export_from_event_boc_base64(EVENT_BOC_B64, &ctx).unwrap();
+    let event = bridge_event_witness::decode_event_boc_base64(EVENT_BOC_B64).unwrap();
+    assert_eq!(event.amount_hex, witness.event.amount_hex);
+    assert_eq!(event.recipient_hex, witness.event.recipient_hex);
+    assert_eq!(event.dst_chain_id_hex, witness.event.dst_chain_id_hex);
+    assert_eq!(event.token_id, witness.event.token_id);
+    assert_eq!(event.sender_hex, witness.event.sender_hex);
+}

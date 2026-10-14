@@ -1,8 +1,8 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.6.0, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.4.2:
+`exchange/` — `eccUSDCBridge` at version 1.7.0, `DepositVoucher` at 1.4.0 and
+`EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -42,7 +42,8 @@ client afterwards.
 |------|----------|
 | `exchange/` | Sources and a `Makefile` that builds them in place |
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
-| `0.81.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `DepositVoucher.tvc`, `EthBeaconLightClient.tvc` and their ABIs |
+| `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
+| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 | `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
@@ -70,19 +71,23 @@ pin is moved.
 
 ## Rebuilding
 
-    make -C contracts/an/exchange SOLD_0_81=/path/to/sold-0.81.0
+    make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
 
-All three tracked artefacts are built with `sold` 0.81.0, which is why the
-compiled folder carries that name. Any other compiler changes the code hash, so
-the `Makefile` stops when `SOLD_0_81` is unset or the binary reports a different
-version. `sold` 0.82.0 does not compile the bridge.
+The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
+`eccUSDCBridge.tvc` and 0.81.0 for `DepositVoucher.tvc` and
+`EthBeaconLightClient.tvc`, which is why the compiled folders carry those names.
+Any other compiler changes the code hash, so the `Makefile` builds each contract
+with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
+unset or the binary reports a different version.
 
-`eccUSDCBridge` was built with 0.80.0 until the volume limits landed; that
-rebuild moved it to 0.81.0 and its artefacts from `0.80.0_compiled/` to
-`0.81.0_compiled/`. `DepositVoucher.tvc` is reproduced byte for byte by 0.81.0,
-so voucher addresses — and with them the replay protection — do not move. The
-bridge keeps the voucher's code in its data, and the zerostate installs the
-light client's code into the bridge, so replace the rebuilt artefacts together.
+`sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
+but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` needs more than the
+version: the source calls `gosh.keccak256`, so `SOLD_0_81` has to be a `sold`
+built against a tvm-sdk that carries the `KECCAK256` instruction. A stock
+0.81.0 emits the mnemonic its assembler does not know. `sold` 0.82.0 does not
+compile the bridge. The bridge keeps the voucher's code in its data, and the
+zerostate installs the light client's code into the bridge, so replace the
+rebuilt artefacts together.
 
 Editing `BridgeZerostateData.sol` is a separate rebuild:
 

@@ -27,6 +27,16 @@ A mismatch reads `aggregator VK drift` and names the first differing line. It me
 different key or a `snark-verifier` upgrade that changed the generated text; after an upgrade,
 regenerate both files of every pair.
 
+## Logs, the pk cache and the slot report
+
+`aggregate-proof` logs to stderr, at `info` for this crate unless `RUST_LOG` says otherwise.
+`ackinacki-bridge withdraw` and the relayer do not pass their own `RUST_LOG` on to it: they forward
+each of its lines into their log, prefixed `aggregate-proof:`, at the level it starts with — and
+the lines of an error it prints (`Error:`, `Caused by:`, a panic) at `error`. With
+`--pk-cache-dir`, the outer key is cached there (`aggregator_cache.rs` has the layout and the
+locking); `--slot-report <path>` then writes the stem of the slot the run used to `<path>` once the
+calldata is written — without `--pk-cache-dir` there is no slot, and nothing is written.
+
 ## Status (M2 closed 2026-05-27; M5 instance-exposure de-risked 2026-05-29)
 
 | Step | Status | Evidence |

@@ -49,7 +49,7 @@ interface IAcceptedBlockHashSink {
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "0.1.2";
+    string constant version = "0.1.1";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -87,7 +87,7 @@ contract EthBeaconLightClient {
     uint16 constant ERR_BAD_ANCESTRY       = 250;
     uint16 constant ERR_ANCESTRY_TOO_LONG  = 251;
     uint16 constant ERR_NOT_PROVEN         = 252;
-    uint16 constant ERR_ZERO_PUBKEY        = 253;
+    uint16 constant ERR_ZERO_PUBKEY        = 254;
 
     event HeadUpdated(
         uint64  finalizedSlot,

@@ -132,6 +132,97 @@ pub(crate) async fn deployed_multisig(ecc3: u128) -> (String, String) {
     (account_id, boc)
 }
 
+/// The USDCBridge contract, as compiled for the bridge account. Its ABI is
+/// the one the CLI ships (`abi/USDCBridge.abi.json`, kept identical to the
+/// compiled one by CI).
+const USDC_BRIDGE_TVC: &[u8] =
+    include_bytes!("../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc");
+
+/// A deployed USDCBridge owned by [`PAIR_PUBLIC`], paused by its owner when
+/// `paused`.
+///
+/// Returns `(account_id_hex, account_boc_base64)`. Built the way
+/// [`deployed_multisig`] is: the constructor executed locally against an
+/// uninitialised account, then — for a paused bridge — the owner's
+/// `setPaused(true)` executed against the result. What `isPaused` answers is
+/// then the contract's own code reading its own storage.
+pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
+    let ctx =
+        Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"));
+    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let owner = || Signer::Keys {
+        keys: KeyPair {
+            public: PAIR_PUBLIC.to_string(),
+            secret: PAIR_SECRET.to_string(),
+        },
+    };
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        deploy_set: Some(DeploySet {
+            tvc: Some(tvm_types::base64_encode(USDC_BRIDGE_TVC)),
+            initial_data: Some(json!({ "_pubkey": format!("0x{PAIR_PUBLIC}") })),
+            ..Default::default()
+        }),
+        call_set: Some(CallSet {
+            function_name: "constructor".to_string(),
+            input: Some(json!({
+                "pubkey": format!("0x{PAIR_PUBLIC}"),
+                "usdcWallet": format!("0:{}", "00".repeat(32)),
+            })),
+            ..Default::default()
+        }),
+        signer: owner(),
+        ..Default::default()
+    })
+    .await
+    .expect("the bridge constructor encodes offline");
+    let deployed = run_executor(ctx.clone(), ParamsOfRunExecutor {
+        message: encoded.message,
+        account: AccountForExecutor::Uninit,
+        return_updated_account: Some(true),
+        ..Default::default()
+    })
+    .await
+    .expect("the bridge deploys against an uninit account");
+    let mut boc = deployed.account;
+
+    if paused {
+        let call = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+            abi,
+            address: Some(encoded.address.clone()),
+            call_set: Some(CallSet {
+                function_name: "setPaused".to_string(),
+                input: Some(json!({ "paused": true })),
+                ..Default::default()
+            }),
+            signer: owner(),
+            ..Default::default()
+        })
+        .await
+        .expect("setPaused encodes offline");
+        boc = run_executor(ctx, ParamsOfRunExecutor {
+            message: call.message,
+            account: AccountForExecutor::Account {
+                boc,
+                unlimited_balance: Some(true),
+            },
+            return_updated_account: Some(true),
+            ..Default::default()
+        })
+        .await
+        .expect("the owner's setPaused executes")
+        .account;
+    }
+
+    let account_id = encoded
+        .address
+        .split_once(':')
+        .expect("the encoder returns a `0:<hex>` address")
+        .1
+        .to_string();
+    (account_id, boc)
+}
+
 /// What the fake node knows about the withdrawal under test.
 pub(crate) struct NodeFixture {
     /// The `--from` multisig, as [`deployed_multisig`] returned it.
@@ -141,6 +232,9 @@ pub(crate) struct NodeFixture {
     /// `Active`, with a dapp id equal to itself — the shape
     /// `deploy_msig_and_mint.py` produces.
     pub usdc_bridge_account_id: String,
+    /// The USDCBridge's account BOC, as [`deployed_usdc_bridge`] returned it.
+    /// `usdc_bridge_account_id` is that account's id.
+    pub usdc_bridge_boc: String,
 }
 
 /// A running fake TVM node. Drop the handle and the listener dies with
@@ -384,10 +478,18 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
             .or_else(|| asked.strip_prefix("0%3A"))
             .or_else(|| asked.strip_prefix("0%3a"))
             .unwrap_or(asked);
+        if asked == fixture.usdc_bridge_account_id {
+            return json!({
+                "boc": fixture.usdc_bridge_boc,
+                "dapp_id": fixture.usdc_bridge_account_id,
+                "state_timestamp": 1_700_000_000i64,
+                "account_id": fixture.usdc_bridge_account_id,
+            });
+        }
         assert_eq!(
             asked, fixture.account_id,
-            "this node knows one account and was asked for another. A fake that answers anyway \
-             makes every check downstream of it vacuous",
+            "this node knows two accounts (the multisig and the USDCBridge) and was asked for \
+             another. A fake that answers anyway makes every check downstream of it vacuous",
         );
         return json!({
             "boc": fixture.account_boc,
@@ -500,6 +602,33 @@ impl FakeWorld {
             record.an_tx_hash.is_none(),
             "a fresh reservation has no hash"
         );
+        crate::idempotency::record_path(self.state_dir.path(), &record.key)
+    }
+
+    /// Pass `--allow-retry`, which a resume over a recorded burn needs.
+    pub(crate) fn with_allow_retry(&mut self) {
+        self.args
+            .as_mut()
+            .expect("the arguments are still here")
+            .allow_retry = true;
+    }
+
+    /// Leave behind a withdrawal whose burn is on the wire: a `Burned`
+    /// record carrying its AN tx hash, written through `update` so it is a
+    /// record `read_record` accepts.
+    pub(crate) fn leave_a_burned_record(&self) -> std::path::PathBuf {
+        let (from, to, amount) = self.identity();
+        let (mut record, _) =
+            crate::idempotency::reserve(self.state_dir.path(), &from, &to, &amount, false)
+                .expect("the first reservation is uncontested");
+        record.status = crate::idempotency::Status::Burned;
+        record.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+        crate::idempotency::update(
+            self.state_dir.path(),
+            &record,
+            &crate::idempotency::LockSlot::empty().hold(),
+        )
+        .expect("the fixture writes its own record");
         crate::idempotency::record_path(self.state_dir.path(), &record.key)
     }
 
@@ -652,14 +781,29 @@ impl FakeWorld {
 /// is pinned to has to equal the one THIS withdrawal will prove, and
 /// that is computed from the USDCBridge ids the fake node serves.
 pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
+    fake_world_with(ecc3, amount, WorldKnobs::default()).await
+}
+
+/// What a [`fake_world_with`] can be told to get wrong.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorldKnobs {
+    /// `AckiNackiBridge.paused()` answers true.
+    pub evm_paused: bool,
+    /// The USDCBridge's owner has called `setPaused(true)`.
+    pub an_paused: bool,
+}
+
+/// [`fake_world`], with the bridges in the state `knobs` names.
+pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs) -> FakeWorld {
     use crate::preflight::tests::{full_walk, full_walk_code, mock_rpc_code_for};
 
     let (account_id, account_boc) = deployed_multisig(ecc3).await;
-    let usdc_bridge_account_id = "2b".repeat(32);
+    let (usdc_bridge_account_id, usdc_bridge_boc) = deployed_usdc_bridge(knobs.an_paused).await;
     let node = fake_node(NodeFixture {
         account_id: account_id.clone(),
         account_boc,
         usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+        usdc_bridge_boc,
     })
     .await;
 
@@ -678,6 +822,10 @@ pub(crate) async fn fake_world(ecc3: u128, amount: &str) -> FakeWorld {
             (
                 crate::preflight::tests::SEL_ACC_FR,
                 format!("0x{acc_fr:064x}"),
+            ),
+            (
+                crate::preflight::tests::SEL_PAUSED,
+                format!("0x{:064x}", u8::from(knobs.evm_paused)),
             ),
         ]),
     )
@@ -745,11 +893,13 @@ mod tests {
     /// arrive, which is the property under test.
     async fn one_account_node() -> (NodeFixture, String) {
         let (account_id, boc) = deployed_multisig(0).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) = deployed_usdc_bridge(false).await;
         (
             NodeFixture {
                 account_id: account_id.clone(),
                 account_boc: boc.clone(),
-                usdc_bridge_account_id: "2b".repeat(32),
+                usdc_bridge_account_id,
+                usdc_bridge_boc,
             },
             boc,
         )
@@ -781,7 +931,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "knows one account and was asked for another")]
+    #[should_panic(expected = "and was asked for another")]
     async fn the_node_refuses_an_account_it_has_never_heard_of() {
         // Measured before this check existed: a production `--from`
         // pointing at an account the node knew nothing about walked the
@@ -804,6 +954,16 @@ mod tests {
             "POST /graphql HTTP/1.1",
             &json!({ "query": "query{blockchain{transaction(hash:\"x\"){boc}}}" }).to_string(),
         );
+    }
+
+    #[tokio::test]
+    async fn the_bridge_fixture_is_an_active_account_both_ways() {
+        for paused in [false, true] {
+            let (id, boc) = deployed_usdc_bridge(paused).await;
+            assert_eq!(id.len(), 64, "{id}");
+            let account = Account::construct_from_base64(&boc).expect("the fixture BOC parses");
+            assert_eq!(account.status(), tvm_block::AccountStatus::AccStateActive);
+        }
     }
 
     /// Everything `preflight::run` asks of the `--from` account, asked

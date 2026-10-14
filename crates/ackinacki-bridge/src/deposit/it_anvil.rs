@@ -248,7 +248,7 @@ async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
             },
             (
                 true,
-                Outcome::Final(Negative::Unprovable(ShapeViolation::NotEip1559 {
+                Outcome::Final(Negative::Unprovable(ShapeViolation::NotTypedTx {
                     tx_type: 0,
                 })),
             ) => {},

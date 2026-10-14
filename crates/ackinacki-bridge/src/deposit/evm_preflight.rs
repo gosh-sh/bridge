@@ -87,7 +87,9 @@ pub async fn run(
         if want > per_tx {
             return Err(refuse(
                 format!(
-                    "{} micro-USDC is above the bridge's MAX_TRANSFER_AMOUNT of {per_tx}:                      deposit() would revert with TransferTooLarge. Split the amount.",
+                    "{} micro-USDC is above the bridge's MAX_TRANSFER_AMOUNT of {per_tx}: \
+                     deposit() would revert with TransferTooLarge. Split the \
+                     amount.",
                     amount
                 ),
                 None,
@@ -96,7 +98,9 @@ pub async fn run(
         if held + want > tvl {
             return Err(refuse(
                 format!(
-                    "the bridge holds {held} micro-USDC of a MAX_TVL of {tvl}, so {} more would                      cross the ceiling: deposit() would revert with TvlCapExceeded. Room left:                      {}.",
+                    "the bridge holds {held} micro-USDC of a MAX_TVL of {tvl}, so {} more \
+                     would cross the ceiling: deposit() would revert with \
+                     TvlCapExceeded. Room left: {}.",
                     amount,
                     tvl.saturating_sub(held)
                 ),

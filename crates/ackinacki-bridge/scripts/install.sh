@@ -19,7 +19,8 @@
 # What it puts on disk, skipping whatever is already there:
 #
 #   1. ackinacki-bridge   the CLI, ~50 MB
-#   2. aggregate-proof    the prover subprocess the CLI shells out to, ~7 MB
+#   2. aggregate-proof    the prover subprocess the CLI shells out to, ~7 MB;
+#                         one too old to take `--slot-report` counts as missing
 #   3. verifier files     the bytecode stage 1 compares with the chain, and the
 #                         source the proof is self-checked against, ~400 KB
 #   4. kzg_bn254_21.srs   the Hermez ceremony, ~257 MB
@@ -42,10 +43,15 @@ readonly BUNDLE="ackinacki-bridge-linux-x86_64.tar.gz"
 readonly CEREMONY="kzg_bn254_21.srs"
 readonly DEPOSIT_CEREMONY="kzg_params_18.srs"
 readonly SUMS="SHA256SUMS"
-# Withdrawals: ceremony, binaries and keygen headroom, ~6 GB. Deposits: the
-# prover's data/ after its first proof (SRS and proving key), ~1.3 GB.
-readonly DISK_NEED_KB=$((8 * 1024 * 1024))
-readonly RAM_WARN_GB=48                      # Circuit 4 peaks around 40 GB
+# Withdrawals: ceremony, binaries and keygen headroom, ~10.5 GB; later
+# withdrawals reuse the keys. Deposits: the prover's data/ after its first
+# proof (SRS and proving key), ~3.4 GB; the prover deletes a rotated-out key
+# once the new one is written. Not counted: the first withdrawal after an
+# upgrade that changes aggregate-proof writes a new ~6.85 GB aggregator key
+# beside the old one, and one that also changes the Circuit-4 key reserves
+# 3 GiB more for that key (README, Step 0).
+readonly DISK_NEED_KB=$((13 * 1024 * 1024))
+readonly RAM_WARN_GB=24                      # a cold withdrawal peaked near 19 GB (README)
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 readonly SELF
@@ -123,7 +129,21 @@ can_run() {   # can_run <binary> <arg...>
 }
 
 have_cli()       { can_run "$CLI_BIN" --version; }
-have_agg()       { can_run "$AGG_BIN" --help; }
+# The CLI passes the aggregator `--slot-report`, and its preflight refuses an
+# aggregate-proof whose `--help` does not name it (preflight.rs). One that
+# runs but predates the flag counts as missing here, so the bundle replaces it
+# instead of this script calling it ok and preflight refusing it after.
+have_agg() {
+  can_run "$AGG_BIN" --help || return 1
+  # Matched in the captured text, not through `| grep -q`: grep stops at
+  # the first match, the binary writing the rest of its help gets SIGPIPE,
+  # and under pipefail that reads as "not found".
+  case "$("$AGG_BIN" --help 2>&1)" in
+    *--slot-report*) return 0 ;;
+  esac
+  LAST_RUN_ERROR="$AGG_BIN predates --slot-report, which this CLI passes it"
+  return 1
+}
 have_verifiers() {
   [ -s "$WITHDRAW_VERIFIER" ] && [ -s "$WITHDRAW_VERIFIER_SOL" ] && [ -s "$WITHDRAW_VERIFIER_CALLDATA" ]
 }
@@ -185,7 +205,7 @@ if [ -r /proc/meminfo ]; then
   if [ "${total_gb:-0}" -ge "$RAM_WARN_GB" ]; then
     ok "${total_gb} GB RAM + swap"
   else
-    warn "${total_gb} GB RAM + swap; Circuit 4 peaks near 40 GB, and it runs AFTER the burn"
+    warn "${total_gb} GB RAM + swap; a withdrawal's proof peaked near 19 GB on the test host, and it runs AFTER the burn"
   fi
 fi
 
@@ -240,6 +260,7 @@ if have_cli && have_agg && have_verifiers && have_deposit_prover; then
 else
   gap "$BUNDLE"
   note "the CLI, the aggregator subprocess, the verifier .bin and .sol files, the deposit prover and a profile"
+  if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
   if confirm "download $BUNDLE (~60 MB) from $RELEASE_BASE?"; then
     if [ -z "$WORK" ]; then WORK=$(mktemp -d); fi
     if fetch_verified "$BUNDLE" "$WORK/bundle.tar.gz"; then

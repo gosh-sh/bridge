@@ -148,7 +148,7 @@ whole treasury. That is a change of security model, not a prerequisites optimisa
 **Move stage 5 into a service** — legitimate and safe (the proof is verified by the chain, not taken
 on trust, and whoever produces it cannot redirect the funds), but it is not code removal: it is new
 infrastructure, and no prover-as-a-service exists today. It is the only path that also removes the
-remaining heavy prerequisites — the ~256 MB ceremony, the ~2.65 GB `event_pk`, ~40 GB of peak RAM
+remaining heavy prerequisites — the ~256 MB ceremony, the ~2.65 GB `event_pk`, ~19 GB of peak RAM
 (`crates/ackinacki-bridge/README.md:220`, `:245-250`). It needs a "prove it yourself" fallback,
 otherwise an unavailable service locks funds (it does not lose them: the proof is deterministic
 for a given event and chain state).

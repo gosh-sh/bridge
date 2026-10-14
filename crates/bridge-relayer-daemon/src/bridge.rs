@@ -874,12 +874,15 @@ mod sol_bindings {
 
             function isNullifierUsed(uint256 nullifier) external view returns (bool);
 
-            /// Custom errors `AckiNackiBridge.withdrawByProof` can revert with.
-            /// Listed here so the sol! macro emits `SELECTOR` constants — the
-            /// relayer withdraw scan uses them to distinguish permanent
+            /// Custom errors `AckiNackiBridge.withdrawByProof` can revert with:
+            /// its own checks, the `whenNotPaused` and `nonReentrant`
+            /// modifiers, and the treasury helpers it calls. Listed here so
+            /// the sol! macro emits `SELECTOR` constants — the relayer
+            /// withdraw scan uses them to distinguish permanent
             /// (proof-intrinsic) reverts from transient ones (e.g. anchor
             /// not yet registered by the verifyBlock lane) so a permanently
-            /// bad proof does not hold up the whole queue.
+            /// bad proof does not hold up the whole queue — and so
+            /// `decode_withdraw_revert` can name them.
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
             error NullifierAlreadyUsed(uint256 nullifier);
@@ -892,6 +895,12 @@ mod sol_bindings {
             error UnsupportedTokenId(uint256 tokenId);
             error InvalidRecipient();
             error WithdrawTreasuryShortfall(uint256 requested, uint256 available);
+            error BridgePaused();
+            error Reentrancy();
+            error LayerOutOfRange(uint8 layer);
+            error InsufficientTreasury();
+            error AaveWithdrawFailed(uint256 requested, uint256 received);
+            error WithdrawTransferFailed(address recipient, uint256 amount);
 
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
@@ -1865,6 +1874,106 @@ pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     WithdrawRevertKind::Transient
 }
 
+/// A `withdrawByProof` revert decoded into the bridge's custom error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeRevert {
+    /// The Solidity error's name, e.g. `NullifierAlreadyUsed`.
+    pub name: &'static str,
+    /// `Name(argument: value, …)`: field elements and hashes in 32-byte hex,
+    /// amounts and chain ids in decimal.
+    pub rendered: String,
+}
+
+/// Find the revert data in `reason` — the text
+/// [`EthBridgeClient::dry_run_withdraw`] and
+/// [`EthBridgeClient::submit_withdraw`] report, the same text
+/// [`classify_withdraw_revert`] reads — and decode it as one of
+/// `AckiNackiBridge`'s custom errors.
+///
+/// Nodes put the data in different places (`data: "0x…"`, or inline after
+/// `execution reverted:`), so every `0x`-prefixed run of at least four
+/// bytes is tried and the first that decodes wins. `None` when nothing
+/// decodes: a transport failure, or a revert raised by something other than
+/// the bridge.
+pub fn decode_withdraw_revert(reason: &str) -> Option<BridgeRevert> {
+    use alloy::sol_types::SolInterface;
+    hex_runs(reason).find_map(|bytes| {
+        AckiNackiBridge::AckiNackiBridgeErrors::abi_decode(&bytes)
+            .ok()
+            .map(render_bridge_error)
+    })
+}
+
+/// Every `0x`-prefixed run of hex digits in `text` that is a whole number of
+/// bytes and at least a selector long, decoded.
+fn hex_runs(text: &str) -> impl Iterator<Item = Vec<u8>> + '_ {
+    text.match_indices("0x").filter_map(move |(i, _)| {
+        let digits: String = text[i + 2..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .collect();
+        if digits.len() < 8 || !digits.len().is_multiple_of(2) {
+            return None;
+        }
+        hex::decode(&digits).ok()
+    })
+}
+
+/// Name a decoded error and its arguments. Exhaustive on purpose: an error
+/// added to the `sol!` block above does not compile until it is named here.
+fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRevert {
+    use AckiNackiBridge::AckiNackiBridgeErrors as E;
+    let word = |v: U256| format!("0x{v:064x}");
+    let (name, args) = match e {
+        E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
+        E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
+        E::NullifierAlreadyUsed(x) => (
+            "NullifierAlreadyUsed",
+            format!("nullifier: {}", word(x.nullifier)),
+        ),
+        E::FieldElementOutOfRange(x) => (
+            "FieldElementOutOfRange",
+            format!("value: {}", word(x.value)),
+        ),
+        E::DstChainIdMismatch(x) => (
+            "DstChainIdMismatch",
+            format!("supplied: {}, expected: {}", x.supplied, x.expected),
+        ),
+        E::RecipientHalfOutOfRange(x) => (
+            "RecipientHalfOutOfRange",
+            format!("value: {}", word(x.value)),
+        ),
+        E::WithdrawIdentityMismatch(_) => ("WithdrawIdentityMismatch", String::new()),
+        E::UnknownAnchor(x) => ("UnknownAnchor", format!("finalRoot: {}", word(x.finalRoot))),
+        E::InvalidNumLayers(x) => (
+            "InvalidNumLayers",
+            format!("anchorLayer: {}", x.anchorLayer),
+        ),
+        E::UnsupportedTokenId(x) => ("UnsupportedTokenId", format!("tokenId: {}", x.tokenId)),
+        E::InvalidRecipient(_) => ("InvalidRecipient", String::new()),
+        E::WithdrawTreasuryShortfall(x) => (
+            "WithdrawTreasuryShortfall",
+            format!("requested: {}, available: {}", x.requested, x.available),
+        ),
+        E::BridgePaused(_) => ("BridgePaused", String::new()),
+        E::Reentrancy(_) => ("Reentrancy", String::new()),
+        E::LayerOutOfRange(x) => ("LayerOutOfRange", format!("layer: {}", x.layer)),
+        E::InsufficientTreasury(_) => ("InsufficientTreasury", String::new()),
+        E::AaveWithdrawFailed(x) => (
+            "AaveWithdrawFailed",
+            format!("requested: {}, received: {}", x.requested, x.received),
+        ),
+        E::WithdrawTransferFailed(x) => (
+            "WithdrawTransferFailed",
+            format!("recipient: {}, amount: {}", x.recipient, x.amount),
+        ),
+    };
+    BridgeRevert {
+        name,
+        rendered: format!("{name}({args})"),
+    }
+}
+
 /// See [`classify_withdraw_revert`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WithdrawRevertKind {
@@ -2587,5 +2696,177 @@ mod tests {
         assert!(get_logs_error_is_retryable(&rate));
         let transport = alloy::transports::TransportErrorKind::custom_str("connection reset");
         assert!(get_logs_error_is_retryable(&transport));
+    }
+
+    /// The text a public Sepolia RPC returned for the dry run of a withdrawal
+    /// whose nullifier was already spent.
+    const NULLIFIER_REVERT: &str =
+        "server returned an error response: error code 3: execution reverted: tried to decode \
+         error from abi but failed: Error: Failed to slice index abi_decoded_error_data when \
+         getting message from revert data, data: \
+         \"0xdc215c0a2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb\"";
+
+    #[test]
+    fn a_spent_nullifier_is_named_with_its_argument() {
+        let r = decode_withdraw_revert(NULLIFIER_REVERT).expect("the bridge's own error");
+        assert_eq!(r.name, "NullifierAlreadyUsed");
+        assert_eq!(
+            r.rendered,
+            "NullifierAlreadyUsed(nullifier: \
+             0x2f01348a22bd5a63a9d567a5f79ac2d0b67b8255981eb11758b080580b9a2fbb)"
+        );
+        // The daemon's classification reads the same text and must not change.
+        assert_eq!(
+            classify_withdraw_revert(NULLIFIER_REVERT),
+            WithdrawRevertKind::Permanent
+        );
+    }
+
+    #[test]
+    fn revert_data_is_found_wherever_the_node_put_it() {
+        use alloy::sol_types::SolError;
+        let paused = hex::encode(AckiNackiBridge::BridgePaused::SELECTOR);
+        // Inline after the message, no `data:` key, and an address before it
+        // that must not be taken for the error.
+        let inline = format!(
+            "execution reverted: from 0x400bb825ca9ca7dddfcb25f39c1ec073a91246b3: 0x{paused}"
+        );
+        assert_eq!(
+            decode_withdraw_revert(&inline).map(|r| r.rendered),
+            Some("BridgePaused()".to_string())
+        );
+        let shortfall = AckiNackiBridge::WithdrawTreasuryShortfall {
+            requested: U256::from(1_000_000u64),
+            available: U256::from(20u64),
+        }
+        .abi_encode();
+        let quoted = format!("custom error: data: \"0x{}\"", hex::encode(shortfall));
+        assert_eq!(
+            decode_withdraw_revert(&quoted).map(|r| r.rendered),
+            Some("WithdrawTreasuryShortfall(requested: 1000000, available: 20)".to_string())
+        );
+    }
+
+    #[test]
+    fn text_without_a_bridge_error_decodes_to_nothing() {
+        assert_eq!(
+            decode_withdraw_revert("error sending request: connection refused"),
+            None
+        );
+        // `Error(string)`: a revert raised by something other than the bridge.
+        let foreign =
+            "execution reverted, data: \
+             \"0x08c379a00000000000000000000000000000000000000000000000000000000000000020\"";
+        assert_eq!(decode_withdraw_revert(foreign), None);
+    }
+
+    #[test]
+    fn every_error_withdraw_by_proof_can_raise_is_decodable() {
+        use alloy::{primitives::Address, sol_types::SolError};
+        use AckiNackiBridge as B;
+        let one = U256::from(1u64);
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (B::BridgePaused {}.abi_encode(), "BridgePaused"),
+            (B::Reentrancy {}.abi_encode(), "Reentrancy"),
+            (
+                B::WithdrawByProofDisabled {}.abi_encode(),
+                "WithdrawByProofDisabled",
+            ),
+            (
+                B::WithdrawIdentityMismatch {}.abi_encode(),
+                "WithdrawIdentityMismatch",
+            ),
+            (
+                B::DstChainIdMismatch {
+                    supplied: one,
+                    expected: one,
+                }
+                .abi_encode(),
+                "DstChainIdMismatch",
+            ),
+            (
+                B::UnsupportedTokenId {
+                    tokenId: one,
+                }
+                .abi_encode(),
+                "UnsupportedTokenId",
+            ),
+            (
+                B::RecipientHalfOutOfRange {
+                    value: one,
+                }
+                .abi_encode(),
+                "RecipientHalfOutOfRange",
+            ),
+            (B::InvalidRecipient {}.abi_encode(), "InvalidRecipient"),
+            (
+                B::FieldElementOutOfRange {
+                    value: one,
+                }
+                .abi_encode(),
+                "FieldElementOutOfRange",
+            ),
+            (
+                B::NullifierAlreadyUsed {
+                    nullifier: one,
+                }
+                .abi_encode(),
+                "NullifierAlreadyUsed",
+            ),
+            (
+                B::LayerOutOfRange {
+                    layer: 11,
+                }
+                .abi_encode(),
+                "LayerOutOfRange",
+            ),
+            (
+                B::UnknownAnchor {
+                    finalRoot: one,
+                }
+                .abi_encode(),
+                "UnknownAnchor",
+            ),
+            (
+                B::WithdrawalProofRejected {}.abi_encode(),
+                "WithdrawalProofRejected",
+            ),
+            (
+                B::WithdrawTreasuryShortfall {
+                    requested: one,
+                    available: one,
+                }
+                .abi_encode(),
+                "WithdrawTreasuryShortfall",
+            ),
+            (
+                B::AaveWithdrawFailed {
+                    requested: one,
+                    received: one,
+                }
+                .abi_encode(),
+                "AaveWithdrawFailed",
+            ),
+            (
+                B::InsufficientTreasury {}.abi_encode(),
+                "InsufficientTreasury",
+            ),
+            (
+                B::WithdrawTransferFailed {
+                    recipient: Address::repeat_byte(7),
+                    amount: one,
+                }
+                .abi_encode(),
+                "WithdrawTransferFailed",
+            ),
+        ];
+        for (data, name) in cases {
+            let text = format!("data: \"0x{}\"", hex::encode(&data));
+            assert_eq!(
+                decode_withdraw_revert(&text).map(|r| r.name),
+                Some(name),
+                "{text}"
+            );
+        }
     }
 }

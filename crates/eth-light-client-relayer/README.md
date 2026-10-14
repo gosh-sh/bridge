@@ -6,10 +6,13 @@ Polls Ethereum beacon `finality_update` **and** `light_client/updates` (current
 `EthBeaconLightClient.submitUpdate` on Acki Nacki.
 
 `finalizeDeposit` flip (owner): `scripts/ursus/flip_deposit_to_light_client.md`.
-Epoch ancestry (31/32 on-chain) cannot run today (keccak gas). The daemon
-fetches headers when `ETH_RPC_URL` is set and checks them locally; sending
+Ancestry (31/32 on-chain) fills the span between two proven checkpoints,
+headers oldest first. The daemon fetches the span back to its previous
+checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
 `submitAncestry` is `--submit-ancestry` (default off). One-shot:
-`eth-lc-relayer submit-ancestry`. Read-only check: `ancestry-one`.
+`eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
+<older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
+parent chain, which is necessary for a span to carry it, not sufficient.
 Committee rotate: on by default (`submitRotate` on a period jump; `--no-rotate`
 opts out). tvm-sdk#284 co-deploys with this contract.
 
@@ -53,9 +56,10 @@ eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree …
 eth-lc-relayer ancestry-one --beacon-url … \
   --checkpoint-slot 12345678 --deposit-hash 0x…
 
-# 7. Write the 31 parent hashes on-chain (will OOG until a keccak builtin;
-#    needs --submit-ancestry on the daemon, or this one-shot + live-submit)
+# 7. Write the blocks between two proven anchors on-chain (needs
+#    --submit-ancestry on the daemon, or this one-shot + live-submit)
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
+  --older-anchor-hash 0x… \
   --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
 

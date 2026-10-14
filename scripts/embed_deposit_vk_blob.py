@@ -24,8 +24,10 @@ BLOB = pathlib.Path(__file__).resolve().parents[1] / (
     "deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin"
 )
 BYTES_PER_LINE = 60  # 120 hex chars, matching the existing formatting
-LITERAL_RE = re.compile(r'(bytes constant VK_BLOB\s*=\s*)((?:\s*hex"[0-9a-f]*")+)(;)')
-SHA_RE = re.compile(r"(//\s+sha256 )([0-9a-f]{64})")
+# Group 1 stops at `=`: the whitespace before the first `hex"` belongs to
+# group 2, which `render` replaces, so no blank line is left behind.
+LITERAL_RE = re.compile(r'(bytes constant VK_BLOB\s*=)((?:\s*hex"[0-9a-f]*")+)(;)')
+SHA_RE = re.compile(r"(//\s+sha256\s*=?\s*)([0-9a-f]{64})")
 
 
 def render(blob: bytes, indent: str = " " * 8) -> str:

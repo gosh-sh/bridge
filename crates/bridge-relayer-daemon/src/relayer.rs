@@ -373,9 +373,14 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                     BkSetUpdateSubmitOutcome::Reverted {
                         reason,
                     } => {
-                        // Keep pending so next tick retries the same update.
+                        // Keep pending so next tick retries the same update,
+                        // with its proof aggregated again: the contract saw
+                        // this one and refused it.
                         self.state.record_bk_update_attempt(upd.block_seq_no);
                         self.persist_state()?;
+                        self.bk_update_source
+                            .discard_rejected_bk_update_proof(upd.block_seq_no)
+                            .await;
                         warn!(
                             seq_no = upd.block_seq_no,
                             reason = %reason,
@@ -520,6 +525,9 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             } => {
                 self.state.record_attempt(target);
                 self.persist_state()?;
+                // The contract saw this proof and refused it: the retry
+                // aggregates it again.
+                self.source.discard_rejected_proof(seq_no).await;
                 warn!(
                     seq_no = target,
                     attempts = self.state.attempts_since_progress,
@@ -1588,6 +1596,143 @@ mod tests {
             r.tick().await.unwrap_err(),
             RelayerError::Stuck { .. }
         ));
+    }
+
+    /// Block source that records which proofs the relayer told it to drop.
+    struct DiscardingBlocks {
+        inner: InMemoryBlockSource,
+        discarded: std::sync::Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for DiscardingBlocks {
+        async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            self.inner.fetch(target).await
+        }
+
+        async fn discard_rejected_proof(&self, seq_no: u64) {
+            self.discarded.lock().unwrap().push(seq_no);
+        }
+    }
+
+    /// Rotation source that records which proofs the relayer told it to drop.
+    struct DiscardingBkUpdates {
+        inner: QueueBkUpdates,
+        discarded: std::sync::Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BkUpdateSource for DiscardingBkUpdates {
+        async fn fetch_bk_update(
+            &self,
+            target: u64,
+        ) -> Result<Option<BkSetUpdateData>, RelayerError> {
+            self.inner.fetch_bk_update(target).await
+        }
+
+        async fn discard_rejected_bk_update_proof(&self, seq_no: u64) {
+            self.discarded.lock().unwrap().push(seq_no);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_contract_rejection_discards_the_kept_bundle_proof() {
+        // The RPC refusing a send says nothing about the proof, so the source
+        // may hand the same aggregated proof back; a revert means the contract
+        // saw it and refused it.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        bridge.verify_script.lock().unwrap().extend([
+            Some(
+                "verifyBlock send failed: server returned an error response: error code -32005: \
+                 rate limit exceeded"
+                    .to_string(),
+            ),
+            Some(
+                "verifyBlock send failed: server returned an error response: error code 3: \
+                 execution reverted, data: \"0x87bf1c06\""
+                    .to_string(),
+            ),
+        ]);
+        let inner = InMemoryBlockSource::new();
+        inner.insert(block(1, U256::ZERO));
+        let source = Arc::new(DiscardingBlocks {
+            inner,
+            discarded: Default::default(),
+        });
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r =
+            Relayer::new(cfg, source.clone(), Arc::new(EmptyBkUpdateSource), bridge).unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BridgeReverted { .. }
+        ));
+        assert!(source.discarded.lock().unwrap().is_empty());
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BridgeReverted { .. }
+        ));
+        assert_eq!(*source.discarded.lock().unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn only_a_contract_rejection_discards_the_kept_rotation_proof() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        bridge.bk_script.lock().unwrap().extend([
+            Some((
+                "applyBkSetUpdate send failed: server returned an error response: error code \
+                 -32003: nonce too low: next nonce 355, tx nonce 354"
+                    .to_string(),
+                false,
+            )),
+            Some((
+                "applyBkSetUpdate send failed: server returned an error response: error code 3: \
+                 execution reverted"
+                    .to_string(),
+                false,
+            )),
+        ]);
+        let bk = Arc::new(DiscardingBkUpdates {
+            inner: QueueBkUpdates {
+                queued: std::sync::Mutex::new(vec![rotation(500, BK, 0xC0FFEE)]),
+            },
+            discarded: Default::default(),
+        });
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBlockSource::new()),
+            bk.clone(),
+            bridge,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateReverted {
+                seq_no: 500,
+                ..
+            }
+        ));
+        assert!(bk.discarded.lock().unwrap().is_empty());
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateReverted {
+                seq_no: 500,
+                ..
+            }
+        ));
+        assert_eq!(*bk.discarded.lock().unwrap(), vec![500]);
     }
 
     #[tokio::test]

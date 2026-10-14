@@ -354,8 +354,11 @@ or a failed post-submit check (`post-submit drift: …`). RPC failures do not
 count — a send the RPC refused (rate limit, connection, nonce) or a receipt
 that never came is logged as `… not confirmed — RPC failure, not counted
 toward the abort threshold` and retried, and the next tick re-reads the chain,
-so a transaction that landed anyway is picked up. Ticks that only wait for the
-next bundle count in `polls_since_progress`, not toward the abort.
+so a transaction that landed anyway is picked up. The retry resends the
+aggregated proof it already has (`… reusing its aggregated calldata`) rather
+than spending ~2 min aggregating it again; a refused proof is aggregated
+anew. Ticks that only wait for the next bundle count in
+`polls_since_progress`, not toward the abort.
 
 ```bash
 ADDR=$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")

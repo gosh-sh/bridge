@@ -1128,6 +1128,15 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **A retried submission reuses its aggregated proof.** `daemon-live` ran
+  `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
+  refused send or missing receipt cost one more aggregation, and a rotation
+  deferred until the next `verifyBlock` was aggregated on every tick. The
+  calldata of the last bundle and of the last rotation is now kept with a
+  digest of every input it was built from, and reused while the inputs
+  match: `aggregated_source: same proof and inputs as the last attempt;
+  reusing its aggregated calldata`. A contract rejection and a successful
+  submission drop it, so a refused proof is aggregated anew.
 - **The relayer no longer reports an ordinary wait between bundles as a
   stall.** `WARN block source still has no data; relayer is stalled` came
   after 16 polls without a new bundle, which at L2 (about 90 minutes between

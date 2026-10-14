@@ -151,6 +151,40 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         seedAnchor = _seedFirstBlock();
     }
 
+    function test_migration_pauses_old_payout_and_deposit_route_before_new_payout() public {
+        AckiNackiBridge retired = bridge;
+        retired.pause();
+        bridge = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            address(0),
+            address(0),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            VerifyBlockConfigLib.withWithdraw(
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+            )
+        );
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
+        seedAnchor = _seedFirstBlock();
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _defaultPub(10 * UsdcTestLib.UNIT, 991);
+        bridge.withdrawByProof(_dummyProof(), pub);
+        assertEq(usdc.balanceOf(RECIPIENT), 10 * UsdcTestLib.UNIT);
+        assertFalse(retired.isNullifierUsed(pub.nullifier));
+        vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
+        retired.withdrawByProof(_dummyProof(), pub);
+        vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
+        retired.deposit(1, 0, bytes32(uint256(1)));
+        assertEq(usdc.balanceOf(RECIPIENT), 10 * UsdcTestLib.UNIT);
+        assertEq(retired.treasuryBalance(), 50 * UsdcTestLib.UNIT);
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────

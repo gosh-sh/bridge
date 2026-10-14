@@ -256,10 +256,9 @@ pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
     })
 }
 
-/// The bridge's `usdc()`: the token it takes deposits in.
 /// The bridge's volume ceilings and what it currently holds, or `None` on a
-/// bridge that predates them: the three reads revert there, and an older
-/// deployment enforces no ceiling, so the caller must not refuse the deposit.
+/// bridge that predates them. This says nothing about the destination AN caps;
+/// callers must check those independently before spending USDC.
 pub async fn read_volume_limits(
     evm: &dyn EvmRead,
     bridge: Address,
@@ -294,6 +293,7 @@ pub async fn read_volume_limits(
     Ok(Some((per_tx, tvl, held)))
 }
 
+/// The bridge's `usdc()`: the token it takes deposits in.
 pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Address> {
     let out = evm
         .call(bridge, IDeposit::usdcCall {}.abi_encode().into())

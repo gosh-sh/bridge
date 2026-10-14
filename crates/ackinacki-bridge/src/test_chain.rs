@@ -888,6 +888,108 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn repeated_over_cap_refunds_return_ecc_without_spending_bridge_shell() {
+        use std::str::FromStr;
+
+        use tvm_block::{
+            ExtraCurrencyCollection, Grams, InternalMessageHeader, Message, MsgAddressInt,
+            VarUInteger32,
+        };
+        use tvm_client::abi::{encode_message_body, ParamsOfEncodeMessageBody};
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let (id, mut boc) = deployed_usdc_bridge(false).await;
+        let source = MsgAddressInt::from_str(&format!("0:{}", "ab".repeat(32))).unwrap();
+        let destination = MsgAddressInt::from_str(&format!("0:{id}")).unwrap();
+        let encoded = encode_message_body(ctx.clone(), ParamsOfEncodeMessageBody {
+            abi: Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.into()),
+            call_set: CallSet::some_with_function_and_input(
+                "initiateWithdrawal",
+                json!({"dstChainId":"1", "recipient":"11".repeat(20)}),
+            )
+            .unwrap(),
+            is_internal: true,
+            signer: Signer::None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let body = tvm_types::SliceData::load_cell(
+            tvm_types::read_single_root_boc(tvm_types::base64_decode(&encoded.body).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        for bounce in [false, true, false] {
+            let before = Account::construct_from_base64(&boc)
+                .unwrap()
+                .balance()
+                .unwrap()
+                .grams
+                .as_u128();
+            let mut ecc = ExtraCurrencyCollection::new();
+            ecc.set(&3, &VarUInteger32::from_str("50000001").unwrap())
+                .unwrap();
+            let mut header = InternalMessageHeader::with_addresses(
+                source.clone(),
+                destination.clone(),
+                CurrencyCollection {
+                    grams: Grams::new(1_000_000_000).unwrap(),
+                    other: ecc,
+                },
+            );
+            header.bounce = bounce;
+            let mut message = Message::with_int_header(header);
+            message.set_body(body.clone());
+            let result = run_executor(ctx.clone(), ParamsOfRunExecutor {
+                message: tvm_types::base64_encode(message.write_to_bytes().unwrap()),
+                account: AccountForExecutor::Account {
+                    boc: boc.clone(),
+                    unlimited_balance: Some(false),
+                },
+                return_updated_account: Some(true),
+                skip_transaction_check: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                result.transaction["compute"]["exit_code"], 233,
+                "{}",
+                result.transaction
+            );
+            assert_eq!(result.out_messages.len(), 1, "{}", result.transaction);
+            let refund = Message::construct_from_base64(&result.out_messages[0]).unwrap();
+            let header = refund.int_header().unwrap();
+            assert_eq!(header.dst, source);
+            assert!(!header.bounce);
+            assert_eq!(
+                header
+                    .value
+                    .other
+                    .get(&3)
+                    .unwrap()
+                    .unwrap()
+                    .value()
+                    .to_string(),
+                "50000001"
+            );
+            assert_eq!(header.value.grams.as_u64().unwrap(), 0);
+            let after = Account::construct_from_base64(&result.account)
+                .unwrap()
+                .balance()
+                .unwrap()
+                .grams
+                .as_u128();
+            assert!(
+                after >= before && after <= before + 1_000_000_000,
+                "before={before}, after={after}, action={}, delta={}",
+                result.transaction["action"],
+                result.transaction["balance_delta"]
+            );
+            boc = result.account;
+        }
+    }
+
     /// A fixture for the two checks the node makes on what it is asked.
     /// Any BOC serves as the message: the node hashes the bytes that
     /// arrive, which is the property under test.

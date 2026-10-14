@@ -23,6 +23,8 @@ pub const ERR_PAUSED: i32 = 231;
 pub const ERR_TRANSFER_TOO_LARGE: i32 = 233;
 /// Pending deposits and outstanding supply fill the AN TVL cap.
 pub const ERR_TVL_CAP: i32 = 234;
+/// Historical per-network balances have not been initialized after upgrade.
+pub const ERR_CHAIN_ACCOUNTING: i32 = 239;
 
 /// The outcome of sending `finalizeDeposit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,12 @@ fn by_code(code: i32) -> Reaction {
     match code {
         ERR_PAUSED => Reaction::WaitPaused,
         ERR_TVL_CAP => Reaction::WaitCapacity,
+        ERR_CHAIN_ACCOUNTING => Reaction::Refused {
+            code,
+            hint: "the owner must initialize historical network balances with \
+                   initializeChainAccounting while paused; retain this operation and resume \
+                   afterwards; do not deposit again",
+        },
         ERR_TRANSFER_TOO_LARGE => Reaction::Refused {
             code,
             hint: "the funded deposit exceeds the AN transfer cap; do not make another deposit. \

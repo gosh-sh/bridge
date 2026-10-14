@@ -12,6 +12,12 @@ pub(crate) fn explain(reason: &str) -> String {
         return reason.to_string();
     };
     let advice = match revert.name {
+        "TransferTooLarge" => Some(
+            "this proof exceeds the transfer cap. For an already-burned legacy withdrawal, ask \
+             the owner to authorize its exact nullifier with setLegacyWithdrawal, then re-run \
+             with --allow-retry; do not burn again. A daemon parks this proof so later payouts \
+             can continue; keep the proof file and restart the daemon after authorization",
+        ),
         "NullifierAlreadyUsed" => Some(
             "this withdrawal's event has already been paid out — by an earlier run, another \
              operator or the relayer daemon — so there is nothing left to submit. Look for \
@@ -84,6 +90,7 @@ mod tests {
         for (signature, words, advice) in [
             ("NullifierAlreadyUsed(uint256)", 1, "already been paid out"),
             ("BridgePaused()", 0, "paused the EVM bridge"),
+            ("TransferTooLarge()", 0, "do not burn again"),
             ("WithdrawTreasuryShortfall(uint256,uint256)", 2, "Top it up"),
             ("UnknownAnchor(uint256)", 1, "not in the bridge's window"),
             ("WithdrawalProofRejected()", 0, "rejected the proof"),

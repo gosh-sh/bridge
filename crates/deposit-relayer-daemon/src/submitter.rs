@@ -392,6 +392,18 @@ const EXIT_MINT_CAP_EXCEEDED: i32 = 229;
 /// after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
+        233 => Some(
+            "ERR_TRANSFER_TOO_LARGE — retain the deposit proof; an already-paid legacy deposit \
+             needs the owner's setLegacyDepositCount cutoff; do not deposit again",
+        ),
+        234 => Some(
+            "ERR_TVL_CAP — AN capacity is full; retain the proof and retry after withdrawals free \
+             capacity",
+        ),
+        239 => Some(
+            "ERR_CHAIN_ACCOUNTING — owner must initialize historical per-network balances while \
+             paused; retain the proof and retry afterwards",
+        ),
         EXIT_INVALID_ZKPROOF => Some(
             "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
              this prover's VkBlob",

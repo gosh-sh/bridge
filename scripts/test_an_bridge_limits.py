@@ -53,11 +53,28 @@ class BridgeLimits(unittest.TestCase):
         _depositVoucherCode = voucherCode;
         _totalMintedBridgeByToken[USDC_ECC_ID] = minted;
         _totalBurnedBridgeByToken[USDC_ECC_ID] = burned;
+        _outstandingBridgeUsdc = minted > burned ? minted - burned : 0;
+        delete _outstandingByChain;
+        _outstandingByChain[1] = _outstandingBridgeUsdc;
+        _chainAccountingReady = true;
         _trustedL1Bridge[1][42] = true;
         _acceptedBlockHash[1][123] = true;
+        _trustedL1Bridge[2][42] = true;
+        _acceptedBlockHash[2][123] = true;
     }
-    function testVoucher(uint256 depositId) public view returns (address voucher) {
-        uint256 h = tvm.hash(abi.encode(depositId, uint256(42), uint256(0), uint256(1)));
+    function testUpgradeV1() public {
+        tvm.accept();
+        TvmCell limitsState = abi.encode(_pendingDepositAmounts, _pendingDepositData,
+            _settledVouchers, _reservedDeposits, _legacyDepositCounts);
+        TvmBuilder empty;
+        TvmCell carried = abi.encode(LIMITS_STATE_TAG, empty.toCell(), limitsState);
+        TvmCell migration = abi.encode(_ownerPubkey, _usdcWallet, _totalMinted,
+            _mintNonce, _mintAccumulatorNonce, _totalMintedBridgeByToken,
+            _totalBurnedBridgeByToken, _depositVoucherCode, carried);
+        onCodeUpgrade(migration);
+    }
+    function testVoucher(uint256 depositId, uint256 chainId) public view returns (address voucher) {
+        uint256 h = tvm.hash(abi.encode(depositId, uint256(42), uint256(0), chainId));
         voucher = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
             contr: DepositVoucher, varInit: {_depositHash: h}, code: _depositVoucherCode
         })));
@@ -115,20 +132,20 @@ class BridgeLimits(unittest.TestCase):
         self.call("testSeed", {"voucherCode": self.voucher_code,
                                "minted": str(minted), "burned": str(burned)})
 
-    def finalize(self, deposit_id, amount=TRANSFER, expect=0, block=123):
-        pi = [deposit_id, 1, amount, 42, 1, 0, 0, 0, 43, 0, block, 0]
+    def finalize(self, deposit_id, amount=TRANSFER, expect=0, block=123, chain=1):
+        pi = [deposit_id, 1, amount, 42, chain, 0, 0, 0, 43, 0, block, 0]
         return self.call("finalizeDeposit", {
             "proof": "", "publicInputs": b"".join(
                 n.to_bytes(32, "little") for n in pi).hex()
         }, expect=expect)
 
-    def limits(self):
-        return self.call("getDepositLimits", {"chainId": "1", "l1Bridge": "42"})["response"]
+    def limits(self, chain=1):
+        return self.call("getDepositLimits", {"chainId": str(chain), "l1Bridge": "42"})["response"]
 
-    def confirm(self, deposit_id, amount=TRANSFER, *, source=None, expect=0):
-        voucher = self.call("testVoucher", {"depositId": str(deposit_id)})["response"]["voucher"]
+    def confirm(self, deposit_id, amount=TRANSFER, *, source=None, expect=0, chain=1):
+        voucher = self.call("testVoucher", {"depositId": str(deposit_id), "chainId": str(chain)})["response"]["voucher"]
         self.call("confirmDeposit", {"depositId": str(deposit_id), "contractAddr": "42",
-                  "dappId": "0", "chainId": "1", "amount": str(amount), "anAccount": "43"},
+                  "dappId": "0", "chainId": str(chain), "amount": str(amount), "anAccount": "43"},
                   source=source or voucher, expect=expect)
 
     def legacy(self, count):
@@ -139,6 +156,70 @@ class BridgeLimits(unittest.TestCase):
         limits = self.limits()
         self.assertEqual(int(limits["maxTransfer"]), TRANSFER)
         self.assertEqual(int(limits["maxTvl"]), TVL)
+
+    def test_excess_historical_burns_do_not_credit_new_deposits(self):
+        self.seed(0, TVL * 2)
+        self.finalize(0)
+        self.confirm(0)
+        self.assertEqual(int(self.limits()["outstanding"]), TRANSFER)
+
+    def test_current_excess_burn_does_not_credit_a_future_deposit(self):
+        self.seed(1)
+        self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
+                  source="0:" + "ab" * 32, ecc=TRANSFER)
+        self.assertEqual(int(self.limits()["outstanding"]), 0)
+        self.finalize(0)
+        self.confirm(0)
+        self.assertEqual(int(self.limits()["outstanding"]), TRANSFER)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.assertEqual(int(self.limits()["outstanding"]), TRANSFER)
+
+    def test_previous_tagged_upgrade_restores_pending_and_initializes_net(self):
+        self.finalize(0)
+        self.call("testUpgradeV1")
+        self.call("getDepositLimits", {"chainId": "1", "l1Bridge": "42"}, expect=239)
+        self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True)
+        self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER)
+        self.confirm(0)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL)
+
+    def test_networks_have_independent_tvl_and_withdrawal_balances(self):
+        self.finalize(0, chain=1)
+        self.finalize(0, chain=2)
+        self.finalize(1, 1, expect=234, chain=1)
+        self.assertEqual(int(self.limits(1)["reserved"]), TRANSFER)
+        self.assertEqual(int(self.limits(2)["reserved"]), TRANSFER)
+        self.confirm(0, chain=1)
+        self.confirm(0, chain=2)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL)
+        self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
+        self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
+                  source="0:" + "ab" * 32, ecc=TRANSFER)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL - TRANSFER)
+        self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
+
+    def test_bounce_and_upgrade_keep_network_reservations_separate(self):
+        self.finalize(0, chain=1)
+        self.finalize(0, chain=2)
+        voucher = self.call("testVoucher", {"depositId": "0", "chainId": "2"})["response"]["voucher"]
+        self.call("testBounce", source=voucher)
+        self.assertEqual(int(self.limits(1)["reserved"]), TRANSFER)
+        self.assertEqual(int(self.limits(2)["reserved"]), 0)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.assertEqual(int(self.limits(1)["reserved"]), TRANSFER)
+        self.assertEqual(int(self.limits(2)["reserved"]), 0)
+        self.confirm(0, chain=1)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL)
+        self.assertEqual(int(self.limits(2)["outstanding"]), 0)
+
+    def test_historical_network_initialization_rejects_bad_or_repeated_snapshots(self):
+        self.call("testUpgradeV1")
+        for chains, amounts in [(["1", "1"], [str(TVL), "0"]), (["1"], ["0"]), (["1"], [])]:
+            self.call("initializeChainAccounting", {"chainIds": chains, "outstanding": amounts}, signed=True, expect=239)
+        self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, expect=209)
+        self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True)
+        self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True, expect=239)
 
     def test_pending_callbacks_cannot_overbook_tvl(self):
         self.finalize(0)
@@ -247,7 +328,7 @@ class BridgeLimits(unittest.TestCase):
     def test_failed_callback_can_be_recovered_without_late_double_mint(self):
         self.finalize(0)
         self.confirm(0, TRANSFER - 1, expect=235)
-        voucher = self.call("testVoucher", {"depositId": "0"})["response"]["voucher"]
+        voucher = self.call("testVoucher", {"depositId": "0", "chainId": "1"})["response"]["voucher"]
         self.call("recoverDeposit", {"voucher": voucher}, signed=True, expect=238)
         self.call("setPaused", {"paused": True}, signed=True)
         self.call("recoverDeposit", {"voucher": voucher}, expect=209)
@@ -275,6 +356,8 @@ class BridgeLimits(unittest.TestCase):
                                       "--abi", str(self.abi)]))
         self.assertEqual(int(decoded["Header"]["value"]["other"]["3"]), TRANSFER + 1)
         self.assertEqual(decoded["Header"]["bounce"], "false")
+        self.assertEqual(int(decoded["Header"]["value"]["value"]), 0,
+                         "the refund must not pay any SHELL to the caller")
 
 
 if __name__ == "__main__":

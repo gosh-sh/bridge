@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.8.1, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.8.2, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -148,14 +148,19 @@ it against the tracked artefact before and after an upgrade.
 
 ### Installing the volume caps on a live bridge
 
-New transfers are limited to 50 USDC, with 10,000 USDC TVL. The AN TVL check
-includes pending deposit reservations, not just completed mints.
+New transfers are limited to 50 USDC, with 10,000 USDC TVL per supported L1
+network. AN counts outstanding and pending reservations per `chainId`, across
+all source contracts/accounts on that network. A withdrawal frees only its
+`dstChainId` capacity. N networks can hold N × 10,000 USDC in total.
 `getDepositLimits(chainId, l1Bridge)` reports `maxTransfer`, `maxTvl`,
 `outstanding`, `reserved` and `legacyDepositCount`, in micro-USDC except for
 that final deposit count.
 
-Before enabling the caps, record the finalized `depositCounter` of each legacy
-L1 bridge. After upgrading AN with the existing voucher code (empty
+Before enabling the caps, stop new AN burns, finalize outstanding deposits and
+pay historical burns on their original L1 route. Then call `pause()` on every
+old L1 bridge and verify `paused() == true` before recording its finalized
+`depositCounter`. Keep old routes paused: new deposits above the frozen cutoff
+must not be accepted. Stopping a UI or relayer alone is insufficient. After upgrading AN with the existing voucher code (empty
 `userCell`), restore its trust entries and canonical anchors, and call
 `setLegacyDepositCount(chainId, l1Bridge, depositCount)` for those sources.
 This allows proven, already-paid deposits whose `depositId < depositCount` to
@@ -164,6 +169,17 @@ counter: the cutoff authorizes an exception for exactly those historical
 IDs. The source must already be trusted; after initial configuration the cutoff
 can only be lowered, including to zero. It is carried through later code
 upgrades. A fresh zerostate needs no legacy cutoff.
+
+An upgrade from aggregate-only accounting stays paused: it cannot infer
+historical network balances, and `getDepositLimits` throws 239. Reconstruct each
+network's outstanding amount from finalized deposits and burns by source and
+destination chain, in micro-USDC. While paused, call
+`initializeChainAccounting(chainIds, outstanding)` once. Arrays must have equal
+nonzero length and distinct nonzero chain IDs. The sum must cover the carried
+aggregate balance; per-network floors can expose a larger sum than the old
+aggregate floor. Supply verified balances, not arbitrary empty capacity.
+Restore trust, anchors and light-client/owner-anchor policy before resuming.
+Fresh zerostates start at zero; later upgrades retain network balances.
 
 Previously dispatched voucher callbacks can complete after the initial
 upgrade. Later upgrades preserve reservations, stored payout data, completed
@@ -185,12 +201,22 @@ Legacy settlements may exceed TVL; new deposits then wait for capacity.
 
 Over-cap withdrawals return their attached ECC before reporting code 233,
 including for incoming messages with `bounce: false`. The refund is committed
-so the exception cannot roll it back.
+so the exception cannot roll it back. Rejected calls do not execute
+`tvm.accept()` or mint SHELL. The refund sends zero SHELL; a native reserve
+protects the existing balance, and the incoming SHELL funds refund costs.
 
-These AN migration exceptions do not move custody between Ethereum
-contracts. Keep the source contracts and their withdrawal routes available
-for the principal they already hold; Ethereum contracts are redeployed,
-not upgraded by AN's `updateCode`.
+These AN migration exceptions do not move custody or spent-nullifier state
+between Ethereum contracts. Proofs do not bind an L1 contract address, and
+nullifier sets are local. Never enable two funded payout contracts for the same
+AN identity/destination chain. Keep old contracts paused before enabling a new
+route, and never unpause them while it is active. AN may retain old source trust
+solely for already-paid deposit proofs below the frozen cutoff.
+
+Pausing does not move old principal or stop a fresh contract accepting proofs
+already paid by a predecessor. A separately reviewed custody/nullifier migration
+is required before a funded replacement is activated. Do not promise that
+old balances or replay protection migrate merely by redeploying the bridge.
+An old bridge without an effective pause cannot participate in this cutover.
 
 Run the TVM limit regressions offline after a contract change:
 

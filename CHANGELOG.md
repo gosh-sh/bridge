@@ -17,6 +17,17 @@ assigns it when the release is tagged.
 ### Added
 ### Changed
 ### Fixed
+
+- Withdrawal preflight checks AN and EVM transfer limits before a fresh burn;
+  resumes of recorded burns skip this new-amount guard. `TransferTooLarge` is
+  named by the CLI and parked by `daemon-withdraw` / `daemon-bridge` so later
+  payouts continue. After authorizing a historical nullifier, keep its proof
+  file and restart the daemon to retry without another burn.
+- Deposit relayer diagnostics name AN 233, 234 and 239 and explain legacy
+  settlement, capacity retry or historical network initialization. New spending
+  against AN 1.7.1, which enforces caps without a capacity getter, is refused.
+- The deposit form limits each deposit to 50 USDC before approval or submission.
+
 ### Removed
 -->
 
@@ -37,15 +48,16 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- **New bridge transfers are capped at 50 USDC, and user principal at
-  10,000 USDC.** Ethereum `deposit` and `withdrawByProof` reject amounts over
+- **New bridge transfers are capped at 50 USDC, with 10,000 USDC capacity
+  per supported L1 network.** Ethereum `deposit` and `withdrawByProof` reject amounts over
   `MAX_TRANSFER_AMOUNT` with `TransferTooLarge`; `deposit` rejects an increase
   of `treasuryBalance` over `MAX_TVL` with `TvlCapExceeded`. Both constants are
   public. Acki Nacki `initiateWithdrawal` and new `finalizeDeposit` calls reject
   an over-limit amount with `ERR_TRANSFER_TOO_LARGE` (233). Its TVL check counts
   outstanding bridged USDC plus deposits awaiting their voucher confirmation,
   and refuses an over-limit deposit with `ERR_TVL_CAP` (234). Split new amounts
-  over 50 USDC; the TVL limit is global, not per account.
+  over 50 USDC; the TVL limit applies per `chainId`, across all accounts and source contracts
+  on that network. N supported networks can hold N × 10,000 USDC in total.
 
   On Acki Nacki, finalizing a deposit reserves its amount before dispatching
   the voucher. Repeating the proof while its callback is pending does not
@@ -53,8 +65,22 @@ assigns it when the release is tagged.
   USDC; a bounced voucher deployment releases it so the proof can be retried.
   `getDepositLimits(chainId, l1Bridge)` returns the transfer and TVL caps,
   outstanding amount, pending reserved amount, and legacy deposit cutoff.
-  Outstanding remains `max(minted - burned, 0)`; this does not add a supply
-  invariant or change the owner/TIP-3 mint paths.
+  Outstanding and reservations are tracked per network. Confirmed deposits
+  increase their source `chainId` balance; withdrawals decrease only their
+  `dstChainId` balance, with a floor at zero. Excess burns do not credit future
+  deposits. This is net bridge flow, not provenance tracking for fungible ECC;
+  owner/TIP-3 minting remains separate and no total ECC supply invariant is added.
+
+  **Retire old L1 routes before enabling a new payout deployment.** Stop new AN
+  burns, finalize outstanding deposits and settle historical burns on their
+  original contracts. Call `pause()` on every old L1 bridge and verify
+  `paused() == true` before recording its finalized `depositCounter`. Keep old
+  routes paused: this stops new deposits above the frozen legacy cutoff and
+  prevents concurrent payout routes for the same AN identity/destination chain.
+  Stopping a UI or relayer alone is insufficient. Pause and AN `updateCode` do
+  not transfer old principal or spent-nullifier state. If these remain, a
+  separately reviewed custody/nullifier migration is required before switching;
+  do not treat deploying a fresh contract as migration of either state.
 
   **Finish already-paid legacy deposits when upgrading a live bridge.** For
   each old Ethereum source, record its finalized `depositCounter` before
@@ -72,8 +98,11 @@ assigns it when the release is tagged.
   completed-voucher markers and legacy cutoffs in a tagged envelope within the
   existing migration tuple; previous-generation and zerostate cells still work.
   With pending deposits, pass an empty `userCell` to retain their voucher code;
-  only voucher-code replacement is refused with 236. Trust entries and anchors
-  still reset and must be re-seeded. If a voucher's original callback failed,
+  only voucher-code replacement is refused with 236. Trust entries, canonical
+  anchors, light-client configuration, pause state and per-chain owner-anchor
+  restrictions still reset. Stop relayers; restore trust and anchors, redeploy
+  the light client and reapply `disableOwnerAnchors(chainId)` where used before
+  resuming. Ethereum caps are constants and require a new deployment. If a voucher's original callback failed,
   pause the bridge, inspect that voucher's transaction history, and have the
   owner call `recoverDeposit(voucher)`. It pays the stored recipient/amount,
   releases the reservation and ignores a later duplicate callback, including
@@ -82,8 +111,10 @@ assigns it when the release is tagged.
   to release the temporary reservation. Recovery is an owner operation and
   fails with 238 unless paused. The voucher code remains unchanged.
 
-  An over-cap `initiateWithdrawal` explicitly returns attached ECC to the
-  sender and commits the refund before reporting 233, including when the
+  An over-cap `initiateWithdrawal` returns attached ECC and zero SHELL, and
+  commits the refund before reporting 233. It does not call `tvm.accept()` or
+  mint SHELL; a native reserve protects the bridge's existing SHELL, so refund
+  computation and forwarding costs use the incoming value, including when the
   incoming transfer had `bounce: false`. On Ethereum, an already-burned legacy
   withdrawal over 50 USDC can be authorized by its exact proof nullifier with
   `setLegacyWithdrawal(nullifier, true)`; proof/identity/chain/recipient and
@@ -94,7 +125,17 @@ assigns it when the release is tagged.
   historical event's nullifier, then submit its unchanged proof. Never permit
   unknown future nullifiers or redirect custody assumptions between contracts.
 
-  `eccUSDCBridge` reports 1.8.1 so the CLI can detect its limit getter. Its `.tvc` and ABI are rebuilt
+  **Initialize historical network balances after an aggregate-only upgrade.**
+  The bridge stays paused and `getDepositLimits` returns 239 until the owner
+  calls `initializeChainAccounting(chainIds, outstanding)` once while paused.
+  Reconstruct balances from finalized deposits and burns by source/destination
+  chain in micro-USDC; the sum must cover the carried aggregate outstanding.
+  Per-network floors may expose a larger sum than the previous aggregate floor.
+  Duplicate/zero chain IDs, mismatched arrays or repeat initialization fail with
+  `ERR_CHAIN_ACCOUNTING` (239). Fresh zerostates start at zero automatically;
+  later upgrades retain network balances and rebuild network reservations.
+
+  `eccUSDCBridge` reports 1.8.2. Its `.tvc` and ABI are rebuilt
   with `sold` 0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
   Existing event formats and call signatures stay the same. Use the release
   `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the

@@ -39,7 +39,7 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 8, 1);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 8, 2);
 
 /// Check the AN limits before a fresh operation can spend USDC on Ethereum.
 pub async fn check_volume(
@@ -50,6 +50,13 @@ pub async fn check_volume(
     version: BridgeVersion,
     amount: u64,
 ) -> CliResult<()> {
+    if version == BridgeVersion(1, 7, 1) {
+        return Err(refuse(
+            "AN bridge 1.7.1 enforces caps but lacks getDepositLimits; upgrade before making a \
+             new deposit"
+                .into(),
+        ));
+    }
     if version < BridgeVersion(1, 8, 1) {
         return Ok(());
     }
@@ -398,6 +405,15 @@ mod tests {
 
     const BRIDGE: [u8; 32] = [0x1a; 32];
     const ACC: [u8; 32] = [0xa3; 32];
+
+    #[tokio::test]
+    async fn a_capped_bridge_without_the_capacity_getter_refuses_new_spending() {
+        let an = healthy();
+        let err = check_volume(&an, BRIDGE, 1, Address::ZERO, BridgeVersion(1, 7, 1), 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("lacks getDepositLimits"), "{err}");
+    }
 
     #[tokio::test]
     async fn fresh_deposits_check_an_transfer_and_reserved_tvl() {

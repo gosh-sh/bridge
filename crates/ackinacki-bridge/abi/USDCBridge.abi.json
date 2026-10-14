@@ -106,6 +106,15 @@
 			]
 		},
 		{
+			"name": "initializeChainAccounting",
+			"inputs": [
+				{"name":"chainIds","type":"uint256[]"},
+				{"name":"outstanding","type":"uint128[]"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "setAcceptedBlockHash",
 			"inputs": [
 				{"name":"chainId","type":"uint256"},
@@ -403,6 +412,10 @@
 		{"components":[{"name":"depositId","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"contractAddr","type":"uint256"},{"name":"chainId","type":"uint256"},{"name":"dappId","type":"uint256"},{"name":"anAccount","type":"uint256"}],"init":false,"name":"_pendingDepositData","type":"map(address,tuple)"},
 		{"init":false,"name":"_settledVouchers","type":"map(address,bool)"},
 		{"init":false,"name":"_reservedDeposits","type":"uint128"},
+		{"init":false,"name":"_outstandingBridgeUsdc","type":"uint128"},
+		{"init":false,"name":"_outstandingByChain","type":"map(uint256,uint128)"},
+		{"init":false,"name":"_reservedByChain","type":"map(uint256,uint128)"},
+		{"init":false,"name":"_chainAccountingReady","type":"bool"},
 		{"init":false,"name":"_legacyDepositCounts","type":"map(uint256,map(uint256,uint256))"},
 		{"init":false,"name":"_depositVoucherCode","type":"cell"},
 		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},

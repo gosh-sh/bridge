@@ -7,6 +7,10 @@ citations below are re-anchored to that commit — the two-line-number-bases spl
 previous revisions of this document carried is gone. When editing the spec, either
 re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
 
+**2026-10-15 volume-limit update:** the constants and deposit/withdrawal checks
+below include PR #101. Their references use that branch; other references
+retain the historical base above.
+
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -108,6 +112,8 @@ There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface c
 |---|---|---:|---|
 | `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
 | `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | Per-tx deposit cap. Chosen so the amount fits the AN `USDCBridge` mint path (`fr[2]` as `uint64`), **not** as a TVL limit. |
+| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 58 | New deposits/withdrawals are limited to 50 USDC; exact legacy withdrawal nullifiers can be authorized by the owner. |
+| `MAX_TVL` | `10000 * USDC_UNIT` | 61 | Ethereum deposits cannot raise `treasuryBalance` above 10,000 USDC. AN tracks this capacity per network. |
 | `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
 | `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
 | `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
@@ -228,15 +234,15 @@ function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external n
 
 `whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:514`).
 
-Sequence (`:673-681`):
+Sequence (`src/AckiNackiBridge.sol:732-758`):
 
 1. `amount != 0` else `InvalidAmount`.
 2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`.
-3. `anAccount != 0` else `InvalidAnAccount` — an EVM address is not a valid AN recipient, so the
-   256-bit TVM destination is supplied explicitly.
-4. `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return ⇒ `TransferFromFailed`.
-5. `depositId = depositCounter++`, `treasuryBalance += amount`.
-6. `emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp)`.
+3. `amount <= MAX_TRANSFER_AMOUNT` else `TransferTooLarge`.
+4. `treasuryBalance + amount <= MAX_TVL` else `TvlCapExceeded`.
+5. `anAccount != 0` else `InvalidAnAccount`.
+6. `usdc.transferFrom(msg.sender, address(this), amount)`; `false` ⇒ `TransferFromFailed`.
+7. Increment `depositCounter`, add the amount to `treasuryBalance`, and emit `Deposit`.
 
 Notes that matter downstream:
 
@@ -362,8 +368,14 @@ finalRoot, anchorLayer`.
 | 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
 | 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
 | 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
+| 12 | `pub.amount <= MAX_TRANSFER_AMOUNT` or `legacyWithdrawals[bytes32(pub.nullifier)]` | 1446-1448 | `TransferTooLarge` |
 
-Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
+`setLegacyWithdrawal(nullifier, allowed)` (`src/AckiNackiBridge.sol:69-73`) is
+owner-only, requires a canonical field element and emits `LegacyWithdrawalConfigured`.
+Authorize only a verified historical burn above 50 USDC. All proof, destination,
+recipient, treasury and replay checks remain; the exemption is deleted on payout.
+
+Effects then interactions (`src/AckiNackiBridge.sol:1450-1474`): mark the nullifier used, `treasuryBalance -= amount`;
 then, if liquid USDC < `amount` and `suppliedPrincipal > 0`, pull `min(shortfall, suppliedPrincipal)`
 back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.

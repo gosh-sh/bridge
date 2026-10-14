@@ -271,6 +271,7 @@ pub async fn run(
     if matches!(balance_check, BalanceCheck::Require) {
         let bridge_boc =
             fetch_account_boc(&context, &usdc_bridge_dapp_id, usdc_bridge_account_id_hex).await?;
+        check_an_withdraw_volume(&context, &usdc_bridge_legacy, &bridge_boc, amount).await?;
         if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -491,14 +492,29 @@ async fn call_is_paused(
     bridge_legacy: &str,
     bridge_boc: &str,
 ) -> CliResult<bool> {
+    let out = call_bridge_getter(ctx, bridge_legacy, bridge_boc, "isPaused", json!({})).await?;
+    out["value0"].as_bool().ok_or_else(|| CliError::Preflight {
+        reason: format!("isPaused on {bridge_legacy}: no boolean answer"),
+        source: None,
+    })
+}
+
+/// Execute a bridge getter locally against the fetched account state.
+async fn call_bridge_getter(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+    function: &str,
+    input: Value,
+) -> CliResult<Value> {
     let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
     let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
         abi: abi.clone(),
         address: Some(bridge_legacy.to_string()),
         call_set: Some(CallSet {
-            function_name: "isPaused".to_string(),
+            function_name: function.to_string(),
             header: None,
-            input: Some(json!({})),
+            input: Some(input),
         }),
         signer: Signer::None,
         deploy_set: None,
@@ -507,7 +523,10 @@ async fn call_is_paused(
     })
     .await
     .map_err(|e| CliError::Preflight {
-        reason: format!("encode isPaused call for {bridge_legacy}: {}", e.message()),
+        reason: format!(
+            "encode {function} call for {bridge_legacy}: {}",
+            e.message()
+        ),
         source: Some(anyhow::anyhow!("{e:?}")),
     })?;
     let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
@@ -521,22 +540,91 @@ async fn call_is_paused(
     .await
     .map_err(|e| CliError::Preflight {
         reason: format!(
-            "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: {} — a bridge without \
-             isPaused() predates the pause and this CLI",
+            "run_tvm {function} on the Acki Nacki bridge {bridge_legacy}: {}",
             e.message()
         ),
         source: Some(anyhow::anyhow!("{e:?}")),
     })?;
     run.decoded
         .and_then(|d| d.output)
-        .and_then(|o| o["value0"].as_bool())
         .ok_or_else(|| CliError::Preflight {
-            reason: format!(
-                "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: no boolean answer \
-                 (ABI mismatch?)"
-            ),
+            reason: format!("{function} on {bridge_legacy}: no decoded output"),
             source: None,
         })
+}
+
+/// Refuse an over-cap fresh burn using the source bridge limits.
+async fn check_an_withdraw_volume(
+    ctx: &Arc<ClientContext>,
+    bridge: &str,
+    boc: &str,
+    amount: &UsdcAmount,
+) -> CliResult<()> {
+    use crate::deposit::an_preflight::BridgeVersion;
+    let out = call_bridge_getter(ctx, bridge, boc, "getVersion", json!({})).await?;
+    let version = out["value0"]
+        .as_str()
+        .and_then(BridgeVersion::parse)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!("invalid AN bridge version: {out}"),
+            source: None,
+        })?;
+    let cap = if version >= BridgeVersion(1, 8, 1) {
+        let out = call_bridge_getter(
+            ctx,
+            bridge,
+            boc,
+            "getDepositLimits",
+            json!({"chainId":"0", "l1Bridge":"0"}),
+        )
+        .await?;
+        out["maxTransfer"]
+            .as_str()
+            .and_then(|v| v.parse::<u128>().ok())
+            .ok_or_else(|| CliError::Preflight {
+                reason: format!("invalid AN transfer cap: {out}"),
+                source: None,
+            })?
+    } else if version == BridgeVersion(1, 7, 1) {
+        50_000_000
+    } else {
+        return Ok(());
+    };
+    require_withdraw_cap(amount, U256::from(cap), "AN")
+}
+
+/// Accept the exact boundary and refuse amounts above the on-chain cap.
+fn require_withdraw_cap(amount: &UsdcAmount, cap: U256, chain: &str) -> CliResult<()> {
+    if U256::from(amount.0) > cap {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "withdrawal amount exceeds {chain} transfer cap {cap} micro-USDC; split the \
+                 amount before burning"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Only for a fresh burn: a resumed legacy proof can use an owner-authorized
+/// nullifier.
+pub async fn check_evm_withdraw_volume(
+    rpc_url: &str,
+    bridge: Address,
+    amount: &UsdcAmount,
+) -> CliResult<()> {
+    let evm = crate::deposit::evm::AlloyEvm::connect(rpc_url)?;
+    let limits = crate::deposit::evm::read_volume_limits(&evm, bridge)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("cannot read EVM withdrawal cap: {e:#}"),
+            source: Some(e),
+        })?;
+    if let Some((cap, _, _)) = limits {
+        require_withdraw_cap(amount, cap, "EVM")?;
+    }
+    Ok(())
 }
 
 /// The custodian list out of a `getCustodians` answer, refusing
@@ -2645,6 +2733,48 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::source_guard::production_source;
+
+    #[tokio::test]
+    async fn an_withdraw_cap_is_checked_on_production_code_before_burn() {
+        let (_, boc) = crate::test_chain::deployed_usdc_bridge(false).await;
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let bridge = format!("0:{}", "00".repeat(32));
+        check_an_withdraw_volume(&ctx, &bridge, &boc, &UsdcAmount(50_000_000))
+            .await
+            .unwrap();
+        let err = check_an_withdraw_volume(&ctx, &bridge, &boc, &UsdcAmount(50_000_001))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("AN transfer cap"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn evm_withdraw_cap_is_read_before_burn() {
+        let limits = std::collections::HashMap::from([
+            ("fc1b3113", format!("0x{:064x}", 50_000_000u64)),
+            ("b8127fac", format!("0x{:064x}", 10_000_000_000u64)),
+            (SEL_TREASURY, MAX_WORD.to_string()),
+        ]);
+        let rpc = mock_rpc(SOME_CODE, limits).await;
+        check_evm_withdraw_volume(&rpc, Address::ZERO, &UsdcAmount(50_000_000))
+            .await
+            .unwrap();
+        let err = check_evm_withdraw_volume(&rpc, Address::ZERO, &UsdcAmount(50_000_001))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("EVM transfer cap"), "{err}");
+        let old = mock_rpc(SOME_CODE, Default::default()).await;
+        check_evm_withdraw_volume(&old, Address::ZERO, &UsdcAmount(50_000_001))
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn withdrawal_cap_boundary() {
+        let cap = U256::from(50_000_000u64);
+        require_withdraw_cap(&UsdcAmount(50_000_000), cap, "EVM").unwrap();
+        assert!(require_withdraw_cap(&UsdcAmount(50_000_001), cap, "EVM").is_err());
+    }
 
     /// The AN half of stage 1, driven end to end against a fake node.
     ///

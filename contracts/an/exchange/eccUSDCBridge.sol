@@ -40,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.8.1";
+    string constant version = "1.8.2";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -86,8 +86,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // of stripe `_totalMinted`). No invariant enforced between minted/burned —
     // intra-AN ECC distribution can outpace deposits, so on-AN withdrawal can
     // exceed historical deposits for the same token. The split is for
-    // observability / per-token analytics; the volume cap uses their net
-    // difference with a floor at zero, not a supply invariant.
+    // observability / per-token analytics. Capacity uses separate per-chain
+    // net flow; excess burns cannot credit future deposits.
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
 
@@ -95,8 +95,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     mapping(address => DepositPI) _pendingDepositData;
     mapping(address => bool) _settledVouchers;
     uint128 _reservedDeposits;
+    uint128 _outstandingBridgeUsdc;
+    mapping(uint256 => uint128) _outstandingByChain;
+    mapping(uint256 => uint128) _reservedByChain;
+    bool _chainAccountingReady;
     // count + 1 distinguishes an unconfigured cutoff from one reduced to zero.
     mapping(uint256 => mapping(uint256 => uint256)) _legacyDepositCounts;
+    uint256 constant LIMITS_STATE_TAG_V3 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a127;
+    uint256 constant LIMITS_STATE_TAG_V2 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a126;
     uint256 constant LIMITS_STATE_TAG = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a125;
 
     // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
@@ -405,6 +411,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(pubkey != 0, ERR_ZERO_PUBKEY);
         _ownerPubkey = pubkey;
         _usdcWallet = usdcWallet;
+        _chainAccountingReady = true;
     }
 
     /// @notice Ensures contract balance stays above MIN_BALANCE by minting vmshell if needed.
@@ -511,8 +518,6 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @param recipient  — destination-chain recipient bytes (≤64 bytes)
     function initiateWithdrawal(uint256 dstChainId, bytes recipient) public {
         require(!_paused, ERR_PAUSED);
-        tvm.accept();
-        ensureBalance();
         require(recipient.length > 0, ERR_RECIPIENT_EMPTY);
         require(recipient.length <= 64, ERR_RECIPIENT_TOO_LONG);
         require(!_isZeroRecipient(recipient), ERR_ZERO_RECIPIENT);
@@ -528,22 +533,29 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         if (amount > MAX_BRIDGE_TRANSFER) {
-            msg.sender.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: currencies});
+            // Protect pre-existing SHELL; the inbound value pays all refund fees.
+            // No accept/ensureBalance and no fixed SHELL payout.
+            tvm.rawReserve(address(this).balance - msg.value, 0);
+            msg.sender.transfer({value: 0, bounce: false, flag: 1, currencies: currencies});
             tvm.commit();
             revert(ERR_TRANSFER_TOO_LARGE);
         }
 
+        require(_chainAccountingReady, ERR_CHAIN_ACCOUNTING);
+        tvm.accept();
+        ensureBalance();
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;
+        uint128 released = math.min(amount, _outstandingByChain[dstChainId]);
+        _outstandingByChain[dstChainId] -= released;
+        _outstandingBridgeUsdc -= released;
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
         emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
     }
 
-    function _bridgedOutstanding() private view returns (uint128) {
-        uint128 minted = _totalMintedBridgeByToken[USDC_ECC_ID];
-        uint128 burned = _totalBurnedBridgeByToken[USDC_ECC_ID];
-        return minted > burned ? minted - burned : 0;
+    function _bridgedOutstanding(uint256 chainId) private view returns (uint128) {
+        return _outstandingByChain[chainId];
     }
 
     /// @dev True when every byte of `recipient` is zero. The destination chain
@@ -612,8 +624,35 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         external view returns (uint128 maxTransfer, uint128 maxTvl,
                                uint128 outstanding, uint128 reserved, uint256 legacyDepositCount)
     {
-        return (MAX_BRIDGE_TRANSFER, MAX_BRIDGE_TVL, _bridgedOutstanding(),
-                _reservedDeposits, _legacyDepositCount(chainId, l1Bridge));
+        require(_chainAccountingReady, ERR_CHAIN_ACCOUNTING);
+        return (MAX_BRIDGE_TRANSFER, MAX_BRIDGE_TVL, _bridgedOutstanding(chainId),
+                _reservedByChain[chainId], _legacyDepositCount(chainId, l1Bridge));
+    }
+
+    /// @notice Seed historical net flow per source/destination chain after an
+    ///         upgrade from aggregate-only accounting. Only once, while paused.
+    ///         Reconstruct balances from DepositFinalized / WithdrawalInitiated.
+    function initializeChainAccounting(uint256[] chainIds, uint128[] outstanding)
+        public onlyOwnerPubkey(_ownerPubkey) accept
+    {
+        require(_paused, ERR_RECOVERY_NOT_PAUSED);
+        require(!_chainAccountingReady && chainIds.length > 0 &&
+                chainIds.length == outstanding.length, ERR_CHAIN_ACCOUNTING);
+        mapping(uint256 => bool) seen;
+        uint128 total;
+        for (uint32 i = 0; i < chainIds.length; i++) {
+            require(chainIds[i] != 0 && !seen[chainIds[i]], ERR_CHAIN_ACCOUNTING);
+            seen[chainIds[i]] = true;
+            total += outstanding[i];
+        }
+        // Per-chain floors can expose debt hidden by aggregate excess burns.
+        require(total >= _outstandingBridgeUsdc, ERR_CHAIN_ACCOUNTING);
+        delete _outstandingByChain;
+        for (uint32 i = 0; i < chainIds.length; i++) {
+            _outstandingByChain[chainIds[i]] = outstanding[i];
+        }
+        _outstandingBridgeUsdc = total;
+        _chainAccountingReady = true;
     }
 
     function _legacyDepositCount(uint256 chainId, uint256 l1Bridge) private view returns (uint256) {
@@ -865,11 +904,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         address voucher = address.makeAddrStd(0, tvm.hash(stateInit));
         if (_settledVouchers[voucher]) { return; }
         if (_pendingDepositAmounts[voucher] != 0) { return; }
-        require(legacy || _bridgedOutstanding() + _reservedDeposits + f.amount <= MAX_BRIDGE_TVL,
+        require(_chainAccountingReady, ERR_CHAIN_ACCOUNTING);
+        require(legacy || _bridgedOutstanding(f.chainId) + _reservedByChain[f.chainId] + f.amount <= MAX_BRIDGE_TVL,
                 ERR_TVL_CAP);
         _pendingDepositAmounts[voucher] = f.amount;
         _pendingDepositData[voucher] = f;
         _reservedDeposits += f.amount;
+        _reservedByChain[f.chainId] += f.amount;
 
         new DepositVoucher{
             stateInit: stateInit,
@@ -934,7 +975,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         delete _pendingDepositAmounts[voucher];
         delete _pendingDepositData[voucher];
         _reservedDeposits -= reservedAmount;
+        _reservedByChain[chainId] -= reservedAmount;
         _totalMintedBridgeByToken[USDC_ECC_ID] += amount;
+        _outstandingBridgeUsdc += amount;
+        _outstandingByChain[chainId] += amount;
 
         mapping(uint32 => varuint32) ecc;
         ecc[USDC_ECC_ID] = varuint32(amount);
@@ -954,9 +998,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     onBounce(TvmSlice /*body*/) external {
         uint128 amount = _pendingDepositAmounts[msg.sender];
         if (amount == 0) { return; }
+        uint256 chainId = _pendingDepositData[msg.sender].chainId;
         delete _pendingDepositAmounts[msg.sender];
         delete _pendingDepositData[msg.sender];
         _reservedDeposits -= amount;
+        _reservedByChain[chainId] -= amount;
     }
 
     // DepositVoucher code rotation is intentionally not exposed as a
@@ -1002,7 +1048,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         ensureBalance();
         TvmCell limitsState = abi.encode(_pendingDepositAmounts, _pendingDepositData,
                                         _settledVouchers, _reservedDeposits, _legacyDepositCounts);
-        TvmCell carried = abi.encode(LIMITS_STATE_TAG, userCell, limitsState);
+        TvmCell carried = abi.encode(LIMITS_STATE_TAG_V3, userCell, limitsState,
+                                    abi.encode(_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady));
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
@@ -1063,10 +1110,30 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _mintAccumulatorNonce = mintAccumulatorNonce;
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
+        uint128 mintedUsdc = _totalMintedBridgeByToken[USDC_ECC_ID];
+        uint128 burnedUsdc = _totalBurnedBridgeByToken[USDC_ECC_ID];
+        _outstandingBridgeUsdc = mintedUsdc > burnedUsdc ? mintedUsdc - burnedUsdc : 0;
+        _chainAccountingReady = mintedUsdc == 0 && burnedUsdc == 0;
         TvmSlice tail = userCell.toSlice();
-        if (tail.bits() >= 256 && tail.preloadUint(256) == LIMITS_STATE_TAG) {
-            (uint256 tag, TvmCell newVoucherCode, TvmCell limitsState) =
-                abi.decode(userCell, (uint256, TvmCell, TvmCell));
+        if (tail.bits() >= 256 && (tail.preloadUint(256) == LIMITS_STATE_TAG || tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3)) {
+            TvmCell newVoucherCode;
+            TvmCell limitsState;
+            if (tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3) {
+                (uint256 tag, TvmCell voucherCode, TvmCell state, TvmCell netState) =
+                    abi.decode(userCell, (uint256, TvmCell, TvmCell, TvmCell));
+                newVoucherCode = voucherCode;
+                limitsState = state;
+                if (tag == LIMITS_STATE_TAG_V3) {
+                    (_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady) =
+                        abi.decode(netState, (uint128, mapping(uint256 => uint128), bool));
+                } else {
+                    _outstandingBridgeUsdc = abi.decode(netState, (uint128));
+                }
+            } else {
+                (uint256 tag, TvmCell voucherCode, TvmCell state) = abi.decode(userCell, (uint256, TvmCell, TvmCell));
+                newVoucherCode = voucherCode;
+                limitsState = state;
+            }
             (_pendingDepositAmounts, _pendingDepositData, _settledVouchers,
              _reservedDeposits, _legacyDepositCounts) = abi.decode(limitsState,
                 (mapping(address => uint128), mapping(address => DepositPI),
@@ -1075,6 +1142,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         } else {
             _depositVoucherCode = tail.empty() ? depositVoucherCode : userCell;
         }
+        address[] pending = _pendingDepositData.keys();
+        for (uint32 i = 0; i < pending.length; i++) {
+            uint128 amount = _pendingDepositAmounts[pending[i]];
+            _reservedByChain[_pendingDepositData[pending[i]].chainId] += amount;
+        }
+        // A live aggregate-only upgrade stays closed until per-chain balances
+        // have been reconstructed; new zerostates need no initialization.
+        if (!_chainAccountingReady) { _paused = true; }
         // `_lightClient`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
         // on for every chain until the owner re-deploys the light client

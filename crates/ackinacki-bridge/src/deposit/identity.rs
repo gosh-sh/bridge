@@ -293,11 +293,14 @@ mod tests {
             "confirmDeposit",
             "isPaused",
             "getAnchorConfig",
+            "isOwnerAnchorsEnabled",
             "isAcceptedBlockHash",
             "isTrustedL1Bridge",
             "getDepositVoucherCodeHash",
             "getVersion",
             "disableOwnerAnchors",
+            "disableOwnerAnchorsOn",
+            "getLightClientL1ChainId",
         ] {
             assert!(
                 sig(&deployed, f).is_some(),

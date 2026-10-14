@@ -37,13 +37,13 @@ version=1, transcript=Blake2b, config JSON, `VerifyingKey(RawBytes)`),
 `*_base_circuit_params.json` and `.sha256` for each blob.
 
 - `step_vkblob/` — deposit-path **step** circuit, Hermez **k=19**, Blake2b.
-  Public inputs = **10 × Fr** (`STEP_INSTANCE_LEN`): committee commitment at
+  Public inputs = **11 × Fr** (`STEP_INSTANCE_LEN`), `gloas_fork_slot` last: committee commitment at
   `inst[5]` is the **2-level** Poseidon scheme (`commit_sync_committee_2level`,
   matching rotate's `next_commit`); attested `state_root` at `inst[8|9]`.
   Regenerate: `examples/export_step_vk_blob.rs`.
 - `rotate_vkblob/` — recursive **rotate** root (2-to-1 tree over 8 shards +
-  step), Hermez **k=21**, Blake2b. Public inputs = **15 × Fr** = 12 KZG
-  accumulator limbs + `[current_commit, next_commit, period]`. `current_commit`
+  step), Hermez **k=21**, Blake2b. Public inputs = **16 × Fr** = 12 KZG
+  accumulator limbs + `[current_commit, next_commit, period, gloas_fork_slot]`. `current_commit`
   is **snark-bound** to the step proof's committee commitment (`inst[0..12]` are
   the accumulator). The VkBlob header sets `accumulator_limbs = 12` (byte 11).
   Enforced by `scripts/check_rotate_vkblob_accumulator.sh` (fixture + patch hex +

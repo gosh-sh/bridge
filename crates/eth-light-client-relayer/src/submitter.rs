@@ -67,6 +67,20 @@ pub trait AnSubmitter: Send + Sync {
         commitment: [u8; 32],
         period: u64,
     ) -> Result<SubmitOutcome, RelayerError>;
+
+    /// Owner `setGloasForkSlot(slot)`. Required once after deploy / after
+    /// `updateCode` with an empty user cell; until it runs, every
+    /// `submitUpdate` / `submitRotate` reverts 256.
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError>;
+
+    /// `(gloasForkSlot, isSet)` from `getGloasForkSlot`. The daemon proves
+    /// against this value, not the beacon spec's `GLOAS_FORK_EPOCH`.
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError>;
+
+    /// `_committeePeriod` from `getCommitteeState`. After a manual
+    /// `submit-rotate` the daemon reads this so the next tick submits a
+    /// step instead of staying in `RotateRequired`.
+    async fn get_committee_period(&self) -> Result<u64, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -118,6 +132,9 @@ struct MockInner {
     /// Answers for the next `submit_rotate` calls, oldest first. Empty means
     /// the default behaviour.
     rotate_script: std::collections::VecDeque<SubmitOutcome>,
+    gloas_fork_slot: u64,
+    gloas_fork_slot_set: bool,
+    gloas_gets: u32,
 }
 
 impl MockAnSubmitter {
@@ -140,8 +157,28 @@ impl MockAnSubmitter {
                 watch_state: None,
                 state_at_re_push: None,
                 rotate_script: std::collections::VecDeque::new(),
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
+                gloas_fork_slot_set: true,
+                gloas_gets: 0,
             }),
         }
+    }
+
+    /// What `getGloasForkSlot` returns. Default is set / `GLOAS_NOT_SCHEDULED`.
+    pub fn set_gloas_fork(&self, slot: u64, is_set: bool) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.gloas_fork_slot = slot;
+        inner.gloas_fork_slot_set = is_set;
+    }
+
+    /// What `getCommitteeState.committeePeriod` returns. Used to pretend a
+    /// manual `submit-rotate` already landed.
+    pub fn set_committee_period(&self, period: u64) {
+        self.inner.lock().expect("poisoned").period = Some(period);
+    }
+
+    pub fn gloas_gets(&self) -> u32 {
+        self.inner.lock().expect("poisoned").gloas_gets
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -377,6 +414,30 @@ impl AnSubmitter for MockAnSubmitter {
         })
     }
 
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.reject {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "setGloasForkSlot rejected".into(),
+            });
+        }
+        inner.gloas_fork_slot = slot;
+        inner.gloas_fork_slot_set = true;
+        Ok(SubmitOutcome::Accepted {
+            tx_hash: None,
+        })
+    }
+
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.gloas_gets += 1;
+        Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
+    }
+
+    async fn get_committee_period(&self) -> Result<u64, RelayerError> {
+        Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
+    }
+
     async fn set_committee_commitment(
         &self,
         _commitment: [u8; 32],
@@ -567,8 +628,9 @@ mod ancestry_submit_tests {
                 committee_commitment: [0xC0; 32],
                 execution_block_hash: [0xAA; 32],
                 attested_state_root: [0; 32],
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
             },
-            public_inputs: vec![0u8; 320],
+            public_inputs: vec![0u8; crate::types::PUBLIC_INPUT_BYTES],
             proof: vec![0xAB; 8],
         };
         mock.submit_update(&first).await.unwrap();
@@ -581,8 +643,9 @@ mod ancestry_submit_tests {
                 committee_commitment: [0xC0; 32],
                 execution_block_hash: [0xBB; 32],
                 attested_state_root: [0; 32],
+                gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
             },
-            public_inputs: vec![0u8; 320],
+            public_inputs: vec![0u8; crate::types::PUBLIC_INPUT_BYTES],
             proof: vec![0xAB; 8],
         };
         match mock.submit_update(&late).await.unwrap() {
@@ -766,9 +829,9 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 ),
             });
         }
-        // `disableOwnerAnchors` does not revert a second call, so the getter is
-        // the only "already flipped" signal; anything but an explicit `false`
-        // sends the call.
+        // `disableOwnerAnchors` is L1-only and does not revert a second call,
+        // so the getter is the only "already flipped" signal; anything but
+        // an explicit `false` sends the call. L2 owner writers stay on.
         let already_off = cfg.get("ownerAnchorsEnabled").and_then(|v| v.as_bool()) == Some(false);
         if !already_off {
             match self
@@ -803,6 +866,49 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         )
         .await
     }
+
+    async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError> {
+        self.call("setGloasForkSlot", json!({ "gloasForkSlot": slot }))
+            .await
+    }
+
+    async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getGloasForkSlot", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        let slot = json_u64(v.get("gloasForkSlot"))
+            .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing gloasForkSlot"))?;
+        let is_set = json_bool(v.get("isSet"))
+            .ok_or_else(|| RelayerError::other("getGloasForkSlot: missing isSet"))?;
+        Ok((slot, is_set))
+    }
+
+    async fn get_committee_period(&self) -> Result<u64, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getCommitteeState", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        json_u64(v.get("committeePeriod"))
+            .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))
+    }
+}
+
+fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
+    let v = v?;
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn json_bool(v: Option<&serde_json::Value>) -> Option<bool> {
+    let v = v?;
+    v.as_bool().or_else(|| match v.as_u64() {
+        Some(0) => Some(false),
+        Some(_) => Some(true),
+        None => None,
+    })
 }
 
 /// Compare a TVM `address` getter (`0:<hex>` / `0x<hex>` / `dapp::account`)

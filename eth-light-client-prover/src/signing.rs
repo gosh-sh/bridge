@@ -47,6 +47,7 @@ pub const SEPOLIA_GENESIS_VALIDATORS_ROOT: [u8; 32] = [
 // so only the signing domain differs.
 pub const SEPOLIA_FORK_VERSION_ELECTRA: [u8; 4] = [0x90, 0x00, 0x00, 0x74];
 pub const SEPOLIA_FORK_VERSION_FULU: [u8; 4] = [0x90, 0x00, 0x00, 0x75];
+pub const SEPOLIA_FORK_VERSION_GLOAS: [u8; 4] = [0x90, 0x00, 0x00, 0x76];
 
 // ---------------------------------------------------------------------------
 // In-circuit

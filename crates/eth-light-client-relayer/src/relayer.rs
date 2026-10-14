@@ -21,7 +21,9 @@ pub struct RelayerConfig {
     /// `generate_rotate` + `submitRotate`. Default **true**: tvm-sdk#284
     /// (KZG accumulator decider) co-deploys with this contract. `--no-rotate`
     /// / `enable_rotate = false` returns [`TickOutcome::RotateRequired`]
-    /// instead. Rotate prove is still a ~40 GB n14 job.
+    /// instead. `rotate_tree_n8` is a committed-fixture tree, not a live
+    /// hand-off: a live period that is not the fixture's returns
+    /// [`TickOutcome::RotateRequired`] without starting the ~40 GB job.
     pub enable_rotate: bool,
     /// After the first accepted `submitUpdate`, call `disableOwnerAnchors` +
     /// `disableOwnerRotation` with the relayer keys (must be the owner
@@ -42,6 +44,11 @@ pub struct RelayerConfig {
     /// wider than a span. `ETH_RPC_URL` still attaches an execution source so
     /// the daemon can run `link_headers` locally without sending the tx.
     pub submit_ancestry: bool,
+    /// Use the beacon spec's Gloas slot instead of `getGloasForkSlot`.
+    /// `--dry-run` sets this: `MockAnSubmitter` has no contract, and on
+    /// Sepolia its default `GLOAS_NOT_SCHEDULED` would refuse every live
+    /// update (`gloas_under_beacon` is already true).
+    pub pin_fork_slot_from_beacon: bool,
 }
 
 impl RelayerConfig {
@@ -53,6 +60,7 @@ impl RelayerConfig {
             flip_owner: false,
             owner_hop: false,
             submit_ancestry: false,
+            pin_fork_slot_from_beacon: false,
         }
     }
 }
@@ -150,7 +158,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
         self.cover_front_span().await;
-        let update = self.source.fetch_finality().await?;
+        let mut update = self.source.fetch_finality().await?;
         self.guard_network(&update)?;
         if let Some(lag) = self.ws_lag(&update) {
             warn!(
@@ -164,7 +172,20 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let period = update.period();
         if let Some(last_p) = self.state.last_committee_period {
             if period > last_p {
-                return self.handle_period_jump(update, last_p, period).await;
+                // A manual `submit-rotate` lands on chain without writing
+                // this process's state. Read the contract so the next tick
+                // submits a step instead of staying in RotateRequired.
+                match self.submitter.get_committee_period().await {
+                    Ok(on_chain) if on_chain >= period => {
+                        self.state.record_rotate(on_chain);
+                        self.persist()?;
+                        info!(
+                            on_chain,
+                            last_p, "committee already rotated on chain; recording it"
+                        );
+                    },
+                    _ => return self.handle_period_jump(update, last_p, period).await,
+                }
             }
         }
 
@@ -187,6 +208,11 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
         }
 
+        // After Unchanged: an idle tick must not download the light-client
+        // account. Pin only when this tick will prove.
+        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+            return Ok(outcome);
+        }
         self.submit_step(update).await
     }
 
@@ -198,6 +224,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     ) -> Result<TickOutcome, RelayerError> {
         if !self.config.enable_rotate {
             if self.config.owner_hop {
+                let mut update = update;
+                if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+                    return Ok(outcome);
+                }
                 return self.owner_hop(update, from_period, to_period).await;
             }
             self.state.record_rotate_pending(to_period);
@@ -213,11 +243,27 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 to_period,
             });
         }
-        let bundle = match self.prover.generate_rotate(to_period).await {
+        let mut update = update;
+        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+            return Ok(outcome);
+        }
+        let bundle = match self.prover.generate_rotate(to_period, update.chain).await {
             Ok(b) => b,
             Err(e) => {
+                let reason = e.to_string();
+                // rotate_tree_n8 proves a committed fixture, not this
+                // hand-off. Do not treat that as a failed 40 GB run to retry.
+                if reason.contains("committed fixture") {
+                    self.state.record_rotate_pending(to_period);
+                    self.persist()?;
+                    warn!(from_period, to_period, %reason, "live rotate is not the fixture tree");
+                    return Ok(TickOutcome::RotateRequired {
+                        from_period,
+                        to_period,
+                    });
+                }
                 return Ok(TickOutcome::ProofFailed {
-                    reason: e.to_string(),
+                    reason,
                 });
             },
         };
@@ -298,6 +344,58 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 })
             },
         }
+    }
+
+    /// Prove against `getGloasForkSlot()`, not the beacon spec. A published
+    /// `GLOAS_FORK_EPOCH` that the contract does not hold would otherwise
+    /// spend a full step prove and come back 255. An update that is still
+    /// Electra under both values proceeds with the contract slot.
+    async fn pin_gloas_fork_slot(&self, update: &mut FinalityUpdate) -> Result<(), TickOutcome> {
+        if self.config.pin_fork_slot_from_beacon {
+            return Ok(());
+        }
+        let (contract_slot, is_set) = match self.submitter.get_gloas_fork_slot().await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(TickOutcome::AnRejected {
+                    reason: format!("getGloasForkSlot: {e}"),
+                });
+            },
+        };
+        if !is_set {
+            return Err(TickOutcome::AnRejected {
+                reason: "getGloasForkSlot is unset; owner set-gloas-fork-slot before proving \
+                         (contract exit 256)"
+                    .into(),
+            });
+        }
+        if let Some(beacon_slot) = update.chain.map(|c| c.gloas_fork_slot) {
+            if beacon_slot != contract_slot {
+                let slot = update.attested_slot;
+                let gloas_under_beacon = slot >= beacon_slot;
+                let gloas_under_contract = slot >= contract_slot;
+                if gloas_under_beacon || gloas_under_contract {
+                    return Err(TickOutcome::ProofFailed {
+                        reason: format!(
+                            "beacon Gloas slot {beacon_slot} != contract getGloasForkSlot \
+                             {contract_slot}; update slot {slot} would prove against the wrong \
+                             fork. Owner setGloasForkSlot to the beacon value before proving."
+                        ),
+                    });
+                }
+                warn!(
+                    beacon_slot,
+                    contract_slot,
+                    slot,
+                    "beacon spec Gloas slot differs from the contract; this update is still \
+                     Electra under both — proving against the contract"
+                );
+            }
+        }
+        if let Some(chain) = update.chain.as_mut() {
+            chain.gloas_fork_slot = contract_slot;
+        }
+        Ok(())
     }
 
     fn mark_rotate_in_flight(&mut self, period: u64) -> Result<(), RelayerError> {
@@ -793,6 +891,7 @@ mod tests {
         u.chain = Some(crate::types::BeaconChainParams {
             fork_version: [0x90, 0, 0, 0x75],
             genesis_validators_root: [gvr_byte; 32],
+            gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
         });
         u
     }
@@ -1024,6 +1123,38 @@ mod tests {
         }
     }
 
+    /// An idle tick must not download the light-client account. Pin only
+    /// when this tick will prove.
+    #[tokio::test]
+    async fn an_unchanged_tick_does_not_read_the_gloas_slot() {
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        let after_prove = mock.gloas_gets();
+        assert!(after_prove >= 1, "the first tick proves and must pin");
+        match r.tick().await.unwrap() {
+            TickOutcome::Unchanged {
+                ..
+            } => {},
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            mock.gloas_gets(),
+            after_prove,
+            "an unchanged tick must not call getGloasForkSlot"
+        );
+    }
+
     #[tokio::test]
     async fn advances_to_newer_checkpoint() {
         let src = InMemoryBeaconSource::new(vec![update(100, 96), update(200, 192)]);
@@ -1096,6 +1227,151 @@ mod tests {
             TickOutcome::Rotated {
                 period, ..
             } => assert_eq!(period, 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `submit-rotate` is a one-shot against the contract. The running
+    /// daemon only learns the new period by reading `getCommitteeState`.
+    #[tokio::test]
+    async fn a_manual_submit_rotate_is_picked_up_on_the_next_tick() {
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        mock.set_committee_period(1);
+        match r.tick().await.unwrap() {
+            TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } => {
+                assert_eq!(finalized_slot, 8192);
+            },
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(r.state().last_committee_period, Some(1));
+    }
+
+    #[tokio::test]
+    async fn unset_gloas_fork_slot_refuses_before_prove() {
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(0, false);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock,
+        )
+        .unwrap();
+        match r.tick().await.unwrap() {
+            TickOutcome::AnRejected {
+                reason,
+            } => {
+                assert!(reason.contains("unset"), "{reason}");
+            },
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(r.state().last_finalized_slot, None);
+    }
+
+    #[tokio::test]
+    async fn beacon_gloas_ahead_of_the_contract_refuses_a_post_fork_update() {
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(crate::types::GLOAS_NOT_SCHEDULED, true);
+        let sepolia = 11_296_768;
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut u = with_chain(update(sepolia + 32, sepolia), 0xd8);
+        if let Some(c) = u.chain.as_mut() {
+            c.gloas_fork_slot = sepolia;
+        }
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![u])),
+            Arc::new(MockProofGenerator::new()),
+            mock,
+        )
+        .unwrap();
+        match r.tick().await.unwrap() {
+            TickOutcome::ProofFailed {
+                reason,
+            } => {
+                assert!(reason.contains("beacon Gloas slot"), "{reason}");
+                assert!(reason.contains("setGloasForkSlot"), "{reason}");
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn beacon_gloas_ahead_of_the_contract_still_proves_an_electra_update() {
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(crate::types::GLOAS_NOT_SCHEDULED, true);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut u = with_chain(update(100, 96), 0xd8);
+        if let Some(c) = u.chain.as_mut() {
+            c.gloas_fork_slot = 11_296_768;
+        }
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![u])),
+            Arc::new(MockProofGenerator::new()),
+            mock,
+        )
+        .unwrap();
+        match r.tick().await.unwrap() {
+            TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } => {
+                assert_eq!(finalized_slot, 96);
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_uses_the_beacon_gloas_slot() {
+        let sepolia = 11_296_768;
+        let mut u = with_chain(update(sepolia + 32, sepolia), 0xd8);
+        if let Some(c) = u.chain.as_mut() {
+            c.gloas_fork_slot = sepolia;
+        }
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.pin_fork_slot_from_beacon = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![u])),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        match r.tick().await.unwrap() {
+            TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } => {
+                assert_eq!(finalized_slot, sepolia);
+            },
             other => panic!("{other:?}"),
         }
     }

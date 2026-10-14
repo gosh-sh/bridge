@@ -113,7 +113,8 @@ pub enum LcFailure {
         /// The head's real block hash.
         block: B256,
     },
-    /// Check 3: no successful `disableOwnerAnchors` in the bridge's history.
+    /// Check 3: no successful `disableOwnerAnchors` /
+    /// `disableOwnerAnchorsOn` in the bridge's history.
     NoFlip,
     /// Check 3: no `AncestryAccepted` with new hashes since the switch-off.
     NoAncestryAfterFlip,
@@ -180,8 +181,9 @@ impl std::fmt::Display for LcFailure {
             ),
             NoFlip => write!(
                 f,
-                "light-client check 3 (ancestry): no successful disableOwnerAnchors in the \
-                 bridge's history, so fresh anchors may still be the owner's"
+                "light-client check 3 (ancestry): no successful disableOwnerAnchors or \
+                 disableOwnerAnchorsOn in the bridge's history, so fresh anchors may still be the \
+                 owner's"
             ),
             NoAncestryAfterFlip => write!(
                 f,
@@ -257,7 +259,8 @@ pub struct LcObs {
     pub head_raw: B256,
     /// The bridge's `isAcceptedBlockHash` for the head's real hash.
     pub bridge_accepts_head: Option<bool>,
-    /// The time of the newest successful `disableOwnerAnchors`.
+    /// The time of the newest successful `disableOwnerAnchors` or
+    /// `disableOwnerAnchorsOn`.
     pub t_flip: Option<u64>,
     /// The newest ancestry with new hashes after the switch-off.
     pub ancestry: Option<Ancestry>,
@@ -439,11 +442,11 @@ async fn accepted(
         .ok_or_else(|| anyhow!("{}: it answered {v}", what()))
 }
 
-/// The time of the newest `disableOwnerAnchors` whose transaction did not
-/// abort; `None` when the bridge's history has none. A switch-off whose
-/// outcome cannot be read is an error, never a reason to fall back to an
-/// older one; a history that runs past `page_cap` pages is a
-/// [`HistoryCapped`] error.
+/// The time of the newest `disableOwnerAnchors` or
+/// `disableOwnerAnchorsOn` whose transaction did not abort; `None` when
+/// the bridge's history has none. A switch-off whose outcome cannot be
+/// read is an error, never a reason to fall back to an older one; a
+/// history that runs past `page_cap` pages is a [`HistoryCapped`] error.
 async fn t_flip(
     an: &dyn AnRead,
     bridge: [u8; 32],
@@ -459,9 +462,11 @@ async fn t_flip(
             .context("could not read the bridge's inbound external messages")?;
         for m in &page.items {
             let Some(body) = &m.body else { continue };
-            if an.decode(BRIDGE_ABI, body, false).map(|(n, _)| n)
-                != Some("disableOwnerAnchors".into())
-            {
+            let name = an.decode(BRIDGE_ABI, body, false).map(|(n, _)| n);
+            if !matches!(
+                name.as_deref(),
+                Some("disableOwnerAnchors") | Some("disableOwnerAnchorsOn")
+            ) {
                 continue;
             }
             let what = || format!("could not read the disableOwnerAnchors message {}", m.hash);
@@ -1366,6 +1371,38 @@ mod tests {
         switch_off(&an, "flip", T_FLIP, true);
         let o = observed(&evm, &an).await;
         assert_eq!(judge(&o, SEPOLIA), Err(LcFailure::NoFlip));
+    }
+
+    #[tokio::test]
+    async fn a_flip_through_disable_owner_anchors_on_counts() {
+        let (evm, an, _) = ready_chains();
+        an.ext_in.lock().unwrap().get_mut(&BRIDGE).unwrap().clear();
+        an.bodies.lock().unwrap().insert(
+            "B-disable-on".into(),
+            (
+                "disableOwnerAnchorsOn".into(),
+                json!({ "chainId": SEPOLIA.to_string() }),
+            ),
+        );
+        let bridge = format!("0:{}", hex::encode(BRIDGE));
+        let m = msg("flip-on", "ExtIn", "", &bridge, Some("B-disable-on"));
+        an.ext_in
+            .lock()
+            .unwrap()
+            .entry(BRIDGE)
+            .or_default()
+            .push(m.clone());
+        let mut full = m;
+        full.dst_tx = Some(TxRef {
+            hash: "flip-on-tx".into(),
+            aborted: false,
+            account: bridge,
+            now: T_FLIP,
+        });
+        an.messages.lock().unwrap().insert("flip-on".into(), full);
+        let o = observed(&evm, &an).await;
+        assert_eq!(o.t_flip, Some(T_FLIP));
+        assert_eq!(judge(&o, SEPOLIA), Ok(()));
     }
 
     #[tokio::test]

@@ -40,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.7.0";
+    string constant version = "1.8.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -125,10 +125,18 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // Derived from `_lightClientCode` when it is installed, never set directly.
     address _lightClient;
 
-    // Whether the owner may still admit anchors directly. True while
-    // bootstrapping; `disableOwnerAnchors()` clears it permanently, which is
-    // the step that turns "the owner key" into "the light-client proof".
-    bool _ownerAnchorsEnabled = true;
+    // EIP-155 chain id the deployed light client follows, written by
+    // `deployLightClient`. 0 until that call. `disableOwnerAnchors` may
+    // only turn the owner writer off for this chain — every other source
+    // chain (the L2s on the deposit allowlist) keeps `setAcceptedBlockHash`.
+    // Not carried through `onCodeUpgrade`.
+    uint256 _lightClientL1ChainId;
+
+    // Owner writer of `_acceptedBlockHash`, keyed by source-chain id.
+    // Missing = owner may still write. `disableOwnerAnchors` sets the bit
+    // for the light client's L1 only. Like `_trustedL1Bridge` it is NOT
+    // carried through `onCodeUpgrade`.
+    mapping(uint256 => bool) _ownerAnchorsDisabled;
 
     // Owner-operated stop of the cross-chain lane: `finalizeDeposit` and
     // `initiateWithdrawal` refuse while it is set. Like `_trustedL1Bridge` and
@@ -583,7 +591,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     function setAcceptedBlockHash(uint256 chainId, uint256 blockHash, bool accepted)
         public onlyOwnerPubkey(_ownerPubkey) accept
     {
-        require(_ownerAnchorsEnabled, ERR_OWNER_ANCHORS_DISABLED);
+        require(!_ownerAnchorsDisabled[chainId], ERR_OWNER_ANCHORS_DISABLED);
         ensureBalance();
         if (accepted) {
             _acceptedBlockHash[chainId][blockHash] = true;
@@ -607,7 +615,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Deploys the beacon light client. The bridge is the only account
     ///         allowed to do so: the contract's constructor refuses any other
-    ///         sender, so nothing else can occupy that address.
+    ///         sender, so nothing else can occupy that address. Always writes
+    ///         `l1ChainId` into `_lightClientL1ChainId`, even if the
+    ///         constructor message bounces because the account already exists.
     function deployLightClient(
         uint256 pubkey,
         uint256 l1ChainId,
@@ -625,6 +635,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             value: 10 vmshell,
             flag: 1
         }(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod);
+        _lightClientL1ChainId = l1ChainId;
     }
 
     /// @notice Address the light client is deployed at, derived from its code
@@ -634,15 +645,41 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Permanently gives up the owner's ability to admit anchors
-    ///         directly, leaving the light client as the only writer. This is
-    ///         the call that turns the trust assumption from "the owner key"
+    ///         on the light client's L1, leaving the light client as the
+    ///         only writer for that chain. Other chain ids (the L2s on the
+    ///         deposit allowlist) keep `setAcceptedBlockHash`. This is the
+    ///         call that turns the L1 trust assumption from "the owner key"
     ///         into "a proof of Ethereum finality".
-    /// @dev One-way, with no re-enable. Requires a light client first, so this
-    ///      cannot brick the only working writer.
+    /// @dev One-way, with no re-enable. Requires `setLightClientCode` (so
+    ///      `_lightClient` is non-zero) and a stored L1 id from
+    ///      `deployLightClient`. It does not check that the light-client
+    ///      account is Active; flipping after `setLightClientCode` and
+    ///      before a successful deploy leaves that L1 with no writer until
+    ///      `deployLightClient` runs again. Idempotent.
     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
+        _disableOwnerAnchors(_lightClientL1ChainId);
+    }
+
+    /// @notice Same as `disableOwnerAnchors()`, for an explicit chain id.
+    ///         The id must equal `_lightClientL1ChainId`, the argument
+    ///         last passed to `deployLightClient`. The bridge does not
+    ///         read the light client's own `_l1ChainId`. Any other id
+    ///         (an L2, or a different L1) reverts
+    ///         `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). After an upgrade
+    ///         re-run, pass the same id the existing light client was
+    ///         constructed with — a constructor bounce still stores
+    ///         whatever was passed. Sold does not allow a public
+    ///         overload of `disableOwnerAnchors`.
+    function disableOwnerAnchorsOn(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept {
+        _disableOwnerAnchors(chainId);
+    }
+
+    function _disableOwnerAnchors(uint256 chainId) private {
         require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
+        require(_lightClientL1ChainId != 0, ERR_LIGHT_CLIENT_UNSET);
+        require(chainId == _lightClientL1ChainId, ERR_NOT_LIGHT_CLIENT_CHAIN);
         ensureBalance();
-        _ownerAnchorsEnabled = false;
+        _ownerAnchorsDisabled[chainId] = true;
     }
 
     /// @notice Stops and resumes the cross-chain lane: while paused,
@@ -682,9 +719,24 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Anchor-path configuration: the light client and whether the
-    ///         owner may still admit anchors.
+    ///         owner may still admit anchors on the light client's L1.
+    ///         Other chain ids keep the owner writer; query
+    ///         `isOwnerAnchorsEnabled(chainId)` for those.
     function getAnchorConfig() external view returns (address lightClient, bool ownerAnchorsEnabled) {
-        return (_lightClient, _ownerAnchorsEnabled);
+        return (_lightClient, _lightClientL1ChainId == 0 || !_ownerAnchorsDisabled[_lightClientL1ChainId]);
+    }
+
+    /// @notice Whether the owner may still admit anchors for `chainId`.
+    ///         False only after `disableOwnerAnchors` for the light
+    ///         client's L1; every other chain stays true.
+    function isOwnerAnchorsEnabled(uint256 chainId) external view returns (bool) {
+        return !_ownerAnchorsDisabled[chainId];
+    }
+
+    /// @notice EIP-155 chain id the deployed light client follows (0 until
+    ///         `deployLightClient`).
+    function getLightClientL1ChainId() external view returns (uint256) {
+        return _lightClientL1ChainId;
     }
 
     /// @notice Whether the cross-chain lane is stopped by the owner.
@@ -912,7 +964,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
         _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
-        _ownerAnchorsEnabled = true;
+        // `_lightClient`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
+        // are absent from the tuple: after an upgrade the owner writer is
+        // on for every chain until the owner re-deploys the light client
+        // and flips L1 again.
     }
 
     // ========================================================

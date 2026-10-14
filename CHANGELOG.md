@@ -53,7 +53,10 @@ assigns it when the release is tagged.
   Ethereum for good. The cost is that two deposits in flight can both pass the
   check and together cross the ceiling. Outstanding is computed as
   `minted - burned` with a floor at zero, because the contract keeps no
-  invariant between those counters.
+  invariant between those counters. On a deployment whose outstanding amount is
+  already above the ceiling when the caps are installed, every deposit is
+  refused with `ERR_TVL_CAP` until burns bring it back under; withdrawals are
+  not held up by the TVL check, only by the per-transfer one.
 
   **The tracked `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` is
   not rebuilt in this change** — it has to be built with `sold` 0.80.0, the

@@ -27,4 +27,5 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_DEPOSIT_RESERVATION = 235;
     uint16 constant ERR_DEPOSITS_PENDING = 236;
     uint16 constant ERR_LEGACY_CONFIG = 237;
+    uint16 constant ERR_RECOVERY_NOT_PAUSED = 238;
 }

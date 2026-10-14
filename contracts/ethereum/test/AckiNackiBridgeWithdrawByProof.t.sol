@@ -996,6 +996,34 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         );
     }
 
+    function test_legacyWithdrawal_can_pay_above_cap_once() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, address(0xC0DE), 50 * UsdcTestLib.UNIT);
+        uint256 amount = bridge.MAX_TRANSFER_AMOUNT() + 1;
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("legacy-over-cap")));
+        vm.prank(address(0xBAD));
+        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
+        bridge.setLegacyWithdrawal(nullifier, true);
+        bridge.setLegacyWithdrawal(nullifier, true);
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+        assertEq(usdc.balanceOf(RECIPIENT), amount);
+        assertFalse(bridge.legacyWithdrawals(bytes32(nullifier)));
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.NullifierAlreadyUsed.selector, nullifier)
+        );
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+    }
+
+    function test_legacyWithdrawal_still_requires_a_valid_proof() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, address(0xC0DE), 50 * UsdcTestLib.UNIT);
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("legacy-invalid-proof")));
+        bridge.setLegacyWithdrawal(nullifier, true);
+        withdrawalVerifier.setShouldAccept(false);
+        uint256 amount = bridge.MAX_TRANSFER_AMOUNT() + 1;
+        vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
+        assertTrue(bridge.legacyWithdrawals(bytes32(nullifier)));
+    }
+
     function test_withdrawByProof_verifierRejects_revertsAndDoesNotMutateState() public {
         withdrawalVerifier.setShouldAccept(false);
 

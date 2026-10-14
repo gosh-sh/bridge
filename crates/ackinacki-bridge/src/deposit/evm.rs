@@ -263,15 +263,35 @@ pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
 pub async fn read_volume_limits(
     evm: &dyn EvmRead,
     bridge: Address,
-) -> Option<(U256, U256, U256)> {
-    let one = async |data: Bytes| -> Option<U256> {
-        let out = evm.call(bridge, data).await.ok()?;
-        (out.len() == 32).then(|| U256::from_be_slice(&out))
+) -> anyhow::Result<Option<(U256, U256, U256)>> {
+    let first = match evm
+        .call(
+            bridge,
+            IDeposit::MAX_TRANSFER_AMOUNTCall {}.abi_encode().into(),
+        )
+        .await
+    {
+        Ok(out) if out.is_empty() => return Ok(None),
+        Ok(out) => out,
+        Err(e)
+            if e.downcast_ref::<TransportError>()
+                .and_then(revert_data)
+                .is_some_and(|d| d.is_empty()) =>
+        {
+            return Ok(None)
+        },
+        Err(e) => return Err(e),
     };
-    let per_tx = one(IDeposit::MAX_TRANSFER_AMOUNTCall {}.abi_encode().into()).await?;
+    anyhow::ensure!(first.len() == 32, "malformed MAX_TRANSFER_AMOUNT response");
+    let per_tx = U256::from_be_slice(&first);
+    let one = async |data: Bytes| -> anyhow::Result<U256> {
+        let out = evm.call(bridge, data).await?;
+        anyhow::ensure!(out.len() == 32, "malformed volume-limit response");
+        Ok(U256::from_be_slice(&out))
+    };
     let tvl = one(IDeposit::MAX_TVLCall {}.abi_encode().into()).await?;
     let held = one(IDeposit::treasuryBalanceCall {}.abi_encode().into()).await?;
-    Some((per_tx, tvl, held))
+    Ok(Some((per_tx, tvl, held)))
 }
 
 pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Address> {

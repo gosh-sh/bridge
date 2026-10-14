@@ -40,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.8.0";
+    string constant version = "1.8.1";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -92,8 +92,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
 
     mapping(address => uint128) _pendingDepositAmounts;
+    mapping(address => DepositPI) _pendingDepositData;
+    mapping(address => bool) _settledVouchers;
     uint128 _reservedDeposits;
+    // count + 1 distinguishes an unconfigured cutoff from one reduced to zero.
     mapping(uint256 => mapping(uint256 => uint256)) _legacyDepositCounts;
+    uint256 constant LIMITS_STATE_TAG = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a125;
 
     // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
     TvmCell _depositVoucherCode;
@@ -523,7 +527,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
-        require(amount <= MAX_BRIDGE_TRANSFER, ERR_TRANSFER_TOO_LARGE);
+        if (amount > MAX_BRIDGE_TRANSFER) {
+            msg.sender.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: currencies});
+            tvm.commit();
+            revert(ERR_TRANSFER_TOO_LARGE);
+        }
 
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;
@@ -593,10 +601,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         public onlyOwnerPubkey(_ownerPubkey) accept
     {
         require(_trustedL1Bridge[chainId][l1Bridge], ERR_UNSUPPORTED_SRC_CHAIN);
-        require(depositCount > 0 && _legacyDepositCounts[chainId][l1Bridge] == 0,
-                ERR_LEGACY_CONFIG);
+        uint256 previous = _legacyDepositCounts[chainId][l1Bridge];
+        require(depositCount < type(uint256).max &&
+                (previous == 0 || depositCount + 1 <= previous), ERR_LEGACY_CONFIG);
         ensureBalance();
-        _legacyDepositCounts[chainId][l1Bridge] = depositCount;
+        _legacyDepositCounts[chainId][l1Bridge] = depositCount + 1;
     }
 
     function getDepositLimits(uint256 chainId, uint256 l1Bridge)
@@ -604,7 +613,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
                                uint128 outstanding, uint128 reserved, uint256 legacyDepositCount)
     {
         return (MAX_BRIDGE_TRANSFER, MAX_BRIDGE_TVL, _bridgedOutstanding(),
-                _reservedDeposits, _legacyDepositCounts[chainId][l1Bridge]);
+                _reservedDeposits, _legacyDepositCount(chainId, l1Bridge));
+    }
+
+    function _legacyDepositCount(uint256 chainId, uint256 l1Bridge) private view returns (uint256) {
+        uint256 encoded = _legacyDepositCounts[chainId][l1Bridge];
+        return encoded == 0 ? 0 : encoded - 1;
     }
 
     /// @notice Admits (or retracts) a source-chain block hash as canonical.
@@ -799,7 +813,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(!_paused, ERR_PAUSED);
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
-        bool legacy = f.depositId < _legacyDepositCounts[f.chainId][f.contractAddr];
+        bool legacy = f.depositId < _legacyDepositCount(f.chainId, f.contractAddr);
         require(legacy || f.amount <= MAX_BRIDGE_TRANSFER, ERR_TRANSFER_TOO_LARGE);
         // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
         // pins which (chain, bridge contract) pairs this side trusts. The deposit
@@ -849,10 +863,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         });
 
         address voucher = address.makeAddrStd(0, tvm.hash(stateInit));
+        if (_settledVouchers[voucher]) { return; }
         if (_pendingDepositAmounts[voucher] != 0) { return; }
         require(legacy || _bridgedOutstanding() + _reservedDeposits + f.amount <= MAX_BRIDGE_TVL,
                 ERR_TVL_CAP);
         _pendingDepositAmounts[voucher] = f.amount;
+        _pendingDepositData[voucher] = f;
         _reservedDeposits += f.amount;
 
         new DepositVoucher{
@@ -882,6 +898,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             code: _depositVoucherCode
         });
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
+        if (_settledVouchers[msg.sender]) { return; }
         uint128 reservedAmount = _pendingDepositAmounts[msg.sender];
         // A voucher dispatched by the previous code may confirm after the
         // upgrade. Its authenticated callback predates reservations.
@@ -892,8 +909,30 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         tvm.accept();
         ensureBalance();
 
+        _completeDeposit(msg.sender, depositId, contractAddr, dappId, chainId, amount, anAccount);
+    }
+
+    /// @notice Recover a failed voucher callback after checking its transaction
+    ///         history. Pausing prevents new proofs from racing the recovery.
+    ///         The stored proof-bound recipient and amount cannot be replaced.
+    function recoverDeposit(address voucher) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(_paused, ERR_RECOVERY_NOT_PAUSED);
+        require(_pendingDepositAmounts[voucher] > 0, ERR_DEPOSIT_RESERVATION);
+        DepositPI f = _pendingDepositData[voucher];
+        ensureBalance();
+        _completeDeposit(voucher, f.depositId, f.contractAddr, f.dappId,
+                         f.chainId, f.amount, f.anAccount);
+    }
+
+    function _completeDeposit(address voucher, uint256 depositId, uint256 contractAddr,
+                              uint256 dappId, uint256 chainId, uint128 amount, uint256 anAccount) private {
+        require(!_settledVouchers[voucher], ERR_DEPOSIT_RESERVATION);
+        uint128 reservedAmount = _pendingDepositAmounts[voucher];
+
         gosh.mintecc(uint64(amount), USDC_ECC_ID);
-        delete _pendingDepositAmounts[msg.sender];
+        _settledVouchers[voucher] = true;
+        delete _pendingDepositAmounts[voucher];
+        delete _pendingDepositData[voucher];
         _reservedDeposits -= reservedAmount;
         _totalMintedBridgeByToken[USDC_ECC_ID] += amount;
 
@@ -916,6 +955,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 amount = _pendingDepositAmounts[msg.sender];
         if (amount == 0) { return; }
         delete _pendingDepositAmounts[msg.sender];
+        delete _pendingDepositData[msg.sender];
         _reservedDeposits -= amount;
     }
 
@@ -952,18 +992,21 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Upgrades the contract code on-chain. Only callable by the owner.
     /// @param newcode — new contract code TvmCell
-    /// @param userCell — reserved passthrough for future upgrade payloads.
-    ///        Currently unused (the new code receives a cell built purely
-    ///        from snapshot of current storage). Future upgrades can read
-    ///        this slot once `onCodeUpgrade` is extended; today it lets the
-    ///        ABI stay stable.
+    /// @param userCell — empty to keep the voucher code, or new voucher code
+    ///        when no deposits are pending. Limit state is carried separately
+    ///        inside a tagged envelope in the existing ninth migration field.
     function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept {
-        require(_reservedDeposits == 0, ERR_DEPOSITS_PENDING);
+        // Pending callbacks require their original voucher code, but do not
+        // prevent an upgrade of the bridge itself to repair a failure.
+        require(_reservedDeposits == 0 || userCell.toSlice().empty(), ERR_DEPOSITS_PENDING);
         ensureBalance();
+        TvmCell limitsState = abi.encode(_pendingDepositAmounts, _pendingDepositData,
+                                        _settledVouchers, _reservedDeposits, _legacyDepositCounts);
+        TvmCell carried = abi.encode(LIMITS_STATE_TAG, userCell, limitsState);
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
-            userCell
+            carried
         );
         tvm.commit();
         tvm.setcode(newcode);
@@ -1020,7 +1063,18 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _mintAccumulatorNonce = mintAccumulatorNonce;
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
-        _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
+        TvmSlice tail = userCell.toSlice();
+        if (tail.bits() >= 256 && tail.preloadUint(256) == LIMITS_STATE_TAG) {
+            (uint256 tag, TvmCell newVoucherCode, TvmCell limitsState) =
+                abi.decode(userCell, (uint256, TvmCell, TvmCell));
+            (_pendingDepositAmounts, _pendingDepositData, _settledVouchers,
+             _reservedDeposits, _legacyDepositCounts) = abi.decode(limitsState,
+                (mapping(address => uint128), mapping(address => DepositPI),
+                 mapping(address => bool), uint128, mapping(uint256 => mapping(uint256 => uint256))));
+            _depositVoucherCode = newVoucherCode.toSlice().empty() ? depositVoucherCode : newVoucherCode;
+        } else {
+            _depositVoucherCode = tail.empty() ? depositVoucherCode : userCell;
+        }
         // `_lightClient`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
         // on for every chain until the owner re-deploys the light client

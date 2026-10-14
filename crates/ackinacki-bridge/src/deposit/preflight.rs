@@ -152,6 +152,15 @@ pub async fn check(
         false,
     )
     .await?;
+    an_preflight::check_volume(
+        d.an.as_ref(),
+        bridge_acc,
+        net.chain_id(),
+        bridge,
+        an.version,
+        amount,
+    )
+    .await?;
     let plan = anchor_plan(d, bridge_acc, net.chain_id(), &an).await?;
     let prover = usable_prover(p.prover_dir.as_deref().expect("validated")).await?;
     // The proof files go there: a path that cannot hold them is refused

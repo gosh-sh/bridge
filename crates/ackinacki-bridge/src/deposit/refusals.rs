@@ -19,6 +19,10 @@ pub const ERR_UNKNOWN_BLOCK: i32 = 224;
 pub const ERR_ZERO_RECIPIENT: i32 = 230;
 /// Deposits are paused.
 pub const ERR_PAUSED: i32 = 231;
+/// The amount exceeds the AN transfer cap.
+pub const ERR_TRANSFER_TOO_LARGE: i32 = 233;
+/// Pending deposits and outstanding supply fill the AN TVL cap.
+pub const ERR_TVL_CAP: i32 = 234;
 
 /// The outcome of sending `finalizeDeposit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +61,8 @@ pub enum FinalizeSend {
 pub enum Reaction {
     /// Deposits are paused: wait and send again.
     WaitPaused,
+    /// AN capacity is full: wait and retry the same funded deposit.
+    WaitCapacity,
     /// The anchored block is not known yet: wait for the next anchor.
     BackToAnchor,
     /// Final refusal.
@@ -82,6 +88,13 @@ pub enum Reaction {
 fn by_code(code: i32) -> Reaction {
     match code {
         ERR_PAUSED => Reaction::WaitPaused,
+        ERR_TVL_CAP => Reaction::WaitCapacity,
+        ERR_TRANSFER_TOO_LARGE => Reaction::Refused {
+            code,
+            hint: "the funded deposit exceeds the AN transfer cap; do not make another deposit. \
+                   Keep the operation and resume after the bridge owner configures its legacy \
+                   cutoff",
+        },
         ERR_UNKNOWN_BLOCK => Reaction::BackToAnchor,
         ERR_UNSUPPORTED_SRC_CHAIN => Reaction::Refused {
             code,
@@ -172,6 +185,12 @@ mod tests {
     #[test]
     fn the_table_of_refusals() {
         assert_eq!(react(&rejected(231)), Reaction::WaitPaused);
+        assert_eq!(react(&rejected(234)), Reaction::WaitCapacity);
+        assert_eq!(react(&executed(234)), Reaction::WaitCapacity);
+        assert!(matches!(react(&rejected(233)), Reaction::Refused {
+            code: 233,
+            ..
+        }));
         for c in [214, 204, 230] {
             assert!(matches!(react(&rejected(c)), Reaction::Refused { code, .. } if code == c));
         }

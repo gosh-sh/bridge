@@ -61,21 +61,40 @@ assigns it when the release is tagged.
   activating the caps, then restore its trust entry and call
   `setLegacyDepositCount(chainId, l1Bridge, depositCount)` on the upgraded AN
   bridge. Only proven deposits with `depositId < depositCount` are exempt from
-  the new caps. The cutoff can be set once per source and code generation;
-  zero or a second configuration fails with `ERR_LEGACY_CONFIG` (237).
+  the new caps. The cutoff may be lowered, including to zero, but cannot be raised after
+  its first configuration (`ERR_LEGACY_CONFIG`, 237).
   Proof verification, canonical anchors and voucher replay protection still
   apply. Legacy settlements may temporarily exceed the TVL cap; new deposits
   remain blocked until withdrawals free enough capacity. Already-dispatched
   old voucher callbacks can also complete after the initial upgrade.
 
-  Subsequent `updateCode` calls refuse with `ERR_DEPOSITS_PENDING` (236) while
-  reservations remain. Stop new finalizations and wait for confirmations or
-  deployment bounces before upgrading; the upgrade resets legacy cutoffs,
-  trust entries and anchors, so re-seed them before accepting deposits. Keep
-  the existing voucher code by passing an empty `userCell`. The voucher code
-  and its replay-protection addresses are unchanged.
+  `updateCode` preserves pending reservations, their proof-bound payout data,
+  completed-voucher markers and legacy cutoffs in a tagged envelope within the
+  existing migration tuple; previous-generation and zerostate cells still work.
+  With pending deposits, pass an empty `userCell` to retain their voucher code;
+  only voucher-code replacement is refused with 236. Trust entries and anchors
+  still reset and must be re-seeded. If a voucher's original callback failed,
+  pause the bridge, inspect that voucher's transaction history, and have the
+  owner call `recoverDeposit(voucher)`. It pays the stored recipient/amount,
+  releases the reservation and ignores a later duplicate callback, including
+  after an upgrade. Do not recover a bounced constructor replay (51) of a
+  deposit already paid under an earlier code generation; wait for its bounce
+  to release the temporary reservation. Recovery is an owner operation and
+  fails with 238 unless paused. The voucher code remains unchanged.
 
-  `eccUSDCBridge` retains main's version 1.8.0. Its `.tvc` and ABI are rebuilt
+  An over-cap `initiateWithdrawal` explicitly returns attached ECC to the
+  sender and commits the refund before reporting 233, including when the
+  incoming transfer had `bounce: false`. On Ethereum, an already-burned legacy
+  withdrawal over 50 USDC can be authorized by its exact proof nullifier with
+  `setLegacyWithdrawal(nullifier, true)`; proof/identity/chain/recipient and
+  spent-nullifier checks still apply. The authorization is consumed on payout
+  and can be revoked before payout. Before switching deployments, stop new AN
+  burns and settle existing burns on their original Ethereum payout contract.
+  If a funded capped deployment must pay an old burn, authorize only that
+  historical event's nullifier, then submit its unchanged proof. Never permit
+  unknown future nullifiers or redirect custody assumptions between contracts.
+
+  `eccUSDCBridge` reports 1.8.1 so the CLI can detect its limit getter. Its `.tvc` and ABI are rebuilt
   with `sold` 0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
   Existing event formats and call signatures stay the same. Use the release
   `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
@@ -1225,8 +1244,14 @@ assigns it when the release is tagged.
   `treasuryBalance` off the bridge rather than carrying the numbers, so it
   needs no rebuild when the ceilings change, and it reports the room left when
   the TVL check is what refuses. A bridge that predates the ceilings answers
-  none of those reads and enforces nothing, so a deposit against it is still
-  allowed through.
+  an absent limit interface and enforces no EVM ceiling, so an old deployment
+  remains supported. Only an empty first response or a structured empty revert
+  identifies that old interface; transport failures, malformed replies and
+  failures of subsequent getters now refuse preflight. On AN 1.8.1 and newer,
+  fresh deposits also read `getDepositLimits` and check pending reservations
+  before spending USDC on L1. Finalization code 234 waits for capacity and
+  retries the same funded operation; code 233 instructs the operator to keep
+  it and resume after the source's legacy cutoff is configured.
 
 - **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
   the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a

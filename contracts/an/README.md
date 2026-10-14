@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.8.0, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.8.1, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -161,18 +161,31 @@ L1 bridge. After upgrading AN with the existing voucher code (empty
 This allows proven, already-paid deposits whose `depositId < depositCount` to
 finish even above 50 USDC or the TVL cap. Never use an estimated or future
 counter: the cutoff authorizes an exception for exactly those historical
-IDs. The source must already be trusted; the cutoff can be set once per
-source, cannot be extended, and resets on a later code upgrade. A fresh
-zerostate needs no legacy cutoff.
+IDs. The source must already be trusted; after initial configuration the cutoff
+can only be lowered, including to zero. It is carried through later code
+upgrades. A fresh zerostate needs no legacy cutoff.
 
 Previously dispatched voucher callbacks can complete after the initial
-upgrade. For later upgrades, stop new finalizations and wait until `reserved`
-is zero: `updateCode` refuses while deposits are pending (236). A failed
-voucher deployment releases its reservation on bounce so its proof can be
-retried. A reservation mismatch in `confirmDeposit` fails with 235; zero or a
-repeated legacy-cutoff configuration fails with 237. Legacy settlements may
-raise outstanding above 10,000 USDC; new deposits then wait until withdrawals
-bring outstanding plus reserved plus the new amount within the cap.
+upgrade. Later upgrades preserve reservations, stored payout data, completed
+voucher markers and legacy cutoffs in the existing migration tuple's tagged
+ninth field. Pending deposits therefore do not block a repair upgrade; use an
+empty `userCell`. Replacing voucher code while reservations remain fails with
+236. Re-seed trust and anchors after the upgrade as before.
+
+A deployed voucher whose callback failed cannot resend its constructor.
+Pause the bridge and inspect the original voucher deployment and callback
+transactions before the owner calls `recoverDeposit(voucher)`. Recovery uses
+the proof-bound amount and recipient stored at finalization, releases the
+reservation and marks the payout complete so a delayed callback cannot mint
+again, even after an upgrade. Never recover an already-paid old voucher whose
+constructor replay aborted with 51: its bounce releases the new temporary
+reservation. This is an explicit owner repair, not an automatic retry.
+Recovery requires a pause (238), and a missing reservation fails with 235.
+Legacy settlements may exceed TVL; new deposits then wait for capacity.
+
+Over-cap withdrawals return their attached ECC before reporting code 233,
+including for incoming messages with `bounce: false`. The refund is committed
+so the exception cannot roll it back.
 
 These AN migration exceptions do not move custody between Ethereum
 contracts. Keep the source contracts and their withdrawal routes available

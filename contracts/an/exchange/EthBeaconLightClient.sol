@@ -130,6 +130,7 @@ contract EthBeaconLightClient {
     uint16 constant ERR_WRONG_FORK_SLOT    = 255;
     uint16 constant ERR_FORK_SLOT_UNSET    = 256;
     uint16 constant ERR_ALREADY_INITIALIZED = 257;
+    uint16 constant ERR_WRONG_CODE_SALT     = 258;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -333,6 +334,9 @@ contract EthBeaconLightClient {
         require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
         require(_ownerPubkey == 0, ERR_ALREADY_INITIALIZED);
         require(pubkey != 0, ERR_ZERO_PUBKEY);
+        optional(TvmCell) salt = abi.codeSalt(tvm.code());
+        require(salt.hasValue() && abi.decode(salt.get(), uint256) == l1ChainId,
+                ERR_WRONG_CODE_SALT);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
         _currentCommittee = bootstrapCommittee;

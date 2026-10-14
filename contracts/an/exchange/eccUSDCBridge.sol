@@ -122,8 +122,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // `_trustedL1Bridge` it is not carried through `onCodeUpgrade`.
     TvmCell _lightClientCode;
 
-    // Derived from `_lightClientCode` when it is installed, never set directly.
-    address _lightClient;
+    // Light client per source-chain id, derived from `_lightClientCode`
+    // salted with that id, never set directly. One code, one client per
+    // chain, each at its own address.
+    mapping(uint256 => address) _lightClients;
 
     // EIP-155 chain id the deployed light client follows, written by
     // `deployLightClient`. 0 until that call. `disableOwnerAnchors` may
@@ -600,17 +602,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         }
     }
 
-    /// @notice Installs the code the light client is deployed from. Changing it
-    ///         moves the light-client address, so an already deployed one stops
-    ///         being recognized as a writer.
+    /// @notice Installs the code every light client is deployed from. Changing
+    ///         it moves every light-client address, so already deployed ones
+    ///         stop being recognized as writers.
     function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         _lightClientCode = code;
-        _lightClient = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
-            contr: EthBeaconLightClient,
-            varInit: {},
-            code: code
-        })));
     }
 
     /// @notice Deploys the beacon light client. The bridge is the only account
@@ -624,28 +621,32 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint256 bootstrapCommittee,
         uint64  bootstrapPeriod
     ) public onlyOwnerPubkey(_ownerPubkey) accept {
-        require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
+        require(_lightClientCode.depth() != 0, ERR_LIGHT_CLIENT_UNSET);
+        require(l1ChainId != 0, ERR_NOT_LIGHT_CLIENT_CHAIN);
         ensureBalance();
+        TvmCell stateInit = abi.encodeStateInit({
+            contr: EthBeaconLightClient,
+            varInit: {},
+            code: abi.setCodeSalt(_lightClientCode, abi.encode(l1ChainId))
+        });
+        address lightClient = address.makeAddrStd(0, tvm.hash(stateInit));
         new EthBeaconLightClient{
-            stateInit: abi.encodeStateInit({
-                contr: EthBeaconLightClient,
-                varInit: {},
-                code: _lightClientCode
-            }),
+            stateInit: stateInit,
             value: 10 vmshell,
             flag: 1
         }();
-        EthBeaconLightClient(_lightClient).initialize{
+        EthBeaconLightClient(lightClient).initialize{
             value: 2 vmshell,
             flag: 1
         }(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod);
+        _lightClients[l1ChainId] = lightClient;
         _lightClientL1ChainId = l1ChainId;
     }
 
-    /// @notice Address the light client is deployed at, derived from its code
-    ///         (0 while no code is installed).
-    function getLightClient() external view returns (address) {
-        return _lightClient;
+    /// @notice Address the light client for `l1ChainId` is deployed at
+    ///         (0 until `deployLightClient` ran for that chain).
+    function getLightClient(uint256 l1ChainId) external view returns (address) {
+        return _lightClients[l1ChainId];
     }
 
     /// @notice Permanently gives up the owner's ability to admit anchors
@@ -654,9 +655,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         deposit allowlist) keep `setAcceptedBlockHash`. This is the
     ///         call that turns the L1 trust assumption from "the owner key"
     ///         into "a proof of Ethereum finality".
-    /// @dev One-way, with no re-enable. Requires `setLightClientCode` (so
-    ///      `_lightClient` is non-zero) and a stored L1 id from
-    ///      `deployLightClient`. It does not check that the light-client
+    /// @dev One-way, with no re-enable. Requires a light client deployed for
+    ///      that chain by `deployLightClient`. It does not check that the light-client
     ///      account is Active; flipping after `setLightClientCode` and
     ///      before a successful deploy leaves that L1 with no writer until
     ///      `deployLightClient` runs again. Idempotent.
@@ -679,9 +679,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     function _disableOwnerAnchors(uint256 chainId) private {
-        require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
-        require(_lightClientL1ChainId != 0, ERR_LIGHT_CLIENT_UNSET);
-        require(chainId == _lightClientL1ChainId, ERR_NOT_LIGHT_CLIENT_CHAIN);
+        require(chainId != 0, ERR_NOT_LIGHT_CLIENT_CHAIN);
+        require(_lightClients[chainId] != address(0), ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         _ownerAnchorsDisabled[chainId] = true;
     }
@@ -703,7 +702,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         chain. Authorized solely by being the light client this bridge
     ///         — no human asserts canonicality, the proof does.
     function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
-        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
+        require(_lightClients[chainId] != address(0) && msg.sender == _lightClients[chainId],
+                ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
         _acceptedBlockHash[chainId][blockHash] = true;
@@ -711,7 +711,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Drops a hash the light client has aged out of its window.
     function forgetBlockHashFromLightClient(uint256 chainId, uint256 blockHash) public {
-        require(_lightClient != address(0) && msg.sender == _lightClient, ERR_INVALID_SENDER);
+        require(_lightClients[chainId] != address(0) && msg.sender == _lightClients[chainId],
+                ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
         delete _acceptedBlockHash[chainId][blockHash];
@@ -727,7 +728,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         Other chain ids keep the owner writer; query
     ///         `isOwnerAnchorsEnabled(chainId)` for those.
     function getAnchorConfig() external view returns (address lightClient, bool ownerAnchorsEnabled) {
-        return (_lightClient, _lightClientL1ChainId == 0 || !_ownerAnchorsDisabled[_lightClientL1ChainId]);
+        return (_lightClients[_lightClientL1ChainId],
+                _lightClientL1ChainId == 0 || !_ownerAnchorsDisabled[_lightClientL1ChainId]);
     }
 
     /// @notice Whether the owner may still admit anchors for `chainId`.
@@ -968,7 +970,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
         _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
-        // `_lightClient`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
+        // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
         // on for every chain until the owner re-deploys the light client
         // and flips L1 again.

@@ -1129,11 +1129,14 @@ assigns it when the release is tagged.
   drift. Before, it was retried silently and without limit, so a reorg that
   dropped the relayer's transaction never surfaced.
 - **The shellnet L2 bridge was redeployed.** `AckiNackiBridge` is now
-  `0x00e4b69d25f4526c768552ea217dad85e4b7963a` (Sepolia block 11909355),
-  seeded at shellnet seq_no 23855104 (`BRIDGE_BOOTSTRAP_SEQNO`) with
-  `GENESIS_LAST_BK_SET_UPDATE_SEQNO=23853771`;
+  `0xb733a57c393214254506bde7e9950a1b57e06fb4` (Sepolia block 11910592),
+  seeded at shellnet seq_no 23887872 (`BRIDGE_BOOTSTRAP_SEQNO`) with
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO=23886566`;
   `crates/bridge-prover-libraries/L2_config/env` now points at it instead
-  of `0x9f993772af91d9b1e61d210eaae903eb43655498` (Deploy #8). A relayer
+  of `0x8d9190666128ab897c5abd8c107239a197e08467`. The bridges deployed for
+  the BK-rotation tests in between, `0x9f993772af91d9b1e61d210eaae903eb43655498`
+  (Deploy #8) and `0x00e4b69d25f4526c768552ea217dad85e4b7963a`, are retired
+  too. A relayer
   set up for the old address needs the new `BRIDGE_ADDRESS` and
   `BRIDGE_DEPLOY_BLOCK`, and a cold start with its `relayer-state.json`
   and `state/*.json` archived first (§3.5 of

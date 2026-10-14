@@ -24,6 +24,11 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- Pause is two owner switches, not one. `AckiNackiBridge.pause()` on Ethereum
+  does not call `eccUSDCBridge.setPaused`, and `setPaused` does not call
+  `pause()`; Circle can still freeze USDC itself. An incident that must stop
+  both directions of the bridge has to flip both switches —
+  `contracts/an/README.md`, `docs/EVM-custody-and-accounting.md`.
 - The prover and circuit docs describe BK-set rotation as it works:
   `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
   and its opened L2/L3 leaves, no circuit of its own. Gone are the

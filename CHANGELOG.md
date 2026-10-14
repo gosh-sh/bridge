@@ -37,6 +37,28 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **One light-client code, one client per source chain, addressed by code
+  salt.** `setLightClientCode` now only stores the code. The address is
+  derived when `deployLightClient` runs, from that code salted with
+  `abi.encode(l1ChainId)`, and kept in `_lightClients[l1ChainId]`; the same
+  code therefore yields a different account for every chain, and
+  `getLightClient` takes the chain id. `initialize` on the client decodes its
+  own salt and refuses a chain id that does not match it
+  (`ERR_WRONG_CODE_SALT`, 258), so an address is bound to the chain it
+  follows. `acceptBlockHashFromLightClient` and
+  `forgetBlockHashFromLightClient` check the sender against the client of the
+  chain in the call, so a client for one chain can no longer admit or forget
+  hashes for another; `disableOwnerAnchors` requires a client deployed for
+  that chain rather than a stored id.
+
+  Code hashes: `eccUSDCBridge` `dcdbabbe…`, `EthBeaconLightClient`
+  `9ade0834…`. A light client deployed before this change came from unsalted
+  code, so the bridge derives a different address for its chain and stops
+  recognizing it as a writer — redeploy it with `deployLightClient`. Nothing
+  is lost: the client holds no funds, and its head and committee come back
+  from the chain it follows. The bundled bridge ABIs under `crates/` are
+  updated for the new `getLightClient` signature.
+
 - **The light client's constructor takes no arguments; the bridge initializes
   it with a second call.** `EthBeaconLightClient` gains
   `initialize(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod)`, which

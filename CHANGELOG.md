@@ -77,8 +77,8 @@ assigns it when the release is tagged.
   `update_period_*.json`; that file may be the beacon `/updates`
   array). Prove the hand-off on n14 and `submit-rotate`.   `--dry-run`
   pins the Gloas slot from the beacon spec (the mock submitter has no
-  contract). A live daemon reads `getGloasForkSlot` before every prove
-  and uses that slot: a published `GLOAS_FORK_EPOCH` that the contract
+  contract).   A live daemon reads `getGloasForkSlot` before a prove (not on an
+  idle tick) and uses that slot: a published `GLOAS_FORK_EPOCH` that the contract
   does not hold would otherwise spend a full step prove and come back
   255. A daemon that started while Gloas was still `FAR_FUTURE_EPOCH`
   re-fetches `/eth/v1/config/spec` until the beacon publishes a real
@@ -1045,8 +1045,10 @@ assigns it when the release is tagged.
   not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
   `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
   `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
-  unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
-  default, `--no-rotate` opts out). The owner flip is **off** by default: only
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`). Rotate
+  of the committed fixture is on by default; a live period jump is
+  `RotateRequired` — prove on n14 and `submit-rotate`. `--no-rotate`
+  opts out of even the fixture path. The owner flip is **off** by default: only
   `daemon --flip-owner` runs it, after the first accepted `submitUpdate`, and
   the daemon refuses to start with the flag unless `AN_USDC_BRIDGE` and
   `AN_USDC_ABI_PATH` are set. The flip reads `getAnchorConfig()` on the bridge
@@ -1422,8 +1424,9 @@ assigns it when the release is tagged.
 - `prove-one` and the daemon keep the prover transcript
   (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
   stderr tail on failure instead of a bare exit status.
-- `eth-lc-relayer daemon` rotates on a period jump by default (`submitRotate`);
-  `--no-rotate` is the shadow/laptop opt-out. The owner flip runs only with
+- `eth-lc-relayer daemon` auto-rotates only the committed fixture period;
+  a live period jump is `RotateRequired` (prove on n14 and
+  `submit-rotate`). `--no-rotate` is the shadow/laptop opt-out. The owner flip runs only with
   `--flip-owner` (see the `eth-lc-relayer` entry under Added). With
   `ETH_RPC_URL` each accepted `submitUpdate` then `rePushAnchor`s
   the checkpoint and runs `link_headers` locally. On-chain `submitAncestry`

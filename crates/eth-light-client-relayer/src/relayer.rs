@@ -160,9 +160,6 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         self.cover_front_span().await;
         let mut update = self.source.fetch_finality().await?;
         self.guard_network(&update)?;
-        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
-            return Ok(outcome);
-        }
         if let Some(lag) = self.ws_lag(&update) {
             warn!(
                 lag_slots = lag,
@@ -211,6 +208,11 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
         }
 
+        // After Unchanged: an idle tick must not download the light-client
+        // account. Pin only when this tick will prove.
+        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+            return Ok(outcome);
+        }
         self.submit_step(update).await
     }
 
@@ -222,6 +224,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     ) -> Result<TickOutcome, RelayerError> {
         if !self.config.enable_rotate {
             if self.config.owner_hop {
+                let mut update = update;
+                if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+                    return Ok(outcome);
+                }
                 return self.owner_hop(update, from_period, to_period).await;
             }
             self.state.record_rotate_pending(to_period);
@@ -236,6 +242,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 from_period,
                 to_period,
             });
+        }
+        let mut update = update;
+        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+            return Ok(outcome);
         }
         let bundle = match self.prover.generate_rotate(to_period, update.chain).await {
             Ok(b) => b,
@@ -1111,6 +1121,38 @@ mod tests {
             } => assert_eq!(finalized_slot, 96),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// An idle tick must not download the light-client account. Pin only
+    /// when this tick will prove.
+    #[tokio::test]
+    async fn an_unchanged_tick_does_not_read_the_gloas_slot() {
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        let after_prove = mock.gloas_gets();
+        assert!(after_prove >= 1, "the first tick proves and must pin");
+        match r.tick().await.unwrap() {
+            TickOutcome::Unchanged {
+                ..
+            } => {},
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            mock.gloas_gets(),
+            after_prove,
+            "an unchanged tick must not call getGloasForkSlot"
+        );
     }
 
     #[tokio::test]

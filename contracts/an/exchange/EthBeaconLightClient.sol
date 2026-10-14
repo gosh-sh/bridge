@@ -317,7 +317,8 @@ contract EthBeaconLightClient {
     ///                                `setCommitteeCommitment`).
     /// @param bootstrapPeriod       — the sync-committee period `bootstrapCommittee`
     ///                                belongs to (recorded as-is on this owner
-    ///                                path; `submitRotate` derives its own).
+    ///                                path; `submitRotate` stores the period
+    ///                                the rotate proof carries).
     constructor(
         uint256 pubkey,
         uint256 l1ChainId,
@@ -723,8 +724,9 @@ contract EthBeaconLightClient {
     ///         leaving the rotate proof as the only committee-advance path.
     /// @param committeeCommitment — the period's sync-committee Poseidon commitment.
     /// @param period             — the period it belongs to, recorded as-is:
-    ///                             this is an owner path, and `submitRotate`
-    ///                             derives its own period from the head.
+    ///                             this is an owner path. `submitRotate`
+    ///                             stores the period the rotate proof carries
+    ///                             (`pi.period` = attested slot / 8192 + 1).
     function setCommitteeCommitment(uint256 committeeCommitment, uint64 period)
         public onlyOwnerPubkey accept
     {

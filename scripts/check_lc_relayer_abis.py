@@ -46,6 +46,7 @@ PAIRS = [
             "setCommitteeCommitment",
             "setGloasForkSlot",
             "getGloasForkSlot",
+            "getCommitteeState",
         ],
     ),
 ]

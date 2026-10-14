@@ -134,6 +134,7 @@ struct MockInner {
     rotate_script: std::collections::VecDeque<SubmitOutcome>,
     gloas_fork_slot: u64,
     gloas_fork_slot_set: bool,
+    gloas_gets: u32,
 }
 
 impl MockAnSubmitter {
@@ -158,6 +159,7 @@ impl MockAnSubmitter {
                 rotate_script: std::collections::VecDeque::new(),
                 gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
                 gloas_fork_slot_set: true,
+                gloas_gets: 0,
             }),
         }
     }
@@ -173,6 +175,10 @@ impl MockAnSubmitter {
     /// manual `submit-rotate` already landed.
     pub fn set_committee_period(&self, period: u64) {
         self.inner.lock().expect("poisoned").period = Some(period);
+    }
+
+    pub fn gloas_gets(&self) -> u32 {
+        self.inner.lock().expect("poisoned").gloas_gets
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -423,7 +429,8 @@ impl AnSubmitter for MockAnSubmitter {
     }
 
     async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
-        let inner = self.inner.lock().expect("poisoned");
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.gloas_gets += 1;
         Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
     }
 

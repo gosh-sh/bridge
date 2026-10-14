@@ -38,7 +38,7 @@ recipient through `confirmDeposit`.
 | State file backup | copy it every few minutes, with the keys | The file is replaced atomically (temp file, `fsync`, `rename`, in `RelayerState::save`), so a plain `cp` always reads a complete file. The copy is what keeps `parked_deposit_ids` if the host dies. |
 | `AN_DAPP_ID` | `0` | `eccUSDCBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
-| `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. If it is set too low the daemon only re-checks: finalized deposits are recognised by their voucher and are not proven again. |
+| `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not proven again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
 | `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks, so one broken deposit blocks the queue until someone intervenes (§3). |
 | `--backoff-initial-secs` / `-max-secs` / `-multiplier` | defaults 5 / 120 / 2 | A zero initial delay or a multiplier of 0 is rejected at start-up (`BackoffConfig::validate`); either would busy-loop. |
 | `DEPOSIT_RELAYER_METRICS_ADDR` | loopback or a monitoring-only interface | Prometheus `GET /metrics`; alerts in §7. |
@@ -191,7 +191,9 @@ the same binary, env file and AN keys, and keep the service disabled. To fail ov
    The lock does not reach across hosts.
 2. Copy the latest backup of `state.json` to the standby's `DEPOSIT_RELAYER_STATE`. If
    there is no backup, start without a file and set `START_DEPOSIT_ID` to the
-   primary's last `target_deposit_id`. If it is lower, the daemon only re-checks.
+   primary's last `target_deposit_id`. If it is lower, keep `FROM_BLOCK` at or
+   below that deposit — then the daemon only re-checks. A `FROM_BLOCK` above it
+   makes every tick fail (`EthLogSource::fetch` finds no log).
 3. Start the service and watch for `finalized` / `already_finalized` ticks.
 
 A one-off `finalize-one` by another operator while the daemon runs is safe: the slower

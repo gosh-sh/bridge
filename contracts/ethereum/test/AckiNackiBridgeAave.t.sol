@@ -402,15 +402,10 @@ contract AckiNackiBridgeAaveTest is Test {
         uint256 treasury = bridge.treasuryBalance();
         assertEq(backing, treasury + interest - lost);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.HarvestWouldBreakSolvency.selector, interest, backing, treasury
-            )
-        );
-        bridge.harvestYield(interest);
-
         uint256 surplus = interest - lost;
-        bridge.harvestYield(surplus);
+        // `harvestYield(accruedYield())` after a write-off pays only the
+        // surplus over treasury — the operator does not have to guess.
+        bridge.harvestYield(interest);
         assertEq(usdc.balanceOf(yieldSink), surplus);
         assertEq(usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance(), treasury);
 
@@ -420,6 +415,25 @@ contract AckiNackiBridgeAaveTest is Test {
             )
         );
         bridge.harvestYield(1);
+    }
+
+    /// @dev AAVE minted 1 wei less than the USDC it took. `accruedYield()`
+    ///      still reports the full interest; the solvency check used to
+    ///      revert `HarvestWouldBreakSolvency` for that 1 wei.
+    function test_harvestYield_accruedYieldSafeAfterAaveRounding() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        deal(address(usdc), address(bridge), usdc.balanceOf(address(bridge)) - 1);
+
+        uint256 interest = 500_000;
+        aUSDC.accrueYield(address(bridge), interest);
+        usdc.mint(address(pool), interest);
+        assertEq(bridge.accruedYield(), interest);
+
+        bridge.setYieldRecipient(yieldSink);
+        bridge.harvestYield(interest);
+        assertEq(usdc.balanceOf(yieldSink), interest - 1);
+        assertEq(usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance(), bridge.treasuryBalance());
     }
 
     function test_eth9_approveFalse_reverts() public {

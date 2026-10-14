@@ -1665,18 +1665,25 @@ contract AckiNackiBridge {
     ///         `yieldRecipient`. After `emergencyWithdrawAll` the surplus is
     ///         liquid USDC — this reverts `NoYield`; collect with
     ///         `skimExcessUsdc` (QC-A1-3).
-    /// @param amount Must be `<= accruedYield()` and non-zero, and must leave
-    ///        liquid USDC + aUSDC at or above `treasuryBalance`.
+    /// @param amount Must be `<= accruedYield()` and non-zero. Paid amount is
+    ///        also capped at liquid + aUSDC − `treasuryBalance`, so
+    ///        `harvestYield(accruedYield())` is safe after AAVE rounding or
+    ///        a write-off. Reverts `HarvestWouldBreakSolvency` when that
+    ///        surplus is zero.
     function harvestYield(uint256 amount) external onlyOwner nonReentrant {
         uint256 yield = accruedYield();
         if (yield == 0 || amount == 0 || amount > yield) revert NoYield();
 
-        // `accruedYield` compares aUSDC with the book only. After a loss the
-        // book can be written down below what users are owed, so check the
-        // harvest against `treasuryBalance` too.
+        // `accruedYield` compares aUSDC with the book only. AAVE may mint 1
+        // wei less than it took, and after a write-off the book can sit
+        // below what users are owed. Pay only the surplus over treasury.
         uint256 backing = usdc.balanceOf(address(this)) + aUsdcBalance();
-        if (backing < treasuryBalance + amount) {
+        uint256 maxSafe = backing > treasuryBalance ? backing - treasuryBalance : 0;
+        if (maxSafe == 0) {
             revert HarvestWouldBreakSolvency(amount, backing, treasuryBalance);
+        }
+        if (amount > maxSafe) {
+            amount = maxSafe;
         }
 
         uint256 before = usdc.balanceOf(address(this));

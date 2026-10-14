@@ -144,7 +144,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 warn!(
                     old_deployment = ?dropped.deployment,
                     old_last_processed_deposit_id = ?dropped.last_processed_deposit_id,
+                    old_scan_done_through_block = ?dropped.scan_done_through_block,
                     old_parked_deposit_ids = ?dropped.parked_deposit_ids,
+                    old_unprovable_deposit_ids = ?dropped.unprovable_deposit_ids,
                     start_deposit_id = config.start_deposit_id,
                     "--force-state: state.json belonged to another deployment; starting over",
                 );

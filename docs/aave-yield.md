@@ -30,13 +30,15 @@ reconciled against real assets, so a loss in AAVE does not shrink it — it surf
 
 | Yield is… | Command | Fails with |
 |---|---|---|
-| in AAVE | `harvestYield(amount)` (`:1287`) | `NoYield` if `amount` is 0 or above `accruedYield()`; `HarvestWouldBreakSolvency` if liquid + aUSDC − `amount` would fall below `treasuryBalance()` |
+| in AAVE | `harvestYield(amount)` (`:1287`) | `NoYield` if `amount` is 0 or above `accruedYield()`; pays at most liquid + aUSDC − `treasuryBalance()`; `HarvestWouldBreakSolvency` when that surplus is zero |
 | on the contract | `skimExcessUsdc(amount)` (`:1315`) | `NoExcessUsdc` if `excessUsdc() == 0` |
 
 Both send to `yieldRecipient`, never to the caller. `skimExcessUsdc` accepts `type(uint256).max` for
-"all of it"; `harvestYield` does not — pass the exact amount, at most `accruedYield()`.
-Neither can touch user principal — neither function appears in the accounting of what we supplied to
-AAVE, and that absence is the guarantee.
+"all of it"; `harvestYield` does not — pass `accruedYield()`. The call pays at most the surplus of
+liquid USDC + aUSDC over `treasuryBalance()`, so that amount is safe after AAVE rounding (a 1-wei
+short mint) and after a write-off. It reverts `HarvestWouldBreakSolvency` only when that surplus is
+zero. Neither can touch user principal — neither function appears in the accounting of what we
+supplied to AAVE, and that absence is the guarantee.
 
 **The two unwind paths leave yield in different places.** This is the part that gets misread:
 
@@ -85,15 +87,15 @@ aUSDC on the bridge (reserve cap / pause). The whole call reverts, so `aaveEnabl
 is what would have made leftover shares look like yield, which is why the revert exists.
 
 ```
-withdrawFromAave(amount)   # repeat until aUsdcBalance() is 0 or AAVE stops paying
+withdrawFromAave(max)      # booked principal only; aUSDC will not reach 0 if interest accrued
 setAaveEnabled(false)
-harvestYield(amount)       # only if accruedYield() > 0 — yield still in AAVE
+harvestYield(accruedYield())  # leftover yield still in AAVE; do not repeat withdrawFromAave
 skimExcessUsdc(max)        # liquid surplus, if any
 ```
 
-`withdrawFromAave` pulls booked principal only, so leftover yield stays in AAVE and
-`harvestYield` is the right collector for that pocket. `skimExcessUsdc` is for whatever
-already sits on the contract.
+`withdrawFromAave` is capped at `_backedPrincipal()` (`min(suppliedPrincipal, aUsdcBalance)`), so
+repeating it cannot drain interest and ends in `InvalidAmount`. `harvestYield` is the collector for
+that pocket. `skimExcessUsdc` is for whatever already sits on the contract.
 
 **If AAVE lost money: `suppliedPrincipal() > aUsdcBalance()`.** A haircut, or the shortfall that
 `emergencyWithdrawAll` keeps on the books when AAVE redeemed less than it was given. The position is

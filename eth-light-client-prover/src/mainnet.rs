@@ -64,18 +64,6 @@ impl RotateFixture {
         branch_for_either(&self.branch, gindex, SYNC_COMMITTEE_BRANCH_LEN)
             .map_err(|e| anyhow::anyhow!("next_sync_committee_branch: {e}"))
     }
-
-    /// The branch in the layout `RotateGlueWitness` takes, read at the index of
-    /// the attested state's fork.
-    pub fn glue_branch(&self, gloas_fork_slot: u64) -> anyhow::Result<Vec<[u8; 32]>> {
-        let gindex = if is_gloas(self.attested_slot, gloas_fork_slot) {
-            NEXT_SYNC_COMMITTEE_GINDEX_GLOAS
-        } else {
-            NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA
-        };
-        branch_for_either(&self.branch, gindex, SYNC_COMMITTEE_BRANCH_LEN)
-            .map_err(|e| anyhow::anyhow!("next_sync_committee_branch: {e}"))
-    }
 }
 
 fn hexv(s: &str) -> anyhow::Result<Vec<u8>> {

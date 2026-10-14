@@ -858,8 +858,6 @@ assigns it when the release is tagged.
 
 ### Added
 
-### Breaking Changes
-
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -867,10 +865,11 @@ assigns it when the release is tagged.
   is accepted, so `accruedYield()` reflects interest again (ETH-28).
   Available only on a bridge deployed from this release.
 
-- `harvestYield(amount)` reverts
-  `HarvestWouldBreakSolvency(amount, backing, treasuryBalance)` when liquid
-  USDC + aUSDC minus `amount` would fall below `treasuryBalance`. After a
-  loss, interest goes to users first.
+- `harvestYield(amount)` pays at most the surplus of liquid USDC + aUSDC
+  over `treasuryBalance`, so `harvestYield(accruedYield())` is safe after
+  AAVE rounding and after a write-off. It reverts
+  `HarvestWouldBreakSolvency(amount, backing, treasuryBalance)` only when
+  that surplus is zero. After a loss, interest goes to users first.
 
 - **`deposit-relayer daemon` no longer proves deposits that are already
   finalized on Acki Nacki.** Before proving, it computes the address of the
@@ -910,8 +909,11 @@ assigns it when the release is tagged.
   `--dry-run`; it used to refuse to start. Zero is the right value:
   `eccUSDCBridge` pins every deposit's dappId to 0 and ignores the proof's
   dappId inputs. `scripts/ursus/deposit-relayer.env.example` now ships
-  `AN_DAPP_ID=0`; an existing env with another value keeps working, the value
-  just has no effect on-chain (QC-OFF-09).
+  `AN_DAPP_ID=0`. The value has no effect on-chain, but it is part of the
+  `state.json` deployment binding (`chain_id`, EVM bridge, `AN_DAPP_ID`).
+  Changing it on an existing file fails start-up with a deployment
+  mismatch; `--force-state` then discards the cursor, parked ids and
+  unprovable ids even though no bridge changed (QC-OFF-09).
 
 - `deposit-relayer daemon` no longer re-scans Ethereum logs while it retries a
   deposit that AN keeps refusing. Once a deposit is found, retries reuse it
@@ -941,15 +943,22 @@ assigns it when the release is tagged.
   file was stamped for another deployment (chain id, EVM bridge address or
   `AN_DAPP_ID`). It used to re-stamp the binding and keep the old
   `last_processed_deposit_id`, `scan_done_through_block` and
-  `parked_deposit_ids`. After a bridge redeploy, that silently skipped the
-  new bridge's deposits up to the old cursor. The daemon now logs the discarded
-  values (record the parked ids before you run it) and begins at
-  `--start-deposit-id`. If the AN bridge did not change, the replay is cheap:
-  deposits that are already finalized are recognised by their voucher and are
-  not proven again (QC-OFF-08).
+  `parked_deposit_ids` and `unprovable_deposit_ids`. After a bridge redeploy,
+  that silently skipped the new bridge's deposits up to the old cursor. The
+  daemon now logs every discarded field (record parked and unprovable ids
+  before you run it) and begins at `--start-deposit-id`. If the AN bridge did
+  not change, the replay is cheap: deposits that are already finalized are
+  recognised by their voucher and are not proven again (QC-OFF-08).
 
-The AN GraphQL endpoint must serve `blockchain { message(hash) }`, which
-  shellnet does (bridge-audit#27).
+- **`deposit-relayer daemon` judges `finalizeDeposit` by the voucher deploy
+  and `confirmDeposit`, not by the bridge transaction's exit code.** The
+  bridge exits 0 as soon as the proof verifies; the mint happens later. A
+  failed voucher or confirm is Rejected; a duplicate (voucher exit 51) is
+  AlreadyFinalized; hops not yet visible — including a GraphQL
+  `transaction: null` that parses as no children — are Pending and are
+  polled until `--confirm-timeout`. The AN GraphQL endpoint must serve
+  `blockchain { message(hash) }`, which shellnet does (QC-OFF-06 /
+  bridge-audit#27).
 
 - Gloas (ePBS) support in the beacon light client. `eth-lc-relayer` reads
   `GLOAS_FORK_EPOCH` from the beacon node's `/eth/v1/config/spec` and hands

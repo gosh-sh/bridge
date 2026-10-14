@@ -605,9 +605,10 @@ async fn settle_finalize<C: IAckiNacki>(
 ) -> Result<Option<SubmitOutcome>, AckiNackiError> {
     let children = client.get_internal_children(root).await?;
     let Some(voucher) = children.first() else {
-        return Ok(Some(SubmitOutcome::Rejected {
-            reason: "finalizeDeposit exited 0 but sent no DepositVoucher deploy".to_string(),
-        }));
+        // Empty is also "transaction not indexed yet": GraphQL returns
+        // `transaction: null` and `parse_internal_children` yields `[]`.
+        // Rejecting here parked successful deposits after a laggy index.
+        return Ok(None);
     };
     let Some(deploy) = &voucher.outcome else {
         return Ok(None);
@@ -629,12 +630,7 @@ async fn settle_finalize<C: IAckiNacki>(
 
     let confirms = client.get_internal_children(&deploy.tx_hash).await?;
     let Some(confirm) = confirms.first() else {
-        return Ok(Some(SubmitOutcome::Rejected {
-            reason: format!(
-                "voucher {} deployed but sent no confirmDeposit",
-                voucher.dst
-            ),
-        }));
+        return Ok(None);
     };
     match &confirm.outcome {
         None => Ok(None),
@@ -914,6 +910,34 @@ mod tests {
                 } => assert!(reason.contains("not both visible"), "{reason}"),
                 other => panic!("expected Pending for {voucher:?}/{confirm:?}, got {other:?}"),
             }
+        }
+    }
+
+    /// GraphQL `transaction: null` parses as no children. That is lag, not
+    /// a missing voucher — keep polling until the confirm timeout.
+    #[tokio::test]
+    async fn unindexed_root_leaves_the_deposit_pending() {
+        use acki_nacki_interface::MockAckiNacki;
+
+        let client = Arc::new(MockAckiNacki::new());
+        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![]);
+        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let cfg = AnSubmitConfig {
+            from: format!(
+                "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ),
+            token_bridge: format!("{dapp}::{dapp}"),
+            confirm_timeout_secs: 1,
+        };
+        let sub = AnInterfaceSubmitter::new(client, cfg);
+        let ev = event(3);
+        match sub.submit(&ev, &bundle(&ev)).await.unwrap() {
+            SubmitOutcome::Pending {
+                reason,
+            } => {
+                assert!(reason.contains("not both visible"), "{reason}");
+            },
+            other => panic!("expected Pending, got {other:?}"),
         }
     }
 

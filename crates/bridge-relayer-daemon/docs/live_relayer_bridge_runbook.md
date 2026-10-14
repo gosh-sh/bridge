@@ -48,8 +48,9 @@ A rotation takes ~3.5–5 min to prove. Shellnet rotates in bursts: on
 `verifyBlock` for a block at or below `N = storedLastBkSetUpdateSeqNo` must be
 signed by the previous set. Rotations that land before the boundary of the next
 unverified bundle are applied back-to-back. One rotation past that boundary is
-applied too; any further one waits until the bundle is verified (on-chain
-`PrevSlotStillOwedForBundle` — the daemon defers it itself). The prover keeps
+applied too; the daemon picks up the next one only after the bundle is
+verified, so it never runs into the contract's `PrevSlotStillOwedForBundle`
+check. The prover keeps
 proving bundles with the outgoing set until the next bundle it proves lies
 past `N`.
 
@@ -102,6 +103,10 @@ itself; K=21 and K=22 come from their own ceremony files.
   Fallback key (~3–5 min). Keep at least 20 GB free: a key write that runs
   out of space leaves a truncated `.pk` that breaks every later proof
   ([details](daemon_live_performance.md)).
+- Wallet: a dedicated Sepolia EOA (`cast wallet new`; never reuse a key that
+  holds real funds), funded from a faucet without a mainnet-balance gate —
+  https://sepolia-faucet.pk910.de/ (proof of work) or
+  https://cloud.google.com/application/web3/faucet/ethereum/sepolia.
 - A deploy reserves ~0.6 ETH at the script's 2 gwei gas price (the actual
   cost is lower); each `verifyBlock` or `applyBkSetUpdate` costs
   ~0.001–0.003 ETH.
@@ -290,12 +295,10 @@ INFO bridge_relayer_daemon::aggregated_source: aggregated_source: wrap+aggregate
 INFO bridge_relayer_daemon::relayer: bk-set update applied seq_no=<N> tx=Some(0x…)
 ```
 
-A rotation that has to wait for the next bundle (it is retried every tick and
-applied after the next `verified`):
-
-```
-INFO bridge_relayer_daemon::relayer: deferring applyBkSetUpdate until verifyBlock covers the next owed bundle boundary rotation=<N> last_bk=<N_prev> last_seen=<L> next_owed_boundary=<B>
-```
+A rotation that has to wait for the next bundle — a second rotation past the
+boundary of a bundle not yet verified — is not picked up at all until that
+bundle is verified, and nothing is logged for it meanwhile. It is proven and
+applied right after the next `verified`.
 
 Between boundaries every tick finds no bundle yet; after 16 such ticks the log
 repeats `block source still has no data; relayer is stalled` — expected until

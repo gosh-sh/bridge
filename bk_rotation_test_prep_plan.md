@@ -5,7 +5,7 @@
 Sergey Hor's shellnet activation instruction
 [`turn_on_bk_sets_on_shellnet.md`](turn_on_bk_sets_on_shellnet.md) and the
 existing bundle-only runbook
-[`crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md`](crates/bridge-relayer-daemon/docs/live_relayer_bridge_verifyBlock_runbook.md).
+[`crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md`](crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md).
 
 ---
 
@@ -241,7 +241,7 @@ Sergey's doc (`turn_on_bk_sets_on_shellnet.md`) is a correct procedure; this is 
 Est. 1 session.
 - [ ] Add targeted test to `relayer.rs` exercising Phase 1 defer-rule and `Stuck` branch end-to-end (currently covered by unit tests, but no integration test with a mock BkUpdateSource that returns two rotations with no gap). Not required for live test but closes an audit hole.
 - [ ] Run `probe_bk_updates` against shellnet right now (rotation OFF). Expect "none pending" — baselines the diagnostic path.
-- [ ] Capture current `getConfig` + `getDetails` output from `0:7777…7777`. Save under `/Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/shellnet_bk_root_pre_rotation.json`.
+- [ ] Capture current `getConfig` + `getDetails` output from `0:7777…7777`. Save under `shellnet_bk_root_pre_rotation.json` at the repository root.
 - [ ] Dry-read `bk_set.shellnet.json` SHA/Poseidon vs on-chain `storedBkSetCommitment` on current Deploy #7 bridge — must match before we accept any rotation sequence.
 
 ### Phase 2 — Documentation (write before Sergey toggles)
@@ -285,6 +285,6 @@ Est. 1 session + ~4h L1 run + ~6h L2 run.
 - `CHANGELOG.md` `## [Unreleased]` entry (per AGENTS.md).
 
 **Will be written (Phase 1):**
-- `/Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/shellnet_bk_root_pre_rotation.json` (snapshot, not committed).
+- `shellnet_bk_root_pre_rotation.json` at the repository root (snapshot, not committed).
 
 **No code changes to the relayer are planned.** Code is ready per §3.

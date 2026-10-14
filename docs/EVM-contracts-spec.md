@@ -7,6 +7,14 @@ citations below are re-anchored to that commit — the two-line-number-bases spl
 previous revisions of this document carried is gone. When editing the spec, either
 re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
 
+> **Drift note, 2026-10-14** (branch `feature/bk-set-updates-flow-test-fixes`): the bundle-aware
+> `applyBkSetUpdate` rule, `bundleStride` and `genesisLastBkSetUpdateSeqNo` grew
+> `src/AckiNackiBridge.sol`, and no re-anchoring pass has been run since. Its citations below
+> point too early by a few lines near the top (`storedBkSetCommitment` `:176` → `:182`), about 30
+> around `HistoryWindow` (`:259` → `:289`) and about 110–130 from `applyBkSetUpdate` on (`:898` →
+> `:1010`, `_frToLeBytes` `:1017` → `:1143`). §4's `InvalidBundleStride` citation and §7.3's
+> operator rule were corrected in this edit.
+
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
 
@@ -199,7 +207,7 @@ constructor(
 `bundleStride`. `bundleStride` is the prover's bundle width in block seq-nos (W·P = 1024 for L1,
 W² = 16384 for L2) and is immutable after construction; `applyBkSetUpdate` divides by it to detect
 whether a second rotation would cross an unverified bundle boundary. When the verifier triple is
-wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:598`); when the triple is
+wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:713`); when the triple is
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
@@ -444,9 +452,9 @@ proof was baked against (`block_seq_no > last_seen`). That is the layer
 cursor at prove time, typically the previous key block — not
 `storedLastSeenBlockSeqNo` after `verifyBlock(N)`, which equals N and
 makes the circuit unsatisfiable. `storedLastBkSetUpdateSeqNo` selects
-the set and gates the next rotation. Relayers apply a rotation as soon
-as the previous one is covered; `verifyBlock` accepts the outgoing set
-for `seqNo <= N`. AN must announce a rotation at bundle target N
+the set and gates the next rotation. A rotation can be applied before
+the layer cursor reaches N; `verifyBlock` accepts the outgoing set for
+`seqNo <= N`. AN must announce a rotation at bundle target N
 *before* that bundle is proven: a proof that already baked
 `last_seen = N` cannot satisfy `attestationLastSeen < N`. Rotation
 bursts within one bundle window apply in order with no on-chain stall;
@@ -675,7 +683,9 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 | `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
-| `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned**. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
+| `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned** at L1; under L2 anchoring it must be a multiple of `BUNDLE_STRIDE` = 16384. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
+| `GENESIS_LAST_BK_SET_UPDATE_SEQNO` | same | Initial `storedLastBkSetUpdateSeqNo`: the last `bkSetUpdates.height` at or below the seed, printed by `compute_bridge_anchors`. `vm.envOr` default `0` (a chain without rotations). |
+| `BUNDLE_STRIDE` | same | Immutable `bundleStride`: the relayer's bundle width in block seq-nos, 16384 (W²) for L2. `vm.envUint` with no default, so the deploy fails without it; `0` with the verifier triple wired reverts `InvalidBundleStride`. Must equal the relayer's anchor-level stride — nothing checks this, and a mismatch stalls rotations until a redeploy. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |

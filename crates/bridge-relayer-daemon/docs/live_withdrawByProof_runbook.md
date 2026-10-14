@@ -11,7 +11,7 @@ modes we have actually hit.
 `prover_state.json` → Circuit 4 SHPLONK aggregate → `withdrawByProof`.
 **Assumes** the bundle-only path (Circuits 1A + 2 via `daemon-live`) is
 already running or has just been launched — that lane is covered in
-[`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md), which
+[`live_relayer_bridge_runbook.md`](./live_relayer_bridge_runbook.md), which
 this doc extends.
 
 > **Honest scope — single-operator, single-burn-in-flight (relayer
@@ -100,7 +100,7 @@ this doc extends.
 ## Quick resume checklist (returning mid-flow)
 
 ```bash
-cd /Users/alinat/HALO2_TVM_EXPERIMENTS/bridge/crates/bridge-prover-libraries
+cd crates/bridge-prover-libraries     # from the repository root
 
 # Source the per-mode env — pick L1_config or L2_config depending on the
 # lane you were running. 
@@ -191,7 +191,7 @@ Per-deploy addresses (`BRIDGE_ADDRESS`, the four aggregator verifiers,
 `scripts/deploy_bridge_bundle.sh` on each deploy), not from this doc.
 Deployer / relayer / owner wallet is the single shared shellnet burner
 `0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` documented in
-[`shellnet.common`](../../bridge-prover-libraries/shellnet.common) or smth that you deployed yourself (see instruction how to deploy and fund your wallet here [`live_relayer_bridge_verifyBlock_runbook.md`](./live_relayer_bridge_verifyBlock_runbook.md)).
+[`shellnet.common`](../../bridge-prover-libraries/shellnet.common) or smth that you deployed yourself (see how to fund a wallet and deploy in [`live_relayer_bridge_runbook.md`](./live_relayer_bridge_runbook.md#2-prerequisites)).
 
 Two values are chain-invariant on shellnet and worth naming here:
 
@@ -380,7 +380,7 @@ Circle's faucet, never via direct `mint`.
 
 ### Step 3 — Cold-start the bundle daemon
 
-Full procedure in the [verifyBlock runbook Case 1](./live_relayer_bridge_verifyBlock_runbook.md#case-1--first-time-bootstrap-from-a-fresh-deploy).
+Full procedure in the [relayer runbook Case 1](./live_relayer_bridge_runbook.md#3-case-1--fresh-deploy-and-cold-start).
 Verify the log line `seed_policy=Explicit(<seed_seqno>)` appears within
 30s. The daemon needs a running proof pipeline before the burn fires —
 otherwise the covering bundle waits on daemon startup instead of on
@@ -484,8 +484,8 @@ submit for real.
 > - **`WALL_MIN ≥ 120`** — the enricher will time out. Either
 >   (a) wait, kill after timeout, and rerun with `--replay-latest`
 >   once the covering bundle lands; or (b) redeploy at fresh chain head
->   per verifyBlock runbook
->   [Case 6](./live_relayer_bridge_verifyBlock_runbook.md#case-6--state-loss--re-bootstrap-from-mid-chain).
+>   per the relayer runbook
+>   [Case 1](./live_relayer_bridge_runbook.md#3-case-1--fresh-deploy-and-cold-start).
 >   For **regular repeated** withdrawals switch to L2 (Case 2) — L2 is
 >   supercritical, so daemon lag is bounded by construction.
 
@@ -554,15 +554,13 @@ the level-swaps below; those are the only L2-specific deviations.
 
 ### Step 1 — Deploy and bootstrap `daemon-live` under L2
 
-Follow the verifyBlock runbook
-[Case 1](./live_relayer_bridge_verifyBlock_runbook.md#case-1--first-time-bootstrap-from-a-fresh-deploy)
-(unified L1/L2 first-time bootstrap) and
-[Case 7](./live_relayer_bridge_verifyBlock_runbook.md#case-7--l2-anchored-cold-start---anchor-level-2)
-(L2-anchored cold-start specifics) end-to-end, substituting `LEVEL=2` /
-`BRIDGE_CONFIG_DIR=./L2_config` / `BRIDGE_ANCHOR_LEVEL=2` throughout.
-Those cases cover `compute_bridge_anchors --level 2`, the T₂-boundary
-retry rule, `deploy_bridge_bundle.sh LEVEL=2`, and `daemon-live
---anchor-level 2` startup with drift-refusal diagnostics.
+Follow the relayer runbook
+[Case 1](./live_relayer_bridge_runbook.md#3-case-1--fresh-deploy-and-cold-start)
+end-to-end; it is written for L2 (`LEVEL=2`,
+`BRIDGE_CONFIG_DIR=./L2_config`, `BRIDGE_ANCHOR_LEVEL=2`) and covers
+building the BK set for the seed, `deploy_bridge_bundle.sh LEVEL=2`
+(which runs `compute_bridge_anchors --level 2`), and `daemon-live`
+startup with its refusal diagnostics.
 
 **Two withdraw-side sanity checks worth doing inline:**
 

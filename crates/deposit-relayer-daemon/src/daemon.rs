@@ -185,11 +185,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     {
         let mut summary = DaemonRunSummary::default();
         let mut current_delay = backoff.initial;
-        if let Some(id) = self.state().last_processed_deposit_id {
+        if let Some(id) = self.state().last_finalized_deposit_id {
             if let Some(m) = &metrics {
                 m.last_finalized_deposit_id.fetch_max(id, Ordering::Relaxed);
             }
-            mark_finalized_high_water(id);
+            seed_finalized_id(id);
         }
         if let Some(m) = &metrics {
             m.current_backoff_secs
@@ -390,14 +390,19 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
 
 /// Gauges that move when a deposit is (found) finalized on AN.
 /// The id gauge is a high-water mark: a later retry of a lower id must not
-/// move it backwards.
+/// move it backwards. The timestamp is only set on a real outcome, never
+/// at startup, so a restart does not hide a stalled relayer.
 fn mark_finalized_high_water(deposit_id: u64) {
+    seed_finalized_id(deposit_id);
+    gauge!(prom::LAST_FINALIZED_TIMESTAMP_SECONDS).set(prom::unix_now());
+}
+
+fn seed_finalized_id(deposit_id: u64) {
     static HIGH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let high = HIGH
         .fetch_max(deposit_id, std::sync::atomic::Ordering::Relaxed)
         .max(deposit_id);
     gauge!(prom::LAST_FINALIZED_DEPOSIT_ID).set(high as f64);
-    gauge!(prom::LAST_FINALIZED_TIMESTAMP_SECONDS).set(prom::unix_now());
 }
 
 // ──────────────────────────────────────────────────────────────────────

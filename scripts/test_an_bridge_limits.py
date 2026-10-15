@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -111,11 +112,13 @@ class BridgeLimits(unittest.TestCase):
                                   "usdcWallet": "0:" + "00" * 32})
         self.seed(TVL - TRANSFER)
 
-    def call(self, function, args=None, *, source=None, signed=False, expect=0, ecc=None, shell=1_000_000_000):
+    def call(self, function, args=None, *, source=None, signed=False, expect=0, ecc=None, shell=1_000_000_000, header=None):
         extra = []
         if source:
             extra = ["--internal", "--message-source", source,
                      "--message-value", str(shell)]
+        if header is not None:
+            extra += ["--abi-header", json.dumps(header)]
         if signed:
             extra += ["--sign", str(self.key_file)]
         if ecc is not None:
@@ -132,12 +135,12 @@ class BridgeLimits(unittest.TestCase):
         self.call("testSeed", {"voucherCode": self.voucher_code,
                                "minted": str(minted), "burned": str(burned)})
 
-    def finalize(self, deposit_id, amount=TRANSFER, expect=0, block=123, chain=1):
+    def finalize(self, deposit_id, amount=TRANSFER, expect=0, block=123, chain=1, header=None):
         pi = [deposit_id, 1, amount, 42, chain, 0, 0, 0, 43, 0, block, 0]
         return self.call("finalizeDeposit", {
             "proof": "", "publicInputs": b"".join(
                 n.to_bytes(32, "little") for n in pi).hex()
-        }, expect=expect)
+        }, expect=expect, header=header)
 
     def limits(self, chain=1):
         return self.call("getDepositLimits", {"chainId": str(chain), "l1Bridge": "42"})["response"]
@@ -220,6 +223,16 @@ class BridgeLimits(unittest.TestCase):
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, expect=209)
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True)
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True, expect=239)
+
+    def test_reordered_unsigned_finalizations_reject_old_time_and_accept_fresh_time(self):
+        self.seed(0)
+        now = int(time.time() * 1000)
+        expires = int(time.time()) + 600
+        self.finalize(0, header={"time": now, "expire": expires})
+        self.finalize(1, expect=52, header={"time": now - 1, "expire": expires})
+        # Do not insert another external call between the timestamped sends.
+        self.finalize(1, header={"time": now + 1, "expire": expires})
+        self.assertEqual(int(self.limits()["reserved"]), 2 * TRANSFER)
 
     def test_pending_callbacks_cannot_overbook_tvl(self):
         self.finalize(0)

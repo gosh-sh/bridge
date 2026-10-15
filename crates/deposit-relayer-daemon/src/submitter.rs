@@ -392,6 +392,10 @@ const EXIT_MINT_CAP_EXCEEDED: i32 = 229;
 /// after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
+        52 => Some(
+            "REPLAY_PROTECTION — another external message advanced the timestamp; retry with a \
+             newly encoded message",
+        ),
         233 => Some(
             "ERR_TRANSFER_TOO_LARGE — retain the deposit proof; an already-paid legacy deposit \
              needs the owner's setLegacyDepositCount cutoff; do not deposit again",

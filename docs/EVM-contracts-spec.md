@@ -130,28 +130,31 @@ split (≥ 2/3 quorum vs > 1/2 split).
 
 ### 4.1 Mutable state (declaration order)
 
-Slots below are the output of `forge inspect AckiNackiBridge storage-layout`; re-run it before
-relying on them for a storage-level migration.
+Slots below were regenerated with `forge inspect AckiNackiBridge storage-layout`
+against `5b503b0` on 2026-10-15. The new `legacyWithdrawals` mapping occupies
+slot 0 and shifts subsequent mutable state by one slot. Re-run the command
+before relying on these offsets for storage readers or migration tooling.
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
-| 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
-| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
-| 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
-| 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
-| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
-| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
-| 7 | 20 | `paused` | `bool` | 149 | `pause`, `unpause` |
-| 8 | 0 | `_reentrancyStatus` | `uint256` | 154 | `nonReentrant` |
-| 9 | 0 | `storedBkSetCommitment` | `uint256` | 182 | constructor, `applyBkSetUpdate` |
-| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
-| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
-| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
-| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 269 | `withdrawByProof` |
-| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 288 | `_appendLayer` |
+| 0 | 0 | `legacyWithdrawals` | `mapping(bytes32 ⇒ bool)` | 64 | `setLegacyWithdrawal`, `withdrawByProof` |
+| 1 | 0 | `depositCounter` | `uint256` | 118 | `deposit` |
+| 2 | 0 | `treasuryBalance` | `uint256` | 122 | `deposit` (+), `withdrawByProof` (−) |
+| 3 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 128 | constructor only |
+| 3 | 20 | `aaveEnabled` | `bool` | 144 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
+| 4 | 0 | `suppliedPrincipal` | `uint256` | 147 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
+| 5 | 0 | `liquidReserveBps` | `uint256` | 152 | constructor (`1_000`), `setLiquidReserveBps` |
+| 6 | 0 | `owner` | `address` | 155 | constructor, `acceptOwnership` |
+| 7 | 0 | `pendingOwner` | `address` | 158 | `transferOwnership`, `acceptOwnership` |
+| 8 | 0 | `yieldRecipient` | `address` | 161 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
+| 8 | 20 | `paused` | `bool` | 167 | `pause`, `unpause` |
+| 9 | 0 | `_reentrancyStatus` | `uint256` | 172 | `nonReentrant` |
+| 10 | 0 | `storedBkSetCommitment` | `uint256` | 200 | constructor, `applyBkSetUpdate` |
+| 11 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 207 | `applyBkSetUpdate` |
+| 11 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 211 | constructor, `verifyBlock` |
+| 12 | 0 | `storedPrevBkSetCommitment` | `uint256` | 218 | `applyBkSetUpdate` |
+| 13 | 0 | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 287 | `withdrawByProof` |
+| 14 | 0 | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 306 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).

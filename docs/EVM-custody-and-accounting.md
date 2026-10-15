@@ -4,13 +4,17 @@
 Line references are to that file. Written by reading the source; earlier revisions of this material
 were carried over from the ETH-deposit era and are superseded by it.*
 
+**2026-10-15 update:** deposit/withdrawal limit rules below are checked against
+`5b503b0`. References in those sections use the current source; other historical
+line references retain the base above.
+
 What the bridge owes, what it actually holds, and the exact order of operations on each path. This
 page exists because those three are easy to conflate, and the labelled rules below are what auditors
 and operators quote at each other during an incident.
 
 **Scope: the EVM side only** — `AckiNackiBridge.sol` and the AAVE position it holds. The
-Acki Nacki side keeps its own accounting in `USDCBridge`, a TVM contract in another repository; only
-its ABI is bundled here, so nothing on this page describes it. Where the two meet is the deposit
+Acki Nacki side keeps per-network accounting in `contracts/an/exchange/eccUSDCBridge.sol`;
+this page describes the EVM book only. Where the two meet is the deposit
 proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 
 ## The book number is not a balance
@@ -48,9 +52,11 @@ Fuzz-tested as `testFuzz_totalAssetsCoversTreasury`
 
 ## Deposit — the external call comes first, deliberately
 
-Actual order in `deposit` (`:578-593`):
+Actual order in `deposit` (`:732-755`):
 
 1. **Checks** — `amount != 0` (`InvalidAmount`), `amount <= MAX_DEPOSIT_AMOUNT` (`DepositTooLarge`),
+   `amount <= MAX_TRANSFER_AMOUNT` (`TransferTooLarge`),
+   `treasuryBalance + amount <= MAX_TVL` (`TvlCapExceeded`), then
    `anAccount != 0` (`InvalidAnAccount`).
 2. **Interaction** — `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return reverts
    `TransferFromFailed` (`:585-587`).
@@ -66,8 +72,10 @@ State it this way rather than as "checks-effects-interactions", which this path 
 
 Two consequences worth naming:
 
-* `MAX_DEPOSIT_AMOUNT` is `type(uint64).max` (`:61`) — sized so the amount fits the AN mint path,
-  not as a TVL cap. The function is **not** `payable`; the amount is a parameter.
+* `MAX_TRANSFER_AMOUNT` is 50 USDC and `MAX_TVL` is 10,000 USDC (`:58-61`).
+  `MAX_DEPOSIT_AMOUNT = type(uint64).max` remains a width guard checked first;
+  values above it still report `DepositTooLarge`. The function is **not**
+  `payable`; the amount is a parameter.
 * The booked figure is the **requested** `amount`, not an observed balance delta. Exact for USDC;
   it would understate custody for a fee-on-transfer token, which is why the token is fixed at
   construction.
@@ -77,15 +85,18 @@ Two consequences worth naming:
 `withdrawByProof` runs the other way round, and the source says so in its own comments
 (`:1192`, `:1196`):
 
-1. Verify the Circuit-4 proof; reject with `WithdrawalProofRejected` (`:1185`).
+1. Verify the Circuit-4 proof; reject with `WithdrawalProofRejected` (`:1435-1440`).
 2. **Solvency check before touching AAVE**: `pub.amount > treasuryBalance` reverts
-   `WithdrawTreasuryShortfall` (`:1188-1190`).
-3. **Effects** — mark the nullifier used, `treasuryBalance -= pub.amount` (`:1193-1194`).
-4. **Interactions** — pull the shortfall from AAVE only if liquid USDC is short (`:1199-1205`), then
-   `usdc.transfer(recipient, amount)` (`:1208`).
+   `WithdrawTreasuryShortfall` (`:1443-1445`).
+3. **Transfer cap**: `pub.amount > MAX_TRANSFER_AMOUNT` reverts `TransferTooLarge`
+   unless the owner authorized this exact nullifier in `legacyWithdrawals` (`:1446-1448`).
+   Authorization never bypasses proof, identity, destination, recipient or replay checks.
+4. **Effects** — mark the nullifier used, consume its legacy authorization and
+   decrement `treasuryBalance` (`:1451-1453`).
+5. **Interactions** — pull any liquid-USDC shortfall from AAVE and transfer the
+   payout to its recipient (`:1455-1474`).
 
-A revert anywhere in step 4 rolls back steps 2–3 atomically, so a failed AAVE pull cannot leave the
-book decremented.
+A revert in step 5 rolls back the accounting and consumed authorization atomically.
 
 The two paths differ on purpose: a deposit must confirm receipt before crediting, a payout must
 debit before paying.
@@ -104,12 +115,12 @@ Quote these, not their earlier versions.
 | | Rule |
 |---|---|
 | **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
-| **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`. The function is not `payable`. |
+| **DEP-2** | In order: `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`; `amount > 50 * USDC_UNIT` reverts `TransferTooLarge`; `treasuryBalance + amount > 10000 * USDC_UNIT` reverts `TvlCapExceeded`. The function is not `payable`. |
 | **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. No other function in the contract increases `treasuryBalance`, and only `withdrawByProof` decreases it. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |
 | **CUST-1** | `treasuryBalance` is book value, not a balance. The solvency invariant is `totalAssets() ≥ treasuryBalance`, never equality. |
 | **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. None of them writes `treasuryBalance`. |
-| **CEI-1** | `withdrawByProof` mutates state before every external call. `deposit` does not, and does not need to — see above. A blanket "all external interactions follow CEI" claim is false for this contract. |
+| **CEI-1** | `withdrawByProof` verifies the proof before mutating state, then updates payout accounting before AAVE and USDC interactions. `deposit` receives tokens before updating accounting. A blanket "all external interactions follow CEI" claim is false for this contract. |
 
 ## What earlier text got wrong
 

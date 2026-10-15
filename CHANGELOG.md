@@ -17,17 +17,6 @@ assigns it when the release is tagged.
 ### Added
 ### Changed
 ### Fixed
-
-- Withdrawal preflight checks AN and EVM transfer limits before a fresh burn;
-  resumes of recorded burns skip this new-amount guard. `TransferTooLarge` is
-  named by the CLI and parked by `daemon-withdraw` / `daemon-bridge` so later
-  payouts continue. After authorizing a historical nullifier, keep its proof
-  file and restart the daemon to retry without another burn.
-- Deposit relayer diagnostics name AN 233, 234 and 239 and explain legacy
-  settlement, capacity retry or historical network initialization. New spending
-  against AN 1.7.1, which enforces caps without a capacity getter, is refused.
-- The deposit form limits each deposit to 50 USDC before approval or submission.
-
 ### Removed
 -->
 
@@ -131,6 +120,13 @@ assigns it when the release is tagged.
   If a funded capped deployment must pay an old burn, authorize only that
   historical event's nullifier, then submit its unchanged proof. Never permit
   unknown future nullifiers or redirect custody assumptions between contracts.
+
+  Ethereum also exposes `legacyWithdrawals(nullifier)` and emits
+  `LegacyWithdrawalConfigured(nullifier, allowed)` when an authorization changes.
+  Its mapping occupies storage slot 0, shifting all subsequent mutable state
+  by one slot: `depositCounter` is now slot 1 and `treasuryBalance` slot 2.
+  Update direct storage readers and migration tooling to the new layout; this
+  contract is deployed afresh rather than upgraded in place.
 
   **Initialize historical network balances after an aggregate-only upgrade.**
   The bridge stays paused and `getDepositLimits` returns 239 until the owner
@@ -1636,6 +1632,21 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- Withdrawal preflight checks AN and EVM transfer limits before a fresh burn;
+  resumes of recorded burns skip this new-amount guard. `TransferTooLarge` is
+  named by the CLI and parked by `daemon-withdraw` / `daemon-bridge` so later
+  payouts continue. After authorizing a historical nullifier, keep its proof
+  file and restart the daemon to retry without another burn.
+- Deposit relayer diagnostics name AN 233, 234 and 239 and explain legacy
+  settlement, capacity retry or historical network initialization. New spending
+  against AN 1.7.1, which enforces caps without a capacity getter, is refused.
+- The deposit form limits each deposit to 50 USDC before approval or submission.
+- Deposit finalization reuses the same encoded external message after an
+  uncertain send while its header remains valid. A confirmed replay refusal
+  (52), expiry or a definitive outcome permits a new header, retaining the same
+  proof and public inputs. Replay/expiry outcomes remain uncertain until
+  voucher/event checks resolve them; a new L1 deposit is never submitted.
 
 - **A zero owner key can no longer be installed in `eccUSDCBridge` or
   `EthBeaconLightClient`.** Both gate their admin calls on

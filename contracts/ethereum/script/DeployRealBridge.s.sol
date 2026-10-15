@@ -261,7 +261,9 @@ contract DeployRealBridge is Script {
                     layerHashesVerifier: ILayerHashesMovementVerifier(address(0)),
                     genesisBkSetCommitment: 0,
                     genesisPrevMaxLevelLayerHash: 0,
-                    genesisLastSeenBlockSeqNo: 0
+                    genesisLastSeenBlockSeqNo: 0,
+                    bundleStride: 0,
+                    genesisLastBkSetUpdateSeqNo: 0
                 });
         }
 
@@ -269,13 +271,24 @@ contract DeployRealBridge is Script {
         ShplonkDeployLib.VerifyBlockVerifiers memory v =
             ShplonkDeployLib.deployVerifyBlockProductionFromEnv();
 
+        // `BUNDLE_STRIDE` MUST match the daemon's `AnchorMode::stride()`
+        // for this deployment — `W·P` for L1, `W²` for L2. Required for
+        // production verifyBlock wiring (reverts with `InvalidBundleStride`
+        // otherwise); the matching `deploy_bridge_bundle.sh` exports it
+        // from `LEVEL`.
         vb = AckiNackiBridge.VerifyBlockConfig({
             primaryVerifier: v.primary,
             fallbackVerifier: v.fallback_,
             layerHashesVerifier: v.layerHashes,
             genesisBkSetCommitment: genesisBkSetCommitment,
             genesisPrevMaxLevelLayerHash: genesisPrevAnchor,
-            genesisLastSeenBlockSeqNo: uint64(vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0)))
+            genesisLastSeenBlockSeqNo: uint64(
+                vm.envOr("GENESIS_LAST_SEEN_BLOCK_SEQNO", uint256(0))
+            ),
+            bundleStride: uint64(vm.envUint("BUNDLE_STRIDE")),
+            genesisLastBkSetUpdateSeqNo: uint64(
+                vm.envOr("GENESIS_LAST_BK_SET_UPDATE_SEQNO", uint256(0))
+            )
         });
         console.log("  PrimaryAggregatorVerifier:", address(v.primary));
         console.log("  FallbackAggregatorVerifier:", address(v.fallback_));

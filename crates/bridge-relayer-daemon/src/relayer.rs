@@ -3,9 +3,10 @@
 //! [`Relayer::tick`] is the testable single-step entry point. It:
 //!
 //! 1. reads the on-chain anchors (+ Check B vs last observed);
-//! 2. **Phase 1** — applies a pending BK-set update (`applyBkSetUpdate`) when
-//!    the previous rotation is already covered. The first rotation (and any
-//!    later one after the cursor passed the last N) may land ahead of the layer
+//! 2. **Phase 1** — applies a pending BK-set update (`applyBkSetUpdate`) unless
+//!    the previous one still owes an unverified bundle boundary (the contract's
+//!    bundle-aware `PrevSlotStillOwedForBundle` gate): rotations before the
+//!    next boundary, and the first one past it, may land ahead of the layer
 //!    cursor. The live prover is acked only once the next bundle target is
 //!    above N, so it keeps the outgoing set for blocks `<= N`.
 //! 3. **Phase 2** — fetches the next block and submits `verifyBlock` against
@@ -23,28 +24,34 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    bridge::{BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState, SubmitOutcome},
+    bridge::{
+        is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome, BridgeClient, BridgeOnChainState,
+        SubmitOutcome,
+    },
     error::RelayerError,
-    history_consistency::{check_chain_monotonicity, check_history_consistency},
+    history_consistency::{check_chain_monotonicity_with_stride, check_history_consistency},
     source::{BkUpdateSource, BlockSource},
     state::RelayerState,
 };
 
-/// Max seq_no gap another actor may advance between ticks before we halt
-/// (Check B). Expressed in bundles rather than seq_nos, and derived from the
-/// stride rather than restating it: the literal 2048 was written when `P` was 4
-/// and the stride 512, so it meant "four bundles". `P` is 8 now
-/// (`THINNING_FACTOR_P`), the stride 1024, and the same literal had quietly
-/// become two — a sibling relayer that advanced three bundles between our ticks
-/// would halt this one with `HistoryDrift` for no reason.
+/// How far `last_seen` may move between the remembered snapshot and a fresh
+/// read before Check B halts, in bundles of the configured stride
+/// ([`Relayer::max_forward_gap`]). Bundles, not seq_nos: the literal 2048 was
+/// written when `P` was 4 and the stride 512, so it meant "four bundles"; at
+/// `P` = 8 the same literal had quietly become two, and a sibling relayer that
+/// advanced three bundles between our ticks halted this one with
+/// `HistoryDrift` for no reason.
 const MAX_FORWARD_GAP_BUNDLES: u64 = 4;
-const MAX_FORWARD_GAP: u64 = MAX_FORWARD_GAP_BUNDLES * BUNDLE_STRIDE_L1;
 
-// The invariant behind the number, checked at build time rather than in a test:
-// tolerate at least the three-bundle advance from the finding. A future `P`
-// bump cannot silently narrow this, and re-hardcoding the literal breaks the
-// build.
-const _: () = assert!(MAX_FORWARD_GAP >= 3 * BUNDLE_STRIDE_L1);
+// The invariant behind the number, checked at build time rather than in a
+// test: tolerate at least the three-bundle advance from that finding.
+const _: () = assert!(MAX_FORWARD_GAP_BUNDLES >= 3);
+
+/// How long a `_rewound` Check B signal may last before it is reported as
+/// drift. Read-after-write lag on a load-balanced RPC lasts seconds; a chain
+/// still below our last confirmed write after ten minutes is a reorg that
+/// dropped the transaction, or a different chain behind the URL.
+const MAX_REWIND_WAIT: Duration = Duration::from_secs(600);
 
 /// Static configuration for one relayer instance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,8 +61,10 @@ pub struct RelayerConfig {
     /// Interval between attempts in [`Relayer::run_loop`].
     #[serde(default = "default_poll_interval")]
     pub poll_interval: Duration,
-    /// After this many consecutive failures on the same target seqNo,
-    /// emit a warning. Doesn't stop the relayer; operator-visible only.
+    /// Polls with no new bundle, per L1-sized stride, before the wait is
+    /// logged as a stall ([`Relayer::polls_before_stall_warn`]). Before
+    /// that, every `max_attempts_warn`-th poll logs the wait at INFO.
+    /// Doesn't stop the relayer; operator-visible only.
     #[serde(default = "default_max_attempts_warn")]
     pub max_attempts_warn: u32,
     /// After this many consecutive rejections on the same target seqNo,
@@ -66,10 +75,11 @@ pub struct RelayerConfig {
     /// applyBkSetUpdate lane (`bk_update_attempts_since_progress`).
     #[serde(default = "default_max_attempts_abort")]
     pub max_attempts_abort: u32,
-    /// Bundle stride the live prover uses (`AnchorMode::stride()`).
-    /// The deferred-ack rule must use this, not a hardcoded L1 1024:
-    /// in L2 the next target is 16384.
-    #[serde(default = "default_bundle_stride")]
+    /// The bridge's bundle stride: 1024 at L1, 16384 at L2. Check B's
+    /// forward bound, the rotation gate, the deferred ack and the stall
+    /// warning all scale with it, so it has no default; each command takes
+    /// it from the bridge or the anchor level (see
+    /// [`crate::bundle_stride`]).
     pub bundle_stride: u64,
 }
 
@@ -82,20 +92,18 @@ fn default_max_attempts_warn() -> u32 {
 fn default_max_attempts_abort() -> u32 {
     3
 }
-fn default_bundle_stride() -> u64 {
-    BUNDLE_STRIDE_L1
-}
 
 impl RelayerConfig {
-    /// Sensible defaults: 2-second polling, warn after 16 attempts on
-    /// the same block, hard-abort after 3.
-    pub fn new(state_path: impl Into<PathBuf>) -> Self {
+    /// Defaults for the rest: 2-second polling, warn after 16 polls without
+    /// a bundle per L1-sized stride, hard-abort after 3 rejected
+    /// submissions.
+    pub fn new(state_path: impl Into<PathBuf>, bundle_stride: u64) -> Self {
         Self {
             state_path: state_path.into(),
             poll_interval: default_poll_interval(),
             max_attempts_warn: default_max_attempts_warn(),
             max_attempts_abort: default_max_attempts_abort(),
-            bundle_stride: default_bundle_stride(),
+            bundle_stride,
         }
     }
 }
@@ -135,6 +143,11 @@ pub struct Relayer<S: BlockSource, U: BkUpdateSource, B: BridgeClient> {
     bk_update_source: Arc<U>,
     bridge: Arc<B>,
     state: RelayerState,
+    /// When the current run of `_rewound` Check B signals began; `None`
+    /// while Check B passes.
+    rewound_since: Option<std::time::Instant>,
+    /// See [`MAX_REWIND_WAIT`]; [`Relayer::with_max_rewind_wait`] overrides.
+    max_rewind_wait: Duration,
 }
 
 impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
@@ -153,7 +166,35 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             bk_update_source,
             bridge,
             state,
+            rewound_since: None,
+            max_rewind_wait: MAX_REWIND_WAIT,
         })
+    }
+
+    /// How long a `_rewound` Check B signal is retried as read-after-write
+    /// lag before it is reported as drift. Defaults to [`MAX_REWIND_WAIT`].
+    pub fn with_max_rewind_wait(mut self, wait: Duration) -> Self {
+        self.max_rewind_wait = wait;
+        self
+    }
+
+    /// Check B's bound on how far `last_seen` may move between two snapshots:
+    /// [`MAX_FORWARD_GAP_BUNDLES`] bundles of the configured stride (4096
+    /// seq_nos at L1, 65536 at L2). A sibling relayer, or our own
+    /// `verifyBlock` whose receipt we never read, moves it one bundle at a
+    /// time. The rotation cursor has no such bound (see
+    /// [`check_chain_monotonicity_with_stride`]).
+    pub fn max_forward_gap(&self) -> u64 {
+        MAX_FORWARD_GAP_BUNDLES * self.config.bundle_stride.max(1)
+    }
+
+    /// Polls with no new bundle before the wait is reported as a stall:
+    /// `max_attempts_warn` per L1-sized stride, so 16 at L1 and 256 at L2.
+    /// At L2 the next bundle is ~90 minutes of chain time away, and an
+    /// ordinary wait between bundles must not read as a stall.
+    pub fn polls_before_stall_warn(&self) -> u64 {
+        let strides = (self.config.bundle_stride / BUNDLE_STRIDE_L1).max(1);
+        u64::from(self.config.max_attempts_warn).saturating_mul(strides)
     }
 
     /// Read-only access to the persisted state (useful for tests + the
@@ -181,15 +222,56 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
     /// `tick()` twice in a row when the second call's data isn't
     /// available returns `NotYetAvailable` rather than re-submitting.
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
-        let on_chain = self.bridge.read_state().await?;
+        let on_chain = self.bridge.read_state_pinned().await?;
 
-        // Check B — chain monotonicity vs last observed snapshot.
+        // Check B — chain monotonicity vs last observed snapshot, with the
+        // contract's own rotation gate and a forward-gap bound sized to the
+        // bundle stride. A `_rewound` drift against our remembered snapshot
+        // (populated by a receipt-pinned `read_state_at(receipt.block_number)`
+        // after our own last successful submit) is almost always
+        // read-after-write staleness on the load-balanced public RPC, so it is
+        // retried as `NotYetAvailable`. The reads are at `latest`, not at a
+        // finalized block, so a rewind can also be a reorg that dropped our
+        // transaction: one that lasts `max_rewind_wait` is reported as drift.
+        // Jumps / orphan commitments / contract-impossible rotations are
+        // reported at once — a stale backend serves an older snapshot, not a
+        // different timeline.
         if let Some(remembered) = &self.state.last_observed_on_chain {
-            if let Err(drift) = check_chain_monotonicity(remembered, &on_chain, MAX_FORWARD_GAP) {
+            if let Err(drift) = check_chain_monotonicity_with_stride(
+                remembered,
+                &on_chain,
+                self.max_forward_gap(),
+                self.config.bundle_stride,
+            ) {
+                if drift.is_transient_rpc_lag() {
+                    let since = *self
+                        .rewound_since
+                        .get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() < self.max_rewind_wait {
+                        warn!(
+                            ?drift,
+                            "transient RPC read-after-write lag — will retry next tick"
+                        );
+                        return Ok(TickOutcome::NotYetAvailable {
+                            target_seq_no: remembered.last_seen_block_seq_no.saturating_add(1),
+                        });
+                    }
+                    error!(
+                        ?drift,
+                        for_secs = since.elapsed().as_secs(),
+                        "chain still below our last confirmed write — not RPC lag (a reorg that \
+                         dropped our transaction?)"
+                    );
+                    return Err(RelayerError::other(format!(
+                        "chain drift: {drift} (for {} s)",
+                        since.elapsed().as_secs()
+                    )));
+                }
                 error!(?drift, "chain monotonicity drift — halting");
                 return Err(RelayerError::other(format!("chain drift: {drift}")));
             }
         }
+        self.rewound_since = None;
 
         if let Some(local_last) = self.state.last_processed_seqno {
             if local_last > on_chain.last_seen_block_seq_no {
@@ -201,36 +283,32 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             }
         }
 
-        // ── Phase 1: apply a rotation when the previous one is already
-        // covered. `applyBkSetUpdate` keeps one outgoing set, so a second
-        // rotation while `lastBk > lastSeen` reverts. The first rotation
-        // (and any later one after the cursor passed the last N) may
-        // land ahead of the layer cursor — `verifyBlock` accepts the
-        // previous commitment for `seqNo <= N`. Defer only the
-        // previous-uncovered case; do not abort the tick.
+        // ── Phase 1: apply a rotation when overwriting
+        // `storedPrevBkSetCommitment` will not strand an unverified bundle
+        // boundary. The contract's `PrevSlotStillOwedForBundle` gate looks
+        // only at the previous N: it reverts while the next bundle boundary
+        // after the cursor is at or below that N. Rotations therefore apply
+        // back-to-back (AN emits bursts of rotations between bundles on
+        // shellnet) until one lands at or past that boundary; the next one
+        // waits until `verifyBlock` reaches the last boundary at or below
+        // it. No permanent stall: `verifyBlock` keeps advancing the cursor,
+        // so a waiting rotation is applied on a later tick.
         let bk_target = on_chain.last_bk_set_update_seq_no.saturating_add(1);
         if let Some(upd) = self.bk_update_source.fetch_bk_update(bk_target).await? {
-            if on_chain.last_bk_set_update_seq_no > on_chain.last_seen_block_seq_no {
+            let prev_slot_still_owed = on_chain.last_bk_set_update_seq_no != 0
+                && !Self::prover_rotation_may_ack(&on_chain, self.config.bundle_stride);
+            if prev_slot_still_owed {
                 let next = Self::next_bundle_boundary(
                     on_chain.last_seen_block_seq_no,
                     self.config.bundle_stride,
                 );
-                if upd.block_seq_no < next {
-                    return Err(RelayerError::Stuck {
-                        seq_no: upd.block_seq_no,
-                        attempts: 0,
-                        reason: format!(
-                            "two rotations with no bundle target in [{}, {}]: next target {} is \
-                             after N2; verifyBlock cannot move and this stall is permanent",
-                            on_chain.last_bk_set_update_seq_no, upd.block_seq_no, next
-                        ),
-                    });
-                }
                 info!(
                     rotation = upd.block_seq_no,
                     last_bk = on_chain.last_bk_set_update_seq_no,
                     last_seen = on_chain.last_seen_block_seq_no,
-                    "deferring applyBkSetUpdate until verifyBlock covers the previous rotation",
+                    next_owed_boundary = next,
+                    "deferring applyBkSetUpdate until verifyBlock covers the next owed bundle \
+                     boundary",
                 );
             } else if upd.old_commitment_l2 != on_chain.bk_set_commitment {
                 self.state.record_bk_update_attempt(upd.block_seq_no);
@@ -274,10 +352,33 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                     },
                     BkSetUpdateSubmitOutcome::Reverted {
                         reason,
+                    } if is_unconfirmed_submit_failure(&reason) => {
+                        // The RPC refused or lost the request, or the receipt
+                        // never came: the rotation may have landed. The next
+                        // tick re-reads the chain (Check B accepts a landed
+                        // rotation, and Phase 2 acks the prover for it).
+                        warn!(
+                            seq_no = upd.block_seq_no,
+                            reason = %reason,
+                            "bk-set update not confirmed — RPC failure, not counted toward the \
+                             abort threshold",
+                        );
+                        return Ok(TickOutcome::BkUpdateReverted {
+                            seq_no: upd.block_seq_no,
+                            reason,
+                        });
+                    },
+                    BkSetUpdateSubmitOutcome::Reverted {
+                        reason,
                     } => {
-                        // Keep pending so next tick retries the same update.
+                        // Keep pending so next tick retries the same update,
+                        // with its proof aggregated again: the contract saw
+                        // this one and refused it.
                         self.state.record_bk_update_attempt(upd.block_seq_no);
                         self.persist_state()?;
+                        self.bk_update_source
+                            .discard_rejected_bk_update_proof(upd.block_seq_no)
+                            .await;
                         warn!(
                             seq_no = upd.block_seq_no,
                             reason = %reason,
@@ -309,14 +410,22 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         let block = match self.source.fetch(target).await? {
             Some(b) => b,
             None => {
-                self.state.record_attempt(target);
+                // Waiting for the next bundle is the normal state between
+                // bundles: a poll, not an attempt. Say so at INFO every
+                // `max_attempts_warn` polls; warn only once the wait runs
+                // well past a bundle interval.
+                self.state.record_poll(target);
                 self.persist_state()?;
-                if self.state.attempts_since_progress >= self.config.max_attempts_warn {
+                let polls = self.state.polls_since_progress;
+                if u64::from(polls) >= self.polls_before_stall_warn() {
                     warn!(
                         seqno = target,
-                        attempts = self.state.attempts_since_progress,
-                        "block source still has no data; relayer is stalled",
+                        polls,
+                        "no new bundle for much longer than a bundle interval; check the prover \
+                         and the chain",
                     );
+                } else if polls.is_multiple_of(self.config.max_attempts_warn) {
+                    info!(seqno = target, polls, "waiting for the next bundle");
                 }
                 return Ok(TickOutcome::NotYetAvailable {
                     target_seq_no: target,
@@ -394,9 +503,29 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             },
             SubmitOutcome::Reverted {
                 reason,
+            } if is_unconfirmed_submit_failure(&reason) => {
+                // The RPC refused or lost the request, or the receipt never
+                // came: the transaction may have landed. The next tick
+                // re-reads the chain.
+                warn!(
+                    seq_no = target,
+                    reason = %reason,
+                    "verifyBlock not confirmed — RPC failure, not counted toward the abort \
+                     threshold",
+                );
+                Ok(TickOutcome::BridgeReverted {
+                    target_seq_no: target,
+                    reason,
+                })
+            },
+            SubmitOutcome::Reverted {
+                reason,
             } => {
                 self.state.record_attempt(target);
                 self.persist_state()?;
+                // The contract saw this proof and refused it: the retry
+                // aggregates it again.
+                self.source.discard_rejected_proof(seq_no).await;
                 warn!(
                     seq_no = target,
                     attempts = self.state.attempts_since_progress,
@@ -622,7 +751,8 @@ mod tests {
         assert_eq!(bridge.accepted_count(), 0);
         assert_eq!(relayer.state().last_processed_seqno, None);
         assert_eq!(relayer.state().last_attempt_seqno, Some(1));
-        assert_eq!(relayer.state().attempts_since_progress, 1);
+        assert_eq!(relayer.state().polls_since_progress, 1);
+        assert_eq!(relayer.state().attempts_since_progress, 0);
 
         source.insert(block(1, U256::ZERO));
         match relayer.tick().await.unwrap() {
@@ -1036,15 +1166,24 @@ mod tests {
 
     #[tokio::test]
     async fn tick_keeps_pending_n2_when_acking_already_applied_n1() {
+        // N1 lives in the second bundle window and the layer cursor has
+        // not covered the first boundary yet, so the relayer refuses to ack
+        // the prover for it. The test then acks by hand — standing in for a
+        // source that has already released N1, which the live source never
+        // does before that boundary is proven — so that N2 reaches the
+        // relayer's own deferral guard. The guard must log the deferral,
+        // fall through to the verifyBlock lane (no blocks available →
+        // NotYetAvailable) and leave N2 in the prover's pending slot.
         let dir = tempdir().unwrap();
-        let bridge = Arc::new(MockBridgeClient::with_genesis(
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
             U256::from(BK),
             U256::ZERO,
+            1024,
             Arc::new(|_| true),
         ));
         let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
-        prover.queue_update(dummy_update(500, 0));
-        let mut n2 = dummy_update(2000, 0);
+        prover.queue_update(dummy_update(1500, 0));
+        let mut n2 = dummy_update(3000, 0);
         n2.old_commitment_l2 = U256::from(0xC0FFEEu64);
         n2.new_commitment_l3 = U256::from(0xD00Du64);
         prover.queue_update(n2);
@@ -1059,12 +1198,21 @@ mod tests {
         assert!(matches!(
             r.tick().await.unwrap(),
             TickOutcome::BkUpdateApplied {
-                seq_no: 500,
+                seq_no: 1500,
                 ..
             }
         ));
+        // N1 sits in the second bundle window and `last_seen` is still
+        // 0, so the submit-site may_ack guard refuses the ack — the live
+        // prover must keep signing against the outgoing set until
+        // `verifyBlock` crosses the next owed boundary. Simulate the
+        // asynchronous ack that would eventually land once `verifyBlock`
+        // catches up (`maybe_ack_prover_rotation` on a later tick) so
+        // that `pending` is clear for N2 on the next tick.
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        prover.ack_last_bk_update(1500).await.unwrap();
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
-        // N2 is discovered and deferred (bundle 1024 sits between 500 and 2000).
+        // N2 is discovered and deferred (bundle 1024 is owed by N1).
         let out = r.tick().await.unwrap();
         assert!(
             matches!(out, TickOutcome::NotYetAvailable { .. }),
@@ -1076,22 +1224,35 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|u| u.block_seq_no == 2000),
+                .is_some_and(|u| u.block_seq_no == 3000),
             "N2 must stay pending"
         );
     }
 
     #[tokio::test]
-    async fn tick_fails_loud_when_n2_has_no_bundle_target_in_range() {
+    async fn tick_defers_second_rotation_when_prev_slot_still_owes_a_bundle() {
+        // Prev-slot-owed path (bundle-aware `PrevSlotStillOwedForBundle`):
+        // N1 lands past the first bundle boundary, so overwriting
+        // `storedPrevBkSetCommitment` with N2 would strand the
+        // seqno-≤-1024 boundary still signed by the outgoing set. The
+        // daemon must defer N2 (log, keep pending) rather than hard-abort
+        // — `verifyBlock` eventually crosses `nextOwedBoundary`, and the
+        // next tick retries the apply.
         let dir = tempdir().unwrap();
-        let bridge = Arc::new(MockBridgeClient::with_genesis(
+        // Mock must agree with the daemon on `bundle_stride` or the two
+        // sides disagree about whether the gate is tripped.
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
             U256::from(BK),
             U256::ZERO,
+            1024,
             Arc::new(|_| true),
         ));
         let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
-        prover.queue_update(dummy_update(500, 0));
-        let mut n2 = dummy_update(800, 0);
+        // N1 = 2000 lies in bundle window [1024, 2048); next owed
+        // boundary from `last_seen = 0` is 1024, which is `<= 2000`
+        // and trips the gate.
+        prover.queue_update(dummy_update(2000, 0));
+        let mut n2 = dummy_update(2500, 0);
         n2.old_commitment_l2 = U256::from(0xC0FFEEu64);
         n2.new_commitment_l3 = U256::from(0xD00Du64);
         prover.queue_update(n2);
@@ -1106,11 +1267,567 @@ mod tests {
         assert!(matches!(
             r.tick().await.unwrap(),
             TickOutcome::BkUpdateApplied {
+                seq_no: 2000,
+                ..
+            }
+        ));
+        // Second tick: the fake prover, like the live source, withholds N2
+        // while N1 is still unacked, so the relayer does not even see N2 and
+        // goes straight to the verifyBlock lane — no block is queued, so the
+        // tick finishes idle without error. The relayer's own deferral guard
+        // is reached in `tick_defers_a_rotation_the_contract_would_refuse`.
+        let outcome = r.tick().await.expect("deferral path must not error");
+        assert!(
+            !matches!(outcome, TickOutcome::BkUpdateApplied { .. }),
+            "N2 must not apply while prev slot is owed, got {outcome:?}"
+        );
+    }
+
+    /// Hands out the next queued rotation at or above the target and keeps
+    /// no pending slot — unlike the live source, which withholds a newer
+    /// rotation while one is still unacked. With it the relayer's own
+    /// deferral guard is reachable.
+    struct QueueBkUpdates {
+        queued: std::sync::Mutex<Vec<BkSetUpdateData>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BkUpdateSource for QueueBkUpdates {
+        async fn fetch_bk_update(
+            &self,
+            target: u64,
+        ) -> Result<Option<BkSetUpdateData>, RelayerError> {
+            Ok(self
+                .queued
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|u| u.block_seq_no >= target)
+                .cloned())
+        }
+
+        async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<(), RelayerError> {
+            Ok(())
+        }
+    }
+
+    /// [`MockBridgeClient`] with scripted failures. Each `verify_script` /
+    /// `bk_script` entry answers one submit, in order: `None` passes it
+    /// through, `Some((reason, landed))` returns `Reverted { reason }` —
+    /// after applying it on the mock first when `landed`, as when a
+    /// transaction lands but its receipt read fails. `rewound`, when set, is
+    /// what every read returns.
+    struct FlakyBridge {
+        inner: MockBridgeClient,
+        verify_script: std::sync::Mutex<std::collections::VecDeque<Option<String>>>,
+        bk_script: std::sync::Mutex<std::collections::VecDeque<Option<(String, bool)>>>,
+        rewound: std::sync::Mutex<Option<BridgeOnChainState>>,
+    }
+
+    impl FlakyBridge {
+        fn new(inner: MockBridgeClient) -> Self {
+            Self {
+                inner,
+                verify_script: std::sync::Mutex::new(Default::default()),
+                bk_script: std::sync::Mutex::new(Default::default()),
+                rewound: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeClient for FlakyBridge {
+        async fn read_state(&self) -> Result<BridgeOnChainState, RelayerError> {
+            let rewound = self.rewound.lock().unwrap().clone();
+            match rewound {
+                Some(s) => Ok(s),
+                None => self.inner.read_state().await,
+            }
+        }
+
+        async fn submit_block(&self, block: &AnBlockData) -> Result<SubmitOutcome, RelayerError> {
+            let next = self.verify_script.lock().unwrap().pop_front().flatten();
+            match next {
+                Some(reason) => Ok(SubmitOutcome::Reverted {
+                    reason,
+                }),
+                None => self.inner.submit_block(block).await,
+            }
+        }
+
+        async fn submit_bk_set_update(
+            &self,
+            update: &BkSetUpdateData,
+        ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+            let next = self.bk_script.lock().unwrap().pop_front().flatten();
+            match next {
+                Some((reason, landed)) => {
+                    if landed {
+                        self.inner.submit_bk_set_update(update).await?;
+                    }
+                    Ok(BkSetUpdateSubmitOutcome::Reverted {
+                        reason,
+                    })
+                },
+                None => self.inner.submit_bk_set_update(update).await,
+            }
+        }
+
+        async fn expected_prev_anchor(&self, num_layers: u8) -> Result<U256, RelayerError> {
+            self.inner.expected_prev_anchor(num_layers).await
+        }
+    }
+
+    fn rotation(seq: u64, old: u64, new: u64) -> BkSetUpdateData {
+        let mut u = dummy_update(seq, 0);
+        u.old_commitment_l2 = U256::from(old);
+        u.new_commitment_l3 = U256::from(new);
+        u
+    }
+
+    fn cfg_with(state_path: PathBuf, stride: u64, abort: u32) -> RelayerConfig {
+        RelayerConfig {
+            state_path,
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: abort,
+            bundle_stride: stride,
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_applies_a_burst_back_to_back_then_proves_the_boundary() {
+        // Shellnet shape at stride 1024: two rotations ahead of the cursor,
+        // the second past the next boundary. Both apply with no verifyBlock
+        // between them; boundary 1024 is then proven with the set active at
+        // it (the first rotation's), and only then does the prover take the
+        // second rotation.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
+            U256::from(BK),
+            U256::ZERO,
+            1024,
+            Arc::new(|_| true),
+        ));
+        let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
+        prover.queue_update(rotation(500, BK, 0xC0FFEE));
+        prover.queue_update(rotation(1500, 0xC0FFEE, 0xD00D));
+        let mut boundary = block(1024, U256::ZERO);
+        boundary.bk_set_commitment = U256::from(0xC0FFEEu64);
+        prover.insert_block(boundary);
+        let cfg = cfg_with(dir.path().join("state.json"), 1024, 3);
+        let mut r = Relayer::new(cfg, prover.clone(), prover.clone(), bridge.clone()).unwrap();
+
+        // N1 = 500: the next boundary 1024 is above it, so the prover rotates
+        // at once.
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
                 seq_no: 500,
                 ..
             }
         ));
-        let err = r.tick().await.expect_err("two rotations without a target");
-        assert!(err.to_string().contains("no bundle target"), "{err}");
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // N2 = 1500 applies back-to-back with the cursor still at 0; it is
+        // past the boundary, so the prover keeps N1's set for block 1024.
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 1500,
+                ..
+            }
+        ));
+        assert_eq!(bridge.read_state().await.unwrap().last_seen_block_seq_no, 0);
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // verifyBlock(1024) under the outgoing set; the next boundary, 2048,
+        // is above N2, so the prover now takes the second rotation.
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 1024,
+            ..
+        }));
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn tick_defers_a_rotation_the_contract_would_refuse() {
+        // N1 = 2000 is past the owed boundary 1024, so the contract reverts
+        // N2 until verifyBlock(1024). The relayer must not submit it: it
+        // logs the deferral and falls through to the verifyBlock lane.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
+            U256::from(BK),
+            U256::ZERO,
+            1024,
+            Arc::new(|_| true),
+        ));
+        let bk = Arc::new(QueueBkUpdates {
+            queued: std::sync::Mutex::new(vec![
+                rotation(2000, BK, 0xC0FFEE),
+                rotation(2500, 0xC0FFEE, 0xD00D),
+            ]),
+        });
+        let source = Arc::new(InMemoryBlockSource::new());
+        let cfg = cfg_with(dir.path().join("state.json"), 1024, 3);
+        let mut r = Relayer::new(cfg, source, bk, bridge.clone()).unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 2000,
+                ..
+            }
+        ));
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable {
+                target_seq_no: 1
+            }
+        ));
+        assert_eq!(
+            bridge.read_state().await.unwrap().last_bk_set_update_seq_no,
+            2000,
+            "N2 must not be submitted"
+        );
+        assert_eq!(r.state().bk_update_attempts_since_progress, 0);
+    }
+
+    #[test]
+    fn stall_warning_scales_with_the_bundle_stride() {
+        // At L2 an ordinary wait between bundles is ~90 polls; the L1
+        // threshold of 16 warned through most of every one of them.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(InMemoryBlockSource::new());
+        let threshold = |stride| {
+            let cfg = cfg_with(dir.path().join("state.json"), stride, 3);
+            Relayer::new(
+                cfg,
+                source.clone(),
+                Arc::new(EmptyBkUpdateSource),
+                bridge.clone(),
+            )
+            .unwrap()
+            .polls_before_stall_warn()
+        };
+        assert_eq!(threshold(BUNDLE_STRIDE_L1), 16);
+        assert_eq!(threshold(bridge_prover_lib::BUNDLE_STRIDE_L2), 256);
+    }
+
+    #[tokio::test]
+    async fn polls_and_unconfirmed_submits_do_not_count_toward_abort() {
+        // Waiting for a bundle used to count as attempts, so with the default
+        // abort threshold of 3 the first RPC hiccup after a wait stopped the
+        // daemon.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        bridge.verify_script.lock().unwrap().extend([
+            Some(
+                "verifyBlock send failed: server returned an error response: error code -32005: \
+                 rate limit exceeded"
+                    .to_string(),
+            ),
+            Some("tx confirmation error: Timeout".to_string()),
+        ]);
+        let source = Arc::new(InMemoryBlockSource::new());
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r =
+            Relayer::new(cfg, source.clone(), Arc::new(EmptyBkUpdateSource), bridge).unwrap();
+
+        for _ in 0..5 {
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::NotYetAvailable { .. }
+            ));
+        }
+        assert_eq!(r.state().polls_since_progress, 5);
+        assert_eq!(r.state().attempts_since_progress, 0);
+
+        source.insert(block(1, U256::ZERO));
+        for _ in 0..2 {
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::BridgeReverted { .. }
+            ));
+        }
+        assert_eq!(r.state().attempts_since_progress, 0);
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 1,
+            ..
+        }));
+    }
+
+    #[tokio::test]
+    async fn contract_rejections_still_abort() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        let revert = "verifyBlock send failed: server returned an error response: error code 3: \
+                      execution reverted, data: \"0x87bf1c06\"";
+        bridge
+            .verify_script
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(Some(revert.to_string()), 3));
+        let source = Arc::new(InMemoryBlockSource::new());
+        source.insert(block(1, U256::ZERO));
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge).unwrap();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::BridgeReverted { .. }
+            ));
+        }
+        assert!(matches!(
+            r.tick().await.unwrap_err(),
+            RelayerError::Stuck { .. }
+        ));
+    }
+
+    /// Block source that records which proofs the relayer told it to drop.
+    struct DiscardingBlocks {
+        inner: InMemoryBlockSource,
+        discarded: std::sync::Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for DiscardingBlocks {
+        async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            self.inner.fetch(target).await
+        }
+
+        async fn discard_rejected_proof(&self, seq_no: u64) {
+            self.discarded.lock().unwrap().push(seq_no);
+        }
+    }
+
+    /// Rotation source that records which proofs the relayer told it to drop.
+    struct DiscardingBkUpdates {
+        inner: QueueBkUpdates,
+        discarded: std::sync::Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BkUpdateSource for DiscardingBkUpdates {
+        async fn fetch_bk_update(
+            &self,
+            target: u64,
+        ) -> Result<Option<BkSetUpdateData>, RelayerError> {
+            self.inner.fetch_bk_update(target).await
+        }
+
+        async fn discard_rejected_bk_update_proof(&self, seq_no: u64) {
+            self.discarded.lock().unwrap().push(seq_no);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_contract_rejection_discards_the_kept_bundle_proof() {
+        // The RPC refusing a send says nothing about the proof, so the source
+        // may hand the same aggregated proof back; a revert means the contract
+        // saw it and refused it.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        bridge.verify_script.lock().unwrap().extend([
+            Some(
+                "verifyBlock send failed: server returned an error response: error code -32005: \
+                 rate limit exceeded"
+                    .to_string(),
+            ),
+            Some(
+                "verifyBlock send failed: server returned an error response: error code 3: \
+                 execution reverted, data: \"0x87bf1c06\""
+                    .to_string(),
+            ),
+        ]);
+        let inner = InMemoryBlockSource::new();
+        inner.insert(block(1, U256::ZERO));
+        let source = Arc::new(DiscardingBlocks {
+            inner,
+            discarded: Default::default(),
+        });
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r =
+            Relayer::new(cfg, source.clone(), Arc::new(EmptyBkUpdateSource), bridge).unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BridgeReverted { .. }
+        ));
+        assert!(source.discarded.lock().unwrap().is_empty());
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BridgeReverted { .. }
+        ));
+        assert_eq!(*source.discarded.lock().unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn only_a_contract_rejection_discards_the_kept_rotation_proof() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        bridge.bk_script.lock().unwrap().extend([
+            Some((
+                "applyBkSetUpdate send failed: server returned an error response: error code \
+                 -32003: nonce too low: next nonce 355, tx nonce 354"
+                    .to_string(),
+                false,
+            )),
+            Some((
+                "applyBkSetUpdate send failed: server returned an error response: error code 3: \
+                 execution reverted"
+                    .to_string(),
+                false,
+            )),
+        ]);
+        let bk = Arc::new(DiscardingBkUpdates {
+            inner: QueueBkUpdates {
+                queued: std::sync::Mutex::new(vec![rotation(500, BK, 0xC0FFEE)]),
+            },
+            discarded: Default::default(),
+        });
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBlockSource::new()),
+            bk.clone(),
+            bridge,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateReverted {
+                seq_no: 500,
+                ..
+            }
+        ));
+        assert!(bk.discarded.lock().unwrap().is_empty());
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateReverted {
+                seq_no: 500,
+                ..
+            }
+        ));
+        assert_eq!(*bk.discarded.lock().unwrap(), vec![500]);
+    }
+
+    #[tokio::test]
+    async fn tick_survives_a_rotation_that_landed_without_a_receipt() {
+        // A burst at stride 1024: N1 = 500 applies normally; N2 = 900 lands
+        // but its receipt read fails, so the snapshot still says 500 while
+        // the chain says 900 with the cursor at 0. The old Check B called
+        // that uncovered and failed every later tick; the contract allowed
+        // it (next boundary 1024 > 500), so the relayer must carry on and
+        // rotate the prover.
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis_stride(
+            U256::from(BK),
+            U256::ZERO,
+            1024,
+            Arc::new(|_| true),
+        )));
+        bridge.bk_script.lock().unwrap().extend([
+            None,
+            Some(("tx confirmation error: Timeout".to_string(), true)),
+        ]);
+        let prover = Arc::new(FakeProver::new(1024, U256::from(BK)));
+        prover.queue_update(rotation(500, BK, 0xC0FFEE));
+        prover.queue_update(rotation(900, 0xC0FFEE, 0xD00D));
+        let cfg = cfg_with(dir.path().join("state.json"), 1024, 3);
+        let mut r = Relayer::new(cfg, prover.clone(), prover.clone(), bridge.clone()).unwrap();
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 500,
+                ..
+            }
+        ));
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateReverted {
+                seq_no: 900,
+                ..
+            }
+        ));
+        assert_eq!(
+            bridge.read_state().await.unwrap().last_bk_set_update_seq_no,
+            900
+        );
+        assert_eq!(r.state().bk_update_attempts_since_progress, 0);
+        let out = r.tick().await.expect("a landed rotation is not drift");
+        assert!(
+            matches!(out, TickOutcome::NotYetAvailable { .. }),
+            "got {out:?}"
+        );
+        assert_eq!(
+            prover.acks.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the prover takes the landed rotation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewind_that_outlasts_the_lag_window_is_reported_as_drift() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(FlakyBridge::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        )));
+        let source = Arc::new(InMemoryBlockSource::new());
+        source.insert(block(1, U256::ZERO));
+        let cfg = cfg_with(dir.path().join("state.json"), BUNDLE_STRIDE_L1, 3);
+        let mut r = Relayer::new(
+            cfg.clone(),
+            source.clone(),
+            Arc::new(EmptyBkUpdateSource),
+            bridge.clone(),
+        )
+        .unwrap();
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Verified {
+            seq_no: 1,
+            ..
+        }));
+
+        let mut rewound = bridge.inner.read_state().await.unwrap();
+        rewound.last_seen_block_seq_no = 0;
+        *bridge.rewound.lock().unwrap() = Some(rewound);
+        // Inside the lag window: retried.
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable { .. }
+        ));
+        // Past it (no allowance at all here): reported as drift.
+        let mut strict = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge)
+            .unwrap()
+            .with_max_rewind_wait(Duration::ZERO);
+        let err = strict.tick().await.unwrap_err();
+        assert!(
+            err.to_string().contains("last_seen_block_seq_no_rewound"),
+            "{err}"
+        );
     }
 }

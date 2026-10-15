@@ -38,13 +38,22 @@
 //! - `fetch_bk_update(target)` — same shape, minus C2: BK-set rotations only
 //!   consume an attestation proof (Solidity `applyBkSetUpdate`).
 //!
+//! - Reuse. The calldata of the last bundle and of the last rotation is kept
+//!   with a digest of every input it was built from. A retry after a failure
+//!   the contract never saw (the RPC refused the send, the receipt did not
+//!   come, a read failed) gets the same inputs back from the prover and reuses
+//!   it instead of running `aggregate-proof` again (~2 min, ~15 GB); so does a
+//!   rotation deferred until the next `verifyBlock`. Ack and a contract
+//!   rejection drop it, so a rejected proof is always rebuilt.
+//!
 //! [`peek_pending_bundle`]: crate::live_source::LiveBlockSource::peek_pending_bundle
 //! [`LiveProverDriver`]: bridge_prover_lib::live_driver::LiveProverDriver
 //! [`LiveProverConfig::transcript`]: bridge_prover_lib::live_driver::LiveProverConfig
 //! [`TranscriptKind::Poseidon`]: bridge_prover_lib::transcript::TranscriptKind
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use alloy::primitives::{keccak256, B256};
 use async_trait::async_trait;
 use bridge_prover_lib::{
     bridge_state::BridgeState,
@@ -57,8 +66,79 @@ use crate::{
     error::RelayerError,
     live_source::LiveBlockSource,
     source::{BkUpdateSource, BlockSource},
-    types::{AnBlockData, BkSetUpdateData},
+    types::{AnBlockData, BkSetUpdateData, FinalizationType},
 };
+
+/// Calldata one `wrap+aggregate` produced, with a digest of every input it
+/// was built from (see the module docs, "Reuse").
+#[derive(Clone)]
+struct AggregatedCalldata {
+    seq_no: u64,
+    inputs: B256,
+    attestation: Vec<u8>,
+    /// Empty for a rotation, which has no layer proof.
+    layer: Vec<u8>,
+}
+
+type CalldataSlot = Mutex<Option<AggregatedCalldata>>;
+
+fn reusable(slot: &CalldataSlot, seq_no: u64, inputs: B256) -> Option<AggregatedCalldata> {
+    let kept = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    kept.as_ref()
+        .filter(|c| c.seq_no == seq_no && c.inputs == inputs)
+        .cloned()
+}
+
+fn remember(slot: &CalldataSlot, calldata: AggregatedCalldata) {
+    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(calldata);
+}
+
+fn forget(slot: &CalldataSlot, seq_no: u64) {
+    let mut kept = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if kept.as_ref().is_some_and(|c| c.seq_no == seq_no) {
+        *kept = None;
+    }
+}
+
+fn push_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// Digest of everything `aggregate_attestation` and `aggregate_layer` read
+/// for a bundle.
+fn bundle_inputs(fin_type: FinalizationType, p: &BundleProofArtifacts, last_seen: u32) -> B256 {
+    let mut buf = Vec::with_capacity(p.attestation_proof.len() + p.layer_hashes_proof.len() + 512);
+    buf.push(fin_type.tag());
+    push_bytes(&mut buf, &p.attestation_proof);
+    push_bytes(&mut buf, &p.layer_hashes_proof);
+    buf.extend_from_slice(&p.block_id_be);
+    buf.extend_from_slice(&p.bk_set_commitment_be);
+    buf.extend_from_slice(&p.block_seq_no.to_le_bytes());
+    buf.extend_from_slice(&last_seen.to_le_bytes());
+    buf.push(p.num_layers);
+    for hash in &p.layer_hashes_be {
+        buf.extend_from_slice(hash);
+    }
+    buf.extend_from_slice(&p.prev_max_level_layer_hash_be);
+    keccak256(&buf)
+}
+
+/// Digest of everything `aggregate_attestation` reads for a rotation.
+fn bk_update_inputs(
+    fin_type: FinalizationType,
+    p: &BkUpdateProofArtifacts,
+    last_seen: u32,
+) -> B256 {
+    let mut buf = Vec::with_capacity(p.attestation_proof.len() + 128);
+    buf.push(fin_type.tag());
+    push_bytes(&mut buf, &p.attestation_proof);
+    buf.extend_from_slice(&p.block_id_be);
+    buf.extend_from_slice(&p.old_bk_set_commitment_be);
+    buf.extend_from_slice(&p.block_seq_no.to_le_bytes());
+    buf.extend_from_slice(&last_seen.to_le_bytes());
+    keccak256(&buf)
+}
 
 /// The `LiveBlockSource`-specific behaviour [`AggregatedBlockSource`] needs
 /// beyond [`BlockSource`] + [`BkUpdateSource`]: peek the pending
@@ -102,6 +182,8 @@ where
 {
     inner: Arc<I>,
     pipeline: Circuit12ShplonkPipeline<W, A>,
+    bundle_calldata: CalldataSlot,
+    bk_update_calldata: CalldataSlot,
 }
 
 impl<I, W, A> AggregatedBlockSource<I, W, A>
@@ -114,6 +196,8 @@ where
         Self {
             inner,
             pipeline,
+            bundle_calldata: Mutex::new(None),
+            bk_update_calldata: Mutex::new(None),
         }
     }
 
@@ -153,6 +237,18 @@ where
             ))
         })?;
 
+        let inputs = bundle_inputs(block.fin_type, &pending, last_seen);
+        if let Some(kept) = reusable(&self.bundle_calldata, seqno, inputs) {
+            info!(
+                seq_no = seqno,
+                "aggregated_source: same proof and inputs as the last attempt; reusing its \
+                 aggregated calldata",
+            );
+            block.attestation_proof = alloy::primitives::Bytes::from(kept.attestation);
+            block.layer_hashes_proof = alloy::primitives::Bytes::from(kept.layer);
+            return Ok(Some(block));
+        }
+
         info!(
             seq_no = seqno,
             last_seen = last_seen,
@@ -188,17 +284,29 @@ where
             t_bundle.elapsed().as_millis(),
         );
 
+        remember(&self.bundle_calldata, AggregatedCalldata {
+            seq_no: seqno,
+            inputs,
+            attestation: attestation_calldata.clone(),
+            layer: layer_calldata.clone(),
+        });
         block.attestation_proof = alloy::primitives::Bytes::from(attestation_calldata);
         block.layer_hashes_proof = alloy::primitives::Bytes::from(layer_calldata);
         Ok(Some(block))
     }
 
     async fn ack_last_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
+        forget(&self.bundle_calldata, seq_no);
         self.inner.ack_last_bundle(seq_no).await
     }
 
     async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
         self.inner.driver_snapshot().await
+    }
+
+    async fn discard_rejected_proof(&self, seq_no: u64) {
+        forget(&self.bundle_calldata, seq_no);
+        self.inner.discard_rejected_proof(seq_no).await;
     }
 }
 
@@ -227,6 +335,17 @@ where
             ))
         })?;
 
+        let inputs = bk_update_inputs(upd.fin_type, &pending, last_seen);
+        if let Some(kept) = reusable(&self.bk_update_calldata, seqno, inputs) {
+            info!(
+                seq_no = seqno,
+                "aggregated_source: same bk-update proof and inputs as the last attempt; reusing \
+                 its aggregated calldata",
+            );
+            upd.attestation_proof = alloy::primitives::Bytes::from(kept.attestation);
+            return Ok(Some(upd));
+        }
+
         info!(
             seq_no = seqno,
             last_seen = last_seen,
@@ -247,12 +366,24 @@ where
                 last_seen,
             )
             .await?;
+        remember(&self.bk_update_calldata, AggregatedCalldata {
+            seq_no: seqno,
+            inputs,
+            attestation: attestation_calldata.clone(),
+            layer: Vec::new(),
+        });
         upd.attestation_proof = alloy::primitives::Bytes::from(attestation_calldata);
         Ok(Some(upd))
     }
 
     async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+        forget(&self.bk_update_calldata, seq_no);
         self.inner.ack_last_bk_update(seq_no).await
+    }
+
+    async fn discard_rejected_bk_update_proof(&self, seq_no: u64) {
+        forget(&self.bk_update_calldata, seq_no);
+        self.inner.discard_rejected_bk_update_proof(seq_no).await;
     }
 }
 
@@ -602,5 +733,74 @@ mod tests {
         src.ack_last_bk_update(42).await.unwrap();
         assert_eq!(&*stub.acked_bundles.lock().unwrap(), &[7]);
         assert_eq!(&*stub.acked_bkupds.lock().unwrap(), &[42]);
+    }
+
+    #[tokio::test]
+    async fn bundle_calldata_is_reused_until_ack_or_rejection() {
+        let stub = Arc::new(StubInnerSource::default());
+        stub.stage_bundle(
+            stub_block(100, FinalizationType::Primary),
+            stub_bundle_artifacts(100, 99, BundleFinalizationType::Primary),
+        );
+        let src = make_aggregated(Arc::clone(&stub));
+        let calls = || src.pipeline.aggregator.calls.lock().unwrap().len();
+
+        // A retry after a failure the contract never saw: same proof, same
+        // inputs, no second aggregation (one call each for attestation and
+        // layer).
+        let first = src.fetch(100).await.unwrap().unwrap();
+        let again = src.fetch(100).await.unwrap().unwrap();
+        assert_eq!(calls(), 2);
+        assert_eq!(first.attestation_proof, again.attestation_proof);
+        assert_eq!(first.layer_hashes_proof, again.layer_hashes_proof);
+
+        // The prover's inputs moved (here the cursor): aggregate again.
+        stub.stage_bundle(
+            stub_block(100, FinalizationType::Primary),
+            stub_bundle_artifacts(100, 98, BundleFinalizationType::Primary),
+        );
+        src.fetch(100).await.unwrap().unwrap();
+        assert_eq!(calls(), 4);
+
+        // The contract rejected it: aggregate again.
+        src.discard_rejected_proof(100).await;
+        src.fetch(100).await.unwrap().unwrap();
+        assert_eq!(calls(), 6);
+
+        // Verified: nothing is kept for the next one.
+        src.ack_last_bundle(100).await.unwrap();
+        src.fetch(100).await.unwrap().unwrap();
+        assert_eq!(calls(), 8);
+    }
+
+    #[tokio::test]
+    async fn bk_update_calldata_is_reused_until_ack_or_rejection() {
+        let stub = Arc::new(StubInnerSource::default());
+        stub.stage_bkupd(
+            stub_bkupd_data(300, FinalizationType::Primary),
+            stub_bkupd_artifacts(300, 299, BundleFinalizationType::Primary),
+        );
+        let src = make_aggregated(Arc::clone(&stub));
+        let calls = || src.pipeline.aggregator.calls.lock().unwrap().len();
+
+        let first = src.fetch_bk_update(300).await.unwrap().unwrap();
+        let again = src.fetch_bk_update(300).await.unwrap().unwrap();
+        assert_eq!(calls(), 1);
+        assert_eq!(first.attestation_proof, again.attestation_proof);
+
+        // A re-proved attestation is new input, never served from the copy.
+        let mut reproved = stub_bkupd_artifacts(300, 299, BundleFinalizationType::Primary);
+        reproved.attestation_proof = vec![1, 2, 3];
+        stub.stage_bkupd(stub_bkupd_data(300, FinalizationType::Primary), reproved);
+        src.fetch_bk_update(300).await.unwrap().unwrap();
+        assert_eq!(calls(), 2);
+
+        src.discard_rejected_bk_update_proof(300).await;
+        src.fetch_bk_update(300).await.unwrap().unwrap();
+        assert_eq!(calls(), 3);
+
+        src.ack_last_bk_update(300).await.unwrap();
+        src.fetch_bk_update(300).await.unwrap().unwrap();
+        assert_eq!(calls(), 4);
     }
 }

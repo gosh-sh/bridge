@@ -251,7 +251,7 @@ impl EvmRead for FakeEvm {
                 self.pinned_reads.lock().unwrap().push(n);
                 if self
                     .pinned_misses
-                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |k| k.checked_sub(1))
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |k| k.checked_sub(1))
                     .is_ok()
                 {
                     anyhow::bail!("header not found");
@@ -332,7 +332,7 @@ impl EvmRead for FakeEvm {
     async fn receipt(&self, h: B256) -> anyhow::Result<Option<ReceiptLite>> {
         if self
             .fail_receipts
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             anyhow::bail!("503 Service Unavailable");
@@ -349,14 +349,14 @@ impl EvmRead for FakeEvm {
     async fn transaction(&self, h: B256) -> anyhow::Result<Option<TxLite>> {
         if self
             .fail_tx_reads
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             anyhow::bail!("503 Service Unavailable");
         }
         if self
             .miss_tx_reads
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             return Ok(None);

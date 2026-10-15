@@ -7,8 +7,8 @@
 //!   1. L0 (Poseidon of the layer-hashes preimage) — 4 opaque top-level SHA
 //!      siblings, matching Circuit 2 `NUM_MERKLE_SIBLINGS = 4`.
 //!   2. The L2/L3 pair (old/new BK-set Poseidon commitments) — 3 sibling nodes,
-//!      consumed by the no-Circuit-3 BK-set rotation path (see
-//!      `docs/bk_set_update_no_circuit3_plan.md`).
+//!      consumed by `applyBkSetUpdate`, which folds them back to the block id
+//!      on chain (`docs/EVM-contracts-spec.md` §7.3).
 //!
 //! Tree structure:
 //! ```text

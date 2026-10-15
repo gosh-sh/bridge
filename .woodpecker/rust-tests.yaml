@@ -1,0 +1,32 @@
+# Rust tests of the root workspace, as `make test-rust` runs them locally
+# (`test.sh --rust` = `cargo test --workspace`): `crates/eth-frontend`,
+# `crates/acki-nacki-interface`, `crates/deposit-chain-ids`.
+#
+# Only the root workspace is covered here. Every other Rust crate is excluded
+# from it (see the `exclude` list in `Cargo.toml`): the relayers, the withdraw
+# CLI, the provers and the aggregator still run only through `make test-all`
+# on a developer host. `crates/bridge-circuits` has its own pipeline,
+# `bridge-circuits.yaml`.
+#
+# Nothing is cached between pipelines, so each run compiles the workspace from
+# scratch: about four minutes in this image. `rust-toolchain.toml` pins a
+# nightly the image does not ship; rustup downloads it on first use.
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+variables:
+  - &rust_image "docker.gosh.sh/rust"
+
+steps:
+  rust-tests:
+    image: *rust_image
+    environment:
+      # Keep cargo's registry inside the workspace, as the other Rust
+      # pipelines in this directory do.
+      CARGO_HOME: .cargo_home
+      CARGO_TERM_COLOR: always
+    commands:
+      - make test-rust

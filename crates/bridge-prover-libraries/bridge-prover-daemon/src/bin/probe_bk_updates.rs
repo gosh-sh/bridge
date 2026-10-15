@@ -1,5 +1,5 @@
 //! `probe_bk_updates` — one-off cadence study for the AN `bkSetUpdates`
-//! stream. Called out in `docs/bk_set_update_no_circuit3_plan.md` §Phase 2.
+//! stream.
 //!
 //! Purpose: sample a live chain's rotation cadence so we can size the
 //! prover's drain loop (one-at-a-time vs batched) and estimate the daemon's

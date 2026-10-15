@@ -80,6 +80,17 @@ folders and `contracts/scripts/bridge_*.py`, never
 the one that does the placing. A change here reaches a network only after that
 pin is moved.
 
+## Deposit amounts
+
+Ethereum `AckiNackiBridge.deposit` and Acki Nacki `finalizeDeposit` share one
+per-deposit ceiling: `type(uint64).max` USDC base units (6 decimals). The EVM
+side refuses anything larger with `DepositTooLarge` (`MAX_DEPOSIT_AMOUNT`);
+the AN side refuses a proven `fr[2]` that does not fit `uint64` with exit 214
+(`ERR_OVERFLOW`) before it mints. There is no extra product minimum: `amount
+> 0` is the floor on both sides (`InvalidAmount` on Ethereum, `ERR_ZERO_AMOUNT`
+(204) on Acki Nacki). Older notes that named a 100 USDC cap are describing a
+limit that is not in the contracts.
+
 ## Rebuilding
 
     make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0

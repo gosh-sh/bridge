@@ -22,6 +22,18 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- The ETH→AN deposit relayer no longer stalls every later deposit behind one
+  that cannot be finalised. `state.json` keeps a high-water mark plus an
+  `outstanding_deposits` set: later ids are tried first, and a failed id
+  retries with backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`,
+  default 2 s, doubled each time up to 64×) when there is nothing new to
+  fetch. A retry loads the stored Deposit tx (or its block) so the log-scan
+  cursor can keep moving with later deposits. Parked ids stay parked;
+  `--skip-after-attempts` and `finalize-one` are unchanged. Gauge
+  `deposit_relayer_outstanding_deposits`.
+
 ### Documentation
 
 - The prover and circuit docs describe BK-set rotation as it works:

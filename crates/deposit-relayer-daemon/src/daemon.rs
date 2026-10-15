@@ -185,6 +185,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     {
         let mut summary = DaemonRunSummary::default();
         let mut current_delay = backoff.initial;
+        if let Some(id) = self.state().last_processed_deposit_id {
+            if let Some(m) = &metrics {
+                m.last_finalized_deposit_id.fetch_max(id, Ordering::Relaxed);
+            }
+            mark_finalized_high_water(id);
+        }
         if let Some(m) = &metrics {
             m.current_backoff_secs
                 .store(current_delay.as_secs(), Ordering::Relaxed);
@@ -210,9 +216,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     if let Some(m) = &metrics {
                         m.finalized_total.fetch_add(1, Ordering::Relaxed);
                         m.last_finalized_deposit_id
-                            .store(deposit_id, Ordering::Relaxed);
+                            .fetch_max(deposit_id, Ordering::Relaxed);
                     }
-                    mark_finalized(deposit_id);
+                    mark_finalized_high_water(deposit_id);
                     summary.finalized += 1;
                     info!(deposit_id, "daemon: finalized");
                     (true, LastOutcome::Finalized {
@@ -225,9 +231,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     if let Some(m) = &metrics {
                         m.already_finalized_total.fetch_add(1, Ordering::Relaxed);
                         m.last_finalized_deposit_id
-                            .store(deposit_id, Ordering::Relaxed);
+                            .fetch_max(deposit_id, Ordering::Relaxed);
                     }
-                    mark_finalized(deposit_id);
+                    mark_finalized_high_water(deposit_id);
                     summary.already_finalized += 1;
                     // A nullifier skip is "progress" — reset backoff.
                     (true, LastOutcome::AlreadyFinalized {
@@ -383,8 +389,14 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
 }
 
 /// Gauges that move when a deposit is (found) finalized on AN.
-fn mark_finalized(deposit_id: u64) {
-    gauge!(prom::LAST_FINALIZED_DEPOSIT_ID).set(deposit_id as f64);
+/// The id gauge is a high-water mark: a later retry of a lower id must not
+/// move it backwards.
+fn mark_finalized_high_water(deposit_id: u64) {
+    static HIGH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let high = HIGH
+        .fetch_max(deposit_id, std::sync::atomic::Ordering::Relaxed)
+        .max(deposit_id);
+    gauge!(prom::LAST_FINALIZED_DEPOSIT_ID).set(high as f64);
     gauge!(prom::LAST_FINALIZED_TIMESTAMP_SECONDS).set(prom::unix_now());
 }
 
@@ -440,6 +452,7 @@ mod tests {
             deployment: None,
             force_state: false,
             skip_after_attempts: None,
+            outstanding_backoff_secs: 0,
             scan_cursor: None,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()

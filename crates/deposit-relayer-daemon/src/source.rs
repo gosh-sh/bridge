@@ -38,6 +38,22 @@ use crate::{error::RelayerError, metrics as prom, types::DepositEvent};
 #[async_trait]
 pub trait DepositSource: Send + Sync {
     async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError>;
+
+    /// Load a deposit this relayer has already seen. Default: [`fetch`].
+    ///
+    /// Production uses the stored tx (receipt) or a one-block `eth_getLogs`,
+    /// so a retry does not walk the shared scan cursor from the deposit's
+    /// block up to the head.
+    async fn fetch_known(
+        &self,
+        deposit_id: u64,
+        tx_hash: Option<B256>,
+        log_index: Option<u64>,
+        block_number: Option<u64>,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        let _ = (tx_hash, log_index, block_number);
+        self.fetch(deposit_id).await
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -207,9 +223,11 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     /// Cached `eth_chainId` from the RPC (stamped onto every [`DepositEvent`]).
     chain_id: Mutex<Option<u64>>,
     /// Scan cursor: no block up to and including this one holds a deposit the
-    /// relayer still has to deliver, so the next scan starts after it. Moved
-    /// here when the target is not made yet as of `safe_head`, and by the
-    /// relayer after a finalize. `None` means "scan from `from_block`".
+    /// relayer still has to *discover*, so the next scan starts after it.
+    /// Outstanding retries use [`DepositSource::fetch_known`], not this
+    /// cursor. Moved here when the target is not made yet as of `safe_head`,
+    /// and by the relayer after a finalize. `None` means "scan from
+    /// `from_block`".
     scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
     _network: std::marker::PhantomData<N>,
 }
@@ -432,6 +450,39 @@ where
         }
         Ok(None)
     }
+
+    /// One-block `eth_getLogs` for a deposit whose block is known but whose
+    /// tx is not. Does not move the shared scan cursor.
+    async fn fetch_in_block(
+        &self,
+        deposit_id: u64,
+        block: u64,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        let head = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
+        let safe_head = head.saturating_sub(self.confirmations);
+        if block > safe_head {
+            return Ok(None);
+        }
+        let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
+        let filter = Filter::new()
+            .address(self.address)
+            .event_signature(Deposit::SIGNATURE_HASH)
+            .topic1(topic1)
+            .from_block(block)
+            .to_block(block);
+        let logs = get_logs_with_retry(&self.provider, &filter).await?;
+        counter!(prom::ETH_SCANNED_BLOCKS_TOTAL).increment(1);
+        if let Some(event) = self.deposit_from_logs(logs, deposit_id).await? {
+            return Ok(Some(event));
+        }
+        Err(RelayerError::eth(format!(
+            "no Deposit log for depositId {deposit_id} in block {block}"
+        )))
+    }
 }
 
 #[async_trait]
@@ -466,8 +517,9 @@ where
         // `depositId` is the first indexed topic; filter on it directly so
         // the node only returns the single matching log. Scan in small chunks
         // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges,
-        // and stop at the chunk that holds the deposit. The cursor stays put:
-        // until AN accepts the deposit, a retry has to find it again.
+        // and stop at the chunk that holds the deposit. The cursor stays put
+        // on this path: a first look that finds the log does not skip it for
+        // a later retry. Outstanding retries use [`fetch_known`] instead.
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
         let scan_from = self.effective_scan_from();
         gauge!(prom::ETH_SCAN_FROM_BLOCK).set(scan_from as f64);
@@ -500,6 +552,30 @@ where
              is below block {scan_from} (lower --from-block, or remove scan_done_through_block \
              from the state file)"
         )))
+    }
+
+    async fn fetch_known(
+        &self,
+        deposit_id: u64,
+        tx_hash: Option<B256>,
+        log_index: Option<u64>,
+        block_number: Option<u64>,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
+            return fetch_deposit_from_receipt(
+                &self.provider,
+                self.address,
+                tx_hash,
+                log_index,
+                deposit_id,
+                self.confirmations,
+            )
+            .await;
+        }
+        if let Some(block) = block_number {
+            return self.fetch_in_block(deposit_id, block).await;
+        }
+        self.fetch(deposit_id).await
     }
 }
 

@@ -17,12 +17,13 @@
 //! | `deposit_relayer_eth_scanned_blocks_total` | counter | | Blocks covered by `eth_getLogs` windows (the idle-scan cost) |
 //! | `deposit_relayer_eth_safe_head_block` | gauge | | `head - confirmations` at the last scan |
 //! | `deposit_relayer_eth_scan_from_block` | gauge | | First block of the last `eth_getLogs` scan (cursor + 1, or `--from-block`); a tick that finds no new deposit by `depositCounter()` makes no scan and leaves it |
-//! | `deposit_relayer_eth_deposit_counter` | gauge | | `AckiNackiBridge.depositCounter()` on Ethereum, polled by the daemon; `counter - (last_finalized + 1)` is the backlog |
+//! | `deposit_relayer_eth_deposit_counter` | gauge | | `AckiNackiBridge.depositCounter()` on Ethereum, polled by the daemon; `counter - (last_finalized + 1)` is the backlog of ids at or above the high-water mark (outstanding ids below it are extra). `last_finalized` is seeded from `state.json` `last_processed_deposit_id` on start |
 //! | `deposit_relayer_target_deposit_id` | gauge | | The `depositId` the loop is working on |
-//! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN in this process |
-//! | `deposit_relayer_attempts_since_progress` | gauge | | Consecutive failed attempts at the current target (`state.json`); waiting for a deposit nobody made yet is not an attempt |
+//! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN in this process; seeded from `last_processed_deposit_id` on start and never moves backwards when a lower outstanding id completes |
+//! | `deposit_relayer_attempts_since_progress` | gauge | | Attempt count of the last failed outstanding id (`state.json`); reset when any id finalizes. Waiting for a deposit nobody made yet is not an attempt |
 //! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` (`state.json` → `parked_deposit_ids`) |
 //! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits the circuit cannot prove; only the EVM bridge operator can return those funds (`state.json` → `unprovable_deposit_ids`) |
+//! | `deposit_relayer_outstanding_deposits` | gauge | | Failed deposits still to retry (`state.json` → `outstanding_deposits`) |
 //! | `deposit_relayer_backoff_seconds` | gauge | | Sleep the daemon applies after the last tick |
 //! | `deposit_relayer_last_tick_timestamp_seconds` | gauge | | Unix time of the last completed tick |
 //! | `deposit_relayer_last_finalized_timestamp_seconds` | gauge | | Unix time of the last `finalized` / `already_finalized` outcome |
@@ -50,6 +51,7 @@ pub const LAST_FINALIZED_DEPOSIT_ID: &str = "deposit_relayer_last_finalized_depo
 pub const ATTEMPTS_SINCE_PROGRESS: &str = "deposit_relayer_attempts_since_progress";
 pub const PARKED_DEPOSITS: &str = "deposit_relayer_parked_deposits";
 pub const UNPROVABLE_DEPOSITS: &str = "deposit_relayer_unprovable_deposits";
+pub const OUTSTANDING_DEPOSITS: &str = "deposit_relayer_outstanding_deposits";
 pub const BACKOFF_SECONDS: &str = "deposit_relayer_backoff_seconds";
 pub const LAST_TICK_TIMESTAMP_SECONDS: &str = "deposit_relayer_last_tick_timestamp_seconds";
 pub const LAST_FINALIZED_TIMESTAMP_SECONDS: &str =
@@ -100,11 +102,12 @@ pub fn describe() {
     describe_gauge!(TARGET_DEPOSIT_ID, "depositId the loop is working on.");
     describe_gauge!(
         LAST_FINALIZED_DEPOSIT_ID,
-        "Highest depositId finalized on AN by this process."
+        "Highest depositId finalized on AN by this process; seeded from last_processed_deposit_id \
+         on start and never moves backwards."
     );
     describe_gauge!(
         ATTEMPTS_SINCE_PROGRESS,
-        "Consecutive non-success ticks on the current target."
+        "Attempt count of the last failed outstanding id; reset when any id finalizes."
     );
     describe_gauge!(
         PARKED_DEPOSITS,
@@ -113,6 +116,10 @@ pub fn describe() {
     describe_gauge!(
         UNPROVABLE_DEPOSITS,
         "Deposits the circuit cannot prove; only the EVM bridge operator can return those funds."
+    );
+    describe_gauge!(
+        OUTSTANDING_DEPOSITS,
+        "Failed deposits still to retry (state.json outstanding_deposits)."
     );
     describe_gauge!(
         BACKOFF_SECONDS,
@@ -168,12 +175,14 @@ pub fn set_state_gauges(
     attempts_since_progress: u32,
     parked: usize,
     unprovable: usize,
+    outstanding: usize,
     scan_done_through_block: Option<u64>,
 ) {
     gauge!(TARGET_DEPOSIT_ID).set(target as f64);
     gauge!(ATTEMPTS_SINCE_PROGRESS).set(f64::from(attempts_since_progress));
     gauge!(PARKED_DEPOSITS).set(parked as f64);
     gauge!(UNPROVABLE_DEPOSITS).set(unprovable as f64);
+    gauge!(OUTSTANDING_DEPOSITS).set(outstanding as f64);
     if let Some(block) = scan_done_through_block {
         gauge!(SCAN_DONE_THROUGH_BLOCK).set(block as f64);
     }

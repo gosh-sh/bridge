@@ -77,6 +77,83 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The relayer's owner flip and the deposit CLI read the light client per
+  chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
+  flip-owner` / `daemon --flip-owner` takes the chain id from the light
+  client's own `getConfig`, checks the bridge's `getLightClient(l1ChainId)`
+  against `AN_LIGHT_CLIENT`, reads `isOwnerAnchorsEnabled(chainId)` for the
+  already-flipped signal and calls `disableOwnerAnchorsOn(chainId)` — it no
+  longer calls `getAnchorConfig` or the no-argument `disableOwnerAnchors`.
+  Against a 1.8.0 bridge `getLightClient(uint256)` has a different function
+  id than that release's `getLightClient()`, so upgrade the bridge to 1.9.0
+  **before** the relayer: an older bridge answers the new call with "function
+  ID is wrong". Both slim relayer ABIs under
+  `crates/eth-light-client-relayer/abi/` changed with it (`getConfig` on the
+  client; `getLightClient`, `isOwnerAnchorsEnabled` and
+  `disableOwnerAnchorsOn` on the bridge).
+
+  `ackinacki-bridge deposit` reads `getLightClient(chainId)` for the
+  deposit's own chain on a 1.9.0 bridge and keeps `getAnchorConfig` below
+  that, so a deposit on a chain whose client was not the last one deployed is
+  no longer refused. A bridge that reports 1.9.0 without the per-chain getter
+  is answered once and falls back with a warning instead of being retried for
+  ever. 1.9.0 is now the newest version the CLI was checked against.
+
+- **One light-client code, one client per source chain, addressed by code
+  salt.** `setLightClientCode` now only stores the code. The address is
+  derived when `deployLightClient` runs, from that code salted with
+  `abi.encode(l1ChainId)`, and kept in `_lightClients[l1ChainId]`; the same
+  code therefore yields a different account for every chain, and
+  `getLightClient` takes the chain id. `initialize` on the client decodes its
+  own salt and refuses a chain id that does not match it
+  (`ERR_WRONG_CODE_SALT`, 258), so an address is bound to the chain it
+  follows. `acceptBlockHashFromLightClient` and
+  `forgetBlockHashFromLightClient` check the sender against the client of the
+  chain in the call, so a client for one chain can no longer admit or forget
+  hashes for another; `disableOwnerAnchors` requires a client deployed for
+  that chain rather than a stored id.
+
+  Versions and code hashes after both changes below: `eccUSDCBridge` 1.9.0,
+  `697d1711…`; `EthBeaconLightClient` 1.5.0, `3e6e5102…`. The bridge's
+  `getLightClient` takes a chain id, so its ABI changed with it. A light
+  client deployed before this change came from unsalted
+  code, so the bridge derives a different address for its chain and stops
+  recognizing it as a writer — redeploy it with `deployLightClient`. Nothing
+  is lost: the client holds no funds, and its head and committee come back
+  from the chain it follows. The bundled bridge ABIs under `crates/` are
+  updated for the new `getLightClient` signature.
+
+- **The light client's constructor takes no arguments; the bridge initializes
+  it with a second call.** `EthBeaconLightClient` gains
+  `initialize(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod)`, which
+  only `USDCBridge` may call and only while the owner key is still zero
+  (`ERR_ALREADY_INITIALIZED`, 257). `deployLightClient` takes the same
+  arguments as before and now sends two messages: the deploy, then
+  `initialize` — in that order, so it is the first message the new account
+  sees. Nothing about the settings travels in the state init any more.
+
+  `onlyOwnerPubkey` on the client now also refuses while the owner key is
+  zero. An unsigned external message carries `msg.pubkey() == 0`, so without
+  that check every admin call would pass in the window between the deploy and
+  `initialize`.
+
+  **Both Acki Nacki artefacts are rebuilt, and they have to be rebuilt
+  together.** The bridge builds the client's *initial data cell* from the
+  layout compiled into it (`abi.encodeStateInit({contr: EthBeaconLightClient,
+  varInit: {}, …})`), so any change to the client's state variables makes a
+  previously built bridge binary unable to deploy it. That is not theoretical:
+  the artefact pair in this repository had drifted — the bridge binary was
+  built before the light client gained `_gloasForkSlot` and
+  `_gloasForkSlotSet`, so it built a 310-byte data cell where the client's code
+  expected 318, and on a network raised from those artefacts the client's
+  constructor aborted with `cell underflow` (exit 9), leaving an account with
+  code and no storage at the derived address. The current hashes are the ones
+  given above.
+
+  `contracts/an/EthBeaconLightClient.sol`, the standalone copy the
+  shellnet-shadow kit deploys with `tvm-cli`, keeps its four-argument
+  constructor; `deploy-contract.sh` is unchanged.
+
 - **The beacon light client's step and rotate verification keys are rotated
   for Gloas (ePBS), and both proofs gain a public input.** From Gloas the
   beacon `finalized_checkpoint`, the sync committees and the execution block
@@ -96,7 +173,9 @@ assigns it when the release is tagged.
   not scheduled) on mainnet. The owner can change it while unset or while
   owner rotation is still enabled; after `disableOwnerRotation` only
   `updateCode` can. Later `updateCode` calls with an empty user cell keep the
-  current value. Constructors and `deployLightClient` are unchanged.
+  current value. That entry predates the light-client bring-up change above:
+  the client now takes no constructor arguments and the bridge initializes it
+  with a second call.
   From Gloas, `submitUpdate` anchors the payload bid's `parent_block_hash`
   rather than the checkpoint slot's own execution hash.
   `eth-lc-relayer ancestry-one` starts its walk at that anchored hash
@@ -131,20 +210,19 @@ assigns it when the release is tagged.
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
   `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
   fields.
-- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
-  id `deployLightClient` stored can be flipped.** The previous bool
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain.** The previous bool
   `_ownerAnchorsEnabled` turned the owner writer off for every source
   chain at once, so a flip left the six L2s on the deposit allowlist
-  with no writer. The call (and `disableOwnerAnchorsOn(uint256 chainId)`)
-  now sets `_ownerAnchorsDisabled` only for `_lightClientL1ChainId`;
-  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The bridge
-  does not read the light client's own `getConfig().l1ChainId`.
-  `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
-  `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
-  `getLightClientL1ChainId()` is the stored L1 id (0 until
-  `deployLightClient`). The new storage field is `_lightClientL1ChainId`.
-  L2 deposits keep `setAcceptedBlockHash`. The no-argument ABI the
-  relayer already calls is unchanged. The bridge reports 1.8.0. Rebuild
+  with no writer. `disableOwnerAnchorsOn(uint256 chainId)` now sets
+  `_ownerAnchorsDisabled` for any chain that has a light client deployed
+  for it; a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226) and
+  chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The no-argument
+  `disableOwnerAnchors` serves the chain whose client was deployed last,
+  which is also all `getAnchorConfig()` reports;
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view and
+  `getLightClientL1ChainId()` that last chain id (0 before the first
+  deploy). L2 deposits keep `setAcceptedBlockHash`. The relayer calls the
+  explicit per-chain form (see the light-client bring-up entry above). The bridge reports 1.8.0. Rebuild
   `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade the premined 1.7.0
   bridge; `onCodeUpgrade` resets storage and does not migrate
   `_lightClient` or the L1 id, so both `disableOwnerAnchors` and

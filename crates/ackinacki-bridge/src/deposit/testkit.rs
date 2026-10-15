@@ -1254,6 +1254,9 @@ pub struct FakeAn {
     pub fail_ext_messages: AtomicBool,
     /// Getters, by name, whose every call fails.
     pub failing_getters: Mutex<HashSet<String>>,
+    /// Getters the deployed code does not have: answered like the VM does,
+    /// not like a transport failure.
+    pub unknown_getters: Mutex<HashSet<String>>,
     /// Blocks whose `isAcceptedBlockHash` read fails.
     pub failing_accepted: Mutex<HashSet<B256>>,
     /// Accounts whose external-message lists fail to read.
@@ -1326,10 +1329,28 @@ impl AnRead for FakeAn {
     async fn run_getter(
         &self,
         id: [u8; 32],
-        _: &str,
+        abi: &str,
         f: &str,
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        // The real client encodes against this ABI: a getter missing from it
+        // cannot be called at all, and the CLI refuses before reaching the
+        // chain. Catch that here rather than against a live bridge.
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(abi) {
+            if let Some(fns) = parsed["functions"].as_array() {
+                assert!(
+                    fns.iter().any(|x| x["name"] == f),
+                    "{f} is missing from the ABI this call encodes with"
+                );
+            }
+        }
+        if self.unknown_getters.lock().unwrap().contains(f) {
+            // What the VM answers for a function the deployed code lacks.
+            anyhow::bail!(
+                "Contract execution was terminated with error: Unknown error, exit code: 60 \
+                 (Contract has no fallback function but function ID is wrong)"
+            );
+        }
         if self.fail_getters.load(Ordering::SeqCst)
             || self.failing_getters.lock().unwrap().contains(f)
         {

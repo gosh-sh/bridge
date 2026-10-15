@@ -6,6 +6,13 @@
 		{
 			"name": "constructor",
 			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "initialize",
+			"inputs": [
 				{"name":"pubkey","type":"uint256"},
 				{"name":"l1ChainId","type":"uint256"},
 				{"name":"bootstrapCommittee","type":"uint256"},

@@ -39,7 +39,7 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 8, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 9, 0);
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
@@ -267,7 +267,33 @@ pub async fn run_with(
         ));
     }
     let cfg = get("getAnchorConfig", json!({})).await;
-    let light_client = cfg["lightClient"].as_str().and_then(parse_an_address);
+    // 1.9.0 keeps one light client per source chain, and `getAnchorConfig`
+    // names only the one deployed last. Ask for this deposit's chain, in one
+    // classified attempt: a bridge that reports 1.9.0 without the per-chain
+    // getter answers "function ID is wrong", and `get` would retry that for
+    // ever, since it has no deadline. Version strings are not unique across
+    // builds, so that bridge is a real possibility.
+    let light_client = if version >= BridgeVersion(1, 9, 0) {
+        let input = json!({ "l1ChainId": chain_id.to_string() });
+        match an
+            .run_getter(bridge, BRIDGE_ABI, "getLightClient", input.clone())
+            .await
+        {
+            Ok(v) => v["value0"].as_str().and_then(parse_an_address),
+            Err(e) if is_unknown_function(&e) => {
+                ui.warn(&format!(
+                    "the bridge reports {version} but has no getLightClient(chainId) ({e:#}); \
+                     reading the last deployed client from getAnchorConfig"
+                ));
+                cfg["lightClient"].as_str().and_then(parse_an_address)
+            },
+            Err(_) => get("getLightClient", input).await["value0"]
+                .as_str()
+                .and_then(parse_an_address),
+        }
+    } else {
+        cfg["lightClient"].as_str().and_then(parse_an_address)
+    };
     // 1.8.0: `getAnchorConfig().ownerAnchorsEnabled` is the light client's
     // L1 only. The deposit's own chain is `isOwnerAnchorsEnabled`. 1.7.0
     // has no such getter — calling it through `transient` would retry
@@ -337,6 +363,15 @@ pub async fn run_with(
     })
 }
 
+/// The TVM answer for a getter the deployed code does not have. Retrying
+/// cannot change it, so a caller must not send it through `transient`.
+fn is_unknown_function(e: &anyhow::Error) -> bool {
+    let t = format!("{e:#}");
+    t.contains("function ID is wrong")
+        || t.contains("exit code: 60")
+        || t.contains("\"exit_code\": 60")
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::address;
@@ -390,6 +425,54 @@ mod tests {
             false,
         )
         .await
+    }
+
+    /// A bridge whose version says 1.9.0 but whose code has no
+    /// `getLightClient(chainId)`: the read must fall back once and warn, not
+    /// retry for ever — `get` has no deadline.
+    #[tokio::test]
+    async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.9.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
+            json!({ "value0": true }),
+        ]);
+        an.unknown_getters
+            .lock()
+            .unwrap()
+            .insert("getLightClient".to_string());
+        let ui = RecordingUi::new(true);
+        let target = AnTarget {
+            dapp_id: [0; 32],
+            account_id: ACC,
+        };
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_with(
+                &an,
+                BRIDGE,
+                11_155_111,
+                address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
+                &target,
+                &ui,
+                Some(BridgeVersion(1, 6, 0)),
+                false,
+                false,
+            ),
+        )
+        .await
+        .expect("the fallback must not retry for ever")
+        .expect("the preflight passes on the last deployed client");
+        assert_eq!(out.light_client, Some([0x20; 32]));
+        assert!(
+            ui.warnings()
+                .iter()
+                .any(|w| w.contains("getLightClient(chainId)")),
+            "{:?}",
+            ui.warnings()
+        );
     }
 
     #[tokio::test]

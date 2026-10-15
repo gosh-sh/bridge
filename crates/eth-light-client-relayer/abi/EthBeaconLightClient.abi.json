@@ -6,10 +6,6 @@
 		{
 			"name": "constructor",
 			"inputs": [
-				{"name":"pubkey","type":"uint256"},
-				{"name":"l1ChainId","type":"uint256"},
-				{"name":"bootstrapCommittee","type":"uint256"},
-				{"name":"bootstrapPeriod","type":"uint64"}
 			],
 			"outputs": []
 		},
@@ -111,6 +107,16 @@
 			"inputs": [],
 			"outputs": [
 				{"name":"value0","type":"uint64"}
+			]
+		},
+		{
+			"name": "getConfig",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"usdcBridge","type":"address"},
+				{"name":"ownerPubkey","type":"uint256"}
 			]
 		},
 		{

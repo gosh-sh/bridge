@@ -1184,8 +1184,10 @@ Preflight, in order:
 - **Acki Nacki** (`--gql-endpoint`): REST `/v2/` and GraphQL both answer; the
   bridge's `getVersion()` is at least the [minimum bridge
   version](#minimum-bridge-version); `isPaused()` is `false`;
-  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getAnchorConfig()` names
-  the light client; `isOwnerAnchorsEnabled(chainId)` says whether the owner
+  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getLightClient(chainId)`
+  names the light client of this deposit's chain (on bridges below 1.9.0,
+  `getAnchorConfig()` names the only one); `isOwnerAnchorsEnabled(chainId)`
+  says whether the owner
   still anchors this deposit's chain (on 1.7.0 that flag is still
   `getAnchorConfig().ownerAnchorsEnabled`, one bool for every chain); and
   with owner anchors off the light client must pass its
@@ -1705,8 +1707,9 @@ does this in a released binary.
 
 ### When only the light client anchors
 
-`getAnchorConfig()` returns the light client and whether owner anchors are
-still enabled on the light client's L1. The deposit's own chain is
+`getLightClient(chainId)` returns the light client of a source chain, and
+`getAnchorConfig()` the one deployed last together with its owner-anchor
+flag. The deposit's own chain is
 `isOwnerAnchorsEnabled(chainId)`: after an L1 flip, L2 deposits keep the
 owner writer.
 

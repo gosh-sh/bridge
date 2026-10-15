@@ -972,7 +972,7 @@ mod tests {
                 "50000001"
             );
             assert_eq!(
-                header.value.grams.as_u64().unwrap(),
+                u128::from(header.value.grams.as_u64().unwrap()),
                 incoming.min(100_000_000)
             );
             boc = result.account;

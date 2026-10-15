@@ -21,7 +21,7 @@ use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use serde_json::{json, Value};
 use tvm_client::{
     abi::{
-        decode_message, decode_message_body, encode_message, Abi, CallSet, ParamsOfDecodeMessage,
+        decode_message_body, encode_message, Abi, CallSet, FunctionHeader,
         ParamsOfDecodeMessageBody, ParamsOfEncodeMessage, Signer,
     },
     account::{get_account, ParamsOfGetAccount},
@@ -733,13 +733,25 @@ async fn encode_finalize(
     bridge: [u8; 32],
     proof: &[u8],
     public_inputs: &[u8],
-) -> Result<String, FinalizeSend> {
+) -> Result<(String, u32), FinalizeSend> {
+    let config =
+        tvm_client::client::config(ctx.clone()).map_err(|error| FinalizeSend::NotSent {
+            message: format!("read SDK message expiry: {}", error.message()),
+        })?;
+    let expires = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + u64::from(config.abi.message_expiration_timeout) / 1000) as u32;
     encode_message(ctx, ParamsOfEncodeMessage {
         abi: Abi::Json(abi.to_string()),
         address: Some(format!("0:{}", hex::encode(bridge))),
         call_set: Some(CallSet {
             function_name: "finalizeDeposit".into(),
-            header: None,
+            header: Some(FunctionHeader {
+                expire: Some(expires),
+                ..Default::default()
+            }),
             input: Some(json!({
                 "proof": hex::encode(proof),
                 "publicInputs": hex::encode(public_inputs),
@@ -751,7 +763,7 @@ async fn encode_finalize(
         signature_id: None,
     })
     .await
-    .map(|m| m.message)
+    .map(|m| (m.message, expires))
     .map_err(|e| FinalizeSend::NotSent {
         message: format!("encode finalizeDeposit: {}", e.message()),
     })
@@ -772,7 +784,7 @@ impl LiveAn {
             }
         }
         let abi = crate::deposit::identity::BRIDGE_ABI;
-        let message = encode_finalize(
+        let (message, expires) = encode_finalize(
             self.ctx.clone(),
             abi,
             request.bridge,
@@ -780,17 +792,6 @@ impl LiveAn {
             &request.inputs,
         )
         .await?;
-        let expires = decode_message(self.ctx.clone(), ParamsOfDecodeMessage {
-            abi: Abi::Json(abi.to_string()),
-            message: message.clone(),
-            ..Default::default()
-        })
-        .ok()
-        .and_then(|decoded| decoded.header)
-        .and_then(|header| header.expire)
-        .ok_or_else(|| FinalizeSend::NotSent {
-            message: "encoded finalizeDeposit has no readable expiry header".into(),
-        })?;
         pending.insert(request.clone(), PendingFinalize {
             message: message.clone(),
             expires,
@@ -1230,12 +1231,12 @@ mod tests {
             inputs: b"inputs".to_vec(),
         };
         let decode = |message: String| {
-            decode_message(an.ctx.clone(), ParamsOfDecodeMessage {
-                abi: Abi::Json(crate::deposit::identity::BRIDGE_ABI.into()),
-                message,
-                ..Default::default()
-            })
-            .unwrap()
+            use tvm_block::Deserializable;
+            let message = tvm_block::Message::construct_from_base64(&message).unwrap();
+            let mut body = message.body().unwrap();
+            // Unsigned ABI 2.4: absent signature and pubkey, time, expiry.
+            body.get_next_bits(98).unwrap();
+            body.into_cell().repr_hash()
         };
         let first = an.prepare_finalize(&request).await.unwrap();
         let mut other = request.clone();
@@ -1251,7 +1252,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let refreshed = an.prepare_finalize(&request).await.unwrap();
         assert_ne!(refreshed, first);
-        assert_eq!(decode(refreshed.clone()).value, decode(first.clone()).value);
+        assert_eq!(decode(refreshed.clone()), decode(first.clone()));
         // A late verdict for the old BOC must not erase its replacement.
         an.forget_finalize(&request, &first).await;
         assert_eq!(an.prepare_finalize(&request).await.unwrap(), refreshed);
@@ -1264,7 +1265,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let after_expiry = an.prepare_finalize(&request).await.unwrap();
         assert_ne!(after_expiry, refreshed);
-        assert_eq!(decode(after_expiry).value, decode(first).value);
+        assert_eq!(decode(after_expiry), decode(first));
     }
 
     #[tokio::test]

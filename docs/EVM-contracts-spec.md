@@ -7,9 +7,14 @@ citations below are re-anchored to that commit — the two-line-number-bases spl
 previous revisions of this document carried is gone. When editing the spec, either
 re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
 
-> **Drift note, 2026-10-14** (branch `feature/bk-set-updates-flow-test-fixes`, after merging
-> `main`): `src/AckiNackiBridge.sol` has grown since `4021c68` — the pause switch on `main`, then
-> this branch's bundle-aware `applyBkSetUpdate` rule, `bundleStride` and
+> **Drift note, 2026-10-12 (ETH-28).** The AAVE behaviour in §6 (payout top-up), §10 and §11
+> describes the code after `writeOffUnbackedPrincipal` landed; the line numbers in those rows
+> are still those of `4021c68`. `writeOffUnbackedPrincipal`, `_backedPrincipal`,
+> `AaveSupplyFailed`, `NothingToWriteOff`, `HarvestWouldBreakSolvency` and
+> `UnbackedPrincipalWrittenOff` did not exist at that commit and carry no line number.
+>
+> **Drift note, 2026-10-14** (after merging `main`): `src/AckiNackiBridge.sol` has grown since
+> `4021c68` — the pause switch, then the bundle-aware `applyBkSetUpdate` rule, `bundleStride` and
 > `genesisLastBkSetUpdateSeqNo` — and no re-anchoring pass has been run since. Citations below that
 > were not re-checked point too early: by about 30 lines around `HistoryWindow` (`:259` → `:289`)
 > and by about 100–160 from `deposit` on (`:672` → `:772`, `applyBkSetUpdate` `:898` → `:1011`,
@@ -144,7 +149,7 @@ relying on them for a storage-level migration.
 | 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
 | 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
 | 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll` |
+| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
 | 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
 | 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
 | 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
@@ -381,8 +386,9 @@ finalRoot, anchorLayer`.
 | 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
 
 Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
-then, if liquid USDC < `amount` and `suppliedPrincipal > 0`, pull `min(shortfall, suppliedPrincipal)`
-back from AAVE; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
+then, if liquid USDC < `amount`, pull exactly the shortfall back from AAVE through `_pullFromAave`
+— bounded by `aUsdcBalance()`, not by `suppliedPrincipal`, so interest above the book can fund a
+payout; an aToken balance below the shortfall reverts `InsufficientTreasury`; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
 
 Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1430-1434`).
@@ -587,10 +593,11 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 
 | Function | Line | Behaviour |
 |---|---:|---|
-| `supplyToAave(amount)` | 1443 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal += toSupply`. |
-| `withdrawFromAave(amount)` | 1464 | Pull back up to `suppliedPrincipal` preemptively. |
+| `supplyToAave(amount)` | 1443 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal +=` the aUSDC actually minted; none minted reverts `AaveSupplyFailed`. |
+| `withdrawFromAave(amount)` | 1464 | Pull back preemptively, at most `_backedPrincipal()` = `min(suppliedPrincipal, aUsdcBalance())`; `type(uint256).max` pulls exactly that. Zero, or an explicit amount above it, reverts `InvalidAmount`. |
 | `emergencyWithdrawAll()` | 1481 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
-| `harvestYield(amount)` | 1504 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. |
+| `writeOffUnbackedPrincipal()` | — | ETH-28: sets `suppliedPrincipal = aUsdcBalance()` when the book is larger, emits `UnbackedPrincipalWrittenOff(dropped)`; otherwise reverts `NothingToWriteOff`. Moves no tokens. |
+| `harvestYield(amount)` | 1504 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. Also reverts `HarvestWouldBreakSolvency` unless liquid USDC + aUSDC ≥ `treasuryBalance + amount`. Transfers `amount`; anything a pool pays above it stays liquid. |
 | `skimExcessUsdc(amount)` | 1532 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
 | `setAaveEnabled(bool)` | 1544 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
 | `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
@@ -598,9 +605,9 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 | `transferOwnership(addr)` | 1565 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
-floored at 0 (`:1593`). `_pullFromAave(amount)` withdraws `min(amount, suppliedPrincipal)`, requires
-the *received* delta to cover both `toPull` and `amount` (`AaveWithdrawFailed`), and decrements
-`suppliedPrincipal` (`:1601-1618`).
+floored at 0 (`:1593`). `_pullFromAave(amount)` reverts `InsufficientTreasury` if `amount` exceeds
+`aUsdcBalance()`, withdraws exactly `amount`, requires the *received* delta to cover it
+(`AaveWithdrawFailed`), and lowers `suppliedPrincipal` by `amount` floored at 0 (`:1601-1618`).
 
 Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal` floored at 0,
 `totalAssets()` = liquid USDC + aUSDC (`:1625-1640`).
@@ -610,7 +617,7 @@ Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal`
 | Function | Caller |
 |---|---|
 | `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone, while not `paused` |
-| `pause`, `unpause`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `pause`, `unpause`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
 | `acceptOwnership` | `pendingOwner` |
 | everything else | view/pure |
 
@@ -639,7 +646,7 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 
 Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnabledSet`,
 `LiquidReserveBpsSet`, `OwnershipTransferred`, `YieldRecipientSet`, `EmergencyWithdrawAll`,
-`ExcessUsdcSkimmed` (`:294-306`).
+`ExcessUsdcSkimmed` (`:294-306`), `UnbackedPrincipalWrittenOff`.
 
 ### 11.2 Selectors
 
@@ -668,7 +675,8 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositTooLarge`,
 `InvalidAnAccount`, `InsufficientTreasury`, `InvalidRecipient`, `InvalidOracle`,
 `InvalidAaveAddress`, `NotOwner`, `Reentrancy`, `AaveDisabled`, `ReserveBpsTooHigh`,
-`NothingToSupply`, `AaveWithdrawFailed`, `NoYield`, `NoExcessUsdc`.
+`NothingToSupply`, `AaveWithdrawFailed`, `AaveSupplyFailed`, `NothingToWriteOff`,
+`HarvestWouldBreakSolvency`, `NoYield`, `NoExcessUsdc`.
 
 `verifyBlock`: `VerifyBlockDisabled`, `AttestationProofRejected`, `LayerHashesProofRejected`,
 `BkSetCommitmentMismatch`, `BlockSeqNoNotMonotonic`, `PrevAnchorMismatch`, `InvalidNumLayers`,
@@ -879,8 +887,9 @@ Read off the code, without a formal audit claim.
    error at `:361`). A fee-on-transfer or rebasing token now fails closed instead of crediting
    book value it never received.
 7. *Solvency is not re-checked against real assets.* `treasuryBalance` is book value; if AAVE were to
-   lose value, `withdrawByProof` fails late (`WithdrawTreasuryShortfall` or the raw transfer),
-   first-come-first-served.
+   lose value, `withdrawByProof` fails late (`InsufficientTreasury` once liquid USDC plus aUSDC no
+   longer covers the payout), first-come-first-served. `harvestYield` is the one owner path that
+   checks real assets (`HarvestWouldBreakSolvency`).
 8. *Zero `dappFr` is accepted* at construction, so on a shellnet-style deployment the AN-side identity
    is pinned by `accFr` alone.
 9. *`blockHeaderOracle` is dead weight* — a required, non-zero constructor argument that no code path

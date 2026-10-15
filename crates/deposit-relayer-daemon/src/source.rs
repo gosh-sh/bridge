@@ -208,9 +208,12 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     chain_id: Mutex<Option<u64>>,
     /// Scan cursor: no block up to and including this one holds a deposit the
     /// relayer still has to deliver, so the next scan starts after it. Moved
-    /// here when the target is not made yet as of `safe_head`, and by the
-    /// relayer after a finalize. `None` means "scan from `from_block`".
+    /// here when the target is not made yet as of `safe_head` or is found, and
+    /// by the relayer after a finalize. `None` means "scan from `from_block`".
     scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
+    /// The last deposit found, so retrying a deposit AN keeps refusing costs
+    /// no `eth_getLogs`. It was already `confirmations` deep when found.
+    located: Mutex<Option<DepositEvent>>,
     _network: std::marker::PhantomData<N>,
 }
 
@@ -227,6 +230,7 @@ where
             confirmations,
             chain_id: Mutex::new(None),
             scan_cursor: None,
+            located: Mutex::new(None),
             _network: std::marker::PhantomData,
         }
     }
@@ -440,6 +444,16 @@ where
     P: Provider<Ethereum> + Send + Sync,
 {
     async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError> {
+        if let Some(event) = self
+            .located
+            .lock()
+            .expect("poisoned lock")
+            .as_ref()
+            .filter(|e| e.deposit_id == deposit_id)
+        {
+            return Ok(Some(event.clone()));
+        }
+
         let head = self
             .provider
             .get_block_number()
@@ -466,8 +480,7 @@ where
         // `depositId` is the first indexed topic; filter on it directly so
         // the node only returns the single matching log. Scan in small chunks
         // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges,
-        // and stop at the chunk that holds the deposit. The cursor stays put:
-        // until AN accepts the deposit, a retry has to find it again.
+        // and stop at the chunk that holds the deposit.
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
         let scan_from = self.effective_scan_from();
         gauge!(prom::ETH_SCAN_FROM_BLOCK).set(scan_from as f64);
@@ -486,6 +499,16 @@ where
             counter!(prom::ETH_SCANNED_BLOCKS_TOTAL)
                 .increment(chunk_end.saturating_sub(chunk_start).saturating_add(1));
             if let Some(event) = self.deposit_from_logs(logs, deposit_id).await? {
+                // `depositId`s grow with block order, so the blocks before this
+                // one hold only lower ids, which the relayer has finalized or
+                // parked. The deposit's own block stays in range for a scan
+                // after a restart.
+                if let (Some(cursor), Some(through)) =
+                    (&self.scan_cursor, event.block_number.checked_sub(1))
+                {
+                    advance_scan_cursor(cursor, through);
+                }
+                *self.located.lock().expect("poisoned lock") = Some(event.clone());
                 return Ok(Some(event));
             }
             chunk_start = chunk_end.saturating_add(1);
@@ -640,16 +663,48 @@ mod tests {
             "receipt-local index, not the block-global one"
         );
         assert_eq!(first.source_chain_id, 11_155_111);
-        // The scan stops at the chunk that holds the deposit.
+        // The scan stops at the chunk that holds the deposit, and the cursor
+        // keeps the deposit's block in range.
         assert_eq!(rpc.take_get_logs_ranges(), vec![(100, 109)]);
-        assert_eq!(*cursor.lock().unwrap(), None);
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
 
         let retry = source.fetch(0).await.unwrap().expect("deposit 0 again");
         assert_eq!(retry.block_number, 105);
 
         let second = source.fetch(1).await.unwrap().expect("deposit 1");
         assert_eq!(second.block_number, 107);
-        assert_eq!(*cursor.lock().unwrap(), None);
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(105, 114)]);
+        assert_eq!(*cursor.lock().unwrap(), Some(106));
+    }
+
+    #[tokio::test]
+    async fn retrying_a_stuck_deposit_makes_no_further_rpc_scans() {
+        let rpc = FakeRpc::new(BRIDGE, 160);
+        rpc.deposit(135);
+        let cursor = Arc::new(Mutex::new(Some(104)));
+        let source = log_source(&rpc, &cursor);
+
+        assert_eq!(source.fetch(0).await.unwrap().unwrap().block_number, 135);
+        assert_eq!(rpc.take_counter_blocks(), vec![148]);
+        assert_eq!(rpc.take_get_logs_ranges(), vec![
+            (105, 114),
+            (115, 124),
+            (125, 134),
+            (135, 144)
+        ]);
+        assert_eq!(*cursor.lock().unwrap(), Some(134));
+
+        rpc.set_head(400);
+        for _ in 0..5 {
+            assert_eq!(source.fetch(0).await.unwrap().unwrap().block_number, 135);
+        }
+        assert_eq!(rpc.take_counter_blocks(), Vec::<u64>::new());
+        assert_eq!(rpc.take_get_logs_ranges(), vec![]);
+
+        // A restarted daemon has only the persisted cursor: one chunk.
+        let restarted = log_source(&rpc, &cursor);
+        assert_eq!(restarted.fetch(0).await.unwrap().unwrap().block_number, 135);
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(135, 144)]);
     }
 
     #[tokio::test]
@@ -687,7 +742,7 @@ mod tests {
         assert_eq!(source.fetch(0).await.unwrap().unwrap().block_number, 125);
         assert_eq!(rpc.take_counter_blocks(), vec![118, 125]);
         assert_eq!(rpc.take_get_logs_ranges(), vec![(119, 125)]);
-        assert_eq!(*cursor.lock().unwrap(), Some(118));
+        assert_eq!(*cursor.lock().unwrap(), Some(124));
     }
 
     #[tokio::test]

@@ -108,9 +108,12 @@ running. Stopping both directions of the bridge in an incident means flipping
 ## AAVE routing never moves the book
 
 `supplyToAave`, `withdrawFromAave` and `emergencyWithdrawAll` move tokens between the bridge and the
-pool and adjust `suppliedPrincipal` only. `harvestYield` and `skimExcessUsdc` send surplus to
-`yieldRecipient` and appear in neither the book nor the principal accounting — that absence is what
-makes them incapable of reaching user principal. Operating detail: [`aave-yield.md`](aave-yield.md).
+pool and adjust `suppliedPrincipal` only; `writeOffUnbackedPrincipal` adjusts `suppliedPrincipal`
+and moves nothing. `harvestYield` and `skimExcessUsdc` send surplus to `yieldRecipient` and are
+each bounded by `treasuryBalance`: `skimExcessUsdc` takes only liquid USDC above it, and
+`harvestYield` reverts if liquid USDC + aUSDC would drop below it. That bound, not the
+`suppliedPrincipal` book, is what keeps them from reaching user principal. Operating detail:
+[`aave-yield.md`](aave-yield.md).
 
 ## Labelled rules, restated
 

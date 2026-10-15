@@ -1383,7 +1383,7 @@ dependencies = [
 [[package]]
 name = "axiom-eth"
 version = "0.4.3"
-source = "git+https://github.com/axiom-crypto/axiom-eth#9c41d989625d5148a0284949fe98b9744e7fb7b7"
+source = "git+https://github.com/gosh-sh/axiom-eth?rev=1d61be00a63ec73b3f709d74eb9e6b09b754b911#1d61be00a63ec73b3f709d74eb9e6b09b754b911"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1391,7 +1391,7 @@ dependencies = [
  "env_logger",
  "ethers-core",
  "getset",
- "halo2-base 0.4.1 (git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git)",
+ "halo2-base",
  "hasher",
  "itertools 0.11.0",
  "lazy_static",
@@ -2665,6 +2665,7 @@ dependencies = [
  "deposit-chain-ids",
  "fs2",
  "hex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -3319,6 +3320,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3572,7 +3579,7 @@ name = "gosh-zk-snark-halo2-utils"
 version = "0.1.0"
 source = "git+https://github.com/gosh-sh/gosh-zk-snark-halo2-utils?branch=main#fcc3ec73510ac61d62848e1fe59617acdbd5c00c"
 dependencies = [
- "halo2-base 0.4.1 (git+https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381?branch=bump-halo2-lib-v0.4.1)",
+ "halo2-base",
  "halo2_kzg_srs",
  "halo2curves",
  "rand 0.8.8",
@@ -3606,6 +3613,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.2",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3614,28 +3640,6 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
-]
-
-[[package]]
-name = "halo2-axiom"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f81aee7974478f9e3ea0cfd349d2a59a3482f7844386486a98e4af9ed8bada6"
-dependencies = [
- "blake2b_simd",
- "crossbeam",
- "ff 0.13.1",
- "group 0.13.0",
- "halo2curves-axiom",
- "itertools 0.11.0",
- "maybe-rayon",
- "pairing",
- "rand 0.8.8",
- "rand_core 0.6.4",
- "rayon",
- "rustc-hash 1.1.0",
- "sha3 0.10.9",
- "tracing",
 ]
 
 [[package]]
@@ -3662,38 +3666,18 @@ dependencies = [
 [[package]]
 name = "halo2-base"
 version = "0.4.1"
-source = "git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git#2fe813b3ccd4f224da195d61829effb20599dcbd"
+source = "git+https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381?branch=bump-halo2-lib-v0.4.1#026e176de8aff8269ab3bbb7f7192b247adab965"
 dependencies = [
  "ark-std 0.3.0",
  "getset",
- "halo2-axiom 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "halo2-axiom",
  "itertools 0.11.0",
  "log",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
- "poseidon-primitives 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "poseidon-primitives",
  "rand 0.8.8",
- "rand_chacha 0.3.1",
- "rayon",
- "rustc-hash 1.1.0",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "halo2-base"
-version = "0.4.1"
-source = "git+https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381?branch=bump-halo2-lib-v0.4.1#026e176de8aff8269ab3bbb7f7192b247adab965"
-dependencies = [
- "getset",
- "halo2-axiom 0.4.5 (git+https://github.com/gosh-sh/halo2-axiom?branch=main)",
- "itertools 0.11.0",
- "log",
- "num-bigint 0.4.8",
- "num-integer",
- "num-traits",
- "poseidon-primitives 0.1.1 (git+https://github.com/gosh-sh/poseidon-primitives?branch=main)",
  "rand_chacha 0.3.1",
  "rayon",
  "rustc-hash 1.1.0",
@@ -3704,9 +3688,9 @@ dependencies = [
 [[package]]
 name = "halo2-ecc"
 version = "0.4.1"
-source = "git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git#2fe813b3ccd4f224da195d61829effb20599dcbd"
+source = "git+https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381?branch=bump-halo2-lib-v0.4.1#026e176de8aff8269ab3bbb7f7192b247adab965"
 dependencies = [
- "halo2-base 0.4.1 (git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git)",
+ "halo2-base",
  "itertools 0.11.0",
  "num-bigint 0.4.8",
  "num-integer",
@@ -3975,6 +3959,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -4729,6 +4714,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5302,21 +5293,6 @@ dependencies = [
 [[package]]
 name = "poseidon-primitives"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bd95570f7ea849b4187298b5bb229643e44e1d47ddf3979d0db8a1c28be26a8"
-dependencies = [
- "bitvec",
- "ff 0.13.1",
- "lazy_static",
- "log",
- "rand 0.8.8",
- "rand_xorshift 0.3.0",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "poseidon-primitives"
-version = "0.1.1"
 source = "git+https://github.com/gosh-sh/poseidon-primitives?branch=main#fb1450059deb4ae52b0dfdddcb9fdd6767ae1293"
 dependencies = [
  "bitvec",
@@ -5829,9 +5805,11 @@ dependencies = [
  "bytes",
  "cookie",
  "cookie_store",
+ "encoding_rs",
  "futures-channel",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -5840,6 +5818,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -6648,10 +6627,10 @@ dependencies = [
 
 [[package]]
 name = "snark-verifier"
-version = "0.1.7"
-source = "git+https://github.com/axiom-crypto/snark-verifier.git?tag=v0.1.7-git#4b733e0ca8be017954b111f359bcf8622c5b7c66"
+version = "0.1.8"
+source = "git+https://github.com/gosh-sh/snark-verifier?rev=164bd42e300b382239e63b16532faca539d6b324#164bd42e300b382239e63b16532faca539d6b324"
 dependencies = [
- "halo2-base 0.4.1 (git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git)",
+ "halo2-base",
  "halo2-ecc",
  "hex",
  "itertools 0.11.0",
@@ -6666,12 +6645,12 @@ dependencies = [
 
 [[package]]
 name = "snark-verifier-sdk"
-version = "0.1.7"
-source = "git+https://github.com/axiom-crypto/snark-verifier.git?tag=v0.1.7-git#4b733e0ca8be017954b111f359bcf8622c5b7c66"
+version = "0.1.8"
+source = "git+https://github.com/gosh-sh/snark-verifier?rev=164bd42e300b382239e63b16532faca539d6b324#164bd42e300b382239e63b16532faca539d6b324"
 dependencies = [
  "bincode",
  "getset",
- "halo2-base 0.4.1 (git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git)",
+ "halo2-base",
  "hex",
  "itertools 0.11.0",
  "lazy_static",
@@ -7135,6 +7114,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -7610,7 +7590,7 @@ dependencies = [
  "fastcrypto",
  "ff 0.13.1",
  "gosh-zk-snark-halo2-utils",
- "halo2-base 0.4.1 (git+https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381?branch=bump-halo2-lib-v0.4.1)",
+ "halo2-base",
  "hex",
  "itertools 0.13.0",
  "lazy_static",
@@ -8880,12 +8860,12 @@ dependencies = [
 [[package]]
 name = "zkevm-hashes"
 version = "0.2.1"
-source = "git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git#2fe813b3ccd4f224da195d61829effb20599dcbd"
+source = "git+https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381?branch=bump-halo2-lib-v0.4.1#026e176de8aff8269ab3bbb7f7192b247adab965"
 dependencies = [
  "array-init",
  "ethers-core",
  "getset",
- "halo2-base 0.4.1 (git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.4.1-git)",
+ "halo2-base",
  "itertools 0.11.0",
  "lazy_static",
  "log",
@@ -8893,6 +8873,7 @@ dependencies = [
  "rand 0.8.8",
  "rayon",
  "serde",
+ "sha2 0.10.9",
  "sha3 0.10.9",
  "snark-verifier-sdk",
  "type-map",

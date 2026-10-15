@@ -1,7 +1,9 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.5.0, the other two at 1.4.0:
+`exchange/` — `eccUSDCBridge` at version 1.6.0 in source (the compiled
+artefact in this tree is still 1.5.0 until `sold` rebuilds it), the other two
+at 1.4.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -24,15 +26,32 @@ rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
 trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
 verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
-event in a block, but cannot show that the block is canonical. Two writers fill
-the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which needs a light client first; the light
-client adds and ages out hashes with `acceptBlockHashFromLightClient` and
-`forgetBlockHashFromLightClient`. `getAnchorConfig()` returns the light client
-and whether the owner may still write. No function turns owner anchors back on,
-but the owner keeps two ways around it: `updateCode` does (`onCodeUpgrade` sets
-the flag back to true), and `setLightClientCode` still replaces the light
-client afterwards.
+event in a block, but cannot show that the block is canonical.
+
+A trusted contract mints USDC (`USDC_ECC_ID`, 3) unless
+`setTrustedBridgeToken(chainId, bridge, tokenId)` says otherwise.
+`confirmDeposit` reads that mapping when the voucher calls back, so don't
+revoke or retarget a bridge while its voucher message is still in flight —
+a cleared override mints USDC. `setTrustedL1Bridge(..., false)` clears the
+override. `initiateWithdrawal` always accepts USDC; any other ECC id has to
+be marked with `setWithdrawableToken` (which `setTrustedBridgeToken` does)
+and can be unmarked later, which strands balances already minted. USDC
+cannot be unmarked.
+
+Anchors have two kinds of writer. The owner admits or retracts hashes with
+`setAcceptedBlockHash` until `disableOwnerAnchors()`, which needs a light
+client first, or until `disableOwnerAnchorsFor(chainId)`, which needs
+`setAnchorProvider` for that chain first. The legacy light client adds and
+ages out hashes with `acceptBlockHashFromLightClient` and
+`forgetBlockHashFromLightClient`, and that path is not limited to one chain
+id. A provider registered with `setAnchorProvider(chainId, provider)` writes
+only that chain, through `acceptBlockHash` and `forgetBlockHash`.
+`getAnchorConfig()` returns the legacy light client and the global owner
+flag; `ownerAnchorsEnabledFor(chainId)` is the per-chain answer. No function
+turns owner anchors back on, but the owner keeps two ways around it:
+`updateCode` does (`onCodeUpgrade` sets the global flag back to true and
+clears the per-chain providers, because they are not in the migration
+tuple), and `setLightClientCode` still replaces the light client afterwards.
 
 | Path | Contents |
 |------|----------|

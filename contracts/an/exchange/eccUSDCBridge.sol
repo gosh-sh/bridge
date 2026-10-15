@@ -28,19 +28,22 @@ interface IShellAccumulator {
 ///            `_mintAccumulatorNonce`) against off-chain replay of signed
 ///            mint requests.
 ///
-///         3. Cross-chain bridge — USDC-only (tokenId == USDC_ECC_ID)
+///         3. Cross-chain bridge
 ///            `initiateWithdrawal` (burn ECC + emit `WithdrawalInitiated`) and
 ///            `finalizeDeposit` / `confirmDeposit` (verify proof, deploy
 ///            deterministic `DepositVoucher` for anti-replay, mint ECC).
 ///            The destination chain of a withdrawal is opaque; the SOURCE of a
 ///            deposit is proof-bound (chainId + emitting contract) and gated by
 ///            the owner-managed `_trustedL1Bridge` allowlist.
+///            A trusted contract mints USDC (ECC[3]) unless
+///            `setTrustedBridgeToken` names another ECC id for it. USDC can
+///            always be burned; any other id needs `_withdrawableToken`.
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
-///            `_totalBurnedBridgeByToken` (mapping kept for forward-compat).
+///            `_totalBurnedBridgeByToken`.
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.5.0";
+    string constant version = "1.6.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -137,6 +140,31 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // unpaused — with an empty allowlist and empty anchors, which hold deposits
     // anyway until the owner re-seeds them.
     bool _paused;
+
+    // Per-chain anchor writer. `acceptBlockHash` / `forgetBlockHash` accept
+    // only `_anchorProvider[chainId]`, so a writer for one chain cannot admit
+    // a hash for another. The legacy beacon light client is NOT this mapping:
+    // it still writes through `acceptBlockHashFromLightClient`, and that path
+    // is not scoped to one chain. Empty after `onCodeUpgrade`.
+    mapping(uint256 => address) _anchorProvider;
+
+    // Per-chain retirement of `setAcceptedBlockHash`. Stacks with the global
+    // `_ownerAnchorsEnabled` flag: either one being off rejects the owner
+    // write for that chain. Not carried through `onCodeUpgrade`.
+    mapping(uint256 => bool) _ownerAnchorsDisabledForChain;
+
+    // ECC id minted for a deposit whose proven contract is this bridge.
+    // Absent (`_bridgeTokenSet` false) means USDC_ECC_ID, so an allowlist
+    // entry seeded by `setTrustedL1Bridge` keeps minting USDC. Read at
+    // `confirmDeposit` time — do not revoke or retarget a bridge while its
+    // voucher message is in flight, or that mint falls back to USDC.
+    // Not carried through `onCodeUpgrade`.
+    mapping(uint256 => mapping(uint256 => uint32)) _bridgeTokenId;
+    mapping(uint256 => mapping(uint256 => bool)) _bridgeTokenSet;
+
+    // Extra ECC ids `initiateWithdrawal` may burn. USDC_ECC_ID is always
+    // allowed and is not stored here. Not carried through `onCodeUpgrade`.
+    mapping(uint32 => bool) _withdrawableToken;
 
     // ZK verifying key (VkBlob) for the FINAL ETH-deposit circuit
     // (receipt-proof of an L1 deposit event, 12 public inputs — chainId added
@@ -390,7 +418,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(keys.length == 1, ERR_MULTIPLE_ECC);
 
         uint32 tokenId = keys[0];
-        require(tokenId == USDC_ECC_ID, ERR_UNSUPPORTED_TOKEN);
+        require(tokenId == USDC_ECC_ID || _withdrawableToken[tokenId], ERR_UNSUPPORTED_TOKEN);
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
@@ -437,7 +465,54 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             _trustedL1Bridge[chainId][l1Bridge] = true;
         } else {
             delete _trustedL1Bridge[chainId][l1Bridge];
+            // Drop the token override with the allowlist entry. A later
+            // re-trust via this function mints USDC again until
+            // `setTrustedBridgeToken` is called. See `_bridgeTokenSet`.
+            delete _bridgeTokenId[chainId][l1Bridge];
+            delete _bridgeTokenSet[chainId][l1Bridge];
         }
+    }
+
+    /// @notice Trust `l1Bridge` on `chainId` and mint `tokenId` for its deposits.
+    ///         Also marks `tokenId` burnable in `initiateWithdrawal`. Several
+    ///         contracts may share one token id. `tokenId` must be non-zero;
+    ///         USDC is `USDC_ECC_ID` (3), not 0. Revoke with
+    ///         `setTrustedL1Bridge(..., false)`, which also clears this override.
+    function setTrustedBridgeToken(uint256 chainId, uint256 l1Bridge, uint32 tokenId) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(l1Bridge != 0, ERR_UNSUPPORTED_SRC_CHAIN);
+        require(tokenId != 0, ERR_TOKEN_UNSET);
+        ensureBalance();
+        _trustedL1Bridge[chainId][l1Bridge] = true;
+        _bridgeTokenId[chainId][l1Bridge] = tokenId;
+        _bridgeTokenSet[chainId][l1Bridge] = true;
+        _withdrawableToken[tokenId] = true;
+    }
+
+    /// @notice Allow or revoke burns of `tokenId` in `initiateWithdrawal`.
+    ///         USDC cannot be revoked. Revoking some other id does not stop
+    ///         `confirmDeposit` from minting it — disable the bridge entry for
+    ///         that — and it strands balances already minted, so it is an
+    ///         operator action, not a pause.
+    function setWithdrawableToken(uint32 tokenId, bool allowed) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(tokenId != 0, ERR_TOKEN_UNSET);
+        require(tokenId != USDC_ECC_ID || allowed, ERR_UNSUPPORTED_TOKEN);
+        ensureBalance();
+        if (allowed) {
+            _withdrawableToken[tokenId] = true;
+        } else {
+            delete _withdrawableToken[tokenId];
+        }
+    }
+
+    /// @notice Token override for one allowlist entry.
+    ///         `tokenSet == false` means deposits of that contract mint USDC.
+    function getTrustedBridgeToken(uint256 chainId, uint256 l1Bridge) external view returns (bool tokenSet, uint32 tokenId) {
+        return (_bridgeTokenSet[chainId][l1Bridge], _bridgeTokenId[chainId][l1Bridge]);
+    }
+
+    /// @notice True if `initiateWithdrawal` will burn `tokenId`.
+    function isWithdrawableToken(uint32 tokenId) external view returns (bool) {
+        return tokenId == USDC_ECC_ID || _withdrawableToken[tokenId];
     }
 
     /// @notice Returns the trusted L1 bridge SET for `chainId` (address -> true).
@@ -467,7 +542,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     function setAcceptedBlockHash(uint256 chainId, uint256 blockHash, bool accepted)
         public onlyOwnerPubkey(_ownerPubkey) accept
     {
-        require(_ownerAnchorsEnabled, ERR_OWNER_ANCHORS_DISABLED);
+        require(_ownerAnchorsEnabled && !_ownerAnchorsDisabledForChain[chainId], ERR_OWNER_ANCHORS_DISABLED);
         ensureBalance();
         if (accepted) {
             _acceptedBlockHash[chainId][blockHash] = true;
@@ -527,6 +602,61 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         _ownerAnchorsEnabled = false;
+    }
+
+    /// @notice Register the only account that may admit or drop anchors for
+    ///         `chainId` through `acceptBlockHash` / `forgetBlockHash`.
+    ///         Does not affect the legacy light-client writer.
+    function setAnchorProvider(uint256 chainId, address provider) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(provider != address(0), ERR_ANCHOR_PROVIDER_UNSET);
+        ensureBalance();
+        _anchorProvider[chainId] = provider;
+    }
+
+    /// @notice Remove the per-chain anchor writer. Refused once owner anchors
+    ///         for that chain are retired, so the chain cannot be left with
+    ///         no writer.
+    function clearAnchorProvider(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(!_ownerAnchorsDisabledForChain[chainId], ERR_OWNER_ANCHORS_DISABLED);
+        ensureBalance();
+        delete _anchorProvider[chainId];
+    }
+
+    /// @notice Stop `setAcceptedBlockHash` for one chain. Requires a provider
+    ///         for that chain first. Does not turn the global flag off, and
+    ///         does not affect other chains. One-way until `onCodeUpgrade`.
+    function disableOwnerAnchorsFor(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept {
+        require(_anchorProvider[chainId] != address(0), ERR_ANCHOR_PROVIDER_UNSET);
+        ensureBalance();
+        _ownerAnchorsDisabledForChain[chainId] = true;
+    }
+
+    /// @notice Admit a block hash. Caller must be the provider registered for
+    ///         this `chainId` — a provider for another chain is rejected.
+    function acceptBlockHash(uint256 chainId, uint256 blockHash) public {
+        address provider = _anchorProvider[chainId];
+        require(provider != address(0) && msg.sender == provider, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+        _acceptedBlockHash[chainId][blockHash] = true;
+    }
+
+    /// @notice Drop a block hash. Same authorization as `acceptBlockHash`.
+    function forgetBlockHash(uint256 chainId, uint256 blockHash) public {
+        address provider = _anchorProvider[chainId];
+        require(provider != address(0) && msg.sender == provider, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+        delete _acceptedBlockHash[chainId][blockHash];
+    }
+
+    function getAnchorProvider(uint256 chainId) external view returns (address) {
+        return _anchorProvider[chainId];
+    }
+
+    /// @notice False when the global flag is off or this chain was retired.
+    function ownerAnchorsEnabledFor(uint256 chainId) external view returns (bool) {
+        return _ownerAnchorsEnabled && !_ownerAnchorsDisabledForChain[chainId];
     }
 
     /// @notice Stops and resumes the cross-chain lane: while paused,
@@ -677,11 +807,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         tvm.accept();
         ensureBalance();
 
-        gosh.mintecc(uint64(amount), USDC_ECC_ID);
-        _totalMintedBridgeByToken[USDC_ECC_ID] += amount;
+        uint32 tokenId = _eccForDeposit(chainId, contractAddr);
+        require(tokenId != 0, ERR_UNSUPPORTED_TOKEN);
+        gosh.mintecc(uint64(amount), tokenId);
+        _totalMintedBridgeByToken[tokenId] += amount;
 
         mapping(uint32 => varuint32) ecc;
-        ecc[USDC_ECC_ID] = varuint32(amount);
+        ecc[tokenId] = varuint32(amount);
         address.makeAddrStd(0, anAccount).transfer({
             value: 1 vmshell,
             bounce: false,
@@ -693,6 +825,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         emit DepositFinalized{dest: addrExtern}(
             depositId, contractAddr, dappId, chainId, amount, anAccount
         );
+    }
+
+    /// @dev Token minted for this source contract. An allowlist entry with no
+    ///      override (the `setTrustedL1Bridge` path) stays on USDC.
+    function _eccForDeposit(uint256 chainId, uint256 contractAddr) private view returns (uint32) {
+        if (_bridgeTokenSet[chainId][contractAddr]) {
+            return _bridgeTokenId[chainId][contractAddr];
+        }
+        return USDC_ECC_ID;
     }
 
     // DepositVoucher code rotation is intentionally not exposed as a

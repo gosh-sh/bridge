@@ -183,6 +183,110 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **USDC deposited on Arbitrum (and any other CCTP chain) can be credited on
+  Acki Nacki without a new deposit circuit.** Two Ethereum contracts, same
+  code on every chain:
+
+  - `CctpEndpoint` (`contracts/ethereum/src/cctp/CctpEndpoint.sol`), deployed
+    on the source chain and again on the hub. `depositToHub(token, amount,
+    anWorkchain, anAccount, maxFee, minFinalityThreshold)` pulls the local
+    token and burns it through Circle `TokenMessengerV2.depositForBurnWithHook`.
+    The hub receiver is both the mint recipient and the only address allowed
+    to submit the attestation (`destinationCaller`). `bridgeOut(token, amount,
+    destinationDomain, mintRecipient, maxFee, minFinalityThreshold)` is the
+    return leg: no hook, USDC is minted straight to `mintRecipient` on a
+    domain the owner has `setEgressDomain`'d. Arbitrum is CCTP domain **3**
+    (`CctpDomains.ARBITRUM`); Ethereum is domain **0**. `minFinalityThreshold`
+    is **2000** for a finalized transfer and **1000** for a fast one, which
+    is where Circle takes `maxFee`.
+  - `CctpHubReceiver`, deployed on the hub next to one `AckiNackiBridge`.
+    Circle does not call the mint recipient — a keeper calls
+    `receiveAndDeposit(message, attestation)` with the signed message from
+    Circle's Iris API. The contract checks the burn came from a
+    `setSource`'d `(domain, adapter, remote token)`, asks
+    `MessageTransmitterV2.receiveMessage` to mint, and calls
+    `AckiNackiBridge.deposit` for `amount - feeExecuted` in the same
+    transaction. The `Deposit` event is a **hub** deposit: `sender` is the
+    receiver, `chainId` in the proof is the hub's, `anAccount` comes from
+    the hook. Do **not** add Arbitrum's chain id 42161 to the deposit-prover
+    allowlist or to `setTrustedL1Bridge` for this path. Trust the hub chain
+    and the hub bridge. The remote chain id and the source depositor are in
+    `RemoteDepositForwarded`, which is not a public input of the proof.
+
+  A second token is a second bridge and a second receiver; a second source
+  chain is another `setSource` / `setHub` row. `script/DeployCctp.s.sol`
+  deploys one contract per broadcast (`CCTP_KIND=endpoint` needs
+  `TOKEN_MESSENGER`; `CCTP_KIND=receiver` needs `DEPOSIT_BRIDGE`,
+  `MESSAGE_TRANSMITTER` and `CCTP_LOCAL_DOMAIN`). Routing (`setHub`,
+  `setSource`, `setEgressDomain`) is a separate owner transaction. The owner
+  of either contract can `rescue` tokens that were sent there outside these
+  calls; a successful deposit or burn does not leave a balance.
+
+  It does not change the deposit proof, the verification key, or the
+  `Deposit` event.
+
+- **`deposit-relayer cctp-forward` and `deposit-relayer cctp-daemon` submit
+  the Circle attestation.** `cctp-forward` takes one source-chain burn
+  (`--tx-hash`, `--source-domain`; Arbitrum is 3) and calls
+  `CctpHubReceiver.receiveAndDeposit` on the hub. `cctp-daemon` scans
+  `HubDeposit` logs on the source `CctpEndpoint` (`--from-block` is
+  required) and does the same for each new burn. Both need an explicit
+  `--iris-url` / `CCTP_IRIS_URL`: `https://iris-api.circle.com` or
+  `https://iris-api-sandbox.circle.com`. The hub key is
+  `CCTP_HUB_PRIVATE_KEY`. The daemon's cursor is
+  `./cctp-forward-state.json` (its own `--state`), not
+  `deposit-relayer-state.json`. A burn whose Circle nonce was already used
+  is treated as done; other submission failures are retried and then left
+  in `gave_up` after eight attempts. These commands do not prove and do not
+  call Acki Nacki. `cctp-forward --dry-run` only checks that Iris has
+  signed; the daemon has no dry-run, so a check cannot skip burns.
+
+  The hub `Deposit` is emitted inside `receiveAndDeposit`. That transaction
+  carries the Circle message and the attestation (the hook starts at byte
+  376) and the receipt has the mint, the approvals, `Deposit` and
+  `RemoteDepositForwarded`. The deposit circuit accepts an EIP-1559
+  transaction of at most 256 calldata bytes and at most 3 logs, so
+  `deposit-relayer daemon` cannot prove this transaction yet. Ethereum
+  mainnet (chain id 1) is also outside the deposit-prover allowlist;
+  Sepolia (11155111) is inside it.
+
+- **`scripts/cctp_usdc.sh` deploys and wires the CCTP contracts.**
+  `deploy-endpoint` and `deploy-receiver` broadcast `script/DeployCctp.s.sol`.
+  `set-hub`, `set-source` and `set-egress` broadcast `script/WireCctp.s.sol`,
+  which left-pads 20-byte addresses to the bytes32 Circle stores. Every
+  broadcast requires `CONFIRM_CCTP=BROADCAST`, `RPC_URL` and `PRIVATE_KEY`.
+  Circle's messenger, transmitter and USDC addresses are arguments, not
+  defaults. `print-keepers` prints the `cctp-daemon` command and the hub
+  `deposit-relayer daemon` command; it does not start them and does not
+  print keys. It repeats the circuit limit above.
+
+- **`eccUSDCBridge` source (version string `1.6.0`) can mint more than USDC
+  and can take a different anchor writer per chain.** The compiled
+  `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` in this tree is
+  still the 1.5.0 artefact — nothing here reaches a network until `sold`
+  0.80.0 rebuilds the `.tvc` and `.abi.json` and the acki-nacki pin moves.
+  Do not deploy this source against the old artefact.
+
+  - `setTrustedBridgeToken(chainId, l1Bridge, tokenId)` trusts that contract
+    and mints `tokenId` for its deposits. `tokenId` 0 is rejected; USDC
+    stays `3`. `setTrustedL1Bridge` is unchanged and still means "mint USDC".
+    Revoking an entry clears the token override. `confirmDeposit` reads the
+    override when the voucher calls back, so don't revoke or retarget a
+    bridge while that message is in flight — a cleared override mints USDC.
+  - `setWithdrawableToken(tokenId, allowed)` gates `initiateWithdrawal`.
+    USDC is always burnable and cannot be turned off. Turning another id
+    off does not stop mints and strands balances already minted.
+  - `setAnchorProvider(chainId, provider)` / `clearAnchorProvider(chainId)`.
+    That provider, and only that provider, may
+    `acceptBlockHash(chainId, blockHash)` and `forgetBlockHash` for that
+    chain. `disableOwnerAnchorsFor(chainId)` then stops
+    `setAcceptedBlockHash` for that chain alone; it requires a provider
+    first, and `clearAnchorProvider` is refused afterwards. The existing
+    light client (`acceptBlockHashFromLightClient`) is untouched and is
+    still not limited to one chain id. `ownerAnchorsEnabledFor(chainId)`
+    reports the combination of the global flag and the per-chain one.
+    None of this new storage is carried through `onCodeUpgrade`.
+
 - **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
   read back with `isPaused()`.** While it is paused, the two cross-chain entry
   points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:

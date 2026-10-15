@@ -20,4 +20,9 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_LIGHT_CLIENT_UNSET = 226;
     uint16 constant ERR_ZERO_RECIPIENT = 230;
     uint16 constant ERR_PAUSED = 231;
+    // No anchor provider is registered for this chain, so the owner cannot
+    // retire manual anchors for it (that would leave the chain with no writer).
+    uint16 constant ERR_ANCHOR_PROVIDER_UNSET = 232;
+    // setTrustedBridgeToken / setWithdrawableToken rejected a zero ECC id.
+    uint16 constant ERR_TOKEN_UNSET = 233;
 }

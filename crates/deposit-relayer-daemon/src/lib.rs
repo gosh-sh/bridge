@@ -60,6 +60,7 @@
 //!   opcode lives in `tvm-sdk` and is authoritative for its semantics.
 
 pub mod an_config;
+pub mod cctp;
 pub mod daemon;
 pub mod error;
 pub mod prover;

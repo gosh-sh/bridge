@@ -17,6 +17,15 @@
 //!   backoff and SIGINT/SIGTERM-aware shutdown. Live submit uses tvm_client 3.0
 //!   (`dapp_id::account_id` addresses); pass `--dry-run` to mock the AN side.
 //!
+//! - `cctp-forward` — one Circle burn. Polls Iris and, unless `--dry-run`,
+//!   calls `CctpHubReceiver.receiveAndDeposit` on the hub. Does not prove and
+//!   does not call Acki Nacki.
+//!
+//! - `cctp-daemon` — every `HubDeposit` on a source `CctpEndpoint`, then the
+//!   same hub submission. Its state file is its own `--state` (default
+//!   `./cctp-forward-state.json`), not the deposit relayer's `--state`. After a
+//!   hub `Deposit` exists, `daemon` on the hub chain proves it.
+//!
 //! - `status` — print the state file path.
 
 use std::{
@@ -30,11 +39,12 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
+    cctp::{run_cctp_daemon, run_cctp_forward, CctpDaemonConfig, CctpForwardConfig},
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
     DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -43,7 +53,8 @@ use tvm_client::crypto::KeyPair;
 #[command(
     name = "deposit-relayer",
     about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, prove them, \
-             finalize on AN."
+             finalize on AN. cctp-forward and cctp-daemon submit Circle attestations to a hub \
+             CctpHubReceiver; they do not prove."
 )]
 struct Args {
     /// Where to persist `state.json` (used by `daemon`).
@@ -228,6 +239,86 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
+    /// Fetch one Circle attestation and call `receiveAndDeposit` on the hub.
+    ///
+    /// Iris is looked up by the source-chain burn transaction and the source
+    /// CCTP domain (Arbitrum is 3). `--iris-url` has no default: production is
+    /// `https://iris-api.circle.com`, sandbox is
+    /// `https://iris-api-sandbox.circle.com`.
+    CctpForward {
+        /// Iris origin, no path. Env: `CCTP_IRIS_URL`.
+        #[arg(long, env = "CCTP_IRIS_URL")]
+        iris_url: String,
+        /// CCTP domain of the chain that burned the tokens.
+        #[arg(long)]
+        source_domain: u32,
+        /// Source-chain transaction that called `depositToHub`.
+        #[arg(long)]
+        tx_hash: String,
+        /// Hub chain RPC. The hub must be a deposit-prover allowlisted chain
+        /// or the later proof step cannot run; this command only warns.
+        #[arg(long, env = "CCTP_HUB_RPC_URL")]
+        hub_rpc_url: String,
+        /// Hub `CctpHubReceiver`. Must be the burn's destination caller.
+        #[arg(long)]
+        receiver: Address,
+        /// Hub EOA that pays gas for `receiveAndDeposit`. Env:
+        /// `CCTP_HUB_PRIVATE_KEY`. Omitted only with `--dry-run`.
+        #[arg(long, env = "CCTP_HUB_PRIVATE_KEY")]
+        private_key: Option<String>,
+        /// Print that an attestation is ready and do not send a transaction.
+        #[arg(long)]
+        dry_run: bool,
+        /// Keep polling Iris for this many seconds. `0` tries once and exits
+        /// non-zero if Circle has not signed yet.
+        #[arg(long, default_value_t = 0)]
+        wait_secs: u64,
+        #[arg(long, default_value_t = 5)]
+        poll_secs: u64,
+    },
+    /// Watch a source `CctpEndpoint` for `HubDeposit` and forward each burn.
+    ///
+    /// Does not prove and does not call Acki Nacki. Run `daemon` against the
+    /// hub bridge afterwards. There is no dry-run: a dry-run must not move
+    /// the scan cursor. State defaults to `./cctp-forward-state.json` and is
+    /// not the deposit relayer `--state`.
+    CctpDaemon {
+        #[arg(long)]
+        source_rpc_url: String,
+        /// CCTP domain of `--source-rpc-url`'s chain. Arbitrum is 3.
+        #[arg(long)]
+        source_domain: u32,
+        /// Source-chain `CctpEndpoint` that emits `HubDeposit`.
+        #[arg(long)]
+        endpoint: Address,
+        /// First source block to scan. Required; there is no silent zero.
+        #[arg(long)]
+        from_block: u64,
+        /// Blocks behind head before a `HubDeposit` is ingested.
+        #[arg(long, default_value_t = 2)]
+        confirmations: u64,
+        /// Iris origin, no path. Env: `CCTP_IRIS_URL`.
+        #[arg(long, env = "CCTP_IRIS_URL")]
+        iris_url: String,
+        #[arg(long, env = "CCTP_HUB_RPC_URL")]
+        hub_rpc_url: String,
+        /// Hub `CctpHubReceiver`.
+        #[arg(long)]
+        receiver: Address,
+        /// Hub EOA that pays gas for `receiveAndDeposit`. Env:
+        /// `CCTP_HUB_PRIVATE_KEY`.
+        #[arg(long, env = "CCTP_HUB_PRIVATE_KEY")]
+        private_key: String,
+        #[arg(long, default_value_t = 15)]
+        poll_secs: u64,
+        /// Cursor, pending burns, and burns this process has given up on.
+        #[arg(long, default_value = "./cctp-forward-state.json")]
+        state: PathBuf,
+        /// Replace a state file bound to a different source, domain,
+        /// endpoint, hub, or receiver.
+        #[arg(long)]
+        force_state: bool,
+    },
     /// Print the state file path and exit.
     Status,
 }
@@ -242,6 +333,58 @@ async fn main() -> anyhow::Result<()> {
             info!("deposit-relayer state file = {}", args.state.display());
             Ok(())
         },
+        Cmd::CctpForward {
+            iris_url,
+            source_domain,
+            tx_hash,
+            hub_rpc_url,
+            receiver,
+            private_key,
+            dry_run,
+            wait_secs,
+            poll_secs,
+        } => run_cctp_forward(CctpForwardConfig {
+            iris_url,
+            source_domain,
+            tx_hash,
+            hub_rpc_url,
+            receiver,
+            private_key,
+            dry_run,
+            wait_secs,
+            poll_secs,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e)),
+        Cmd::CctpDaemon {
+            source_rpc_url,
+            source_domain,
+            endpoint,
+            from_block,
+            confirmations,
+            iris_url,
+            hub_rpc_url,
+            receiver,
+            private_key,
+            poll_secs,
+            state,
+            force_state,
+        } => run_cctp_daemon(CctpDaemonConfig {
+            source_rpc_url,
+            source_domain,
+            endpoint,
+            from_block,
+            confirmations,
+            iris_url,
+            hub_rpc_url,
+            receiver,
+            private_key,
+            poll_secs,
+            state_path: state,
+            force_state,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e)),
         Cmd::Watch {
             rpc_url,
             bridge_address,

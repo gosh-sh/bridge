@@ -101,10 +101,19 @@ impl TvmAckiNacki {
     /// Whether the connected node speaks the v3 `dapp_id` wire format
     /// (GraphQL `info.version >= 1.0.0`).
     pub async fn supports_dapp_id(&self) -> Result<bool> {
-        self.context
-            .supports_dapp_id()
-            .await
-            .map_err(|e| AckiNackiError::NetworkError(e.to_string()))
+        let res = query(self.context.clone(), ParamsOfQuery {
+            query: "{ info { version } }".to_owned(),
+            variables: None,
+        })
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        let version = res
+            .result
+            .get("info")
+            .and_then(|info| info.get("version"))
+            .and_then(|version| version.as_str())
+            .unwrap_or("0");
+        Ok(version_supports_dapp_id(version))
     }
 
     /// Probe account state via SDK 3.0 `ParamsOfGetAccount { account_id,
@@ -325,6 +334,15 @@ pub fn parse_exit_code_from_message(msg: &str) -> Option<i32> {
     None
 }
 
+/// Node `info.version` major >= 1 is the SDK 3 `dapp_id` wire format.
+fn version_supports_dapp_id(version: &str) -> bool {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|part| part.parse::<u64>().ok())
+        .is_some_and(|major| major >= 1)
+}
+
 fn format_tvm_client_error(e: tvm_client::error::ClientError) -> AckiNackiError {
     let mut msg = e.message().to_string();
     let data = e.data();
@@ -423,6 +441,14 @@ mod tests {
         let (status, code, _) = classify_tx_json(&tx);
         assert_eq!(status, TransactionStatus::Reverted);
         assert_eq!(code, Some(EXIT_CONSTRUCTOR_ALREADY_CALLED));
+    }
+
+    #[test]
+    fn dapp_id_wire_starts_at_major_one() {
+        assert!(version_supports_dapp_id("1.0.0"));
+        assert!(version_supports_dapp_id("v1.2.3"));
+        assert!(!version_supports_dapp_id("0.9.9"));
+        assert!(!version_supports_dapp_id(""));
     }
 
     #[test]

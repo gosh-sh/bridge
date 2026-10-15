@@ -80,9 +80,10 @@ assigns it when the release is tagged.
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
-  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and
-  cannot be withdrawn across the bridge against Ethereum treasury they
-  never entered. Existing ECC from those paths stays on Acki Nacki.
+  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
+  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
+  against headroom that deposits created: the cap limits total bridge
+  payouts to total deposits, not one depositor's own withdrawal.
 
   A fresh zerostate starts both counters at 0, so the cap holds from the
   first burn. `updateCode` copies the maps as they are. On a live bridge

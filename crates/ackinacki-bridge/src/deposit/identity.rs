@@ -308,5 +308,12 @@ mod tests {
             );
             assert_eq!(sig(&bundled, f), sig(&deployed, f), "{f}");
         }
+        // The SDK builds a deploy's initial data from `fields`, so a stale
+        // entry here does not fail a call — it makes the constructor read past
+        // the end of its own data (exit 9). Compare the whole section.
+        assert_eq!(
+            bundled["fields"], deployed["fields"],
+            "the bundled `fields` must match the deployed data layout"
+        );
     }
 }

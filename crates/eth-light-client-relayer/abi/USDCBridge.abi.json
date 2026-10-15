@@ -25,6 +25,23 @@
 			"outputs": []
 		},
 		{
+			"name": "isOwnerAnchorsEnabled",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "disableOwnerAnchorsOn",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "getLightClient",
 			"inputs": [
 				{"name":"l1ChainId","type":"uint256"}

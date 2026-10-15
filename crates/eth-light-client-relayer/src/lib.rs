@@ -7,7 +7,7 @@
 //! Epoch ancestry: [`ancestry`]
 //! (off-chain) + [`header_rlp`] + `submitAncestry` (on-chain writer).
 //! `finalizeDeposit` flip, only with `--flip-owner`: after the first accepted
-//! update the daemon checks `getAnchorConfig().lightClient` against
+//! update the daemon checks the bridge's client for its chain against
 //! `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchors` +
 //! `disableOwnerRotation`. With `ETH_RPC_URL` each accepted tick then
 //! `rePushAnchor`s the checkpoint and runs `link_headers` locally on the span

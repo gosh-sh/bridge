@@ -73,7 +73,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.4.8";
+    string constant version = "1.5.0";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;

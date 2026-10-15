@@ -39,7 +39,7 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 8, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 9, 0);
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
@@ -267,7 +267,18 @@ pub async fn run_with(
         ));
     }
     let cfg = get("getAnchorConfig", json!({})).await;
-    let light_client = cfg["lightClient"].as_str().and_then(parse_an_address);
+    // 1.9.0 keeps one light client per source chain, and `getAnchorConfig`
+    // names only the one deployed last. Ask for this deposit's chain.
+    let light_client = if version >= BridgeVersion(1, 9, 0) {
+        let per_chain = get(
+            "getLightClient",
+            json!({ "l1ChainId": chain_id.to_string() }),
+        )
+        .await;
+        per_chain["value0"].as_str().and_then(parse_an_address)
+    } else {
+        cfg["lightClient"].as_str().and_then(parse_an_address)
+    };
     // 1.8.0: `getAnchorConfig().ownerAnchorsEnabled` is the light client's
     // L1 only. The deposit's own chain is `isOwnerAnchorsEnabled`. 1.7.0
     // has no such getter — calling it through `transient` would retry

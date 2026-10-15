@@ -49,12 +49,12 @@ pub trait AnSubmitter: Send + Sync {
     /// [`anchor_key_hex`] re-packs it into the stored key at the ABI boundary.
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
-    /// Owner flip: check `getAnchorConfig().lightClient` against
-    /// `AN_LIGHT_CLIENT`, then `disableOwnerAnchors` (USDCBridge) unless
-    /// `ownerAnchorsEnabled` is already false, then `disableOwnerRotation`
-    /// (EthBeaconLightClient). The bridge derives the light-client address
-    /// from `setLightClientCode`. Rejected without a USDCBridge client.
-    /// Idempotent.
+    /// Owner flip: take the chain id from the light client's own
+    /// `getConfig`, check the bridge's `getLightClient(l1ChainId)` against
+    /// `AN_LIGHT_CLIENT`, then `disableOwnerAnchorsOn(chainId)` (USDCBridge)
+    /// unless `isOwnerAnchorsEnabled(chainId)` is already false, then
+    /// `disableOwnerRotation` (EthBeaconLightClient). Rejected without a
+    /// USDCBridge client. Idempotent.
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError>;
 
     /// Owner `setCommitteeCommitment(commitment, period)`: the
@@ -806,40 +806,79 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             ExtendedAddress::parse(&self.config.light_client).map_err(RelayerError::from)?;
         // A failed read is retried on the next accepted update like any other
         // refusal; it must not abort the tick before `rePushAnchor`.
-        let cfg = match usdc_client
-            .run_getter(usdc_addr, "getAnchorConfig", json!({}))
+        // The bridge keeps one light client per source chain, so every read
+        // here is keyed by the chain this client follows rather than by
+        // `getAnchorConfig`, which names only the one deployed last.
+        let lc_cfg = match self
+            .client
+            .run_getter(&self.config.light_client, "getConfig", json!({}))
             .await
         {
             Ok(cfg) => cfg,
             Err(e) => {
                 return Ok(SubmitOutcome::Rejected {
-                    reason: format!("getAnchorConfig failed: {e}"),
+                    reason: format!("light client getConfig failed: {e}"),
                 })
             },
         };
-        let on_chain = cfg
-            .get("lightClient")
+        let Some(chain_id) = lc_cfg
+            .get("l1ChainId")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .map(String::from)
+        else {
+            return Ok(SubmitOutcome::Rejected {
+                reason: format!("light client getConfig answered {lc_cfg}"),
+            });
+        };
+        let cfg = match usdc_client
+            .run_getter(
+                usdc_addr,
+                "getLightClient",
+                json!({ "l1ChainId": chain_id }),
+            )
+            .await
+        {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return Ok(SubmitOutcome::Rejected {
+                    reason: format!("getLightClient failed: {e}"),
+                })
+            },
+        };
+        let on_chain = cfg.get("value0").and_then(|v| v.as_str()).unwrap_or("");
         if is_zero_tvm_account(on_chain) || !same_tvm_account(on_chain, expected.account_id()) {
             return Ok(SubmitOutcome::Rejected {
                 reason: format!(
-                    "getAnchorConfig.lightClient={on_chain} != AN_LIGHT_CLIENT {}",
+                    "getLightClient({chain_id})={on_chain} != AN_LIGHT_CLIENT {}",
                     expected.workchain_address()
                 ),
             });
         }
-        // `disableOwnerAnchors` is L1-only and does not revert a second call,
-        // so the getter is the only "already flipped" signal; anything but
-        // an explicit `false` sends the call. L2 owner writers stay on.
-        let already_off = cfg.get("ownerAnchorsEnabled").and_then(|v| v.as_bool()) == Some(false);
+        // The flip does not revert a second call, so the getter is the only
+        // "already flipped" signal; anything but an explicit `false` sends the
+        // call. Every other chain's owner writer stays on.
+        let already_off = match usdc_client
+            .run_getter(
+                usdc_addr,
+                "isOwnerAnchorsEnabled",
+                json!({ "chainId": chain_id }),
+            )
+            .await
+        {
+            Ok(v) => v.get("value0").and_then(|v| v.as_bool()) == Some(false),
+            Err(e) => {
+                return Ok(SubmitOutcome::Rejected {
+                    reason: format!("isOwnerAnchorsEnabled failed: {e}"),
+                })
+            },
+        };
         if !already_off {
             match self
                 .call_on(
                     usdc_client.as_ref(),
                     usdc_addr,
-                    "disableOwnerAnchors",
-                    json!({}),
+                    "disableOwnerAnchorsOn",
+                    json!({ "chainId": chain_id }),
                 )
                 .await?
             {
@@ -1117,6 +1156,7 @@ mod flip_owner_tests {
         serves: String,
         calls: Arc<Mutex<Vec<(String, String)>>>,
         getter: std::result::Result<Value, String>,
+        getters: HashMap<&'static str, std::result::Result<Value, String>>,
         replies: HashMap<&'static str, Reply>,
         sent: Mutex<HashMap<[u8; 32], String>>,
     }
@@ -1127,6 +1167,7 @@ mod flip_owner_tests {
                 serves: String::new(),
                 calls: Arc::new(Mutex::new(Vec::new())),
                 getter,
+                getters: HashMap::new(),
                 replies: HashMap::new(),
                 sent: Mutex::new(HashMap::new()),
             }
@@ -1137,12 +1178,23 @@ mod flip_owner_tests {
             self
         }
 
+        /// Answer one getter by name; others fall back to the single script.
+        fn getter(
+            mut self,
+            function: &'static str,
+            out: std::result::Result<Value, String>,
+        ) -> Self {
+            self.getters.insert(function, out);
+            self
+        }
+
         /// A client for `account`'s contract sharing this one's log and script.
         fn serving(&self, account: String) -> Self {
             Self {
                 serves: account,
                 calls: self.calls.clone(),
                 getter: self.getter.clone(),
+                getters: self.getters.clone(),
                 replies: self.replies.clone(),
                 sent: Mutex::new(HashMap::new()),
             }
@@ -1232,7 +1284,11 @@ mod flip_owner_tests {
             _params: Value,
         ) -> acki_nacki_interface::Result<Value> {
             self.record(ExtendedAddress::parse(to).unwrap().account_id(), function);
-            self.getter.clone().map_err(AckiNackiError::NetworkError)
+            self.getters
+                .get(function)
+                .cloned()
+                .unwrap_or_else(|| self.getter.clone())
+                .map_err(AckiNackiError::NetworkError)
         }
     }
 
@@ -1265,11 +1321,30 @@ mod flip_owner_tests {
         (s, lc_client)
     }
 
-    fn anchor_config(light_client: &str, owner_anchors_enabled: bool) -> Value {
+    /// Sepolia, as the light client reports it from `getConfig`.
+    const CHAIN: &str = "0xaa36a7";
+
+    fn lc_config(chain_id: &str) -> Value {
         json!({
-            "lightClient": format!("0:{light_client}"),
-            "ownerAnchorsEnabled": owner_anchors_enabled,
+            "l1ChainId": chain_id,
+            "usdcBridge": format!("0:{}", bridge()),
+            "ownerPubkey": "0x1",
         })
+    }
+
+    /// The bridge's per-chain getters: which client serves `CHAIN`, and
+    /// whether the owner may still write there.
+    fn script(client_of_chain: &str, owner_anchors_enabled: bool) -> RecordingClient {
+        RecordingClient::new(Ok(json!({})))
+            .getter("getConfig", Ok(lc_config(CHAIN)))
+            .getter(
+                "getLightClient",
+                Ok(json!({ "value0": format!("0:{client_of_chain}") })),
+            )
+            .getter(
+                "isOwnerAnchorsEnabled",
+                Ok(json!({ "value0": owner_anchors_enabled })),
+            )
     }
 
     fn call(account: String, function: &str) -> (String, String) {
@@ -1278,22 +1353,49 @@ mod flip_owner_tests {
 
     #[tokio::test]
     async fn flips_bridge_anchors_then_light_client_rotation() {
-        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&lc(), true))), true);
+        let (s, client) = submitter(script(&lc(), true), true);
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Accepted { .. }
         ));
         assert_eq!(client.calls(), vec![
-            call(bridge(), "getAnchorConfig"),
-            call(bridge(), "disableOwnerAnchors"),
+            call(lc(), "getConfig"),
+            call(bridge(), "getLightClient"),
+            call(bridge(), "isOwnerAnchorsEnabled"),
+            call(bridge(), "disableOwnerAnchorsOn"),
             call(lc(), "disableOwnerRotation"),
         ]);
+    }
+
+    /// A client deployed for another chain afterwards moves
+    /// `getAnchorConfig`, which this path must not consult: the flip follows
+    /// the chain this relayer's own client reports.
+    #[tokio::test]
+    async fn a_later_client_on_another_chain_does_not_block_this_one() {
+        let other = "44".repeat(32);
+        let s = script(&lc(), true).getter(
+            "getAnchorConfig",
+            Ok(json!({ "lightClient": format!("0:{other}"), "ownerAnchorsEnabled": true })),
+        );
+        let (s, client) = submitter(s, true);
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Accepted { .. }
+        ));
+        assert!(
+            !client
+                .calls()
+                .iter()
+                .any(|(_, f)| f.starts_with("getAnchorConfig")),
+            "{:?}",
+            client.calls()
+        );
     }
 
     #[tokio::test]
     async fn another_light_client_on_the_bridge_sends_nothing() {
         let other = "44".repeat(32);
-        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&other, true))), true);
+        let (s, client) = submitter(script(&other, true), true);
         match s.flip_owner().await.unwrap() {
             SubmitOutcome::Rejected {
                 reason,
@@ -1303,47 +1405,67 @@ mod flip_owner_tests {
             },
             other => panic!("{other:?}"),
         }
-        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+        assert_eq!(client.calls(), vec![
+            call(lc(), "getConfig"),
+            call(bridge(), "getLightClient"),
+        ]);
     }
 
     #[tokio::test]
-    async fn light_client_code_not_installed_sends_nothing() {
+    async fn no_client_deployed_for_the_chain_sends_nothing() {
         // `AN_LIGHT_CLIENT` is zero too, so only the zero check can refuse.
         let zero = "00".repeat(32);
-        let (s, client) = submitter_for(
-            RecordingClient::new(Ok(anchor_config(&zero, true))),
-            true,
-            zero.clone(),
-        );
+        let (s, client) = submitter_for(script(&zero, true), true, zero.clone());
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Rejected { .. }
         ));
-        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+        assert_eq!(client.calls(), vec![
+            call(zero.clone(), "getConfig"),
+            call(bridge(), "getLightClient"),
+        ]);
     }
 
     #[tokio::test]
     async fn malformed_getter_output_sends_nothing() {
         let (s, client) = submitter(
-            RecordingClient::new(Ok(json!({ "value0": format!("0:{}", lc()) }))),
+            script(&lc(), true).getter("getLightClient", Ok(json!({ "nope": 1 }))),
             true,
         );
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Rejected { .. }
         ));
-        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+        assert_eq!(client.calls(), vec![
+            call(lc(), "getConfig"),
+            call(bridge(), "getLightClient"),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn a_light_client_without_a_chain_id_sends_nothing() {
+        let (s, client) = submitter(
+            script(&lc(), true).getter("getConfig", Ok(json!({ "usdcBridge": "0:1" }))),
+            true,
+        );
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
+        assert_eq!(client.calls(), vec![call(lc(), "getConfig")]);
     }
 
     #[tokio::test]
     async fn owner_anchors_already_off_goes_straight_to_rotation() {
-        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&lc(), false))), true);
+        let (s, client) = submitter(script(&lc(), false), true);
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Accepted { .. }
         ));
         assert_eq!(client.calls(), vec![
-            call(bridge(), "getAnchorConfig"),
+            call(lc(), "getConfig"),
+            call(bridge(), "getLightClient"),
+            call(bridge(), "isOwnerAnchorsEnabled"),
             call(lc(), "disableOwnerRotation"),
         ]);
     }
@@ -1351,14 +1473,14 @@ mod flip_owner_tests {
     #[tokio::test]
     async fn missing_owner_anchors_flag_still_disables_them() {
         let (s, client) = submitter(
-            RecordingClient::new(Ok(json!({ "lightClient": format!("0:{}", lc()) }))),
+            script(&lc(), true).getter("isOwnerAnchorsEnabled", Ok(json!({ "nope": 1 }))),
             true,
         );
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Accepted { .. }
         ));
-        assert_eq!(client.calls()[1], call(bridge(), "disableOwnerAnchors"));
+        assert_eq!(client.calls()[3], call(bridge(), "disableOwnerAnchorsOn"));
     }
 
     /// The error text carries addresses and message ids, so a code that
@@ -1369,24 +1491,24 @@ mod flip_owner_tests {
             "contract call aborted (exit_code=209) account=0:{}225 OWNER_ANCHORS_DISABLED",
             "ab".repeat(30)
         );
-        let client = RecordingClient::new(Ok(anchor_config(&lc(), true)))
-            .reply("disableOwnerAnchors", Reply::Err(text));
+        let client = script(&lc(), true).reply("disableOwnerAnchorsOn", Reply::Err(text));
         let (s, client) = submitter(client, true);
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Rejected { .. }
         ));
         assert_eq!(client.calls(), vec![
-            call(bridge(), "getAnchorConfig"),
-            call(bridge(), "disableOwnerAnchors"),
+            call(lc(), "getConfig"),
+            call(bridge(), "getLightClient"),
+            call(bridge(), "isOwnerAnchorsEnabled"),
+            call(bridge(), "disableOwnerAnchorsOn"),
         ]);
     }
 
     #[tokio::test]
     async fn reverted_or_pending_disable_stops_before_rotation() {
         for reply in [Reply::Reverted(225), Reply::Pending] {
-            let client = RecordingClient::new(Ok(anchor_config(&lc(), true)))
-                .reply("disableOwnerAnchors", reply);
+            let client = script(&lc(), true).reply("disableOwnerAnchorsOn", reply);
             let (s, client) = submitter(client, true);
             let out = s.flip_owner().await.unwrap();
             assert!(
@@ -1396,25 +1518,31 @@ mod flip_owner_tests {
                 ),
                 "{out:?}"
             );
-            assert_eq!(client.calls().len(), 2, "{:?}", client.calls());
+            assert_eq!(client.calls().len(), 4, "{:?}", client.calls());
         }
     }
 
     #[tokio::test]
     async fn getter_failure_is_a_rejection_not_an_error() {
-        let (s, client) = submitter(RecordingClient::new(Err("empty boc".into())), true);
+        let (s, client) = submitter(
+            script(&lc(), true).getter("getLightClient", Err("empty boc".into())),
+            true,
+        );
         match s.flip_owner().await.unwrap() {
             SubmitOutcome::Rejected {
                 reason,
-            } => assert!(reason.contains("getAnchorConfig"), "{reason}"),
+            } => assert!(reason.contains("getLightClient"), "{reason}"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(client.calls(), vec![call(bridge(), "getAnchorConfig")]);
+        assert_eq!(client.calls(), vec![
+            call(lc(), "getConfig"),
+            call(bridge(), "getLightClient"),
+        ]);
     }
 
     #[tokio::test]
     async fn without_the_bridge_client_nothing_is_sent() {
-        let (s, client) = submitter(RecordingClient::new(Ok(anchor_config(&lc(), true))), false);
+        let (s, client) = submitter(script(&lc(), true), false);
         assert!(matches!(
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Rejected { .. }

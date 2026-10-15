@@ -24,13 +24,13 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use clap::{Parser, Subcommand};
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::AnInterfaceSubmitter;
+#[cfg(feature = "live-submit")]
+use eth_light_client_relayer::RelayerState;
 use eth_light_client_relayer::{
     AnConfig, AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource,
     MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
     StateLock, SubprocessProofGenerator, SubprocessProverConfig,
 };
-#[cfg(feature = "live-submit")]
-use eth_light_client_relayer::RelayerState;
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
 use tracing::info;
@@ -179,10 +179,11 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
-    /// Owner flip: check `getAnchorConfig().lightClient`, then
-    /// `disableOwnerAnchors` + `disableOwnerRotation`. Relayer keys must be the
-    /// owner pubkey. Afterwards the light client is the only anchor writer,
-    /// and it anchors one checkpoint block per epoch and no L2.
+    /// Owner flip: check `getLightClient(l1ChainId)`, then
+    /// `disableOwnerAnchorsOn(chainId)` + `disableOwnerRotation`. Relayer keys
+    /// must be the owner pubkey. Afterwards the light client is the only
+    /// anchor writer, and it anchors one checkpoint block per epoch and no
+    /// L2.
     FlipOwner {
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,

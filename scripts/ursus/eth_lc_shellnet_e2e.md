@@ -47,7 +47,8 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    after step 4, or run `eth-lc-relayer flip-owner`. After it, deposits outside
    checkpoint blocks and from L2s have no anchor writer; read
    `scripts/ursus/flip_deposit_to_light_client.md` first. Confirm
-   `getLightClient() != 0` and owner flags are off.
+   `getLightClient(l1ChainId) != 0` for the chain under test and owner flags
+   are off.
 
 Negative: a privately mined `Deposit` whose `blockHash` is not on the parent
 chain of a proven checkpoint must still revert `finalizeDeposit`.

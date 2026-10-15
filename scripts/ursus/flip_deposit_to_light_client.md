@@ -17,13 +17,14 @@ The **relayer** issues the owner calls. Relayer keys (`AN_KEYS_PATH`) must be
 the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
 
 1. The bridge is `eccUSDCBridge` from the zerostate. The zerostate installs the
-   light-client code (`setLightClientCode`), and the bridge derives the
-   light-client address from it (`getAnchorConfig().lightClient`).
+   light-client code (`setLightClientCode`); the address of a chain's client
+   follows from that code salted with the chain id and exists only after
+   `deployLightClient` (`getLightClient(l1ChainId)`, 0 until then).
 2. With the owner key, call `deployLightClient(pubkey, l1ChainId, 0, 0)` on the
    bridge. The light client's constructor accepts only the bridge as sender, so
    a copy deployed with `sold` or `tvm-cli deploy` — including the standalone
    `contracts/an/EthBeaconLightClient.sol` — is not the one the bridge listens
-   to, and the flip refuses it. `getAnchorConfig().lightClient` returns
+   to, and the flip refuses it. `getLightClient(l1ChainId)` returns
    `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`.
 3. Pin the Gloas fork slot. The constructor does not set it, and
    `submitUpdate` / `submitRotate` revert 256 until it is set:
@@ -43,8 +44,8 @@ USDCBridge.disableOwnerAnchors()                 # skipped when ownerAnchorsEnab
 EthBeaconLightClient.disableOwnerRotation()
 ```
 
-If `getAnchorConfig().lightClient` does not match `AN_LIGHT_CLIENT`, or the
-getter fails, the flip sends nothing and the daemon retries after the next
+If the bridge's client for the chain the light client reports does not match
+`AN_LIGHT_CLIENT`, or either getter fails, the flip sends nothing and the daemon retries after the next
 accepted update. The state file records `owner_flip_done` so a restart does not
 resend. One-shot without waiting for a tick:
 

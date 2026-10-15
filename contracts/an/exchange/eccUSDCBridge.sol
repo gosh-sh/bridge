@@ -40,7 +40,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.8.0";
+    string constant version = "1.9.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -127,17 +127,17 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // chain, each at its own address.
     mapping(uint256 => address) _lightClients;
 
-    // EIP-155 chain id the deployed light client follows, written by
-    // `deployLightClient`. 0 until that call. `disableOwnerAnchors` may
-    // only turn the owner writer off for this chain — every other source
-    // chain (the L2s on the deposit allowlist) keeps `setAcceptedBlockHash`.
-    // Not carried through `onCodeUpgrade`.
+    // Chain id of the light client deployed last, written by every
+    // `deployLightClient`. 0 until the first one. Only the no-argument
+    // `disableOwnerAnchors` and `getAnchorConfig` read it; every other path
+    // takes the chain id from its caller. Not carried through
+    // `onCodeUpgrade`.
     uint256 _lightClientL1ChainId;
 
     // Owner writer of `_acceptedBlockHash`, keyed by source-chain id.
-    // Missing = owner may still write. `disableOwnerAnchors` sets the bit
-    // for the light client's L1 only. Like `_trustedL1Bridge` it is NOT
-    // carried through `onCodeUpgrade`.
+    // Missing = owner may still write. The bit is set per chain, for any
+    // chain that has a deployed light client. Like `_trustedL1Bridge` it is
+    // NOT carried through `onCodeUpgrade`.
     mapping(uint256 => bool) _ownerAnchorsDisabled;
 
     // Owner-operated stop of the cross-chain lane: `finalizeDeposit` and
@@ -602,9 +602,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         }
     }
 
-    /// @notice Installs the code every light client is deployed from. Changing
-    ///         it moves every light-client address, so already deployed ones
-    ///         stop being recognized as writers.
+    /// @notice Installs the code every light client is deployed from. It
+    ///         changes the address the next `deployLightClient` derives;
+    ///         clients already recorded in `_lightClients` keep their
+    ///         addresses and stay recognized as writers.
     function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         _lightClientCode = code;
@@ -665,15 +666,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Same as `disableOwnerAnchors()`, for an explicit chain id.
-    ///         The id must equal `_lightClientL1ChainId`, the argument
-    ///         last passed to `deployLightClient`. The bridge does not
-    ///         read the light client's own `_l1ChainId`. Any other id
-    ///         (an L2, or a different L1) reverts
-    ///         `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). After an upgrade
-    ///         re-run, pass the same id the existing light client was
-    ///         constructed with — a constructor bounce still stores
-    ///         whatever was passed. Sold does not allow a public
-    ///         overload of `disableOwnerAnchors`.
+    ///         Any chain with a light client in `_lightClients` is accepted;
+    ///         a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226),
+    ///         and chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
+    ///         Sold does not allow a public overload of
+    ///         `disableOwnerAnchors`.
     function disableOwnerAnchorsOn(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept {
         _disableOwnerAnchors(chainId);
     }
@@ -723,18 +720,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return _acceptedBlockHash[chainId][blockHash];
     }
 
-    /// @notice Anchor-path configuration: the light client and whether the
-    ///         owner may still admit anchors on the light client's L1.
-    ///         Other chain ids keep the owner writer; query
-    ///         `isOwnerAnchorsEnabled(chainId)` for those.
+    /// @notice Anchor-path configuration of the chain whose light client was
+    ///         deployed last, and whether the owner may still admit anchors
+    ///         there. With clients on several chains this names only that one:
+    ///         read `getLightClient(chainId)` and
+    ///         `isOwnerAnchorsEnabled(chainId)` for a specific chain.
     function getAnchorConfig() external view returns (address lightClient, bool ownerAnchorsEnabled) {
         return (_lightClients[_lightClientL1ChainId],
                 _lightClientL1ChainId == 0 || !_ownerAnchorsDisabled[_lightClientL1ChainId]);
     }
 
     /// @notice Whether the owner may still admit anchors for `chainId`.
-    ///         False only after `disableOwnerAnchors` for the light
-    ///         client's L1; every other chain stays true.
+    ///         False after `disableOwnerAnchors` / `disableOwnerAnchorsOn`
+    ///         for that chain; every chain is independent.
     function isOwnerAnchorsEnabled(uint256 chainId) external view returns (bool) {
         return !_ownerAnchorsDisabled[chainId];
     }

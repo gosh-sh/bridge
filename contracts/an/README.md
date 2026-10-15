@@ -30,22 +30,22 @@ verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Two writers fill
 the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which needs `setLightClientCode` (so
-`_lightClient` is non-zero) and a stored L1 id from `deployLightClient`
-(`ERR_LIGHT_CLIENT_UNSET` (226) until both); it does not check that the
-light-client account is Active. The call turns the owner writer off only
-for the stored L1 id (`ERR_NOT_LIGHT_CLIENT_CHAIN` (227) on any other id);
-the bridge does not read the light client's own `getConfig().l1ChainId`.
-The light client adds and ages out hashes with
-`acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient`. L2
-source chains on the deposit allowlist keep the owner writer. `getAnchorConfig()`
-returns the light client and whether the owner may still write that L1;
-`isOwnerAnchorsEnabled(chainId)` is the per-chain view;
-`getLightClientL1ChainId()` is the stored L1 id (0 until
-`deployLightClient`). No function turns owner
-anchors back on, but the owner keeps two ways around it: `updateCode` does
-(`onCodeUpgrade` leaves every chain owner-writable), and `setLightClientCode`
-still replaces the light client afterwards.
+until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
+for one chain and needs a light client deployed for it
+(`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
+for chain id 0); the no-argument `disableOwnerAnchors()` does the same for the
+chain whose client was deployed last. Neither checks that the light-client
+account is Active. Each client writes only for its own chain:
+`acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient` compare
+the sender against the client of the chain named in the call. L2 source chains
+on the deposit allowlist keep the owner writer. `getLightClient(chainId)` is
+the client of a chain (0 if none), `isOwnerAnchorsEnabled(chainId)` the
+per-chain writer state, and `getAnchorConfig()` the pair for the chain
+deployed last — with clients on several chains, read the per-chain getters.
+No function turns owner anchors back on, but `updateCode` goes around it
+(`onCodeUpgrade` leaves every chain owner-writable). `setLightClientCode`
+does not: it only changes the address the next `deployLightClient` derives,
+and clients already recorded keep writing.
 
 | Path | Contents |
 |------|----------|

@@ -60,8 +60,10 @@ assigns it when the release is tagged.
   hashes for another; `disableOwnerAnchors` requires a client deployed for
   that chain rather than a stored id.
 
-  Code hashes: `eccUSDCBridge` `dcdbabbe…`, `EthBeaconLightClient`
-  `9ade0834…`. A light client deployed before this change came from unsalted
+  Versions and code hashes after both changes below: `eccUSDCBridge` 1.9.0,
+  `697d1711…`; `EthBeaconLightClient` 1.5.0, `3e6e5102…`. The bridge's
+  `getLightClient` takes a chain id, so its ABI changed with it. A light
+  client deployed before this change came from unsalted
   code, so the bridge derives a different address for its chain and stops
   recognizing it as a writer — redeploy it with `deployLightClient`. Nothing
   is lost: the client holds no funds, and its head and committee come back
@@ -92,8 +94,8 @@ assigns it when the release is tagged.
   `_gloasForkSlotSet`, so it built a 310-byte data cell where the client's code
   expected 318, and on a network raised from those artefacts the client's
   constructor aborted with `cell underflow` (exit 9), leaving an account with
-  code and no storage at the derived address. Code hashes now:
-  `eccUSDCBridge` `4d853f11…`, `EthBeaconLightClient` `29bb4233…`.
+  code and no storage at the derived address. The current hashes are the ones
+  given above.
 
   `contracts/an/EthBeaconLightClient.sol`, the standalone copy the
   shellnet-shadow kit deploys with `tvm-cli`, keeps its four-argument
@@ -118,7 +120,9 @@ assigns it when the release is tagged.
   not scheduled) on mainnet. The owner can change it while unset or while
   owner rotation is still enabled; after `disableOwnerRotation` only
   `updateCode` can. Later `updateCode` calls with an empty user cell keep the
-  current value. Constructors and `deployLightClient` are unchanged.
+  current value. That entry predates the light-client bring-up change above:
+  the client now takes no constructor arguments and the bridge initializes it
+  with a second call.
   From Gloas, `submitUpdate` anchors the payload bid's `parent_block_hash`
   rather than the checkpoint slot's own execution hash.
   `eth-lc-relayer ancestry-one` starts its walk at that anchored hash

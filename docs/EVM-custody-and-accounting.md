@@ -90,6 +90,19 @@ book decremented.
 The two paths differ on purpose: a deposit must confirm receipt before crediting, a payout must
 debit before paying.
 
+## Pause is two switches, not one
+
+`AckiNackiBridge.pause()` stops the Ethereum user entry points (`deposit`,
+`verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`). It does not call
+`eccUSDCBridge.setPaused`, and `setPaused` does not call `pause()`. Circle can
+also freeze the USDC contract on Ethereum; that is a third control, not wired
+to either bridge.
+
+The AN side keeps its own ECC ledger. A pause here leaves mint and burn on
+Acki Nacki running; a pause there leaves Ethereum deposits and payouts
+running. Stopping both directions of the bridge in an incident means flipping
+**both** owner switches. There is no single stop switch (QC-AN-J5).
+
 ## AAVE routing never moves the book
 
 `supplyToAave`, `withdrawFromAave` and `emergencyWithdrawAll` move tokens between the bridge and the

@@ -29,8 +29,8 @@ assigns it when the release is tagged.
   `outstanding_deposits` set: later ids are tried first, and a failed id
   retries with backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`,
   default 2 s, doubled each time up to 64×) when there is nothing new to
-  fetch. The log-scan cursor does not move past an outstanding deposit's
-  block, so a retry can still find its log. Parked ids stay parked;
+  fetch. A retry loads the stored Deposit tx (or its block) so the log-scan
+  cursor can keep moving with later deposits. Parked ids stay parked;
   `--skip-after-attempts` and `finalize-one` are unchanged. Gauge
   `deposit_relayer_outstanding_deposits`.
 

@@ -55,7 +55,7 @@ pub struct RelayerConfig {
     #[serde(default)]
     pub force_state: bool,
     /// After this many consecutive failures on the same deposit, park it and
-    /// advance the cursor. `None` or `0` disables skipping (default).
+    /// stop retrying it. `None` or `0` disables skipping (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_after_attempts: Option<u32>,
     /// Base delay, in seconds, before a failed deposit is retried. Doubled
@@ -120,8 +120,8 @@ pub enum TickOutcome {
     /// AN accepted the tx but confirmation timed out while still pending.
     /// Retried later without advancing the cursor.
     AnPending { deposit_id: u64, reason: String },
-    /// The deposit was parked after `--skip-after-attempts`; cursor advanced
-    /// for liveness. Operator must run `finalize-one` manually.
+    /// The deposit was parked after `--skip-after-attempts` and is no longer
+    /// retried. Operator must run `finalize-one` manually.
     Skipped { deposit_id: u64, reason: String },
     /// The circuit cannot prove this deposit. Recorded in
     /// `unprovable_deposit_ids` and advanced past at once; there is no
@@ -191,12 +191,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
         let now = unix_now_secs();
         let forward = self.state.next_target_at(self.config.start_deposit_id, now);
-        self.rewind_scan_for(forward);
         let outcome = self.tick_target(forward).await?;
         if matches!(outcome, TickOutcome::NotYetAvailable { .. }) {
             if let Some(id) = self.state.ready_outstanding(now) {
                 if id != forward {
-                    self.rewind_scan_for(id);
                     return self.tick_target(id).await;
                 }
             }
@@ -207,10 +205,25 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     async fn tick_target(&mut self, target: u64) -> Result<TickOutcome, RelayerError> {
         self.publish_state_gauges(target);
 
-        // 1. Fetch the confirmed deposit event.
+        // 1. Fetch the confirmed deposit event. Outstanding ids load from the
+        //    stored tx / block so the shared scan cursor can keep moving.
         debug!(deposit_id = target, "fetching deposit event");
         let timer = StageTimer::start("fetch_event");
-        let fetched = self.source.fetch(target).await;
+        let known = self.state.outstanding(target).map(|o| {
+            (
+                o.tx_hash.as_deref().and_then(|s| s.parse().ok()),
+                o.log_index,
+                o.block_number,
+            )
+        });
+        let fetched = match known {
+            Some((tx_hash, log_index, block_number)) => {
+                self.source
+                    .fetch_known(target, tx_hash, log_index, block_number)
+                    .await
+            },
+            None => self.source.fetch(target).await,
+        };
         timer.finish();
         let event = match fetched? {
             Some(e) => e,
@@ -276,11 +289,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 });
             },
             Err(e) => {
-                if let Some(outcome) = self.record_failure(
-                    target,
-                    &format!("proof generation: {e}"),
-                    Some(event.block_number),
-                )? {
+                if let Some(outcome) =
+                    self.record_failure(target, &format!("proof generation: {e}"), Some(&event))?
+                {
                     return Ok(outcome);
                 }
                 let reason = e.to_string();
@@ -329,11 +340,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Rejected {
                 reason,
             } => {
-                if let Some(outcome) = self.record_failure(
-                    target,
-                    &format!("AN rejected: {reason}"),
-                    Some(event.block_number),
-                )? {
+                if let Some(outcome) =
+                    self.record_failure(target, &format!("AN rejected: {reason}"), Some(&event))?
+                {
                     return Ok(outcome);
                 }
                 warn!(
@@ -386,7 +395,6 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     }
 
     fn persist_state(&mut self) -> Result<(), RelayerError> {
-        self.clamp_scan_cursor();
         if let Some(cursor) = &self.config.scan_cursor {
             self.state.scan_done_through_block = *cursor
                 .lock()
@@ -412,44 +420,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     /// Remember that the deposit at `block_number` is done. The next log
     /// scan still includes that block: a later `depositId` can share it.
-    /// Never called on a failed tick, so a retry finds the deposit again.
+    /// Outstanding retries do not use this cursor: they load the stored tx.
     fn mark_finalized_block(&self, block_number: u64) {
         if let (Some(cursor), Some(through)) =
             (&self.config.scan_cursor, block_number.checked_sub(1))
         {
             advance_scan_cursor(cursor, through);
-        }
-        self.clamp_scan_cursor();
-    }
-
-    /// Keep the log-scan cursor from moving past an outstanding deposit's
-    /// block.
-    fn clamp_scan_cursor(&self) {
-        let Some(min_block) = self.state.min_outstanding_block() else {
-            return;
-        };
-        let cap = min_block.saturating_sub(1);
-        self.cap_scan_cursor(cap);
-    }
-
-    /// Scan from this deposit's block on the next fetch, if we know it.
-    fn rewind_scan_for(&self, deposit_id: u64) {
-        if let Some(block) = self.state.outstanding_block(deposit_id) {
-            self.cap_scan_cursor(block.saturating_sub(1));
-        }
-    }
-
-    fn cap_scan_cursor(&self, cap: u64) {
-        let Some(cursor) = &self.config.scan_cursor else {
-            return;
-        };
-        let Ok(mut guard) = cursor.lock() else {
-            return;
-        };
-        if let Some(cur) = *guard {
-            if cur > cap {
-                *guard = Some(cap);
-            }
         }
     }
 
@@ -459,13 +435,18 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         &mut self,
         deposit_id: u64,
         reason: &str,
-        block_number: Option<u64>,
+        event: Option<&crate::types::DepositEvent>,
     ) -> Result<Option<TickOutcome>, RelayerError> {
+        let log = event.map(|e| crate::state::DepositLogRef {
+            block_number: e.block_number,
+            tx_hash: e.tx_hash,
+            log_index: e.log_index,
+        });
         self.state.record_attempt_at(
             deposit_id,
             unix_now_secs(),
             self.config.outstanding_backoff_secs,
-            block_number,
+            log,
         );
         if let Some(limit) = self.config.skip_after_attempts {
             if limit > 0 && self.state.outstanding_attempts(deposit_id) >= limit {
@@ -689,9 +670,8 @@ mod tests {
     #[tokio::test]
     async fn log_source_retry_and_same_block_neighbour_end_to_end() {
         // Deposits 0 and 1 share block 105, deposit 2 is in block 107; AN
-        // rejects the first attempt at deposit 0. Later ids go first; the
-        // scan cursor stays at 104 while 0 is outstanding, then an idle tick
-        // parks it at the safe head.
+        // rejects the first attempt at deposit 0. Later ids go first and the
+        // scan cursor keeps moving; 0 is retried from its stored tx.
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let bridge = Address::repeat_byte(0x22);
@@ -736,8 +716,8 @@ mod tests {
         );
 
         // 0 is outstanding; later ids are delivered first. The scan cursor
-        // stays at 104 while 0 (block 105) is still outstanding.
-        for (id, cursor_after) in [(1, 104), (2, 104)] {
+        // moves with them (not held at 0's block).
+        for (id, cursor_after) in [(1, 104), (2, 106)] {
             match relayer.tick().await.unwrap() {
                 TickOutcome::Finalized {
                     deposit_id, ..
@@ -747,14 +727,15 @@ mod tests {
             assert_eq!(*cursor.lock().unwrap(), Some(cursor_after));
         }
 
-        // Nothing new at 3: same tick retries 0 and finds its log.
+        // Nothing new at 3: idle scan parks the cursor, then the same tick
+        // retries 0 from the stored receipt.
         match relayer.tick().await.unwrap() {
             TickOutcome::Finalized {
                 deposit_id, ..
             } => assert_eq!(deposit_id, 0),
             other => panic!("expected Finalized(0), got {other:?}"),
         }
-        assert_eq!(*cursor.lock().unwrap(), Some(104));
+        assert_eq!(*cursor.lock().unwrap(), Some(118));
 
         assert!(matches!(
             relayer.tick().await.unwrap(),

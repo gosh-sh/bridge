@@ -29,6 +29,10 @@ assigns it when the release is tagged.
   `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
   exit 214. There is no extra product minimum besides `amount > 0`, and the
   100 USDC figure in older notes is not in the contracts —
+- Pause is two owner switches, not one. `AckiNackiBridge.pause()` on Ethereum
+  does not call `eccUSDCBridge.setPaused`, and `setPaused` does not call
+  `pause()`; Circle can still freeze USDC itself. An incident that must stop
+  both directions of the bridge has to flip both switches —
   `contracts/an/README.md`, `docs/EVM-custody-and-accounting.md`.
 - The prover and circuit docs describe BK-set rotation as it works:
   `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block

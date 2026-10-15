@@ -510,6 +510,9 @@ const EXIT_PAUSED: i32 = 231;
 /// first deposit after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
+        400 => Some("ERR_MESSAGE_IS_EXIST — check voucher settlement and retry the same proof"),
+        401 => Some("ERR_MESSAGE_WITH_HUGE_EXPIREAT — use an expiry less than five minutes ahead"),
+        402 => Some("ERR_MESSAGE_EXPIRED — retry the same proof with a fresh message header"),
         52 => Some(
             "REPLAY_PROTECTION — another external message advanced the timestamp; retry with a \
              newly encoded message",
@@ -581,6 +584,9 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
         EXIT_CONSTRUCTOR_ALREADY_CALLED => SubmitOutcome::AlreadyFinalized,
         // A paused lane rejects every deposit; counting that against the
         // deposit would park healthy deposits for the length of the pause.
+        400 | 402 => SubmitOutcome::Pending {
+            reason: format!("external message replay/expiry ({code}); retain the proof and retry"),
+        },
         EXIT_PAUSED => SubmitOutcome::Pending {
             reason: format!(
                 "ERR_PAUSED — the bridge lane is paused (setPaused); retrying until it resumes \
@@ -747,6 +753,24 @@ mod tests {
             proof: vec![0xAB; 48].into(),
             parsed: pi,
         }
+    }
+
+    #[test]
+    fn replay_and_expiry_keep_the_funded_deposit_pending() {
+        for code in [400, 402] {
+            assert!(matches!(
+                classify_call_error(&format!("contract call aborted (exit_code={code})")),
+                SubmitOutcome::Pending { .. }
+            ));
+            assert!(matches!(
+                classify_reverted(Some(code), "reverted"),
+                SubmitOutcome::Pending { .. }
+            ));
+        }
+        assert!(matches!(
+            classify_reverted(Some(401), "reverted"),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 
     #[test]

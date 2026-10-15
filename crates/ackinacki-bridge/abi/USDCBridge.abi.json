@@ -399,8 +399,10 @@
 	],
 	"fields": [
 		{"init":true,"name":"_pubkey","type":"uint256"},
-		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
+		{"init":false,"name":"_replayMessages","type":"map(uint32,map(uint256,bool))"},
+		{"init":false,"name":"_legacyReplayTimeFloor","type":"uint64"},
+		{"components":[{"name":"messageHash","type":"uint256"},{"name":"expireAt","type":"uint32"}],"init":false,"name":"_lastReplayMessage","type":"tuple"},
 		{"init":false,"name":"_ownerPubkey","type":"uint256"},
 		{"init":false,"name":"_usdcWallet","type":"address"},
 		{"init":false,"name":"_totalMinted","type":"uint128"},

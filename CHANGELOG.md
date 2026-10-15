@@ -178,7 +178,7 @@ assigns it when the release is tagged.
   `ERR_CHAIN_ACCOUNTING` (239). Fresh zerostates start at zero automatically;
   later upgrades retain network balances and rebuild network reservations.
 
-  `eccUSDCBridge` reports 1.8.2. Its `.tvc` and ABI are rebuilt
+  `eccUSDCBridge` reports 1.8.3. Its `.tvc` and ABI are rebuilt
   with `sold` 0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
   Existing event formats and call signatures stay the same. Use the release
   `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
@@ -1918,6 +1918,20 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- AN bridge 1.8.3 replaces the shared external-message timestamp guard with
+  hash-and-expiry replay protection. Public deposit submissions no longer block
+  owner emergency calls or other deposits by choosing a future `time` header.
+  Exact processed messages return 400; expired messages return 402 and may be
+  retried with a fresh header and the same proof. External messages must expire
+  less than five minutes ahead (401 otherwise). Upgrade with `updateCode` so
+  the changed storage layout is migrated; deposit/withdraw signatures and events
+  remain unchanged. Replay records survive subsequent upgrades. The first upgrade
+  retains the old timestamp as a fixed lower bound for signed owner messages
+  (403), preventing replay of pre-upgrade commands; send new signed commands
+  with a greater `time`. Restore bridge trust and anchor configuration after
+  upgrading as described in `contracts/an/README.md`.
+
 
 - Withdrawal preflight checks AN and EVM transfer limits before a fresh burn;
   resumes of recorded burns skip this new-amount guard. `TransferTooLarge` is

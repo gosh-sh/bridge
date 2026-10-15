@@ -26,6 +26,14 @@ pub const ERR_TVL_CAP: i32 = 234;
 /// Historical per-network balances have not been initialized after upgrade.
 pub const ERR_CHAIN_ACCOUNTING: i32 = 239;
 
+/// The exact external message was already processed.
+pub const ERR_MESSAGE_IS_EXIST: i32 = 400;
+/// The external message validity window exceeds the contract's five-minute
+/// bound.
+pub const ERR_MESSAGE_WITH_HUGE_EXPIREAT: i32 = 401;
+/// The external message validity window has elapsed.
+pub const ERR_MESSAGE_EXPIRED: i32 = 402;
+
 /// The outcome of sending `finalizeDeposit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalizeSend {
@@ -89,6 +97,12 @@ pub enum Reaction {
 /// The reaction to a bridge exit code.
 fn by_code(code: i32) -> Reaction {
     match code {
+        ERR_MESSAGE_IS_EXIST | ERR_MESSAGE_EXPIRED => Reaction::Retry,
+        ERR_MESSAGE_WITH_HUGE_EXPIREAT => Reaction::Refused {
+            code,
+            hint: "the external message expiry must be less than five minutes ahead; correct the \
+                   sender clock or SDK expiration timeout and resume the same deposit",
+        },
         ERR_PAUSED => Reaction::WaitPaused,
         ERR_TVL_CAP => Reaction::WaitCapacity,
         ERR_CHAIN_ACCOUNTING => Reaction::Refused {
@@ -192,6 +206,14 @@ mod tests {
 
     #[test]
     fn the_table_of_refusals() {
+        for code in [400, 402] {
+            assert_eq!(react(&rejected(code)), Reaction::Retry);
+            assert_eq!(react(&executed(code)), Reaction::Retry);
+        }
+        assert!(matches!(react(&rejected(401)), Reaction::Refused {
+            code: 401,
+            ..
+        }));
         assert_eq!(react(&rejected(231)), Reaction::WaitPaused);
         assert_eq!(react(&rejected(234)), Reaction::WaitCapacity);
         assert_eq!(react(&executed(234)), Reaction::WaitCapacity);

@@ -3,6 +3,7 @@ pragma AbiHeader expire;
 pragma AbiHeader pubkey;
 
 import "./modifiers/modifiers.sol";
+import "./modifiers/replayprotection.sol";
 import "./DepositVoucher.sol";
 import "./EthBeaconLightClient.sol";
 import "../token/interface/ISubscriber.sol";
@@ -39,8 +40,8 @@ interface IShellAccumulator {
 ///            `_totalBurnedBridgeByToken` (mapping kept for forward-compat).
 ///
 ///         Deployed at fixed address in zerostate.
-contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.8.2";
+contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
+    string constant version = "1.8.3";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -101,6 +102,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     bool _chainAccountingReady;
     // count + 1 distinguishes an unconfigured cutoff from one reduced to zero.
     mapping(uint256 => mapping(uint256 => uint256)) _legacyDepositCounts;
+    uint256 constant LIMITS_STATE_TAG_V4 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a128;
     uint256 constant LIMITS_STATE_TAG_V3 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a127;
     uint256 constant LIMITS_STATE_TAG_V2 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a126;
     uint256 constant LIMITS_STATE_TAG = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a125;
@@ -460,7 +462,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         Only callable by the owner (by public key).
     /// @param recipient — address to receive the minted ECC[3] USDC
     /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
-    function mintAndSend(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function mintAndSend(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
         require(value > 0, ERR_ZERO_AMOUNT);
@@ -486,7 +488,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         which will process the purchase and send ECC[2] Shell to the buyer.
     /// @param buyer — address to receive Shell from the Accumulator
     /// @param value — amount of ECC[3] USDC to mint (in micro-USDC)
-    function mintAndSendAccumulator(address buyer, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function mintAndSendAccumulator(address buyer, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         require(nonce == _mintAccumulatorNonce + 1, ERR_INVALID_NONCE);
         require(value > 0, ERR_ZERO_AMOUNT);
@@ -587,7 +589,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         chain at once (rotation window). Applies to `finalizeDeposit`
     ///         only — the outbound path and the TIP-3/owner-mint flows are
     ///         unaffected.
-    function setTrustedL1Bridge(uint256 chainId, uint256 l1Bridge, bool allowed) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setTrustedL1Bridge(uint256 chainId, uint256 l1Bridge, bool allowed) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         if (allowed) {
             _trustedL1Bridge[chainId][l1Bridge] = true;
@@ -610,7 +612,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         caps. depositCount is the source's finalized depositCounter
     ///         before enabling the caps: only lower IDs are grandfathered.
     function setLegacyDepositCount(uint256 chainId, uint256 l1Bridge, uint256 depositCount)
-        public onlyOwnerPubkey(_ownerPubkey) accept
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(_trustedL1Bridge[chainId][l1Bridge], ERR_UNSUPPORTED_SRC_CHAIN);
         uint256 previous = _legacyDepositCounts[chainId][l1Bridge];
@@ -633,7 +635,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         upgrade from aggregate-only accounting. Only once, while paused.
     ///         Reconstruct balances from DepositFinalized / WithdrawalInitiated.
     function initializeChainAccounting(uint256[] chainIds, uint128[] outstanding)
-        public onlyOwnerPubkey(_ownerPubkey) accept
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(_paused, ERR_RECOVERY_NOT_PAUSED);
         require(!_chainAccountingReady && chainIds.length > 0 &&
@@ -675,7 +677,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @param accepted  — true to admit, false to retract (e.g. on discovering
     ///                    the block was reorged out before any deposit landed).
     function setAcceptedBlockHash(uint256 chainId, uint256 blockHash, bool accepted)
-        public onlyOwnerPubkey(_ownerPubkey) accept
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(!_ownerAnchorsDisabled[chainId], ERR_OWNER_ANCHORS_DISABLED);
         ensureBalance();
@@ -689,7 +691,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Installs the code the light client is deployed from. Changing it
     ///         moves the light-client address, so an already deployed one stops
     ///         being recognized as a writer.
-    function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         _lightClientCode = code;
         _lightClient = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
@@ -709,7 +711,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint256 l1ChainId,
         uint256 bootstrapCommittee,
         uint64  bootstrapPeriod
-    ) public onlyOwnerPubkey(_ownerPubkey) accept {
+    ) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         require(_lightClient != address(0), ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         new EthBeaconLightClient{
@@ -742,7 +744,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///      account is Active; flipping after `setLightClientCode` and
     ///      before a successful deploy leaves that L1 with no writer until
     ///      `deployLightClient` runs again. Idempotent.
-    function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
+    function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         _disableOwnerAnchors(_lightClientL1ChainId);
     }
 
@@ -756,7 +758,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         constructed with — a constructor bounce still stores
     ///         whatever was passed. Sold does not allow a public
     ///         overload of `disableOwnerAnchors`.
-    function disableOwnerAnchorsOn(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function disableOwnerAnchorsOn(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         _disableOwnerAnchors(chainId);
     }
 
@@ -776,7 +778,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         available, so a deposit already proven can still be paid out and
     ///         the owner can keep the bridge's configuration current while it
     ///         is stopped.
-    function setPaused(bool paused) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setPaused(bool paused) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         _paused = paused;
     }
@@ -885,6 +887,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             ERR_UNKNOWN_BLOCK
         );
 
+        _saveMsg();
         ensureBalance();
 
         // Anti-replay anchor = proof-bound (deposit_id, source contract, source
@@ -956,7 +959,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Recover a failed voucher callback after checking its transaction
     ///         history. Pausing prevents new proofs from racing the recovery.
     ///         The stored proof-bound recipient and amount cannot be replaced.
-    function recoverDeposit(address voucher) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function recoverDeposit(address voucher) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         require(_paused, ERR_RECOVERY_NOT_PAUSED);
         require(_pendingDepositAmounts[voucher] > 0, ERR_DEPOSIT_RESERVATION);
         DepositPI f = _pendingDepositData[voucher];
@@ -1017,7 +1020,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     /// @notice Replaces the owner public key. Only callable by the current owner.
     /// @param pubkey — new owner public key (uint256)
-    function setPubkey(uint256 pubkey) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function setPubkey(uint256 pubkey) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         require(pubkey != 0, ERR_ZERO_PUBKEY);
         ensureBalance();
         _ownerPubkey = pubkey;
@@ -1027,7 +1030,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         Used to trigger Transaction contracts deployed by the bridge's USDC wallet
     ///         (e.g. SET_SUBSCRIBER_TYPE). Only callable by the owner.
     /// @param txAddr — address of the Transaction contract to trigger
-    function triggerTransaction(address txAddr) public view onlyOwnerPubkey(_ownerPubkey) accept {
+    function triggerTransaction(address txAddr) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         txAddr.transfer({value: 1 vmshell, bounce: true, flag: 1});
     }
@@ -1041,15 +1044,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @param userCell — empty to keep the voucher code, or new voucher code
     ///        when no deposits are pending. Limit state is carried separately
     ///        inside a tagged envelope in the existing ninth migration field.
-    function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept {
+    function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         // Pending callbacks require their original voucher code, but do not
         // prevent an upgrade of the bridge itself to repair a failure.
         require(_reservedDeposits == 0 || userCell.toSlice().empty(), ERR_DEPOSITS_PENDING);
         ensureBalance();
         TvmCell limitsState = abi.encode(_pendingDepositAmounts, _pendingDepositData,
                                         _settledVouchers, _reservedDeposits, _legacyDepositCounts);
-        TvmCell carried = abi.encode(LIMITS_STATE_TAG_V3, userCell, limitsState,
-                                    abi.encode(_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady));
+        TvmCell carried = abi.encode(LIMITS_STATE_TAG_V4, userCell, limitsState,
+                                    abi.encode(_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady, _replayMessages, _legacyReplayTimeFloor));
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
@@ -1089,6 +1092,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         via `setTrustedL1Bridge`.
     function onCodeUpgrade(TvmCell cell) private {
         tvm.accept();
+        // Legacy code commits its implicit timestamp before switching code.
+        // Read that old C4 prefix before resetStorage changes the layout.
+        TvmSlice previousData = tvm.getData().toSlice();
         tvm.resetStorage();
         (uint256 pubkey,
          address usdcWallet,
@@ -1114,16 +1120,22 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 burnedUsdc = _totalBurnedBridgeByToken[USDC_ECC_ID];
         _outstandingBridgeUsdc = mintedUsdc > burnedUsdc ? mintedUsdc - burnedUsdc : 0;
         _chainAccountingReady = mintedUsdc == 0 && burnedUsdc == 0;
+        bool replayStateCarried = false;
         TvmSlice tail = userCell.toSlice();
-        if (tail.bits() >= 256 && (tail.preloadUint(256) == LIMITS_STATE_TAG || tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3)) {
+        if (tail.bits() >= 256 && (tail.preloadUint(256) == LIMITS_STATE_TAG || tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3 || tail.preloadUint(256) == LIMITS_STATE_TAG_V4)) {
             TvmCell newVoucherCode;
             TvmCell limitsState;
-            if (tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3) {
+            if (tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3 || tail.preloadUint(256) == LIMITS_STATE_TAG_V4) {
                 (uint256 tag, TvmCell voucherCode, TvmCell state, TvmCell netState) =
                     abi.decode(userCell, (uint256, TvmCell, TvmCell, TvmCell));
                 newVoucherCode = voucherCode;
                 limitsState = state;
-                if (tag == LIMITS_STATE_TAG_V3) {
+                if (tag == LIMITS_STATE_TAG_V4) {
+                    replayStateCarried = true;
+                    (_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady, _replayMessages, _legacyReplayTimeFloor) =
+                        abi.decode(netState, (uint128, mapping(uint256 => uint128), bool,
+                                              mapping(uint32 => mapping(uint256 => bool)), uint64));
+                } else if (tag == LIMITS_STATE_TAG_V3) {
                     (_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady) =
                         abi.decode(netState, (uint128, mapping(uint256 => uint128), bool));
                 } else {
@@ -1141,6 +1153,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
             _depositVoucherCode = newVoucherCode.toSlice().empty() ? depositVoucherCode : newVoucherCode;
         } else {
             _depositVoucherCode = tail.empty() ? depositVoucherCode : userCell;
+        }
+        if (!replayStateCarried && msg.isExternal) {
+            previousData.skip(256); // implicit TVM public key
+            _legacyReplayTimeFloor = previousData.load(uint64);
         }
         address[] pending = _pendingDepositData.keys();
         for (uint32 i = 0; i < pending.length; i++) {

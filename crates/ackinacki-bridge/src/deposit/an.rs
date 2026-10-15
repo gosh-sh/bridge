@@ -660,7 +660,9 @@ fn bridge_exit_code(e: &ClientError) -> Option<i32> {
 /// Exit codes of the contract's own expiry and replay checks. Neither is
 /// the bridge refusing the deposit: the message expired before it ran, or
 /// an identical one ran already.
-const EXPIRY_EXIT_CODES: [i32; 2] = [
+const EXPIRY_EXIT_CODES: [i32; 4] = [
+    crate::deposit::refusals::ERR_MESSAGE_IS_EXIST,
+    crate::deposit::refusals::ERR_MESSAGE_EXPIRED,
     StdContractError::ReplayProtection as i32,
     StdContractError::ExtMessageExpired as i32,
 ];
@@ -848,7 +850,7 @@ impl LiveAn {
                 // A confirmed RP refusal cannot be cured by resending this BOC.
                 // Its earlier execution is still unknown, so preserve the
                 // existing classifier's Unknown result for the driver.
-                if bridge_exit_code(&e) == Some(StdContractError::ReplayProtection as i32) {
+                if bridge_exit_code(&e).is_some_and(|code| EXPIRY_EXIT_CODES.contains(&code)) {
                     self.forget_finalize(request, message).await;
                 }
                 return send_error(&e);
@@ -1168,7 +1170,7 @@ mod tests {
     fn an_expiry_is_never_the_bridge_refusing() {
         // The contract's own expiry and replay checks: the message may run
         // again after a fresh encode, or ran already.
-        for code in [52, 57] {
+        for code in [52, 57, 400, 402] {
             assert!(
                 matches!(
                     classify_send_error(&node_refusal("TVM_ERROR", code)),

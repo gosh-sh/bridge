@@ -117,8 +117,8 @@ class BridgeLimits(unittest.TestCase):
         if source:
             extra = ["--internal", "--message-source", source,
                      "--message-value", str(shell)]
-        if header is not None:
-            extra += ["--abi-header", json.dumps(header)]
+        if not source:
+            extra += ["--abi-header", json.dumps(header if header is not None else {"expire": int(time.time()) + 240})]
         if signed:
             extra += ["--sign", str(self.key_file)]
         if ecc is not None:
@@ -179,7 +179,7 @@ class BridgeLimits(unittest.TestCase):
 
     def test_previous_tagged_upgrade_restores_pending_and_initializes_net(self):
         self.finalize(0)
-        self.call("testUpgradeV1")
+        self.call("testUpgradeV1", source=BRIDGE)
         self.call("getDepositLimits", {"chainId": "1", "l1Bridge": "42"}, expect=239)
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True)
         self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
@@ -217,22 +217,83 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(int(self.limits(2)["outstanding"]), 0)
 
     def test_historical_network_initialization_rejects_bad_or_repeated_snapshots(self):
-        self.call("testUpgradeV1")
+        self.call("testUpgradeV1", source=BRIDGE)
         for chains, amounts in [(["1", "1"], [str(TVL), "0"]), (["1"], ["0"]), (["1"], [])]:
             self.call("initializeChainAccounting", {"chainIds": chains, "outstanding": amounts}, signed=True, expect=239)
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, expect=209)
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True)
         self.call("initializeChainAccounting", {"chainIds": ["1"], "outstanding": [str(TVL - TRANSFER)]}, signed=True, expect=239)
 
-    def test_reordered_unsigned_finalizations_reject_old_time_and_accept_fresh_time(self):
+    def test_future_and_reordered_deposits_do_not_block_owner_or_other_deposits(self):
         self.seed(0)
         now = int(time.time() * 1000)
-        expires = int(time.time()) + 600
-        self.finalize(0, header={"time": now, "expire": expires})
-        self.finalize(1, expect=52, header={"time": now - 1, "expire": expires})
-        # Do not insert another external call between the timestamped sends.
-        self.finalize(1, header={"time": now + 1, "expire": expires})
+        expires = int(time.time()) + 240
+        self.finalize(0, header={"time": now + 600_000, "expire": expires})
+        self.finalize(0, header={"time": now + 600_001, "expire": expires})
+        self.call("setPaused", {"paused": True}, signed=True,
+                  header={"time": now, "expire": expires})
+        self.call("setPaused", {"paused": False}, signed=True,
+                  header={"time": now - 1, "expire": expires})
+        self.finalize(1, header={"time": now - 2, "expire": expires})
         self.assertEqual(int(self.limits()["reserved"]), 2 * TRANSFER)
+
+    def test_owner_message_replay_is_rejected_even_after_upgrade(self):
+        header = {"time": int(time.time() * 1000), "expire": int(time.time()) + 240}
+        self.call("setPaused", {"paused": True}, signed=True, header=header)
+        self.call("setPaused", {"paused": True}, signed=True, header=header, expect=400)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.call("setPaused", {"paused": True}, signed=True, header=header, expect=400)
+
+    def test_exact_deposit_message_replay_is_rejected_but_new_header_is_safe(self):
+        self.seed(0)
+        header = {"time": int(time.time() * 1000), "expire": int(time.time()) + 240}
+        self.finalize(0, header=header)
+        self.finalize(0, header=header, expect=400)
+        header["time"] += 1
+        self.assertEqual(self.finalize(0, header=header)["messages"], [])
+        self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
+
+    def test_external_expiry_is_bounded_and_expired_messages_are_rejected(self):
+        now = int(time.time())
+        self.call("setPaused", {"paused": True}, signed=True,
+                  header={"time": now * 1000, "expire": now - 1}, expect=402)
+        self.call("setPaused", {"paused": True}, signed=True,
+                  header={"time": now * 1000, "expire": now + 600}, expect=401)
+
+    def test_unsigned_admin_call_cannot_commit_a_message_record(self):
+        header = {"time": int(time.time() * 1000) + 600_000,
+                  "expire": int(time.time()) + 240}
+        self.call("setPaused", {"paused": True}, header=header, expect=209)
+        self.call("setPaused", {"paused": True}, header=header, expect=209)
+        self.call("setPaused", {"paused": True}, signed=True)
+
+    def test_settled_proof_with_future_time_cannot_block_emergency_calls(self):
+        self.seed(0)
+        self.finalize(0)
+        self.confirm(0)
+        now = int(time.time() * 1000)
+        self.assertEqual(self.finalize(0, header={"time": now + 600_000,
+                         "expire": int(time.time()) + 240})["messages"], [])
+        self.call("setPaused", {"paused": True}, signed=True,
+                  header={"time": now, "expire": int(time.time()) + 240})
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+
+    def test_upgrade_from_implicit_timestamp_storage_uses_the_existing_migration_tuple(self):
+        fixture = REPO / "scripts/fixtures/bridge_timestamp_rp_1_8_2.tvc.b64"
+        self.tvc.write_bytes(base64.b64decode(fixture.read_text()))
+        self.call("constructor", {"pubkey": "0x" + self.keys["public"],
+                                  "usdcWallet": "0:" + "00" * 32})
+        old_header = {"time": int(time.time() * 1000), "expire": int(time.time()) + 240}
+        self.call("setPaused", {"paused": True}, signed=True, header=old_header)
+        upgrade_header = {"time": int(time.time() * 1000) + 1, "expire": int(time.time()) + 240}
+        upgrade_args = {"newcode": self.bridge_code, "userCell": ""}
+        self.call("updateCode", upgrade_args, signed=True, header=upgrade_header)
+        self.call("setPaused", {"paused": True}, signed=True, header=old_header, expect=403)
+        self.call("updateCode", upgrade_args, signed=True, header=upgrade_header, expect=403)
+        self.assertEqual(int(self.call("getOwnerPubkey")["response"]["value0"], 0),
+                         int(self.keys["public"], 16))
+        self.call("setPaused", {"paused": True}, signed=True)
+        self.assertEqual(int(self.limits()["outstanding"]), 0)
 
     def test_pending_callbacks_cannot_overbook_tvl(self):
         self.finalize(0)

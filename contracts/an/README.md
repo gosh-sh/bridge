@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.8.2, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.8.3, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.4.8:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -48,6 +48,35 @@ returns the light client and whether the owner may still write that L1;
 anchors back on, but the owner keeps two ways around it: `updateCode` does
 (`onCodeUpgrade` leaves every chain owner-writable), and `setLightClientCode`
 still replaces the light client afterwards.
+
+### External-message replay protection
+
+Bridge 1.8.3 uses the hash-and-expiry mechanism from the DEX/multifactor
+contracts. The compiler still verifies signatures. A successful public deposit
+cannot advance a shared timestamp or block signed owner calls. Identical
+processed external messages are rejected with `ERR_MESSAGE_IS_EXIST` (400).
+A new header may resubmit the same proof; voucher identity still prevents a
+second mint. Internal voucher callbacks do not consume external-message records.
+
+Every external message, including getters, must expire strictly after the block
+time and strictly before five minutes after it. `ERR_MESSAGE_EXPIRED` (402)
+means expired; `ERR_MESSAGE_WITH_HUGE_EXPIREAT` (401) means the validity window
+is too long. Keep sender clocks synchronized and the SDK expiration timeout
+below 300,000 milliseconds, with room for clock skew. The deposit CLI keeps
+ambiguous sends on the same BOC; a confirmed 400/402 allows a new header and
+keeps voucher/event checks authoritative.
+
+Install the rebuilt bridge through the existing `updateCode(newcode, userCell)`
+entry point, not by replacing its code without running the migration: the
+compiler's implicit `_timestamp` is removed from storage. The existing nine-field
+migration tuple stays compatible. The internal V4 envelope carries the replay
+journal and per-network accounting through subsequent upgrades. When upgrading
+from timestamp protection, the old committed timestamp becomes a fixed lower
+bound for signed messages (`ERR_MESSAGE_BEFORE_UPGRADE`, 403), so previously
+executed owner commands, including the upgrade itself, cannot be replayed.
+Public deposits cannot move that bound. New signed commands must use a `time`
+greater than the upgrading message's timestamp; if that message was future-dated,
+keep using greater timestamps until the local clock catches up.
 
 | Path | Contents |
 |------|----------|

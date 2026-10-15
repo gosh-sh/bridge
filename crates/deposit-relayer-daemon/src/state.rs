@@ -69,6 +69,10 @@ pub struct OutstandingDeposit {
     pub deposit_id: u64,
     pub attempts: u32,
     pub retry_after_unix: u64,
+    /// Ethereum block that holds this deposit's log, when known. The log-scan
+    /// cursor must not move past it while the id is outstanding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
 }
 
 /// Locally-persisted relayer progress.
@@ -96,9 +100,8 @@ pub struct RelayerState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_done_through_block: Option<u64>,
     /// Deposit ids the daemon abandoned after `--skip-after-attempts`.
-    /// Operators must finalise these manually via `finalize-one`. An older
-    /// `state.json` that only has this field is migrated on load: those ids
-    /// become outstanding with `retry_after_unix = 0`.
+    /// Operators must finalise these manually via `finalize-one`. Parked ids
+    /// stay parked across restarts; they are not loaded back as outstanding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked_deposit_ids: Vec<u64>,
     /// Deposit ids the circuit cannot prove, advanced past at once.
@@ -130,19 +133,9 @@ impl RelayerState {
         // attempt, so its count says nothing about the current target: start
         // it over rather than let one real failure reach the skip threshold.
         let written_by_older_daemon = raw.get("scanned_through_block").is_some();
-        let had_outstanding = raw.get("outstanding_deposits").is_some();
         let mut state: Self = serde_json::from_value(raw)?;
         if written_by_older_daemon {
             state.attempts_since_progress = 0;
-        }
-        // Pre-outstanding files listed parked ids as the only way past a
-        // stuck deposit. Those become the initial outstanding set so they
-        // retry without operator action.
-        if !had_outstanding {
-            let parked = std::mem::take(&mut state.parked_deposit_ids);
-            for id in parked {
-                state.upsert_outstanding(id, 0, 0);
-            }
         }
         Ok(state)
     }
@@ -203,15 +196,13 @@ impl RelayerState {
         self.next_target_at(start, unix_now_secs())
     }
 
-    /// The next `depositId` the relayer should target at `now`.
+    /// The next new `depositId` the relayer should try at `now`.
     ///
-    /// Prefer the smallest outstanding id whose backoff has elapsed. Otherwise
-    /// walk `last_processed + 1` (or `start`), skipping parked, unprovable,
-    /// and outstanding ids that are not yet due.
-    pub fn next_target_at(&self, start: u64, now: u64) -> u64 {
-        if let Some(id) = self.ready_outstanding(now) {
-            return id;
-        }
+    /// Walks `last_processed + 1` (or `start`), skipping parked, unprovable,
+    /// and outstanding ids. Outstanding ids are retried separately when this
+    /// walk has nothing new to fetch, so two failing deposits cannot starve
+    /// later ones.
+    pub fn next_target_at(&self, start: u64, _now: u64) -> u64 {
         let mut id = match self.last_processed_deposit_id {
             Some(last) => last.saturating_add(1),
             None => start,
@@ -240,6 +231,18 @@ impl RelayerState {
     /// a per-id backoff; the high-water mark does not move, so a later id
     /// can be tried while this one waits.
     pub fn record_attempt(&mut self, deposit_id: u64, now: u64, backoff_secs: u64) {
+        self.record_attempt_at(deposit_id, now, backoff_secs, None);
+    }
+
+    /// Like [`record_attempt`], and remembers the deposit's Ethereum block
+    /// so a later retry can scan from that block.
+    pub fn record_attempt_at(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        backoff_secs: u64,
+        block_number: Option<u64>,
+    ) {
         self.last_attempt_deposit_id = Some(deposit_id);
         let attempts = self
             .outstanding_deposits
@@ -250,7 +253,12 @@ impl RelayerState {
         self.attempts_since_progress = attempts;
         let shift = attempts.saturating_sub(1).min(6);
         let delay = backoff_secs.saturating_mul(1u64 << shift);
-        self.upsert_outstanding(deposit_id, attempts, now.saturating_add(delay));
+        self.upsert_outstanding(
+            deposit_id,
+            attempts,
+            now.saturating_add(delay),
+            block_number,
+        );
     }
 
     /// Park a stuck deposit and advance the cursor past it. The id is recorded
@@ -297,7 +305,13 @@ impl RelayerState {
         });
     }
 
-    fn upsert_outstanding(&mut self, deposit_id: u64, attempts: u32, retry_after_unix: u64) {
+    fn upsert_outstanding(
+        &mut self,
+        deposit_id: u64,
+        attempts: u32,
+        retry_after_unix: u64,
+        block_number: Option<u64>,
+    ) {
         if let Some(existing) = self
             .outstanding_deposits
             .iter_mut()
@@ -305,12 +319,16 @@ impl RelayerState {
         {
             existing.attempts = attempts;
             existing.retry_after_unix = retry_after_unix;
+            if block_number.is_some() {
+                existing.block_number = block_number;
+            }
             return;
         }
         self.outstanding_deposits.push(OutstandingDeposit {
             deposit_id,
             attempts,
             retry_after_unix,
+            block_number,
         });
         self.outstanding_deposits.sort_by_key(|o| o.deposit_id);
     }
@@ -331,12 +349,28 @@ impl RelayerState {
             || self.unprovable_deposit_ids.contains(&deposit_id)
     }
 
-    fn ready_outstanding(&self, now: u64) -> Option<u64> {
+    pub fn ready_outstanding(&self, now: u64) -> Option<u64> {
         self.outstanding_deposits
             .iter()
             .filter(|o| o.retry_after_unix <= now && !self.is_skipped(o.deposit_id))
             .map(|o| o.deposit_id)
             .min()
+    }
+
+    /// Lowest Ethereum block among outstanding deposits, when any is known.
+    pub fn min_outstanding_block(&self) -> Option<u64> {
+        self.outstanding_deposits
+            .iter()
+            .filter_map(|o| o.block_number)
+            .min()
+    }
+
+    /// Known Ethereum block for an outstanding id.
+    pub fn outstanding_block(&self, deposit_id: u64) -> Option<u64> {
+        self.outstanding_deposits
+            .iter()
+            .find(|o| o.deposit_id == deposit_id)
+            .and_then(|o| o.block_number)
     }
 }
 
@@ -476,14 +510,15 @@ mod tests {
         assert_eq!(s.outstanding_deposits.len(), 1);
         assert_eq!(s.outstanding_deposits[0].deposit_id, 3);
         assert_eq!(s.outstanding_deposits[0].retry_after_unix, 15);
-        // Backoff has not elapsed: walk past 3.
+        // Walk past 3 whether or not its backoff has elapsed.
         assert_eq!(s.next_target_at(0, 10), 4);
-        // Once it is due, 3 is preferred again.
-        assert_eq!(s.next_target_at(0, 15), 3);
+        assert_eq!(s.next_target_at(0, 15), 4);
+        assert_eq!(s.ready_outstanding(10), None);
+        assert_eq!(s.ready_outstanding(15), Some(3));
         s.record_progress(4);
         assert_eq!(s.last_processed_deposit_id, Some(4));
         assert_eq!(s.next_target_at(0, 10), 5);
-        assert_eq!(s.next_target_at(0, 15), 3);
+        assert_eq!(s.ready_outstanding(15), Some(3));
         s.record_progress(3);
         assert!(s.outstanding_deposits.is_empty());
         assert_eq!(s.last_processed_deposit_id, Some(4));
@@ -491,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn parked_ids_become_outstanding_on_load() {
+    fn parked_ids_stay_parked_on_load() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(
@@ -502,31 +537,16 @@ mod tests {
         .unwrap();
 
         let mut loaded = RelayerState::load(&path).unwrap().unwrap();
-        assert!(loaded.parked_deposit_ids.is_empty());
-        assert_eq!(
-            loaded
-                .outstanding_deposits
-                .iter()
-                .map(|o| o.deposit_id)
-                .collect::<Vec<_>>(),
-            vec![4, 6]
-        );
-        assert!(loaded.unprovable_deposit_ids.is_empty());
-        assert_eq!(loaded.next_target_at(0, 0), 4);
+        assert_eq!(loaded.parked_deposit_ids, vec![4, 6]);
+        assert!(loaded.outstanding_deposits.is_empty());
+        assert_eq!(loaded.next_target_at(0, 0), 7);
 
         loaded.record_unprovable(7);
         loaded.save(&path).unwrap();
         let reloaded = RelayerState::load(&path).unwrap().unwrap();
-        assert!(reloaded.parked_deposit_ids.is_empty());
+        assert_eq!(reloaded.parked_deposit_ids, vec![4, 6]);
         assert_eq!(reloaded.unprovable_deposit_ids, vec![7]);
-        assert_eq!(
-            reloaded
-                .outstanding_deposits
-                .iter()
-                .map(|o| o.deposit_id)
-                .collect::<Vec<_>>(),
-            vec![4, 6]
-        );
+        assert!(reloaded.outstanding_deposits.is_empty());
     }
 
     #[test]

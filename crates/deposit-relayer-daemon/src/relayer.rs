@@ -168,9 +168,27 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
     /// One step of the loop. Idempotent: a deposit already finalised on AN
     /// is skipped via the nullifier pre-check rather than re-submitted.
+    ///
+    /// New work is tried first. Outstanding ids are retried in the same tick
+    /// only when that walk has nothing new to fetch, so they cannot starve
+    /// later deposits.
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
         let now = unix_now_secs();
-        let target = self.state.next_target_at(self.config.start_deposit_id, now);
+        let forward = self.state.next_target_at(self.config.start_deposit_id, now);
+        self.rewind_scan_for(forward);
+        let outcome = self.tick_target(forward).await?;
+        if matches!(outcome, TickOutcome::NotYetAvailable { .. }) {
+            if let Some(id) = self.state.ready_outstanding(now) {
+                if id != forward {
+                    self.rewind_scan_for(id);
+                    return self.tick_target(id).await;
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn tick_target(&mut self, target: u64) -> Result<TickOutcome, RelayerError> {
         self.publish_state_gauges(target);
 
         // 1. Cheap nullifier pre-check — skip proving on replays.
@@ -240,9 +258,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 });
             },
             Err(e) => {
-                if let Some(outcome) =
-                    self.record_failure(target, &format!("proof generation: {e}"))?
-                {
+                if let Some(outcome) = self.record_failure(
+                    target,
+                    &format!("proof generation: {e}"),
+                    Some(event.block_number),
+                )? {
                     return Ok(outcome);
                 }
                 let reason = e.to_string();
@@ -291,9 +311,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Rejected {
                 reason,
             } => {
-                if let Some(outcome) =
-                    self.record_failure(target, &format!("AN rejected: {reason}"))?
-                {
+                if let Some(outcome) = self.record_failure(
+                    target,
+                    &format!("AN rejected: {reason}"),
+                    Some(event.block_number),
+                )? {
                     return Ok(outcome);
                 }
                 warn!(
@@ -310,10 +332,11 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Pending {
                 reason,
             } => {
-                self.state.record_attempt(
+                self.state.record_attempt_at(
                     target,
                     unix_now_secs(),
                     self.config.outstanding_backoff_secs,
+                    Some(event.block_number),
                 );
                 self.persist_state()?;
                 debug!(
@@ -350,6 +373,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     }
 
     fn persist_state(&mut self) -> Result<(), RelayerError> {
+        self.clamp_scan_cursor();
         if let Some(cursor) = &self.config.scan_cursor {
             self.state.scan_done_through_block = *cursor
                 .lock()
@@ -382,6 +406,38 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         {
             advance_scan_cursor(cursor, through);
         }
+        self.clamp_scan_cursor();
+    }
+
+    /// Keep the log-scan cursor from moving past an outstanding deposit's
+    /// block.
+    fn clamp_scan_cursor(&self) {
+        let Some(min_block) = self.state.min_outstanding_block() else {
+            return;
+        };
+        let cap = min_block.saturating_sub(1);
+        self.cap_scan_cursor(cap);
+    }
+
+    /// Scan from this deposit's block on the next fetch, if we know it.
+    fn rewind_scan_for(&self, deposit_id: u64) {
+        if let Some(block) = self.state.outstanding_block(deposit_id) {
+            self.cap_scan_cursor(block.saturating_sub(1));
+        }
+    }
+
+    fn cap_scan_cursor(&self, cap: u64) {
+        let Some(cursor) = &self.config.scan_cursor else {
+            return;
+        };
+        let Ok(mut guard) = cursor.lock() else {
+            return;
+        };
+        if let Some(cur) = *guard {
+            if cur > cap {
+                *guard = Some(cap);
+            }
+        }
     }
 
     /// Record a failed attempt and optionally park the deposit when the skip
@@ -390,11 +446,13 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         &mut self,
         deposit_id: u64,
         reason: &str,
+        block_number: Option<u64>,
     ) -> Result<Option<TickOutcome>, RelayerError> {
-        self.state.record_attempt(
+        self.state.record_attempt_at(
             deposit_id,
             unix_now_secs(),
             self.config.outstanding_backoff_secs,
+            block_number,
         );
         if let Some(limit) = self.config.skip_after_attempts {
             if limit > 0 && self.state.outstanding_attempts(deposit_id) >= limit {
@@ -575,8 +633,9 @@ mod tests {
     #[tokio::test]
     async fn log_source_retry_and_same_block_neighbour_end_to_end() {
         // Deposits 0 and 1 share block 105, deposit 2 is in block 107; AN
-        // rejects the first attempt at deposit 0. Every deposit is delivered
-        // in order, and an idle tick then parks the cursor at the safe head.
+        // rejects the first attempt at deposit 0. Later ids go first; the
+        // scan cursor stays at 104 while 0 is outstanding, then an idle tick
+        // parks it at the safe head.
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let bridge = Address::repeat_byte(0x22);
@@ -613,7 +672,9 @@ mod tests {
         ));
         assert_eq!(*cursor.lock().unwrap(), None);
 
-        for (id, cursor_after) in [(0, 104), (1, 104), (2, 106)] {
+        // 0 is outstanding; later ids are delivered first. The scan cursor
+        // stays at 104 while 0 (block 105) is still outstanding.
+        for (id, cursor_after) in [(1, 104), (2, 104)] {
             match relayer.tick().await.unwrap() {
                 TickOutcome::Finalized {
                     deposit_id, ..
@@ -622,6 +683,15 @@ mod tests {
             }
             assert_eq!(*cursor.lock().unwrap(), Some(cursor_after));
         }
+
+        // Nothing new at 3: same tick retries 0 and finds its log.
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Finalized {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
+            other => panic!("expected Finalized(0), got {other:?}"),
+        }
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
 
         assert!(matches!(
             relayer.tick().await.unwrap(),
@@ -820,22 +890,13 @@ mod tests {
             dir.path().join("state.json"),
         );
 
-        for _ in 0..2 {
-            assert!(matches!(
-                relayer.tick().await.unwrap(),
-                TickOutcome::ProofFailed {
-                    deposit_id: 0,
-                    ..
-                }
-            ));
-        }
-        match relayer.tick().await.unwrap() {
-            TickOutcome::Skipped {
-                deposit_id, ..
-            } => assert_eq!(deposit_id, 0),
-            other => panic!("expected Skipped, got {other:?}"),
-        }
-        assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::ProofFailed {
+                deposit_id: 0,
+                ..
+            }
+        ));
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::Finalized {
@@ -843,6 +904,20 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::ProofFailed {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Skipped {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert_eq!(relayer.state().parked_deposit_ids, vec![0]);
     }
 
     #[tokio::test]

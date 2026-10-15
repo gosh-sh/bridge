@@ -26,13 +26,13 @@ assigns it when the release is tagged.
 
 - The ETH→AN deposit relayer no longer stalls every later deposit behind one
   that cannot be finalised. `state.json` keeps a high-water mark plus an
-  `outstanding_deposits` set: a failed id retries on its own backoff
-  (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default 2 s,
-  doubled each time up to 64×) and does not block a later id. An older
-  `state.json` that only has `parked_deposit_ids` loads those ids as the
-  initial outstanding set, so they retry without operator action.
-  `--skip-after-attempts` still parks an id and `finalize-one` still submits
-  one bundle. Gauge `deposit_relayer_outstanding_deposits`.
+  `outstanding_deposits` set: later ids are tried first, and a failed id
+  retries with backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`,
+  default 2 s, doubled each time up to 64×) when there is nothing new to
+  fetch. The log-scan cursor does not move past an outstanding deposit's
+  block, so a retry can still find its log. Parked ids stay parked;
+  `--skip-after-attempts` and `finalize-one` are unchanged. Gauge
+  `deposit_relayer_outstanding_deposits`.
 
 ### Documentation
 

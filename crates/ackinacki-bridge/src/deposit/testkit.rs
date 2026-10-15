@@ -1329,10 +1329,21 @@ impl AnRead for FakeAn {
     async fn run_getter(
         &self,
         id: [u8; 32],
-        _: &str,
+        abi: &str,
         f: &str,
         input: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        // The real client encodes against this ABI: a getter missing from it
+        // cannot be called at all, and the CLI refuses before reaching the
+        // chain. Catch that here rather than against a live bridge.
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(abi) {
+            if let Some(fns) = parsed["functions"].as_array() {
+                assert!(
+                    fns.iter().any(|x| x["name"] == f),
+                    "{f} is missing from the ABI this call encodes with"
+                );
+            }
+        }
         if self.unknown_getters.lock().unwrap().contains(f) {
             // What the VM answers for a function the deployed code lacks.
             anyhow::bail!(

@@ -9,7 +9,9 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
   USDC on `initiateWithdrawal`. The owner can stop both of those with
   `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until it is
-  lifted; nothing else the bridge does is affected.
+  lifted; nothing else the bridge does is affected. That switch is independent
+  of `AckiNackiBridge.pause()` on Ethereum and of a Circle freeze of USDC —
+  see *Two pause domains* below.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
   from the deposit identity and from the voucher's own code; a second
   finalization of the same deposit collides with it and does not mint again.
@@ -78,6 +80,17 @@ folders and `contracts/scripts/bridge_*.py`, never
 the one that does the placing. A change here reaches a network only after that
 pin is moved.
 
+## Deposit amounts
+
+Ethereum `AckiNackiBridge.deposit` and Acki Nacki `finalizeDeposit` share one
+per-deposit ceiling: `type(uint64).max` USDC base units (6 decimals). The EVM
+side refuses anything larger with `DepositTooLarge` (`MAX_DEPOSIT_AMOUNT`);
+the AN side refuses a proven `fr[2]` that does not fit `uint64` with exit 214
+(`ERR_OVERFLOW`) before it mints. There is no extra product minimum: `amount
+> 0` is the floor on both sides (`InvalidAmount` on Ethereum, `ERR_ZERO_AMOUNT`
+(204) on Acki Nacki). Older notes that named a 100 USDC cap are describing a
+limit that is not in the contracts.
+
 ## Rebuilding
 
     make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
@@ -120,6 +133,25 @@ Before committing new artefacts:
     scripts/check_voucher_abi_consistency.py
     scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
     scripts/check_zerostate_data_encoder.py
+
+## Two pause domains
+
+Custody on Ethereum (USDC in `AckiNackiBridge`, some of it in AAVE) and the ECC
+ledger on Acki Nacki are two books. Each side has its own stop switch, and
+neither reaches the other:
+
+- Ethereum: `AckiNackiBridge.pause()` / `unpause()`. While `paused` is true,
+  `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert
+  `BridgePaused`. Owner AAVE management stays available so funds can be moved
+  out of the pool.
+- Acki Nacki: `eccUSDCBridge.setPaused(true)`, read back with `isPaused()`.
+  `finalizeDeposit` and `initiateWithdrawal` throw 231 until it is lifted.
+- Circle can freeze the USDC contract itself. That is a third control, not
+  wired to either bridge.
+
+Pausing Ethereum does not pause Acki Nacki, and `setPaused` does not pause
+Ethereum. An incident that must stop both directions of the bridge has to
+flip **both** owner switches. There is no single stop switch (QC-AN-J5).
 
 ## Upgrading the bridge
 

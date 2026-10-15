@@ -23,10 +23,12 @@ use tvm_client::{
 
 use crate::{
     address::ExtendedAddress,
+    children::{parse_internal_children, parse_message_dst_transaction},
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -211,14 +213,8 @@ impl IAckiNacki for TvmAckiNacki {
             "{{ blockchain {{ transaction(hash:\"{id}\") {{ aborted now compute {{ exit_code \
              success }} }} }} }}"
         );
-        let res = query(self.context.clone(), ParamsOfQuery {
-            query: gql,
-            variables: None,
-        })
-        .await
-        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        let res = self.gql(gql).await?;
         let tx = res
-            .result
             .get("blockchain")
             .and_then(|b| b.get("transaction"))
             .filter(|t| !t.is_null());
@@ -311,6 +307,52 @@ impl IAckiNacki for TvmAckiNacki {
         .map_err(|e| AckiNackiError::NetworkError(format!("run_tvm {function}: {e}")))?;
         run.decoded.and_then(|d| d.output).ok_or_else(|| {
             AckiNackiError::NetworkError(format!("run_tvm {function}: no decoded output"))
+        })
+    }
+
+    async fn get_internal_children(&self, tx_hash: &TxHash) -> Result<Vec<ChildTransaction>> {
+        let gql = format!(
+            "{{ blockchain {{ transaction(hash:\"{}\") {{ out_messages {{ id dst msg_type_name \
+             dst_transaction {{ id aborted compute {{ exit_code }} }} }} }} }} }}",
+            hex::encode(tx_hash)
+        );
+        let mut children = parse_internal_children(&self.gql(gql).await?);
+        // Nested under `out_messages` the link can come back null (shellnet
+        // does this) while the same message queried on its own carries it.
+        for child in children.iter_mut().filter(|c| c.outcome.is_none()) {
+            let gql = format!(
+                "{{ blockchain {{ message(hash:\"{}\") {{ dst_transaction {{ id aborted compute \
+                 {{ exit_code }} }} }} }} }}",
+                child.message_id
+            );
+            child.outcome = parse_message_dst_transaction(&self.gql(gql).await?);
+        }
+        Ok(children)
+    }
+
+    async fn get_account_info(&self, address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        let gql = format!(
+            "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ info {{ acc_type \
+             code_hash data }} }} }} }}",
+            address.account_id(),
+            address.dapp_id()
+        );
+        Ok(AccountInfo::from_blockchain_api(&self.gql(gql).await?))
+    }
+}
+
+impl TvmAckiNacki {
+    async fn gql(&self, query_text: String) -> Result<Value> {
+        let res = query(self.context.clone(), ParamsOfQuery {
+            query: query_text,
+            variables: None,
+        })
+        .await
+        .map_err(|e| AckiNackiError::NetworkError(e.to_string()))?;
+        // `net::query` returns the whole GraphQL response, `{ "data": … }`.
+        Ok(match res.result {
+            Value::Object(mut obj) if obj.contains_key("data") => obj.remove("data").unwrap(),
+            other => other,
         })
     }
 }

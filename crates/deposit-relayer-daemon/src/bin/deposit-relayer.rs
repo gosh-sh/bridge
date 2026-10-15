@@ -48,7 +48,11 @@ use tvm_client::crypto::KeyPair;
 )]
 struct Args {
     /// Where to persist `state.json` (used by `daemon`).
-    #[arg(long, default_value = "./deposit-relayer-state.json")]
+    #[arg(
+        long,
+        env = "DEPOSIT_RELAYER_STATE",
+        default_value = "./deposit-relayer-state.json"
+    )]
     state: PathBuf,
 
     #[command(subcommand)]
@@ -116,8 +120,8 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        /// Required non-zero for live `daemon` (QC-OFF-09); `"0"` only allowed
-        /// with `--dry-run` / offline `prove-one`.
+        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
+        /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
@@ -154,7 +158,8 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        /// Must be non-zero unless `--dry-run` (QC-OFF-09).
+        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
+        /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
         /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
@@ -185,7 +190,9 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Override a mismatched deployment binding in an existing state file.
+        /// Accept a state file stamped for another deployment (chain, bridge
+        /// or dappId) by starting it over: progress, scan cursor and parked
+        /// ids are discarded and the daemon begins at `--start-deposit-id`.
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in
@@ -289,8 +296,7 @@ async fn main() -> anyhow::Result<()> {
             out_dir,
             expect_chain_id,
         } => {
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ true)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
@@ -361,8 +367,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(addr) = metrics_addr {
                 install_metrics_exporter(addr)?;
             }
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id, /* allow_zero */ dry_run)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
@@ -745,6 +750,10 @@ async fn run_daemon(
         })
         .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
         let submit_cfg = an_cfg.to_submit_config();
+        let voucher_abi = TvmAckiNacki::load_abi(&an_cfg.bridge_abi_path)
+            .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
+        let submitter =
+            AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg).with_voucher_check(voucher_abi)?;
         run_daemon_loop(
             state_path,
             start_deposit_id,
@@ -755,7 +764,7 @@ async fn run_daemon(
             scan_cursor,
             source,
             prover,
-            Arc::new(AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg)),
+            Arc::new(submitter),
         )
         .await
     }

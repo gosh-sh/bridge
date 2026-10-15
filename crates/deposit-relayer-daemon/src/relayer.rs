@@ -3,9 +3,10 @@
 //! [`Relayer::tick`] is the testable single-step entry point. For the next
 //! target `deposit_id` it:
 //!
-//! 1. cheaply checks the AN nullifier ([`AnSubmitter::is_finalized`]) so a
-//!    replay skips the expensive proving step;
-//! 2. asks the [`DepositSource`] for the confirmed `Deposit` event;
+//! 1. asks the [`DepositSource`] for the confirmed `Deposit` event;
+//! 2. cheaply checks whether AN already finalized it
+//!    ([`AnSubmitter::is_finalized`]) so a replay skips the expensive proving
+//!    step;
 //! 3. generates the AN-consumable proof triple via the [`ProofGenerator`];
 //! 4. submits it to AN via the [`AnSubmitter`] (`finalizeDeposit`);
 //! 5. on success — advances [`RelayerState`] and persists it; otherwise records
@@ -139,7 +140,22 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     ) -> Result<Self, RelayerError> {
         let mut state = RelayerState::load(&config.state_path)?.unwrap_or_default();
         if let Some(deployment) = &config.deployment {
-            state.ensure_deployment(deployment, config.force_state)?;
+            if let Some(dropped) = state.ensure_deployment(deployment, config.force_state)? {
+                warn!(
+                    old_deployment = ?dropped.deployment,
+                    old_last_processed_deposit_id = ?dropped.last_processed_deposit_id,
+                    old_scan_done_through_block = ?dropped.scan_done_through_block,
+                    old_parked_deposit_ids = ?dropped.parked_deposit_ids,
+                    old_unprovable_deposit_ids = ?dropped.unprovable_deposit_ids,
+                    start_deposit_id = config.start_deposit_id,
+                    "--force-state: state.json belonged to another deployment; starting over",
+                );
+                if let Some(cursor) = &config.scan_cursor {
+                    *cursor
+                        .lock()
+                        .map_err(|e| RelayerError::other(e.to_string()))? = None;
+                }
+            }
         }
         Ok(Self {
             config,
@@ -161,23 +177,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let target = self.state.next_target(self.config.start_deposit_id);
         self.publish_state_gauges(target);
 
-        // 1. Cheap nullifier pre-check — skip proving on replays.
-        let timer = StageTimer::start("is_finalized");
-        let finalized = self.submitter.is_finalized(target).await;
-        timer.finish();
-        if finalized? {
-            debug!(
-                deposit_id = target,
-                "already finalized on AN; advancing cursor"
-            );
-            self.state.record_progress(target);
-            self.persist_state()?;
-            return Ok(TickOutcome::AlreadyFinalized {
-                deposit_id: target,
-            });
-        }
-
-        // 2. Fetch the confirmed deposit event.
+        // 1. Fetch the confirmed deposit event.
         debug!(deposit_id = target, "fetching deposit event");
         let timer = StageTimer::start("fetch_event");
         let fetched = self.source.fetch(target).await;
@@ -199,6 +199,24 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             return Err(RelayerError::DepositIdMismatch {
                 requested: target,
                 got: event.deposit_id,
+            });
+        }
+
+        // 2. Cheap pre-check — skip proving on replays. Needs the event: the deposit's
+        //    AN identity includes its source contract and chain.
+        let timer = StageTimer::start("is_finalized");
+        let finalized = self.submitter.is_finalized(&event).await;
+        timer.finish();
+        if finalized? {
+            self.mark_finalized_block(event.block_number);
+            self.state.record_progress(target);
+            self.persist_state()?;
+            info!(
+                deposit_id = target,
+                "already finalized on AN; advancing without proving"
+            );
+            return Ok(TickOutcome::AlreadyFinalized {
+                deposit_id: target,
             });
         }
 
@@ -298,9 +316,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             SubmitOutcome::Pending {
                 reason,
             } => {
-                self.state.record_attempt(target);
+                self.state.record_pending(target);
                 self.persist_state()?;
-                debug!(
+                info!(
                     deposit_id = target,
                     reason = %reason,
                     "finalizeDeposit still pending; will retry",
@@ -417,7 +435,7 @@ mod tests {
         prover::MockProofGenerator,
         source::{EthLogSource, InMemoryDepositSource},
         submitter::MockAnSubmitter,
-        types::DepositEvent,
+        types::{DepositEvent, DepositProofBundle},
     };
 
     fn deposit(id: u64) -> DepositEvent {
@@ -455,6 +473,49 @@ mod tests {
             scan_cursor: None,
         };
         Relayer::new(cfg, source, prover, submitter).unwrap()
+    }
+
+    #[tokio::test]
+    async fn force_state_onto_another_bridge_starts_from_its_first_deposit() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let old_bridge = DeploymentIdentity::new(1, Address::repeat_byte(0x01), "0x0");
+        let mut old = RelayerState {
+            deployment: Some(old_bridge),
+            scan_done_through_block: Some(900),
+            ..RelayerState::default()
+        };
+        old.record_progress(100);
+        old.save(&state_path).unwrap();
+
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let cursor = Arc::new(Mutex::new(old.scan_done_through_block));
+        let cfg = RelayerConfig {
+            deployment: Some(DeploymentIdentity::new(
+                1,
+                Address::repeat_byte(0x02),
+                "0x0",
+            )),
+            force_state: true,
+            scan_cursor: Some(cursor.clone()),
+            ..RelayerConfig::new(&state_path)
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        assert_eq!(*cursor.lock().unwrap(), None);
+
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Finalized {
+                deposit_id, ..
+            } => assert_eq!(deposit_id, 0),
+            other => panic!("expected Finalized(0), got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -587,7 +648,14 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(*cursor.lock().unwrap(), None);
+        assert_eq!(*cursor.lock().unwrap(), Some(104));
+        assert_eq!(
+            RelayerState::load(&state_path)
+                .unwrap()
+                .unwrap()
+                .scan_done_through_block,
+            Some(104)
+        );
 
         for (id, cursor_after) in [(0, 104), (1, 104), (2, 106)] {
             match relayer.tick().await.unwrap() {
@@ -647,8 +715,7 @@ mod tests {
     async fn skips_already_finalized_without_proving() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
-        // Note: deposit 0 is NOT staged in the source — the nullifier
-        // pre-check must let us advance past it without a source hit.
+        source.insert(deposit(0));
         source.insert(deposit(1));
         let prover = Arc::new(MockProofGenerator::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());
@@ -780,6 +847,76 @@ mod tests {
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap()
+    }
+
+    /// Answers each submit with the next outcome from its script.
+    struct ScriptedSubmitter(Mutex<Vec<SubmitOutcome>>);
+
+    #[async_trait::async_trait]
+    impl AnSubmitter for ScriptedSubmitter {
+        async fn is_finalized(&self, _: &DepositEvent) -> Result<bool, RelayerError> {
+            Ok(false)
+        }
+
+        async fn submit(
+            &self,
+            _: &DepositEvent,
+            _: &DepositProofBundle,
+        ) -> Result<SubmitOutcome, RelayerError> {
+            Ok(self.0.lock().unwrap().remove(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_submit_does_not_count_toward_parking() {
+        // A long pause of the lane (exit 231) or slow confirmations must not
+        // leave a healthy deposit one failure away from being parked.
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let pending = || SubmitOutcome::Pending {
+            reason: "paused".into(),
+        };
+        let rejected = || SubmitOutcome::Rejected {
+            reason: "anchor".into(),
+        };
+        let script = vec![pending(), pending(), pending(), rejected(), rejected()];
+        let cfg = RelayerConfig {
+            skip_after_attempts: Some(2),
+            ..RelayerConfig::new(dir.path().join("state.json"))
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(ScriptedSubmitter(Mutex::new(script))),
+        )
+        .unwrap();
+
+        for _ in 0..3 {
+            assert!(matches!(
+                relayer.tick().await.unwrap(),
+                TickOutcome::AnPending {
+                    deposit_id: 0,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(relayer.state().attempts_since_progress, 0);
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::Skipped {
+                deposit_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

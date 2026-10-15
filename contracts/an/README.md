@@ -6,8 +6,7 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
-  `confirmDeposit`) once the deposit's block is in its anchor set, and burns
-<<<<<<< HEAD
+  `  confirmDeposit`) once the deposit's block is in its anchor set, and burns
   USDC on `initiateWithdrawal`. A burn that would take bridged burned
   above bridged minted for that token throws `ERR_BURN_EXCEEDS_BRIDGED`
   (233). ECC is fungible: owner-minted and TIP-3-minted ECC can still

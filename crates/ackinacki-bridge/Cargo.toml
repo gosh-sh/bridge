@@ -118,8 +118,11 @@ tempfile = "3"
 # Test-only: reads a rendered QR code back.
 rqrr = "0.10"
 # Test-only: building a real deployed-multisig account BOC offline, so a
-# fake node has something `tvm_block::Account` will actually parse.
+# fake node has something `tvm_block::Account` will actually parse, and
+# poking `_totalMintedBridgeByToken` through the ABI so getTotalBridged
+# answers a seeded inventory.
 tvm_types = { workspace = true }
+tvm_abi = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an" }
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [features]

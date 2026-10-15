@@ -438,7 +438,9 @@ MODE=shellnet python3 python/test_deploy_and_withdraw_only.py
 The script deploys a fresh Multisig (two-shot GiverV3.sendCurrencyWithFlag
 17→1 on shellnet), mints USDC via `USDCBridge.mintAndSend`, calls
 `initiate_withdrawal`, and polls GQL for the `WithdrawalInitiated`
-ExtOut. It prints the captured `seq_no` + `block_hash` + `msg_id`.
+ExtOut. `mintAndSend` does not add bridged inventory: a fresh bridge
+with `getTotalBridged` minted=0 refuses the burn with 233. It prints
+the captured `seq_no` + `block_hash` + `msg_id`.
 
 The Step 4 shell picks the event up within one poll interval and moves
 on to enrichment / prove.

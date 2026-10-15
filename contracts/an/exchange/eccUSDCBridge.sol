@@ -38,8 +38,10 @@ interface IShellAccumulator {
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
 ///            `_totalBurnedBridgeByToken`. `initiateWithdrawal` refuses a
 ///            burn that would take burned above minted for that token
-///            (`ERR_BURN_EXCEEDS_BRIDGED`). Owner-mint and TIP-3 mint do
-///            not increment the bridged counters.
+///            (`ERR_BURN_EXCEEDS_BRIDGED`), except while the totals are
+///            already inverted (burned > minted), when the cap is skipped
+///            so those withdrawals are not frozen. Owner-mint and TIP-3
+///            mint do not increment the bridged counters.
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
@@ -87,7 +89,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     // Cross-chain bridge accounting per tokenId (independent of stripe
     // `_totalMinted`). `initiateWithdrawal` keeps burned <= minted for that
-    // token. ECC[3] is fungible, so this is an inventory cap, not a
+    // token unless the pair is already inverted, in which case it lets the
+    // burn through. ECC[3] is fungible, so this is an inventory cap, not a
     // provenance fence: owner/TIP-3 ECC can still consume deposit headroom.
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
@@ -524,8 +527,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         uint128 minted = _totalMintedBridgeByToken[tokenId];
         uint128 burned = _totalBurnedBridgeByToken[tokenId];
-        require(burned <= minted, ERR_BURN_EXCEEDS_BRIDGED);
-        require(amount <= minted - burned, ERR_BURN_EXCEEDS_BRIDGED);
+        // Skip the cap while a live bridge is already inverted (burned > minted
+        // from owner/TIP-3 ECC withdrawn before this check existed). Freezing
+        // those withdrawals, or raising minted to burned on upgrade, would
+        // either halt the bridge or mint unbacked inventory. Further burns
+        // cannot increase a non-inverted excess.
+        if (burned <= minted) {
+            require(amount <= minted - burned, ERR_BURN_EXCEEDS_BRIDGED);
+        }
 
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;
@@ -973,19 +982,6 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _mintNonce = mintNonce;
         _mintAccumulatorNonce = mintAccumulatorNonce;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
-        // A live bridge may already have burned > minted (owner/TIP-3 ECC
-        // withdrawn before this cap existed). Raise minted to burned so the
-        // new require does not freeze every withdrawal; further burns still
-        // cannot increase the excess.
-        uint32[] tokenIds = totalBurnedBridgeByToken.keys();
-        for (uint i = 0; i < tokenIds.length; i++) {
-            uint32 tokenId = tokenIds[i];
-            uint128 burned = totalBurnedBridgeByToken[tokenId];
-            uint128 minted = totalMintedBridgeByToken[tokenId];
-            if (burned > minted) {
-                totalMintedBridgeByToken[tokenId] = burned;
-            }
-        }
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
@@ -1014,7 +1010,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Returns total ECC minted/burned via the cross-chain bridge path
-    ///         for a specific tokenId.
+    ///         for a specific tokenId. `initiateWithdrawal` uses these as an
+    ///         inventory cap, skipped while `burned > minted`.
     function getTotalBridged(uint32 tokenId) external view returns (uint128 minted, uint128 burned) {
         return (_totalMintedBridgeByToken[tokenId], _totalBurnedBridgeByToken[tokenId]);
     }

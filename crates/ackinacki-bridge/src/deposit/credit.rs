@@ -444,8 +444,9 @@ pub async fn confirm(
                         "the deposit voucher exists, but the bridge transaction {bridge_tx} that \
                          should have minted the credit aborted. The voucher is spent and the \
                          deposit cannot be finalized again; only the bridge operator can pay it \
-                         out (mintAndSend). Give them operation {op_id} and transaction \
-                         {bridge_tx}"
+                         out (mintAndSend, TVM exit 37). That ECC does not add bridged inventory, \
+                         so it cannot be withdrawn over the bridge until a later deposit covers \
+                         it. Give them operation {op_id} and transaction {bridge_tx}"
                     ),
                 ));
             },

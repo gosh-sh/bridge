@@ -8,6 +8,11 @@ WithdrawalInitiated event path works on the target cluster BEFORE running
 the heavy Circuit 4 pipeline. If this test fails, the full orchestrator
 cannot succeed either — this is the cheap fast-fail signal.
 
+`mintAndSend` does not add bridged inventory. The driver reads
+`getTotalBridged(3)` before the burn and sends with bounce, so a 233
+refusal returns the ECC. A fresh bridge with minted=0 refuses until a
+deposit has been finalized for at least `WITHDRAWAL_AMOUNT`.
+
 Modes (env `MODE`, default `local`):
   local     - local devnet cluster, keys auto-materialized from
               `$ACKI_NACKI_ROOT/config/`

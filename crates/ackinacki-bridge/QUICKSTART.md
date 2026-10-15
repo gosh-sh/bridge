@@ -328,7 +328,9 @@ exit 30", has the details.
 
 **35 and 37: go to the operator.** The message says what to give them: the
 transaction hash, the `depositId`, the amount, the bridge address and the
-operation id.
+operation id. After exit 37 the operator pays it out with `mintAndSend`;
+that ECC cannot leave over the bridge until deposits cover
+`getTotalBridged`.
 
 ## 13. Which wallets work
 

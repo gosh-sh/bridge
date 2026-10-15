@@ -83,8 +83,17 @@ assigns it when the release is tagged.
   Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and
   cannot be withdrawn across the bridge against Ethereum treasury they
   never entered. Existing ECC from those paths stays on Acki Nacki.
-  The withdraw CLI preflight checks `getTotalBridged` and refuses before
-  the burn. Redeploy or `updateCode` the AN bridge after this version.
+
+  A fresh zerostate starts both counters at 0, so the cap holds from the
+  first burn. `updateCode` copies the maps as they are. On a live bridge
+  that is already inverted (`getTotalBridged` burned above minted — the
+  current shellnet USDCBridge answers minted 0, burned 1 000 000), every
+  burn is refused until `finalizeDeposit` brings minted up to burned.
+  That is not the same as a fresh deploy.
+
+  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
+  The ABI is unchanged. The withdraw CLI preflight checks
+  `getTotalBridged` and refuses before the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer

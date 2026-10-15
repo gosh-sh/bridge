@@ -135,9 +135,9 @@ impl BalanceCheck {
 /// 6. USDCBridge live dapp_id resolved via GraphQL (canonical account default
 ///    overridden by `--usdc-bridge-account`).
 /// 6b. While the burn is still to be sent: USDCBridge `isPaused()` is false,
-///     and `getTotalBridged(3)` has headroom for the amount. The inventory
-///     check is skipped while burned > minted (the contract skips the cap
-///     then too). Both are skipped once the burn is on the wire.
+///     and `getTotalBridged(3)` has headroom for the amount (`burned` is
+///     not above `minted`, and `amount` fits in `minted - burned`). Both
+///     are skipped once the burn is on the wire.
 /// 7. Multisig ECC[3] balance ≥ amount (preflight, not guarantee — the chain
 ///    has the final word between check and send). Skipped, and only skipped,
 ///    when `balance_check` says the burn is already on the wire: see
@@ -288,9 +288,10 @@ pub async fn run(
         }
         let (minted, burned) =
             call_get_total_bridged(&context, &usdc_bridge_legacy, &bridge_boc).await?;
-        // Match initiateWithdrawal: skip the cap while burned > minted so an
-        // inverted live bridge is not frozen from the CLI either.
-        if burned <= minted && amount.0 > minted - burned {
+        // Match initiateWithdrawal: burned already above minted, or this
+        // amount would take it there, is exit 233. The first arm avoids
+        // subtracting when burned > minted.
+        if burned > minted || amount.0 > minted - burned {
             return Err(CliError::Preflight {
                 reason: format!(
                     "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
@@ -635,6 +636,8 @@ async fn call_get_total_bridged(
     Ok((minted, burned))
 }
 
+/// Parse a JSON number or decimal string as `u128` (`getTotalBridged` answers
+/// both).
 fn json_u128(v: &Value) -> Option<u128> {
     v.as_u64()
         .map(u128::from)
@@ -2755,8 +2758,69 @@ pub(crate) mod tests {
     /// the Active and code-hash checks, `getCustodians` on the account's
     /// own code, the owner match against `--from-keys`, the USDCBridge
     /// lookup and the ECC[3] sufficiency check — with nothing stubbed
-    /// but the wire. A freshly deployed test bridge has no bridged
-    /// inventory, so the burn is refused with 233 before it is sent.
+    /// but the wire.
+    #[tokio::test]
+    async fn preflight_passes_its_an_side_against_a_fake_node() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge_with(false, 5_000_000, 0).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+
+        let report = run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect("the AN side of preflight passes against a real account and a fake wire");
+
+        assert_eq!(
+            report.multisig_ecc3_balance, 5_000_000,
+            "the balance comes off the account BOC, not off anything the node said in JSON",
+        );
+        assert_eq!(
+            report.usdc_bridge_extended,
+            format!("{usdc_bridge_account_id}::{usdc_bridge_account_id}"),
+        );
+
+        // And it got there by asking, rather than by some default
+        // answering for it. The two REST shapes are the ones this crate
+        // would silently stop needing if `get_account` changed form.
+        let seen = node.seen.lock().await.join("\n");
+        assert!(
+            seen.contains("/v2/account"),
+            "the account was fetched: {seen}"
+        );
+        assert!(
+            seen.contains("POST /graphql"),
+            "the USDCBridge was queried: {seen}"
+        );
+        assert!(
+            seen.contains(&usdc_bridge_account_id),
+            "the USDCBridge account was fetched for isPaused: {seen}"
+        );
+    }
+
     #[tokio::test]
     async fn preflight_refuses_when_bridged_inventory_is_short() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
@@ -2795,30 +2859,13 @@ pub(crate) mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("233"), "{msg}");
         assert!(msg.contains("getTotalBridged"), "{msg}");
-
-        // And it got there by asking, rather than by some default
-        // answering for it. The two REST shapes are the ones this crate
-        // would silently stop needing if `get_account` changed form.
-        let seen = node.seen.lock().await.join("\n");
-        assert!(
-            seen.contains("/v2/account"),
-            "the account was fetched: {seen}"
-        );
-        assert!(
-            seen.contains("POST /graphql"),
-            "the USDCBridge was queried: {seen}"
-        );
-        assert!(
-            seen.contains(&usdc_bridge_account_id),
-            "the USDCBridge account was fetched for isPaused: {seen}"
-        );
     }
 
     #[tokio::test]
-    async fn preflight_allows_when_bridged_inventory_is_inverted() {
+    async fn preflight_passes_when_amount_equals_bridged_headroom() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
         let (usdc_bridge_account_id, usdc_bridge_boc) =
-            crate::test_chain::deployed_usdc_bridge_with(false, 0, 5_000_000).await;
+            crate::test_chain::deployed_usdc_bridge_with(false, 1_000_000, 0).await;
         let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
             account_id: account_id.clone(),
             account_boc,
@@ -2847,7 +2894,86 @@ pub(crate) mod tests {
             BalanceCheck::Require,
         )
         .await
-        .expect("an inverted bridge (burned > minted) must not freeze the burn");
+        .expect("amount == minted - burned is the last burn the cap still allows");
+    }
+
+    #[tokio::test]
+    async fn preflight_refuses_when_amount_exceeds_bridged_headroom_by_one() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge_with(false, 1_000_000, 0).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000001").unwrap();
+
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("amount == minted - burned + 1 is refused");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("233"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn preflight_refuses_when_bridged_inventory_is_inverted() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge_with(false, 0, 5_000_000).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("burned already above minted is refused, not skipped");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("233"), "{msg}");
+        assert!(msg.contains("getTotalBridged"), "{msg}");
     }
 
     #[tokio::test]

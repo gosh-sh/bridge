@@ -4,7 +4,8 @@ End-to-end driver for the Acki Nacki → Ethereum bridge Circuit 4
 shellnet — select with `MODE` env var (`local` (default) | `shellnet`).
 
 Pipeline (single event):
-  deploy + fund multisig → fire `initiateWithdrawal` → capture event
+  deploy + fund multisig → check `getTotalBridged` headroom → fire
+  `initiateWithdrawal` (bounce) → capture event
   via GQL → wait for verifier daemon to reach the W-aligned key block
   → run the three Rust bins (private-witness-export, witness-builder,
   halo2-prover) → assert daemon verdict (`verified && anchor_matched`).

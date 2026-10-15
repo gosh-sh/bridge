@@ -272,6 +272,8 @@ fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
     )
 }
 
+/// A `mapping(uint32 => uint128)` with ECC[3] set to `value`, or empty when
+/// `value` is 0.
 fn u32_u128_map(value: u128) -> tvm_abi::TokenValue {
     let mut map = std::collections::BTreeMap::new();
     if value > 0 {
@@ -1020,6 +1022,24 @@ mod tests {
             &fixture,
             "POST /graphql HTTP/1.1",
             &json!({ "query": "query{blockchain{transaction(hash:\"x\"){boc}}}" }).to_string(),
+        );
+    }
+
+    #[tokio::test]
+    async fn compiled_bridge_tvc_code_hash_matches_the_changelog() {
+        let (_id, boc) = deployed_usdc_bridge(false).await;
+        let account = Account::construct_from_base64(&boc).expect("the fixture BOC parses");
+        let hash = account
+            .get_code_hash()
+            .expect("an Active bridge has a code hash")
+            .as_hex_string();
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.10.0. Any other compiler
+        // or a stale artefact moves this, and the 233 cap would ship as a
+        // different binary than CHANGELOG names.
+        assert_eq!(
+            &hash[..8],
+            "4b2a9600",
+            "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }
 

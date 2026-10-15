@@ -412,10 +412,10 @@ lines on stdout. Everything else (tvm-cli output, tracer logs) goes
 to stderr, so the `eval` line does not pollute the shell.
 
 `mintAndSend` does not add bridged inventory. `initiateWithdrawal` refuses
-a burn that would take `getTotalBridged` burned above minted (exit 233),
-except while burned is already above minted, when the cap is skipped.
-This step still funds the multisig; the amount you withdraw has to be
-covered by prior `finalizeDeposit` mints, or preflight and the burn both
+a burn that would take `getTotalBridged` burned above minted (exit 233).
+This step still funds the multisig; withdraw only after a deposit has
+been finalized on this bridge for at least the amount (read
+`getTotalBridged(3)` minted − burned), or preflight and the burn both
 refuse.
 
 The script shells out to `tvm-cli`, which is platform-specific and is
@@ -1547,7 +1547,9 @@ record.
   relayer can finalize it to the recipient in its call data; otherwise only
   the operator can return the USDC.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
-  The operator pays it out (`mintAndSend`).
+  The operator pays it out (`mintAndSend`). That ECC does not add bridged
+  inventory, so it cannot be withdrawn over the bridge until a later
+  `finalizeDeposit` covers it.
 
 Give the operator the deposit's transaction hash, its `depositId`, the amount
 and recipient actually deposited, the EVM bridge address and the operation id;

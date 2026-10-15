@@ -420,7 +420,7 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
 7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
    flag, after the first accepted update the daemon checks `getLightClient(l1ChainId)`
-   against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchors` and `disableOwnerRotation`; from
+   against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and `disableOwnerRotation`; from
    then on the bridge refuses `setAcceptedBlockHash` only for the light client's L1.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light

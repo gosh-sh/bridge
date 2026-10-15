@@ -46,6 +46,28 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The relayer's owner flip and the deposit CLI read the light client per
+  chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
+  flip-owner` / `daemon --flip-owner` takes the chain id from the light
+  client's own `getConfig`, checks the bridge's `getLightClient(l1ChainId)`
+  against `AN_LIGHT_CLIENT`, reads `isOwnerAnchorsEnabled(chainId)` for the
+  already-flipped signal and calls `disableOwnerAnchorsOn(chainId)` — it no
+  longer calls `getAnchorConfig` or the no-argument `disableOwnerAnchors`.
+  Against a 1.8.0 bridge `getLightClient(uint256)` has a different function
+  id than that release's `getLightClient()`, so upgrade the bridge to 1.9.0
+  **before** the relayer: an older bridge answers the new call with "function
+  ID is wrong". Both slim relayer ABIs under
+  `crates/eth-light-client-relayer/abi/` changed with it (`getConfig` on the
+  client; `getLightClient`, `isOwnerAnchorsEnabled` and
+  `disableOwnerAnchorsOn` on the bridge).
+
+  `ackinacki-bridge deposit` reads `getLightClient(chainId)` for the
+  deposit's own chain on a 1.9.0 bridge and keeps `getAnchorConfig` below
+  that, so a deposit on a chain whose client was not the last one deployed is
+  no longer refused. A bridge that reports 1.9.0 without the per-chain getter
+  is answered once and falls back with a warning instead of being retried for
+  ever. 1.9.0 is now the newest version the CLI was checked against.
+
 - **One light-client code, one client per source chain, addressed by code
   salt.** `setLightClientCode` now only stores the code. The address is
   derived when `deployLightClient` runs, from that code salted with
@@ -157,20 +179,19 @@ assigns it when the release is tagged.
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
   `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
   fields.
-- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
-  id `deployLightClient` stored can be flipped.** The previous bool
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain.** The previous bool
   `_ownerAnchorsEnabled` turned the owner writer off for every source
   chain at once, so a flip left the six L2s on the deposit allowlist
-  with no writer. The call (and `disableOwnerAnchorsOn(uint256 chainId)`)
-  now sets `_ownerAnchorsDisabled` only for `_lightClientL1ChainId`;
-  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The bridge
-  does not read the light client's own `getConfig().l1ChainId`.
-  `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
-  `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
-  `getLightClientL1ChainId()` is the stored L1 id (0 until
-  `deployLightClient`). The new storage field is `_lightClientL1ChainId`.
-  L2 deposits keep `setAcceptedBlockHash`. The no-argument ABI the
-  relayer already calls is unchanged. The bridge reports 1.8.0. Rebuild
+  with no writer. `disableOwnerAnchorsOn(uint256 chainId)` now sets
+  `_ownerAnchorsDisabled` for any chain that has a light client deployed
+  for it; a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226) and
+  chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The no-argument
+  `disableOwnerAnchors` serves the chain whose client was deployed last,
+  which is also all `getAnchorConfig()` reports;
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view and
+  `getLightClientL1ChainId()` that last chain id (0 before the first
+  deploy). L2 deposits keep `setAcceptedBlockHash`. The relayer calls the
+  explicit per-chain form (see the light-client bring-up entry above). The bridge reports 1.8.0. Rebuild
   `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade the premined 1.7.0
   bridge; `onCodeUpgrade` resets storage and does not migrate
   `_lightClient` or the L1 id, so both `disableOwnerAnchors` and

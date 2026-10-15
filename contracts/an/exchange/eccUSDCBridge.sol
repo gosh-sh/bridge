@@ -650,17 +650,18 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return _lightClients[l1ChainId];
     }
 
-    /// @notice Permanently gives up the owner's ability to admit anchors
-    ///         on the light client's L1, leaving the light client as the
-    ///         only writer for that chain. Other chain ids (the L2s on the
-    ///         deposit allowlist) keep `setAcceptedBlockHash`. This is the
-    ///         call that turns the L1 trust assumption from "the owner key"
-    ///         into "a proof of Ethereum finality".
+    /// @notice Permanently gives up the owner's ability to admit anchors on
+    ///         the chain whose light client was deployed last, leaving that
+    ///         client as the only writer there. Every other chain id (the L2s
+    ///         on the deposit allowlist, and any L1 whose client was deployed
+    ///         earlier) keeps `setAcceptedBlockHash`; name those with
+    ///         `disableOwnerAnchorsOn`. This is the call that turns the L1
+    ///         trust assumption from "the owner key" into "a proof of
+    ///         Ethereum finality".
     /// @dev One-way, with no re-enable. Requires a light client deployed for
-    ///      that chain by `deployLightClient`. It does not check that the light-client
-    ///      account is Active; flipping after `setLightClientCode` and
-    ///      before a successful deploy leaves that L1 with no writer until
-    ///      `deployLightClient` runs again. Idempotent.
+    ///      that chain by `deployLightClient`, so it cannot run before one
+    ///      exists. It does not check that the account is Active.
+    ///      Idempotent.
     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
         _disableOwnerAnchors(_lightClientL1ChainId);
     }

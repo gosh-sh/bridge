@@ -1200,7 +1200,28 @@ mod flip_owner_tests {
             }
         }
 
+        /// The trimmed ABIs the daemon ships: a call this mock accepts but
+        /// `AN_LC_ABI_PATH` / the bundled bridge ABI cannot encode would fail
+        /// only against a live chain, which is how a missing `getConfig`
+        /// reached review.
+        fn in_abi(account: &str, function: &str) -> bool {
+            const LC: &str = include_str!("../abi/EthBeaconLightClient.abi.json");
+            const BRIDGE: &str = include_str!("../abi/USDCBridge.abi.json");
+            // Everything that is not the bridge is a light client: tests
+            // use other accounts for it, including the zero one.
+            let abi = if account == bridge() { BRIDGE } else { LC };
+            serde_json::from_str::<Value>(abi).unwrap()["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["name"] == function)
+        }
+
         fn record(&self, account: &str, function: &str) -> usize {
+            assert!(
+                Self::in_abi(account, function),
+                "{function} is missing from the trimmed ABI of {account}"
+            );
             let entry = if account == self.serves {
                 function.to_string()
             } else {

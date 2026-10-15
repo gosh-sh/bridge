@@ -39,8 +39,10 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    `submitUpdate` it calls, in order:
 
 ```text
-USDCBridge.getAnchorConfig()                     # lightClient must match AN_LIGHT_CLIENT
-USDCBridge.disableOwnerAnchors()                 # skipped when ownerAnchorsEnabled is already false
+EthBeaconLightClient.getConfig()                 # l1ChainId of this client
+USDCBridge.getLightClient(l1ChainId)             # must match AN_LIGHT_CLIENT
+USDCBridge.isOwnerAnchorsEnabled(l1ChainId)      # skipped call when already false
+USDCBridge.disableOwnerAnchorsOn(l1ChainId)
 EthBeaconLightClient.disableOwnerRotation()
 ```
 

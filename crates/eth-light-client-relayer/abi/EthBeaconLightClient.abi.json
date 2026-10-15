@@ -110,6 +110,16 @@
 			]
 		},
 		{
+			"name": "getConfig",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"usdcBridge","type":"address"},
+				{"name":"ownerPubkey","type":"uint256"}
+			]
+		},
+		{
 			"name": "getCommitteeState",
 			"inputs": [],
 			"outputs": [

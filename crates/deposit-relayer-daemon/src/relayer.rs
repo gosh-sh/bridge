@@ -138,6 +138,10 @@ pub struct Relayer<S: DepositSource, P: ProofGenerator, A: AnSubmitter> {
     prover: Arc<P>,
     submitter: Arc<A>,
     state: RelayerState,
+    /// Last outstanding id this process retried. Idle ticks walk past it so
+    /// two failing deposits share the retry slot instead of the lowest id
+    /// taking every tick.
+    last_outstanding_retry: Option<u64>,
 }
 
 impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
@@ -174,6 +178,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             prover,
             submitter,
             state,
+            last_outstanding_retry: None,
         })
     }
 
@@ -193,8 +198,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let forward = self.state.next_target_at(self.config.start_deposit_id, now);
         let outcome = self.tick_target(forward).await?;
         if matches!(outcome, TickOutcome::NotYetAvailable { .. }) {
-            if let Some(id) = self.state.ready_outstanding(now) {
+            if let Some(id) = self
+                .state
+                .ready_outstanding_after(now, self.last_outstanding_retry)
+            {
                 if id != forward {
+                    self.last_outstanding_retry = Some(id);
                     return self.tick_target(id).await;
                 }
             }
@@ -1074,6 +1083,55 @@ mod tests {
             vec![0]
         );
         assert_eq!(relayer.state().last_processed_deposit_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn idle_retries_share_the_slot_across_outstanding_ids() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        source.insert(deposit(1));
+        let cfg = RelayerConfig {
+            outstanding_backoff_secs: 0,
+            poll_interval: Duration::from_millis(0),
+            ..RelayerConfig::new(dir.path().join("state.json"))
+        };
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::with_verifier(Arc::new(|_| false))),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 1,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

@@ -29,10 +29,13 @@ assigns it when the release is tagged.
   `outstanding_deposits` set: later ids are tried first, and a failed id
   retries with backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`,
   default 2 s, doubled each time up to 64×) when there is nothing new to
-  fetch. A retry loads the stored Deposit tx (or its block) so the log-scan
-  cursor can keep moving with later deposits. Parked ids stay parked;
-  `--skip-after-attempts` and `finalize-one` are unchanged. Gauge
-  `deposit_relayer_outstanding_deposits`.
+  fetch. Idle retries walk the outstanding set round-robin so one stuck low
+  id does not take every tick. A retry loads the stored Deposit tx (or its
+  block) so the log-scan cursor can keep moving with later deposits. Parked
+  ids stay parked. A `main` `state.json` that only has `attempts_since_progress`
+  for the last failed id carries that count into the new outstanding entry,
+  so `--skip-after-attempts` does not start over; `finalize-one` is unchanged.
+  Gauge `deposit_relayer_outstanding_deposits`.
 
 ### Documentation
 
@@ -1442,9 +1445,9 @@ assigns it when the release is tagged.
   `disableOwnerRotation`; one-shot: `eth-lc-relayer flip-owner`. Do not flip
   yet: afterwards deposits from the allowlisted L2s and from the 31
   non-checkpoint blocks of an epoch fail `finalizeDeposit` with
-  `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer` stops at the first of them
-  unless `--skip-after-attempts` is set
-  (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
+  `ERR_UNKNOWN_BLOCK` (224). `deposit-relayer` walks past a failed id and
+  retries it with backoff; `--skip-after-attempts` still parks one that
+  keeps failing (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
   changes nothing. Relayer keys must be the owner pubkey of both contracts. The
   slim ABIs in `crates/eth-light-client-relayer/abi/` follow the compiled
   contracts: `USDCBridge.abi.json` has `getAnchorConfig` and no
@@ -2169,9 +2172,10 @@ assigns it when the release is tagged.
   - while the next `depositId` is not made yet, the poll makes no
     `eth_getLogs` call and moves the cursor up to the confirmed head;
   - once it is made, the scan starts after the cursor and stops at the block
-    that holds the deposit. The cursor moves only after AN accepts the
-    deposit, and only to the block before it, so a retry finds the deposit
-    again and a later deposit in the same block is still found;
+    that holds the deposit. The cursor moves after AN accepts the deposit,
+    to the block before it, so a later deposit in the same block is still
+    found. A failed deposit is retried from its stored tx, not from this
+    cursor;
   - if `depositCounter()` says the deposit is made but no scanned block holds
     its log, the poll fails with an error naming the blocks it scanned: the
     RPC returned incomplete logs, or `--from-block` is above the deposit.

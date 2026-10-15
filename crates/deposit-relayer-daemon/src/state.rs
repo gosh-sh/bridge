@@ -101,6 +101,11 @@ pub struct RelayerState {
     /// Highest `depositId` known finalized, parked, or unprovable on AN.
     /// `None` before the first such outcome of this relayer's lifetime.
     pub last_processed_deposit_id: Option<u64>,
+    /// Highest `depositId` this relayer has finalized (or found finalized)
+    /// on AN. Parked and unprovable ids do not move it. Used to seed the
+    /// `last_finalized` gauge across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_finalized_deposit_id: Option<u64>,
     /// Most recent `depositId` attempted (may be ahead of
     /// `last_processed_deposit_id` if the latest attempt failed).
     pub last_attempt_deposit_id: Option<u64>,
@@ -153,6 +158,17 @@ impl RelayerState {
         let mut state: Self = serde_json::from_value(raw)?;
         if written_by_older_daemon {
             state.attempts_since_progress = 0;
+        }
+        // A `main` file has attempts on the last failed id but no outstanding
+        // set. Carry that count into the new per-id slot so --skip-after-attempts
+        // does not start over.
+        if state.outstanding_deposits.is_empty() && state.attempts_since_progress > 0 {
+            if let Some(id) = state.last_attempt_deposit_id {
+                if !state.is_skipped(id) {
+                    let attempts = state.attempts_since_progress;
+                    state.upsert_outstanding(id, attempts, 0, None);
+                }
+            }
         }
         Ok(state)
     }
@@ -245,6 +261,10 @@ impl RelayerState {
     /// from the outstanding set. The high-water mark only moves forward.
     pub fn record_progress(&mut self, deposit_id: u64) {
         self.raise_last_processed(deposit_id);
+        self.last_finalized_deposit_id = Some(match self.last_finalized_deposit_id {
+            Some(last) => last.max(deposit_id),
+            None => deposit_id,
+        });
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = 0;
         self.remove_outstanding(deposit_id);
@@ -380,11 +400,30 @@ impl RelayerState {
     }
 
     pub fn ready_outstanding(&self, now: u64) -> Option<u64> {
-        self.outstanding_deposits
+        self.ready_outstanding_after(now, None)
+    }
+
+    /// Next outstanding id that is due, walking past `after` so a stuck low
+    /// id does not take every idle tick.
+    pub fn ready_outstanding_after(&self, now: u64, after: Option<u64>) -> Option<u64> {
+        let mut ready: Vec<u64> = self
+            .outstanding_deposits
             .iter()
             .filter(|o| o.retry_after_unix <= now && !self.is_skipped(o.deposit_id))
             .map(|o| o.deposit_id)
-            .min()
+            .collect();
+        ready.sort_unstable();
+        if ready.is_empty() {
+            return None;
+        }
+        match after {
+            Some(last) => ready
+                .iter()
+                .copied()
+                .find(|id| *id > last)
+                .or_else(|| ready.first().copied()),
+            None => ready.first().copied(),
+        }
     }
 
     /// The stored log of an outstanding id, if this relayer has seen it.
@@ -565,7 +604,53 @@ mod tests {
         s.record_progress(3);
         assert!(s.outstanding_deposits.is_empty());
         assert_eq!(s.last_processed_deposit_id, Some(4));
+        assert_eq!(s.last_finalized_deposit_id, Some(4));
         assert_eq!(s.next_target_at(0, 15), 5);
+    }
+
+    #[test]
+    fn idle_retries_walk_outstanding_round_robin() {
+        let mut s = RelayerState::default();
+        s.record_attempt(3, 0, 0);
+        s.record_attempt(5, 0, 0);
+        s.record_attempt(7, 0, 0);
+        assert_eq!(s.ready_outstanding_after(0, None), Some(3));
+        assert_eq!(s.ready_outstanding_after(0, Some(3)), Some(5));
+        assert_eq!(s.ready_outstanding_after(0, Some(5)), Some(7));
+        assert_eq!(s.ready_outstanding_after(0, Some(7)), Some(3));
+    }
+
+    #[test]
+    fn parking_does_not_move_last_finalized() {
+        let mut s = RelayerState::default();
+        s.record_progress(2);
+        s.record_skip(4);
+        assert_eq!(s.last_processed_deposit_id, Some(4));
+        assert_eq!(s.last_finalized_deposit_id, Some(2));
+    }
+
+    #[test]
+    fn a_main_file_carries_skip_count_into_outstanding() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_processed_deposit_id":4,"last_attempt_deposit_id":5,
+                "attempts_since_progress":7}"#,
+        )
+        .unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.outstanding_attempts(5), 7);
+        assert_eq!(loaded.attempts_since_progress, 7);
+        assert_eq!(
+            loaded
+                .outstanding_deposits
+                .iter()
+                .map(|o| o.deposit_id)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
     }
 
     #[test]

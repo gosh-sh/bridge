@@ -45,10 +45,16 @@ class BridgeLimits(unittest.TestCase):
         source = bridge.read_text()
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
-        source = source.replace(verification, "true")
+        source = source.replace(verification, "testVerifyProof()")
         source = source.replace("onBounce(TvmSlice /*body*/) external {",
                                 "function testBounce() public {")
         seed = """
+    bool _testRejectProof;
+    function testRejectProof() public { tvm.accept(); _testRejectProof = true; }
+    function testVerifyProof() private view returns (bool) {
+        require(!_testRejectProof, 490);
+        return true;
+    }
     function testSeed(TvmCell voucherCode, uint128 minted, uint128 burned) public {
         tvm.accept();
         _depositVoucherCode = voucherCode;
@@ -65,8 +71,9 @@ class BridgeLimits(unittest.TestCase):
     }
     function testUpgradeV1() public {
         tvm.accept();
+        mapping(address => bool) retiredSettledVouchers;
         TvmCell limitsState = abi.encode(_pendingDepositAmounts, _pendingDepositData,
-            _settledVouchers, _reservedDeposits, _legacyDepositCounts);
+            retiredSettledVouchers, _reservedDeposits, _legacyDepositCounts);
         TvmBuilder empty;
         TvmCell carried = abi.encode(LIMITS_STATE_TAG, empty.toCell(), limitsState);
         TvmCell migration = abi.encode(_ownerPubkey, _usdcWallet, _totalMinted,
@@ -229,7 +236,7 @@ class BridgeLimits(unittest.TestCase):
         now = int(time.time() * 1000)
         expires = int(time.time()) + 240
         self.finalize(0, header={"time": now + 600_000, "expire": expires})
-        self.finalize(0, header={"time": now + 600_001, "expire": expires})
+        self.finalize(0, expect=400, header={"time": now + 600_001, "expire": expires})
         self.call("setPaused", {"paused": True}, signed=True,
                   header={"time": now, "expire": expires})
         self.call("setPaused", {"paused": False}, signed=True,
@@ -250,7 +257,7 @@ class BridgeLimits(unittest.TestCase):
         self.finalize(0, header=header)
         self.finalize(0, header=header, expect=400)
         header["time"] += 1
-        self.assertEqual(self.finalize(0, header=header)["messages"], [])
+        self.finalize(0, header=header, expect=400)
         self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
 
     def test_external_expiry_is_bounded_and_expired_messages_are_rejected(self):
@@ -272,8 +279,8 @@ class BridgeLimits(unittest.TestCase):
         self.finalize(0)
         self.confirm(0)
         now = int(time.time() * 1000)
-        self.assertEqual(self.finalize(0, header={"time": now + 600_000,
-                         "expire": int(time.time()) + 240})["messages"], [])
+        self.assertEqual(len(self.finalize(0, header={"time": now + 600_000,
+                         "expire": int(time.time()) + 240})["messages"]), 1)
         self.call("setPaused", {"paused": True}, signed=True,
                   header={"time": now, "expire": int(time.time()) + 240})
         self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
@@ -300,10 +307,16 @@ class BridgeLimits(unittest.TestCase):
         self.finalize(1, expect=234)
         self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
 
-    def test_repeated_pending_proof_does_not_reserve_or_deploy_twice(self):
+    def test_pending_proof_is_rejected_before_accept_and_verification(self):
         self.finalize(0)
-        self.assertEqual(self.finalize(0)["messages"], [])
+        self.call("testRejectProof")
+        duplicate = self.finalize(0, expect=400)
+        self.assertEqual(duplicate["messages"], [])
+        self.assertFalse(duplicate["vm_success"])
         self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
+        self.finalize(1, expect=490)
+        self.confirm(0)
+        self.assertEqual(int(self.limits()["reserved"]), 0)
 
     def test_confirmation_moves_reservation_into_outstanding(self):
         self.finalize(0)
@@ -408,15 +421,15 @@ class BridgeLimits(unittest.TestCase):
         self.call("recoverDeposit", {"voucher": voucher}, expect=209)
         self.call("recoverDeposit", {"voucher": voucher}, signed=True)
         self.assertEqual(int(self.limits()["reserved"]), 0)
-        self.confirm(0)
+        self.confirm(0, expect=235)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
         self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
-        self.confirm(0)
+        self.confirm(0, expect=235)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
 
-    def test_old_voucher_callback_survives_initial_upgrade(self):
-        self.confirm(0, 2 * TRANSFER)
-        self.assertEqual(int(self.limits()["outstanding"]), TVL + TRANSFER)
+    def test_unreserved_callback_is_rejected_without_minting(self):
+        self.confirm(0, 2 * TRANSFER, expect=235)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER)
         self.assertEqual(int(self.limits()["reserved"]), 0)
 
     def test_over_cap_withdrawal_commits_an_explicit_ecc_refund(self):

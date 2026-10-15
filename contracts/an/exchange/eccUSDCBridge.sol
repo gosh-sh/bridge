@@ -94,7 +94,6 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     mapping(address => uint128) _pendingDepositAmounts;
     mapping(address => DepositPI) _pendingDepositData;
-    mapping(address => bool) _settledVouchers;
     uint128 _reservedDeposits;
     uint128 _outstandingBridgeUsdc;
     mapping(uint256 => uint128) _outstandingByChain;
@@ -102,6 +101,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     bool _chainAccountingReady;
     // count + 1 distinguishes an unconfigured cutoff from one reduced to zero.
     mapping(uint256 => mapping(uint256 => uint256)) _legacyDepositCounts;
+    uint256 constant LIMITS_STATE_TAG_V5 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a129;
     uint256 constant LIMITS_STATE_TAG_V4 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a128;
     uint256 constant LIMITS_STATE_TAG_V3 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a127;
     uint256 constant LIMITS_STATE_TAG_V2 = 0x584bbbf6645b67c3c2c67b26a9f85182f824026fbd9df45bf38d78c7aef6a126;
@@ -866,6 +866,23 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
                 ERR_UNSUPPORTED_SRC_CHAIN);
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
 
+        // Anti-replay anchor = proof-bound (deposit_id, source contract, source
+        // chain); the dapp component is pinned to 0 (see _parsePublicInputs).
+        // chainId is IN the key: two different L1s may legitimately emit the
+        // same (deposit_id, contract) pair. amount/recipient are NOT in the
+        // key — they are fixed by the proof, so a replay can never re-route or
+        // re-mint: same key ⇒ same one-shot voucher.
+        uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId, f.chainId));
+
+        TvmCell stateInit = abi.encodeStateInit({
+            contr: DepositVoucher,
+            varInit: { _depositHash: depositHash },
+            code: _depositVoucherCode
+        });
+
+        address voucher = address.makeAddrStd(0, tvm.hash(stateInit));
+        require(_pendingDepositAmounts[voucher] == 0, ERR_MESSAGE_IS_EXIST);
+
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
         // pre-accept gas limit. Permissionless submission — the proof itself is
@@ -890,23 +907,6 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _saveMsg();
         ensureBalance();
 
-        // Anti-replay anchor = proof-bound (deposit_id, source contract, source
-        // chain); the dapp component is pinned to 0 (see _parsePublicInputs).
-        // chainId is IN the key: two different L1s may legitimately emit the
-        // same (deposit_id, contract) pair. amount/recipient are NOT in the
-        // key — they are fixed by the proof, so a replay can never re-route or
-        // re-mint: same key ⇒ same voucher ⇒ no-op.
-        uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId, f.chainId));
-
-        TvmCell stateInit = abi.encodeStateInit({
-            contr: DepositVoucher,
-            varInit: { _depositHash: depositHash },
-            code: _depositVoucherCode
-        });
-
-        address voucher = address.makeAddrStd(0, tvm.hash(stateInit));
-        if (_settledVouchers[voucher]) { return; }
-        if (_pendingDepositAmounts[voucher] != 0) { return; }
         require(_chainAccountingReady, ERR_CHAIN_ACCOUNTING);
         require(legacy || _bridgedOutstanding(f.chainId) + _reservedByChain[f.chainId] + f.amount <= MAX_BRIDGE_TVL,
                 ERR_TVL_CAP);
@@ -918,6 +918,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         new DepositVoucher{
             stateInit: stateInit,
             value: 2 vmshell,
+            bounce: true,
             flag: 1
         }(f.depositId, f.contractAddr, f.dappId, f.chainId, f.amount, f.anAccount);
     }
@@ -942,11 +943,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
             code: _depositVoucherCode
         });
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
-        if (_settledVouchers[msg.sender]) { return; }
         uint128 reservedAmount = _pendingDepositAmounts[msg.sender];
-        // A voucher dispatched by the previous code may confirm after the
-        // upgrade. Its authenticated callback predates reservations.
-        require((reservedAmount == 0 || reservedAmount == amount) && amount > 0,
+        // A callback may mint only against its live reservation. Recovery
+        // consumes that reservation too, so a late callback cannot mint again.
+        require(reservedAmount == amount && amount > 0,
                 ERR_DEPOSIT_RESERVATION);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
 
@@ -956,8 +956,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _completeDeposit(msg.sender, depositId, contractAddr, dappId, chainId, amount, anAccount);
     }
 
-    /// @notice Recover a failed voucher callback after checking its transaction
-    ///         history. Pausing prevents new proofs from racing the recovery.
+    /// @notice Recover a conclusively failed voucher callback after checking
+    ///         its transaction history. Never recover a pending/unindexed call. Pausing prevents new proofs from racing the recovery.
     ///         The stored proof-bound recipient and amount cannot be replaced.
     function recoverDeposit(address voucher) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         require(_paused, ERR_RECOVERY_NOT_PAUSED);
@@ -970,11 +970,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     function _completeDeposit(address voucher, uint256 depositId, uint256 contractAddr,
                               uint256 dappId, uint256 chainId, uint128 amount, uint256 anAccount) private {
-        require(!_settledVouchers[voucher], ERR_DEPOSIT_RESERVATION);
         uint128 reservedAmount = _pendingDepositAmounts[voucher];
 
         gosh.mintecc(uint64(amount), USDC_ECC_ID);
-        _settledVouchers[voucher] = true;
         delete _pendingDepositAmounts[voucher];
         delete _pendingDepositData[voucher];
         _reservedDeposits -= reservedAmount;
@@ -1001,7 +999,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     onBounce(TvmSlice /*body*/) external {
         uint128 amount = _pendingDepositAmounts[msg.sender];
         if (amount == 0) { return; }
-        uint256 chainId = _pendingDepositData[msg.sender].chainId;
+        DepositPI f = _pendingDepositData[msg.sender];
+        uint256 chainId = f.chainId;
         delete _pendingDepositAmounts[msg.sender];
         delete _pendingDepositData[msg.sender];
         _reservedDeposits -= amount;
@@ -1050,8 +1049,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(_reservedDeposits == 0 || userCell.toSlice().empty(), ERR_DEPOSITS_PENDING);
         ensureBalance();
         TvmCell limitsState = abi.encode(_pendingDepositAmounts, _pendingDepositData,
-                                        _settledVouchers, _reservedDeposits, _legacyDepositCounts);
-        TvmCell carried = abi.encode(LIMITS_STATE_TAG_V4, userCell, limitsState,
+                                        _reservedDeposits, _legacyDepositCounts);
+        TvmCell carried = abi.encode(LIMITS_STATE_TAG_V5, userCell, limitsState,
                                     abi.encode(_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady, _replayMessages, _legacyReplayTimeFloor));
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
@@ -1122,15 +1121,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _chainAccountingReady = mintedUsdc == 0 && burnedUsdc == 0;
         bool replayStateCarried = false;
         TvmSlice tail = userCell.toSlice();
-        if (tail.bits() >= 256 && (tail.preloadUint(256) == LIMITS_STATE_TAG || tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3 || tail.preloadUint(256) == LIMITS_STATE_TAG_V4)) {
+        if (tail.bits() >= 256 && (tail.preloadUint(256) == LIMITS_STATE_TAG || tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3 || tail.preloadUint(256) == LIMITS_STATE_TAG_V4 || tail.preloadUint(256) == LIMITS_STATE_TAG_V5)) {
             TvmCell newVoucherCode;
             TvmCell limitsState;
-            if (tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3 || tail.preloadUint(256) == LIMITS_STATE_TAG_V4) {
+            if (tail.preloadUint(256) == LIMITS_STATE_TAG_V2 || tail.preloadUint(256) == LIMITS_STATE_TAG_V3 || tail.preloadUint(256) == LIMITS_STATE_TAG_V4 || tail.preloadUint(256) == LIMITS_STATE_TAG_V5) {
                 (uint256 tag, TvmCell voucherCode, TvmCell state, TvmCell netState) =
                     abi.decode(userCell, (uint256, TvmCell, TvmCell, TvmCell));
                 newVoucherCode = voucherCode;
                 limitsState = state;
-                if (tag == LIMITS_STATE_TAG_V4) {
+                if (tag == LIMITS_STATE_TAG_V4 || tag == LIMITS_STATE_TAG_V5) {
                     replayStateCarried = true;
                     (_outstandingBridgeUsdc, _outstandingByChain, _chainAccountingReady, _replayMessages, _legacyReplayTimeFloor) =
                         abi.decode(netState, (uint128, mapping(uint256 => uint128), bool,
@@ -1146,10 +1145,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
                 newVoucherCode = voucherCode;
                 limitsState = state;
             }
-            (_pendingDepositAmounts, _pendingDepositData, _settledVouchers,
-             _reservedDeposits, _legacyDepositCounts) = abi.decode(limitsState,
-                (mapping(address => uint128), mapping(address => DepositPI),
-                 mapping(address => bool), uint128, mapping(uint256 => mapping(uint256 => uint256))));
+            if (tail.preloadUint(256) == LIMITS_STATE_TAG_V5) {
+                (_pendingDepositAmounts, _pendingDepositData, _reservedDeposits, _legacyDepositCounts) =
+                    abi.decode(limitsState, (mapping(address => uint128), mapping(address => DepositPI),
+                                            uint128, mapping(uint256 => mapping(uint256 => uint256))));
+            } else {
+                // Older envelopes carried a permanent voucher registry. Decode
+                // it for compatibility and discard it; the voucher is one-shot.
+                mapping(address => bool) retiredSettledVouchers;
+                (_pendingDepositAmounts, _pendingDepositData, retiredSettledVouchers,
+                 _reservedDeposits, _legacyDepositCounts) = abi.decode(limitsState,
+                    (mapping(address => uint128), mapping(address => DepositPI),
+                     mapping(address => bool), uint128, mapping(uint256 => mapping(uint256 => uint256))));
+            }
             _depositVoucherCode = newVoucherCode.toSlice().empty() ? depositVoucherCode : newVoucherCode;
         } else {
             _depositVoucherCode = tail.empty() ? depositVoucherCode : userCell;
@@ -1161,7 +1169,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         address[] pending = _pendingDepositData.keys();
         for (uint32 i = 0; i < pending.length; i++) {
             uint128 amount = _pendingDepositAmounts[pending[i]];
-            _reservedByChain[_pendingDepositData[pending[i]].chainId] += amount;
+            DepositPI f = _pendingDepositData[pending[i]];
+            _reservedByChain[f.chainId] += amount;
         }
         // A live aggregate-only upgrade stays closed until per-chain balances
         // have been reconstructed; new zerostates need no initialization.

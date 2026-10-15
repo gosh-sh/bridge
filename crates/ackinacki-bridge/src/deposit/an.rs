@@ -744,7 +744,10 @@ async fn encode_finalize(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        + u64::from(config.abi.message_expiration_timeout) / 1000) as u32;
+        // Keep one minute of margin below the contract's strict five-minute
+        // ceiling, and avoid immediately expiring zero/subsecond settings.
+        + u64::from((config.abi.message_expiration_timeout / 1000).clamp(1, 240)))
+        as u32;
     encode_message(ctx, ParamsOfEncodeMessage {
         abi: Abi::Json(abi.to_string()),
         address: Some(format!("0:{}", hex::encode(bridge))),
@@ -1268,6 +1271,45 @@ mod tests {
         let after_expiry = an.prepare_finalize(&request).await.unwrap();
         assert_ne!(after_expiry, refreshed);
         assert_eq!(decode(after_expiry), decode(first));
+    }
+
+    #[tokio::test]
+    async fn encoded_finalize_expiry_stays_within_the_contract_window() {
+        use tvm_block::Deserializable;
+        for (timeout, lifetime) in [
+            (0, 1),
+            (999, 1),
+            (40_000, 40),
+            (300_000, 240),
+            (u32::MAX, 240),
+        ] {
+            let mut config = tvm_client::ClientConfig::default();
+            config.abi.message_expiration_timeout = timeout;
+            let ctx = Arc::new(ClientContext::new(config).unwrap());
+            let before = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let (message, expires) = encode_finalize(
+                ctx,
+                crate::deposit::identity::BRIDGE_ABI,
+                [1; 32],
+                b"proof",
+                b"inputs",
+            )
+            .await
+            .unwrap();
+            let after = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert!((before + lifetime..=after + lifetime).contains(&u64::from(expires)));
+            let message = tvm_block::Message::construct_from_base64(&message).unwrap();
+            let mut body = message.body().unwrap();
+            // Absent signature and public key, then the 64-bit time header.
+            body.get_next_bits(66).unwrap();
+            assert_eq!(body.get_next_u32().unwrap(), expires);
+        }
     }
 
     #[tokio::test]

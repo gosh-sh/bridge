@@ -1919,6 +1919,17 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- Pending AN deposits now reject repeated finalization before accepting gas,
+  verifying the proof or deploying another voucher (400). The bridge no longer
+  stores a permanent registry of settled vouchers; after settlement, duplicate
+  deployment is rejected by the voucher's one-shot constructor. Confirmation
+  requires a matching live reservation (235 otherwise), including after owner
+  recovery. Before upgrading a version without reservations, pause finalizations
+  and drain its outstanding callbacks. Existing reservation-based upgrades keep
+  their pending state. The deposit CLI clamps encoded message lifetimes to
+  1–240 seconds so large or zero SDK timeouts cannot generate invalid headers.
+
+
 - AN bridge 1.8.3 replaces the shared external-message timestamp guard with
   hash-and-expiry replay protection. Public deposit submissions no longer block
   owner emergency calls or other deposits by choosing a future `time` header.

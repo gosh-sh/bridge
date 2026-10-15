@@ -412,7 +412,6 @@
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_pendingDepositAmounts","type":"map(address,uint128)"},
 		{"components":[{"name":"depositId","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"contractAddr","type":"uint256"},{"name":"chainId","type":"uint256"},{"name":"dappId","type":"uint256"},{"name":"anAccount","type":"uint256"}],"init":false,"name":"_pendingDepositData","type":"map(address,tuple)"},
-		{"init":false,"name":"_settledVouchers","type":"map(address,bool)"},
 		{"init":false,"name":"_reservedDeposits","type":"uint128"},
 		{"init":false,"name":"_outstandingBridgeUsdc","type":"uint128"},
 		{"init":false,"name":"_outstandingByChain","type":"map(uint256,uint128)"},

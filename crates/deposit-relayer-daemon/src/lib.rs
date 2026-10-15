@@ -87,7 +87,7 @@ pub use source::{
     resolve_from_block, AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource,
     BRIDGE_DEPLOY_BLOCK_ENV,
 };
-pub use state::{DeploymentIdentity, OutstandingDeposit, RelayerState, StateLock};
+pub use state::{DeploymentIdentity, DepositLogRef, OutstandingDeposit, RelayerState, StateLock};
 pub use submitter::{
     build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,

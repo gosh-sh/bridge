@@ -69,10 +69,25 @@ pub struct OutstandingDeposit {
     pub deposit_id: u64,
     pub attempts: u32,
     pub retry_after_unix: u64,
-    /// Ethereum block that holds this deposit's log, when known. The log-scan
-    /// cursor must not move past it while the id is outstanding.
+    /// Ethereum block that holds this deposit's log, when known. A retry
+    /// can scan that one block if the tx hash is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_number: Option<u64>,
+    /// Deposit transaction hash (`0x…`). A retry uses the receipt instead of
+    /// walking `eth_getLogs` from the shared scan cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    /// Receipt-local log index, with `tx_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_index: Option<u64>,
+}
+
+/// Where a failed deposit's `Deposit` log sits on Ethereum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepositLogRef {
+    pub block_number: u64,
+    pub tx_hash: alloy::primitives::B256,
+    pub log_index: u64,
 }
 
 /// Locally-persisted relayer progress.
@@ -93,10 +108,11 @@ pub struct RelayerState {
     /// [`OutstandingDeposit::attempts`].
     pub attempts_since_progress: u32,
     /// No Ethereum block up to and including this one holds a deposit the
-    /// relayer still has to deliver, so the next `eth_getLogs` scan starts
-    /// after it. Set to the confirmed head while the next deposit is not made
-    /// yet, and to a finalized deposit's block minus one (a later `depositId`
-    /// can share that block). `None` = scan from `--from-block`.
+    /// relayer still has to *discover*, so the next `eth_getLogs` scan starts
+    /// after it. Outstanding ids are retried from their stored tx / block,
+    /// not from this cursor. Set to the confirmed head while the next deposit
+    /// is not made yet, and to a finalized deposit's block minus one (a later
+    /// `depositId` can share that block). `None` = scan from `--from-block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_done_through_block: Option<u64>,
     /// Deposit ids the daemon abandoned after `--skip-after-attempts`.
@@ -234,14 +250,14 @@ impl RelayerState {
         self.record_attempt_at(deposit_id, now, backoff_secs, None);
     }
 
-    /// Like [`record_attempt`], and remembers the deposit's Ethereum block
-    /// so a later retry can scan from that block.
+    /// Like [`record_attempt`], and remembers the deposit's Ethereum log so a
+    /// later retry can load it without walking the shared scan cursor.
     pub fn record_attempt_at(
         &mut self,
         deposit_id: u64,
         now: u64,
         backoff_secs: u64,
-        block_number: Option<u64>,
+        log: Option<DepositLogRef>,
     ) {
         self.last_attempt_deposit_id = Some(deposit_id);
         let attempts = self
@@ -253,17 +269,13 @@ impl RelayerState {
         self.attempts_since_progress = attempts;
         let shift = attempts.saturating_sub(1).min(6);
         let delay = backoff_secs.saturating_mul(1u64 << shift);
-        self.upsert_outstanding(
-            deposit_id,
-            attempts,
-            now.saturating_add(delay),
-            block_number,
-        );
+        self.upsert_outstanding(deposit_id, attempts, now.saturating_add(delay), log);
     }
 
-    /// Park a stuck deposit and advance the cursor past it. The id is recorded
-    /// in `parked_deposit_ids` for operator follow-up and dropped from
-    /// outstanding so it is not retried automatically.
+    /// Park a stuck deposit. The high-water mark only moves if this id is
+    /// above it. The id is recorded in `parked_deposit_ids` for operator
+    /// follow-up and dropped from outstanding so it is not retried
+    /// automatically.
     pub fn record_skip(&mut self, deposit_id: u64) {
         if !self.parked_deposit_ids.contains(&deposit_id) {
             self.parked_deposit_ids.push(deposit_id);
@@ -310,7 +322,7 @@ impl RelayerState {
         deposit_id: u64,
         attempts: u32,
         retry_after_unix: u64,
-        block_number: Option<u64>,
+        log: Option<DepositLogRef>,
     ) {
         if let Some(existing) = self
             .outstanding_deposits
@@ -319,8 +331,10 @@ impl RelayerState {
         {
             existing.attempts = attempts;
             existing.retry_after_unix = retry_after_unix;
-            if block_number.is_some() {
-                existing.block_number = block_number;
+            if let Some(log) = log {
+                existing.block_number = Some(log.block_number);
+                existing.tx_hash = Some(format!("{:#x}", log.tx_hash));
+                existing.log_index = Some(log.log_index);
             }
             return;
         }
@@ -328,7 +342,9 @@ impl RelayerState {
             deposit_id,
             attempts,
             retry_after_unix,
-            block_number,
+            block_number: log.map(|l| l.block_number),
+            tx_hash: log.map(|l| format!("{:#x}", l.tx_hash)),
+            log_index: log.map(|l| l.log_index),
         });
         self.outstanding_deposits.sort_by_key(|o| o.deposit_id);
     }
@@ -357,20 +373,11 @@ impl RelayerState {
             .min()
     }
 
-    /// Lowest Ethereum block among outstanding deposits, when any is known.
-    pub fn min_outstanding_block(&self) -> Option<u64> {
-        self.outstanding_deposits
-            .iter()
-            .filter_map(|o| o.block_number)
-            .min()
-    }
-
-    /// Known Ethereum block for an outstanding id.
-    pub fn outstanding_block(&self, deposit_id: u64) -> Option<u64> {
+    /// The stored log of an outstanding id, if this relayer has seen it.
+    pub fn outstanding(&self, deposit_id: u64) -> Option<&OutstandingDeposit> {
         self.outstanding_deposits
             .iter()
             .find(|o| o.deposit_id == deposit_id)
-            .and_then(|o| o.block_number)
     }
 }
 

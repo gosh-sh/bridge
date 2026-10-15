@@ -185,6 +185,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     {
         let mut summary = DaemonRunSummary::default();
         let mut current_delay = backoff.initial;
+        if let Some(id) = self.state().last_processed_deposit_id {
+            if let Some(m) = &metrics {
+                m.last_finalized_deposit_id.fetch_max(id, Ordering::Relaxed);
+            }
+            mark_finalized_high_water(id);
+        }
         if let Some(m) = &metrics {
             m.current_backoff_secs
                 .store(current_delay.as_secs(), Ordering::Relaxed);

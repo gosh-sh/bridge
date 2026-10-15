@@ -72,6 +72,7 @@ pub mod state;
 pub mod submitter;
 pub mod supported_chains;
 pub mod types;
+pub mod voucher;
 
 pub use an_config::AnConfig;
 pub use daemon::{

@@ -162,6 +162,66 @@ impl TransactionReceipt {
     }
 }
 
+/// One internal message a transaction sent, and what the transaction it
+/// spawned at the destination did with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildTransaction {
+    /// Message hash.
+    pub message_id: String,
+    /// Destination in `workchain:account_id` form.
+    pub dst: String,
+    /// Outcome at the destination; `None` while that transaction is not yet
+    /// executed or not yet indexed.
+    pub outcome: Option<ChildOutcome>,
+}
+
+/// Compute-phase result of a [`ChildTransaction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildOutcome {
+    /// Hash of the destination transaction.
+    pub tx_hash: TxHash,
+    /// `compute.exit_code`, when the transaction reached the compute phase.
+    pub exit_code: Option<i32>,
+    /// Whether the transaction was aborted.
+    pub aborted: bool,
+}
+
+impl ChildOutcome {
+    /// Neither aborted nor a non-zero exit code.
+    pub fn is_success(&self) -> bool {
+        !self.aborted && self.exit_code.unwrap_or(0) == 0
+    }
+}
+
+/// State of an account as the blockchain API reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountInfo {
+    /// Deployed and running code (`acc_type` Active), as opposed to uninit
+    /// or frozen.
+    pub active: bool,
+    /// Hex hash of the account's code, when it has code.
+    pub code_hash: Option<String>,
+    /// Account data as a base64 BOC, when it has data.
+    pub data: Option<String>,
+}
+
+impl AccountInfo {
+    /// Read a `blockchain { account { info { acc_type code_hash data } } }`
+    /// response; `None` when the API knows no such account.
+    pub fn from_blockchain_api(res: &Value) -> Option<Self> {
+        let info = res
+            .pointer("/blockchain/account/info")
+            .filter(|i| !i.is_null())?;
+        let text = |k: &str| info.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+        Some(Self {
+            // `acc_type`: 0 uninit, 1 active, 2 frozen, 3 non-exist.
+            active: info.get("acc_type").and_then(|v| v.as_i64()) == Some(1),
+            code_hash: text("code_hash"),
+            data: text("data"),
+        })
+    }
+}
+
 /// Event log from a transaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Log {
@@ -226,5 +286,24 @@ mod tests {
 
         assert!(receipt.is_success());
         assert_eq!(receipt.block_number, Some(12345));
+    }
+
+    #[test]
+    fn account_info_from_blockchain_api() {
+        let active = serde_json::json!({ "blockchain": { "account": { "info": {
+            "acc_type": 1, "code_hash": "bd44", "data": "te6c" } } } });
+        assert_eq!(
+            AccountInfo::from_blockchain_api(&active),
+            Some(AccountInfo {
+                active: true,
+                code_hash: Some("bd44".into()),
+                data: Some("te6c".into()),
+            })
+        );
+        let uninit = serde_json::json!({ "blockchain": { "account": { "info": {
+            "acc_type": 0, "code_hash": null, "data": null } } } });
+        assert!(!AccountInfo::from_blockchain_api(&uninit).unwrap().active);
+        let absent = serde_json::json!({ "blockchain": { "account": { "info": null } } });
+        assert_eq!(AccountInfo::from_blockchain_api(&absent), None);
     }
 }

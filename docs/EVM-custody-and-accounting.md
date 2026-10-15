@@ -66,8 +66,10 @@ State it this way rather than as "checks-effects-interactions", which this path 
 
 Two consequences worth naming:
 
-* `MAX_DEPOSIT_AMOUNT` is `type(uint64).max` (`:61`) — sized so the amount fits the AN mint path,
-  not as a TVL cap. The function is **not** `payable`; the amount is a parameter.
+* `MAX_DEPOSIT_AMOUNT` is `type(uint64).max` (`:55`) — the same ceiling the AN mint path
+  enforces on proven `fr[2]` (exit 214). It is not a TVL cap and not a 100 USDC limit.
+  There is no extra product minimum besides `amount != 0`. The function is **not**
+  `payable`; the amount is a parameter.
 * The booked figure is the **requested** `amount`, not an observed balance delta. Exact for USDC;
   it would understate custody for a fee-on-transfer token, which is why the token is fixed at
   construction.
@@ -90,12 +92,28 @@ book decremented.
 The two paths differ on purpose: a deposit must confirm receipt before crediting, a payout must
 debit before paying.
 
+## Pause is two switches, not one
+
+`AckiNackiBridge.pause()` stops the Ethereum user entry points (`deposit`,
+`verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`). It does not call
+`eccUSDCBridge.setPaused`, and `setPaused` does not call `pause()`. Circle can
+also freeze the USDC contract on Ethereum; that is a third control, not wired
+to either bridge.
+
+The AN side keeps its own ECC ledger. A pause here leaves mint and burn on
+Acki Nacki running; a pause there leaves Ethereum deposits and payouts
+running. Stopping both directions of the bridge in an incident means flipping
+**both** owner switches. There is no single stop switch (QC-AN-J5).
+
 ## AAVE routing never moves the book
 
 `supplyToAave`, `withdrawFromAave` and `emergencyWithdrawAll` move tokens between the bridge and the
-pool and adjust `suppliedPrincipal` only. `harvestYield` and `skimExcessUsdc` send surplus to
-`yieldRecipient` and appear in neither the book nor the principal accounting — that absence is what
-makes them incapable of reaching user principal. Operating detail: [`aave-yield.md`](aave-yield.md).
+pool and adjust `suppliedPrincipal` only; `writeOffUnbackedPrincipal` adjusts `suppliedPrincipal`
+and moves nothing. `harvestYield` and `skimExcessUsdc` send surplus to `yieldRecipient` and are
+each bounded by `treasuryBalance`: `skimExcessUsdc` takes only liquid USDC above it, and
+`harvestYield` reverts if liquid USDC + aUSDC would drop below it. That bound, not the
+`suppliedPrincipal` book, is what keeps them from reaching user principal. Operating detail:
+[`aave-yield.md`](aave-yield.md).
 
 ## Labelled rules, restated
 

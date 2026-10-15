@@ -9,10 +9,12 @@ use async_trait::async_trait;
 use tokio::time::{sleep, Duration};
 
 use crate::{
+    address::ExtendedAddress,
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -29,6 +31,11 @@ pub struct MockAckiNacki {
     fail_mode: Arc<Mutex<bool>>,
     /// What `run_getter` returns; `None` makes it fail.
     getter_response: Arc<Mutex<Option<serde_json::Value>>>,
+    /// What `get_internal_children` returns per parent tx; unknown parents
+    /// have no children.
+    children: Arc<Mutex<HashMap<TxHash, Vec<ChildTransaction>>>>,
+    /// Accounts `get_account_info` knows, keyed by account id.
+    accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
 }
 
 impl MockAckiNacki {
@@ -40,7 +47,29 @@ impl MockAckiNacki {
             block_number: Arc::new(Mutex::new(1)),
             fail_mode: Arc::new(Mutex::new(false)),
             getter_response: Arc::new(Mutex::new(None)),
+            children: Arc::new(Mutex::new(HashMap::new())),
+            accounts: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Hash every `call_contract` returns.
+    pub const CALL_TX_HASH: TxHash = {
+        let mut h = [0u8; 32];
+        h[0] = 0xCC;
+        h
+    };
+
+    /// Set what `get_internal_children(parent)` returns.
+    pub fn set_children(&self, parent: TxHash, children: Vec<ChildTransaction>) {
+        self.children.lock().unwrap().insert(parent, children);
+    }
+
+    /// Make `get_account_info` report `info` for `account_id`.
+    pub fn set_account(&self, account_id: &str, info: AccountInfo) {
+        self.accounts
+            .lock()
+            .unwrap()
+            .insert(account_id.to_owned(), info);
     }
 
     /// Set the decoded output every `run_getter` call returns.
@@ -107,10 +136,8 @@ impl IAckiNacki for MockAckiNacki {
     }
 
     async fn call_contract(&self, call: ContractCallRequest) -> Result<TxHash> {
-        let mut tx_hash = [0u8; 32];
-        tx_hash[0] = 0xCC;
         let tx = AckiNackiTransaction::new(
-            tx_hash,
+            Self::CALL_TX_HASH,
             call.from.to_string(),
             call.to.to_string(),
             serde_json::to_vec(&call.params)
@@ -180,6 +207,25 @@ impl IAckiNacki for MockAckiNacki {
                 "MockAckiNacki: no getter response set for {function}"
             ))
         })
+    }
+
+    async fn get_internal_children(&self, tx_hash: &TxHash) -> Result<Vec<ChildTransaction>> {
+        Ok(self
+            .children
+            .lock()
+            .unwrap()
+            .get(tx_hash)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn get_account_info(&self, address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        Ok(self
+            .accounts
+            .lock()
+            .unwrap()
+            .get(address.account_id())
+            .cloned())
     }
 }
 

@@ -32,6 +32,7 @@ contract AckiNackiBridgeAaveTest is Test {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event YieldRecipientSet(address indexed recipient);
+    event UnbackedPrincipalWrittenOff(uint256 amount);
 
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
@@ -307,8 +308,132 @@ contract AckiNackiBridgeAaveTest is Test {
         assertEq(bridge.accruedYield(), 0, "empty pool is not yield");
         assertEq(usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT - haircut);
 
-        vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
+        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
         bridge.withdrawFromAave(type(uint256).max);
+
+        vm.expectEmit(false, false, false, true);
+        emit UnbackedPrincipalWrittenOff(haircut);
+        bridge.writeOffUnbackedPrincipal();
+        assertEq(bridge.suppliedPrincipal(), 0);
+    }
+
+    function test_supplyToAave_zeroDeltaRevertsAaveSupplyFailed() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        uint256 toSupply = 5 * UsdcTestLib.UNIT;
+        pool.setSupplyHaircut(toSupply);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.AaveSupplyFailed.selector, toSupply, 0)
+        );
+        bridge.supplyToAave(toSupply);
+    }
+
+    // -----------------------------------------------------------------
+    // ETH-28: book above the aToken balance
+    // -----------------------------------------------------------------
+
+    /// @dev 10 deposited, 9 supplied, `lost` aUSDC gone (a socialized loss).
+    function _supplyThenLose(uint256 lost) internal {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        vm.prank(address(bridge));
+        aUSDC.transfer(address(0xdead), lost);
+    }
+
+    function test_writeOffUnbackedPrincipal_revertsWhenBooksAreBacked() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        vm.expectRevert(AckiNackiBridge.NothingToWriteOff.selector);
+        bridge.writeOffUnbackedPrincipal();
+    }
+
+    function test_writeOffUnbackedPrincipal_revertsWhenBooksAreEmpty() public {
+        vm.expectRevert(AckiNackiBridge.NothingToWriteOff.selector);
+        bridge.writeOffUnbackedPrincipal();
+    }
+
+    function test_writeOffUnbackedPrincipal_onlyOwner() public {
+        vm.prank(user1);
+        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
+        bridge.writeOffUnbackedPrincipal();
+    }
+
+    function test_writeOffUnbackedPrincipal_clampsToDust() public {
+        _supplyThenLose(9 * UsdcTestLib.UNIT - 1);
+
+        vm.expectEmit(false, false, false, true);
+        emit UnbackedPrincipalWrittenOff(9 * UsdcTestLib.UNIT - 1);
+        bridge.writeOffUnbackedPrincipal();
+        assertEq(bridge.suppliedPrincipal(), 1);
+        assertEq(bridge.aUsdcBalance(), 1);
+        assertEq(bridge.accruedYield(), 0);
+    }
+
+    function test_withdrawFromAave_maxPullsBackedWhenUnderBooked() public {
+        uint256 lost = 10;
+        _supplyThenLose(lost);
+
+        bridge.withdrawFromAave(type(uint256).max);
+        assertEq(bridge.aUsdcBalance(), 0);
+        assertEq(bridge.suppliedPrincipal(), lost, "unbacked part stays booked");
+    }
+
+    function test_withdrawFromAave_aboveBackedReverts() public {
+        _supplyThenLose(10);
+        uint256 backed = bridge.aUsdcBalance();
+        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
+        bridge.withdrawFromAave(backed + 1);
+    }
+
+    /// @dev After a loss and a write-off, interest first refills what users
+    ///      are owed; only the surplus over `treasuryBalance` is harvestable.
+    function test_harvestYield_revertsWhenWouldBreakSolvency() public {
+        uint256 lost = 2 * UsdcTestLib.UNIT;
+        _supplyThenLose(lost);
+        bridge.writeOffUnbackedPrincipal();
+        assertEq(bridge.accruedYield(), 0);
+
+        uint256 interest = 3 * UsdcTestLib.UNIT;
+        aUSDC.accrueYield(address(bridge), interest);
+        usdc.mint(address(pool), interest);
+        assertEq(bridge.accruedYield(), interest, "book-side yield");
+        bridge.setYieldRecipient(yieldSink);
+
+        uint256 backing = usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance();
+        uint256 treasury = bridge.treasuryBalance();
+        assertEq(backing, treasury + interest - lost);
+
+        uint256 surplus = interest - lost;
+        // `harvestYield(accruedYield())` after a write-off pays only the
+        // surplus over treasury — the operator does not have to guess.
+        bridge.harvestYield(interest);
+        assertEq(usdc.balanceOf(yieldSink), surplus);
+        assertEq(usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance(), treasury);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.HarvestWouldBreakSolvency.selector, 1, treasury, treasury
+            )
+        );
+        bridge.harvestYield(1);
+    }
+
+    /// @dev AAVE minted 1 wei less than the USDC it took. `accruedYield()`
+    ///      still reports the full interest; the solvency check used to
+    ///      revert `HarvestWouldBreakSolvency` for that 1 wei.
+    function test_harvestYield_accruedYieldSafeAfterAaveRounding() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, 10 * UsdcTestLib.UNIT);
+        bridge.supplyToAave(type(uint256).max);
+        deal(address(usdc), address(bridge), usdc.balanceOf(address(bridge)) - 1);
+
+        uint256 interest = 500_000;
+        aUSDC.accrueYield(address(bridge), interest);
+        usdc.mint(address(pool), interest);
+        assertEq(bridge.accruedYield(), interest);
+
+        bridge.setYieldRecipient(yieldSink);
+        bridge.harvestYield(interest);
+        assertEq(usdc.balanceOf(yieldSink), interest - 1);
+        assertEq(usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance(), bridge.treasuryBalance());
     }
 
     function test_eth9_approveFalse_reverts() public {

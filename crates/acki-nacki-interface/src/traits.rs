@@ -3,9 +3,11 @@
 use async_trait::async_trait;
 
 use crate::{
-    error::Result,
+    address::ExtendedAddress,
+    error::{AckiNackiError, Result},
     types::{
-        AckiNackiTransaction, ContractCallRequest, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -46,6 +48,19 @@ pub trait IAckiNacki: Send + Sync {
         function: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value>;
+
+    /// The internal messages `tx_hash` sent, in send order, each with the
+    /// outcome of the transaction it spawned. On TVM a transaction that exits
+    /// 0 can still have every message it sent fail at the destination, so
+    /// this is what tells a caller whether the call actually did its work.
+    async fn get_internal_children(&self, _tx_hash: &TxHash) -> Result<Vec<ChildTransaction>> {
+        Err(AckiNackiError::NotImplemented)
+    }
+
+    /// State of the account at `address`; `None` when no such account exists.
+    async fn get_account_info(&self, _address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        Err(AckiNackiError::NotImplemented)
+    }
 }
 
 /// Trait for sending transactions with retry logic

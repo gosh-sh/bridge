@@ -200,27 +200,45 @@ assigns it when the release is tagged.
     is **2000** for a finalized transfer and **1000** for a fast one, which
     is where Circle takes `maxFee`.
   - `CctpHubReceiver`, deployed on the hub next to one `AckiNackiBridge`.
-    Circle does not call the mint recipient — a keeper calls
-    `receiveAndDeposit(message, attestation)` with the signed message from
-    Circle's Iris API. The contract checks the burn came from a
-    `setSource`'d `(domain, adapter, remote token)`, asks
-    `MessageTransmitterV2.receiveMessage` to mint, and calls
-    `AckiNackiBridge.deposit` for `amount - feeExecuted` in the same
-    transaction. The `Deposit` event is a **hub** deposit: `sender` is the
-    receiver, `chainId` in the proof is the hub's, `anAccount` comes from
-    the hook. Do **not** add Arbitrum's chain id 42161 to the deposit-prover
-    allowlist or to `setTrustedL1Bridge` for this path. Trust the hub chain
-    and the hub bridge. The remote chain id and the source depositor are in
-    `RemoteDepositForwarded`, which is not a public input of the proof.
+    Circle does not call the mint recipient, so crediting takes two hub
+    transactions:
+    - `receiveBurn(message, attestation)` — anyone may send it with the
+      signed message from Circle's Iris API. It checks the burn came from a
+      `setSource`'d `(domain, adapter, remote token)`, asks
+      `MessageTransmitterV2.receiveMessage` to mint, and parks
+      `amount - feeExecuted` under `messageKey(sourceDomain, nonce)` =
+      `keccak256(abi.encode(sourceDomain, nonce))`. It emits
+      `RemoteDepositReceived(key, sourceDomain, chainId, depositor,
+      anAccount, amount, feeExecuted)`. Readable state: `pending(key)`,
+      `totalPending`.
+    - `forward(key)` — calls `AckiNackiBridge.deposit` for the parked amount.
+      This is the transaction the deposit relayer proves: 36 bytes of
+      calldata, and a receipt with only the token `Transfer` and `Deposit`
+      (the receiver gives the bridge a standing maximum allowance at
+      construction, so there is no `Approval` log). Only an address the
+      owner enabled with `setForwarder(account, allowed)` (event
+      `ForwarderSet`), or the burn's own `depositor`, may call it. The
+      forwarder must send an EIP-1559 transaction straight to the receiver:
+      a legacy or contract-wrapped `forward` still moves the funds into the
+      bridge but leaves a `Deposit` the circuit cannot prove.
+
+    The `Deposit` event is a **hub** deposit: `sender` is the receiver,
+    `chainId` in the proof is the hub's, `anAccount` comes from the hook. Do
+    **not** add Arbitrum's chain id 42161 to `setTrustedL1Bridge` for this
+    path. Trust the hub chain and the hub bridge. The remote chain id and
+    the source depositor are in `RemoteDepositReceived`, which is not a
+    public input of the proof. New errors: `AlreadyPending`, `NotPending`,
+    `NotForwarder`, `PendingFunds`.
 
   A second token is a second bridge and a second receiver; a second source
   chain is another `setSource` / `setHub` row. `script/DeployCctp.s.sol`
   deploys one contract per broadcast (`CCTP_KIND=endpoint` needs
   `TOKEN_MESSENGER`; `CCTP_KIND=receiver` needs `DEPOSIT_BRIDGE`,
   `MESSAGE_TRANSMITTER` and `CCTP_LOCAL_DOMAIN`). Routing (`setHub`,
-  `setSource`, `setEgressDomain`) is a separate owner transaction. The owner
-  of either contract can `rescue` tokens that were sent there outside these
-  calls; a successful deposit or burn does not leave a balance.
+  `setSource`, `setEgressDomain`, `setForwarder`) is a separate owner
+  transaction. The owner of either contract can `rescue` tokens that were
+  sent there outside these calls; on the receiver `rescue` cannot take the
+  bridge token below `totalPending` and reverts with `PendingFunds`.
 
   It does not change the deposit proof, the verification key, or the
   `Deposit` event.
@@ -228,37 +246,43 @@ assigns it when the release is tagged.
 - **`deposit-relayer cctp-forward` and `deposit-relayer cctp-daemon` submit
   the Circle attestation.** `cctp-forward` takes one source-chain burn
   (`--tx-hash`, `--source-domain`; Arbitrum is 3) and calls
-  `CctpHubReceiver.receiveAndDeposit` on the hub. `cctp-daemon` scans
+  `CctpHubReceiver.receiveBurn`, then `forward`, on the hub. `cctp-daemon` scans
   `HubDeposit` logs on the source `CctpEndpoint` (`--from-block` is
   required) and does the same for each new burn. Both need an explicit
   `--iris-url` / `CCTP_IRIS_URL`: `https://iris-api.circle.com` or
   `https://iris-api-sandbox.circle.com`. The hub key is
-  `CCTP_HUB_PRIVATE_KEY`. The daemon's cursor is
+  `CCTP_HUB_PRIVATE_KEY`, and its address must be a forwarder on the
+  receiver. The daemon's cursor is
   `./cctp-forward-state.json` (its own `--state`), not
-  `deposit-relayer-state.json`. A burn whose Circle nonce was already used
-  is treated as done; other submission failures are retried and then left
+  `deposit-relayer-state.json`. Restarts are safe: the keeper reads
+  `pending(key)` first, skips `receiveBurn` when the burn is already parked,
+  and treats a used Circle nonce with nothing parked as done. `forward` is
+  sent as EIP-1559 with no access list; if its receipt is not type 2 or has
+  more than 3 logs the keeper logs an error that the `Deposit` is not
+  provable. Other submission failures are retried and then left
   in `gave_up` after eight attempts. These commands do not prove and do not
   call Acki Nacki. `cctp-forward --dry-run` only checks that Iris has
   signed; the daemon has no dry-run, so a check cannot skip burns.
 
-  The hub `Deposit` is emitted inside `receiveAndDeposit`. That transaction
-  carries the Circle message and the attestation (the hook starts at byte
-  376) and the receipt has the mint, the approvals, `Deposit` and
-  `RemoteDepositForwarded`. The deposit circuit accepts an EIP-1559
-  transaction of at most 256 calldata bytes and at most 3 logs, so
-  `deposit-relayer daemon` cannot prove this transaction yet. Ethereum
-  mainnet (chain id 1) is also outside the deposit-prover allowlist;
-  Sepolia (11155111) is inside it.
+- **Ethereum mainnet (chain id 1) is a supported deposit chain.**
+  `crates/deposit-chain-ids` now lists it, so `deposit-prover` and
+  `deposit-relayer` accept `Deposit` events from a mainnet `AckiNackiBridge`
+  — the CCTP hub. The allowlist is checked off-circuit: the verification key
+  is unchanged and existing proofs still verify. On Acki Nacki, trust the
+  mainnet hub bridge with `setTrustedL1Bridge(1, <hub bridge>)` and give
+  chain 1 an anchor writer, as for any other chain.
 
 - **`scripts/cctp_usdc.sh` deploys and wires the CCTP contracts.**
   `deploy-endpoint` and `deploy-receiver` broadcast `script/DeployCctp.s.sol`.
-  `set-hub`, `set-source` and `set-egress` broadcast `script/WireCctp.s.sol`,
+  `set-hub`, `set-source`, `set-egress` and `set-forwarder` (`CCTP_RECEIVER`,
+  `CCTP_FORWARDER`) broadcast `script/WireCctp.s.sol`,
   which left-pads 20-byte addresses to the bytes32 Circle stores. Every
   broadcast requires `CONFIRM_CCTP=BROADCAST`, `RPC_URL` and `PRIVATE_KEY`.
   Circle's messenger, transmitter and USDC addresses are arguments, not
   defaults. `print-keepers` prints the `cctp-daemon` command and the hub
   `deposit-relayer daemon` command; it does not start them and does not
-  print keys. It repeats the circuit limit above.
+  print keys. Run `set-forwarder` for the `cctp-daemon` key before starting
+  it.
 
 - **`eccUSDCBridge` source (version string `1.6.0`) can mint more than USDC
   and can take a different anchor writer per chain.** The compiled

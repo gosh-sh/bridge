@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::error::RelayerError;
 
-/// One attested CCTP message, ready to pass to `receiveAndDeposit`.
+/// One attested CCTP message, ready to pass to `receiveBurn`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttestedMessage {
     pub message: Vec<u8>,

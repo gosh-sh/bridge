@@ -14,21 +14,34 @@ import "./TwoStepOwnable.sol";
 ///
 ///         Circle mints to `mintRecipient` and stops there — the hook is not
 ///         executed. This contract is both the mint recipient and the message's
-///         `destinationCaller`, so the mint and `bridge.deposit` happen in one
-///         transaction: `receiveAndDeposit` parses the burn, asks the
-///         MessageTransmitter to verify the attestation and mint, and deposits
-///         the amount that actually arrived (`amount - feeExecuted`).
+///         `destinationCaller`. Crediting takes two transactions:
+///
+///         1. `receiveBurn(message, attestation)` — permissionless. Parses the
+///            burn, asks the MessageTransmitter to verify and mint, and parks
+///            `amount - feeExecuted` under the message key.
+///         2. `forward(key)` — a configured forwarder or the depositor calls
+///            `bridge.deposit` for the parked amount.
+///
+///         The `Deposit` from step 2 is what Acki Nacki proves. The deposit
+///         circuit accepts only an EIP-1559 transaction with at most 256 bytes
+///         of calldata and at most 3 logs in the receipt; step 1 carries the
+///         Circle message and attestation and cannot fit. `forward` is 36 bytes
+///         of calldata, and its receipt holds the token `Transfer` and the
+///         `Deposit`. The contract cannot see the transaction type, so `forward`
+///         is not open to everyone: a legacy or contract-wrapped call would
+///         still move the funds into the bridge and leave a deposit no one can
+///         prove.
 ///
 ///         Sources are a registry, not a hard-coded chain. Arbitrum is one row
 ///         (`domain => adapter, remote token, EIP-155 chain id`). A second
 ///         domain or a second token (another receiver, another bridge) does not
 ///         change this code.
 ///
-///         The `Deposit` event this produces is a hub deposit. Its `chainId` is
-///         the hub's, its `sender` is this contract, and its `anAccount` comes
-///         from the hook. Acki Nacki trusts the hub bridge, not the remote
-///         chain. The remote chain id is in `RemoteDepositForwarded` for the
-///         indexer; it is not a public input of the deposit proof.
+///         The `Deposit` event is a hub deposit. Its `chainId` is the hub's, its
+///         `sender` is this contract, and its `anAccount` comes from the hook.
+///         Acki Nacki trusts the hub bridge, not the remote chain. The remote
+///         chain id is in `RemoteDepositReceived`; it is not a public input of
+///         the deposit proof.
 contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
     struct Source {
         uint256 chainId;
@@ -37,20 +50,33 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
         bool enabled;
     }
 
+    struct Pending {
+        uint256 amount;
+        bytes32 anAccount;
+        address depositor;
+        int8 anWorkchain;
+    }
+
     IDepositBridge public immutable bridge;
     IERC20 public immutable token;
     IMessageTransmitterV2 public immutable messageTransmitter;
     uint32 public immutable localDomain;
 
     mapping(uint32 domain => Source) public sources;
+    mapping(bytes32 key => Pending) public pending;
+    mapping(address account => bool) public forwarders;
+    /// @notice Sum of `pending` amounts. `rescue` cannot touch it.
+    uint256 public totalPending;
 
     event SourceSet(
         uint32 indexed domain, uint256 chainId, bytes32 adapter, bytes32 remoteToken, bool enabled
     );
-    event RemoteDepositForwarded(
+    event ForwarderSet(address indexed account, bool allowed);
+    event RemoteDepositReceived(
+        bytes32 indexed key,
         uint32 indexed sourceDomain,
         uint256 indexed chainId,
-        address indexed depositor,
+        address depositor,
         bytes32 anAccount,
         uint256 amount,
         uint256 feeExecuted
@@ -69,6 +95,10 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
     error ReceiveFailed();
     error MintMismatch(uint256 expected, uint256 actual);
     error TransferFailed();
+    error AlreadyPending(bytes32 key);
+    error NotPending(bytes32 key);
+    error NotForwarder();
+    error PendingFunds(uint256 available);
 
     constructor(address bridge_, address messageTransmitter_, uint32 localDomain_) {
         if (bridge_ == address(0) || messageTransmitter_ == address(0)) revert ZeroAddress();
@@ -78,10 +108,14 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
         token = IERC20(token_);
         messageTransmitter = IMessageTransmitterV2(messageTransmitter_);
         localDomain = localDomain_;
+        // A per-forward approve would add an `Approval` log to the receipt the
+        // deposit circuit parses (3 logs max). `bridge` is immutable and only
+        // pulls from its own caller.
+        if (!token.approve(bridge_, type(uint256).max)) revert TransferFailed();
     }
 
     /// @notice Trust burns from `adapter` of `remoteToken` on CCTP `domain`.
-    ///         `chainId` is the EIP-155 id recorded in `RemoteDepositForwarded`.
+    ///         `chainId` is the EIP-155 id recorded in `RemoteDepositReceived`.
     ///         Enabling requires all three of adapter, remote token and chain id.
     function setSource(
         uint32 domain,
@@ -99,14 +133,27 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
         emit SourceSet(domain, chainId, adapter, remoteToken, enabled);
     }
 
-    /// @notice Verify `message` with Circle and deposit the minted tokens.
+    /// @notice Allow `account` to call `forward`. It must send EIP-1559
+    ///         transactions straight to this contract.
+    function setForwarder(address account, bool allowed) external onlyOwner {
+        if (account == address(0)) revert ZeroAddress();
+        forwarders[account] = allowed;
+        emit ForwarderSet(account, allowed);
+    }
+
+    /// @notice `keccak256(abi.encode(sourceDomain, nonce))` — the `pending` key.
+    function messageKey(uint32 sourceDomain, bytes32 nonce) public pure returns (bytes32) {
+        return keccak256(abi.encode(sourceDomain, nonce));
+    }
+
+    /// @notice Verify `message` with Circle, mint, and park the deposit.
     ///         Permissionless: the attestation is the authorization, and the
     ///         message names this contract as `destinationCaller`, so no one
     ///         else can mint it out from under us.
-    function receiveAndDeposit(bytes calldata message, bytes calldata attestation)
+    function receiveBurn(bytes calldata message, bytes calldata attestation)
         external
         nonReentrant
-        returns (uint256 minted)
+        returns (bytes32 key, uint256 minted)
     {
         CctpV2Message.Parsed memory parsed = CctpV2Message.parse(message);
         if (parsed.destinationDomain != localDomain) {
@@ -127,6 +174,9 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
         minted = parsed.amount - parsed.feeExecuted;
         if (minted == 0) revert ZeroMint();
 
+        key = messageKey(parsed.sourceDomain, parsed.nonce);
+        if (pending[key].amount != 0) revert AlreadyPending(key);
+
         uint256 beforeBal = token.balanceOf(address(this));
         if (!messageTransmitter.receiveMessage(message, attestation)) revert ReceiveFailed();
         uint256 afterBal = token.balanceOf(address(this));
@@ -134,30 +184,45 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
             revert MintMismatch(minted, afterBal - beforeBal);
         }
 
-        _approve(address(bridge), 0);
-        _approve(address(bridge), minted);
-        bridge.deposit(minted, anWorkchain, anAccount);
-        if (token.allowance(address(this), address(bridge)) != 0) {
-            _approve(address(bridge), 0);
-        }
+        pending[key] = Pending({
+            amount: minted, anAccount: anAccount, depositor: depositor, anWorkchain: anWorkchain
+        });
+        totalPending += minted;
 
-        emit RemoteDepositForwarded(
-            parsed.sourceDomain, source.chainId, depositor, anAccount, minted, parsed.feeExecuted
+        emit RemoteDepositReceived(
+            key,
+            parsed.sourceDomain,
+            source.chainId,
+            depositor,
+            anAccount,
+            minted,
+            parsed.feeExecuted
         );
     }
 
-    /// @notice Pull tokens that were sent here outside `receiveAndDeposit`.
-    ///         A successful receive leaves a zero balance: the mint and the
-    ///         deposit are one transaction, and a failing deposit rolls the
-    ///         mint back with it.
-    function rescue(address token_, address to, uint256 amount) external onlyOwner nonReentrant {
-        if (to == address(0)) revert ZeroAddress();
-        if (!IERC20(token_).transfer(to, amount)) revert TransferFailed();
-        emit Rescued(token_, to, amount);
+    /// @notice Deposit a parked burn into the hub bridge. Emits no event of its
+    ///         own: the receipt must stay within the deposit circuit's 3 logs.
+    function forward(bytes32 key) external nonReentrant {
+        Pending memory parked = pending[key];
+        if (parked.amount == 0) revert NotPending(key);
+        if (!forwarders[msg.sender] && msg.sender != parked.depositor) revert NotForwarder();
+
+        delete pending[key];
+        totalPending -= parked.amount;
+        bridge.deposit(parked.amount, parked.anWorkchain, parked.anAccount);
     }
 
-    function _approve(address spender, uint256 amount) internal {
-        if (!token.approve(spender, amount)) revert TransferFailed();
+    /// @notice Pull tokens that were sent here outside `receiveBurn`. Parked
+    ///         deposits are not available to it.
+    function rescue(address token_, address to, uint256 amount) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        if (token_ == address(token)) {
+            uint256 balance = token.balanceOf(address(this));
+            uint256 available = balance > totalPending ? balance - totalPending : 0;
+            if (amount > available) revert PendingFunds(available);
+        }
+        if (!IERC20(token_).transfer(to, amount)) revert TransferFailed();
+        emit Rescued(token_, to, amount);
     }
 
     function _asBytes32(address account) internal pure returns (bytes32) {

@@ -21,6 +21,10 @@ import "../src/cctp/CctpHubReceiver.sol";
 ///
 ///         `set-egress` on the hub `CctpEndpoint`:
 ///         `CCTP_ENDPOINT`, `CCTP_EGRESS_DOMAIN`, `CCTP_EGRESS_ALLOWED`.
+///
+///         `set-forwarder` on the hub `CctpHubReceiver`:
+///         `CCTP_RECEIVER`, `CCTP_FORWARDER` (the keeper EOA). `CCTP_ENABLED`
+///         defaults to true.
 contract WireCctp is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -52,8 +56,12 @@ contract WireCctp is Script {
                 uint32(vm.envUint("CCTP_EGRESS_DOMAIN")), vm.envBool("CCTP_EGRESS_ALLOWED")
             );
             console.log("setEgressDomain on", address(endpoint));
+        } else if (keccak256(bytes(wire)) == keccak256("set-forwarder")) {
+            CctpHubReceiver receiver = CctpHubReceiver(vm.envAddress("CCTP_RECEIVER"));
+            receiver.setForwarder(vm.envAddress("CCTP_FORWARDER"), vm.envOr("CCTP_ENABLED", true));
+            console.log("setForwarder on", address(receiver));
         } else {
-            revert("CCTP_WIRE must be set-hub, set-source, or set-egress");
+            revert("CCTP_WIRE must be set-hub, set-source, set-egress, or set-forwarder");
         }
         vm.stopBroadcast();
     }

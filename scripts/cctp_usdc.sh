@@ -7,6 +7,7 @@
 #   set-hub           source endpoint: which hub receiver a token burns toward
 #   set-source        hub receiver: which remote endpoint may burn which token
 #   set-egress        hub endpoint: which domain bridgeOut may mint on
+#   set-forwarder     hub receiver: which keeper EOA may call forward
 #   print-keepers     print cctp-daemon and the hub deposit-relayer daemon
 #
 # A broadcast refuses to run unless CONFIRM_CCTP=BROADCAST. Circle contract
@@ -14,12 +15,10 @@
 # / USDC for that chain from Circle's registry.
 #
 # print-keepers does not start a process and does not print private keys.
-# The hub Deposit is emitted by receiveAndDeposit. That transaction's calldata
-# is the Circle message plus the attestation (the hook starts at byte 376) and
-# the receipt has more than three logs. The deposit circuit accepts an
-# EIP-1559 transaction of at most 256 calldata bytes and at most 3 logs, so
-# `deposit-relayer daemon` cannot prove it yet. Ethereum mainnet (chain id 1)
-# is also outside the deposit-prover allowlist; Sepolia (11155111) is inside it.
+# The keeper sends two hub transactions per burn: receiveBurn (Circle message
+# and attestation, mints and parks) and forward (36 bytes, calls
+# bridge.deposit). Only forward's Deposit is proven, so the keeper EOA must be
+# a forwarder (set-forwarder) and must send EIP-1559 transactions directly.
 #
 # Arbitrum's CCTP domain is 3. Ethereum's is 0. Those are not chain ids.
 set -euo pipefail
@@ -30,7 +29,7 @@ ETH_DIR="${ROOT}/contracts/ethereum"
 RELAYER_DIR="${ROOT}/crates/deposit-relayer-daemon"
 
 usage() {
-  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -116,6 +115,15 @@ case "${cmd}" in
     echo ">>> setEgressDomain on ${CCTP_ENDPOINT}"
     forge_broadcast script/WireCctp.s.sol:WireCctp
     ;;
+  set-forwarder)
+    require_broadcast
+    require_addr CCTP_RECEIVER "${CCTP_RECEIVER:?set CCTP_RECEIVER}"
+    require_addr CCTP_FORWARDER "${CCTP_FORWARDER:?set CCTP_FORWARDER to the cctp-daemon EOA}"
+    export CCTP_WIRE=set-forwarder
+    export CCTP_ENABLED="${CCTP_ENABLED:-true}"
+    echo ">>> setForwarder on ${CCTP_RECEIVER}"
+    forge_broadcast script/WireCctp.s.sol:WireCctp
+    ;;
   print-keepers)
     : "${SOURCE_RPC_URL:?set SOURCE_RPC_URL}"
     require_uint SOURCE_DOMAIN "${SOURCE_DOMAIN:?set SOURCE_DOMAIN (Arbitrum is 3)}"
@@ -126,9 +134,11 @@ case "${cmd}" in
     require_addr CCTP_RECEIVER "${CCTP_RECEIVER:?set CCTP_RECEIVER}"
     require_addr HUB_BRIDGE "${HUB_BRIDGE:?set HUB_BRIDGE to the hub AckiNackiBridge}"
     cat <<EOF
-# 1. Submit Circle attestations. Export CCTP_HUB_PRIVATE_KEY in the environment
-#    of this process; the key is not written here. This does not prove and does
-#    not call Acki Nacki. Cursor: ./cctp-forward-state.json
+# 1. Submit Circle attestations: receiveBurn, then forward. Export
+#    CCTP_HUB_PRIVATE_KEY in the environment of this process; the key is not
+#    written here, and its address must be a forwarder on the receiver. This
+#    does not prove and does not call Acki Nacki. Cursor:
+#    ./cctp-forward-state.json
 cd ${RELAYER_DIR}
 cargo run --bin deposit-relayer -- cctp-daemon \\
   --source-rpc-url ${SOURCE_RPC_URL} \\
@@ -142,12 +152,8 @@ cargo run --bin deposit-relayer -- cctp-daemon \\
 # 2. Prove the hub Deposit and call finalizeDeposit. Fill the Acki Nacki flags
 #    the way a normal deposit-relayer daemon is started (AN_GRAPHQL_URL,
 #    AN_KEYS_PATH, AN_BRIDGE_ABI_PATH, AN_TOKEN_BRIDGE, AN_SENDER, AN_DAPP_ID,
-#    and the deposit-prover directory).
-#
-# This step cannot succeed yet. receiveAndDeposit emits the Deposit, and that
-# transaction carries the Circle message and attestation, past the deposit
-# circuit's 256-byte calldata limit and its 3-log limit. Ethereum mainnet
-# (chain id 1) is also outside the prover allowlist; Sepolia is inside it.
+#    and the deposit-prover directory). The Acki Nacki bridge must trust the
+#    hub bridge for the hub chain id (setTrustedL1Bridge), not the source L2.
 cargo run --bin deposit-relayer -- daemon \\
   --rpc-url ${HUB_RPC_URL} \\
   --bridge-address ${HUB_BRIDGE} \\

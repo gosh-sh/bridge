@@ -6,8 +6,9 @@
 
 pub use deposit_chain_ids::{
     is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
-    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET,
-    CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN, SUPPORTED_DEPOSIT_CHAIN_IDS,
+    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_ETHEREUM_MAINNET,
+    CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN,
+    SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
 
 #[cfg(test)]
@@ -15,9 +16,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn six_l2s_plus_sepolia() {
-        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 7);
+    fn mainnet_six_l2s_plus_sepolia() {
+        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 8);
         assert!(is_supported_deposit_chain(CHAIN_ID_BASE));
-        assert!(!is_supported_deposit_chain(1));
+        assert!(is_supported_deposit_chain(CHAIN_ID_ETHEREUM_MAINNET));
+        assert!(!is_supported_deposit_chain(31337));
     }
 }

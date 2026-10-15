@@ -18,8 +18,8 @@
 //!   (`dapp_id::account_id` addresses); pass `--dry-run` to mock the AN side.
 //!
 //! - `cctp-forward` — one Circle burn. Polls Iris and, unless `--dry-run`,
-//!   calls `CctpHubReceiver.receiveAndDeposit` on the hub. Does not prove and
-//!   does not call Acki Nacki.
+//!   calls `CctpHubReceiver.receiveBurn` and then `forward` on the hub. Does
+//!   not prove and does not call Acki Nacki.
 //!
 //! - `cctp-daemon` — every `HubDeposit` on a source `CctpEndpoint`, then the
 //!   same hub submission. Its state file is its own `--state` (default
@@ -239,7 +239,9 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
-    /// Fetch one Circle attestation and call `receiveAndDeposit` on the hub.
+    /// Fetch one Circle attestation, then call `receiveBurn` and `forward` on
+    /// the hub. The `forward` transaction is the one the deposit relayer
+    /// proves; it is sent as EIP-1559 with no access list.
     ///
     /// Iris is looked up by the source-chain burn transaction and the source
     /// CCTP domain (Arbitrum is 3). `--iris-url` has no default: production is
@@ -262,7 +264,8 @@ enum Cmd {
         /// Hub `CctpHubReceiver`. Must be the burn's destination caller.
         #[arg(long)]
         receiver: Address,
-        /// Hub EOA that pays gas for `receiveAndDeposit`. Env:
+        /// Hub EOA that pays gas for `receiveBurn` and `forward`. It must be
+        /// a forwarder on the receiver (`setForwarder`). Env:
         /// `CCTP_HUB_PRIVATE_KEY`. Omitted only with `--dry-run`.
         #[arg(long, env = "CCTP_HUB_PRIVATE_KEY")]
         private_key: Option<String>,
@@ -305,7 +308,8 @@ enum Cmd {
         /// Hub `CctpHubReceiver`.
         #[arg(long)]
         receiver: Address,
-        /// Hub EOA that pays gas for `receiveAndDeposit`. Env:
+        /// Hub EOA that pays gas for `receiveBurn` and `forward`. It must be
+        /// a forwarder on the receiver (`setForwarder`). Env:
         /// `CCTP_HUB_PRIVATE_KEY`.
         #[arg(long, env = "CCTP_HUB_PRIVATE_KEY")]
         private_key: String,

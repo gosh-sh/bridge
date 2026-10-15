@@ -81,6 +81,9 @@ contract CctpArbitrumUsdcTest is Test {
             true
         );
 
+        usdcReceiver.setForwarder(address(this), true);
+        eurcReceiver.setForwarder(address(this), true);
+
         transmitter.setLocalToken(_b32(address(arbUsdc)), address(hubUsdc));
         transmitter.setLocalToken(_b32(address(arbEurc)), address(hubEurc));
 
@@ -162,26 +165,74 @@ contract CctpArbitrumUsdcTest is Test {
         );
 
         vm.recordLogs();
-        uint256 minted = usdcReceiver.receiveAndDeposit(message, "");
+        (bytes32 key, uint256 minted) = usdcReceiver.receiveBurn(message, "");
+        Vm.Log[] memory received = vm.getRecordedLogs();
 
+        assertEq(key, usdcReceiver.messageKey(CctpDomains.ARBITRUM, bytes32(uint256(1))));
         assertEq(minted, AMOUNT - FEE);
+        assertEq(usdcBridge.depositCounter(), 0);
+        assertEq(usdcReceiver.totalPending(), AMOUNT - FEE);
+        assertEq(hubUsdc.balanceOf(address(usdcReceiver)), AMOUNT - FEE);
+        _assertReceived(
+            received, key, CctpDomains.ARBITRUM, ARBITRUM_CHAIN, user, AMOUNT - FEE, FEE
+        );
+
+        vm.recordLogs();
+        usdcReceiver.forward(key);
+        Vm.Log[] memory forwarded = vm.getRecordedLogs();
+
+        assertLe(forwarded.length, 3, "deposit circuit parses at most 3 logs");
+        _assertDeposit(forwarded, address(usdcReceiver), AMOUNT - FEE);
         assertEq(usdcBridge.treasuryBalance(), AMOUNT - FEE);
         assertEq(usdcBridge.depositCounter(), 1);
         assertEq(hubUsdc.balanceOf(address(usdcBridge)), AMOUNT - FEE);
         assertEq(hubUsdc.balanceOf(address(usdcReceiver)), 0);
-        assertEq(hubUsdc.allowance(address(usdcReceiver), address(usdcBridge)), 0);
+        assertEq(usdcReceiver.totalPending(), 0);
         assertEq(eurcBridge.treasuryBalance(), 0);
 
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        _assertDeposit(logs, address(usdcReceiver), AMOUNT - FEE);
-        _assertForwarded(logs, CctpDomains.ARBITRUM, ARBITRUM_CHAIN, user, AMOUNT - FEE, FEE);
+        vm.expectRevert(abi.encodeWithSelector(CctpHubReceiver.NotPending.selector, key));
+        usdcReceiver.forward(key);
+    }
+
+    function test_forward_isForwarderOrDepositorOnly() public {
+        bytes memory message = _message(
+            CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(11)), 0
+        );
+        (bytes32 key,) = usdcReceiver.receiveBurn(message, "");
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(CctpHubReceiver.NotForwarder.selector);
+        usdcReceiver.forward(key);
+
+        usdcReceiver.setForwarder(address(this), false);
+        vm.expectRevert(CctpHubReceiver.NotForwarder.selector);
+        usdcReceiver.forward(key);
+
+        vm.prank(user);
+        usdcReceiver.forward(key);
+        assertEq(usdcBridge.treasuryBalance(), AMOUNT);
+    }
+
+    function test_rescue_cannotTakeParkedDeposits() public {
+        bytes memory message = _message(
+            CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(12)), 0
+        );
+        (bytes32 key,) = usdcReceiver.receiveBurn(message, "");
+        hubUsdc.mint(address(usdcReceiver), 50);
+
+        vm.expectRevert(abi.encodeWithSelector(CctpHubReceiver.PendingFunds.selector, 50));
+        usdcReceiver.rescue(address(hubUsdc), user, 51);
+
+        usdcReceiver.rescue(address(hubUsdc), user, 50);
+        usdcReceiver.forward(key);
+        assertEq(usdcBridge.treasuryBalance(), AMOUNT);
     }
 
     function test_baseSource_usesTheSameReceiver() public {
         bytes memory hook = _hook(address(0xB0B));
         bytes memory message =
             _messageFrom(CctpDomains.BASE, _b32(address(0xBACE)), hook, bytes32(uint256(2)), 0);
-        uint256 minted = usdcReceiver.receiveAndDeposit(message, "");
+        uint256 minted = _receiveAndForward(usdcReceiver, message);
         assertEq(minted, AMOUNT);
         assertEq(usdcBridge.treasuryBalance(), AMOUNT);
     }
@@ -191,7 +242,7 @@ contract CctpArbitrumUsdcTest is Test {
             CctpDomains.ARBITRUM, _b32(address(0xBACE)), _hook(user), bytes32(uint256(3)), 0
         );
         vm.expectRevert(CctpHubReceiver.UnexpectedAdapter.selector);
-        usdcReceiver.receiveAndDeposit(message, "");
+        usdcReceiver.receiveBurn(message, "");
         assertEq(transmitter.calls(), 0);
         assertEq(hubUsdc.balanceOf(address(usdcBridge)), 0);
     }
@@ -220,7 +271,7 @@ contract CctpArbitrumUsdcTest is Test {
                 hookData: messenger.lastHook()
             })
         );
-        eurcReceiver.receiveAndDeposit(message, "");
+        _receiveAndForward(eurcReceiver, message);
         assertEq(eurcBridge.treasuryBalance(), AMOUNT);
         assertEq(hubEurc.balanceOf(address(eurcBridge)), AMOUNT);
         assertEq(usdcBridge.treasuryBalance(), 0);
@@ -260,7 +311,7 @@ contract CctpArbitrumUsdcTest is Test {
             unlocked[i] = 0;
         }
         vm.expectRevert(CctpHubReceiver.UnexpectedCaller.selector);
-        usdcReceiver.receiveAndDeposit(unlocked, "");
+        usdcReceiver.receiveBurn(unlocked, "");
         assertEq(transmitter.calls(), 0);
 
         transmitter.setMintDelta(1);
@@ -272,18 +323,23 @@ contract CctpArbitrumUsdcTest is Test {
                 CctpHubReceiver.MintMismatch.selector, AMOUNT - FEE, AMOUNT - FEE + 1
             )
         );
-        usdcReceiver.receiveAndDeposit(message, "");
+        usdcReceiver.receiveBurn(message, "");
         assertEq(hubUsdc.balanceOf(address(usdcReceiver)), 0);
-        assertEq(usdcBridge.treasuryBalance(), 0);
+        assertEq(usdcReceiver.totalPending(), 0);
     }
 
     function test_receive_replayReverts() public {
         bytes memory message = _message(
             CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(8)), 0
         );
-        usdcReceiver.receiveAndDeposit(message, "");
+        (bytes32 key,) = usdcReceiver.receiveBurn(message, "");
+        vm.expectRevert(abi.encodeWithSelector(CctpHubReceiver.AlreadyPending.selector, key));
+        usdcReceiver.receiveBurn(message, "");
+
+        usdcReceiver.forward(key);
         vm.expectRevert(MockMessageTransmitter.NonceUsed.selector);
-        usdcReceiver.receiveAndDeposit(message, "");
+        usdcReceiver.receiveBurn(message, "");
+        assertEq(usdcBridge.depositCounter(), 1);
     }
 
     function test_receive_reentrancyReverts() public {
@@ -304,7 +360,7 @@ contract CctpArbitrumUsdcTest is Test {
         // The crafted message names `usdcReceiver` as destinationCaller. Point it at `trapped`.
         bytes memory aimed = _retarget(message, address(trapped));
         vm.expectRevert(ReentrancyGuard.Reentrancy.selector);
-        trapped.receiveAndDeposit(aimed, "");
+        trapped.receiveBurn(aimed, "");
     }
 
     function test_hook_rejectsUnknownVersion() public {
@@ -312,7 +368,7 @@ contract CctpArbitrumUsdcTest is Test {
         bytes memory message =
             _message(CctpDomains.ARBITRUM, _b32(address(endpoint)), hook, bytes32(uint256(10)), 0);
         vm.expectRevert(abi.encodeWithSelector(AnDestinationHook.BadHookVersion.selector, uint8(2)));
-        usdcReceiver.receiveAndDeposit(message, "");
+        usdcReceiver.receiveBurn(message, "");
         assertEq(transmitter.calls(), 0);
     }
 
@@ -353,6 +409,15 @@ contract CctpArbitrumUsdcTest is Test {
         assertEq(endpoint.owner(), user);
         vm.expectRevert(TwoStepOwnable.NotOwner.selector);
         endpoint.setEgressDomain(CctpDomains.BASE, true);
+    }
+
+    function _receiveAndForward(CctpHubReceiver receiver, bytes memory message)
+        internal
+        returns (uint256 minted)
+    {
+        bytes32 key;
+        (key, minted) = receiver.receiveBurn(message, "");
+        receiver.forward(key);
     }
 
     function _bridge(MockERC20 token) internal returns (AckiNackiBridge) {
@@ -440,8 +505,9 @@ contract CctpArbitrumUsdcTest is Test {
         revert("Deposit log missing");
     }
 
-    function _assertForwarded(
+    function _assertReceived(
         Vm.Log[] memory logs,
+        bytes32 key,
         uint32 domain,
         uint256 chainId,
         address depositor,
@@ -449,21 +515,22 @@ contract CctpArbitrumUsdcTest is Test {
         uint256 fee
     ) internal pure {
         bytes32 topic = keccak256(
-            "RemoteDepositForwarded(uint32,uint256,address,bytes32,uint256,uint256)"
+            "RemoteDepositReceived(bytes32,uint32,uint256,address,bytes32,uint256,uint256)"
         );
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != topic) continue;
-            assertEq(uint32(uint256(logs[i].topics[1])), domain);
-            assertEq(uint256(logs[i].topics[2]), chainId);
-            assertEq(address(uint160(uint256(logs[i].topics[3]))), depositor);
-            (bytes32 account, uint256 loggedAmount, uint256 loggedFee) =
-                abi.decode(logs[i].data, (bytes32, uint256, uint256));
+            assertEq(logs[i].topics[1], key);
+            assertEq(uint32(uint256(logs[i].topics[2])), domain);
+            assertEq(uint256(logs[i].topics[3]), chainId);
+            (address loggedDepositor, bytes32 account, uint256 loggedAmount, uint256 loggedFee) =
+                abi.decode(logs[i].data, (address, bytes32, uint256, uint256));
+            assertEq(loggedDepositor, depositor);
             assertEq(account, bytes32(uint256(0xabc)));
             assertEq(loggedAmount, amount);
             assertEq(loggedFee, fee);
             return;
         }
-        revert("RemoteDepositForwarded log missing");
+        revert("RemoteDepositReceived log missing");
     }
 
     function _b32(address account) internal pure returns (bytes32) {
@@ -471,7 +538,7 @@ contract CctpArbitrumUsdcTest is Test {
     }
 }
 
-/// @notice Re-enters `receiveAndDeposit` from inside `receiveMessage`.
+/// @notice Re-enters `receiveBurn` from inside `receiveMessage`.
 contract ReenteringTransmitter is IMessageTransmitterV2 {
     CctpHubReceiver public receiver;
     bool public entered;
@@ -486,7 +553,7 @@ contract ReenteringTransmitter is IMessageTransmitterV2 {
     {
         if (!entered) {
             entered = true;
-            receiver.receiveAndDeposit(message, attestation);
+            receiver.receiveBurn(message, attestation);
         }
         return true;
     }

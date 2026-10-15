@@ -8,7 +8,7 @@ use std::{
 
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, Bytes},
+    primitives::{keccak256, Address, Bytes, B256, U256},
     providers::{Provider, ProviderBuilder},
     rpc::types::{Filter, TransactionRequest},
     signers::local::PrivateKeySigner,
@@ -16,7 +16,7 @@ use alloy::{
     sol_types::{SolCall, SolEvent},
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::iris::{expected_domain, normalize_tx_hash, AttestedMessage, IrisClass, IrisClient};
 use crate::{
@@ -37,7 +37,9 @@ sol! {
             uint256 maxFee
         );
 
-        function receiveAndDeposit(bytes message, bytes attestation) external returns (uint256 minted);
+        function receiveBurn(bytes message, bytes attestation) external returns (bytes32 key, uint256 minted);
+        function forward(bytes32 key) external;
+        function pending(bytes32 key) external view returns (uint256 amount, bytes32 anAccount, address depositor, int8 anWorkchain);
     }
 }
 
@@ -46,6 +48,10 @@ sol! {
 pub const MAX_FORWARD_FAILURES: u32 = 8;
 
 const LOG_CHUNK_BLOCKS: u64 = 10;
+/// Deposit circuit limits (`deposit-prover/src/circuit_v2.rs`: `MAX_LOG_NUM`,
+/// `EIP1559_TX_TYPE`).
+const MAX_PROVABLE_LOGS: usize = 3;
+const EIP1559_TX_TYPE: u8 = 2;
 /// Iris lookups per tick. A backlog waits for the next poll instead of
 /// bursting the public API.
 const MAX_LOOKUPS_PER_TICK: usize = 20;
@@ -391,7 +397,7 @@ where
                     match submit_one(hub, cfg.receiver, message).await {
                         Ok(()) => {},
                         Err(error) => {
-                            warn!(%tx_hash, %error, "receiveAndDeposit failed");
+                            warn!(%tx_hash, %error, "hub submission failed");
                             state.record_failure(&tx_hash);
                             failed = true;
                             break;
@@ -456,12 +462,30 @@ async fn hub_provider(hub_rpc_url: &str, private_key: &str) -> Result<impl Provi
     Ok(provider)
 }
 
+/// `receiveBurn`, then `forward`. Either step may already have been done by an
+/// earlier run; `pending(key)` tells which.
 async fn submit_one(
     provider: &impl Provider,
     receiver: Address,
     message: &AttestedMessage,
 ) -> Result<(), RelayerError> {
-    let call = CctpHubReceiver::receiveAndDepositCall {
+    let key = message_key(&message.message)?;
+    if pending_amount(provider, receiver, key).await?.is_zero() {
+        receive_burn(provider, receiver, message).await?;
+        if pending_amount(provider, receiver, key).await?.is_zero() {
+            info!(%key, "message already received and forwarded");
+            return Ok(());
+        }
+    }
+    forward(provider, receiver, key).await
+}
+
+async fn receive_burn(
+    provider: &impl Provider,
+    receiver: Address,
+    message: &AttestedMessage,
+) -> Result<(), RelayerError> {
+    let call = CctpHubReceiver::receiveBurnCall {
         message: Bytes::copy_from_slice(&message.message),
         attestation: Bytes::copy_from_slice(&message.attestation),
     };
@@ -473,18 +497,18 @@ async fn submit_one(
         Err(error) => {
             let text = error.to_string();
             if is_nonce_already_used(&text) {
-                info!("receiveAndDeposit already mined (nonce used)");
+                info!("receiveBurn already mined (nonce used)");
                 return Ok(());
             }
-            return Err(RelayerError::eth(format!("send receiveAndDeposit: {text}")));
+            return Err(RelayerError::eth(format!("send receiveBurn: {text}")));
         },
     };
     let receipt = pending
         .get_receipt()
         .await
-        .map_err(|e| RelayerError::eth(format!("receiveAndDeposit receipt: {e}")))?;
+        .map_err(|e| RelayerError::eth(format!("receiveBurn receipt: {e}")))?;
     if receipt.status() {
-        info!(tx = %receipt.transaction_hash, "receiveAndDeposit mined");
+        info!(tx = %receipt.transaction_hash, "receiveBurn mined");
         return Ok(());
     }
     let replay = provider
@@ -493,12 +517,102 @@ async fn submit_one(
         .map(|_| "eth_call succeeded after a failed receipt".to_string())
         .unwrap_or_else(|e| e.to_string());
     if is_nonce_already_used(&replay) {
-        info!("receiveAndDeposit already mined (nonce used)");
+        info!("receiveBurn already mined (nonce used)");
         return Ok(());
     }
-    Err(RelayerError::eth(format!(
-        "receiveAndDeposit reverted: {replay}"
-    )))
+    Err(RelayerError::eth(format!("receiveBurn reverted: {replay}")))
+}
+
+/// The deposit circuit proves this transaction's `Deposit`: EIP-1559 only, no
+/// access list, at most [`MAX_PROVABLE_LOGS`] logs in the receipt.
+async fn forward(
+    provider: &impl Provider,
+    receiver: Address,
+    key: B256,
+) -> Result<(), RelayerError> {
+    let fees = provider
+        .estimate_eip1559_fees()
+        .await
+        .map_err(|e| RelayerError::eth(format!("EIP-1559 fee estimate: {e}")))?;
+    let tx = TransactionRequest::default()
+        .to(receiver)
+        .input(
+            CctpHubReceiver::forwardCall {
+                key,
+            }
+            .abi_encode()
+            .into(),
+        )
+        .max_fee_per_gas(fees.max_fee_per_gas)
+        .max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .map_err(|e| RelayerError::eth(format!("send forward: {e}")))?;
+    let receipt = pending
+        .get_receipt()
+        .await
+        .map_err(|e| RelayerError::eth(format!("forward receipt: {e}")))?;
+    if !receipt.status() {
+        if pending_amount(provider, receiver, key).await?.is_zero() {
+            info!(%key, "forward reverted but nothing is parked; another caller forwarded it");
+            return Ok(());
+        }
+        return Err(RelayerError::eth(format!(
+            "forward reverted (tx {}); is this key a forwarder on the receiver?",
+            receipt.transaction_hash
+        )));
+    }
+    let tx_type = u8::from(receipt.transaction_type());
+    let logs = receipt.logs().len();
+    if tx_type != EIP1559_TX_TYPE || logs > MAX_PROVABLE_LOGS {
+        error!(
+            tx = %receipt.transaction_hash,
+            tx_type,
+            logs,
+            "hub Deposit is not provable: the deposit circuit needs an EIP-1559 transaction with at \
+             most 3 logs"
+        );
+    } else {
+        info!(tx = %receipt.transaction_hash, %key, "forward mined; hub Deposit emitted");
+    }
+    Ok(())
+}
+
+async fn pending_amount(
+    provider: &impl Provider,
+    receiver: Address,
+    key: B256,
+) -> Result<U256, RelayerError> {
+    let tx = TransactionRequest::default().to(receiver).input(
+        CctpHubReceiver::pendingCall {
+            key,
+        }
+        .abi_encode()
+        .into(),
+    );
+    let out = provider
+        .call(tx)
+        .await
+        .map_err(|e| RelayerError::eth(format!("pending({key}): {e}")))?;
+    let decoded = CctpHubReceiver::pendingCall::abi_decode_returns(&out)
+        .map_err(|e| RelayerError::eth(format!("decode pending({key}): {e}")))?;
+    Ok(decoded.amount)
+}
+
+/// `CctpHubReceiver.messageKey(sourceDomain, nonce)` from the raw message:
+/// source domain at byte 4, nonce at byte 12.
+pub fn message_key(message: &[u8]) -> Result<B256, RelayerError> {
+    if message.len() < 44 {
+        return Err(RelayerError::other(format!(
+            "CCTP message is {} bytes, too short for a nonce",
+            message.len()
+        )));
+    }
+    let mut encoded = [0u8; 64];
+    encoded[28..32].copy_from_slice(&message[4..8]);
+    encoded[32..64].copy_from_slice(&message[12..44]);
+    Ok(keccak256(encoded))
 }
 
 pub fn is_nonce_already_used(err: &str) -> bool {
@@ -583,6 +697,18 @@ mod tests {
         state.last_scanned_block = Some(150);
         assert_eq!(state.next_scan_block(100), 151);
         assert_eq!(state.next_scan_block(400), 400);
+    }
+
+    #[test]
+    fn message_key_matches_abi_encode_of_domain_and_nonce() {
+        use alloy::sol_types::SolValue;
+        let nonce = B256::from([0x5a; 32]);
+        let mut message = vec![0u8; 400];
+        message[4..8].copy_from_slice(&3u32.to_be_bytes());
+        message[12..44].copy_from_slice(nonce.as_slice());
+        let expected = keccak256((3u32, nonce).abi_encode());
+        assert_eq!(message_key(&message).unwrap(), expected);
+        assert!(message_key(&message[..43]).is_err());
     }
 
     #[test]

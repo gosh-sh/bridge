@@ -282,6 +282,22 @@ pub async fn run(
                 source: None,
             });
         }
+        let (minted, burned) =
+            call_get_total_bridged(&context, &usdc_bridge_legacy, &bridge_boc).await?;
+        if burned > minted || amount.0 > minted - burned {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
+                     minted={minted} burned={burned} µUSDC (getTotalBridged(3)); \
+                     initiateWithdrawal of {} µUSDC would refuse the burn with 233 \
+                     (ERR_BURN_EXCEEDS_BRIDGED) and the USDC would bounce back to the multisig. \
+                     Owner-minted ECC does not add bridged inventory; a prior finalized deposit \
+                     must cover the amount.",
+                    amount.0
+                ),
+                source: None,
+            });
+        }
     }
 
     // 7. ECC[3] balance from the parsed account.
@@ -537,6 +553,86 @@ async fn call_is_paused(
             ),
             source: None,
         })
+}
+
+/// ECC token id the bridge withdraws (`USDC_ECC_ID` in `eccUSDCBridge`).
+const BRIDGED_USDC_TOKEN_ID: u32 = 3;
+
+/// Run `getTotalBridged(3)` on the USDCBridge's own code, locally.
+async fn call_get_total_bridged(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+) -> CliResult<(u128, u128)> {
+    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        address: Some(bridge_legacy.to_string()),
+        call_set: Some(CallSet {
+            function_name: "getTotalBridged".to_string(),
+            header: None,
+            input: Some(json!({ "tokenId": BRIDGED_USDC_TOKEN_ID })),
+        }),
+        signer: Signer::None,
+        deploy_set: None,
+        processing_try_index: None,
+        signature_id: None,
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!(
+            "encode getTotalBridged call for {bridge_legacy}: {}",
+            e.message()
+        ),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
+        message: encoded.message,
+        account: bridge_boc.to_string(),
+        abi: Some(abi),
+        execution_options: None,
+        boc_cache: None,
+        return_updated_account: Some(false),
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!(
+            "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: {}",
+            e.message()
+        ),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    let output = run
+        .decoded
+        .and_then(|d| d.output)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: no decoded \
+                 output (ABI mismatch?)"
+            ),
+            source: None,
+        })?;
+    let minted = json_u128(&output["minted"]).ok_or_else(|| CliError::Preflight {
+        reason: format!(
+            "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: minted is not a \
+             uint128: {output}"
+        ),
+        source: None,
+    })?;
+    let burned = json_u128(&output["burned"]).ok_or_else(|| CliError::Preflight {
+        reason: format!(
+            "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: burned is not a \
+             uint128: {output}"
+        ),
+        source: None,
+    })?;
+    Ok((minted, burned))
+}
+
+fn json_u128(v: &Value) -> Option<u128> {
+    v.as_u64()
+        .map(u128::from)
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 /// The custodian list out of a `getCustodians` answer, refusing
@@ -2653,9 +2749,10 @@ pub(crate) mod tests {
     /// the Active and code-hash checks, `getCustodians` on the account's
     /// own code, the owner match against `--from-keys`, the USDCBridge
     /// lookup and the ECC[3] sufficiency check — with nothing stubbed
-    /// but the wire.
+    /// but the wire. A freshly deployed test bridge has no bridged
+    /// inventory, so the burn is refused with 233 before it is sent.
     #[tokio::test]
-    async fn preflight_passes_its_an_side_against_a_fake_node() {
+    async fn preflight_refuses_when_bridged_inventory_is_short() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
         let (usdc_bridge_account_id, usdc_bridge_boc) =
             crate::test_chain::deployed_usdc_bridge(false).await;
@@ -2677,7 +2774,7 @@ pub(crate) mod tests {
                 .unwrap();
         let amount = crate::args::parse_amount("1.000000").unwrap();
 
-        let report = run(
+        let err = run(
             &from,
             &keys,
             &to,
@@ -2687,16 +2784,11 @@ pub(crate) mod tests {
             BalanceCheck::Require,
         )
         .await
-        .expect("the AN side of preflight passes against a real account and a fake wire");
-
-        assert_eq!(
-            report.multisig_ecc3_balance, 5_000_000,
-            "the balance comes off the account BOC, not off anything the node said in JSON",
-        );
-        assert_eq!(
-            report.usdc_bridge_extended,
-            format!("{usdc_bridge_account_id}::{usdc_bridge_account_id}"),
-        );
+        .expect_err("a bridge with minted=0 refuses the burn before it is sent");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("233"), "{msg}");
+        assert!(msg.contains("getTotalBridged"), "{msg}");
 
         // And it got there by asking, rather than by some default
         // answering for it. The two REST shapes are the ones this crate
@@ -2727,6 +2819,12 @@ pub(crate) mod tests {
                     .await
                     .unwrap(),
                 paused
+            );
+            assert_eq!(
+                call_get_total_bridged(&ctx, &format!("0:{id}"), &boc)
+                    .await
+                    .unwrap(),
+                (0, 0)
             );
         }
     }

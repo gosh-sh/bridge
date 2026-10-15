@@ -83,7 +83,8 @@ assigns it when the release is tagged.
   Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and
   cannot be withdrawn across the bridge against Ethereum treasury they
   never entered. Existing ECC from those paths stays on Acki Nacki.
-  Redeploy or `updateCode` the AN bridge after this version.
+  The withdraw CLI preflight checks `getTotalBridged` and refuses before
+  the burn. Redeploy or `updateCode` the AN bridge after this version.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer

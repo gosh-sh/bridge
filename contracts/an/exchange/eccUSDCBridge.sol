@@ -87,8 +87,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
     // Cross-chain bridge accounting per tokenId (independent of stripe
     // `_totalMinted`). `initiateWithdrawal` keeps burned <= minted for that
-    // token, so owner-minted and TIP-3-minted ECC cannot be withdrawn to
-    // Ethereum against bridged inventory they never entered.
+    // token. ECC[3] is fungible, so this is an inventory cap, not a
+    // provenance fence: owner/TIP-3 ECC can still consume deposit headroom.
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
 
@@ -972,8 +972,21 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _totalMinted = totalMinted;
         _mintNonce = mintNonce;
         _mintAccumulatorNonce = mintAccumulatorNonce;
-        _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
+        // A live bridge may already have burned > minted (owner/TIP-3 ECC
+        // withdrawn before this cap existed). Raise minted to burned so the
+        // new require does not freeze every withdrawal; further burns still
+        // cannot increase the excess.
+        uint32[] tokenIds = totalBurnedBridgeByToken.keys();
+        for (uint i = 0; i < tokenIds.length; i++) {
+            uint32 tokenId = tokenIds[i];
+            uint128 burned = totalBurnedBridgeByToken[tokenId];
+            uint128 minted = totalMintedBridgeByToken[tokenId];
+            if (burned > minted) {
+                totalMintedBridgeByToken[tokenId] = burned;
+            }
+        }
+        _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is

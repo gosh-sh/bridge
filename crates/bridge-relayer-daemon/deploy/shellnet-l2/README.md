@@ -12,9 +12,11 @@ deployment and anchor derivation are covered by
 ## Runtime model
 
 - `relayer` is the only long-running service.
-- `preflight` is an opt-in, read-only one-shot service. It hashes all proving
+- `preflight` is an opt-in one-shot service. It hashes all proving
   artifacts and checks the EOA, GraphQL endpoint, bridge configuration,
-  verifier bytecode, nonce and balance. It never sends a transaction.
+  verifier bytecode, nonce and balance. It never sends a transaction. It
+  does write `$BRIDGE_STATE_DIR/bridge_address` so a later start cannot
+  reuse another bridge's prover state.
 - The container runs as a non-root UID/GID, with a read-only root filesystem,
   all capabilities dropped and `no-new-privileges` enabled.
 - Params, outer proving-key cache, state, submission dumps and scratch space
@@ -68,7 +70,9 @@ $RELAYER_RUNTIME_ROOT/
 │   └── pk_cache/           # writable primary/layer outer PK cache (~17 GiB)
 ├── L2_config/
 │   ├── relayer-state.json
-│   └── state/prover_state.json
+│   └── state/
+│       ├── prover_state.json
+│       └── bridge_address  # written by preflight; the bridge this state belongs to
 ├── submissions/            # exact verifyBlock calldata dumps
 └── tmp/
 ```
@@ -276,5 +280,6 @@ Alert example for an unhealthy source: `sum(rate(relayer_gql_errors_total[1m])) 
 After a planned host reboot, the service returns automatically unless an
 operator stopped it explicitly. Confirm recovery with `docker compose ps`,
 logs and `status.sh`; the normal container entrypoint has already rerun the
-same read-only preflight. If that preflight fails, inspect the restart logs and
+same preflight (it may write `bridge_address`; it still sends no
+transaction). If that preflight fails, inspect the restart logs and
 run `docker compose run --rm preflight` after correcting the cause.

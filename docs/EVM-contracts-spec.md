@@ -233,7 +233,7 @@ Validation performed (and *not* performed):
 | AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
-| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:141`). |
+| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:145`). |
 | verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
@@ -401,9 +401,15 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
-(or its scoped alias), so the same proof cannot be replayed on a second deployment. The
+(or its scoped alias), so the same proof cannot be replayed on a deployment on another chain. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
-on a deployment whose host chain is not the configured one. The rotated
+on a deployment whose host chain is not the configured one. On the **same** chain nothing stops it:
+no public input names the bridge contract, so a second deployment with the same
+`bridgeWithdrawalDappFr`/`bridgeWithdrawalAccFr` pays the same burn again once one of its anchors
+covers it. Pausing the first deployment does not prevent that: the nullifier map
+is per contract. Keep the new deployment's treasury to what the operator
+deposits for the test, and do not point `deposit-relayer` or the user CLI
+at a same-identity redeploy ([`aave-yield.md`](aave-yield.md)). The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
 nullifier, so two identical burns in one AN block mint distinct
 nullifiers (trade-off 12).
@@ -701,8 +707,8 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **required** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:140`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:150-151`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:254`). |
+| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, Circle Sepolia USDC (`0x1c7D4B19…7238`). That token is not a reserve on the Sepolia AAVE V3 pool, so the script never wires the real pool, and `aavePool` is immutable. It wires none, so this deploy can never earn yield; a stand that has to is a `DeployRealBridge` redeploy (`docs/aave-yield.md`). `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`DeployShellnetE2EBridge.s.sol` `wireWithdraw` guard). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
@@ -715,8 +721,8 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 |---|---|---|
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle`, else mock. |
-| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
+| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. Default **false**. Does not pick the USDC: on Sepolia `_resolveTokenAddresses` always sets `usdc` to the pool's underlying `0x94a9D9AC…E4C8`; the flag only fills the pool and aToken. Mainnet uses canonical `0xA0b86991…eB48`. Mainnet and Sepolia only; any other chain reverts. The live Sepolia bridges were deployed with `DeployShellnetE2EBridge` (Circle USDC, no pool), so they have `aavePool = 0` and cannot be flipped on. Before broadcasting, `_checkAaveReserve` requires `getReserveData(usdc).aTokenAddress` to equal the hard-coded aUSDC and logs the reserve's supply cap. `deploy_bridge_bundle.sh` passes it through as `USE_AAVE=true` (`docs/aave-yield.md`, *Launching a Sepolia stand with AAVE*). |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:140`, unconditional). On mainnet the value is `envBool` with no default (`:137`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned** at L1; under L2 anchoring it must be a multiple of `BUNDLE_STRIDE` = 16384. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
@@ -744,7 +750,7 @@ address.
 | Chain | USDC | AAVE V3 Pool | aUSDC | Axiom V2 Core |
 |---|---|---|---|---|
 | Mainnet (1) | `0xA0b86991…eB48` | `0x87870Bca…A4E2` | `0x98C23E9d…6F5c` | `0x69963768…C98B` |
-| Sepolia (11155111) | `0x94a9D9AC…E4C8` (Aave-faucet test USDC) | `0x6Ae43d32…8951` | `0x16dA4541…EB80` | `0x69963768…C98B` (mock core) |
+| Sepolia (11155111) | `0x94a9D9AC…E4C8` (Aave-faucet test USDC, `DeployRealBridge`) / `0x1c7D4B19…7238` (Circle USDC, `DeployShellnetE2EBridge` and the live shellnet bridges) | `0x6Ae43d32…8951` | `0x16dA4541…EB80` | `0x69963768…C98B` (mock core) |
 
 No deployment-address artefact is committed to this repo (`deployment_real.json` is produced at
 deploy time and not tracked; `contracts/ethereum/broadcast/` is gitignored, `.gitignore:26`), so
@@ -774,7 +780,7 @@ was written in, so the suite was read, not executed).
 | File | Focus |
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
-| `AckiNackiBridgeAaveFork.t.sol` (4) | Mainnet-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`). |
+| `AckiNackiBridgeAaveFork.t.sol` (4) | Sepolia-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`); lifts the reserve's supply cap inside the fork when it is reached. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |

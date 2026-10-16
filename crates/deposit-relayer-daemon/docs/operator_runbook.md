@@ -70,7 +70,11 @@ What a stuck deposit costs: everyone behind it waits. What gets it moving:
    ```bash
    deposit-relayer prove-one --rpc-url "$RPC_URL" --bridge-address "$BRIDGE_ADDRESS" \
      --deposit-id <N> --from-block <block at or below the deposit> \
-     --deposit-prover-dir "$DEPOSIT_PROVER_DIR" --out-dir ./bundle-<N>
+     --deposit-prover-dir "$DEPOSIT_PROVER_DIR" \
+     --fetch-deposit-data-bin "$DEPOSIT_FETCH_DEPOSIT_DATA_BIN" \
+     --export-vk-blob-bin "$DEPOSIT_EXPORT_VK_BLOB_BIN" \
+     --export-blake2b-proof-bin "$DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN" \
+     --out-dir ./bundle-<N>
    deposit-relayer finalize-one --bundle-dir ./bundle-<N>   # AN_* settings from the env file
    ```
 

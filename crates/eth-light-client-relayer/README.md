@@ -22,7 +22,7 @@ contract.
 ## How it runs
 
 ```text
-beacon REST ──▶ eth-lc-relayer daemon ──▶ cargo run --example export_step_vk_blob
+beacon REST ──▶ eth-lc-relayer daemon ──▶ export_step_vk_blob (prebuilt, --step-prover-bin)
    finality_update                         FINALITY_UPDATE_PATH + COMMITTEE_JSON_PATH
    updates?start_period=P-1                   real 512 keys (not OsRng)
                                               proof + public_inputs
@@ -47,7 +47,7 @@ eth-lc-relayer daemon --beacon-url https://lodestar-mainnet.chainsafe.io \
 
 # 4. Real step prove on n14
 eth-lc-relayer prove-one --beacon-url … \
-  --prover-dir ../../eth-light-client-prover \
+  --step-prover-bin ../../eth-light-client-prover/target/release/examples/export_step_vk_blob \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle
 

@@ -46,8 +46,8 @@ different language dialect and a different chain.
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
 | `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
-| Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | Invoked as `cargo run --release --example export_step_vk_blob` with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
-| Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
+| Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | The binary `--step-prover-bin` names (`LIGHT_CLIENT_STEP_PROVER_BIN`, prebuilt with `cargo build --release --example export_step_vk_blob`), started with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
+| Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | The binary `--rotate-prover-bin` names (`LIGHT_CLIENT_ROTATE_PROVER_BIN`, prebuilt with `cargo build --release --features aggregation --example rotate_tree_n8`); `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
 | Hermez KZG SRS, k=19 | file `kzg_bn254_19.srs` | relayer host | Same ceremony the opcode is keyed to. Public mirrors have been unreliable; copy from an existing relayer host (`deploy/shellnet-shadow/install-srs.sh` pins the sha256). |
 | Beacon node | external | Ethereum | Must serve the light-client REST endpoints (`finality_update`, `updates`). Public ChainSafe Lodestar and Nimbus endpoints do; publicnode does not serve `updates`. |
 | Execution node | external, optional | Ethereum | Only for epoch ancestry (`submitAncestry`), see §3.4. |
@@ -65,7 +65,7 @@ flowchart LR
   end
   subgraph RH["Relayer host"]
     D["eth-lc-relayer daemon"]
-    P["Step prover<br/>cargo example export_step_vk_blob"]
+    P["Step prover<br/>export_step_vk_blob binary"]
     S[("state file, bundles,<br/>SRS k=19, owner key")]
   end
   subgraph AN["Acki Nacki network"]
@@ -322,7 +322,7 @@ flowchart LR
   subgraph RH["Relayer host, no inbound ports"]
     direction TB
     SVC["systemd unit: eth-lc-relayer daemon<br/>outbound HTTPS only"]
-    PRV["prover subprocess<br/>cargo run --release --example export_step_vk_blob"]
+    PRV["prover subprocess<br/>export_step_vk_blob (LIGHT_CLIENT_STEP_PROVER_BIN)"]
     FS[("ETH_LC_ROOT/<br/>config/ env file, owner key (0600)<br/>state/ state json, prover-logs/<br/>bundles/ srs/ contracts/ bin/")]
     SVC --> PRV
     SVC --- FS
@@ -369,7 +369,7 @@ production unit in `scripts/ursus/` uses the same pieces under a different prefi
 | Path | Content | Sensitivity |
 |---|---|---|
 | `bin/` | `eth-lc-relayer` (built with `live-submit`), `tvm-cli` 3.0.6, `sold` | public |
-| `src/bridge/` | this repository; the daemon runs the prover with `cargo run` inside `eth-light-client-prover/` | public |
+| `src/bridge/` | this repository, for `build.sh`; the daemon runs the prebuilt prover binary it is given, never `cargo` | public |
 | `srs/kzg_bn254_19.srs` | Hermez SRS, mode 0444 | public, integrity matters (sha256 pinned in `install-srs.sh`) |
 | `contracts/` | compiled `EthBeaconLightClient.tvc`, `.abi.json` | public |
 | `config/eth-lc-relayer.env` | endpoints, addresses, paths (see §4.4) | 0600, no secrets besides paths |
@@ -385,7 +385,9 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | Variable | Meaning | Production | Shadow |
 |---|---|---|---|
 | `BEACON_URL` | beacon REST base URL | mainnet node with light-client endpoints | Sepolia public Lodestar |
-| `LIGHT_CLIENT_PROVER_DIR` | checkout of `eth-light-client-prover/` | required | required |
+| `LIGHT_CLIENT_STEP_PROVER_BIN` | prebuilt `export_step_vk_blob` example, checked at startup | required | required |
+| `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `rotate_tree_n8` example (`--features aggregation`) | required unless `--no-rotate` | not needed (`--no-rotate`) |
+| `LIGHT_CLIENT_PROVER_DIR` | working directory of the provers; the rotate fixture lives under it | optional | optional |
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |

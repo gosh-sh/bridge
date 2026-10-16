@@ -55,6 +55,60 @@ assigns it when the release is tagged.
   `pause()`; Circle can still freeze USDC itself. An incident that must stop
   both directions of the bridge has to flip both switches —
   `contracts/an/README.md`, `docs/EVM-custody-and-accounting.md`.
+- AAVE is not attached on any live deploy, and the shellnet stand cannot grow
+  a yield position without a redeploy. `docs/aave-yield.md` states that:
+  `deposit()` never supplies; `aavePool` is immutable; the live Sepolia
+  bridge `0xa1baf3f7…2cb36` and the stopped/rolled-back ones have a zero
+  pool; `DeployShellnetE2EBridge` uses Circle USDC, which the Sepolia AAVE
+  V3 pool does not list; `DeployRealBridge` always uses the pool's underlying
+  USDC (`0x94a9D9AC…E4C8`) on Sepolia and Circle/canonical USDC on mainnet,
+  and `USE_AAVE=true` only fills the pool and aToken (Sepolia and mainnet
+  only); a yield stand also has to set the shellnet withdraw aliases;
+  `supplyToAave` / `harvestYield` are `onlyOwner`. `EVM-contracts-spec.md`
+  §12.1–12.2 and the `DeployShellnetE2EBridge` comment say the same.
+- `docs/aave-yield.md` gains *Planned: a test integration on Arbitrum Sepolia*.
+  No deploy on any network earns yield today, and Ethereum Sepolia cannot give a
+  stand both a faucet-fundable burner and a live AAVE market: Circle's token
+  (`0x1c7D4B19…7238`) and the pool's reserve underlying (`0x94a9D9AC…E4C8`) are
+  different contracts. The AAVE V3 market on Arbitrum Sepolia (chain id `421614`,
+  Pool `0xBfC91D59…2Eff`) lists Circle's own Arbitrum Sepolia USDC
+  (`0x75faf114…AA4d`) as its underlying, so one token serves both. The document
+  records what such an integration needs beyond a redeploy — `421614` in
+  `crates/deposit-chain-ids`, a deposit `VkBlob` covering the chain, and
+  `setTrustedL1Bridge(421614, …)` on the Acki Nacki side. Nothing in the tree
+  targets that chain yet; this is a plan, not a deployment.
+
+- `docs/aave-yield.md` launches a Sepolia AAVE stand as a **test stand**, not a
+  user cutover. Same withdraw identity means a burn the
+  live bridge already paid can be paid again on the stand, so the live
+  bridge is paused first, the stand is deployed while Acki Nacki is still
+  paused, and `deposit-relayer` and the user CLI stay off the stand.
+  Circulating ECC[3] stays backed by Circle USDC on the paused live
+  bridge; the stand's treasury is only what the operator deposits for the
+  test. Wait a proving window before `pause()` on the live bridge —
+  `ackinacki-bridge withdraw` can take hours, and `withdrawByProof`
+  reverts `whenNotPaused`.   After leftover deposits finalize, Acki Nacki
+  is paused again so no one can burn. The stand is paused on deploy
+  and is never trusted: the operator deposit is not finalized, so no
+  faucet USDC becomes ECC[3]. Circulating ECC[3] stays frozen until
+  teardown restores `unpause()` on the live bridge, Acki Nacki, its
+  trust bit, the AN→ETH relayer, `deposit-relayer`, and the
+  `shellnet-l2.env` values (a burn the stand already paid is then
+  payable there again). If anyone finalized a stand deposit, teardown
+  does not restore payouts. `EVM-contracts-spec.md` §7.2 says a withdrawal proof
+  cannot be replayed on another chain, but on one chain any unpaused
+  bridge with the same identity pays it. The launch runbook's supply-cap
+  check uses Python 256-bit arithmetic, and it moves the whole `L2_config`
+  aside rather than one file, because `daemon-live` reads a leftover
+  `relayer-state.json`.
+- `docs/aave-yield.md` no longer says `transferOwnership` leaves
+  `yieldRecipient` behind. Ownership moves in two steps, and `acceptOwnership`
+  moves `yieldRecipient` with it while it still equals the outgoing owner; a
+  recipient set with `setYieldRecipient` stays put.
+- `live_withdrawByProof_runbook.md` no longer says AAVE is never a payout
+  source: on a bridge with a pool, `withdrawByProof` withdraws from AAVE the
+  part of a payout the USDC on the contract does not cover. AAVE still cannot
+  cover a `WithdrawTreasuryShortfall`.
 - The prover and circuit docs describe BK-set rotation as it works:
   `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
   and its opened L2/L3 leaves, no circuit of its own. Gone are the

@@ -379,7 +379,7 @@ demo default).
 `DeployShellnetE2EBridge.s.sol` wires the bridge against **Circle
 canonical Sepolia USDC**
 (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, see
-`contracts/ethereum/script/DeployShellnetE2EBridge.s.sol:27-32`),
+`contracts/ethereum/script/DeployShellnetE2EBridge.s.sol`, `USDC_SEPOLIA`),
 which is a real `FiatToken` with a minter allowlist — third parties
 cannot self-mint via `cast send`. Fund the burner from Circle's
 public faucet <https://faucet.circle.com> first, then approve + deposit

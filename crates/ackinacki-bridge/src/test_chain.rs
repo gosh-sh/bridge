@@ -146,7 +146,7 @@ pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
 
 /// [`deployed_usdc_bridge`], then the bridged minted/burned totals that
 /// `getTotalBridged(3)` reads. `fake_world` seeds minted so orchestrator
-/// dry-runs pass the 233 inventory check; the unit test that names 233
+/// dry-runs pass the 240 inventory check; the unit test that names 240
 /// keeps minted at zero.
 pub(crate) async fn deployed_usdc_bridge_with(
     paused: bool,
@@ -957,6 +957,97 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn repeated_over_cap_refunds_return_ecc_with_bounded_shell_allowance() {
+        use std::str::FromStr;
+
+        use tvm_block::{
+            ExtraCurrencyCollection, Grams, InternalMessageHeader, Message, MsgAddressInt,
+            VarUInteger32,
+        };
+        use tvm_client::abi::{encode_message_body, ParamsOfEncodeMessageBody};
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let (id, mut boc) = deployed_usdc_bridge(false).await;
+        let source = MsgAddressInt::from_str(&format!("0:{}", "ab".repeat(32))).unwrap();
+        let destination = MsgAddressInt::from_str(&format!("0:{id}")).unwrap();
+        let encoded = encode_message_body(ctx.clone(), ParamsOfEncodeMessageBody {
+            abi: Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.into()),
+            call_set: CallSet::some_with_function_and_input(
+                "initiateWithdrawal",
+                json!({"dstChainId":"1", "recipient":"11".repeat(20)}),
+            )
+            .unwrap(),
+            is_internal: true,
+            signer: Signer::None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let body = tvm_types::SliceData::load_cell(
+            tvm_types::read_single_root_boc(tvm_types::base64_decode(&encoded.body).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        for (bounce, incoming) in [
+            (false, 1_000_000_000),
+            (true, 50_000_000),
+            (false, 50_000_000),
+        ] {
+            let mut ecc = ExtraCurrencyCollection::new();
+            ecc.set(&3, &VarUInteger32::from_str("50000001").unwrap())
+                .unwrap();
+            let mut header = InternalMessageHeader::with_addresses(
+                source.clone(),
+                destination.clone(),
+                CurrencyCollection {
+                    grams: Grams::new(incoming).unwrap(),
+                    other: ecc,
+                },
+            );
+            header.bounce = bounce;
+            let mut message = Message::with_int_header(header);
+            message.set_body(body.clone());
+            let result = run_executor(ctx.clone(), ParamsOfRunExecutor {
+                message: tvm_types::base64_encode(message.write_to_bytes().unwrap()),
+                account: AccountForExecutor::Account {
+                    boc: boc.clone(),
+                    unlimited_balance: Some(false),
+                },
+                return_updated_account: Some(true),
+                skip_transaction_check: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                result.transaction["compute"]["exit_code"], 233,
+                "{}",
+                result.transaction
+            );
+            assert_eq!(result.out_messages.len(), 1, "{}", result.transaction);
+            let refund = Message::construct_from_base64(&result.out_messages[0]).unwrap();
+            let header = refund.int_header().unwrap();
+            assert_eq!(header.dst, source);
+            assert!(!header.bounce);
+            assert_eq!(
+                header
+                    .value
+                    .other
+                    .get(&3)
+                    .unwrap()
+                    .unwrap()
+                    .value()
+                    .to_string(),
+                "50000001"
+            );
+            assert_eq!(
+                u128::from(header.value.grams.as_u64().unwrap()),
+                incoming.min(100_000_000)
+            );
+            boc = result.account;
+        }
+    }
+
     /// A fixture for the two checks the node makes on what it is asked.
     /// Any BOC serves as the message: the node hashes the bytes that
     /// arrive, which is the property under test.
@@ -1033,12 +1124,12 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.10.0. Any other compiler
-        // or a stale artefact moves this, and the 233 cap would ship as a
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.11.0. Any other compiler
+        // or a stale artefact moves this, and the volume caps would ship as a
         // different binary than CHANGELOG names.
         assert_eq!(
             &hash[..8],
-            "4b2a9600",
+            "df6b2f9d",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

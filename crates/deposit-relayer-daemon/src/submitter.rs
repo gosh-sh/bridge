@@ -489,6 +489,8 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
 /// TVM: the constructor of an already deployed contract was called again — a
 /// `DepositVoucher` for this deposit exists, so it was finalized before.
 const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
+/// The bridge refuses a proof whose deposit it has already paid.
+const ERR_DEPOSIT_SETTLED: i32 = 241;
 /// TVM: cell underflow. From a voucher constructor, the signature of a bridge
 /// whose `_depositVoucherCode` predates the voucher's constructor ABI.
 const EXIT_CELL_UNDERFLOW: i32 = 9;
@@ -510,6 +512,26 @@ const EXIT_PAUSED: i32 = 231;
 /// first deposit after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
+        241 => Some("ERR_DEPOSIT_SETTLED — this deposit was already paid; nothing left to do"),
+        400 => Some("ERR_MESSAGE_IS_EXIST — a deposit callback is pending; retry the same proof"),
+        401 => Some("ERR_MESSAGE_WITH_HUGE_EXPIREAT — use an expiry less than five minutes ahead"),
+        402 => Some("ERR_MESSAGE_EXPIRED — retry the same proof with a fresh message header"),
+        52 => Some(
+            "REPLAY_PROTECTION — another external message advanced the timestamp; retry with a \
+             newly encoded message",
+        ),
+        233 => Some(
+            "ERR_TRANSFER_TOO_LARGE — retain the deposit proof; an already-paid legacy deposit \
+             needs the owner's setLegacyDepositCount cutoff; do not deposit again",
+        ),
+        234 => Some(
+            "ERR_TVL_CAP — AN capacity is full; retain the proof and retry after withdrawals free \
+             capacity",
+        ),
+        239 => Some(
+            "ERR_CHAIN_ACCOUNTING — owner must initialize historical per-network balances while \
+             paused; retain the proof and retry afterwards",
+        ),
         EXIT_ZERO_AMOUNT => Some("ERR_ZERO_AMOUNT — the proven deposit amount is zero"),
         EXIT_INVALID_ZKPROOF => Some(
             "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
@@ -565,6 +587,10 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
         EXIT_CONSTRUCTOR_ALREADY_CALLED => SubmitOutcome::AlreadyFinalized,
         // A paused lane rejects every deposit; counting that against the
         // deposit would park healthy deposits for the length of the pause.
+        ERR_DEPOSIT_SETTLED => SubmitOutcome::AlreadyFinalized,
+        400 | 402 => SubmitOutcome::Pending {
+            reason: format!("external message replay/expiry ({code}); retain the proof and retry"),
+        },
         EXIT_PAUSED => SubmitOutcome::Pending {
             reason: format!(
                 "ERR_PAUSED — the bridge lane is paused (setPaused); retrying until it resumes \
@@ -731,6 +757,36 @@ mod tests {
             proof: vec![0xAB; 48].into(),
             parsed: pi,
         }
+    }
+
+    #[test]
+    fn a_settled_deposit_is_not_retried() {
+        assert!(matches!(
+            classify_reverted(Some(241), "reverted"),
+            SubmitOutcome::AlreadyFinalized
+        ));
+        assert!(matches!(
+            classify_call_error("contract call aborted (exit_code=241)"),
+            SubmitOutcome::AlreadyFinalized
+        ));
+    }
+
+    #[test]
+    fn replay_and_expiry_keep_the_funded_deposit_pending() {
+        for code in [400, 402] {
+            assert!(matches!(
+                classify_call_error(&format!("contract call aborted (exit_code={code})")),
+                SubmitOutcome::Pending { .. }
+            ));
+            assert!(matches!(
+                classify_reverted(Some(code), "reverted"),
+                SubmitOutcome::Pending { .. }
+            ));
+        }
+        assert!(matches!(
+            classify_reverted(Some(401), "reverted"),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 
     #[test]

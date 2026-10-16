@@ -22,6 +22,9 @@ alloy::sol! {
         function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external;
         function usdc() external view returns (address);
         function paused() external view returns (bool);
+        function treasuryBalance() external view returns (uint256);
+        function MAX_TRANSFER_AMOUNT() external view returns (uint256);
+        function MAX_TVL() external view returns (uint256);
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, int8 anWorkchain, bytes32 anAccount, uint256 timestamp);
         error BridgePaused();
     }
@@ -251,6 +254,43 @@ pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
         an_workchain: ev.anWorkchain,
         an_account: ev.anAccount,
     })
+}
+
+/// The bridge's volume ceilings and what it currently holds, or `None` on a
+/// bridge that predates them. This says nothing about the destination AN caps;
+/// callers must check those independently before spending USDC.
+pub async fn read_volume_limits(
+    evm: &dyn EvmRead,
+    bridge: Address,
+) -> anyhow::Result<Option<(U256, U256, U256)>> {
+    let first = match evm
+        .call(
+            bridge,
+            IDeposit::MAX_TRANSFER_AMOUNTCall {}.abi_encode().into(),
+        )
+        .await
+    {
+        Ok(out) if out.is_empty() => return Ok(None),
+        Ok(out) => out,
+        Err(e)
+            if e.downcast_ref::<TransportError>()
+                .and_then(revert_data)
+                .is_some_and(|d| d.is_empty()) =>
+        {
+            return Ok(None)
+        },
+        Err(e) => return Err(e),
+    };
+    anyhow::ensure!(first.len() == 32, "malformed MAX_TRANSFER_AMOUNT response");
+    let per_tx = U256::from_be_slice(&first);
+    let one = async |data: Bytes| -> anyhow::Result<U256> {
+        let out = evm.call(bridge, data).await?;
+        anyhow::ensure!(out.len() == 32, "malformed volume-limit response");
+        Ok(U256::from_be_slice(&out))
+    };
+    let tvl = one(IDeposit::MAX_TVLCall {}.abi_encode().into()).await?;
+    let held = one(IDeposit::treasuryBalanceCall {}.abi_encode().into()).await?;
+    Ok(Some((per_tx, tvl, held)))
 }
 
 /// The bridge's `usdc()`: the token it takes deposits in.

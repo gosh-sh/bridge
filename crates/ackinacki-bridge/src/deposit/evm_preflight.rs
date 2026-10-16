@@ -5,7 +5,10 @@ use alloy_primitives::{Address, U256};
 use crate::{
     deposit::{
         args::Network,
-        evm::{read_allowance, read_balance, read_decimals, read_usdc, BlockTag, EvmRead},
+        evm::{
+            read_allowance, read_balance, read_decimals, read_usdc, read_volume_limits, BlockTag,
+            EvmRead,
+        },
     },
     errors::{CliError, CliResult},
 };
@@ -76,6 +79,35 @@ pub async fn run(
             "the EVM bridge is paused by its owner: deposit() would revert".into(),
             None,
         ));
+    }
+    // A bridge that predates the volume ceilings answers none of these, and
+    // enforces nothing, so a deposit against it must not be refused here.
+    if let Some((per_tx, tvl, held)) = read_volume_limits(evm, bridge)
+        .await
+        .map_err(|e| refuse("cannot read the bridge's volume limits".into(), Some(e)))?
+    {
+        let want = U256::from(amount);
+        if want > per_tx {
+            return Err(refuse(
+                format!(
+                    "{} micro-USDC is above the bridge's MAX_TRANSFER_AMOUNT of {per_tx}: \
+                     deposit() would revert with TransferTooLarge. Split the amount.",
+                    amount
+                ),
+                None,
+            ));
+        }
+        if held + want > tvl {
+            return Err(refuse(
+                format!(
+                    "the bridge holds {held} micro-USDC of a MAX_TVL of {tvl}, so {} more would \
+                     cross the ceiling: deposit() would revert with TvlCapExceeded. Room left: {}.",
+                    amount,
+                    tvl.saturating_sub(held)
+                ),
+                None,
+            ));
+        }
     }
     let dec = read_decimals(evm, usdc)
         .await
@@ -238,5 +270,117 @@ mod tests {
         run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
             .await
             .unwrap();
+    }
+
+    fn with_limits(per_tx: u64, tvl: u64, held: u64) -> FakeEvm {
+        let f = healthy();
+        f.set_call(
+            BRIDGE,
+            IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR,
+            U256::from(per_tx).abi_encode().into(),
+        );
+        f.set_call(
+            BRIDGE,
+            IDeposit::MAX_TVLCall::SELECTOR,
+            U256::from(tvl).abi_encode().into(),
+        );
+        f.set_call(
+            BRIDGE,
+            IDeposit::treasuryBalanceCall::SELECTOR,
+            U256::from(held).abi_encode().into(),
+        );
+        f
+    }
+
+    #[tokio::test]
+    async fn rpc_failures_are_not_an_old_bridge() {
+        for successful_reads in 0..3 {
+            let f = with_limits(50_000_000, 10_000_000_000, 0);
+            *f.calls_before_failing.lock().unwrap() = Some(successful_reads);
+            assert!(read_volume_limits(&f, BRIDGE).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partially_missing_limit_interface_is_refused() {
+        let f = with_limits(50_000_000, 10_000_000_000, 0);
+        f.set_call(BRIDGE, IDeposit::MAX_TVLCall::SELECTOR, Bytes::new());
+        assert!(read_volume_limits(&f, BRIDGE).await.is_err());
+    }
+
+    /// A bridge that predates the ceilings answers none of the three reads, so
+    /// the deposit must still go through — which is also why every other test
+    /// here passes without them.
+    #[tokio::test]
+    async fn a_bridge_without_the_volume_getters_passes() {
+        run(&healthy(), Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deposit_within_both_ceilings_passes() {
+        run(
+            &with_limits(50_000_000, 10_000_000_000, 100_000_000),
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(FROM),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deposit_of_exactly_the_per_tx_ceiling_passes() {
+        let f = with_limits(12_500_000, 10_000_000_000, 0);
+        run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deposit_that_exactly_fills_the_tvl_ceiling_passes() {
+        let f = with_limits(50_000_000, 10_000_000_000, 9_987_500_000);
+        run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deposit_over_the_per_tx_ceiling_is_refused_by_name() {
+        let e = run(
+            &with_limits(12_499_999, 10_000_000_000, 0),
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(FROM),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+        let msg = e.to_string();
+        assert!(msg.contains("MAX_TRANSFER_AMOUNT"), "{msg}");
+        assert!(msg.contains("TransferTooLarge"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_deposit_that_crosses_the_tvl_ceiling_is_refused_with_the_room_left() {
+        let e = run(
+            &with_limits(50_000_000, 10_000_000_000, 9_995_000_000),
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(FROM),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+        let msg = e.to_string();
+        assert!(msg.contains("TvlCapExceeded"), "{msg}");
+        assert!(
+            msg.contains("Room left: 5000000"),
+            "the refusal must say how much room is left: {msg}"
+        );
     }
 }

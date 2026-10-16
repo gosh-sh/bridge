@@ -273,7 +273,16 @@ impl EvmRead for FakeEvm {
                     .get(&(to, sel))
                     .and_then(|s| s.next())
             })
-            .ok_or_else(|| anyhow::anyhow!("execution reverted"))
+            .ok_or_else(|| {
+                let error: alloy::transports::TransportError =
+                    alloy::transports::TransportError::ErrorResp(
+                        serde_json::from_value(serde_json::json!({
+                            "code": 3, "message": "execution reverted"
+                        }))
+                        .expect("a structured empty revert"),
+                    );
+                anyhow::Error::new(error)
+            })
     }
 
     async fn revert_reason(

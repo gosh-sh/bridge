@@ -1,6 +1,10 @@
 pragma gosh-solidity >=0.80;
 
 abstract contract eccUSDCBridgeErrors {
+    uint16 constant ERR_MESSAGE_IS_EXIST = 400;
+    uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
+    uint16 constant ERR_MESSAGE_EXPIRED = 402;
+    uint16 constant ERR_MESSAGE_BEFORE_UPGRADE = 403;
     uint16 constant ERR_ZERO_AMOUNT = 204;
     uint16 constant ERR_INVALID_SENDER = 207;
     uint16 constant ERR_NOT_OWNER = 209;
@@ -22,5 +26,14 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_ZERO_RECIPIENT = 230;
     uint16 constant ERR_PAUSED = 231;
     uint16 constant ERR_ZERO_PUBKEY = 232;
-    uint16 constant ERR_BURN_EXCEEDS_BRIDGED = 233;
+    uint16 constant ERR_TRANSFER_TOO_LARGE = 233;
+    uint16 constant ERR_TVL_CAP = 234;
+    uint16 constant ERR_DEPOSIT_RESERVATION = 235;
+    uint16 constant ERR_DEPOSITS_PENDING = 236;
+    uint16 constant ERR_LEGACY_CONFIG = 237;
+    uint16 constant ERR_RECOVERY_NOT_PAUSED = 238;
+    uint16 constant ERR_BURN_EXCEEDS_BRIDGED = 240;
+    uint16 constant ERR_DEPOSIT_SETTLED = 241;
 }
+
+uint16 constant ERR_CHAIN_ACCOUNTING = 239; // Initialize historical per-chain balances while paused

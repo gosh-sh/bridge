@@ -1,5 +1,6 @@
 {
   "place": [
+    { "from": "contracts/an/exchange/modifiers/replayprotection.sol", "to": "contracts/exchange/modifiers/replayprotection.sol" },
     { "from": "contracts/an/exchange/eccUSDCBridge.sol", "to": "contracts/exchange/eccUSDCBridge.sol" },
     { "from": "contracts/an/exchange/DepositVoucher.sol", "to": "contracts/exchange/DepositVoucher.sol" },
     { "from": "contracts/an/exchange/EthBeaconLightClient.sol", "to": "contracts/exchange/EthBeaconLightClient.sol" },

@@ -7,6 +7,10 @@ citations below are re-anchored to that commit — the two-line-number-bases spl
 previous revisions of this document carried is gone. When editing the spec, either
 re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
 
+**2026-10-15 volume-limit update:** the constants and deposit/withdrawal checks
+below include PR #101. Their references use that branch; other references
+retain the historical base above.
+
 > **Drift note, 2026-10-12 (ETH-28).** The AAVE behaviour in §6 (payout top-up), §10 and §11
 > describes the code after `writeOffUnbackedPrincipal` landed; the line numbers in those rows
 > are still those of `4021c68`. `writeOffUnbackedPrincipal`, `_backedPrincipal`,
@@ -124,6 +128,8 @@ There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface c
 |---|---|---:|---|
 | `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
 | `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | Per-tx deposit cap. Chosen so the amount fits the AN `USDCBridge` mint path (`fr[2]` as `uint64`), **not** as a TVL limit. |
+| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 58 | New deposits/withdrawals are limited to 50 USDC; exact legacy withdrawal nullifiers can be authorized by the owner. |
+| `MAX_TVL` | `10000 * USDC_UNIT` | 61 | Ethereum deposits cannot raise `treasuryBalance` above 10,000 USDC. AN tracks this capacity per network. |
 | `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
 | `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
 | `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
@@ -140,28 +146,31 @@ split (≥ 2/3 quorum vs > 1/2 split).
 
 ### 4.1 Mutable state (declaration order)
 
-Slots below are the output of `forge inspect AckiNackiBridge storage-layout`; re-run it before
-relying on them for a storage-level migration.
+Slots below were regenerated with `forge inspect AckiNackiBridge storage-layout`
+against `5b503b0` on 2026-10-15. The new `legacyWithdrawals` mapping occupies
+slot 0 and shifts subsequent mutable state by one slot. Re-run the command
+before relying on these offsets for storage readers or migration tooling.
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
-| 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
-| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
-| 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
-| 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
-| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
-| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
-| 7 | 20 | `paused` | `bool` | 149 | `pause`, `unpause` |
-| 8 | 0 | `_reentrancyStatus` | `uint256` | 154 | `nonReentrant` |
-| 9 | 0 | `storedBkSetCommitment` | `uint256` | 182 | constructor, `applyBkSetUpdate` |
-| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
-| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
-| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
-| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 284 | `withdrawByProof` |
-| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 303 | `_appendLayer` |
+| 0 | 0 | `legacyWithdrawals` | `mapping(bytes32 ⇒ bool)` | 64 | `setLegacyWithdrawal`, `withdrawByProof` |
+| 1 | 0 | `depositCounter` | `uint256` | 118 | `deposit` |
+| 2 | 0 | `treasuryBalance` | `uint256` | 122 | `deposit` (+), `withdrawByProof` (−) |
+| 3 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 128 | constructor only |
+| 3 | 20 | `aaveEnabled` | `bool` | 144 | constructor, `setAaveEnabled`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
+| 4 | 0 | `suppliedPrincipal` | `uint256` | 147 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
+| 5 | 0 | `liquidReserveBps` | `uint256` | 152 | constructor (`1_000`), `setLiquidReserveBps` |
+| 6 | 0 | `owner` | `address` | 155 | constructor, `acceptOwnership` |
+| 7 | 0 | `pendingOwner` | `address` | 158 | `transferOwnership`, `acceptOwnership` |
+| 8 | 0 | `yieldRecipient` | `address` | 161 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
+| 8 | 20 | `paused` | `bool` | 167 | `pause`, `unpause` |
+| 9 | 0 | `_reentrancyStatus` | `uint256` | 172 | `nonReentrant` |
+| 10 | 0 | `storedBkSetCommitment` | `uint256` | 200 | constructor, `applyBkSetUpdate` |
+| 11 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 207 | `applyBkSetUpdate` |
+| 11 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 211 | constructor, `verifyBlock` |
+| 12 | 0 | `storedPrevBkSetCommitment` | `uint256` | 218 | `applyBkSetUpdate` |
+| 13 | 0 | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 302 | `withdrawByProof` |
+| 14 | 0 | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 321 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -250,15 +259,15 @@ function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external n
 
 `whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
 
-Sequence (`:673-681`):
+Sequence (`src/AckiNackiBridge.sol:732-758`):
 
 1. `amount != 0` else `InvalidAmount`.
 2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`.
-3. `anAccount != 0` else `InvalidAnAccount` — an EVM address is not a valid AN recipient, so the
-   256-bit TVM destination is supplied explicitly.
-4. `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return ⇒ `TransferFromFailed`.
-5. `depositId = depositCounter++`, `treasuryBalance += amount`.
-6. `emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp)`.
+3. `amount <= MAX_TRANSFER_AMOUNT` else `TransferTooLarge`.
+4. `treasuryBalance + amount <= MAX_TVL` else `TvlCapExceeded`.
+5. `anAccount != 0` else `InvalidAnAccount`.
+6. `usdc.transferFrom(msg.sender, address(this), amount)`; `false` ⇒ `TransferFromFailed`.
+7. Increment `depositCounter`, add the amount to `treasuryBalance`, and emit `Deposit`.
 
 Notes that matter downstream:
 
@@ -384,6 +393,12 @@ finalRoot, anchorLayer`.
 | 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
 | 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
 | 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
+| 12 | `pub.amount <= MAX_TRANSFER_AMOUNT` or `legacyWithdrawals[bytes32(pub.nullifier)]` | 1446-1448 | `TransferTooLarge` |
+
+`setLegacyWithdrawal(nullifier, allowed)` (`src/AckiNackiBridge.sol:69-73`) is
+owner-only, requires a canonical field element and emits `LegacyWithdrawalConfigured`.
+Authorize only a verified historical burn above 50 USDC. All proof, destination,
+recipient, treasury and replay checks remain; the exemption is deleted on payout.
 
 Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
 then, if liquid USDC < `amount`, pull exactly the shortfall back from AAVE through `_pullFromAave`
@@ -551,7 +566,7 @@ contract's fallback entrypoint via `staticcall`.
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
 specifically so its aggregated Yul fits: at `K=20` it auto-configures 44 advice columns and the
-output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`). 
+output exceeds ~28 KB (`verifiers/README.md`: Circuit 1B inner `K=21`).
 
 `verifiers/*.sol` are the generated `Halo2Verifier` sources (a single `fallback(bytes) → bytes` with
 inline assembly) kept for reference; deployment always goes through `create` on the `.bin`

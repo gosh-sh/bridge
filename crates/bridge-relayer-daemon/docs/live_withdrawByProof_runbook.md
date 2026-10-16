@@ -439,7 +439,7 @@ The script deploys a fresh Multisig (two-shot GiverV3.sendCurrencyWithFlag
 17→1 on shellnet), mints USDC via `USDCBridge.mintAndSend`, calls
 `initiate_withdrawal`, and polls GQL for the `WithdrawalInitiated`
 ExtOut. `mintAndSend` does not add bridged inventory: a fresh bridge
-with `getTotalBridged` minted=0 refuses the burn with 233. It prints
+with `getTotalBridged` minted=0 refuses the burn with 240. It prints
 the captured `seq_no` + `block_hash` + `msg_id`.
 
 The Step 4 shell picks the event up within one poll interval and moves

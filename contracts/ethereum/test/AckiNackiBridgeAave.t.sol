@@ -518,7 +518,7 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function testFuzz_totalAssetsCoversTreasury(uint96 depositAmt, uint16 bps) public {
-        vm.assume(depositAmt > 0 && depositAmt <= 100 * UsdcTestLib.UNIT);
+        vm.assume(depositAmt > 0 && depositAmt <= bridge.MAX_TRANSFER_AMOUNT());
         vm.assume(bps <= bridge.MAX_LIQUID_RESERVE_BPS());
 
         bridge.setLiquidReserveBps(bps);

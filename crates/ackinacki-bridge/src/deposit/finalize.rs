@@ -363,6 +363,13 @@ async fn attempts(
                 })
             },
             Reaction::BackToAnchor => return Ok(FinalizeExit::BackToAnchor),
+            Reaction::WaitCapacity => {
+                in_doubt.store(earlier, Ordering::SeqCst);
+                ui.status(
+                    "the AN TVL cap is full; waiting for capacity to finalize the same deposit",
+                );
+                tokio::time::sleep(cx.poll).await;
+            },
             Reaction::WaitPaused => {
                 // Refused before accept: this send did not execute, and the
                 // checks before it found no earlier one executed.
@@ -952,6 +959,38 @@ mod tests {
             "{:?}",
             ui.statuses()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tvl_refusal_waits_and_retries_the_same_funded_deposit() {
+        use crate::deposit::refusals::FinalizeSend;
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).unwrap();
+        let mut rec = proved(&store);
+        let (an, cx) = plain(
+            [
+                FinalizeSend::Executed {
+                    tx_id: "full".into(),
+                    aborted: true,
+                    exit_code: Some(234),
+                },
+                FinalizeSend::Executed {
+                    tx_id: "retry".into(),
+                    aborted: false,
+                    exit_code: Some(0),
+                },
+            ],
+            60,
+        );
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        assert!(matches!(
+            finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+                .await
+                .unwrap(),
+            FinalizeExit::ToCredit { .. }
+        ));
+        assert_eq!(*an.sent.lock().unwrap(), 2);
+        assert!(ui.statuses().iter().any(|s| s.contains("TVL cap")));
     }
 
     #[tokio::test(start_paused = true)]

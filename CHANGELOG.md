@@ -77,9 +77,119 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **New bridge transfers are capped at 50 USDC, with 10,000 USDC capacity
+  per supported L1 network.** Ethereum `deposit` and `withdrawByProof` reject amounts over
+  `MAX_TRANSFER_AMOUNT` with `TransferTooLarge`; `deposit` rejects an increase
+  of `treasuryBalance` over `MAX_TVL` with `TvlCapExceeded`. Both constants are
+  public. Acki Nacki `initiateWithdrawal` and new `finalizeDeposit` calls reject
+  an over-limit amount with `ERR_TRANSFER_TOO_LARGE` (233). Its TVL check counts
+  outstanding bridged USDC plus deposits awaiting their voucher confirmation,
+  and refuses an over-limit deposit with `ERR_TVL_CAP` (234). Split new amounts
+  over 50 USDC; the TVL limit applies per `chainId`, across all accounts and source contracts
+  on that network. N supported networks can hold N × 10,000 USDC in total.
+
+  On Acki Nacki, finalizing a deposit reserves its amount before dispatching
+  the voucher. Repeating the proof while its callback is pending does not
+  reserve or deploy twice. Confirmation converts the reservation into minted
+  USDC; a bounced voucher deployment releases it so the proof can be retried.
+  `getDepositLimits(chainId, l1Bridge)` returns the transfer and TVL caps,
+  outstanding amount, pending reserved amount, and legacy deposit cutoff.
+  Outstanding and reservations are tracked per network. Confirmed deposits
+  increase their source `chainId` balance; withdrawals decrease only their
+  `dstChainId` balance, with a floor at zero. Excess burns do not credit future
+  deposits. This is net bridge flow, not provenance tracking for fungible ECC;
+  owner/TIP-3 minting remains separate and no total ECC supply invariant is added.
+
+  **Retire old L1 routes before enabling a new payout deployment.** Stop new AN
+  burns, finalize outstanding deposits and settle historical burns on their
+  original contracts. Call `pause()` on every old L1 bridge and verify
+  `paused() == true` before recording its finalized `depositCounter`. Keep old
+  routes paused: this stops new deposits above the frozen legacy cutoff and
+  prevents concurrent payout routes for the same AN identity/destination chain.
+  Stopping a UI or relayer alone is insufficient. Pause and AN `updateCode` do
+  not transfer old principal or spent-nullifier state. If these remain, a
+  separately reviewed custody/nullifier migration is required before switching;
+  do not treat deploying a fresh contract as migration of either state.
+
+  **Finish already-paid legacy deposits when upgrading a live bridge.** For
+  each old Ethereum source, record its finalized `depositCounter` before
+  activating the caps, then restore its trust entry and call
+  `setLegacyDepositCount(chainId, l1Bridge, depositCount)` on the upgraded AN
+  bridge. Only proven deposits with `depositId < depositCount` are exempt from
+  the new caps. The cutoff may be lowered, including to zero, but cannot be raised after
+  its first configuration (`ERR_LEGACY_CONFIG`, 237).
+  Proof verification, canonical anchors and voucher replay protection still
+  apply. Legacy settlements may temporarily exceed the TVL cap; new deposits
+  remain blocked until withdrawals free enough capacity. Already-dispatched
+  old voucher callbacks can also complete after the initial upgrade.
+
+  `updateCode` preserves pending reservations, their proof-bound payout data,
+  completed-voucher markers and legacy cutoffs in a tagged envelope within the
+  existing migration tuple; previous-generation and zerostate cells still work.
+  With pending deposits, pass an empty `userCell` to retain their voucher code;
+  only voucher-code replacement is refused with 236. Trust entries, canonical
+  anchors, light-client configuration, pause state and per-chain owner-anchor
+  restrictions still reset. Stop relayers; restore trust and anchors, redeploy
+  the light client and reapply `disableOwnerAnchorsOn(chainId)` where used before
+  resuming. Ethereum caps are constants and require a new deployment. If a voucher's original callback failed,
+  pause the bridge, inspect that voucher's transaction history, and have the
+  owner call `recoverDeposit(voucher)`. It pays the stored recipient/amount,
+  releases the reservation and ignores a later duplicate callback, including
+  after an upgrade. Do not recover a bounced constructor replay (51) of a
+  deposit already paid under an earlier code generation; wait for its bounce
+  to release the temporary reservation. Recovery is an owner operation and
+  fails with 238 unless paused. The voucher code remains unchanged.
+
+  An over-cap `initiateWithdrawal` calls `ensureBalance()` and returns the
+  attached ECC with `math.min(msg.value, 0.1 vmshell)`, committing the refund
+  before reporting 233. The allowance is bounded by both incoming SHELL and
+  0.1 vmshell; the CLI's 1 vmshell incoming value still returns 0.1 vmshell.
+  **`ensureBalance()` is free.** It replenishes SHELL with
+  `gosh.mintshellq(MIN_BALANCE)`. The bridge is a system contract in DApp 0.
+  On mainnet, DApp 0 has a deployed DApp config with an unlimited configuration.
+  **Non-system contracts cannot exist in DApp 0.** User withdrawal messages
+  therefore arrive from another DApp ID. The SHELL attached to the return
+  message is burned on the cross-DApp return; the user receives the refunded
+  ECC. Forwarding fees are paid separately and no native balance is reserved.
+  This also applies to incoming transfers with `bounce: false`. On Ethereum, an already-burned legacy
+  withdrawal over 50 USDC can be authorized by its exact proof nullifier with
+  `setLegacyWithdrawal(nullifier, true)`; proof/identity/chain/recipient and
+  spent-nullifier checks still apply. The authorization is consumed on payout
+  and can be revoked before payout. Before switching deployments, stop new AN
+  burns and settle existing burns on their original Ethereum payout contract.
+  If a funded capped deployment must pay an old burn, authorize only that
+  historical event's nullifier, then submit its unchanged proof. Never permit
+  unknown future nullifiers or redirect custody assumptions between contracts.
+
+  Ethereum also exposes `legacyWithdrawals(nullifier)` and emits
+  `LegacyWithdrawalConfigured(nullifier, allowed)` when an authorization changes.
+  Its mapping occupies storage slot 0, shifting all subsequent mutable state
+  by one slot: `depositCounter` is now slot 1 and `treasuryBalance` slot 2.
+  Update direct storage readers and migration tooling to the new layout; this
+  contract is deployed afresh rather than upgraded in place.
+
+  **Initialize historical network balances after an aggregate-only upgrade.**
+  The bridge stays paused and `getDepositLimits` returns 239 until the owner
+  calls `initializeChainAccounting(chainIds, outstanding)` once while paused.
+  Reconstruct balances from finalized deposits and burns by source/destination
+  chain in micro-USDC; the sum must cover the carried aggregate outstanding.
+  Per-network floors may expose a larger sum than the previous aggregate floor.
+  Duplicate/zero chain IDs, mismatched arrays or repeat initialization fail with
+  `ERR_CHAIN_ACCOUNTING` (239). Fresh zerostates start at zero automatically;
+  later upgrades retain network balances and rebuild network reservations.
+
+  `eccUSDCBridge` reports 1.11.0, code hash `df6b2f9d…`. Its `.tvc` and ABI
+  are rebuilt with `sold` 0.80.0; the new getters and legacy-cutoff setter are
+  additive ABI changes.
+  Existing event formats and call signatures stay the same. Use the release
+  `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
+  wire format of `WithdrawalInitiated` even when the event ABI is identical,
+  which would break the withdrawal proof's message-layout assumptions.
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
-  bridged burned above bridged minted for that token, exit 233
-  (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
+  bridged burned above bridged minted for that token, exit 240
+  (`ERR_BURN_EXCEEDS_BRIDGED`).** The code is 240, not the 233 this entry
+  carried before the volume caps landed in the same release: 233 is
+  `ERR_TRANSFER_TOO_LARGE` there. Read the totals with `getTotalBridged`.
   Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
   no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
   against headroom that deposits created: the cap limits total bridge
@@ -92,8 +202,10 @@ assigns it when the release is tagged.
   burn is refused until `finalizeDeposit` brings minted up to burned.
   That is not the same as a fresh deploy.
 
-  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The ABI is unchanged. The withdraw CLI preflight checks
+  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…` when this landed; the volume-cap
+  entry above rebuilds the same contract as 1.11.0, code hash `df6b2f9d…`,
+  with the same compiler. This change itself leaves the ABI unchanged.
+  The withdraw CLI preflight checks
   `getTotalBridged` and refuses before the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
@@ -1493,6 +1605,20 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **The deposit CLI refuses an over-limit deposit in preflight instead of
+  letting it revert on chain.** It reads `MAX_TRANSFER_AMOUNT`, `MAX_TVL` and
+  `treasuryBalance` off the bridge rather than carrying the numbers, so it
+  needs no rebuild when the ceilings change, and it reports the room left when
+  the TVL check is what refuses. A bridge that predates the ceilings answers
+  an absent limit interface and enforces no EVM ceiling, so an old deployment
+  remains supported. Only an empty first response or a structured empty revert
+  identifies that old interface; transport failures, malformed replies and
+  failures of subsequent getters now refuse preflight. On AN 1.8.1 and newer,
+  fresh deposits also read `getDepositLimits` and check pending reservations
+  before spending USDC on L1. Finalization code 234 waits for capacity and
+  retries the same funded operation; code 233 instructs the operator to keep
+  it and resume after the source's legacy cutoff is configured.
+
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation
@@ -1899,6 +2025,52 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- AN deposits now reject a repeated proof before accepting gas, verifying it or
+  deploying another voucher: 400 while the first callback is still pending, 241
+  (`ERR_DEPOSIT_SETTLED`) once the deposit has been paid. The bridge keeps its
+  registry of settled vouchers for that second check — without it a public proof
+  of a paid deposit could be re-sent at no cost to its sender, each time paying
+  for a halo2 verify and holding that network's capacity reserved until the
+  voucher's constructor bounced it back. The deposit CLI reads 241 as "already
+  credited" and the deposit relayer as finalized; neither retries. Confirmation
+  requires a matching live reservation (235 otherwise), including after owner
+  recovery. Before upgrading a version without reservations, pause finalizations
+  and drain its outstanding callbacks. Existing reservation-based upgrades keep
+  their pending state. The deposit CLI clamps encoded message lifetimes to
+  1–240 seconds so large or zero SDK timeouts cannot generate invalid headers.
+
+
+- AN bridge 1.11.0 replaces the shared external-message timestamp guard with
+  hash-and-expiry replay protection. Public deposit submissions no longer block
+  owner emergency calls or other deposits by choosing a future `time` header.
+  Exact processed messages return 400; expired messages return 402 and may be
+  retried with a fresh header and the same proof. External messages must expire
+  less than five minutes ahead (401 otherwise). Upgrade with `updateCode` so
+  the changed storage layout is migrated; deposit/withdraw signatures and events
+  remain unchanged. Replay records survive subsequent upgrades. The first upgrade
+  retains the old timestamp as a fixed lower bound for signed owner messages
+  (403), preventing replay of pre-upgrade commands; send new signed commands
+  with a greater `time`. A bound more than five minutes ahead of the block is
+  not a timestamp from the previous layout, so the bound falls back to the
+  upgrade block: a stale read can never leave the owner unable to sign.
+  Restore bridge trust and anchor configuration after
+  upgrading as described in `contracts/an/README.md`.
+
+
+- Withdrawal preflight checks AN and EVM transfer limits before a fresh burn;
+  resumes of recorded burns skip this new-amount guard. `TransferTooLarge` is
+  named by the CLI and parked by `daemon-withdraw` / `daemon-bridge` so later
+  payouts continue. After authorizing a historical nullifier, keep its proof
+  file and restart the daemon to retry without another burn.
+- Deposit relayer diagnostics name AN 233, 234 and 239 and explain legacy
+  settlement, capacity retry or historical network initialization. New spending
+  against AN 1.7.1, which enforces caps without a capacity getter, is refused.
+- The deposit form limits each deposit to 50 USDC before approval or submission.
+- Deposit finalization reuses the same encoded external message after an
+  uncertain send while its header remains valid. A confirmed replay refusal
+  (52), expiry or a definitive outcome permits a new header, retaining the same
+  proof and public inputs. Replay/expiry outcomes remain uncertain until
+  voucher/event checks resolve them; a new L1 deposit is never submitted.
 - An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
   to bring it down: `accruedYield()` stayed zero for good, and
   `withdrawFromAave` kept reverting once the pool was empty. The book can now

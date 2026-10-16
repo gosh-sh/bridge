@@ -412,7 +412,7 @@ lines on stdout. Everything else (tvm-cli output, tracer logs) goes
 to stderr, so the `eval` line does not pollute the shell.
 
 `mintAndSend` does not add bridged inventory. `initiateWithdrawal` refuses
-a burn that would take `getTotalBridged` burned above minted (exit 233).
+a burn that would take `getTotalBridged` burned above minted (exit 240).
 This step still funds the multisig; withdraw only after a deposit has
 been finalized on this bridge for at least the amount (read
 `getTotalBridged(3)` minted − burned), or preflight and the burn both

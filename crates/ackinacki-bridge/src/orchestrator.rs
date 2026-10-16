@@ -459,6 +459,11 @@ pub async fn run(
         &preflight.bridge_dapp_id,
         &preflight.bridge_account_id,
     );
+    if !burn_already_sent {
+        crate::preflight::check_evm_withdraw_volume(&args.rpc_url, args.bridge_address, &amount)
+            .await
+            .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
+    }
     crate::preflight::check_bridge_deploy(
         &args.rpc_url,
         args.bridge_address,

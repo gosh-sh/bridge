@@ -54,6 +54,24 @@ contract AckiNackiBridge {
     ///         global TVL limit (QC-A1-1 / QC-AN-J1).
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
+    /// @notice Maximum per-tx amount moved in either direction.
+    uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
+
+    /// @notice Maximum user principal the bridge may hold.
+    uint256 public constant MAX_TVL = 10000 * USDC_UNIT;
+
+    /// @notice Exact proof nullifiers for burns made before the transfer cap.
+    mapping(bytes32 => bool) public legacyWithdrawals;
+    event LegacyWithdrawalConfigured(uint256 indexed nullifier, bool allowed);
+
+    /// @notice Authorize only an already-burned legacy withdrawal. Its proof,
+    ///         recipient, chain, identity and replay checks remain mandatory.
+    function setLegacyWithdrawal(uint256 nullifier, bool allowed) external onlyOwner {
+        _requireCanonicalFr(nullifier);
+        legacyWithdrawals[bytes32(nullifier)] = allowed;
+        emit LegacyWithdrawalConfigured(nullifier, allowed);
+    }
+
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -399,6 +417,8 @@ contract AckiNackiBridge {
     ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
     error TransferAmountMismatch();
     error DepositTooLarge();
+    error TransferTooLarge();
+    error TvlCapExceeded();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
@@ -790,6 +810,8 @@ contract AckiNackiBridge {
     {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+        if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
+        if (treasuryBalance + amount > MAX_TVL) revert TvlCapExceeded();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
         uint256 credited = _pullExactUsdc(amount);
 
@@ -1118,9 +1140,8 @@ contract AckiNackiBridge {
         // operands with `_frToLeBytes` before the round-1 SHA. Siblings at
         // rounds 2..4 are opaque SHA-256 outputs (already `bytes32`) and need
         // no reversal.
-        bytes32 h23 = sha256(
-            abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3))
-        );
+        bytes32 h23 =
+            sha256(abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3)));
         bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
         bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
         bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
@@ -1510,9 +1531,13 @@ contract AckiNackiBridge {
         if (pub.amount > treasuryBalance) {
             revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
         }
+        if (pub.amount > MAX_TRANSFER_AMOUNT && !legacyWithdrawals[nullifierKey]) {
+            revert TransferTooLarge();
+        }
 
         // ---- Effects (CEI: mutate state before any external call). ----
         _nullifiers[nullifierKey] = true;
+        delete legacyWithdrawals[nullifierKey];
         treasuryBalance -= pub.amount;
 
         // ---- Interactions ----

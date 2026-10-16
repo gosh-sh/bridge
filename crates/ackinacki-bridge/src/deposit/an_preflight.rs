@@ -39,7 +39,65 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 9, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 11, 0);
+
+/// Check the AN limits before a fresh operation can spend USDC on Ethereum.
+pub async fn check_volume(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    chain_id: u64,
+    evm_bridge: Address,
+    version: BridgeVersion,
+    amount: u64,
+) -> CliResult<()> {
+    if version == BridgeVersion(1, 7, 1) {
+        return Err(refuse(
+            "AN bridge 1.7.1 enforces caps but lacks getDepositLimits; upgrade before making a \
+             new deposit"
+                .into(),
+        ));
+    }
+    if version < BridgeVersion(1, 8, 1) {
+        return Ok(());
+    }
+    let limits = an
+        .run_getter(
+            bridge,
+            BRIDGE_ABI,
+            "getDepositLimits",
+            json!({
+                "chainId": chain_id.to_string(),
+                "l1Bridge": U256::from_be_slice(evm_bridge.as_slice()).to_string()
+            }),
+        )
+        .await
+        .map_err(|e| refuse(format!("cannot read AN volume limits: {e:#}")))?;
+    let read = |name: &str| -> CliResult<u128> {
+        limits[name]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| refuse(format!("getDepositLimits has invalid {name}: {limits}")))
+    };
+    let max_transfer = read("maxTransfer")?;
+    let tvl = read("maxTvl")?;
+    let held = read("outstanding")?;
+    let reserved = read("reserved")?;
+    if u128::from(amount) > max_transfer {
+        return Err(refuse(format!(
+            "amount exceeds AN transfer cap {max_transfer}; split the amount before depositing"
+        )));
+    }
+    if held
+        .checked_add(reserved)
+        .and_then(|v| v.checked_add(u128::from(amount)))
+        .is_none_or(|v| v > tvl)
+    {
+        return Err(refuse(
+            "AN TVL capacity is full, including pending deposits; wait before depositing".into(),
+        ));
+    }
+    Ok(())
+}
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
@@ -382,6 +440,61 @@ mod tests {
 
     const BRIDGE: [u8; 32] = [0x1a; 32];
     const ACC: [u8; 32] = [0xa3; 32];
+
+    #[tokio::test]
+    async fn a_capped_bridge_without_the_capacity_getter_refuses_new_spending() {
+        let an = healthy();
+        let err = check_volume(&an, BRIDGE, 1, Address::ZERO, BridgeVersion(1, 7, 1), 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("lacks getDepositLimits"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fresh_deposits_check_an_transfer_and_reserved_tvl() {
+        let an = FakeAn::default();
+        let source = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
+        an.getter(BRIDGE, "getDepositLimits", vec![json!({
+            "maxTransfer": "50000000", "maxTvl": "10000000000",
+            "outstanding": "9950000000", "reserved": "0"
+        })]);
+        check_volume(&an, BRIDGE, 1, source, BridgeVersion(1, 8, 1), 50_000_000)
+            .await
+            .unwrap();
+        assert!(
+            check_volume(&an, BRIDGE, 1, source, BridgeVersion(1, 8, 1), 50_000_001)
+                .await
+                .is_err()
+        );
+        an.getter(BRIDGE, "getDepositLimits", vec![json!({
+            "maxTransfer": "50000000", "maxTvl": "10000000000",
+            "outstanding": "9950000000", "reserved": "50000000"
+        })]);
+        assert!(
+            check_volume(&an, BRIDGE, 1, source, BridgeVersion(1, 8, 1), 1)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_or_malformed_an_limits_do_not_allow_spending() {
+        let an = FakeAn::default();
+        let source = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
+        assert!(
+            check_volume(&an, BRIDGE, 1, source, BridgeVersion(1, 8, 1), 1)
+                .await
+                .is_err()
+        );
+        an.getter(BRIDGE, "getDepositLimits", vec![
+            json!({"maxTransfer": "invalid"}),
+        ]);
+        assert!(
+            check_volume(&an, BRIDGE, 1, source, BridgeVersion(1, 8, 1), 1)
+                .await
+                .is_err()
+        );
+    }
 
     fn healthy() -> FakeAn {
         let an = FakeAn::default();

@@ -73,7 +73,7 @@ time they take.
   coming out of, so you have it already. The AN bridge must also have
   bridged inventory (`getTotalBridged(3)` minted − burned) covering the
   amount: `mintAndSend` ECC does not add that headroom, and
-  `initiateWithdrawal` refuses the burn with 233 without it. (If you are
+  `initiateWithdrawal` refuses the burn with 240 without it. (If you are
   only testing, the repository's `scripts/deploy_msig_and_mint.sh` deploys
   one and seeds it with 1 USDC — that one needs a checkout and `tvm-cli`,
   neither of which a withdrawal does, and a freshly minted wallet still

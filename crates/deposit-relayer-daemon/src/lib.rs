@@ -80,7 +80,8 @@ pub use daemon::{
 };
 pub use error::RelayerError;
 pub use prover::{
-    MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,
+    require_executable, DepositProverBins, MockProofGenerator, ProofGenerator,
+    SubprocessProofGenerator, SubprocessProverConfig,
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{

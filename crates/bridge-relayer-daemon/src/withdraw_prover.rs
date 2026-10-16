@@ -129,16 +129,13 @@ impl WithdrawalProver for MockWithdrawalProver {
 /// Configuration for the out-of-process `bridge-event-halo2-prover` invocation.
 #[derive(Clone, Debug)]
 pub struct SubprocessWithdrawalProverConfig {
-    /// Path to the `crates/bridge-prover-libraries` workspace root. The
-    /// prebuilt release binary is expected at
-    /// `<dir>/target/release/bridge-event-halo2-prover`; if absent we fall back
-    /// to `cargo run --release -p bridge-event-halo2-prover`.
-    pub bridge_prover_libraries_dir: PathBuf,
+    /// The prebuilt `bridge-event-halo2-prover` (`cargo build --release -p
+    /// bridge-event-halo2-prover` in `crates/bridge-prover-libraries`).
+    /// Nothing is built here; the command that runs this checks the path at
+    /// startup with [`crate::require_executable`].
+    pub prover_bin: PathBuf,
     /// Working directory for the prover process. The binary reads the SRS +
-    /// Circuit 4 PK/VK from `./params` **relative to this dir**. Defaults to
-    /// `bridge_prover_libraries_dir`. (Only honoured for the prebuilt-binary
-    /// path; the `cargo run` fallback always runs from
-    /// `bridge_prover_libraries_dir`.)
+    /// Circuit 4 PK/VK from `./params` **relative to this dir**.
     pub work_dir: PathBuf,
     /// Optional dir to also persist `proof_event_{seq:06}.json` (passed as
     /// `--out-dir`). The proof is returned regardless via stdout.
@@ -151,11 +148,10 @@ pub struct SubprocessWithdrawalProverConfig {
 }
 
 impl SubprocessWithdrawalProverConfig {
-    pub fn new(bridge_prover_libraries_dir: impl Into<PathBuf>) -> Self {
-        let dir = bridge_prover_libraries_dir.into();
+    pub fn new(prover_bin: impl Into<PathBuf>, work_dir: impl Into<PathBuf>) -> Self {
         Self {
-            work_dir: dir.clone(),
-            bridge_prover_libraries_dir: dir,
+            prover_bin: prover_bin.into(),
+            work_dir: work_dir.into(),
             out_dir: None,
             seq_no: 0,
             timeout: Duration::from_secs(1800),
@@ -173,8 +169,8 @@ impl SubprocessWithdrawalProver {
     pub fn new(mut config: SubprocessWithdrawalProverConfig) -> Self {
         // Subprocess spawn with `current_dir` needs absolute paths; operators
         // often pass relative dirs.
-        if let Ok(abs) = config.bridge_prover_libraries_dir.canonicalize() {
-            config.bridge_prover_libraries_dir = abs;
+        if let Ok(abs) = config.prover_bin.canonicalize() {
+            config.prover_bin = abs;
         }
         if let Ok(abs) = config.work_dir.canonicalize() {
             config.work_dir = abs;
@@ -182,15 +178,6 @@ impl SubprocessWithdrawalProver {
         Self {
             config,
         }
-    }
-
-    fn release_bin(&self) -> Option<PathBuf> {
-        let bin = self
-            .config
-            .bridge_prover_libraries_dir
-            .join("target/release")
-            .join(PROVER_BIN);
-        bin.is_file().then_some(bin)
     }
 
     /// Build the argv passed to the prover (program excluded). Pulled out so
@@ -217,18 +204,11 @@ impl WithdrawalProver for SubprocessWithdrawalProver {
 
         let args = self.prover_args(witness_path);
 
-        let mut cmd = if let Some(bin) = self.release_bin() {
-            let mut c = Command::new(bin);
-            c.current_dir(&self.config.work_dir).args(&args);
-            c
-        } else {
-            let mut c = Command::new("cargo");
-            c.current_dir(&self.config.bridge_prover_libraries_dir)
-                .args(["run", "--release", "-p", PROVER_BIN, "--"])
-                .args(&args);
-            c
-        };
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut cmd = Command::new(&self.config.prover_bin);
+        cmd.current_dir(&self.config.work_dir)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
@@ -296,7 +276,7 @@ mod tests {
 
     #[test]
     fn subprocess_args_carry_fixture_seqno_and_outdir() {
-        let mut cfg = SubprocessWithdrawalProverConfig::new(".");
+        let mut cfg = SubprocessWithdrawalProverConfig::new("./bridge-event-halo2-prover", ".");
         cfg.seq_no = 7;
         cfg.out_dir = Some(PathBuf::from("/tmp/out"));
         let prover = SubprocessWithdrawalProver::new(cfg);
@@ -311,9 +291,47 @@ mod tests {
         ]);
     }
 
+    #[tokio::test]
+    async fn the_prover_is_the_configured_binary_run_in_the_work_dir() {
+        // The path given is what runs, in `work_dir`; a failure quotes the
+        // prover's stderr. No cargo anywhere.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let bin = dir.path().join("prover.sh");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\npwd -P > {cwd}\necho 'no params here' >&2\nexit 2\n",
+                cwd = dir.path().join("cwd").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let prover =
+            SubprocessWithdrawalProver::new(SubprocessWithdrawalProverConfig::new(&bin, &work));
+        let err = prover
+            .prove(Path::new("/w/witness.json"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bridge-event-halo2-prover exited"), "{err}");
+        assert!(err.contains("no params here"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cwd"))
+                .unwrap()
+                .trim(),
+            work.canonicalize().unwrap().to_str().unwrap()
+        );
+    }
+
     #[test]
     fn subprocess_args_omit_outdir_when_unset() {
-        let prover = SubprocessWithdrawalProver::new(SubprocessWithdrawalProverConfig::new("."));
+        let prover = SubprocessWithdrawalProver::new(SubprocessWithdrawalProverConfig::new(
+            "./bridge-event-halo2-prover",
+            ".",
+        ));
         let args = prover.prover_args(Path::new("w.json"));
         assert_eq!(args, vec!["--fixture", "w.json", "--seq-no", "0"]);
     }

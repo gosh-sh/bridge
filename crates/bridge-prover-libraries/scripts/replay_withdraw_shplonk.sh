@@ -57,7 +57,7 @@ OUT="L1_config/proofs/proof_event_replay_${TS}.json"
 LOG_PROVE="logs/replay_prove_${TS}.log"
 LOG_SUBMIT="logs/replay_submit_${TS}.log"
 
-# The aggregate-proof subprocess `cd`s into $BRIDGE_AGGREGATOR_DIR, so it must
+# The aggregate-proof subprocess runs in its own directory, so it must
 # receive an ABSOLUTE snark-dir path (a relative "work_dir/..." would resolve
 # against the aggregator's cwd and miss the intermediate `.snark` file).
 SNARK_DIR_ABS=$(python3 -c "import os,sys; print(os.path.abspath('L1_config/work_dir/shplonk-snark-replay'))")
@@ -66,7 +66,7 @@ echo "==> Step 1/3  prove SHPLONK  (witness=$WITNESS, seq=$SEQ)"
 echo "    (first run cold: outer PK keygen ~a few min; warm: ~30-60s)"
 ./target/release/relayer prove-withdraw-shplonk \
   --witness       "$WITNESS" \
-  --aggregator-dir "$BRIDGE_AGGREGATOR_DIR" \
+  --aggregate-proof-bin "${BRIDGE_AGGREGATE_PROOF_BIN:-$BRIDGE_AGGREGATOR_DIR/target/release/aggregate-proof}" \
   --verifiers-dir  "$BRIDGE_VERIFIERS_DIR" \
   --params-dir     "$BRIDGE_PARAMS_DIR" \
   --snark-dir      "$SNARK_DIR_ABS" \

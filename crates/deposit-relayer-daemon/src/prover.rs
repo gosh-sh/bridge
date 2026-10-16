@@ -16,7 +16,7 @@
 //!   Blake2b SHPLONK proof operands) and assembles the three opcode operands.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, Instant},
 };
@@ -155,11 +155,70 @@ impl ProofGenerator for MockProofGenerator {
 // SubprocessProofGenerator — invokes deposit-prover example binaries
 // ─────────────────────────────────────────────────────────────────────
 
+/// The three `deposit-prover` example binaries the generator runs, each an
+/// explicit path (`cargo build --release --examples` in `deposit-prover/`
+/// leaves them under `target/release/examples/`). Nothing is built here.
+#[derive(Clone, Debug)]
+pub struct DepositProverBins {
+    pub fetch_deposit_data: PathBuf,
+    pub export_vk_blob: PathBuf,
+    pub export_blake2b_proof: PathBuf,
+}
+
+impl DepositProverBins {
+    /// Every path as an absolute path, refused unless it is an executable
+    /// file, so a daemon with a wrong binary stops at startup rather than at
+    /// its first deposit.
+    pub fn validated(self) -> Result<Self, RelayerError> {
+        Ok(Self {
+            fetch_deposit_data: require_executable(&self.fetch_deposit_data, "fetch_deposit_data")?,
+            export_vk_blob: require_executable(&self.export_vk_blob, "export_vk_blob")?,
+            export_blake2b_proof: require_executable(
+                &self.export_blake2b_proof,
+                "export_blake2b_proof",
+            )?,
+        })
+    }
+
+    fn for_example(&self, example: &str) -> Option<&Path> {
+        match example {
+            "fetch_deposit_data" => Some(&self.fetch_deposit_data),
+            "export_vk_blob" => Some(&self.export_vk_blob),
+            "export_blake2b_proof" => Some(&self.export_blake2b_proof),
+            _ => None,
+        }
+    }
+}
+
+/// `path` as an absolute path, refused unless it is an executable file.
+pub fn require_executable(path: &Path, what: &str) -> Result<PathBuf, RelayerError> {
+    let refuse = |why: String| {
+        RelayerError::ProofGeneration(format!("{what} binary {}: {why}", path.display()))
+    };
+    let meta = std::fs::metadata(path).map_err(|e| refuse(e.to_string()))?;
+    if !meta.is_file() {
+        return Err(refuse("not a file".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err(refuse("not executable (chmod +x)".into()));
+        }
+    }
+    path.canonicalize().map_err(|e| refuse(e.to_string()))
+}
+
 /// Configuration for the out-of-process `deposit-prover` invocation.
 #[derive(Clone, Debug)]
 pub struct SubprocessProverConfig {
-    /// Path to the `deposit-prover` crate root (its own cargo workspace).
+    /// Working directory of the examples. `export_blake2b_proof` keeps the
+    /// proving key under `data/` relative to it, and `data/kzg_params_18.srs`
+    /// is read from there too: the `deposit-prover` tree, or a copy of its
+    /// `data/`.
     pub deposit_prover_dir: PathBuf,
+    /// The example binaries, see [`DepositProverBins`].
+    pub bins: DepositProverBins,
     /// Ethereum RPC URL passed to `fetch_deposit_data`.
     pub rpc_url: String,
     /// Circuit degree (`k`). The `deposit-prover` examples default to 18.
@@ -177,9 +236,14 @@ pub struct SubprocessProverConfig {
 }
 
 impl SubprocessProverConfig {
-    pub fn new(deposit_prover_dir: impl Into<PathBuf>, rpc_url: impl Into<String>) -> Self {
+    pub fn new(
+        deposit_prover_dir: impl Into<PathBuf>,
+        bins: DepositProverBins,
+        rpc_url: impl Into<String>,
+    ) -> Self {
         Self {
             deposit_prover_dir: deposit_prover_dir.into(),
+            bins,
             rpc_url: rpc_url.into(),
             degree: 18,
             max_data_byte_len: 2048,
@@ -200,8 +264,8 @@ impl SubprocessProverConfig {
 ///
 /// The three resulting files are read back and assembled into a
 /// [`DepositProofBundle`]. This is intentionally heavyweight (it runs the
-/// halo2 prover); operators typically pre-build the examples in release mode
-/// so step (3) doesn't recompile.
+/// halo2 prover). The examples are the prebuilt binaries the generator was
+/// configured with; it never builds them.
 pub struct SubprocessProofGenerator {
     config: SubprocessProverConfig,
 }
@@ -215,19 +279,6 @@ impl SubprocessProofGenerator {
         }
         Self {
             config,
-        }
-    }
-
-    fn release_example_bin(&self, example: &str) -> Option<PathBuf> {
-        let bin = self
-            .config
-            .deposit_prover_dir
-            .join("target/release/examples")
-            .join(example);
-        if bin.is_file() {
-            Some(bin)
-        } else {
-            None
         }
     }
 
@@ -254,23 +305,16 @@ impl SubprocessProofGenerator {
             _ => &args[1..],
         };
 
-        let mut cmd = if let Some(bin) = self.release_example_bin(example) {
-            let mut c = Command::new(bin);
-            c.current_dir(&self.config.deposit_prover_dir)
-                .args(passthrough);
-            c
-        } else {
-            let mut c = Command::new("cargo");
-            c.current_dir(&self.config.deposit_prover_dir)
-                .arg("run")
-                .arg("--release")
-                .arg("--example");
-            for a in args {
-                c.arg(a);
-            }
-            c
-        };
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let bin = self.config.bins.for_example(example).ok_or_else(|| {
+            RelayerError::ProofGeneration(format!(
+                "no binary configured for deposit-prover example {example:?}"
+            ))
+        })?;
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(&self.config.deposit_prover_dir)
+            .args(passthrough)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
@@ -452,5 +496,99 @@ mod tests {
         let gen = MockProofGenerator::failing_on(3);
         assert!(gen.generate(&event(3)).await.is_err());
         assert!(gen.generate(&event(4)).await.is_ok());
+    }
+
+    fn install_script(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn bins_in(dir: &Path) -> DepositProverBins {
+        DepositProverBins {
+            fetch_deposit_data: dir.join("fetch_deposit_data"),
+            export_vk_blob: dir.join("export_vk_blob"),
+            export_blake2b_proof: dir.join("export_blake2b_proof"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_example_runs_as_its_configured_binary_in_the_prover_dir() {
+        // The generator executes the path it was given for the example, in
+        // `deposit_prover_dir`, with the arguments after `--`; no cargo.
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let bins = bins_in(dir.path());
+        install_script(
+            &bins.fetch_deposit_data,
+            &format!(
+                "#!/bin/sh\npwd -P > {cwd}\nprintf '%s ' \"$@\" > {args}\n",
+                cwd = dir.path().join("cwd").display(),
+                args = dir.path().join("args").display(),
+            ),
+        );
+        let gen =
+            SubprocessProofGenerator::new(SubprocessProverConfig::new(&work, bins, "http://rpc"));
+        gen.run_example(&[
+            "fetch_deposit_data".into(),
+            "--".into(),
+            "--tx-hash".into(),
+            "0x1".into(),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cwd"))
+                .unwrap()
+                .trim(),
+            work.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args")).unwrap(),
+            "--tx-hash 0x1 "
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_example_is_refused_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let gen = SubprocessProofGenerator::new(SubprocessProverConfig::new(
+            dir.path(),
+            bins_in(dir.path()),
+            "http://rpc",
+        ));
+        let err = gen
+            .run_example(&["export_something".into()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no binary configured"), "{err}");
+    }
+
+    #[test]
+    fn validated_bins_refuse_a_missing_or_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = bins_in(dir.path());
+        let err = bins.clone().validated().unwrap_err().to_string();
+        assert!(err.contains("fetch_deposit_data binary"), "{err}");
+        install_script(&bins.fetch_deposit_data, "#!/bin/sh\n");
+        install_script(&bins.export_vk_blob, "#!/bin/sh\n");
+        std::fs::write(&bins.export_blake2b_proof, "x").unwrap();
+        let err = bins.clone().validated().unwrap_err().to_string();
+        assert!(
+            err.contains("export_blake2b_proof binary") && err.contains("not executable"),
+            "{err}"
+        );
+        install_script(&bins.export_blake2b_proof, "#!/bin/sh\n");
+        let ok = bins.validated().unwrap();
+        assert!(ok.fetch_deposit_data.is_absolute());
+        assert_eq!(
+            ok.export_blake2b_proof,
+            dir.path()
+                .join("export_blake2b_proof")
+                .canonicalize()
+                .unwrap()
+        );
     }
 }

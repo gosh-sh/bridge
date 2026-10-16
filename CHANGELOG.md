@@ -77,6 +77,25 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
+  bridged burned above bridged minted for that token, exit 233
+  (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
+  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
+  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
+  against headroom that deposits created: the cap limits total bridge
+  payouts to total deposits, not one depositor's own withdrawal.
+
+  A fresh zerostate starts both counters at 0, so the cap holds from the
+  first burn. `updateCode` copies the maps as they are. On a live bridge
+  that is already inverted (`getTotalBridged` burned above minted — the
+  current shellnet USDCBridge answers minted 0, burned 1 000 000), every
+  burn is refused until `finalizeDeposit` brings minted up to burned.
+  That is not the same as a fresh deploy.
+
+  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
+  The ABI is unchanged. The withdraw CLI preflight checks
+  `getTotalBridged` and refuses before the burn.
+
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
   flip-owner` / `daemon --flip-owner` takes the chain id from the light

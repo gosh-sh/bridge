@@ -16,6 +16,8 @@ function the full-orchestrator drivers (`test_deploy_and_withdraw_only`,
 `generate_withdrawals_with_live_event_proving`) use. This driver stops
 at the ECC[3] mint — it does NOT fire `initiateWithdrawal`, does NOT
 wait for a WithdrawalInitiated event, and does NOT run any Rust binary.
+`mintAndSend` does not add bridged inventory; a later `withdraw` still
+needs a prior `finalizeDeposit` covering the amount (`getTotalBridged`).
 
 Env vars honored:
   BRIDGE_CONFIG           REQUIRED path to a network profile file

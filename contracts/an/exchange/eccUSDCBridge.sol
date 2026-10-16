@@ -36,11 +36,14 @@ interface IShellAccumulator {
 ///            deposit is proof-bound (chainId + emitting contract) and gated by
 ///            the owner-managed `_trustedL1Bridge` allowlist.
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
-///            `_totalBurnedBridgeByToken` (mapping kept for forward-compat).
+///            `_totalBurnedBridgeByToken`. `initiateWithdrawal` refuses a
+///            burn that would take burned above minted for that token
+///            (`ERR_BURN_EXCEEDS_BRIDGED`). Owner-mint and TIP-3 mint do
+///            not increment the bridged counters.
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.9.0";
+    string constant version = "1.10.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -82,11 +85,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     uint64 _mintNonce;
     uint64 _mintAccumulatorNonce;
 
-    // Cross-chain bridge accounting per tokenId (any external chain; independent
-    // of stripe `_totalMinted`). No invariant enforced between minted/burned —
-    // intra-AN ECC distribution can outpace deposits, so on-AN withdrawal can
-    // exceed historical deposits for the same token. The split is for
-    // observability / per-token analytics, not for on-chain checks.
+    // Cross-chain bridge accounting per tokenId (independent of stripe
+    // `_totalMinted`). `initiateWithdrawal` keeps burned <= minted for that
+    // token. ECC[3] is fungible, so this is an inventory cap, not a
+    // provenance fence: owner/TIP-3 ECC can still consume deposit headroom.
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
 
@@ -520,6 +522,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
+        uint128 minted = _totalMintedBridgeByToken[tokenId];
+        uint128 burned = _totalBurnedBridgeByToken[tokenId];
+        require(burned <= minted, ERR_BURN_EXCEEDS_BRIDGED);
+        require(amount <= minted - burned, ERR_BURN_EXCEEDS_BRIDGED);
 
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;
@@ -966,8 +972,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         _totalMinted = totalMinted;
         _mintNonce = mintNonce;
         _mintAccumulatorNonce = mintAccumulatorNonce;
-        _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _totalBurnedBridgeByToken = totalBurnedBridgeByToken;
+        _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
@@ -995,7 +1001,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     }
 
     /// @notice Returns total ECC minted/burned via the cross-chain bridge path
-    ///         for a specific tokenId.
+    ///         for a specific tokenId. `initiateWithdrawal` uses these as an
+    ///         inventory cap (`ERR_BURN_EXCEEDS_BRIDGED` when burned would
+    ///         exceed minted).
     function getTotalBridged(uint32 tokenId) external view returns (uint128 minted, uint128 burned) {
         return (_totalMintedBridgeByToken[tokenId], _totalBurnedBridgeByToken[tokenId]);
     }

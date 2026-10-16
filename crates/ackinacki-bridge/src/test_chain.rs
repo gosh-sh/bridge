@@ -139,14 +139,20 @@ const USDC_BRIDGE_TVC: &[u8] =
     include_bytes!("../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc");
 
 /// A deployed USDCBridge owned by [`PAIR_PUBLIC`], paused by its owner when
-/// `paused`.
-///
-/// Returns `(account_id_hex, account_boc_base64)`. Built the way
-/// [`deployed_multisig`] is: the constructor executed locally against an
-/// uninitialised account, then — for a paused bridge — the owner's
-/// `setPaused(true)` executed against the result. What `isPaused` answers is
-/// then the contract's own code reading its own storage.
+/// `paused`, with empty bridged inventory.
 pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
+    deployed_usdc_bridge_with(paused, 0, 0).await
+}
+
+/// [`deployed_usdc_bridge`], then the bridged minted/burned totals that
+/// `getTotalBridged(3)` reads. `fake_world` seeds minted so orchestrator
+/// dry-runs pass the 233 inventory check; the unit test that names 233
+/// keeps minted at zero.
+pub(crate) async fn deployed_usdc_bridge_with(
+    paused: bool,
+    bridged_minted: u128,
+    bridged_burned: u128,
+) -> (String, String) {
     let ctx =
         Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"));
     let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
@@ -188,7 +194,7 @@ pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
 
     if paused {
         let call = encode_message(ctx.clone(), ParamsOfEncodeMessage {
-            abi,
+            abi: abi.clone(),
             address: Some(encoded.address.clone()),
             call_set: Some(CallSet {
                 function_name: "setPaused".to_string(),
@@ -200,7 +206,7 @@ pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
         })
         .await
         .expect("setPaused encodes offline");
-        boc = run_executor(ctx, ParamsOfRunExecutor {
+        boc = run_executor(ctx.clone(), ParamsOfRunExecutor {
             message: call.message,
             account: AccountForExecutor::Account {
                 boc,
@@ -214,6 +220,10 @@ pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
         .account;
     }
 
+    if bridged_minted > 0 || bridged_burned > 0 {
+        boc = with_bridged_totals(&boc, bridged_minted, bridged_burned);
+    }
+
     let account_id = encoded
         .address
         .split_once(':')
@@ -221,6 +231,62 @@ pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
         .1
         .to_string();
     (account_id, boc)
+}
+
+/// Write `_totalMintedBridgeByToken[3]` / `_totalBurnedBridgeByToken[3]` into
+/// a deployed USDCBridge account so `getTotalBridged` answers those totals.
+/// The contract has no owner setter for them; tests decode the storage
+/// fields, replace those two maps, and pack the same layout back.
+fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
+    let mut account = Account::construct_from_base64(boc).expect("the executor returns an account");
+    let data = account.get_data().expect("a deployed bridge has data");
+    let contract = tvm_abi::Contract::load(crate::burn::USDC_BRIDGE_ABI_JSON.as_bytes())
+        .expect("the shipped ABI loads");
+    let slice = tvm_types::SliceData::load_cell(data).expect("bridge data is a slice");
+    let mut tokens = contract
+        .decode_storage_fields(slice, false)
+        .expect("USDCBridge data decodes against the shipped ABI");
+    for token in &mut tokens {
+        if token.name == "_totalMintedBridgeByToken" {
+            token.value = u32_u128_map(minted);
+        }
+        if token.name == "_totalBurnedBridgeByToken" {
+            token.value = u32_u128_map(burned);
+        }
+    }
+    let builder = tvm_abi::TokenValue::pack_values_into_chain(
+        &tokens,
+        Vec::new(),
+        &tvm_abi::contract::ABI_VERSION_2_4,
+    )
+    .expect("bridged totals pack");
+    let new_data = builder.into_cell().expect("packed data is a cell");
+    assert!(
+        account.set_data(new_data),
+        "set_data on an Active USDCBridge"
+    );
+    tvm_types::base64_encode(
+        account
+            .write_to_bytes()
+            .expect("the account serialises back"),
+    )
+}
+
+/// A `mapping(uint32 => uint128)` with ECC[3] set to `value`, or empty when
+/// `value` is 0.
+fn u32_u128_map(value: u128) -> tvm_abi::TokenValue {
+    let mut map = std::collections::BTreeMap::new();
+    if value > 0 {
+        map.insert(
+            3u32.to_string(),
+            tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(value, 128)),
+        );
+    }
+    tvm_abi::TokenValue::Map(
+        tvm_abi::ParamType::Uint(32),
+        tvm_abi::ParamType::Uint(128),
+        map,
+    )
 }
 
 /// What the fake node knows about the withdrawal under test.
@@ -798,7 +864,10 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
     use crate::preflight::tests::{full_walk, full_walk_code, mock_rpc_code_for};
 
     let (account_id, account_boc) = deployed_multisig(ecc3).await;
-    let (usdc_bridge_account_id, usdc_bridge_boc) = deployed_usdc_bridge(knobs.an_paused).await;
+    // Bridged minted must cover the burn: owner/TIP-3 ECC does not add
+    // inventory. Seed a round 1_000 USDC so any fixture amount here passes.
+    let (usdc_bridge_account_id, usdc_bridge_boc) =
+        deployed_usdc_bridge_with(knobs.an_paused, 1_000_000_000, 0).await;
     let node = fake_node(NodeFixture {
         account_id: account_id.clone(),
         account_boc,
@@ -953,6 +1022,24 @@ mod tests {
             &fixture,
             "POST /graphql HTTP/1.1",
             &json!({ "query": "query{blockchain{transaction(hash:\"x\"){boc}}}" }).to_string(),
+        );
+    }
+
+    #[tokio::test]
+    async fn compiled_bridge_tvc_code_hash_matches_the_changelog() {
+        let (_id, boc) = deployed_usdc_bridge(false).await;
+        let account = Account::construct_from_base64(&boc).expect("the fixture BOC parses");
+        let hash = account
+            .get_code_hash()
+            .expect("an Active bridge has a code hash")
+            .as_hex_string();
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.10.0. Any other compiler
+        // or a stale artefact moves this, and the 233 cap would ship as a
+        // different binary than CHANGELOG names.
+        assert_eq!(
+            &hash[..8],
+            "4b2a9600",
+            "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }
 

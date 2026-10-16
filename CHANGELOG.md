@@ -1642,24 +1642,29 @@ assigns it when the release is tagged.
   no `BRIDGE_DEPLOY_BLOCK` at all a short log set is final too, since the
   re-read would walk to genesis again.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
-  rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
-  deploy from `main` with the owner pause; its deploy block 11828971 is
-  pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The previous deploys,
-  `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, deploy block
-  11807209, stopped at seq 20856832) and
-  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq 20054016),
-  still answer every getter but are no longer advanced:
-  preflight refuses `0x0F4F…` (an older verifier stack) and, with the
-  profile's `BRIDGE_DEPLOY_BLOCK`, `0x32b9…` too (its anchors predate that
+  rotated to `0x5384f162aa1a80b7a03687e1a3188f67b1fffad5`** (the 2026-10-15
+  deploy from `main` for the shellnet network started on 2026-10-14; its
+  deploy block 11921366 is pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The
+  earlier deploys, `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36` (2026-10-02,
+  deploy block 11828971), `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38`
+  (2026-09-29, deploy block 11807209) and
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, were advanced from the
+  previous network; they still answer every getter, but nobody advances
+  them. Preflight refuses `0x0F4F…` (an older verifier stack) and, with the
+  profile's `BRIDGE_DEPLOY_BLOCK`, the other two (their anchors predate that
   block, so the window-heights read comes up short); only a deploy block at
-  or before the oldest anchor its windows still hold (its own deploy block,
-  for one) gets a burn that then times out at stage 4b. All three bind the
-  same AN bridge account; the rotation changes nothing else in the profile.
-  A deposit into a deploy nobody advances reaches Acki Nacki only while that
-  bridge stays trusted there. A profile installed by `install.sh` from an
-  earlier release, or copied by hand, keeps the old `BRIDGE_ADDRESS` and
-  `RPC_URL`: change both and add `BRIDGE_DEPLOY_BLOCK`. Each deploy keeps
-  its own treasury, and nothing moves from the old one to the new one.
+  or before the oldest anchor their windows still hold (their own deploy
+  block, for one) gets a burn that then times out at stage 4b. All of them
+  bind the same AN bridge account id; the rotation changes nothing else in
+  the profile. Accounts from the previous network do not exist on the
+  current one: a multisig used as `--from` before 2026-10-14 is refused in
+  preflight with exit 2 (account not found) and has to be replaced. Acki
+  Nacki trusts deposits from `0x5384…` and from none of the earlier deploys,
+  so a deposit into one of them is not credited. A profile installed by
+  `install.sh` from an earlier release, or copied by hand, keeps the old
+  `BRIDGE_ADDRESS` and `RPC_URL`: change both and add `BRIDGE_DEPLOY_BLOCK`.
+  Each deploy keeps its own treasury, and nothing moves from the old one to
+  the new one.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn

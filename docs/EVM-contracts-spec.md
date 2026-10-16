@@ -67,6 +67,11 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/AxiomBlockHeaderOracle.sol` | 186 | Axiom V2 Core–backed oracle implementation. |
 | `src/MockBlockHeaderOracle.sol` | 76 | Test/E2E oracle (owner-settable hashes + `blockhash()` fallback). |
 | `src/IAavePool.sol`, `src/IERC20.sol` | 47 / 12 | Minimal external interfaces. |
+| `src/cctp/CctpEndpoint.sol` | 191 | CCTP burn on a source chain (`depositToHub`) and the return leg (`bridgeOut`). One deployment, many tokens. |
+| `src/cctp/CctpHubReceiver.sol` | 231 | Hub side of a CCTP burn: attestation, mint, `AckiNackiBridge.deposit`. One deployment per bridge/token. |
+| `src/cctp/CctpV2Message.sol`, `src/cctp/AnDestinationHook.sol` | 148 / 43 | Circle V2 message layout and the versioned Acki Nacki hook. |
+| `src/cctp/CctpDomains.sol` | 22 | Circle domain ids and finality thresholds. |
+| `src/cctp/ITokenMessengerV2.sol`, `src/cctp/IMessageTransmitterV2.sol`, `src/cctp/IDepositBridge.sol` | 33 / 12 / 14 | Circle and bridge interfaces the two contracts call. |
 | `verifiers/*.bin` | — | Production SHPLONK Yul **creation** bytecode (4 circuits). |
 | `verifiers/*_calldata.bin` | — | Reference `instances ‖ proof` calldata fixtures. |
 | `verifiers/{Primary,Fallback,LayerHashes}AggregatorVerifier.sol` | 82–92 KB | Generated `Halo2Verifier` Yul-in-Solidity sources (reference; the `.bin` is what deploys). |
@@ -273,11 +278,77 @@ Notes that matter downstream:
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
   (`crates/deposit-relayer-daemon/src/types.rs:101-115`). `anWorkchain` is emitted by the contract
   but is **not** one of them — `dappId` (a config-supplied tag) replaced it.
-* Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
-  Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
-  (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The
-  contract itself is chain-agnostic; the constraint lives in the prover/relayer allowlist and the
-  AN-side `(chainId → bridge Fr)` allowlist.
+* Deposits are provable from an allowlisted set of chains: Ethereum mainnet (1), OP Mainnet (10),
+  World Chain (480), Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia
+  (11155111) (`crates/deposit-chain-ids/src/lib.rs:33-42`). The contract itself is chain-agnostic;
+  the constraint lives in the prover/relayer allowlist and the AN-side `(chainId → bridge Fr)`
+  allowlist. The circuit takes `chain_id` as a public input and does not fix it, so the list
+  changes without a new verification key.
+* A CCTP deposit (Arbitrum USDC and the other rows in §6.1) does **not** use the source chain's
+  row. The proof is of the hub `Deposit`, so the chain id inside it is the hub's (1 on mainnet).
+
+### 6.1 Remote USDC via CCTP
+
+`CctpEndpoint` and `CctpHubReceiver` (`src/cctp/`) move an issuer token onto the
+hub bridge. Circle's `TokenMessengerV2` burns on the source and mints on the
+hub; it does not call the recipient. `CctpHubReceiver` is the only
+`destinationCaller` on the burn message and credits in two transactions:
+
+1. `receiveBurn(message, attestation)` — permissionless. Checks the source row,
+   mints through `MessageTransmitterV2.receiveMessage`, and parks
+   `amount - feeExecuted` (from the attested burn body, `src/cctp/CctpV2Message.sol`)
+   under `messageKey(sourceDomain, nonce) = keccak256(abi.encode(sourceDomain, nonce))`.
+   Emits `RemoteDepositReceived`. `pending(key)` and `totalPending` expose the parked amounts.
+2. `forward(key)` — a `setForwarder`'d address or the burn's `depositor` calls
+   `AckiNackiBridge.deposit` for the parked amount. No event of its own.
+
+The split protects provability. The deposit circuit takes only a type 1 or type 2 enclosing
+transaction whose receipt fits its keccak budget (`deposit-prover/src/circuit_v2.rs`). The Circle
+attestation is public once Iris signs it, so a single permissionless mint-and-deposit call could
+be sent by anyone as a legacy (type 0) or EIP-7702 transaction, leaving a `Deposit` no one can
+prove. Minting only parks the funds, so `receiveBurn` stays open; the contract cannot check the
+transaction type, so `forward` is limited to forwarders and the depositor. `forward` is 36 bytes
+of calldata, and with the standing maximum allowance the constructor grants the bridge its
+receipt is `Transfer` + `Deposit`.
+
+The hook is `abi.encode(uint8(1), int8 anWorkchain, bytes32 anAccount, address depositor)`
+(`src/cctp/AnDestinationHook.sol`). `anAccount` becomes the `Deposit` event's
+account. `depositor` is only in `RemoteDepositReceived`. The event's `sender`
+is the receiver, because that is who calls `deposit`.
+
+Registries, not hard-coded chains or tokens:
+
+* `CctpEndpoint.setHub(token, destinationDomain, hubReceiver, enabled)` — which
+  hub a local token burns toward. One endpoint per chain, many tokens.
+* `CctpEndpoint.setEgressDomain(domain, allowed)` — `bridgeOut` destinations.
+  No hook; the mint recipient is the argument.
+* `CctpHubReceiver.setSource(domain, chainId, adapter, remoteToken, enabled)` —
+  which remote adapter may originate burns of which remote token. One receiver
+  per hub bridge, so one token. A second token is a second bridge and a second
+  receiver.
+* `CctpHubReceiver.setForwarder(account, allowed)` — who may call `forward`
+  besides the depositor.
+
+`CctpDomains` records Circle's domain ids (Arbitrum = 3, Ethereum = 0, Base = 6,
+OP = 2, Polygon = 7) and the finality thresholds 1000 (fast) and 2000
+(finalized). `script/DeployCctp.s.sol` deploys one of the two contracts;
+`setHub` / `setSource` / `setEgressDomain` / `setForwarder` are separate owner calls. Both
+contracts can `rescue` tokens sent to them outside these flows; the receiver's `rescue` cannot
+take the bridge token below `totalPending` (`PendingFunds`).
+
+`deposit-relayer cctp-forward` (one burn) and `deposit-relayer cctp-daemon`
+(every `HubDeposit` on the source endpoint) read Circle Iris and call
+`receiveBurn`, then `forward` as an EIP-1559 transaction with no access list. They read
+`pending(key)` first, so a restart neither re-mints nor double-forwards, and they log an error
+if a `forward` receipt is not type 1 or 2 or has more than 20 logs. Their key must be a
+forwarder.
+They do not prove the deposit and they do not call Acki
+Nacki. Iris is queried with the source domain and the burn transaction hash,
+not with `HubDeposit.destinationDomain` (that field is the hub's domain).
+
+`deposit-relayer daemon` against the hub bridge then proves the `forward` transaction's
+`Deposit`. `scripts/cctp_usdc.sh` wires the contracts (`set-forwarder` included) and
+`print-keepers` prints both processes.
 
 ---
 
@@ -707,6 +778,9 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
 | `GenDepositSetup.s.sol` | Local only: mock USDC + oracle + bare bridge, mints and pre-approves so a `cast` loop can emit real `Deposit` events for proof generation. |
+| `DeployCctp.s.sol` | One CCTP contract. `CCTP_KIND=endpoint` (needs `TOKEN_MESSENGER`) or `receiver` (needs `DEPOSIT_BRIDGE`, `MESSAGE_TRANSMITTER`, `CCTP_LOCAL_DOMAIN`). Does not call `setHub` / `setSource`. |
+| `WireCctp.s.sol` | One owner routing call. `CCTP_WIRE=set-hub`, `set-source`, `set-egress` or `set-forwarder`. 20-byte addresses are left-padded to bytes32. |
+| `scripts/cctp_usdc.sh` | `deploy-endpoint`, `deploy-receiver`, `set-hub`, `set-source`, `set-egress`, `set-forwarder`, `print-keepers`. A broadcast requires `CONFIRM_CCTP=BROADCAST`; gas comes from the node (`--skip-simulation`). |
 | `ShplonkDeployLib.sol` | `create`-deploys Yul `.bin` → `ShplonkHalo2Verifier` → typed adapter, for each of the four circuits. |
 
 ### 12.2 Environment variables
@@ -728,6 +802,18 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
+| `CCTP_KIND` | DeployCctp | `endpoint` or `receiver`. |
+| `TOKEN_MESSENGER` | DeployCctp endpoint | Circle `TokenMessengerV2` on that chain. |
+| `DEPOSIT_BRIDGE` | DeployCctp receiver | Hub `AckiNackiBridge` whose `usdc()` is the token CCTP will mint. |
+| `MESSAGE_TRANSMITTER` | DeployCctp receiver | Circle `MessageTransmitterV2` on the hub. |
+| `CCTP_LOCAL_DOMAIN` | DeployCctp receiver | Circle domain of the hub (Ethereum is 0). |
+| `CONFIRM_CCTP` | `scripts/cctp_usdc.sh` | Must be `BROADCAST` or the script refuses to send a transaction. |
+| `RPC_URL` | `scripts/cctp_usdc.sh` | Chain the forge broadcast is sent to. |
+| `CCTP_WIRE` | WireCctp | `set-hub`, `set-source` or `set-egress`. The shell script sets this. |
+| `CCTP_ENDPOINT`, `CCTP_TOKEN`, `CCTP_DESTINATION_DOMAIN`, `CCTP_HUB_RECEIVER` | WireCctp `set-hub` | Source endpoint, its USDC, the hub's Circle domain, the hub receiver. `CCTP_ENABLED` defaults true. |
+| `CCTP_RECEIVER`, `CCTP_SOURCE_DOMAIN`, `CCTP_SOURCE_CHAIN_ID`, `CCTP_ADAPTER`, `CCTP_REMOTE_TOKEN` | WireCctp `set-source` | Hub receiver, remote CCTP domain, remote EIP-155 chain id, source endpoint, source USDC. |
+| `CCTP_RECEIVER`, `CCTP_FORWARDER` | WireCctp `set-forwarder` | Hub receiver and the keeper EOA allowed to call `forward` (`CCTP_ENABLED`, default true). |
+| `CCTP_EGRESS_DOMAIN`, `CCTP_EGRESS_ALLOWED` | WireCctp `set-egress` | Domain `bridgeOut` may mint on, and whether it is allowed. |
 
 When a verification key rotates, deploy the new Yul verifier (and confirm its
 `extcodehash` against `ShplonkDeployLib`) **before** pointing the live bridge at
@@ -790,6 +876,7 @@ was written in, so the suite was read, not executed).
 | `ShplonkVkDigestPinDerivation.t.sol` | Each `*_VK_DIGEST` constant equals word `12 + N` of the matching `<name>_calldata.bin`. |
 | `ShplonkDeployLib.t.sol`, `ShplonkSpikeOnChain.t.sol` (4) | Wrapper accepts/rejects spike calldata (`test/fixtures/r15_spike/`, **not** production verifiers). |
 | `AxiomBlockHeaderOracle.t.sol` (16) | Oracle recent/historical/future paths. |
+| `CctpArbitrumUsdc.t.sol` | CCTP hub path: Arbitrum USDC net of fee, a second domain, a second token, egress, replay, reentrancy, rescue. |
 | `Halo2PoseidonVerifier.t.sol` (7) | Standalone DarkDEX Poseidon Halo2 verifier bytecode — unrelated to the bridge's live path. |
 
 Mocks (`test/mocks/`): `MockPrimaryVerifier` / `MockFallbackVerifier` are `shouldAccept` toggles that
@@ -807,7 +894,7 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 |---|---|
 | `crates/bridge-relayer-daemon` | `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`, reads `storedLastSeenBlockSeqNo`, `storedBkSetCommitment`, `expectedPrevAnchor(numLayers)`, `storedPrevMaxLevelLayerHash`. Its `MockBridgeClient` mirrors the contract's cheap pre-flight checks exactly (`src/bridge.rs:15-23`). |
 | `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
-| `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. |
+| `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. `cctp-forward` / `cctp-daemon` (`src/cctp/`) are the earlier hop: Iris attestation in, `CctpHubReceiver.receiveBurn` and `forward` on the hub. They stop there. |
 | `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:80-128`), emits the 12-PI SHPLONK proof. |
 | `frontend/` (WASM) | Calls `deposit(uint256,int8,bytes32)` = `0xa41d0229` and `depositCounter()` — **current**. |
 | `crates/eth-frontend` | ⚠️ **Stale ABI.** Declares `deposit(uint256)` and a 4-field `Deposit` event (`src/contract.rs:42,47`) and calls `.deposit(amount)` at `src/contract.rs:133-137`. No such selector exists on the deployed bridge, so that call path cannot succeed against any current deployment. |

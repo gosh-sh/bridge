@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "forge-std/Script.sol";
+import "../src/cctp/CctpEndpoint.sol";
+import "../src/cctp/CctpHubReceiver.sol";
+
+/// @title DeployCctp
+/// @notice Deploys one CCTP contract. `CCTP_KIND=endpoint` on a source chain
+///         (Arbitrum) or on the hub (for `bridgeOut`). `CCTP_KIND=receiver` on
+///         the hub, next to an already deployed `AckiNackiBridge`.
+///
+///         Routing is a follow-up from the owner, not part of this broadcast:
+///         `setHub` / `setEgressDomain` on the endpoint, `setSource` on the
+///         receiver. Circle domain ids are `CctpDomains` (Arbitrum is 3,
+///         Ethereum is 0). Confirm messenger and transmitter addresses against
+///         Circle's registry — this script does not default them.
+contract DeployCctp is Script {
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        string memory kind = vm.envString("CCTP_KIND");
+
+        vm.startBroadcast(deployerPrivateKey);
+        if (keccak256(bytes(kind)) == keccak256("endpoint")) {
+            address messenger = vm.envAddress("TOKEN_MESSENGER");
+            CctpEndpoint endpoint = new CctpEndpoint(messenger);
+            console.log("CctpEndpoint", address(endpoint));
+        } else if (keccak256(bytes(kind)) == keccak256("receiver")) {
+            address bridge = vm.envAddress("DEPOSIT_BRIDGE");
+            address transmitter = vm.envAddress("MESSAGE_TRANSMITTER");
+            uint32 domain = uint32(vm.envUint("CCTP_LOCAL_DOMAIN"));
+            CctpHubReceiver receiver = new CctpHubReceiver(bridge, transmitter, domain);
+            console.log("CctpHubReceiver", address(receiver));
+        } else {
+            revert("CCTP_KIND must be endpoint or receiver");
+        }
+        vm.stopBroadcast();
+    }
+}

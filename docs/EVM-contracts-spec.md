@@ -72,6 +72,8 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/cctp/CctpV2Message.sol`, `src/cctp/AnDestinationHook.sol` | 148 / 43 | Circle V2 message layout and the versioned Acki Nacki hook. |
 | `src/cctp/CctpDomains.sol` | 22 | Circle domain ids and finality thresholds. |
 | `src/cctp/ITokenMessengerV2.sol`, `src/cctp/IMessageTransmitterV2.sol`, `src/cctp/IDepositBridge.sol` | 33 / 12 / 14 | Circle and bridge interfaces the two contracts call. |
+| `src/testnet/SepoliaAaveUsdcShim.sol` | 104 | Testnet only. Stands where a hub receiver expects the bridge; swaps Circle USDC for the Aave faucet USDC an AAVE-enabled Sepolia bridge custodies. See §6.2. |
+| `src/testnet/TestnetAavePool.sol`, `src/testnet/IAaveTestnetFaucet.sol` | 142 / 8 | Testnet only. The slice of the Aave V3 Pool the bridge calls, with its own aToken and an owner `accrue` for interest. See §6.2. |
 | `verifiers/*.bin` | — | Production SHPLONK Yul **creation** bytecode (4 circuits). |
 | `verifiers/*_calldata.bin` | — | Reference `instances ‖ proof` calldata fixtures. |
 | `verifiers/{Primary,Fallback,LayerHashes}AggregatorVerifier.sol` | 82–92 KB | Generated `Halo2Verifier` Yul-in-Solidity sources (reference; the `.bin` is what deploys). |
@@ -349,6 +351,30 @@ not with `HubDeposit.destinationDomain` (that field is the hub's domain).
 `deposit-relayer daemon` against the hub bridge then proves the `forward` transaction's
 `Deposit`. `scripts/cctp_usdc.sh` wires the contracts (`set-forwarder` included) and
 `print-keepers` prints both processes.
+
+### 6.2 AAVE on Sepolia (testnet only)
+
+On Sepolia, CCTP mints Circle USDC (`0x1c7D…7238`), and the Aave V3 market lists only the Aave
+faucet's own USDC (`0x94a9…E4C8`). A bridge with AAVE enabled has to custody the faucet token, so a
+hub receiver cannot deposit into it directly. Two testnet contracts close the gap; neither belongs
+on mainnet, where the hub bridge custodies Circle USDC and supplies it to the real market.
+
+`SepoliaAaveUsdcShim(bridge, circleUsdc, faucet)` is the receiver's `DEPOSIT_BRIDGE`. Its `usdc()`
+is Circle USDC. `deposit(amount, anWorkchain, anAccount)` pulls the Circle USDC from the caller,
+takes the same amount of faucet USDC from its own balance or mints the rest from the faucet
+(10 000 USDC per call at most), and calls `bridge.deposit`. The Circle USDC stays in the shim and
+backs `redeem(amount, to)`, a 1:1 swap of faucet USDC back to Circle USDC for a withdrawal that
+leaves through CCTP. The `Deposit` names the shim as `sender`. The `forward` receipt has six logs —
+the Circle `Transfer`, the faucet mint, the faucet `Transfer` into the bridge and its `Approval`,
+the `Deposit`, `Shimmed` — and the `Deposit` is at receipt log index 4.
+
+The real USDC reserve on Sepolia is over its supply cap (about 4.58 billion supplied against a cap
+of 2 billion on 2026-10-17), so `supplyToAave` reverts with Aave error `51`
+(`SUPPLY_CAP_EXCEEDED`) for any amount. `TestnetAavePool(underlying, faucet)` stands in for it:
+`supply` and `withdraw` move the underlying 1:1 against its `TestnetAToken`, `getReserveData`
+returns that aToken, and the owner's `accrue(holder, amount)` mints aTokens to a holder together
+with faucet USDC to back them, so `harvestYield` and the payout top-up from AAVE have something to
+pull. The bridge's AAVE module (§10) runs against it unchanged.
 
 ---
 
@@ -776,11 +802,11 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
-| `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
+| `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with `verifyBlock` and withdrawals disabled. AAVE off unless `USE_AAVE=true` (the Sepolia market) or `USE_AAVE=true TESTNET_AAVE_POOL=true` (a fresh `TestnetAavePool`, §6.2). |
 | `GenDepositSetup.s.sol` | Local only: mock USDC + oracle + bare bridge, mints and pre-approves so a `cast` loop can emit real `Deposit` events for proof generation. |
-| `DeployCctp.s.sol` | One CCTP contract. `CCTP_KIND=endpoint` (needs `TOKEN_MESSENGER`) or `receiver` (needs `DEPOSIT_BRIDGE`, `MESSAGE_TRANSMITTER`, `CCTP_LOCAL_DOMAIN`). Does not call `setHub` / `setSource`. |
+| `DeployCctp.s.sol` | One CCTP contract. `CCTP_KIND=endpoint` (needs `TOKEN_MESSENGER`), `receiver` (needs `DEPOSIT_BRIDGE`, `MESSAGE_TRANSMITTER`, `CCTP_LOCAL_DOMAIN`) or, on Sepolia only, `aave-shim` (needs `DEPOSIT_BRIDGE`, `CIRCLE_USDC`, `AAVE_FAUCET`). Does not call `setHub` / `setSource`. |
 | `WireCctp.s.sol` | One owner routing call. `CCTP_WIRE=set-hub`, `set-source`, `set-egress` or `set-forwarder`. 20-byte addresses are left-padded to bytes32. |
-| `scripts/cctp_usdc.sh` | `deploy-endpoint`, `deploy-receiver`, `set-hub`, `set-source`, `set-egress`, `set-forwarder`, `print-keepers`. A broadcast requires `CONFIRM_CCTP=BROADCAST`; gas comes from the node (`--skip-simulation`). |
+| `scripts/cctp_usdc.sh` | `deploy-endpoint`, `deploy-receiver`, `deploy-aave-shim` (Sepolia; `AAVE_FAUCET` defaults to `0xC959…f42D`), `set-hub`, `set-source`, `set-egress`, `set-forwarder`, `print-keepers`. A broadcast requires `CONFIRM_CCTP=BROADCAST`; gas comes from the node (`--skip-simulation`). |
 | `ShplonkDeployLib.sol` | `create`-deploys Yul `.bin` → `ShplonkHalo2Verifier` → typed adapter, for each of the four circuits. |
 
 ### 12.2 Environment variables
@@ -801,10 +827,13 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
-| `USDC_ADDRESS` | TestBridge | Override token. |
-| `CCTP_KIND` | DeployCctp | `endpoint` or `receiver`. |
+| `USDC_ADDRESS` | TestBridge | Override token. Must stay the faucet USDC when `USE_AAVE=true`. |
+| `USE_AAVE` | TestBridge | Wire the Aave V3 Sepolia pool and aUSDC. |
+| `TESTNET_AAVE_POOL` | TestBridge | With `USE_AAVE=true`: deploy a `TestnetAavePool` over the faucet USDC and wire that instead. |
+| `CCTP_KIND` | DeployCctp | `endpoint`, `receiver` or `aave-shim`. |
 | `TOKEN_MESSENGER` | DeployCctp endpoint | Circle `TokenMessengerV2` on that chain. |
 | `DEPOSIT_BRIDGE` | DeployCctp receiver | Hub `AckiNackiBridge` whose `usdc()` is the token CCTP will mint. |
+| `DEPOSIT_BRIDGE`, `CIRCLE_USDC`, `AAVE_FAUCET` | DeployCctp aave-shim | The AAVE-enabled bridge (custodying the faucet USDC), the USDC CCTP mints on Sepolia, the Aave testnet faucet. Deploy the receiver with `DEPOSIT_BRIDGE` set to the shim. |
 | `MESSAGE_TRANSMITTER` | DeployCctp receiver | Circle `MessageTransmitterV2` on the hub. |
 | `CCTP_LOCAL_DOMAIN` | DeployCctp receiver | Circle domain of the hub (Ethereum is 0). |
 | `CONFIRM_CCTP` | `scripts/cctp_usdc.sh` | Must be `BROADCAST` or the script refuses to send a transaction. |

@@ -163,3 +163,12 @@ The owner cannot reduce `treasuryBalance` and cannot replace a verifier — thos
 immutable. The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
 `applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield controls above stay
 available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec.md`, §10.1).
+
+## On Sepolia
+
+The Aave V3 USDC reserve on Sepolia is over its supply cap, so `supplyToAave` reverts with Aave
+error `51` there whatever the amount. To exercise the commands above on Sepolia, deploy the bridge
+with `USE_AAVE=true TESTNET_AAVE_POOL=true` (`script/DeployTestBridge.s.sol`): it gets a
+`TestnetAavePool`, whose owner simulates interest with `accrue(<bridge>, <amount>)`. A CCTP route
+into either kind of Sepolia bridge goes through `SepoliaAaveUsdcShim`, because the market's USDC is
+not the USDC CCTP mints (`EVM-contracts-spec.md`, §6.2).

@@ -4,11 +4,15 @@ pragma solidity ^0.8.19;
 import "forge-std/Script.sol";
 import "../src/cctp/CctpEndpoint.sol";
 import "../src/cctp/CctpHubReceiver.sol";
+import "../src/testnet/SepoliaAaveUsdcShim.sol";
 
 /// @title DeployCctp
 /// @notice Deploys one CCTP contract. `CCTP_KIND=endpoint` on a source chain
 ///         (Arbitrum) or on the hub (for `bridgeOut`). `CCTP_KIND=receiver` on
 ///         the hub, next to an already deployed `AckiNackiBridge`.
+///         `CCTP_KIND=aave-shim` on Sepolia only: a `SepoliaAaveUsdcShim` in
+///         front of a bridge that custodies the Aave faucet USDC. Deploy the
+///         receiver with `DEPOSIT_BRIDGE` set to the shim.
 ///
 ///         Routing is a follow-up from the owner, not part of this broadcast:
 ///         `setHub` / `setEgressDomain` on the endpoint, `setSource` on the
@@ -31,8 +35,14 @@ contract DeployCctp is Script {
             uint32 domain = uint32(vm.envUint("CCTP_LOCAL_DOMAIN"));
             CctpHubReceiver receiver = new CctpHubReceiver(bridge, transmitter, domain);
             console.log("CctpHubReceiver", address(receiver));
+        } else if (keccak256(bytes(kind)) == keccak256("aave-shim")) {
+            address bridge = vm.envAddress("DEPOSIT_BRIDGE");
+            address circleUsdc = vm.envAddress("CIRCLE_USDC");
+            address faucet = vm.envAddress("AAVE_FAUCET");
+            SepoliaAaveUsdcShim shim = new SepoliaAaveUsdcShim(bridge, circleUsdc, faucet);
+            console.log("SepoliaAaveUsdcShim", address(shim));
         } else {
-            revert("CCTP_KIND must be endpoint or receiver");
+            revert("CCTP_KIND must be endpoint, receiver or aave-shim");
         }
         vm.stopBroadcast();
     }

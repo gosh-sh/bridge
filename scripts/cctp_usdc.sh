@@ -4,6 +4,9 @@
 #
 #   deploy-endpoint   source-chain CctpEndpoint (Arbitrum, or the hub for bridgeOut)
 #   deploy-receiver   hub CctpHubReceiver, next to an existing AckiNackiBridge
+#   deploy-aave-shim  Sepolia only: SepoliaAaveUsdcShim in front of a bridge
+#                     that custodies the Aave faucet USDC; deploy the receiver
+#                     with DEPOSIT_BRIDGE set to the shim
 #   set-hub           source endpoint: which hub receiver a token burns toward
 #   set-source        hub receiver: which remote endpoint may burn which token
 #   set-egress        hub endpoint: which domain bridgeOut may mint on
@@ -31,7 +34,7 @@ ETH_DIR="${ROOT}/contracts/ethereum"
 RELAYER_DIR="${ROOT}/crates/deposit-relayer-daemon"
 
 usage() {
-  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -86,6 +89,16 @@ case "${cmd}" in
     echo ">>> Deploying CctpHubReceiver via ${RPC_URL}"
     forge_broadcast script/DeployCctp.s.sol:DeployCctp
     ;;
+  deploy-aave-shim)
+    require_broadcast
+    require_addr DEPOSIT_BRIDGE "${DEPOSIT_BRIDGE:?set DEPOSIT_BRIDGE to the Aave-enabled AckiNackiBridge}"
+    require_addr CIRCLE_USDC "${CIRCLE_USDC:?set CIRCLE_USDC to the USDC CCTP mints on this chain}"
+    export AAVE_FAUCET="${AAVE_FAUCET:-0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D}"
+    require_addr AAVE_FAUCET "${AAVE_FAUCET}"
+    export CCTP_KIND=aave-shim
+    echo ">>> Deploying SepoliaAaveUsdcShim via ${RPC_URL}"
+    forge_broadcast script/DeployCctp.s.sol:DeployCctp
+    ;;
   set-hub)
     require_broadcast
     require_addr CCTP_ENDPOINT "${CCTP_ENDPOINT:?set CCTP_ENDPOINT}"
@@ -135,7 +148,7 @@ case "${cmd}" in
     : "${CCTP_IRIS_URL:?set CCTP_IRIS_URL to https://iris-api.circle.com or the sandbox host}"
     : "${HUB_RPC_URL:?set HUB_RPC_URL}"
     require_addr CCTP_RECEIVER "${CCTP_RECEIVER:?set CCTP_RECEIVER}"
-    require_addr HUB_BRIDGE "${HUB_BRIDGE:?set HUB_BRIDGE to the hub AckiNackiBridge}"
+    require_addr HUB_BRIDGE "${HUB_BRIDGE:?set HUB_BRIDGE to the hub AckiNackiBridge (behind a shim, the bridge, not the shim)}"
     cat <<EOF
 # 1. Submit Circle attestations: receiveBurn, then forward. Export
 #    CCTP_HUB_PRIVATE_KEY in the environment of this process; the key is not

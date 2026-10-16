@@ -1045,6 +1045,45 @@ assigns it when the release is tagged.
   not defaults. `print-keepers` prints the `cctp-daemon` and hub
   `deposit-relayer daemon` commands without keys.
 
+- **AAVE on Sepolia, for a CCTP route or on its own (testnet only).** On
+  Sepolia, CCTP mints Circle USDC (`0x1c7D…7238`), while the Aave V3 market
+  lists only the Aave faucet's USDC (`0x94a9…E4C8`), and that reserve is over
+  its supply cap: `supplyToAave` reverts with Aave error `51` for any
+  amount. Two testnet contracts, not for mainnet:
+  - `SepoliaAaveUsdcShim(bridge, circleUsdc, faucet)`
+    (`contracts/ethereum/src/testnet/`) goes between a `CctpHubReceiver`
+    and an AAVE-enabled bridge: deploy the receiver with
+    `DEPOSIT_BRIDGE=<shim>`. `deposit` pulls Circle USDC and deposits the
+    same amount of faucet USDC (minted for what the shim does not hold, at
+    most 10 000 USDC per call); `redeem(amount, to)` swaps faucet USDC back
+    to Circle USDC 1:1. Events `Shimmed`, `Redeemed`. The hub `Deposit`
+    names the shim as `sender` and sits at receipt log index 4 of a six-log
+    `forward`.
+  - `TestnetAavePool(underlying, faucet)` with its `TestnetAToken`: the
+    `supply` / `withdraw` / `getReserveData` the bridge calls, and an owner
+    `accrue(holder, amount)` that simulates interest. The bridge's AAVE
+    commands work against it unchanged.
+
+  `script/DeployTestBridge.s.sol` takes `USE_AAVE=true` (the Sepolia
+  market) and `USE_AAVE=true TESTNET_AAVE_POOL=true` (a fresh
+  `TestnetAavePool`). `DeployCctp.s.sol` takes `CCTP_KIND=aave-shim`
+  (`DEPOSIT_BRIDGE`, `CIRCLE_USDC`, `AAVE_FAUCET`), and
+  `scripts/cctp_usdc.sh deploy-aave-shim` wraps it, with the faucet
+  `0xC959…f42D` as the default. Deployed and run on 2026-10-17, Arbitrum
+  Sepolia → Sepolia:
+
+  | Contract | Real Aave market | `TestnetAavePool` |
+  |---|---|---|
+  | `AckiNackiBridge` (Sepolia) | `0x071E029ba21284B5f53808a110E0E5C9ef1a3759` | `0x46a6dEeb5370a1AF561f9509826d40e2b2FD9EB4` |
+  | `SepoliaAaveUsdcShim` | `0xc6ED7FEa530fB417a4094224CC2d3EDEe3EE6E04` | `0xb07280fE267e1E95840bDF25036dBD38cFBC7FD9` |
+  | `CctpHubReceiver` | `0xE4928314a2996111e12EEcd9f43BefFe35aE9f99` | `0x25409518E34fc111Cf25b42b8b4adbFEA6e18ce4` |
+  | `CctpEndpoint` (Arbitrum Sepolia) | `0x196F6231a5dD483fea38D9EC56730C6CB8F337c3` | `0x1d8d8b3EbB146E0c38Da1c562c6b15D3C8fd83aa` |
+  | `TestnetAavePool` / `TestnetAToken` | — | `0x2D37d380B7DC46Ee1d0A5bd07333d3a03b7739dE` / `0x18420353E97D02EF9262Ca25846F199b1630eBa1` |
+
+  Neither bridge is trusted by the shellnet `eccUSDCBridge` yet, so their
+  deposits do not finalize on Acki Nacki until its owner calls
+  `setTrustedL1Bridge(11155111, <bridge>, true)`.
+
 - **Ethereum mainnet (chain id 1) is a supported deposit chain** in
   `crates/deposit-chain-ids`, so `deposit-prover` and `deposit-relayer`
   accept `Deposit` events from a mainnet `AckiNackiBridge` — the CCTP hub.

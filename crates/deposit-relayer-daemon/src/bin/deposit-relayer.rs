@@ -33,8 +33,8 @@ use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
-    DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    DepositProofBundle, DepositProverBins, DepositSource, EthLogSource, MockAnSubmitter,
+    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
     SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
@@ -106,9 +106,20 @@ enum Cmd {
         /// with `--tx-hash`.
         #[arg(long, requires = "tx_hash")]
         log_index: Option<u64>,
-        /// Path to the `deposit-prover` crate root.
-        #[arg(long)]
+        /// Working directory of the `deposit-prover` examples: the proving
+        /// key under `data/` and `data/kzg_params_18.srs` are read there.
+        #[arg(long, env = "DEPOSIT_PROVER_DIR")]
         deposit_prover_dir: PathBuf,
+        /// Prebuilt `fetch_deposit_data` example (`cargo build --release
+        /// --examples` in `deposit-prover/`). Checked to run at startup.
+        #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
+        fetch_deposit_data_bin: PathBuf,
+        /// Prebuilt `export_vk_blob` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_VK_BLOB_BIN")]
+        export_vk_blob_bin: PathBuf,
+        /// Prebuilt `export_blake2b_proof` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
+        export_blake2b_proof_bin: PathBuf,
         /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`).
         #[arg(long)]
         prover_rpc_url: Option<String>,
@@ -146,8 +157,20 @@ enum Cmd {
         /// First depositId to target on a fresh start.
         #[arg(long, default_value_t = 0)]
         start_deposit_id: u64,
-        #[arg(long)]
+        /// Working directory of the `deposit-prover` examples: the proving
+        /// key under `data/` and `data/kzg_params_18.srs` are read there.
+        #[arg(long, env = "DEPOSIT_PROVER_DIR")]
         deposit_prover_dir: PathBuf,
+        /// Prebuilt `fetch_deposit_data` example (`cargo build --release
+        /// --examples` in `deposit-prover/`). Checked to run at startup.
+        #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
+        fetch_deposit_data_bin: PathBuf,
+        /// Prebuilt `export_vk_blob` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_VK_BLOB_BIN")]
+        export_vk_blob_bin: PathBuf,
+        /// Prebuilt `export_blake2b_proof` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
+        export_blake2b_proof_bin: PathBuf,
         #[arg(long)]
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
@@ -288,6 +311,9 @@ async fn main() -> anyhow::Result<()> {
             tx_hash,
             log_index,
             deposit_prover_dir,
+            fetch_deposit_data_bin,
+            export_vk_blob_bin,
+            export_blake2b_proof_bin,
             prover_rpc_url,
             degree,
             max_data_byte_len,
@@ -299,12 +325,17 @@ async fn main() -> anyhow::Result<()> {
             let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
+                DepositProverBins {
+                    fetch_deposit_data: fetch_deposit_data_bin,
+                    export_vk_blob: export_vk_blob_bin,
+                    export_blake2b_proof: export_blake2b_proof_bin,
+                },
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
                 degree,
                 max_data_byte_len,
                 max_log_num,
                 dapp_id,
-            );
+            )?;
             prove_one(
                 rpc_url,
                 bridge_address,
@@ -344,6 +375,9 @@ async fn main() -> anyhow::Result<()> {
             confirmations,
             start_deposit_id,
             deposit_prover_dir,
+            fetch_deposit_data_bin,
+            export_vk_blob_bin,
+            export_blake2b_proof_bin,
             prover_rpc_url,
             degree,
             max_data_byte_len,
@@ -371,12 +405,17 @@ async fn main() -> anyhow::Result<()> {
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
+                DepositProverBins {
+                    fetch_deposit_data: fetch_deposit_data_bin,
+                    export_vk_blob: export_vk_blob_bin,
+                    export_blake2b_proof: export_blake2b_proof_bin,
+                },
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
                 degree,
                 max_data_byte_len,
                 max_log_num,
                 dapp_id,
-            );
+            )?;
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
@@ -492,21 +531,30 @@ async fn finalize_one(
     }
 }
 
+/// The prover configuration, its binaries and working directory checked
+/// before anything connects: a wrong path is a configuration error, found
+/// at startup rather than at the first deposit.
 #[allow(clippy::too_many_arguments)]
 fn build_prover_cfg(
     deposit_prover_dir: PathBuf,
+    bins: DepositProverBins,
     rpc_url: String,
     degree: u32,
     max_data_byte_len: usize,
     max_log_num: usize,
     dapp_id: String,
-) -> SubprocessProverConfig {
-    let mut cfg = SubprocessProverConfig::new(deposit_prover_dir, rpc_url);
+) -> anyhow::Result<SubprocessProverConfig> {
+    anyhow::ensure!(
+        deposit_prover_dir.is_dir(),
+        "--deposit-prover-dir {} is not a directory",
+        deposit_prover_dir.display()
+    );
+    let mut cfg = SubprocessProverConfig::new(deposit_prover_dir, bins.validated()?, rpc_url);
     cfg.degree = degree;
     cfg.max_data_byte_len = max_data_byte_len;
     cfg.max_log_num = max_log_num;
     cfg.dapp_id = dapp_id;
-    cfg
+    Ok(cfg)
 }
 
 async fn ensure_supported_rpc_chain(

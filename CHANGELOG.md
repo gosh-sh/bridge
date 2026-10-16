@@ -77,6 +77,55 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **Every prover the relayers start is a binary the operator names, checked
+  at startup; the `cargo run` fallbacks are gone.** A daemon started with a
+  wrong path used to find out at its first proof, or, with no binary where
+  it looked, to build one from whatever source tree sat on the host. Now
+  each path is a flag with an environment variable, the file has to exist
+  and be executable before anything connects, and the daemons never derive
+  `target/release/…` from a directory or call `cargo`.
+  - `eth-lc-relayer daemon` / `prove-one`: `--step-prover-bin`
+    (`LIGHT_CLIENT_STEP_PROVER_BIN`), the prebuilt `export_step_vk_blob`
+    example, required unless `--mock-prove`; `daemon --rotate-prover-bin`
+    (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), the prebuilt `rotate_tree_n8`
+    example (`--features aggregation`), required unless `--no-rotate`.
+    `--prover-dir` (`LIGHT_CLIENT_PROVER_DIR`) is now optional: the working
+    directory of the provers, where `rotate_tree_n8` finds its fixture.
+    Units no longer need `cargo` on `PATH` or a rustup home.
+  - `deposit-relayer daemon` / `prove-one`: `--fetch-deposit-data-bin`,
+    `--export-vk-blob-bin`, `--export-blake2b-proof-bin`
+    (`DEPOSIT_FETCH_DEPOSIT_DATA_BIN`, `DEPOSIT_EXPORT_VK_BLOB_BIN`,
+    `DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN`), the three prebuilt examples;
+    `--deposit-prover-dir` stays as their working directory (the `data/`
+    SRS and proving-key cache live under it) and now also reads
+    `DEPOSIT_PROVER_DIR`.
+  - `relayer daemon-live`, `withdraw-e2e` and `prove-withdraw-shplonk`:
+    `--aggregate-proof-bin` (`BRIDGE_AGGREGATE_PROOF_BIN`) replaces
+    `--aggregator-dir` (`BRIDGE_AGGREGATOR_DIR`, `AGGREGATOR_DIR`); the
+    subprocess runs in the binary's own directory. `relayer prove-withdraw`:
+    `--prover-bin` (`BRIDGE_WITHDRAW_PROVER_BIN`) replaces
+    `--bridge-prover-libraries-dir`, and `--work-dir`
+    (`BRIDGE_WITHDRAW_PROVER_WORK_DIR`) is required.
+  - shellnet-l2 kit: the image keeps `aggregate-proof` at
+    `/opt/gosh-relayer/bin/aggregate-proof`, `container-paths.sh` exports
+    `BRIDGE_AGGREGATE_PROOF_BIN`, and the preflight pins the checksum under
+    that name. A host-layout `runtime.env` sets `BRIDGE_AGGREGATE_PROOF_BIN`
+    instead of `BRIDGE_AGGREGATOR_DIR`. Rebuild the image to pick this up.
+  - `ackinacki-bridge withdraw` is unchanged: it keeps `--aggregator-dir` and
+    hands the library the binary its own preflight already checks.
+
+  Migration: build the provers once (`cargo build --release --example
+  export_step_vk_blob` and `cargo build --release --features aggregation
+  --example rotate_tree_n8` in `eth-light-client-prover/`; `cargo build
+  --release --examples` in `deposit-prover/`; `cargo build --release --bin
+  aggregate-proof` in `crates/bridge-evm-aggregator`), put the paths in the
+  env files (`scripts/ursus/*.env.example`,
+  `crates/eth-light-client-relayer/deploy/shellnet-shadow/env.example` and
+  `crates/bridge-relayer-daemon/deploy/shellnet-l2/runtime.env.example`
+  show where) and the unit files (`scripts/ursus/*.service`), then restart.
+  A daemon started from an old unit refuses with the name of the missing
+  flag.
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
@@ -2494,6 +2543,14 @@ assigns it when the release is tagged.
   regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
 - `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
   which ran the same missing `generate-proof` binary.
+
+### Removed
+
+- The `cargo run` fallbacks of `eth-lc-relayer` (`export_step_vk_blob`,
+  `rotate_tree_n8`), `deposit-relayer` (`fetch_deposit_data`,
+  `export_vk_blob`, `export_blake2b_proof`) and `relayer` (`aggregate-proof`,
+  `bridge-event-halo2-prover`), and with them the `--aggregator-dir` /
+  `--bridge-prover-libraries-dir` flags of `relayer`. See Breaking Changes.
 
 ## [0.2.0] – 2026-09-11
 

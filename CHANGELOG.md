@@ -282,7 +282,22 @@ assigns it when the release is tagged.
   defaults. `print-keepers` prints the `cctp-daemon` command and the hub
   `deposit-relayer daemon` command; it does not start them and does not
   print keys. Run `set-forwarder` for the `cctp-daemon` key before starting
-  it.
+  it. Broadcasts run with `--skip-simulation`, so gas limits come from the
+  node: after Sepolia's Gloas upgrade forge's local estimate is several
+  times too low and a deployment runs out of gas.
+
+  A testnet deployment, wired and exercised once (2 USDC from Arbitrum
+  Sepolia, fast transfer; `forward` was an EIP-1559 transaction with 36
+  calldata bytes and two logs, `Transfer` and `Deposit` id 10):
+  `CctpHubReceiver` `0x2c62B5f55b4d4182d24567224467b369ea0B8e3D` on Sepolia
+  next to `AckiNackiBridge` `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb`,
+  and `CctpEndpoint` `0x249864f8789F755f296FD71cA9a1A78B7ea1206E` on
+  Arbitrum Sepolia (CCTP domain 3, chain id 421614). Circle's V2 testnet
+  `TokenMessengerV2` is `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` and
+  `MessageTransmitterV2` `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275` on
+  both chains; Iris is `https://iris-api-sandbox.circle.com`. That `Deposit`
+  cannot be proven yet: `deposit-prover` does not encode the Gloas block
+  header, which affects every Sepolia deposit since the upgrade.
 
 - **`eccUSDCBridge` source (version string `1.6.0`) can mint more than USDC
   and can take a different anchor writer per chain.** The compiled

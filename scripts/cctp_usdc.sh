@@ -10,7 +10,9 @@
 #   set-forwarder     hub receiver: which keeper EOA may call forward
 #   print-keepers     print cctp-daemon and the hub deposit-relayer daemon
 #
-# A broadcast refuses to run unless CONFIRM_CCTP=BROADCAST. Circle contract
+# A broadcast refuses to run unless CONFIRM_CCTP=BROADCAST. Gas limits come
+# from the node (--skip-simulation): forge's local EVM can lag a fork that
+# repriced gas, and its estimate then runs the deployment out of gas. Circle contract
 # addresses are not defaulted: pass the TokenMessengerV2 / MessageTransmitterV2
 # / USDC for that chain from Circle's registry.
 #
@@ -29,7 +31,7 @@ ETH_DIR="${ROOT}/contracts/ethereum"
 RELAYER_DIR="${ROOT}/crates/deposit-relayer-daemon"
 
 usage() {
-  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -60,7 +62,8 @@ require_broadcast() {
 
 forge_broadcast() {
   local script="$1"
-  (cd "${ETH_DIR}" && forge script "${script}" --rpc-url "${RPC_URL}" --broadcast --slow)
+  (cd "${ETH_DIR}" && forge script "${script}" --rpc-url "${RPC_URL}" --broadcast --slow \
+    --skip-simulation)
 }
 
 cmd="${1:-}"

@@ -239,8 +239,18 @@ last_seen=$(call_word "$BRIDGE_ADDRESS" 'storedLastSeenBlockSeqNo()(uint64)')
 (( last_seen >= BRIDGE_BOOTSTRAP_SEQNO )) || die "on-chain cursor $last_seen is behind bootstrap"
 (( (last_seen - BRIDGE_BOOTSTRAP_SEQNO) % 16384 == 0 )) || die "on-chain cursor is off the L2 deployment lane"
 bk_decimal=$(call_word "$BRIDGE_ADDRESS" 'storedBkSetCommitment()(uint256)')
+prev_bk_decimal=$(call_word "$BRIDGE_ADDRESS" 'storedPrevBkSetCommitment()(uint256)')
 expected_bk_decimal=$(cast to-dec "$EXPECTED_BK_SET_COMMITMENT")
-[[ "$bk_decimal" == "$expected_bk_decimal" ]] || die "on-chain BK commitment mismatch"
+# EXPECTED_BK_SET_COMMITMENT is the set the bridge was deployed with. Once the
+# daemon has applied a rotation the contract holds a newer set, so the pin is
+# accepted as the current set, as the outgoing set, or, when the rotation
+# cursor has moved past both, as the deploy-time set; only a contract that
+# never held the pinned set (a fresh deploy with another set) is refused.
+last_bk_upd=$(call_word "$BRIDGE_ADDRESS" 'storedLastBkSetUpdateSeqNo()(uint64)')
+if [[ "$bk_decimal" != "$expected_bk_decimal" && "$prev_bk_decimal" != "$expected_bk_decimal" ]]; then
+  (( last_bk_upd > 0 )) || die "on-chain BK commitment mismatch"
+  ok "BK set rotated past the deploy-time pin (rotation cursor $last_bk_upd)"
+fi
 genesis_prev=$(call_word "$BRIDGE_ADDRESS" 'storedPrevMaxLevelLayerHash()(uint256)')
 expected_genesis_prev=$(cast to-dec "$EXPECTED_GENESIS_PREV_ANCHOR")
 [[ "$genesis_prev" == "$expected_genesis_prev" ]] || die "immutable genesis anchor mismatch"

@@ -70,10 +70,14 @@ time they take.
 
 - **A single-custodian AN multisig** holding at least the amount in ECC[3],
   and its owner key file at mode `0400`. This is the wallet the USDC is
-  coming out of, so you have it already. (If you are only testing, the
-  repository's `scripts/deploy_msig_and_mint.sh` deploys one and seeds it
-  with 1 USDC — that one needs a checkout and `tvm-cli`, neither of which a
-  withdrawal does.)
+  coming out of, so you have it already. The AN bridge must also have
+  bridged inventory (`getTotalBridged(3)` minted − burned) covering the
+  amount: `mintAndSend` ECC does not add that headroom, and
+  `initiateWithdrawal` refuses the burn with 240 without it. (If you are
+  only testing, the repository's `scripts/deploy_msig_and_mint.sh` deploys
+  one and seeds it with 1 USDC — that one needs a checkout and `tvm-cli`,
+  neither of which a withdrawal does, and a freshly minted wallet still
+  needs a prior deposit on that bridge.)
 - **A Sepolia wallet with ~0.02 ETH** to pay for `withdrawByProof`. Use a
   fresh, disposable one — never a wallet holding real funds.
 
@@ -324,7 +328,9 @@ exit 30", has the details.
 
 **35 and 37: go to the operator.** The message says what to give them: the
 transaction hash, the `depositId`, the amount, the bridge address and the
-operation id.
+operation id. After exit 37 the operator pays it out with `mintAndSend`;
+that ECC cannot leave over the bridge until deposits cover
+`getTotalBridged`.
 
 ## 13. Which wallets work
 

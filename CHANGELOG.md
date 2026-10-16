@@ -130,7 +130,7 @@ assigns it when the release is tagged.
   only voucher-code replacement is refused with 236. Trust entries, canonical
   anchors, light-client configuration, pause state and per-chain owner-anchor
   restrictions still reset. Stop relayers; restore trust and anchors, redeploy
-  the light client and reapply `disableOwnerAnchors(chainId)` where used before
+  the light client and reapply `disableOwnerAnchorsOn(chainId)` where used before
   resuming. Ethereum caps are constants and require a new deployment. If a voucher's original callback failed,
   pause the bridge, inspect that voucher's transaction history, and have the
   owner call `recoverDeposit(voucher)`. It pays the stored recipient/amount,
@@ -178,12 +178,112 @@ assigns it when the release is tagged.
   `ERR_CHAIN_ACCOUNTING` (239). Fresh zerostates start at zero automatically;
   later upgrades retain network balances and rebuild network reservations.
 
-  `eccUSDCBridge` reports 1.8.3. Its `.tvc` and ABI are rebuilt
-  with `sold` 0.80.0; the new getters and legacy-cutoff setter are additive ABI changes.
+  `eccUSDCBridge` reports 1.11.0, code hash `df6b2f9d…`. Its `.tvc` and ABI
+  are rebuilt with `sold` 0.80.0; the new getters and legacy-cutoff setter are
+  additive ABI changes.
   Existing event formats and call signatures stay the same. Use the release
   `sold_gosh_0.80.0_linux_x86_64.tar.gz` (tag `gosh_0.80.0`); 0.81.0 changes the
   wire format of `WithdrawalInitiated` even when the event ABI is identical,
   which would break the withdrawal proof's message-layout assumptions.
+- **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
+  bridged burned above bridged minted for that token, exit 240
+  (`ERR_BURN_EXCEEDS_BRIDGED`).** The code is 240, not the 233 this entry
+  carried before the volume caps landed in the same release: 233 is
+  `ERR_TRANSFER_TOO_LARGE` there. Read the totals with `getTotalBridged`.
+  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
+  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
+  against headroom that deposits created: the cap limits total bridge
+  payouts to total deposits, not one depositor's own withdrawal.
+
+  A fresh zerostate starts both counters at 0, so the cap holds from the
+  first burn. `updateCode` copies the maps as they are. On a live bridge
+  that is already inverted (`getTotalBridged` burned above minted — the
+  current shellnet USDCBridge answers minted 0, burned 1 000 000), every
+  burn is refused until `finalizeDeposit` brings minted up to burned.
+  That is not the same as a fresh deploy.
+
+  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…` when this landed; the volume-cap
+  entry above rebuilds the same contract as 1.11.0, code hash `df6b2f9d…`,
+  with the same compiler. This change itself leaves the ABI unchanged.
+  The withdraw CLI preflight checks
+  `getTotalBridged` and refuses before the burn.
+
+- **The relayer's owner flip and the deposit CLI read the light client per
+  chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
+  flip-owner` / `daemon --flip-owner` takes the chain id from the light
+  client's own `getConfig`, checks the bridge's `getLightClient(l1ChainId)`
+  against `AN_LIGHT_CLIENT`, reads `isOwnerAnchorsEnabled(chainId)` for the
+  already-flipped signal and calls `disableOwnerAnchorsOn(chainId)` — it no
+  longer calls `getAnchorConfig` or the no-argument `disableOwnerAnchors`.
+  Against a 1.8.0 bridge `getLightClient(uint256)` has a different function
+  id than that release's `getLightClient()`, so upgrade the bridge to 1.9.0
+  **before** the relayer: an older bridge answers the new call with "function
+  ID is wrong". Both slim relayer ABIs under
+  `crates/eth-light-client-relayer/abi/` changed with it (`getConfig` on the
+  client; `getLightClient`, `isOwnerAnchorsEnabled` and
+  `disableOwnerAnchorsOn` on the bridge).
+
+  `ackinacki-bridge deposit` reads `getLightClient(chainId)` for the
+  deposit's own chain on a 1.9.0 bridge and keeps `getAnchorConfig` below
+  that, so a deposit on a chain whose client was not the last one deployed is
+  no longer refused. A bridge that reports 1.9.0 without the per-chain getter
+  is answered once and falls back with a warning instead of being retried for
+  ever. 1.9.0 is now the newest version the CLI was checked against.
+
+- **One light-client code, one client per source chain, addressed by code
+  salt.** `setLightClientCode` now only stores the code. The address is
+  derived when `deployLightClient` runs, from that code salted with
+  `abi.encode(l1ChainId)`, and kept in `_lightClients[l1ChainId]`; the same
+  code therefore yields a different account for every chain, and
+  `getLightClient` takes the chain id. `initialize` on the client decodes its
+  own salt and refuses a chain id that does not match it
+  (`ERR_WRONG_CODE_SALT`, 258), so an address is bound to the chain it
+  follows. `acceptBlockHashFromLightClient` and
+  `forgetBlockHashFromLightClient` check the sender against the client of the
+  chain in the call, so a client for one chain can no longer admit or forget
+  hashes for another; `disableOwnerAnchors` requires a client deployed for
+  that chain rather than a stored id.
+
+  Versions and code hashes after both changes below: `eccUSDCBridge` 1.9.0,
+  `697d1711…`; `EthBeaconLightClient` 1.5.0, `3e6e5102…`. The bridge's
+  `getLightClient` takes a chain id, so its ABI changed with it. A light
+  client deployed before this change came from unsalted
+  code, so the bridge derives a different address for its chain and stops
+  recognizing it as a writer — redeploy it with `deployLightClient`. Nothing
+  is lost: the client holds no funds, and its head and committee come back
+  from the chain it follows. The bundled bridge ABIs under `crates/` are
+  updated for the new `getLightClient` signature.
+
+- **The light client's constructor takes no arguments; the bridge initializes
+  it with a second call.** `EthBeaconLightClient` gains
+  `initialize(pubkey, l1ChainId, bootstrapCommittee, bootstrapPeriod)`, which
+  only `USDCBridge` may call and only while the owner key is still zero
+  (`ERR_ALREADY_INITIALIZED`, 257). `deployLightClient` takes the same
+  arguments as before and now sends two messages: the deploy, then
+  `initialize` — in that order, so it is the first message the new account
+  sees. Nothing about the settings travels in the state init any more.
+
+  `onlyOwnerPubkey` on the client now also refuses while the owner key is
+  zero. An unsigned external message carries `msg.pubkey() == 0`, so without
+  that check every admin call would pass in the window between the deploy and
+  `initialize`.
+
+  **Both Acki Nacki artefacts are rebuilt, and they have to be rebuilt
+  together.** The bridge builds the client's *initial data cell* from the
+  layout compiled into it (`abi.encodeStateInit({contr: EthBeaconLightClient,
+  varInit: {}, …})`), so any change to the client's state variables makes a
+  previously built bridge binary unable to deploy it. That is not theoretical:
+  the artefact pair in this repository had drifted — the bridge binary was
+  built before the light client gained `_gloasForkSlot` and
+  `_gloasForkSlotSet`, so it built a 310-byte data cell where the client's code
+  expected 318, and on a network raised from those artefacts the client's
+  constructor aborted with `cell underflow` (exit 9), leaving an account with
+  code and no storage at the derived address. The current hashes are the ones
+  given above.
+
+  `contracts/an/EthBeaconLightClient.sol`, the standalone copy the
+  shellnet-shadow kit deploys with `tvm-cli`, keeps its four-argument
+  constructor; `deploy-contract.sh` is unchanged.
 
 - **The beacon light client's step and rotate verification keys are rotated
   for Gloas (ePBS), and both proofs gain a public input.** From Gloas the
@@ -204,7 +304,9 @@ assigns it when the release is tagged.
   not scheduled) on mainnet. The owner can change it while unset or while
   owner rotation is still enabled; after `disableOwnerRotation` only
   `updateCode` can. Later `updateCode` calls with an empty user cell keep the
-  current value. Constructors and `deployLightClient` are unchanged.
+  current value. That entry predates the light-client bring-up change above:
+  the client now takes no constructor arguments and the bridge initializes it
+  with a second call.
   From Gloas, `submitUpdate` anchors the payload bid's `parent_block_hash`
   rather than the checkpoint slot's own execution hash.
   `eth-lc-relayer ancestry-one` starts its walk at that anchored hash
@@ -239,20 +341,19 @@ assigns it when the release is tagged.
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
   `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
   fields.
-- **`eccUSDCBridge.disableOwnerAnchors` is per-chain, and only the L1
-  id `deployLightClient` stored can be flipped.** The previous bool
+- **`eccUSDCBridge.disableOwnerAnchors` is per-chain.** The previous bool
   `_ownerAnchorsEnabled` turned the owner writer off for every source
   chain at once, so a flip left the six L2s on the deposit allowlist
-  with no writer. The call (and `disableOwnerAnchorsOn(uint256 chainId)`)
-  now sets `_ownerAnchorsDisabled` only for `_lightClientL1ChainId`;
-  any other id reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The bridge
-  does not read the light client's own `getConfig().l1ChainId`.
-  `getAnchorConfig().ownerAnchorsEnabled` is that L1 flag;
-  `isOwnerAnchorsEnabled(chainId)` is the per-chain view;
-  `getLightClientL1ChainId()` is the stored L1 id (0 until
-  `deployLightClient`). The new storage field is `_lightClientL1ChainId`.
-  L2 deposits keep `setAcceptedBlockHash`. The no-argument ABI the
-  relayer already calls is unchanged. The bridge reports 1.8.0. Rebuild
+  with no writer. `disableOwnerAnchorsOn(uint256 chainId)` now sets
+  `_ownerAnchorsDisabled` for any chain that has a light client deployed
+  for it; a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226) and
+  chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227). The no-argument
+  `disableOwnerAnchors` serves the chain whose client was deployed last,
+  which is also all `getAnchorConfig()` reports;
+  `isOwnerAnchorsEnabled(chainId)` is the per-chain view and
+  `getLightClientL1ChainId()` that last chain id (0 before the first
+  deploy). L2 deposits keep `setAcceptedBlockHash`. The relayer calls the
+  explicit per-chain form (see the light-client bring-up entry above). The bridge reports 1.8.0. Rebuild
   `eccUSDCBridge.tvc` (sold 0.80.0) and upgrade the premined 1.7.0
   bridge; `onCodeUpgrade` resets storage and does not migrate
   `_lightClient` or the L1 id, so both `disableOwnerAnchors` and
@@ -1667,24 +1768,29 @@ assigns it when the release is tagged.
   no `BRIDGE_DEPLOY_BLOCK` at all a short log set is final too, since the
   re-read would walk to genesis again.
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
-  rotated to `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`** (the 2026-10-02
-  deploy from `main` with the owner pause; its deploy block 11828971 is
-  pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The previous deploys,
-  `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, deploy block
-  11807209, stopped at seq 20856832) and
-  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7` (stopped at seq 20054016),
-  still answer every getter but are no longer advanced:
-  preflight refuses `0x0F4F…` (an older verifier stack) and, with the
-  profile's `BRIDGE_DEPLOY_BLOCK`, `0x32b9…` too (its anchors predate that
+  rotated to `0x5384f162aa1a80b7a03687e1a3188f67b1fffad5`** (the 2026-10-15
+  deploy from `main` for the shellnet network started on 2026-10-14; its
+  deploy block 11921366 is pinned beside it as `BRIDGE_DEPLOY_BLOCK`). The
+  earlier deploys, `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36` (2026-10-02,
+  deploy block 11828971), `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38`
+  (2026-09-29, deploy block 11807209) and
+  `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`, were advanced from the
+  previous network; they still answer every getter, but nobody advances
+  them. Preflight refuses `0x0F4F…` (an older verifier stack) and, with the
+  profile's `BRIDGE_DEPLOY_BLOCK`, the other two (their anchors predate that
   block, so the window-heights read comes up short); only a deploy block at
-  or before the oldest anchor its windows still hold (its own deploy block,
-  for one) gets a burn that then times out at stage 4b. All three bind the
-  same AN bridge account; the rotation changes nothing else in the profile.
-  A deposit into a deploy nobody advances reaches Acki Nacki only while that
-  bridge stays trusted there. A profile installed by `install.sh` from an
-  earlier release, or copied by hand, keeps the old `BRIDGE_ADDRESS` and
-  `RPC_URL`: change both and add `BRIDGE_DEPLOY_BLOCK`. Each deploy keeps
-  its own treasury, and nothing moves from the old one to the new one.
+  or before the oldest anchor their windows still hold (their own deploy
+  block, for one) gets a burn that then times out at stage 4b. All of them
+  bind the same AN bridge account id; the rotation changes nothing else in
+  the profile. Accounts from the previous network do not exist on the
+  current one: a multisig used as `--from` before 2026-10-14 is refused in
+  preflight with exit 2 (account not found) and has to be replaced. Acki
+  Nacki trusts deposits from `0x5384…` and from none of the earlier deploys,
+  so a deposit into one of them is not credited. A profile installed by
+  `install.sh` from an earlier release, or copied by hand, keeps the old
+  `BRIDGE_ADDRESS` and `RPC_URL`: change both and add `BRIDGE_DEPLOY_BLOCK`.
+  Each deploy keeps its own treasury, and nothing moves from the old one to
+  the new one.
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn
@@ -1919,10 +2025,14 @@ assigns it when the release is tagged.
 
 ### Fixed
 
-- Pending AN deposits now reject repeated finalization before accepting gas,
-  verifying the proof or deploying another voucher (400). The bridge no longer
-  stores a permanent registry of settled vouchers; after settlement, duplicate
-  deployment is rejected by the voucher's one-shot constructor. Confirmation
+- AN deposits now reject a repeated proof before accepting gas, verifying it or
+  deploying another voucher: 400 while the first callback is still pending, 241
+  (`ERR_DEPOSIT_SETTLED`) once the deposit has been paid. The bridge keeps its
+  registry of settled vouchers for that second check — without it a public proof
+  of a paid deposit could be re-sent at no cost to its sender, each time paying
+  for a halo2 verify and holding that network's capacity reserved until the
+  voucher's constructor bounced it back. The deposit CLI reads 241 as "already
+  credited" and the deposit relayer as finalized; neither retries. Confirmation
   requires a matching live reservation (235 otherwise), including after owner
   recovery. Before upgrading a version without reservations, pause finalizations
   and drain its outstanding callbacks. Existing reservation-based upgrades keep
@@ -1930,7 +2040,7 @@ assigns it when the release is tagged.
   1–240 seconds so large or zero SDK timeouts cannot generate invalid headers.
 
 
-- AN bridge 1.8.3 replaces the shared external-message timestamp guard with
+- AN bridge 1.11.0 replaces the shared external-message timestamp guard with
   hash-and-expiry replay protection. Public deposit submissions no longer block
   owner emergency calls or other deposits by choosing a future `time` header.
   Exact processed messages return 400; expired messages return 402 and may be
@@ -1940,7 +2050,10 @@ assigns it when the release is tagged.
   remain unchanged. Replay records survive subsequent upgrades. The first upgrade
   retains the old timestamp as a fixed lower bound for signed owner messages
   (403), preventing replay of pre-upgrade commands; send new signed commands
-  with a greater `time`. Restore bridge trust and anchor configuration after
+  with a greater `time`. A bound more than five minutes ahead of the block is
+  not a timestamp from the previous layout, so the bound falls back to the
+  upgrade block: a stale read can never leave the owner unable to sign.
+  Restore bridge trust and anchor configuration after
   upgrading as described in `contracts/an/README.md`.
 
 

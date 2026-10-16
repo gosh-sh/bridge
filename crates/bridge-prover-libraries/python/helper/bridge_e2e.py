@@ -192,14 +192,40 @@ def encode_initiate_withdrawal_body(dst_chain_id: int, recipient_hex: str) -> st
     return json.loads(out)["Message"]
 
 
+def require_bridged_headroom(amount: int) -> None:
+    """Refuse locally if `initiateWithdrawal` would throw 240.
+
+    `mintAndSend` does not increment `getTotalBridged`. Without this check
+    a 240 revert with bounce=false leaves the minted ECC on the bridge.
+    """
+    raw = common.run_getter(
+        USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getTotalBridged",
+        {"tokenId": USDC_TOKEN_ID},
+    )
+    if not isinstance(raw, dict) or "minted" not in raw or "burned" not in raw:
+        raise RuntimeError(
+            f"USDCBridge.getTotalBridged({USDC_TOKEN_ID}) returned unexpected payload: {raw!r}"
+        )
+    minted = int(str(raw["minted"]))
+    burned = int(str(raw["burned"]))
+    if burned > minted or amount > minted - burned:
+        raise RuntimeError(
+            f"USDCBridge.getTotalBridged({USDC_TOKEN_ID}) minted={minted} burned={burned}; "
+            f"initiateWithdrawal of {amount} µUSDC would refuse with 240 "
+            "(ERR_BURN_EXCEEDS_BRIDGED). mintAndSend does not add bridged inventory; "
+            "a prior finalizeDeposit must cover the amount."
+        )
+
+
 def call_initiate_withdrawal(msig_address: str, msig_abi: str, msig_key_path: str,
                              dst_chain_id: int, recipient_hex: str):
+    require_bridged_headroom(WITHDRAWAL_AMOUNT)
     payload = encode_initiate_withdrawal_body(dst_chain_id, recipient_hex)
     params = {
         "dest":    USDC_BRIDGE_ADDRESS_LEGACY,   # ABI `address` field — legacy form
         "value":   "1000000000",
         "cc":      {str(USDC_TOKEN_ID): str(WITHDRAWAL_AMOUNT)},   # ECC[3] USDC required by USDCBridge
-        "bounce":  False,
+        "bounce":  True,
         "flags":   1,
         "payload": payload,
     }

@@ -81,6 +81,14 @@ class BridgeLimits(unittest.TestCase):
             _totalBurnedBridgeByToken, _depositVoucherCode, carried);
         onCodeUpgrade(migration);
     }
+    function testUpgradeBareTuple() public {
+        tvm.accept();
+        TvmCell empty;
+        TvmCell migration = abi.encode(_ownerPubkey, _usdcWallet, _totalMinted,
+            _mintNonce, _mintAccumulatorNonce, _totalMintedBridgeByToken,
+            _totalBurnedBridgeByToken, _depositVoucherCode, empty);
+        onCodeUpgrade(migration);
+    }
     function testVoucher(uint256 depositId, uint256 chainId) public view returns (address voucher) {
         uint256 h = tvm.hash(abi.encode(depositId, uint256(42), uint256(0), chainId));
         voucher = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
@@ -173,8 +181,13 @@ class BridgeLimits(unittest.TestCase):
         self.confirm(0)
         self.assertEqual(int(self.limits()["outstanding"]), TRANSFER)
 
-    def test_current_excess_burn_does_not_credit_a_future_deposit(self):
+    def test_current_excess_burn_is_refused_and_credits_no_future_deposit(self):
+        # A burn above bridged inventory is refused outright since 1.10.0
+        # (ERR_BURN_EXCEEDS_BRIDGED); an inventory-sized one leaves no credit.
         self.seed(1)
+        self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
+                  source="0:" + "ab" * 32, ecc=TRANSFER, expect=240)
+        self.seed(TRANSFER)
         self.call("initiateWithdrawal", {"dstChainId": "1", "recipient": "11" * 20},
                   source="0:" + "ab" * 32, ecc=TRANSFER)
         self.assertEqual(int(self.limits()["outstanding"]), 0)
@@ -279,8 +292,9 @@ class BridgeLimits(unittest.TestCase):
         self.finalize(0)
         self.confirm(0)
         now = int(time.time() * 1000)
-        self.assertEqual(len(self.finalize(0, header={"time": now + 600_000,
-                         "expire": int(time.time()) + 240})["messages"]), 1)
+        replay = self.finalize(0, header={"time": now + 600_000,
+                               "expire": int(time.time()) + 240}, expect=241)
+        self.assertEqual(replay["messages"], [])
         self.call("setPaused", {"paused": True}, signed=True,
                   header={"time": now, "expire": int(time.time()) + 240})
         self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
@@ -301,6 +315,36 @@ class BridgeLimits(unittest.TestCase):
                          int(self.keys["public"], 16))
         self.call("setPaused", {"paused": True}, signed=True)
         self.assertEqual(int(self.limits()["outstanding"]), 0)
+
+    def test_paid_proof_replay_is_refused_before_accept_and_books_nothing(self):
+        self.seed(0)
+        self.finalize(0)
+        self.confirm(0)
+        replay = self.finalize(0, expect=241)
+        self.assertEqual(replay["messages"], [], "a paid proof must not redeploy its voucher")
+        self.assertFalse(replay["vm_success"])
+        self.assertEqual(int(self.limits()["reserved"]), 0,
+                         "a replay must not hold the network's capacity")
+        self.finalize(1)
+        self.assertEqual(int(self.limits()["reserved"]), TRANSFER)
+
+    def test_recovered_deposit_cannot_be_proven_again(self):
+        self.finalize(0)
+        self.call("setPaused", {"paused": True}, signed=True)
+        voucher = self.call("testVoucher", {"depositId": "0", "chainId": "1"})["response"]["voucher"]
+        self.call("recoverDeposit", {"voucher": voucher}, signed=True)
+        self.call("setPaused", {"paused": False}, signed=True)
+        self.finalize(0, expect=241)
+
+    def test_bare_tuple_upgrade_cannot_lock_the_owner_out(self):
+        # The zerostate path upgrades with the nine-field tuple and an empty
+        # userCell, so the legacy signed-message floor is read from a layout
+        # that holds no timestamp there. Taken at face value that read lands
+        # far in the future and refuses every signed call from then on, this
+        # contract's own updateCode included.
+        self.call("testUpgradeBareTuple")
+        self.call("setPaused", {"paused": True}, signed=True)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
 
     def test_pending_callbacks_cannot_overbook_tvl(self):
         self.finalize(0)

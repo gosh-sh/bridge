@@ -411,6 +411,13 @@ on ECC[3] via `USDCBridge.mintAndSend`, then prints two eval-able env
 lines on stdout. Everything else (tvm-cli output, tracer logs) goes
 to stderr, so the `eval` line does not pollute the shell.
 
+`mintAndSend` does not add bridged inventory. `initiateWithdrawal` refuses
+a burn that would take `getTotalBridged` burned above minted (exit 240).
+This step still funds the multisig; withdraw only after a deposit has
+been finalized on this bridge for at least the amount (read
+`getTotalBridged(3)` minted − burned), or preflight and the burn both
+refuse.
+
 The script shells out to `tvm-cli`, which is platform-specific and is
 not shipped here. Confirm the one it will pick actually runs on this
 machine before spending a deploy on finding out:
@@ -1184,8 +1191,10 @@ Preflight, in order:
 - **Acki Nacki** (`--gql-endpoint`): REST `/v2/` and GraphQL both answer; the
   bridge's `getVersion()` is at least the [minimum bridge
   version](#minimum-bridge-version); `isPaused()` is `false`;
-  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getAnchorConfig()` names
-  the light client; `isOwnerAnchorsEnabled(chainId)` says whether the owner
+  `isTrustedL1Bridge(chainId, bridge)` is `true`; `getLightClient(chainId)`
+  names the light client of this deposit's chain (on bridges below 1.9.0,
+  `getAnchorConfig()` names the only one); `isOwnerAnchorsEnabled(chainId)`
+  says whether the owner
   still anchors this deposit's chain (on 1.7.0 that flag is still
   `getAnchorConfig().ownerAnchorsEnabled`, one bool for every chain); and
   with owner anchors off the light client must pass its
@@ -1538,7 +1547,9 @@ record.
   relayer can finalize it to the recipient in its call data; otherwise only
   the operator can return the USDC.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
-  The operator pays it out (`mintAndSend`).
+  The operator pays it out (`mintAndSend`). That ECC does not add bridged
+  inventory, so it cannot be withdrawn over the bridge until a later
+  `finalizeDeposit` covers it.
 
 Give the operator the deposit's transaction hash, its `depositId`, the amount
 and recipient actually deposited, the EVM bridge address and the operation id;
@@ -1705,8 +1716,9 @@ does this in a released binary.
 
 ### When only the light client anchors
 
-`getAnchorConfig()` returns the light client and whether owner anchors are
-still enabled on the light client's L1. The deposit's own chain is
+`getLightClient(chainId)` returns the light client of a source chain, and
+`getAnchorConfig()` the one deployed last together with its owner-anchor
+flag. The deposit's own chain is
 `isOwnerAnchorsEnabled(chainId)`: after an L1 flip, L2 deposits keep the
 owner writer.
 

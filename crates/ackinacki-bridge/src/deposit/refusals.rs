@@ -26,6 +26,9 @@ pub const ERR_TVL_CAP: i32 = 234;
 /// Historical per-network balances have not been initialized after upgrade.
 pub const ERR_CHAIN_ACCOUNTING: i32 = 239;
 
+/// The deposit this proof names was already paid out.
+pub const ERR_DEPOSIT_SETTLED: i32 = 241;
+
 /// The exact external message was already processed.
 pub const ERR_MESSAGE_IS_EXIST: i32 = 400;
 /// The external message validity window exceeds the contract's five-minute
@@ -97,6 +100,9 @@ pub enum Reaction {
 /// The reaction to a bridge exit code.
 fn by_code(code: i32) -> Reaction {
     match code {
+        // The bridge refuses a settled deposit before accept, so the credit is
+        // already on the AN side: go read it instead of sending again.
+        ERR_DEPOSIT_SETTLED => Reaction::ToCredit,
         ERR_MESSAGE_IS_EXIST | ERR_MESSAGE_EXPIRED => Reaction::Retry,
         ERR_MESSAGE_WITH_HUGE_EXPIREAT => Reaction::Refused {
             code,
@@ -202,6 +208,12 @@ mod tests {
             aborted: true,
             exit_code: Some(code),
         }
+    }
+
+    #[test]
+    fn a_deposit_already_paid_sends_the_cli_to_the_credit() {
+        assert_eq!(react(&rejected(241)), Reaction::ToCredit);
+        assert_eq!(react(&executed(241)), Reaction::ToCredit);
     }
 
     #[test]

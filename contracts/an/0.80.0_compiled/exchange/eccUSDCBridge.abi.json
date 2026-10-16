@@ -146,6 +146,7 @@
 		{
 			"name": "getLightClient",
 			"inputs": [
+				{"name":"l1ChainId","type":"uint256"}
 			],
 			"outputs": [
 				{"name":"value0","type":"address"}
@@ -412,6 +413,7 @@
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_pendingDepositAmounts","type":"map(address,uint128)"},
 		{"components":[{"name":"depositId","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"contractAddr","type":"uint256"},{"name":"chainId","type":"uint256"},{"name":"dappId","type":"uint256"},{"name":"anAccount","type":"uint256"}],"init":false,"name":"_pendingDepositData","type":"map(address,tuple)"},
+		{"init":false,"name":"_settledVouchers","type":"map(address,bool)"},
 		{"init":false,"name":"_reservedDeposits","type":"uint128"},
 		{"init":false,"name":"_outstandingBridgeUsdc","type":"uint128"},
 		{"init":false,"name":"_outstandingByChain","type":"map(uint256,uint128)"},
@@ -422,7 +424,7 @@
 		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},
 		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},
 		{"init":false,"name":"_lightClientCode","type":"cell"},
-		{"init":false,"name":"_lightClient","type":"address"},
+		{"init":false,"name":"_lightClients","type":"map(uint256,address)"},
 		{"init":false,"name":"_lightClientL1ChainId","type":"uint256"},
 		{"init":false,"name":"_ownerAnchorsDisabled","type":"map(uint256,bool)"},
 		{"init":false,"name":"_paused","type":"bool"}

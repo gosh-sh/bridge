@@ -32,7 +32,7 @@ PAIRS = [
     (
         TRIMMED / "USDCBridge.abi.json",
         REPO / "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json",
-        ["getAnchorConfig", "disableOwnerAnchors"],
+        ["getLightClient", "isOwnerAnchorsEnabled", "disableOwnerAnchorsOn"],
     ),
     (
         TRIMMED / "EthBeaconLightClient.abi.json",
@@ -47,6 +47,7 @@ PAIRS = [
             "setGloasForkSlot",
             "getGloasForkSlot",
             "getCommitteeState",
+            "getConfig",
         ],
     ),
 ]

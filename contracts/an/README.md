@@ -1,17 +1,25 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.8.3, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.4.8:
+`exchange/` — `eccUSDCBridge` at version 1.11.0, `DepositVoucher` at 1.4.0 and
+`EthBeaconLightClient` at 1.5.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
-  USDC on `initiateWithdrawal`. The owner can stop both of those with
-  `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until it is
-  lifted; nothing else the bridge does is affected. That switch is independent
-  of `AckiNackiBridge.pause()` on Ethereum and of a Circle freeze of USDC —
-  see *Two pause domains* below.
+  USDC on `initiateWithdrawal`. A burn that would take bridged burned
+  above bridged minted for that token throws `ERR_BURN_EXCEEDS_BRIDGED`
+  (240 — 233 is `ERR_TRANSFER_TOO_LARGE`). ECC is fungible: owner-minted
+  and TIP-3-minted ECC can still consume headroom that deposits created;
+  the cap stops burned exceeding minted. An `updateCode` of a live bridge
+  that already burned more than it minted (`getTotalBridged` burned above
+  minted) refuses every burn
+  until deposits bring minted up to burned; a fresh zerostate starts both
+  counters at 0. The owner can stop `finalizeDeposit` and `initiateWithdrawal`
+  with `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until
+  it is lifted; `confirmDeposit`, owner mint and TIP-3 mint keep running.
+  That switch is independent of `AckiNackiBridge.pause()` on Ethereum and
+  of a Circle freeze of USDC — see *Two pause domains* below.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
   from the deposit identity and from the voucher's own code; a second
   finalization of the same deposit collides with it and does not mint again.
@@ -32,36 +40,37 @@ verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Two writers fill
 the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until `disableOwnerAnchors()`, which needs `setLightClientCode` (so
-`_lightClient` is non-zero) and a stored L1 id from `deployLightClient`
-(`ERR_LIGHT_CLIENT_UNSET` (226) until both); it does not check that the
-light-client account is Active. The call turns the owner writer off only
-for the stored L1 id (`ERR_NOT_LIGHT_CLIENT_CHAIN` (227) on any other id);
-the bridge does not read the light client's own `getConfig().l1ChainId`.
-The light client adds and ages out hashes with
-`acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient`. L2
-source chains on the deposit allowlist keep the owner writer. `getAnchorConfig()`
-returns the light client and whether the owner may still write that L1;
-`isOwnerAnchorsEnabled(chainId)` is the per-chain view;
-`getLightClientL1ChainId()` is the stored L1 id (0 until
-`deployLightClient`). No function turns owner
-anchors back on, but the owner keeps two ways around it: `updateCode` does
-(`onCodeUpgrade` leaves every chain owner-writable), and `setLightClientCode`
-still replaces the light client afterwards.
+until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
+for one chain and needs a light client deployed for it
+(`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
+for chain id 0); the no-argument `disableOwnerAnchors()` does the same for the
+chain whose client was deployed last. Neither checks that the light-client
+account is Active. Each client writes only for its own chain:
+`acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient` compare
+the sender against the client of the chain named in the call. L2 source chains
+on the deposit allowlist keep the owner writer. `getLightClient(chainId)` is
+the client of a chain (0 if none), `isOwnerAnchorsEnabled(chainId)` the
+per-chain writer state, and `getAnchorConfig()` the pair for the chain
+deployed last — with clients on several chains, read the per-chain getters.
+No function turns owner anchors back on, but `updateCode` goes around it
+(`onCodeUpgrade` leaves every chain owner-writable). `setLightClientCode`
+does not: it only changes the address the next `deployLightClient` derives,
+and clients already recorded keep writing.
 
 ### External-message replay protection
 
-Bridge 1.8.3 uses the hash-and-expiry mechanism from the DEX/multifactor
+Bridge 1.11.0 uses the hash-and-expiry mechanism from the DEX/multifactor
 contracts. The compiler still verifies signatures. A successful public deposit
 cannot advance a shared timestamp or block signed owner calls. Identical
 processed external messages and deposits with an active reservation are rejected
-with `ERR_MESSAGE_IS_EXIST` (400). Pending deposits reject before `accept`, proof
-verification or another voucher deployment. There is no permanent settled-voucher
-registry. After settlement, a fresh message attempts deployment at the same
-voucher address; the one-shot constructor rejects it and its bounce releases
-the temporary reservation.
-A new header may resubmit the same proof; voucher identity still prevents a
-second mint. Internal voucher callbacks do not consume external-message records.
+with `ERR_MESSAGE_IS_EXIST` (400). A proof whose deposit has already been paid
+is rejected with `ERR_DEPOSIT_SETTLED` (241). Both reject before `accept`, proof
+verification or another voucher deployment, so replaying a public proof costs
+the bridge nothing and holds no capacity. The settled-voucher registry is what
+makes that second check possible, and `updateCode` carries it.
+A new header may resubmit the same proof while it is unpaid; voucher identity
+still prevents a second mint, and the one-shot constructor's bounce releases the
+temporary reservation. Internal voucher callbacks do not consume external-message records.
 
 Every external message, including getters, must expire strictly after the block
 time and strictly before five minutes after it. `ERR_MESSAGE_EXPIRED` (402)

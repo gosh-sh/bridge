@@ -442,9 +442,12 @@ pass:
 
 The same 5-step Quick Start applies: wallet + config, deploy msig +
 mint (`scripts/deploy_msig_and_mint.sh` works against your own
-deploy too — no changes needed), treasury check (should be covered
-from Step L2), dry-run, real submit. See README Step 4/5 for the
-full `cargo run` invocation and expected log markers.
+deploy too — no changes needed; `mintAndSend` ECC does not add
+bridged inventory, so `initiateWithdrawal` still needs
+`getTotalBridged` headroom from a prior deposit or it is refused
+with 233), treasury check (should be covered from Step L2), dry-run,
+real submit. See README Step 4/5 for the full `cargo run` invocation
+and expected log markers.
 
 **Ground-truth log lines to grep:** `resolved anchor: L2` and
 `anchor_layer=L2` in the enricher output, `anchor_stride=16384` from

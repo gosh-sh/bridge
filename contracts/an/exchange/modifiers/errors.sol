@@ -32,6 +32,8 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_DEPOSITS_PENDING = 236;
     uint16 constant ERR_LEGACY_CONFIG = 237;
     uint16 constant ERR_RECOVERY_NOT_PAUSED = 238;
+    uint16 constant ERR_BURN_EXCEEDS_BRIDGED = 240;
+    uint16 constant ERR_DEPOSIT_SETTLED = 241;
 }
 
 uint16 constant ERR_CHAIN_ACCOUNTING = 239; // Initialize historical per-chain balances while paused

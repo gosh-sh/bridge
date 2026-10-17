@@ -889,7 +889,7 @@ was written in, so the suite was read, not executed).
 | File | Focus |
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
-| `AckiNackiBridgeAaveFork.t.sol` (4) | Mainnet-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`). |
+| `AckiNackiBridgeAaveFork.t.sol` (4) | Sepolia-fork round-trip against the real AAVE V3 Sepolia market (`FOUNDRY_PROFILE=fork`; `setUp` requires chain id 11155111). The three supply cases revert with Aave error `51` while that reserve is over its supply cap (§6.2); pin `FORK_BLOCK` to a block before it filled to run them. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
@@ -906,6 +906,8 @@ was written in, so the suite was read, not executed).
 | `ShplonkDeployLib.t.sol`, `ShplonkSpikeOnChain.t.sol` (4) | Wrapper accepts/rejects spike calldata (`test/fixtures/r15_spike/`, **not** production verifiers). |
 | `AxiomBlockHeaderOracle.t.sol` (16) | Oracle recent/historical/future paths. |
 | `CctpArbitrumUsdc.t.sol` | CCTP hub path: Arbitrum USDC net of fee, a second domain, a second token, egress, replay, reentrancy, rescue. |
+| `CctpMainnetAaveFork.t.sol` (3) | Mainnet fork (`FOUNDRY_PROFILE=fork`, `FORK_URL`). Circle's real `MessageTransmitterV2` / `TokenMessengerV2` accept an Arbitrum burn laid out by `CctpV2Message` (the fork enables a test attester with threshold one), mint real USDC to the receiver; `forward` leaves `Transfer` + `Deposit`; the bridge supplies the real AAVE V3 market, a `withdrawByProof` payout tops up from it, and `bridgeOut` burns through Circle again. Also the fast path net of `feeExecuted` and Circle's own nonce replay check. |
+| `SepoliaAaveUsdcShim.t.sol` (7), `TestnetAavePool.t.sol` (5) | The testnet shim and pool of §6.2: a CCTP burn deposited as faucet USDC and supplied, held balance spent before minting, the faucet cap, `redeem`, and the bridge's supply / `accrue` / `harvestYield` / `withdrawFromAave` against `TestnetAavePool`. |
 | `Halo2PoseidonVerifier.t.sol` (7) | Standalone DarkDEX Poseidon Halo2 verifier bytecode — unrelated to the bridge's live path. |
 
 Mocks (`test/mocks/`): `MockPrimaryVerifier` / `MockFallbackVerifier` are `shouldAccept` toggles that

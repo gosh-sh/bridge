@@ -965,6 +965,133 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **USDC from Arbitrum (and any other Circle CCTP chain) can reach Acki Nacki
+  through the hub `AckiNackiBridge`, with no new deposit circuit and no
+  Acki Nacki contract change.** Acki Nacki proves a deposit on the hub and
+  trusts the hub bridge; the source chain never enters the proof. Do **not**
+  add Arbitrum's chain id 42161 to `setTrustedL1Bridge` for this path. Two
+  Ethereum contracts, same code on every chain:
+
+  - `CctpEndpoint` (`contracts/ethereum/src/cctp/CctpEndpoint.sol`), on the
+    source chain and again on the hub. `depositToHub(token, amount,
+    anWorkchain, anAccount, maxFee, minFinalityThreshold)` pulls the token
+    and burns it through Circle `TokenMessengerV2.depositForBurnWithHook`,
+    naming the hub receiver as both mint recipient and the only
+    `destinationCaller`; it emits `HubDeposit`. `bridgeOut(token, amount,
+    destinationDomain, mintRecipient, maxFee, minFinalityThreshold)` is the
+    return leg to a domain the owner `setEgressDomain`'d. Routing is
+    `setHub(token, destinationDomain, hubReceiver, enabled)`. Arbitrum is
+    CCTP domain **3**, Ethereum **0**. `minFinalityThreshold` is **2000**
+    for a finalized transfer and **1000** for a fast one, which is where
+    Circle takes `maxFee`.
+  - `CctpHubReceiver`, on the hub next to one `AckiNackiBridge`. Circle does
+    not call the mint recipient, so crediting takes two hub transactions:
+    - `receiveBurn(message, attestation)` — anyone may send it with the
+      signed message from Circle's Iris API. It checks the burn came from a
+      `setSource(domain, chainId, adapter, remoteToken, enabled)` row, asks
+      `MessageTransmitterV2.receiveMessage` to mint, and parks
+      `amount - feeExecuted` under `messageKey(sourceDomain, nonce)` =
+      `keccak256(abi.encode(sourceDomain, nonce))`, emitting
+      `RemoteDepositReceived(key, sourceDomain, chainId, depositor,
+      anAccount, amount, feeExecuted)`. Readable state: `pending(key)`,
+      `totalPending`.
+    - `forward(key)` — calls `AckiNackiBridge.deposit` for the parked
+      amount. This is the transaction the deposit relayer proves: 36 bytes
+      of calldata, and a receipt holding only the token `Transfer` and
+      `Deposit` (the receiver gives the bridge a standing maximum allowance
+      at construction). Only an address the owner enabled with
+      `setForwarder(account, allowed)` (event `ForwarderSet`), or the burn's
+      own `depositor`, may call it, and it must be a type 1 or type 2
+      transaction. Anyone holding the public attestation could otherwise
+      deposit through a legacy or EIP-7702 transaction and leave a
+      `Deposit` the circuit cannot prove.
+
+    The `Deposit` is a hub deposit: `sender` is the receiver, `chainId` in
+    the proof is the hub's, `anAccount` comes from the hook. The source
+    chain id and depositor are only in `RemoteDepositReceived`. `rescue`
+    cannot take the bridge token below `totalPending` (`PendingFunds`). New
+    errors: `AlreadyPending`, `NotPending`, `NotForwarder`, `PendingFunds`.
+
+  One receiver serves one hub bridge, so one token; a second source chain is
+  another `setSource` / `setHub` row.
+
+- **`deposit-relayer cctp-forward` and `deposit-relayer cctp-daemon` move a
+  Circle burn onto the hub.** `cctp-forward` takes one source-chain burn
+  (`--tx-hash`, `--source-domain`) and calls `receiveBurn`, then `forward`.
+  `cctp-daemon` scans `HubDeposit` logs on the source `CctpEndpoint`
+  (`--source-rpc-url`, `--endpoint`, `--from-block` is required,
+  `--confirmations` default 2) and does the same for every new burn. Both
+  need `--iris-url` / `CCTP_IRIS_URL` (`https://iris-api.circle.com`, or
+  `https://iris-api-sandbox.circle.com` on testnets), `--hub-rpc-url` /
+  `CCTP_HUB_RPC_URL`, `--receiver`, and the hub key `CCTP_HUB_PRIVATE_KEY`,
+  whose address must be a forwarder on the receiver. The daemon's state is
+  its own `--state` (default `./cctp-forward-state.json`), not the deposit
+  relayer's. Restarts are safe: the keeper reads `pending(key)` first,
+  skips `receiveBurn` for a parked burn, and treats a used Circle nonce with
+  nothing parked as done. `forward` goes out as EIP-1559 with no access
+  list; a receipt of another type or with more than 20 logs is logged as an
+  unprovable `Deposit`. Other failures are retried and left in `gave_up`
+  after eight attempts. Neither command proves or calls Acki Nacki: run
+  `deposit-relayer daemon` against the hub bridge for that.
+
+- **`scripts/cctp_usdc.sh` deploys and wires the CCTP contracts.**
+  `deploy-endpoint` and `deploy-receiver` broadcast
+  `contracts/ethereum/script/DeployCctp.s.sol`; `set-hub`, `set-source`,
+  `set-egress` and `set-forwarder` broadcast `script/WireCctp.s.sol`.
+  Every broadcast needs `CONFIRM_CCTP=BROADCAST`, `RPC_URL` and
+  `PRIVATE_KEY`, and takes its gas limits from the node
+  (`--skip-simulation`) — forge's local estimate can be several times too
+  low on a chain past a gas repricing. Circle's addresses are arguments,
+  not defaults. `print-keepers` prints the `cctp-daemon` and hub
+  `deposit-relayer daemon` commands without keys.
+
+- **AAVE on Sepolia, for a CCTP route or on its own (testnet only).** On
+  Sepolia, CCTP mints Circle USDC (`0x1c7D…7238`), while the Aave V3 market
+  lists only the Aave faucet's USDC (`0x94a9…E4C8`), and that reserve is over
+  its supply cap: `supplyToAave` reverts with Aave error `51` for any
+  amount. Two testnet contracts, not for mainnet:
+  - `SepoliaAaveUsdcShim(bridge, circleUsdc, faucet)`
+    (`contracts/ethereum/src/testnet/`) goes between a `CctpHubReceiver`
+    and an AAVE-enabled bridge: deploy the receiver with
+    `DEPOSIT_BRIDGE=<shim>`. `deposit` pulls Circle USDC and deposits the
+    same amount of faucet USDC (minted for what the shim does not hold, at
+    most 10 000 USDC per call); `redeem(amount, to)` swaps faucet USDC back
+    to Circle USDC 1:1. Events `Shimmed`, `Redeemed`. The hub `Deposit`
+    names the shim as `sender` and sits at receipt log index 4 of a six-log
+    `forward`.
+  - `TestnetAavePool(underlying, faucet)` with its `TestnetAToken`: the
+    `supply` / `withdraw` / `getReserveData` the bridge calls, and an owner
+    `accrue(holder, amount)` that simulates interest. The bridge's AAVE
+    commands work against it unchanged.
+
+  `script/DeployTestBridge.s.sol` takes `USE_AAVE=true` (the Sepolia
+  market) and `USE_AAVE=true TESTNET_AAVE_POOL=true` (a fresh
+  `TestnetAavePool`). `DeployCctp.s.sol` takes `CCTP_KIND=aave-shim`
+  (`DEPOSIT_BRIDGE`, `CIRCLE_USDC`, `AAVE_FAUCET`), and
+  `scripts/cctp_usdc.sh deploy-aave-shim` wraps it, with the faucet
+  `0xC959…f42D` as the default. Deployed and run on 2026-10-17, Arbitrum
+  Sepolia → Sepolia:
+
+  | Contract | Real Aave market | `TestnetAavePool` |
+  |---|---|---|
+  | `AckiNackiBridge` (Sepolia) | `0x071E029ba21284B5f53808a110E0E5C9ef1a3759` | `0x46a6dEeb5370a1AF561f9509826d40e2b2FD9EB4` |
+  | `SepoliaAaveUsdcShim` | `0xc6ED7FEa530fB417a4094224CC2d3EDEe3EE6E04` | `0xb07280fE267e1E95840bDF25036dBD38cFBC7FD9` |
+  | `CctpHubReceiver` | `0xE4928314a2996111e12EEcd9f43BefFe35aE9f99` | `0x25409518E34fc111Cf25b42b8b4adbFEA6e18ce4` |
+  | `CctpEndpoint` (Arbitrum Sepolia) | `0x196F6231a5dD483fea38D9EC56730C6CB8F337c3` | `0x1d8d8b3EbB146E0c38Da1c562c6b15D3C8fd83aa` |
+  | `TestnetAavePool` / `TestnetAToken` | — | `0x2D37d380B7DC46Ee1d0A5bd07333d3a03b7739dE` / `0x18420353E97D02EF9262Ca25846F199b1630eBa1` |
+
+  Neither bridge is trusted by the shellnet `eccUSDCBridge` yet, so their
+  deposits do not finalize on Acki Nacki until its owner calls
+  `setTrustedL1Bridge(11155111, <bridge>, true)`.
+
+- **Ethereum mainnet (chain id 1) is a supported deposit chain** in
+  `crates/deposit-chain-ids`, so `deposit-prover` and `deposit-relayer`
+  accept `Deposit` events from a mainnet `AckiNackiBridge` — the CCTP hub.
+  The allowlist is checked off-circuit: the verification key does not
+  change and existing proofs still verify. On Acki Nacki, trust the hub with
+  `setTrustedL1Bridge(1, <hub bridge>, true)` and anchor mainnet blocks
+  (`deployLightClient` for chain 1, or owner anchors until then).
+
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts

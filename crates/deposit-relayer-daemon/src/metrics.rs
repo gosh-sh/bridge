@@ -27,7 +27,7 @@
 //! | `deposit_relayer_backoff_seconds` | gauge | | Sleep the daemon applies after the last tick |
 //! | `deposit_relayer_last_tick_timestamp_seconds` | gauge | | Unix time of the last completed tick |
 //! | `deposit_relayer_last_finalized_timestamp_seconds` | gauge | | Unix time of the last `finalized` / `already_finalized` outcome |
-//! | `deposit_relayer_scan_done_through_block` | gauge | | The log-scan cursor persisted in `state.json` (`scan_done_through_block`): no block up to it holds a deposit still to deliver |
+//! | `deposit_relayer_scan_done_through_block` | gauge | | The log-scan cursor persisted in `state.json` (`scan_done_through_block`): no block up to it holds a deposit still to *discover*. Outstanding ids with a stored tx are retried from that, not from this cursor |
 //! | `deposit_relayer_build_info` | gauge | `version` | Always 1; the crate version |
 //! | `deposit_relayer_start_timestamp_seconds` | gauge | | Unix time the daemon started |
 

@@ -22,21 +22,6 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
-### Changed
-
-- The ETH→AN deposit relayer no longer stalls every later deposit behind one
-  that cannot be finalised. `state.json` keeps a high-water mark plus an
-  `outstanding_deposits` set: later ids are tried first, and a failed id
-  retries with backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`,
-  default 2 s, doubled each time up to 64×) when there is nothing new to
-  fetch. Idle retries walk the outstanding set round-robin so one stuck low
-  id does not take every tick. A retry loads the stored Deposit tx (or its
-  block) so the log-scan cursor can keep moving with later deposits. Parked
-  ids stay parked. A `main` `state.json` that only has `attempts_since_progress`
-  for the last failed id carries that count into the new outstanding entry,
-  so `--skip-after-attempts` does not start over; `finalize-one` is unchanged.
-  Gauge `deposit_relayer_outstanding_deposits`.
-
 ### Documentation
 
 - Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
@@ -46,13 +31,14 @@ assigns it when the release is tagged.
   100 USDC figure in older notes is not in the contracts —
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
-  `state.json`, the strict `depositId` queue, parking with
-  `--skip-after-attempts` and finishing parked deposits with
-  `prove-one` + `finalize-one`, which outcomes are retried automatically
-  (pending, paused lane) and which need a person, a fix for each exit code,
-  the `--force-state` checklist after a redeploy, alert rules over the
-  Prometheus metrics, and failing over to a cold standby (QC-OFF-01, -02, -08,
-  -11).
+  `state.json`, later ids going first while failed ids retry from
+  `outstanding_deposits`, parking with `--skip-after-attempts` and finishing
+  parked deposits with `prove-one` + `finalize-one`, which outcomes are retried
+  automatically (pending, paused lane) and which need a person, a fix for each
+  exit code, the `--force-state` checklist after a redeploy, alert rules over
+  the Prometheus metrics (`deposit_relayer_outstanding_deposits` for a stuck
+  id), and failing over to a cold standby by copying the full `state.json`
+  (QC-OFF-01, -02, -08, -11).
 
 - `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
   row told operators to re-prove `applyBkSetUpdate` against the live
@@ -980,6 +966,14 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `deposit-relayer daemon --outstanding-backoff-secs` /
+  `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
+  is retried, doubled on each later failure of that id up to 64×. Gauge
+  `deposit_relayer_outstanding_deposits`. `state.json` gains
+  `outstanding_deposits` (per-id attempts, `retry_after_unix`, and the
+  Deposit tx / block / log index when known) and `last_finalized_deposit_id`
+  (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
+
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -1507,6 +1501,32 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- The ETH→AN deposit relayer no longer stalls every later deposit behind one
+  that cannot be finalised. Later ids are tried first; a failed id stays in
+  `outstanding_deposits` and is retried with backoff on idle ticks,
+  round-robin, from its stored Deposit tx (or its block) so the log-scan
+  cursor can keep moving. A pending submit (`ERR_PAUSED`, a confirmation
+  timeout) goes into that set with backoff but does not count toward
+  `--skip-after-attempts`. Parked ids stay parked. A `state.json` written by
+  an earlier relayer that only has `attempts_since_progress` for the last
+  failed id carries that count into the new outstanding entry, so
+  `--skip-after-attempts` does not start over; that id has no stored tx, so
+  the first retry scans from `--from-block` instead of from the shared
+  cursor. `finalize-one` is unchanged.
+
+  Gauges that used to mean "the one stuck head-of-line id" now mean something
+  else: `deposit_relayer_attempts_since_progress` follows the last failed
+  outstanding id and resets when any later id finalizes;
+  `deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` and
+  only goes up; `deposit_relayer_target_deposit_id` shows the retried id
+  during an idle retry, then the forward id again. Alert on
+  `deposit_relayer_outstanding_deposits`.
+
+  Before running an older binary, move every `outstanding_deposits[].deposit_id`
+  into `parked_deposit_ids`. An older binary ignores `outstanding_deposits`
+  (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
+  those ids, so it would neither retry nor park them.
 
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each

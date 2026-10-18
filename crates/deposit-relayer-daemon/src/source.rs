@@ -226,8 +226,8 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     /// relayer still has to *discover*, so the next scan starts after it.
     /// Outstanding retries use [`DepositSource::fetch_known`], not this
     /// cursor. Moved here when the target is not made yet as of `safe_head`,
-    /// and by the relayer after a finalize. `None` means "scan from
-    /// `from_block`".
+    /// when a deposit is found (its block minus one), and by the relayer
+    /// after a finalize. `None` means "scan from `from_block`".
     scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
     /// The last deposit found, so retrying a deposit AN keeps refusing costs
     /// no `eth_getLogs`. It was already `confirmations` deep when found.
@@ -455,6 +455,89 @@ where
         Ok(None)
     }
 
+    fn cached_located(&self, deposit_id: u64) -> Option<DepositEvent> {
+        self.located
+            .lock()
+            .expect("poisoned lock")
+            .as_ref()
+            .filter(|e| e.deposit_id == deposit_id)
+            .cloned()
+    }
+
+    /// Scan `eth_getLogs` for `deposit_id` starting at `scan_from`.
+    ///
+    /// When `move_cursor` is set, a miss (the counter says the deposit is
+    /// not made yet) advances the shared cursor to `safe_head`, and a hit
+    /// moves it to the deposit's block minus one so later ids in the same
+    /// block stay in range. Outstanding retries with no stored log pass
+    /// `--from-block` and leave the cursor alone.
+    async fn scan_for_deposit(
+        &self,
+        deposit_id: u64,
+        scan_from: u64,
+        move_cursor: bool,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        let head = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
+        let safe_head = head.saturating_sub(self.confirmations);
+        gauge!(prom::ETH_SAFE_HEAD_BLOCK).set(safe_head as f64);
+        if safe_head < self.from_block {
+            return Ok(None);
+        }
+
+        let counter = self.deposit_counter_at(safe_head).await?;
+        if counter <= U256::from(deposit_id) {
+            if move_cursor {
+                if let Some(cursor) = &self.scan_cursor {
+                    advance_scan_cursor(cursor, safe_head);
+                }
+            }
+            return Ok(None);
+        }
+
+        let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
+        let scan_from = scan_from.max(self.from_block);
+        gauge!(prom::ETH_SCAN_FROM_BLOCK).set(scan_from as f64);
+        let mut chunk_start = scan_from;
+        while chunk_start <= safe_head {
+            let chunk_end = chunk_start
+                .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
+                .min(safe_head);
+            let filter = Filter::new()
+                .address(self.address)
+                .event_signature(Deposit::SIGNATURE_HASH)
+                .topic1(topic1)
+                .from_block(chunk_start)
+                .to_block(chunk_end);
+            let logs = get_logs_with_retry(&self.provider, &filter).await?;
+            counter!(prom::ETH_SCANNED_BLOCKS_TOTAL)
+                .increment(chunk_end.saturating_sub(chunk_start).saturating_add(1));
+            if let Some(event) = self.deposit_from_logs(logs, deposit_id).await? {
+                *self.located.lock().expect("poisoned lock") = Some(event.clone());
+                if move_cursor {
+                    if let (Some(cursor), Some(through)) =
+                        (&self.scan_cursor, event.block_number.checked_sub(1))
+                    {
+                        advance_scan_cursor(cursor, through);
+                    }
+                }
+                return Ok(Some(event));
+            }
+            chunk_start = chunk_end.saturating_add(1);
+        }
+
+        Err(RelayerError::eth(format!(
+            "depositCounter() at block {safe_head} is {counter}, so depositId {deposit_id} is at \
+             or below that block, but eth_getLogs found no Deposit log for it in blocks \
+             {scan_from}..={safe_head}: either the RPC returned incomplete logs, or the deposit \
+             is below block {scan_from} (lower --from-block, or remove scan_done_through_block \
+             from the state file)"
+        )))
+    }
+
     /// One-block `eth_getLogs` for a deposit whose block is known but whose
     /// tx is not. Does not move the shared scan cursor.
     async fn fetch_in_block(
@@ -495,78 +578,15 @@ where
     P: Provider<Ethereum> + Send + Sync,
 {
     async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError> {
-        if let Some(event) = self
-            .located
-            .lock()
-            .expect("poisoned lock")
-            .as_ref()
-            .filter(|e| e.deposit_id == deposit_id)
-        {
-            return Ok(Some(event.clone()));
+        if let Some(event) = self.cached_located(deposit_id) {
+            return Ok(Some(event));
         }
 
-        let head = self
-            .provider
-            .get_block_number()
+        // A first look that finds the log moves the discovery cursor to the
+        // deposit's block minus one (later ids can share that block).
+        // Outstanding retries use [`fetch_known`] instead of this cursor.
+        self.scan_for_deposit(deposit_id, self.effective_scan_from(), true)
             .await
-            .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
-        let safe_head = head.saturating_sub(self.confirmations);
-        gauge!(prom::ETH_SAFE_HEAD_BLOCK).set(safe_head as f64);
-        if safe_head < self.from_block {
-            // Nothing finalised in our window yet.
-            return Ok(None);
-        }
-
-        // A counter at or below the id means neither this deposit nor any
-        // later one is made by `safe_head`. Skip every block up to it for
-        // good, with no `eth_getLogs` call.
-        let counter = self.deposit_counter_at(safe_head).await?;
-        if counter <= U256::from(deposit_id) {
-            if let Some(cursor) = &self.scan_cursor {
-                advance_scan_cursor(cursor, safe_head);
-            }
-            return Ok(None);
-        }
-
-        // `depositId` is the first indexed topic; filter on it directly so
-        // the node only returns the single matching log. Scan in small chunks
-        // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges,
-        // and stop at the chunk that holds the deposit. The cursor stays put
-        // on this path: a first look that finds the log does not skip it for
-        // a later retry. Outstanding retries use [`fetch_known`] instead.
-        let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
-        let scan_from = self.effective_scan_from();
-        gauge!(prom::ETH_SCAN_FROM_BLOCK).set(scan_from as f64);
-        let mut chunk_start = scan_from;
-        while chunk_start <= safe_head {
-            let chunk_end = chunk_start
-                .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
-                .min(safe_head);
-            let filter = Filter::new()
-                .address(self.address)
-                .event_signature(Deposit::SIGNATURE_HASH)
-                .topic1(topic1)
-                .from_block(chunk_start)
-                .to_block(chunk_end);
-            let logs = get_logs_with_retry(&self.provider, &filter).await?;
-            counter!(prom::ETH_SCANNED_BLOCKS_TOTAL)
-                .increment(chunk_end.saturating_sub(chunk_start).saturating_add(1));
-            if let Some(event) = self.deposit_from_logs(logs, deposit_id).await? {
-                *self.located.lock().expect("poisoned lock") = Some(event.clone());
-                return Ok(Some(event));
-            }
-            chunk_start = chunk_end.saturating_add(1);
-        }
-
-        // The deposit exists, yet no block we scanned holds its log. Saying
-        // "not yet" here would leave the relayer waiting for it forever.
-        Err(RelayerError::eth(format!(
-            "depositCounter() at block {safe_head} is {counter}, so depositId {deposit_id} is at \
-             or below that block, but eth_getLogs found no Deposit log for it in blocks \
-             {scan_from}..={safe_head}: either the RPC returned incomplete logs, or the deposit \
-             is below block {scan_from} (lower --from-block, or remove scan_done_through_block \
-             from the state file)"
-        )))
     }
 
     async fn fetch_known(
@@ -576,6 +596,9 @@ where
         log_index: Option<u64>,
         block_number: Option<u64>,
     ) -> Result<Option<DepositEvent>, RelayerError> {
+        if let Some(event) = self.cached_located(deposit_id) {
+            return Ok(Some(event));
+        }
         if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
             return fetch_deposit_from_receipt(
                 &self.provider,
@@ -590,7 +613,11 @@ where
         if let Some(block) = block_number {
             return self.fetch_in_block(deposit_id, block).await;
         }
-        self.fetch(deposit_id).await
+        // No stored log: a `state.json` from an earlier relayer only carried
+        // the failed id's attempt count. Scan from `--from-block` and do not
+        // move the shared cursor, which later ids may already have advanced.
+        self.scan_for_deposit(deposit_id, self.from_block, false)
+            .await
     }
 }
 
@@ -835,5 +862,25 @@ mod tests {
             &"HTTP error 429 with body: compute units per second"
         ));
         assert!(!is_retryable_eth_rpc_error(&"invalid params"));
+    }
+
+    #[tokio::test]
+    async fn fetch_known_without_a_log_scans_from_from_block() {
+        // A `state.json` from an earlier relayer carries the failed id with
+        // no tx or block. The shared cursor may already sit past that
+        // deposit; the retry must still find it.
+        let rpc = FakeRpc::new(BRIDGE, 130);
+        rpc.deposit(105);
+        let cursor = Arc::new(Mutex::new(Some(110)));
+        let source = log_source(&rpc, &cursor);
+
+        let event = source
+            .fetch_known(0, None, None, None)
+            .await
+            .unwrap()
+            .expect("deposit 0");
+        assert_eq!(event.block_number, 105);
+        assert_eq!(*cursor.lock().unwrap(), Some(110));
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(100, 109)]);
     }
 }

@@ -115,10 +115,12 @@ pub struct RelayerState {
     pub attempts_since_progress: u32,
     /// No Ethereum block up to and including this one holds a deposit the
     /// relayer still has to *discover*, so the next `eth_getLogs` scan starts
-    /// after it. Outstanding ids are retried from their stored tx / block,
-    /// not from this cursor. Set to the confirmed head while the next deposit
-    /// is not made yet, and to a finalized deposit's block minus one (a later
-    /// `depositId` can share that block). `None` = scan from `--from-block`.
+    /// after it. Outstanding ids with a stored tx or block are retried from
+    /// that, not from this cursor. An outstanding id that has none (a
+    /// `state.json` from an earlier relayer) is scanned from `--from-block`.
+    /// Set to the confirmed head while the next deposit is not made yet, and
+    /// to a found deposit's block minus one (a later `depositId` can share
+    /// that block). `None` = scan from `--from-block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_done_through_block: Option<u64>,
     /// Deposit ids the daemon abandoned after `--skip-after-attempts`.
@@ -241,7 +243,8 @@ impl RelayerState {
     /// Walks `last_processed + 1` (or `start`), skipping parked, unprovable,
     /// and outstanding ids. Outstanding ids are retried separately when this
     /// walk has nothing new to fetch, so two failing deposits cannot starve
-    /// later ones.
+    /// later ones. `_now` is unused: backoff is applied by
+    /// [`ready_outstanding_after`], not by this walk.
     pub fn next_target_at(&self, start: u64, _now: u64) -> u64 {
         let mut id = match self.last_processed_deposit_id {
             Some(last) => last.saturating_add(1),
@@ -294,16 +297,36 @@ impl RelayerState {
             .map(|o| o.attempts.saturating_add(1))
             .unwrap_or(1);
         self.attempts_since_progress = attempts;
-        let shift = attempts.saturating_sub(1).min(6);
-        let delay = backoff_secs.saturating_mul(1u64 << shift);
-        self.upsert_outstanding(deposit_id, attempts, now.saturating_add(delay), log);
+        self.upsert_outstanding(
+            deposit_id,
+            attempts,
+            now.saturating_add(retry_delay(attempts, backoff_secs)),
+            log,
+        );
     }
 
     /// Mark a submit whose outcome is not known yet (confirmation timed out,
-    /// or the lane is paused). It says nothing against the deposit, so it does
-    /// not count toward `--skip-after-attempts`.
-    pub fn record_pending(&mut self, deposit_id: u64) {
+    /// or the lane is paused). The id stays outstanding with backoff so later
+    /// deposits are not held behind it, and the attempt count is left alone
+    /// so it does not count toward `--skip-after-attempts`.
+    pub fn record_pending(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        backoff_secs: u64,
+        log: Option<DepositLogRef>,
+    ) {
         self.last_attempt_deposit_id = Some(deposit_id);
+        let attempts = self
+            .outstanding(deposit_id)
+            .map(|o| o.attempts)
+            .unwrap_or(0);
+        self.upsert_outstanding(
+            deposit_id,
+            attempts,
+            now.saturating_add(retry_delay(attempts, backoff_secs)),
+            log,
+        );
     }
 
     /// Park a stuck deposit. The high-water mark only moves if this id is
@@ -432,6 +455,11 @@ impl RelayerState {
             .iter()
             .find(|o| o.deposit_id == deposit_id)
     }
+}
+
+fn retry_delay(attempts: u32, backoff_secs: u64) -> u64 {
+    let shift = attempts.saturating_sub(1).min(6);
+    backoff_secs.saturating_mul(1u64 << shift)
 }
 
 /// Advisory exclusive lock for a single-writer daemon. Held for the process
@@ -651,6 +679,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![5]
         );
+    }
+
+    #[test]
+    fn record_pending_keeps_the_attempt_count() {
+        let mut s = RelayerState::default();
+        s.record_progress(2);
+        s.record_attempt(3, 10, 5);
+        assert_eq!(s.outstanding_attempts(3), 1);
+        s.record_pending(3, 10, 5, None);
+        assert_eq!(s.outstanding_attempts(3), 1);
+        assert_eq!(s.attempts_since_progress, 1);
+        assert_eq!(s.next_target_at(0, 10), 4);
+        assert_eq!(s.ready_outstanding(15), Some(3));
     }
 
     #[test]

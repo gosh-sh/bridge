@@ -51,10 +51,16 @@ on the deposit allowlist keep the owner writer. `getLightClient(chainId)` is
 the client of a chain (0 if none), `isOwnerAnchorsEnabled(chainId)` the
 per-chain writer state, and `getAnchorConfig()` the pair for the chain
 deployed last — with clients on several chains, read the per-chain getters.
-No function turns owner anchors back on, but `updateCode` goes around it
-(`onCodeUpgrade` leaves every chain owner-writable). `setLightClientCode`
-does not: it only changes the address the next `deployLightClient` derives,
-and clients already recorded keep writing.
+The flip disables `setAcceptedBlockHash` for the selected chain; it does not
+revoke the owner's configuration or upgrade authority. There is no direct
+re-enable function in the current code. A bridge `updateCode` resets the
+owner-anchor flags and recorded clients, so operators must restore configuration
+and repeat the intended flips after upgrading. `setLightClientCode` alone keeps
+recorded clients unchanged, but calling `deployLightClient` afterwards for the
+same chain can replace its writer even while the owner-anchor flag is off.
+The light client's owner also retains `reAnchorCommittee` and `updateCode`.
+Both owner keys therefore remain part of the trust model after a flip; proof
+verification governs the routine light-client path, not arbitrary owner upgrades.
 
 | Path | Contents |
 |------|----------|

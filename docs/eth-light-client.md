@@ -13,7 +13,7 @@ that tree. When code and this text disagree, the code wins.
 [`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`](../crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md)
 (shadow deployment kit), [`scripts/ursus/eth_lc_shellnet_e2e.md`](../scripts/ursus/eth_lc_shellnet_e2e.md)
 (production E2E), [`scripts/ursus/flip_deposit_to_light_client.md`](../scripts/ursus/flip_deposit_to_light_client.md)
-(the one-way flip), `eth-light-client-prover/docs/m5_eth_beacon_light_client.md` (circuits).
+(the owner controls and flip), `eth-light-client-prover/docs/m5_eth_beacon_light_client.md` (circuits).
 
 ## 1. What it is
 
@@ -265,7 +265,15 @@ writer of that map changes.
 
 ### 3.5 The trust switches
 
-Two one-way switches move the deployment from key-trusted to proof-trusted. The daemon issues
+The retained owner authority described here was checked against `98df1a9`:
+`contracts/an/exchange/eccUSDCBridge.sol:599` (direct writer), `:615` / `:625`
+(client code and deployment), `:671` (flip), `:915` / `:954` (upgrade and reset);
+`contracts/an/exchange/EthBeaconLightClient.sol:763` (rotation flip), `:795`
+(re-anchor), `:827` / `:855` (upgrade and migration). These citations refer to
+that commit rather than the older tree cited at the top of this document.
+
+Two switches disable routine owner anchor writes and routine owner committee updates.
+They do not revoke either contract's owner key or upgrade authority. The daemon issues
 them after its first accepted `submitUpdate` only when started with `--flip-owner`
 (`src/relayer.rs:335`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
@@ -277,19 +285,32 @@ stateDiagram-v2
   state "USDCBridge anchors" as UBA {
     OwnerAnchors: owner or attesters write _acceptedBlockHash
     LightClientAnchors: LC writes L1; owner still writes L2
-    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way, L1 only)
+    OwnerAnchors --> LightClientAnchors: disableOwnerAnchorsOn(chainId)
+    LightClientAnchors --> OwnerAnchors: bridge updateCode resets flags
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
     ProofRotation: submitRotate only, reAnchorCommittee armed
-    OwnerRotation --> ProofRotation: disableOwnerRotation (one way)
+    OwnerRotation --> ProofRotation: disableOwnerRotation
   }
 ```
 
-Before the flip the light client is advisory: it pushes hashes, but the owner key can still push
-anything. After the flip nothing but a valid proof adds an L1 block hash; L2 hashes still take
-the owner key. There is no way back on that L1; the only recovery from a stalled relayer is
-`reAnchorCommittee`, which is logged on chain.
+Before the flip the bridge owner can admit hashes directly. Afterwards,
+`setAcceptedBlockHash` rejects writes for the flipped chain with 225, while
+other chains keep their own settings. Routine writes then come from that
+chain's recorded light client, under the proof checks of its current code.
+
+**Both owners remain trusted after the flip.** The bridge owner can still call
+`updateCode`, which clears the owner-anchor flags and recorded clients. The owner
+can also install different code with `setLightClientCode` and replace a flipped
+chain's client with `deployLightClient`; changing the stored code alone does not
+replace the writer. The light-client owner retains the logged weak-subjectivity
+recovery `reAnchorCommittee` and can replace its code with `updateCode`.
+`disableOwnerRotation` survives that client's normal migration, but it cannot
+constrain arbitrary replacement code. These switches restrict routine entry
+points; they do not make the deployment immutable or remove owner trust.
+After a bridge upgrade, restore configuration and repeat the flips intended for
+each chain, then check `isOwnerAnchorsEnabled(chainId)`.
 
 **Do not flip yet.** The flip is per chain: `disableOwnerAnchorsOn(chainId)` turns the
 owner writer off for one chain and needs a light client deployed for it (226 otherwise,

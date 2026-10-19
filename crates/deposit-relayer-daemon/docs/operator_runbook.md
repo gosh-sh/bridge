@@ -53,16 +53,19 @@ The daemon tries new work first: `next_target` walks `last_processed + 1`, skipp
 parked, unprovable and outstanding ids (`RelayerState::next_target_at`). When that walk
 has nothing new to fetch, one outstanding id is retried on the same tick, round-robin,
 with per-id backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default
-2 s, doubled each time up to 64×). A retry loads the stored Deposit tx (or its block)
-so the log-scan cursor can keep moving with later deposits. An outstanding id that has
-no stored log — a `state.json` written by an earlier relayer that only recorded
-`attempts_since_progress` — is scanned from `--from-block`.
+2 s, doubled each *failed* attempt up to 64×). A pending submit does not increment
+`attempts`, so it stays at the base delay until a proof failure or an AN rejection.
+A retry loads the stored Deposit tx (or its block) so the log-scan cursor can keep
+moving with later deposits. An outstanding id that has no stored log — a `state.json`
+written by an earlier relayer that only recorded `attempts_since_progress` — is
+scanned from `--from-block` up to `scan_done_through_block`, not to the live head.
 
 A stuck deposit no longer holds every later user. What gets the stuck one moving:
 
-1. **On its own**, a transient failure (RPC blip, prover crash, a pending submit) is
-   retried with that per-id backoff on idle ticks. A retry with a stored tx uses the
-   receipt and makes no `eth_getLogs` walk from the shared cursor.
+1. **On its own**, a transient failure (RPC blip, prover crash) is retried with that
+   per-id backoff on idle ticks. A pending submit is retried at the base delay (it
+   does not count as an attempt). A retry with a stored tx uses the receipt and
+   makes no `eth_getLogs` walk from the shared cursor.
 2. **With `--skip-after-attempts N`**, after N consecutive *failed* attempts (a proof
    failure or a rejection by AN) the deposit is **parked**. It is appended to
    `parked_deposit_ids`, dropped from outstanding, and the log shows `daemon: deposit
@@ -144,14 +147,15 @@ it refuses with `state.json deployment mismatch`, so a cursor from one bridge ca
 silently skip another bridge's deposits.
 
 `--force-state` accepts the mismatch by **starting the file over**. Progress, scan
-cursor and parked ids are discarded, the old values are logged at `warn`, and the daemon
-begins at `--start-deposit-id` (`RelayerState::ensure_deployment`). Checklist before
-using it:
+cursor, parked ids, outstanding ids and `last_finalized_deposit_id` are discarded, the
+old values are logged at `warn`, and the daemon begins at `--start-deposit-id`
+(`RelayerState::ensure_deployment`). Checklist before using it:
 
 1. Is this really a new deployment? A typo in `BRIDGE_ADDRESS` also mismatches. Fix the
    env instead.
-2. Write down `parked_deposit_ids` from the old file. They are dropped, and each one
-   still needs `finalize-one` against the bridge it belongs to.
+2. Write down `parked_deposit_ids` and the ids in `outstanding_deposits` from the old
+   file. They are dropped, and each one still needs `finalize-one` against the bridge
+   it belongs to.
 3. Set `START_DEPOSIT_ID` (0 for a new EVM bridge) and `FROM_BLOCK` (its deploy block).
 4. Keep a copy of the old file, then start once with `--force-state`, and remove the
    flag again. Leaving it on accepts the next mismatch without asking.
@@ -161,8 +165,9 @@ Other cases:
 - **Crash between submit and save.** The next tick finds the voucher and records the
   deposit as `already_finalized`; nothing is proven twice.
 - **A corrupt or unreadable file** stops the daemon at start-up. Restore the backup. If
-  there is none, deleting the file is safe apart from the parked ids: the daemon
-  restarts at `START_DEPOSIT_ID` and skips finalized deposits by their vouchers.
+  there is none, deleting the file is safe apart from the parked and outstanding
+  ids: the daemon restarts at `START_DEPOSIT_ID` and skips finalized deposits by
+  their vouchers. An outstanding id below `START_DEPOSIT_ID` is never retried.
 - **Two daemons on one file**: the second fails to take the lock and exits.
 
 ## 7. Monitoring

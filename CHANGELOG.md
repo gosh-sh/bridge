@@ -38,7 +38,10 @@ assigns it when the release is tagged.
   exit code, the `--force-state` checklist after a redeploy, alert rules over
   the Prometheus metrics (`deposit_relayer_outstanding_deposits` for a stuck
   id), and failing over to a cold standby by copying the full `state.json`
-  (QC-OFF-01, -02, -08, -11).
+  (QC-OFF-01, -02, -08, -11). A pending submit stays at the base outstanding
+  delay (it does not increment attempts). `--force-state` also drops
+  outstanding ids and logs them. An outstanding id with no stored log is
+  scanned from `--from-block` only up to `scan_done_through_block`.
 
 - `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
   row told operators to re-prove `applyBkSetUpdate` against the live
@@ -1028,8 +1031,9 @@ assigns it when the release is tagged.
   `AN_DAPP_ID=0`. The value has no effect on-chain, but it is part of the
   `state.json` deployment binding (`chain_id`, EVM bridge, `AN_DAPP_ID`).
   Changing it on an existing file fails start-up with a deployment
-  mismatch; `--force-state` then discards the cursor, parked ids and
-  unprovable ids even though no bridge changed (QC-OFF-09).
+  mismatch; `--force-state` then discards the cursor, parked ids,
+  outstanding ids, `last_finalized_deposit_id` and unprovable ids even
+  though no bridge changed (QC-OFF-09).
 
 - `deposit-relayer daemon` no longer re-scans Ethereum logs while it retries a
   deposit that AN keeps refusing. Once a deposit is found, retries reuse it
@@ -1512,8 +1516,8 @@ assigns it when the release is tagged.
   an earlier relayer that only has `attempts_since_progress` for the last
   failed id carries that count into the new outstanding entry, so
   `--skip-after-attempts` does not start over; that id has no stored tx, so
-  the first retry scans from `--from-block` instead of from the shared
-  cursor. `finalize-one` is unchanged.
+  the first retry scans from `--from-block` up to `scan_done_through_block`,
+  not to the live head. `finalize-one` is unchanged.
 
   Gauges that used to mean "the one stuck head-of-line id" now mean something
   else: `deposit_relayer_attempts_since_progress` follows the last failed

@@ -163,6 +163,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     old_scan_done_through_block = ?dropped.scan_done_through_block,
                     old_parked_deposit_ids = ?dropped.parked_deposit_ids,
                     old_unprovable_deposit_ids = ?dropped.unprovable_deposit_ids,
+                    old_outstanding_deposit_ids = ?dropped
+                        .outstanding_deposits
+                        .iter()
+                        .map(|o| o.deposit_id)
+                        .collect::<Vec<_>>(),
+                    old_last_finalized_deposit_id = ?dropped.last_finalized_deposit_id,
                     start_deposit_id = config.start_deposit_id,
                     "--force-state: state.json belonged to another deployment; starting over",
                 );

@@ -271,7 +271,7 @@ Notes that matter downstream:
   retyping event fields breaks proof generation, not just indexing.
 * The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
-  (`crates/deposit-relayer-daemon/src/types.rs:101-115`). `anWorkchain` is emitted by the contract
+  (`DepositPublicInputs` in `crates/deposit-relayer-daemon/src/types.rs`). `anWorkchain` is emitted by the contract
   but is **not** one of them — `dappId` (a config-supplied tag) replaced it on 2026-06-02.
   That is accepted (QC-AN-J3 / gosh-sh/bridge-audit#59): L1 workchain is telemetry, the AN
   credit is always `makeAddrStd(0, anAccount)`, and the field will not return to the proof.

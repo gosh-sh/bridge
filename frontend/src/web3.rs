@@ -283,9 +283,10 @@ pub async fn approve_usdc(amount: u128) -> Result<String, String> {
 }
 
 /// Deposit `amount` USDC base units into the bridge (pulls via `transferFrom`),
-/// bridging to the Acki Nacki destination `an_workchain:an_account`. The EVM
-/// `msg.sender` is not a valid AN recipient, so the destination is supplied
-/// explicitly and carried as a ZK public input.
+/// bridging to the Acki Nacki destination `an_account`. The ABI still takes
+/// `anWorkchain`; the form pins it to 0. The EVM `msg.sender` is not a valid
+/// AN recipient, so the account is supplied explicitly and carried as a ZK
+/// public input.
 pub async fn make_deposit(
     amount: u128,
     an_workchain: i8,

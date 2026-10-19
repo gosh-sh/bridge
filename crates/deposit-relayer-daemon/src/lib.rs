@@ -15,7 +15,7 @@
 //!    blockHashHigh, blockHashLow, promiseCommit]` — the Acki Nacki destination
 //!    account is bound in-circuit so the AN side credits a proven account,
 //!    proven `chainId` is allowlisted by USDCBridge, and `dappId` (a config
-//!    tag, replaced `anWorkchain` on 2026-06-02) is checked by the AN-side
+//!    tag, replaced `anWorkchain` on 2026-06-02) is pinned to 0 by the AN-side
 //!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
 //!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,

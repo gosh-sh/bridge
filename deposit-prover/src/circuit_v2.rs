@@ -1214,8 +1214,8 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier)
     /// replaced the single `anWorkchain` slot on 2026-06-02. dappId is a
     /// config-supplied tag — it is not bound to event data in-circuit; the
-    /// AN-side `TokenBridge.finalizeDeposit` checks it against its
-    /// configured dappId. `anAccountHigh`/`anAccountLow` remain the
+    /// AN-side bridge pins `dappId` to 0 and does not check the proven
+    /// halves. `anAccountHigh`/`anAccountLow` remain the
     /// event-bound AN recipient account. The `ZKHALO2VERIFYWITHVK` consumer
     /// is VK-driven (it reads this count from the VkBlob), and
     /// `TokenBridge.finalizeDeposit` builds the public-inputs cell from the

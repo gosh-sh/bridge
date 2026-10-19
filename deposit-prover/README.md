@@ -35,7 +35,7 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
 
 ### Public inputs (12 field elements)
 
-One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:42-55`);
+One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
 `NUM_PUBLIC_INPUTS` derives from it (`src/types.rs:11`).
 
 | Index | Field | Description |

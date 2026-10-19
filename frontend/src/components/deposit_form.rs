@@ -8,8 +8,9 @@ use crate::web3::{
     make_deposit, mint_test_usdc, switch_to_sepolia, usdc_to_units, wait_for_receipt,
 };
 
-/// Maximum deposit (100 USDC in base units), mirrors `MAX_DEPOSIT_AMOUNT`.
-const MAX_USDC_UNITS: u128 = 100 * USDC_UNIT;
+/// Maximum deposit in base units, mirrors `AckiNackiBridge.MAX_DEPOSIT_AMOUNT`
+/// (`type(uint64).max`). There is no extra 100 USDC product cap.
+const MAX_USDC_UNITS: u128 = u64::MAX as u128;
 
 /// Default faucet mint amount (100 USDC).
 const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
@@ -180,7 +181,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             }
             if units > MAX_USDC_UNITS {
                 error_msg.set(Some(
-                    "Amount exceeds the 100 USDC per-deposit limit".to_string(),
+                    "Amount exceeds the uint64 per-deposit cap".to_string(),
                 ));
                 return;
             }
@@ -311,7 +312,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"USDC"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Max 100 USDC per deposit. Gas is paid in ETH."}
+                        {"The contract cap is 2^64-1 USDC base units. Gas is paid in ETH."}
                     </div>
                 </div>
 

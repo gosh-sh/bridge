@@ -100,7 +100,8 @@ pub const BRIDGE_ABI: &str = r#"[
 ///
 /// The bridge's `deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)`
 /// now takes the AN destination explicitly (an EVM address is not a valid AN
-/// recipient), so the deposit form collects workchain + account per-deposit.
+/// recipient), so the deposit form collects the 256-bit AN account per-deposit.
+/// `anWorkchain` is pinned to 0 in the ABI call; Acki Nacki ignores it.
 /// This constant is only a convenience default the UI may prefill; an empty
 /// value means "no prefill — the user types their AN account".
 pub const ACKI_NACKI_RECEIVER: &str = match option_env!("AN_RECEIVER") {

@@ -34,10 +34,10 @@ use crate::error::RelayerError;
 /// Acki Nacki destination account into the proof (an EVM address is not a valid
 /// AN recipient). `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced
 /// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
-/// event data in-circuit; `TokenBridge.finalizeDeposit` checks it against its
-/// configured dappId. The L1 event still emits `anWorkchain`; it is not a
-/// public input and AN always credits workchain 0 (QC-AN-J3). USDCBridge must
-/// also allowlist `(chainId → expected bridge Fr)`.
+/// event data in-circuit. The AN bridge pins `dappId` to 0 and does not
+/// check the proven halves. The L1 event still emits `anWorkchain`; it is
+/// not a public input and AN always credits workchain 0 (QC-AN-J3).
+/// USDCBridge must also allowlist `(chainId → expected bridge Fr)`.
 pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
@@ -60,8 +60,8 @@ pub struct DepositEvent {
     pub amount: U256,
     /// Acki Nacki destination workchain id (TVM `int8`, event data word 1).
     /// Still emitted by the event; no longer bound in-circuit (the dappId tag
-    /// took its public-input slot on 2026-06-02). Kept for logging / recipient
-    /// reconstruction on the AN side.
+    /// took its public-input slot on 2026-06-02). Kept for logging. AN never
+    /// sees this value: the recipient is `address.makeAddrStd(0, anAccount)`.
     pub an_workchain: i8,
     /// Acki Nacki destination account (256-bit TVM address, event data word 2).
     ///

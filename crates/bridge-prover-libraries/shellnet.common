@@ -52,7 +52,9 @@ unset _shellnet_common_dir
 # credits a second, 255 per eth_getLogs. Back to back, the scan drew HTTP 429
 # for the next half minute, even on eth_chainId.
 BRIDGE_GET_LOGS_PAUSE_MS=600
-RELAYER_PRIVATE_KEY=0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87
+# A key set in .env (RELAYER_PRIVATE_KEY=...) takes precedence: use a dedicated
+# EOA there. The shared burner below is the fallback.
+RELAYER_PRIVATE_KEY=${RELAYER_PRIVATE_KEY:-0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87}
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql

@@ -306,9 +306,12 @@ can also install different code with `setLightClientCode` and replace a flipped
 chain's client with `deployLightClient`; changing the stored code alone does not
 replace the writer. The light-client owner retains the logged weak-subjectivity
 recovery `reAnchorCommittee` and can replace its code with `updateCode`.
-`disableOwnerRotation` survives that client's normal migration, but it cannot
-constrain arbitrary replacement code. These switches restrict routine entry
-points; they do not make the deployment immutable or remove owner trust.
+`disableOwnerRotation` survives that client's normal migration. However, an
+owner who retains `updateCode` can install arbitrary replacement code, including
+code that changes or removes any of these checks. The current implementation
+cannot constrain that future code; preserving flags during migration does not
+change this. The flips apply to the installed code and do not revoke upgrade
+authority or remove either owner from the trust model.
 After a bridge upgrade, restore configuration and repeat the flips intended for
 each chain, then check `isOwnerAnchorsEnabled(chainId)`.
 

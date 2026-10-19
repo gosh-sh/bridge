@@ -59,8 +59,10 @@ and repeat the intended flips after upgrading. `setLightClientCode` alone keeps
 recorded clients unchanged, but calling `deployLightClient` afterwards for the
 same chain can replace its writer even while the owner-anchor flag is off.
 The light client's owner also retains `reAnchorCommittee` and `updateCode`.
-Both owner keys therefore remain part of the trust model after a flip; proof
-verification governs the routine light-client path, not arbitrary owner upgrades.
+An owner who retains `updateCode` can install arbitrary replacement code,
+including code that removes these checks. The current implementation cannot
+constrain owner-selected replacement code, even if a migration preserves the
+flags. Both owner keys therefore remain trusted after a flip.
 
 | Path | Contents |
 |------|----------|

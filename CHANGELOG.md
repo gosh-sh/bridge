@@ -1517,6 +1517,19 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`bk_set.shellnet.json` holds the genesis committee of shellnet as
+  restarted on 2026-10-14** (5 signers; Poseidon commitment
+  `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
+  `e2a508b4…0020`, of every block before the network's first rotation):
+  `keys_config.json` `bk_nodes[i].bls_pubkey` of the restart's config, which
+  a node's `GET :8600/v2/bk_set_update` confirmed on 2026-10-14. `zs_bk_set`
+  of that config holds another set, as before. Rotation has been on since
+  2026-10-15, so a cold start still folds `bkSetUpdates` up to its seed
+  (`seed_prover_bk_set --cap-height`). `TECHNICAL_README.md`, the prover
+  daemon and circuits READMEs and the live relayer runbook now describe the
+  restarted network, and the shellnet BK-set section shows how to check a set
+  against leaf 2 — the first config posted for the restart held other keys —
+  and how to read the live set from a node on port 8600.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation

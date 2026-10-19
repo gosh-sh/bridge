@@ -183,7 +183,7 @@ jq '.pubkeys_hex' "/tmp/prover_bk_set_$S.json" > bk_set.shellnet.live.json
 ```
 
 It prints the signer indices and the set's Poseidon commitment. The replay
-needs every change since rotations began (2026-10-08) to still be served by
+needs every change since the network's genesis to still be served by
 GraphQL.
 
 ### 3.3 Deploy
@@ -474,7 +474,7 @@ on `BRIDGE_ADDRESS`.
 ```
 crates/bridge-prover-libraries/
 ├── shellnet.common              shared development env (RPC, GraphQL, burner key, paths)
-├── bk_set.shellnet.json         BK set before rotations began (2026-10-08); input of §3.2
+├── bk_set.shellnet.json         BK set at the network's genesis (restart of 2026-10-14); input of §3.2
 ├── bk_set.shellnet.live.json    BK set at the current bridge's seed; BRIDGE_BK_SET_CONFIG
 ├── L2_config/
 │   ├── env                      written by the deploy script
@@ -497,8 +497,9 @@ Rotation is controlled by `minBlockKeepers` on `BlockKeeperContractRoot`
 (`0:7777…7777`). With 5 active keepers, `minBlockKeepers = 5` stops rotations
 and `4` enables them; `setConfig` (owner key in
 `config/BlockKeeperContractRoot.keys.json`) overwrites all six config fields
-at once, so read the live values (`getConfig`) before calling it. Rotations
-have been on since the evening of 2026-10-08. Step by step, with rollback:
+at once, so read the live values (`getConfig`) before calling it. On the
+network started on 2026-10-14 rotations have been on since 2026-10-15 (on the
+previous one, since the evening of 2026-10-08). Step by step, with rollback:
 [`turn_on_bk_sets_on_shellnet.md`](../../../turn_on_bk_sets_on_shellnet.md).
 
 ### Server deployment and handoff

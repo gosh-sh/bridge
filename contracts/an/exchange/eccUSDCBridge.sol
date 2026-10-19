@@ -658,7 +658,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     /// @notice Installs the code every light client is deployed from. It
     ///         changes the address the next `deployLightClient` derives;
     ///         clients already recorded in `_lightClients` keep their
-    ///         addresses and stay recognized as writers.
+    ///         addresses and stay recognized as writers. This remains owner-
+    ///         callable after the anchor flip; a subsequent `deployLightClient`
+    ///         can replace the recorded writer for a flipped chain.
     function setLightClientCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         _lightClientCode = code;
@@ -703,18 +705,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return _lightClients[l1ChainId];
     }
 
-    /// @notice Permanently gives up the owner's ability to admit anchors on
-    ///         the chain whose light client was deployed last, leaving that
-    ///         client as the only writer there. Every other chain id (the L2s
-    ///         on the deposit allowlist, and any L1 whose client was deployed
-    ///         earlier) keeps `setAcceptedBlockHash`; name those with
-    ///         `disableOwnerAnchorsOn`. This is the call that turns the L1
-    ///         trust assumption from "the owner key" into "a proof of
-    ///         Ethereum finality".
-    /// @dev One-way, with no re-enable. Requires a light client deployed for
-    ///      that chain by `deployLightClient`, so it cannot run before one
-    ///      exists. It does not check that the account is Active.
-    ///      Idempotent.
+    /// @notice Disables direct owner anchor writes for the chain whose light
+    ///         client was deployed last. Other chains keep their own setting;
+    ///         use `disableOwnerAnchorsOn` to select one explicitly.
+    /// @dev There is no direct re-enable function in this code, but the owner
+    ///      retains `updateCode`, which resets these flags, and can replace
+    ///      the recorded client through `setLightClientCode` followed by
+    ///      `deployLightClient`. This call does not revoke owner trust or
+    ///      upgrade authority. Requires a recorded client for the chain;
+    ///      it does not check that the account is Active. Idempotent.
     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept {
         _disableOwnerAnchors(_lightClientL1ChainId);
     }
@@ -955,6 +954,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // ========================================================
 
     /// @notice Upgrades the contract code on-chain. Only callable by the owner.
+    ///         Remains available after the anchor flip. This migration clears
+    ///         the owner-anchor flags and recorded clients; operators must
+    ///         restore configuration and repeat each intended chain's flip.
     /// @param newcode — new contract code TvmCell
     /// @param userCell — reserved passthrough for future upgrade payloads.
     ///        Currently unused (the new code receives a cell built purely

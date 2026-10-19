@@ -232,8 +232,6 @@ pub struct DepositEvent {
     pub sender: Address,
     /// The amount, in USDC units.
     pub amount: U256,
-    /// The Acki Nacki workchain the deposit names.
-    pub an_workchain: i8,
     /// The Acki Nacki recipient account.
     pub an_account: B256,
 }
@@ -248,7 +246,6 @@ pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
         deposit_id: ev.depositId,
         sender: ev.sender,
         amount: ev.amount,
-        an_workchain: ev.anWorkchain,
         an_account: ev.anAccount,
     })
 }
@@ -669,7 +666,7 @@ mod tests {
     #[test]
     fn a_deposit_log_parses_back() {
         let sender = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
-        let log = crate::deposit::testkit::deposit_log(
+        let mut log = crate::deposit::testkit::deposit_log(
             address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
             U256::from(7),
             sender,
@@ -682,6 +679,10 @@ mod tests {
         assert_eq!(ev.sender, sender);
         assert_eq!(ev.amount, U256::from(12_500_000u64));
         assert_eq!(ev.an_account, B256::repeat_byte(0xa3));
+        let mut historical = log.data.to_vec();
+        historical[32..64].fill(0xff);
+        log.data = historical.into();
+        assert_eq!(parse_deposit_log(&log), Some(ev));
     }
 
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");

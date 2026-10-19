@@ -57,11 +57,6 @@ pub struct DepositEvent {
     pub sender: Address,
     /// Deposited amount (event data word 0).
     pub amount: U256,
-    /// Acki Nacki destination workchain id (TVM `int8`, event data word 1).
-    /// Still emitted by the event; no longer bound in-circuit (the dappId tag
-    /// took its public-input slot on 2026-06-02). Kept for logging / recipient
-    /// reconstruction on the AN side.
-    pub an_workchain: i8,
     /// Acki Nacki destination account (256-bit TVM address, event data word 2).
     ///
     /// The EVM `sender` is not a valid AN recipient (different address system),
@@ -406,7 +401,6 @@ mod tests {
             deposit_id: 3,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(5u64),
-            an_workchain: 0,
             an_account: B256::repeat_byte(0x55),
             timestamp: U256::ZERO,
             tx_hash: B256::ZERO,

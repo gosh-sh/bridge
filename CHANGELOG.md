@@ -1493,6 +1493,13 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- Decoded deposit records no longer carry the unused `an_workchain` field,
+  and the frontend's deposit helper accepts the destination account without a
+  workchain argument. The Ethereum `deposit(uint256,int8,bytes32)` ABI,
+  `Deposit` event and witness JSON stay compatible: `fetch_deposit_data` still
+  writes the legacy JSON field as 0 for existing proof tools. DApp IDs, proof
+  public inputs, verifying keys and contract artifacts are unchanged.
+
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation

@@ -27,8 +27,6 @@ pub struct DepositEventData {
     /// FIX BC-TYPES-001: Changed from u64 to [u8; 32] to support amounts >
     /// 18.44 ETH
     pub amount: [u8; 32],
-    /// Acki Nacki destination workchain id (TVM `int8`, from log data).
-    pub an_workchain: i8,
     /// Acki Nacki destination account (256-bit TVM address, from log data).
     /// The EVM `sender` is not a valid AN recipient, so the destination is
     /// supplied explicitly at deposit time and carried as ZK public inputs.
@@ -214,6 +212,20 @@ mod tests {
     use super::*;
     use crate::supported_chains::{CHAIN_ID_BASE, CHAIN_ID_SEPOLIA};
 
+    #[test]
+    fn legacy_witness_workchain_is_ignored() {
+        let mut legacy: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/chain_binding_sepolia_dep0/input.json"
+        ))
+        .unwrap();
+        legacy["event_data"]["an_workchain"] = serde_json::json!(-1);
+        let before = legacy["event_data"]["an_account"].clone();
+        let input: DepositProofInput = serde_json::from_value(legacy).unwrap();
+        let current = serde_json::to_value(input).unwrap();
+        assert!(current["event_data"].get("an_workchain").is_none());
+        assert_eq!(current["event_data"]["an_account"], before);
+    }
+
     /// Minimal witness carrying only what the chain-id logic reads: an
     /// typed-tx prefix whose RLP field 0 is `chain_id`.
     fn input_for_chain(chain_id: u64) -> DepositProofInput {
@@ -227,7 +239,6 @@ mod tests {
                 deposit_id: 0,
                 sender: [0u8; 20],
                 amount: [0u8; 32],
-                an_workchain: 0,
                 an_account: [0u8; 32],
                 timestamp: 0,
                 contract_address: [0u8; 20],

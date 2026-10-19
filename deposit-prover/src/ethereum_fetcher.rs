@@ -123,10 +123,6 @@ impl EthereumFetcher {
             bytes
         };
 
-        // anWorkchain (word 1): int8 ABI-encoded as a 32-byte sign-extended word;
-        // the value lives in the last byte.
-        let an_workchain = log.data[63] as i8;
-
         // anAccount (word 2): 256-bit TVM account address.
         let an_account = {
             let mut bytes = [0u8; 32];
@@ -151,7 +147,6 @@ impl EthereumFetcher {
             deposit_id,
             sender,
             amount,
-            an_workchain,
             an_account,
             timestamp,
             contract_address: contract_address.as_bytes().try_into().unwrap(),

@@ -222,17 +222,6 @@ fn encode_address(addr: &str) -> String {
     format!("{:0>64}", a)
 }
 
-/// Encode a Solidity `int8` as a 32-byte two's-complement ABI word.
-fn encode_int8(value: i8) -> String {
-    let fill = if value < 0 { "ff" } else { "00" };
-    let mut s = String::with_capacity(64);
-    for _ in 0..31 {
-        s.push_str(fill);
-    }
-    s.push_str(&format!("{:02x}", value as u8));
-    s
-}
-
 /// Encode a Solidity `bytes32` as a 32-byte ABI word. The Acki Nacki account
 /// is a 256-bit number, so a short hex input is left-padded with zeros.
 fn encode_bytes32(value: &str) -> String {
@@ -282,22 +271,35 @@ pub async fn approve_usdc(amount: u128) -> Result<String, String> {
     send_tx(USDC_CONTRACT_ADDRESS, &data).await
 }
 
-/// Deposit `amount` USDC base units into the bridge (pulls via `transferFrom`),
-/// bridging to the Acki Nacki destination `an_workchain:an_account`. The EVM
-/// `msg.sender` is not a valid AN recipient, so the destination is supplied
-/// explicitly and carried as a ZK public input.
-pub async fn make_deposit(
-    amount: u128,
-    an_workchain: i8,
-    an_account: &str,
-) -> Result<String, String> {
-    // deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) = 0xa41d0229
-    let data = format!(
+fn deposit_calldata(amount: u128, an_account: &str) -> String {
+    // deposit(uint256,int8,bytes32): the legacy int8 word stays zero.
+    format!(
         "0xa41d0229{}{}{}",
         encode_uint256(amount),
-        encode_int8(an_workchain),
+        encode_uint256(0),
         encode_bytes32(an_account)
-    );
+    )
+}
+
+#[cfg(test)]
+mod deposit_tests {
+    use super::deposit_calldata;
+
+    #[test]
+    fn deposit_keeps_the_legacy_selector_and_zero_word() {
+        let account = "a3".repeat(32);
+        let data = deposit_calldata(12_500_000, &account);
+        assert_eq!(data.len(), 2 + 2 * 100);
+        assert_eq!(&data[..10], "0xa41d0229");
+        assert_eq!(u128::from_str_radix(&data[10..74], 16).unwrap(), 12_500_000);
+        assert_eq!(&data[74..138], "0".repeat(64));
+        assert_eq!(&data[138..], account);
+    }
+}
+
+/// Deposit USDC into the bridge for the specified Acki Nacki account.
+pub async fn make_deposit(amount: u128, an_account: &str) -> Result<String, String> {
+    let data = deposit_calldata(amount, an_account);
     send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
 }
 

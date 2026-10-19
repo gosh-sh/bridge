@@ -179,9 +179,7 @@ fn deposit_log(event: &DepositEventData) -> Log {
     sender[12..].copy_from_slice(&event.sender);
     let mut data = Vec::with_capacity(128);
     data.extend_from_slice(&event.amount);
-    let mut workchain = [0u8; 32];
-    workchain[31] = event.an_workchain as u8;
-    data.extend_from_slice(&workchain);
+    data.extend_from_slice(&[0u8; 32]);
     data.extend_from_slice(&event.an_account);
     let mut timestamp = [0u8; 32];
     timestamp[24..].copy_from_slice(&event.timestamp.to_be_bytes());
@@ -265,7 +263,6 @@ fn sample_event() -> DepositEventData {
         deposit_id: 7,
         sender: [0x11; 20],
         amount,
-        an_workchain: 0,
         an_account: [0x22; 32],
         timestamp: 1_700_000_000,
         contract_address: [0x33; 20],

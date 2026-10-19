@@ -14,11 +14,6 @@ const MAX_USDC_UNITS: u128 = 100 * USDC_UNIT;
 /// Default faucet mint amount (100 USDC).
 const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
 
-/// The `anWorkchain` argument of `deposit`. Kept in the ABI, ignored by Acki
-/// Nacki: the workchain concept is retired there and `dappId` replaced it, so
-/// the recipient always lives in workchain 0 (`eccUSDCBridge.sol`).
-const AN_WORKCHAIN: i8 = 0;
-
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
     pub wallet_connected: bool,
@@ -55,7 +50,7 @@ fn validate_an_account(raw: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_an_account, AN_WORKCHAIN};
+    use super::validate_an_account;
 
     /// The mistake this guard exists for: a pasted Ethereum address is 40 hex
     /// chars, non-zero, and all-hex, so every other check passes it.
@@ -81,11 +76,6 @@ mod tests {
     #[test]
     fn zero_account_is_rejected_even_at_full_width() {
         assert!(validate_an_account(&"0".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn workchain_is_pinned_to_zero() {
-        assert_eq!(AN_WORKCHAIN, 0);
     }
 }
 
@@ -184,11 +174,6 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 return;
             }
 
-            // Acki Nacki destination: the 256-bit account. The ABI still carries
-            // `anWorkchain`, but the workchain concept is retired on AN — the
-            // network ignores the field, so it is pinned to 0 rather than asked
-            // for.
-            let workchain = AN_WORKCHAIN;
             let account = match validate_an_account(&an_account) {
                 Ok(a) => a,
                 Err(err) => {
@@ -255,7 +240,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
                 // Step 2: deposit to the Acki Nacki destination.
                 status_msg.set(Some("Step 2/2 — deposit (confirm in wallet)…".to_string()));
-                match make_deposit(units, workchain, &account).await {
+                match make_deposit(units, &account).await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         status_msg.set(Some("Waiting for deposit to confirm…".to_string()));

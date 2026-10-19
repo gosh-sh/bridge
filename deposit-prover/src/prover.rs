@@ -914,7 +914,6 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         deposit_id: 0,
         sender: [0u8; 20],
         amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
-        an_workchain: 0,
         an_account: [0u8; 32],
         timestamp: 0,
         contract_address: [0u8; 20],

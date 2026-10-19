@@ -24,6 +24,16 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- Clarify the owner-anchor flip trust model (bridge-audit #57 / #106).
+  `disableOwnerAnchorsOn(chainId)` disables direct owner writes for that chain,
+  while owner upgrades and light-client replacement remain available. Bridge
+  upgrades reset the flags and recorded clients: restore configuration and
+  repeat the intended flips afterwards. NatSpec and operator runbooks now state
+  these powers consistently. An owner retaining `updateCode` can install
+  arbitrary replacement code that changes or removes the current checks, so
+  both owners remain trusted after a flip. No contract behavior, ABI or
+  deployment artifact changes.
+
 - Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
   USDC base units. `AckiNackiBridge.deposit` reverts `DepositTooLarge` above it;
   `finalizeDeposit` refuses a proven amount that does not fit `uint64` with

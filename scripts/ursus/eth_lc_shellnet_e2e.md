@@ -15,6 +15,9 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
 - `EthBeaconLightClient` deployed from the bridge (`deployLightClient`). Set
   `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH` only if you mean to flip (step 9).
 - Binary: `cargo build --release --features live-submit` in the relayer crate.
+- Both owner keys remain trusted after the flip: upgrades and client replacement
+  remain available. After a bridge upgrade, restore configuration and repeat the
+  intended per-chain flips; check `isOwnerAnchorsEnabled(chainId)`.
 
 ## Steps
 

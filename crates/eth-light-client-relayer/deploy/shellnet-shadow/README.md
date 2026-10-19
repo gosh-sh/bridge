@@ -8,7 +8,7 @@ Operator kit for running `eth-lc-relayer` against **Sepolia** (beacon) and a
 - step proofs only (`--no-rotate`): shellnet nodes run tvm-sdk `v3.0.4.an`
   without the rotate decider (tvm-sdk#284), so `submitRotate` is unsound
   there; period hops are done with the owner key (`set-committee`);
-- no one-way owner flip (`--no-flip-owner`).
+- no owner flip (`--no-flip-owner`).
 
 What it proves: the whole pipeline beacon → Halo2 step proof → opcode
 `ZKHALO2VERIFYWITHVK` on shellnet → light-client head advancing with Sepolia

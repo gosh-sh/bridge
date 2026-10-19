@@ -12,6 +12,8 @@ use crate::header_rlp::{keccak256, rlp_parent_hash};
 pub const SLOTS_PER_YEAR: u64 = 2_628_000;
 /// Sync-committee period: 256 epochs of 32 slots.
 pub const SLOTS_PER_PERIOD: u64 = 8192;
+/// Matches `EthBeaconLightClient.ROTATE_ATTESTED_SLACK`.
+pub const ROTATE_ATTESTED_SLACK: u64 = 256;
 /// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
 pub const MAX_EVICT_PER_TX: usize = 128;
 
@@ -44,6 +46,8 @@ pub enum LcError {
     AncestryTooLong,
     WrongCommittee,
     SelfRotation,
+    EarlyRotate,
+    BadPublicInputs,
 }
 
 impl LcError {
@@ -61,6 +65,8 @@ impl LcError {
             Self::AncestryTooLong => 251,
             Self::NotProven => 252,
             Self::SelfRotation => 253,
+            Self::BadPublicInputs => 240,
+            Self::EarlyRotate => 259,
         }
     }
 }
@@ -205,9 +211,7 @@ impl LightClient {
         let prev_ok = late
             && self.prev_committee != [0; 32]
             && committee == self.prev_committee
-            && self.prev_committee_head_slot != 0
-            && attested_slot <= self.prev_committee_head_slot + SLOTS_PER_PERIOD
-            && attested_slot + SLOTS_PER_PERIOD >= self.prev_committee_head_slot;
+            && attested_slot / SLOTS_PER_PERIOD + 1 == self.period;
         let signer_ok = committee == self.committee || prev_ok;
         if !signer_ok {
             return Err(LcError::WrongCommittee);
@@ -282,8 +286,14 @@ impl LightClient {
 
     /// `submitRotate`: a proven hand-off. The committee leaving office is kept
     /// as the previous one, which is the only path that grants it the
-    /// late-registration window.
-    pub fn rotate(&mut self, next: [u8; 32], period: u64) -> Result<(), LcError> {
+    /// late-registration window. The attested header must sit in the last
+    /// 256 slots of the old period.
+    pub fn rotate(
+        &mut self,
+        next: [u8; 32],
+        period: u64,
+        attested_slot: u64,
+    ) -> Result<(), LcError> {
         if self.committee == [0; 32] {
             return Err(LcError::CommitteeUnset);
         }
@@ -292,9 +302,14 @@ impl LightClient {
         if next == self.committee {
             return Err(LcError::SelfRotation);
         }
-        // No test on `period`. The circuit binds it to the attested slot, but
-        // the committee chain above is the replay guard and nothing gates on
-        // the label.
+        if attested_slot / SLOTS_PER_PERIOD + 1 != period {
+            return Err(LcError::BadPublicInputs);
+        }
+        if attested_slot.saturating_add(ROTATE_ATTESTED_SLACK)
+            < period.saturating_mul(SLOTS_PER_PERIOD)
+        {
+            return Err(LcError::EarlyRotate);
+        }
         self.prev_committee = self.committee;
         self.prev_committee_head_slot = self.finalized_slot;
         self.committee = next;
@@ -374,6 +389,11 @@ mod tests {
 
     fn lc() -> LightClient {
         LightClient::bootstrap([0xC0; 32], 0)
+    }
+
+    /// Last slot of the period a rotate into `period` must attest.
+    fn in_window_attested(period: u64) -> u64 {
+        period.saturating_mul(SLOTS_PER_PERIOD).saturating_sub(1)
     }
 
     fn hex32(s: &str) -> [u8; 32] {
@@ -545,46 +565,71 @@ mod tests {
         let old_committee = [0xC0; 32];
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
-        c.submit_update(64, [0xAA; 32], old_committee).unwrap();
+        c.submit_update_at(
+            SLOTS_PER_PERIOD + 64,
+            SLOTS_PER_PERIOD,
+            [0xAA; 32],
+            old_committee,
+        )
+        .unwrap();
 
-        // Slot 32 was never proven, and the committee rotates before it is.
-        c.rotate(new_committee, 2).unwrap();
+        // A checkpoint in the old period was never proven, and the committee
+        // rotates before it is.
+        c.rotate(new_committee, 2, in_window_attested(2)).unwrap();
         assert_eq!(c.committee, new_committee);
 
         // Attested inside the period the old committee served.
-        c.submit_update_at(32, 64, [0xBB; 32], old_committee)
-            .expect("the skipped checkpoint must still be registrable");
+        c.submit_update_at(
+            SLOTS_PER_PERIOD + 32,
+            SLOTS_PER_PERIOD + 32,
+            [0xBB; 32],
+            old_committee,
+        )
+        .expect("the skipped checkpoint must still be registrable");
         assert!(c.is_live(&[0xBB; 32]));
         assert_eq!(
-            c.finalized_slot, 64,
+            c.finalized_slot,
+            SLOTS_PER_PERIOD + 64,
             "late registration must not move the head"
         );
     }
 
     /// The rotate period is proven (the attested slot's period plus one) and
-    /// stored as it is, but nothing gates on it: a hand-off goes through
-    /// whatever its label, and the committee chain is the replay guard.
+    /// stored; a header that is not in the last 256 slots of the old period
+    /// is refused (`ERR_EARLY_ROTATE`, 259).
     #[test]
-    fn the_rotate_label_is_stored_and_gates_nothing() {
+    fn the_rotate_label_gates_an_early_hand_off() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
 
-        c.rotate([0xC1; 32], 2).unwrap();
+        // Three hours into period 1 (~900 slots) is well before the last 256.
+        let three_hours_in = SLOTS_PER_PERIOD + 900;
+        assert_eq!(
+            c.rotate([0xC1; 32], 2, three_hours_in).unwrap_err(),
+            LcError::EarlyRotate
+        );
+        assert_eq!(
+            c.committee, [0xC0; 32],
+            "an early hand-off must not install"
+        );
+        assert_eq!(LcError::EarlyRotate.code(), 259);
+
+        c.rotate([0xC1; 32], 2, in_window_attested(2)).unwrap();
         assert_eq!(c.period, 2, "the stored period is the proof's");
         assert_eq!(c.committee, [0xC1; 32]);
+    }
 
-        c.submit_update_at(
-            2 * SLOTS_PER_PERIOD,
-            2 * SLOTS_PER_PERIOD,
-            [0xAB; 32],
-            [0xC1; 32],
-        )
-        .unwrap();
-        c.rotate([0xC2; 32], 0)
-            .expect("the label must not block a genuine hand-off");
-        assert_eq!(c.committee, [0xC2; 32]);
-        assert_eq!(c.period, 0);
+    #[test]
+    fn an_attested_slot_that_does_not_match_the_period_is_refused() {
+        let mut c = LightClient::bootstrap([0xC0; 32], 1);
+        c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
+            .unwrap();
+        assert_eq!(
+            c.rotate([0xC1; 32], 2, 100).unwrap_err(),
+            LcError::BadPublicInputs
+        );
+        assert_eq!(LcError::BadPublicInputs.code(), 240);
     }
 
     /// Reachable for every period boundary: the last header of a period is
@@ -596,11 +641,11 @@ mod tests {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
-        c.rotate([0xC1; 32], 2).unwrap();
+        c.rotate([0xC1; 32], 2, in_window_attested(2)).unwrap();
         assert_eq!(c.prev_committee, [0xC0; 32]);
 
         assert_eq!(
-            c.rotate([0xC1; 32], 3).unwrap_err(),
+            c.rotate([0xC1; 32], 3, in_window_attested(3)).unwrap_err(),
             LcError::SelfRotation,
             "a hand-off onto the committee already in force must be refused"
         );
@@ -610,7 +655,7 @@ mod tests {
         );
     }
 
-    /// The replaced committee may only sign around the head it left behind.
+    /// The replaced committee may only sign in the period it served.
     /// Without that bound it could sign any slot in the one-year window,
     /// including slots it never attested, and the hashes it wrote would back
     /// mints.
@@ -626,10 +671,10 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2, in_window_attested(2)).unwrap();
 
-        // The head it left was 2 periods in; more than one period past that
-        // is outside the window.
+        // Attested in period 3 after a rotate into period 2: outside the
+        // period the replaced committee served.
         assert_eq!(
             c.submit_update_at(
                 2 * SLOTS_PER_PERIOD - 1,
@@ -659,7 +704,7 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2, in_window_attested(2)).unwrap();
         c.submit_update_at(
             2 * SLOTS_PER_PERIOD,
             2 * SLOTS_PER_PERIOD,
@@ -691,7 +736,7 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 4).unwrap();
+        c.rotate(new_committee, 4, in_window_attested(4)).unwrap();
 
         assert_eq!(
             c.submit_update_at(100, 100, [0xDD; 32], old_committee)
@@ -727,7 +772,7 @@ mod tests {
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
         c.submit_update(64, [0xAA; 32], old_committee).unwrap();
-        c.rotate(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2, in_window_attested(2)).unwrap();
 
         assert_eq!(
             c.submit_update(96, [0xCC; 32], old_committee).unwrap_err(),
@@ -890,7 +935,7 @@ mod tests {
     fn upgrade_clears_the_previous_committee_window() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update(64, [0xAA; 32], [0xC0; 32]).unwrap();
-        c.rotate([0xC1; 32], 2).unwrap();
+        c.rotate([0xC1; 32], 2, in_window_attested(2)).unwrap();
         assert_ne!(c.prev_committee, [0; 32], "the rotation armed the window");
         assert_ne!(c.prev_committee_head_slot, 0);
 

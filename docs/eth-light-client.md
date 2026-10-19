@@ -189,8 +189,11 @@ flowchart TD
   beacon light client): the owner writes the commitment of a committee it believes is honest,
   `setCommitteeCommitment` (`EthBeaconLightClient.sol:458`). The relayer takes it from public
   input word 5 of a freshly proven bundle (`eth-lc-relayer set-committee`).
-- **Rotate** (`submitRotate`, `EthBeaconLightClient.sol:335`) proves that the next committee
-  is the one the current committee signed for, so the chain of committees becomes trustless. The
+- **Rotate** (`submitRotate`, `EthBeaconLightClient.sol`) proves that the next committee
+  is the one the current committee signed for, so the chain of committees becomes trustless.
+  The attested header must sit in the last 256 slots of the old period (`ERR_EARLY_ROTATE`,
+  259) so a successor cannot be installed from hour 3 of P; the honest relayer proves a
+  historical end-of-P update after the beacon period has jumped. The
   daemon does this by default on a period jump (`src/relayer.rs:152`). It needs the rotate
   decider from tvm-sdk PR #284 in the node VM; on a network without it `submitRotate` is
   unsound and must stay off (`--no-rotate`).

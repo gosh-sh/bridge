@@ -77,6 +77,22 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **The rotate verification key is rotated and `submitRotate` refuses an
+  early committee hand-off.** The rotate circuit now exposes the attested
+  slot as public input 16 (17 Fr in all: 12 accumulator limbs then
+  `[current, next, period, gloas_fork_slot, attested_slot]`).
+  `EthBeaconLightClient.submitRotate` reverts `ERR_EARLY_ROTATE` (259)
+  unless that header is in the last 256 slots of the old period (~8
+  epochs, ~51 min), and `ERR_BAD_PUBLIC_INPUTS` (240) if
+  `attestedSlot / 8192 + 1` is not the proof's `period`. Previous rotate
+  proofs do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3` (was
+  `4dc3f0a7…71d4cf54`). Redeploy the light client (`1.6.0`, code hash
+  `5ecdb821…`) after embedding the new `ROTATE_VK_BLOB`; rebuild
+  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.{tvc,abi.json}`.
+  Honest `eth-lc-relayer` already waits until the beacon period has
+  jumped, then proves a historical end-of-P update, so prove wall time
+  is not racing the slack. (gosh-sh/bridge-audit#118)
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
@@ -1493,6 +1509,12 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **Late registration of a skipped checkpoint is the proven period the
+  replaced committee served**, not a band of slots around the head it
+  left. `submitUpdate` still accepts that signer only for a late
+  (non-advancing) update; `attestedSlot / 8192 + 1` must equal
+  `_committeePeriod`. (gosh-sh/bridge-audit#118)
+
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation
@@ -2406,11 +2428,6 @@ assigns it when the release is tagged.
   deposit whose block is older than a year by as much as one full rotation of
   the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
   is the light client's own `_isLive`, not the bridge's map.
-
-- **A genuine committee hand-off can be submitted early and freeze the head.**
-  Permissionless, repeatable once per period, and present in the deployed
-  1.4.1; see the `submitRotate` entry in Breaking Changes. The fix belongs in
-  the rotate circuit, which has to bind the hand-off to a slot.
 
 - **A deposit is only covered once both checkpoints bracketing its block are
   proven and within a span of each other.** Gas is no longer the obstacle —

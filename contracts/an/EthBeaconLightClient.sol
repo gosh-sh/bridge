@@ -60,6 +60,8 @@ contract EthBeaconLightClient {
     // 365 * 24 * 3600 / 12. A proven execution hash older than this many
     // slots behind head is not canonical for `finalizeDeposit` (one-year SLA).
     uint64 constant SLOTS_PER_YEAR = 2_628_000;
+    uint64 constant SLOTS_PER_PERIOD = 8192;
+    uint64 constant ROTATE_ATTESTED_SLACK = 256;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
@@ -95,6 +97,7 @@ contract EthBeaconLightClient {
     uint16 constant ERR_ZERO_PUBKEY        = 254;
     uint16 constant ERR_WRONG_FORK_SLOT    = 255;
     uint16 constant ERR_FORK_SLOT_UNSET    = 256;
+    uint16 constant ERR_EARLY_ROTATE        = 259;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -154,7 +157,7 @@ contract EthBeaconLightClient {
     /// @notice The proven public inputs of the **rotate** circuit. The rotate
     ///         root is a recursive 2-to-1 aggregation over 8 committee shards +
     ///         a step snark (`eth-light-client-prover`, milestone M6), so its
-    ///         instance column is 16 little-endian 32-byte Fr:
+    ///         instance column is 17 little-endian 32-byte Fr:
     ///           [0..12)  KZG accumulator limbs (lhs/rhs G1, 3×88-bit per coord)
     ///           [12] current_committee_commitment  — 2-level Poseidon commitment
     ///               to the committee that SIGNED (must equal the trusted current
@@ -167,6 +170,8 @@ contract EthBeaconLightClient {
     ///           [15] gloas_fork_slot               — picks the `next_sync_committee`
     ///               index (87 before Gloas, 2946 from it); bound to the folded
     ///               step's PI #10, must equal `_gloasForkSlot`
+    ///           [16] attested_slot                 — signed header of the rotate
+    ///               proof; must sit in the last 256 slots of the old period
     ///
     ///         ⚠ The 12 accumulator limbs are the recursion's KZG accumulator.
     ///         `ZKHALO2VERIFYWITHVK` verifies the aggregation proof with a plain
@@ -179,6 +184,7 @@ contract EthBeaconLightClient {
         uint256 nextCommitteeCommitment;
         uint64  period;
         uint64  gloasForkSlot;
+        uint64  attestedSlot;
     }
 
     uint256 _ownerPubkey;
@@ -380,8 +386,9 @@ contract EthBeaconLightClient {
     ///
     ///         Permissionless: the proof is the authorization.
     /// @param proof        — SHPLONK proof bytes, the `proof_cell` operand.
-    /// @param publicInputs — 16 × 32-byte LE Fr: 12 accumulator limbs then
-    ///                       [current_commit, next_commit, period, gloas_fork_slot].
+    /// @param publicInputs — 17 × 32-byte LE Fr: 12 accumulator limbs then
+    ///                       [current_commit, next_commit, period, gloas_fork_slot,
+    ///                       attested_slot].
     function submitRotate(bytes proof, bytes publicInputs) public {
         RotatePI pi = _parseRotatePublicInputs(publicInputs);
         // Chain to the trusted committee; fail-closed until bootstrapped.
@@ -393,6 +400,11 @@ contract EthBeaconLightClient {
         // state's `next_sync_committee` is still the signer: a genuine
         // hand-off that changes nothing.
         require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
+        require(pi.attestedSlot / SLOTS_PER_PERIOD + 1 == pi.period, ERR_BAD_PUBLIC_INPUTS);
+        require(
+            pi.attestedSlot + ROTATE_ATTESTED_SLACK >= pi.period * SLOTS_PER_PERIOD,
+            ERR_EARLY_ROTATE
+        );
         // Monotonic period — reject stale / replayed hand-offs. The circuit
         // binds `period` to the attested slot, so it cannot be inflated.
         require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
@@ -886,19 +898,19 @@ contract EthBeaconLightClient {
         pi.gloasForkSlot        = uint64(fr[10]);
     }
 
-    /// @dev Reads the 16 rotate public inputs out of the PROVEN blob. Layout =
-    ///      16 × 32-byte LE Fr: 12 KZG accumulator limbs, then
+    /// @dev Reads the 17 rotate public inputs out of the PROVEN blob. Layout =
+    ///      17 × 32-byte LE Fr: 12 KZG accumulator limbs, then
     ///      [current_committee_commitment, next_committee_commitment, period,
-    ///      gloas_fork_slot].
+    ///      gloas_fork_slot, attested_slot].
     ///      Same little-endian Fr decoding as `_parsePublicInputs`; the two
     ///      commitments are full-width field elements (Poseidon outputs),
-    ///      `period` is a small u64. The 12 accumulator limbs are skipped here
-    ///      (they gate the recursion, not the committee hand-off) — see the
-    ///      soundness note on `submitRotate`.
+    ///      `period` and `attested_slot` are small u64s. The 12 accumulator
+    ///      limbs are skipped here (they gate the recursion, not the committee
+    ///      hand-off) — see the soundness note on `submitRotate`.
     function _parseRotatePublicInputs(bytes publicInputs) private pure returns (RotatePI pi) {
         TvmSlice s = publicInputs.toSlice();
         uint256[] fr;
-        for (uint k = 0; k < ROTATE_ACCUMULATOR_LIMBS + 4; k++) {
+        for (uint k = 0; k < ROTATE_ACCUMULATOR_LIMBS + 5; k++) {
             uint256 v = 0;
             for (uint i = 0; i < 32; i++) {
                 if (s.bits() < 8) { s = s.loadRef().toSlice(); }
@@ -909,10 +921,12 @@ contract EthBeaconLightClient {
         uint acc = ROTATE_ACCUMULATOR_LIMBS;
         require(fr[acc + 2] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
         require(fr[acc + 3] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
+        require(fr[acc + 4] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
         pi.currentCommitteeCommitment = fr[acc];
         pi.nextCommitteeCommitment    = fr[acc + 1];
         pi.period                     = uint64(fr[acc + 2]);
         pi.gloasForkSlot              = uint64(fr[acc + 3]);
+        pi.attestedSlot               = uint64(fr[acc + 4]);
     }
 
     // ZK verifying key (VkBlob) for the beacon light-client STEP circuit —
@@ -1140,8 +1154,8 @@ contract EthBeaconLightClient {
 
     // ZK verifying key (VkBlob) for the beacon light-client ROTATE circuit —
     // recursive 2-to-1 aggregation root over 8 committee shards + a step snark
-    // (16 public inputs: 12 KZG accumulator limbs + current_commit, next_commit,
-    // period, gloas_fork_slot). Base v1 (Blake2b transcript). Hermez SRS (outer k=21, shard
+    // (17 public inputs: 12 KZG accumulator limbs + current_commit, next_commit,
+    // period, gloas_fork_slot, attested_slot). Base v1 (Blake2b transcript). Hermez SRS (outer k=21, shard
     // inners k=20). Source:
     //   acki-nacki-bridge/eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin
     //
@@ -1158,7 +1172,7 @@ contract EthBeaconLightClient {
     // refresh the tvm-sdk opcode fixtures
     //   (acki-nacki-bridge/scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh).
     // Do NOT hand-edit the hex.
-    //   sha256 4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54
+    //   sha256 60c0af2af9e231b31325800ef260bad28a66261df7582dfb2e24bb4ce2df58d3
     bytes constant ROTATE_VK_BLOB =
         hex"564b424c4f4200000100000c000000007e0000007b226b223a32312c226e756d5f6164766963655f7065725f7068617365223a5b32315d2c226e756d"
         hex"5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f7065725f7068617365223a5b325d2c226c6f6f6b75705f62697473223a3230"
@@ -1196,8 +1210,8 @@ contract EthBeaconLightClient {
         hex"913b4f06b83af8f98e9de281c37d9a60efdb9117d9f8568b3684d376c571bc2e6e8d550bb4f9599ce5829b06ba75e0adb8f4b3a0b659d20c5bfae1bf"
         hex"1f6c1fbc40fae62de0355c60bbae1a291774a7f0cad116cd135f9cc8456f738d014f2ed52d13da187795dcc0d8149810464b4d6d39da7092831dd70d"
         hex"dda9b60b18fab5e70c0fed0dc4b5464ff8920b69758e7480d6b2a71122a0f02a7bb520e7ce00472f5943c71e4526c8deb7e80c0acf28c47f2935adab"
-        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f322674d099a572988d155cf8a54d"
-        hex"b5a5106cdf9cc9d0fe9ed924e9d4b5836c47181761081f5b98de7cd58c5901d13b72392cab066627455a268e79d0f225979bf702b052e04e333311e1"
+        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f3226cd697520b5f88564febefa98"
+        hex"faededf4243c0e6518e500776b7e82049f816024904fb0f5fa1a948e0f78bbc1d9afc3249054993bd107729f97c3b4fae73f0a0bb052e04e333311e1"
         hex"54012da7b05a0a9f5073d9b4e7f31002c029c124b1fc410f5b91c66c715d1dbb33a5c2f0911d50eedcc14b6c2d8bd786f2546b238b4a480c8d865bd8"
         hex"719730c4548d26d88b34024836b7b0ff0199ccb77e96f9a12af3cf0374993dad386f7d1454c43d8ad84020123fe51adb17b20e16755999f8335bcb00"
         hex"06efe595b621406f68fbabc21e9bf5a1d50c264ea052145f35330d43c4383e30660d105d6cf1198c00a099e718792b52c42362e4eca92ae6b25dc6ad"
@@ -1212,6 +1226,6 @@ contract EthBeaconLightClient {
         hex"6cb4171f3028d919e90cb5504ed5c03cd1bb111984343be7c41a7fbd9e998f6bafe0f9116ad7e277dd22e04762ac8321598c88629013cf928e5f83d9"
         hex"614b8f91722e45265a4b47d418e32ea1cffa40527f351b7d4988de72d35cc2d9d025a37b3106a10e9149cca6f75ac2653365cdd9b23a2974379e41d7"
         hex"a53fc7a2c7b9b6e422559612407dc6bf399b39c02a84f5154c69c83a595863646ace33b256e2bcf1a3ae641cd1f64e9b9efbf76c24e9dbda1723f08f"
-        hex"63e3d8a3d49836b2874fa6d39bd9f923aa8f52bc5b5f37aef032a65c8741d792e2a05932262a9c9e277dc0cb05be702a37480b5609269b9e96199c8e"
-        hex"51604660453d94344456271100be5ade1e7ad9040d65e819139ed0585349add8e893c304467d2926dc98147d77a2f8029104542b";
+        hex"63e3d8a3d49836b2874fa6d39bd9f923aa8f52bc5b5f37aef032a65c8741d792e2a05932262a9c9e277dc0cb05be702a7e5eb1722282aa644a0a425d"
+        hex"c7b840d910758c070140461426a966d217c38828b04f464b1a4f54cde2636aff77fe84e93f5f0efa567415f09390d981cb469a0b";
 }

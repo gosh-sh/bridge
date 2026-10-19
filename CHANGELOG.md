@@ -37,7 +37,10 @@ assigns it when the release is tagged.
   and target an earlier deploy (`0x99c37fb7…`) that AN no longer trusts.
   Test USDC comes from Circle's faucet, not an in-form mint. The ursus
   deposit-relayer and bridge-relayer env examples pin the same bridge
-  and deploy block 11921366.
+  and deploy block 11921366, and the deposit-relayer example uses the
+  same full-history Sepolia RPC (`rpc.sepolia.ethpandaops.io`) — publicnode
+  keeps only about 10 000 blocks of logs, which no longer covers that
+  deploy.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
   `state.json`, the strict `depositId` queue, parking with

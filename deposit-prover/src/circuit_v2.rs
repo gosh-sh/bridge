@@ -669,8 +669,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
         // 5. chainId - extracted typed-tx RLP field 0 (EIP-2930 / EIP-1559, already
-        //    computed above). Exposed as a public input so USDCBridge can allowlist
-        //    (chainId → expected bridge Fr). Not constrained to a constant.
+        //    computed above). Exposed as a public input so `eccUSDCBridge` can
+        //    allowlist the proven bridge in `_trustedL1Bridge[chainId][bridge]`.
+        //    Not constrained to a constant.
 
         // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied from
         //    the bridge config (NOT from the Ethereum event). It replaced `anWorkchain`
@@ -1205,8 +1206,8 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     ///
     /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559)
     /// extracted from the enclosing tx (MPT-bound under `transactionsRoot`).
-    /// It is **not** VK-baked — the
-    /// AN-side `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
+    /// It is **not** VK-baked — the AN-side `eccUSDCBridge` allowlists the
+    /// proven bridge in `_trustedL1Bridge[chainId][bridge]`.
     /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier)
     /// replaced the single `anWorkchain` slot on 2026-06-02. dappId is a
     /// config-supplied tag — it is not bound to event data in-circuit; the

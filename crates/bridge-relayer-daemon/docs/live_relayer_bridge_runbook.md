@@ -125,8 +125,47 @@ itself; K=21 and K=22 come from their own ceremony files.
 Optional: `BRIDGE_PK_CACHE_DIR=./params/pk_cache`,
 `BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions` (saves each `verifyBlock`
 calldata for replay), `RELAYER_METRICS_ADDR`, `BRIDGE_GQL_FAILOVER_ENDPOINTS`,
-`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60: how long one request to
-`RPC_URL` may take).
+`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 20: how long one request to one
+Ethereum endpoint may take before the next endpoint is tried).
+
+**Ethereum RPC.** `RPC_URL` is the primary endpoint and `RPC_FAILOVER_URLS`
+(comma-separated, also `--rpc-failover-urls`) the fallbacks, tried in order.
+`shellnet.common` builds both: Infura first, then Alchemy, the EF DevOps
+endpoint, publicnode and Tenderly's public gateway. The Infura and Alchemy
+URLs carry API keys, which come from the untracked
+`crates/bridge-prover-libraries/.env` (`INFURA_API_KEY=…`,
+`ALCHEMY_API_KEY=…`; `.gitignore` covers it). Never put a key into
+`shellnet.common`: it is tracked and `.gitleaks.toml` does not scan it. An
+endpoint whose key is not set is left out.
+
+- At start the relayer asks every endpoint for its chain id. It refuses to
+  start when two disagree or none answers; one that does not answer stays in
+  the list. The log line `Ethereum RPC endpoints, in order` names them by host
+  only, as every relayer log line does: keys never reach the log.
+- A request goes to the first endpoint that is not cooling down. An endpoint
+  that times out, answers HTTP 429/5xx or refuses with a rate-limit, quota or
+  key error is skipped for 60 s (`WARN … endpoint failing, trying the next
+  one`); one that cannot serve a particular request (an `eth_getLogs` span
+  over its cap, pruned history, a block it has not seen yet) passes that
+  request on and keeps its place. A revert or `nonce too low` is the answer
+  and is not retried elsewhere.
+- A signed transaction goes to the first endpoint that accepts it, and copies
+  go to the others. Before every transaction the relayer reads the account's
+  nonce from the chain; when its previous transaction is still waiting
+  unmined, it sends at the same nonce with fees 25 % higher, which replaces
+  it (`WARN … replacing it at the same nonce with higher fees`). A lost send
+  no longer stalls the bridge until a restart.
+- `BRIDGE_GET_LOGS_PAUSE_MS=600` in `shellnet.common` paces the startup scan
+  for Infura's free tier (500 credits a second, 255 per `eth_getLogs`).
+
+To check a list of endpoints without starting the daemon (read-only: chain
+id, then the bridge's full state with the startup scan):
+
+```bash
+cd crates/bridge-prover-libraries
+set -a && source L2_config/env && set +a     # bash: the env files use BASH_SOURCE
+cargo test -p bridge-relayer-daemon --lib live_endpoints -- --ignored --nocapture
+```
 
 Check before every launch:
 
@@ -317,9 +356,11 @@ after 256 such ticks at L2 (16 at L1), about four hours: by then the prover or
 the chain is stuck.
 
 An occasional `WARN … tick failed, will back off` naming the RPC or GraphQL
-endpoint is a failed read; the next tick repeats it. A request to `RPC_URL`
-that gets no answer fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`)
-rather than holding up the ticks.
+endpoint is a failed read; the next tick repeats it. A request to an Ethereum
+endpoint that gets no answer moves to the next endpoint after 20 s
+(`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`); the tick fails only when every endpoint
+has failed it. `WARN … endpoint failing, trying the next one` once a minute
+means the primary is down and its fallbacks carry the load.
 
 **Snapshot.**
 

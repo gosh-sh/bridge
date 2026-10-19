@@ -26,28 +26,27 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use alloy::{
-    network::EthereumWallet,
     primitives::Address,
-    providers::{Provider, ProviderBuilder},
-    signers::{local::PrivateKeySigner, Signer},
+    providers::{Provider, RootProvider},
+    signers::local::PrivateKeySigner,
+    transports::http::reqwest::Url,
 };
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs,
-    rpc_http_client, rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig,
-    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
-    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
-    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
-    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
-    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
-    WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    GET_LOGS_CHUNK_BLOCKS,
+    check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs, eth_rpc,
+    rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig, BkSetUpdateSubmitOutcome,
+    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
+    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
+    InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig, PartnerWithdrawalProof,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
+    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge, WithdrawE2EConfig,
+    WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver, GET_LOGS_CHUNK_BLOCKS,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -62,6 +61,13 @@ struct Args {
     /// subcommand; `sentry-watch` is stateless.
     #[arg(long, default_value = "./relayer-state.json")]
     state: PathBuf,
+
+    /// Fallback Ethereum RPC endpoints behind `--rpc-url`, comma-separated,
+    /// tried in order when the one before fails (see
+    /// `bridge_relayer_daemon::eth_rpc`). Their URLs may carry API keys:
+    /// logs name hosts only.
+    #[arg(long, env = "RPC_FAILOVER_URLS", value_delimiter = ',', global = true)]
+    rpc_failover_urls: Vec<String>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -583,6 +589,7 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let args = Args::parse();
+    let _ = RPC_FAILOVER_URLS.set(args.rpc_failover_urls.clone());
 
     match args.cmd {
         Cmd::Status => {
@@ -974,8 +981,35 @@ async fn main() -> anyhow::Result<()> {
 /// HTTP client for `--rpc-url`: each request fails after
 /// `BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60) instead of waiting on a
 /// connection that went silent.
-fn rpc_http() -> anyhow::Result<alloy::transports::http::reqwest::Client> {
-    rpc_http_client(rpc_request_timeout_from_env()?)
+/// `--rpc-failover-urls` / `RPC_FAILOVER_URLS`, set once in `main`.
+static RPC_FAILOVER_URLS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// `rpc_url` followed by the failover endpoints.
+fn rpc_endpoints(rpc_url: &str) -> anyhow::Result<Vec<Url>> {
+    eth_rpc::endpoint_urls(
+        rpc_url,
+        RPC_FAILOVER_URLS
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    )
+}
+
+/// A read-only provider over `rpc_url` and the failover endpoints.
+async fn read_provider(rpc_url: &str) -> anyhow::Result<RootProvider> {
+    Ok(eth_rpc::read_provider(&rpc_endpoints(rpc_url)?).await?.0)
+}
+
+/// A provider that signs with `private_key`, over `rpc_url` and the
+/// failover endpoints, and the address it sends from.
+async fn wallet_provider(
+    rpc_url: &str,
+    private_key: &str,
+) -> anyhow::Result<(impl Provider + Clone + 'static, Address)> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let sender = signer.address();
+    let provider = eth_rpc::wallet_provider(&rpc_endpoints(rpc_url)?, signer).await?;
+    Ok((provider, sender))
 }
 
 /// The bundle stride `smoke-fixture`, `daemon` and `daemon-bridge` run at:
@@ -1019,20 +1053,9 @@ async fn smoke_fixture(
     max_ticks: usize,
     anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
-    // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
-    // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
-    // chain that yields a wallet-filled provider in a single call. The
-    // signer's chain ID is derived from the RPC endpoint to mirror the
-    // ethers behaviour (which called `get_chainid` before `with_chain_id`).
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe_provider.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
 
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider).with_sender(sender));
     let source = Arc::new(FixturesBlockSource::open(
         &fixtures_dir,
         verifiers_dir.as_deref(),
@@ -1062,15 +1085,9 @@ async fn run_daemon(
     backoff: BackoffConfig,
     anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe_provider.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
 
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider).with_sender(sender));
     let source = Arc::new(FixturesBlockSource::open(
         &fixtures_dir,
         verifiers_dir.as_deref(),
@@ -1138,7 +1155,7 @@ async fn verify_fixture(
     bridge_address: Address,
     simulate: bool,
 ) -> anyhow::Result<()> {
-    let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let provider = read_provider(&rpc_url).await?;
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let source = FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?;
 
@@ -1304,7 +1321,7 @@ async fn submit_verify_block(
         .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
 
     if dry_run {
-        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+        let provider = read_provider(&rpc_url).await?;
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_block(&block).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: verifyBlock would succeed"),
@@ -1317,14 +1334,8 @@ async fn submit_verify_block(
         return Ok(());
     }
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_block(&block).await? {
         bridge_relayer_daemon::SubmitOutcome::Verified {
@@ -1356,7 +1367,7 @@ async fn verify_prover_proof(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
 
-    let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let provider = read_provider(&rpc_url).await?;
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let on_chain = bridge.read_state().await?;
 
@@ -1719,14 +1730,8 @@ async fn run_withdraw_daemon(
     backoff: BackoffConfig,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -1805,24 +1810,19 @@ async fn run_bridge_daemon(
     dry_run: bool,
     anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
 
     // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
     let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
-    let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
+    let prover_bridge =
+        Arc::new(EthBridgeClient::new(bridge_address, provider.clone()).with_sender(sender));
     let stride = submitting_stride(&prover_bridge, bridge_address, anchor_level).await?;
     let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
 
     // Withdraw leg: shares the SAME provider (one nonce source; the two
     // legs run sequentially so there's only ever one in-flight tx).
-    let wd_bridge = EthBridgeClient::new(bridge_address, provider);
+    let wd_bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
     let mut wd_state = WithdrawScanState::default();
 
     let shutdown = shutdown_signal();
@@ -1943,7 +1943,7 @@ async fn submit_withdraw(
     let pub_inputs = bundle.public_inputs()?;
 
     if dry_run {
-        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+        let provider = read_provider(&rpc_url).await?;
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
@@ -1956,14 +1956,8 @@ async fn submit_withdraw(
         return Ok(());
     }
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_withdraw(&proof, &pub_inputs).await? {
         WithdrawSubmitOutcome::Paid {
@@ -2069,7 +2063,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
     let pub_inputs = summary.proof.public_inputs()?;
 
     if args.dry_run {
-        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+        let provider = read_provider(&rpc_url).await?;
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
@@ -2080,14 +2074,8 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
         WithdrawSubmitOutcome::Paid {
@@ -2134,14 +2122,8 @@ async fn submit_bk_update(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no bkupd bundle for seq_no={block_seq_no}"))?;
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
@@ -2306,14 +2288,8 @@ async fn run_daemon_live(
         "daemon-live: Ethereum RPC",
     );
     let bridge_probe = {
-        let signer: PrivateKeySigner = private_key.parse()?;
-        let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-        let chain_id = probe.get_chain_id().await?;
-        let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
+        let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan).with_sender(sender)
     };
     let chain_full = bridge_probe
         .read_full_state()

@@ -978,6 +978,23 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
+  primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
+  `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
+  A request moves on when its endpoint times out, answers HTTP 429/5xx or a
+  rate-limit, quota or key error — that endpoint then waits 60 s at the back
+  of the line — or cannot serve that one request (an `eth_getLogs` span over
+  its cap, pruned history, a block it has not seen); a revert or `nonce too
+  low` is returned as before. A signed transaction goes to the first endpoint
+  that accepts it, with copies to the others, and `already known` counts as
+  accepted. At start every endpoint is asked for its chain id: the relayer
+  refuses to start when two disagree or none answers. `shellnet.common` now
+  builds the list — Infura, Alchemy, the EF DevOps endpoint, publicnode,
+  Tenderly's public gateway — from `INFURA_API_KEY` and `ALCHEMY_API_KEY` in
+  the untracked `crates/bridge-prover-libraries/.env`, leaving out an endpoint
+  whose key is not set, and paces the startup scan with
+  `BRIDGE_GET_LOGS_PAUSE_MS=600` for Infura's free tier. Live relayer
+  runbook, *Environment*.
 - **`daemon-live` stops when the Acki Nacki chain is behind the bridge.** A
   chain head below the bridge's last verified block means shellnet was
   restarted from a new zerostate, or `BRIDGE_GQL_ENDPOINT` serves another
@@ -1517,6 +1534,16 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` defaults to 20, per endpoint** (was 60
+  for the one endpoint): past it the request moves to the next endpoint. A
+  value set by hand is kept.
+- **Relayer logs and errors name Ethereum endpoints by scheme and host
+  only.** reqwest put the full URL, API key included, into every transport
+  error the relayer logged.
+- **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
+  set** (the EF DevOps endpoint otherwise, as before). Every tool that
+  sources it — the deploy script, the `cast` commands of the runbooks, the
+  Python drivers — then talks to Infura.
 - **`bk_set.shellnet.json` holds the genesis committee of shellnet as
   restarted on 2026-10-14** (5 signers; Poseidon commitment
   `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
@@ -1936,6 +1963,22 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **A lost send no longer stalls the relayer until a restart.** alloy's
+  default nonce manager read the nonce once and counted locally, advancing
+  before the broadcast: when the RPC lost a send, every later transaction
+  went out one nonce too high and waited for the missing one, and the bridge
+  stood still until the daemon was restarted. The relayer now reads the
+  `latest` and `pending` counts before every transaction and remembers what
+  it sent last: a lost send goes out again at its nonce, and its own
+  transaction still waiting unmined is replaced at the same nonce with fees
+  25 % higher. Transactions others have waiting from the same account are
+  left alone. `daemon-live`, `daemon-bridge`, `daemon-withdraw`,
+  `withdraw-e2e` and the `submit-*` commands all send this way.
+- **`withdrawByProof` waits at most 180 s for its receipt**, like
+  `verifyBlock` and `applyBkSetUpdate`. It waited forever, so one dropped
+  transaction held the withdraw scan of `daemon-withdraw` and
+  `daemon-bridge`; the proof is now retried, and its nullifier check skips it
+  once it has landed.
 - An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
   to bring it down: `accruedYield()` stayed zero for good, and
   `withdrawFromAave` kept reverting once the pool was empty. The book can now

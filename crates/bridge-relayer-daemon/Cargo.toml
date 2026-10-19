@@ -23,6 +23,7 @@ alloy = { version = "2.0", features = [
     "sol-types",
     "transport-http",
     "eips",
+    "json-rpc",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -31,6 +32,8 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
+# `Service` for the failover transport in `eth_rpc` (alloy does not re-export it).
+tower = "0.5"
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 acki-nacki-interface = { path = "../../acki-nacki-interface" }

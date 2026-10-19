@@ -1000,6 +1000,10 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// [`Self::with_scan_config`]. Set `deploy_block` in production so a
     /// failed scan does not walk back to genesis.
     scan: LogScanConfig,
+    /// The account this client sends from ([`Self::with_sender`]). With it
+    /// every transaction carries its nonce and fees from [`crate::nonce`];
+    /// without it the provider's fillers choose them.
+    sender: Option<Address>,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -1023,7 +1027,28 @@ where
             contract,
             address,
             scan: scan.normalized(),
+            sender: None,
         }
+    }
+
+    /// Sends from `sender`, the address of the provider's signer, with the
+    /// nonce and fees [`crate::nonce`] plans: read from the chain before
+    /// every transaction, replacing our own transaction while it waits
+    /// unmined.
+    pub fn with_sender(mut self, sender: Address) -> Self {
+        self.sender = Some(sender);
+        self
+    }
+
+    /// The nonce and fees of the next transaction, remembered before it is
+    /// sent; `None` without a sender.
+    async fn plan_send(&self) -> Result<Option<crate::nonce::TxPlan>, TransportError> {
+        let Some(sender) = self.sender else {
+            return Ok(None);
+        };
+        let plan = crate::nonce::plan_transaction(self.contract.provider(), sender).await?;
+        crate::nonce::remember(sender, &plan);
+        Ok(Some(plan))
     }
 
     /// One `storedLastSeenBlockSeqNo` view call at `latest`: the cheap probe
@@ -1243,8 +1268,25 @@ where
         let call = self
             .contract
             .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
+        let call = match self.plan_send().await {
+            Ok(Some(plan)) => call
+                .nonce(plan.nonce)
+                .max_fee_per_gas(plan.max_fee_per_gas)
+                .max_priority_fee_per_gas(plan.max_priority_fee_per_gas),
+            Ok(None) => call,
+            Err(e) => {
+                return Ok(WithdrawSubmitOutcome::Reverted {
+                    reason: format!("withdrawByProof send failed: {e}"),
+                    permanent: false,
+                });
+            },
+        };
         match call.send().await {
-            Ok(pending) => match pending.get_receipt().await {
+            Ok(pending) => match pending
+                .with_timeout(Some(WITHDRAW_RECEIPT_TIMEOUT))
+                .get_receipt()
+                .await
+            {
                 Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
                     tx_hash: receipt.transaction_hash(),
                 }),
@@ -1342,6 +1384,18 @@ where
             B256::from(update.sibling_h4_7),
             B256::from(update.sibling_h8_15),
         );
+        let call = match self.plan_send().await {
+            Ok(Some(plan)) => call
+                .nonce(plan.nonce)
+                .max_fee_per_gas(plan.max_fee_per_gas)
+                .max_priority_fee_per_gas(plan.max_priority_fee_per_gas),
+            Ok(None) => call,
+            Err(e) => {
+                return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!("applyBkSetUpdate send failed: {e}"),
+                });
+            },
+        };
         match call.send().await {
             Ok(pending) => match pending.get_receipt().await {
                 Ok(receipt) => {
@@ -2091,6 +2145,12 @@ pub enum BkSetUpdateSubmitOutcome {
 /// (~15 Sepolia blocks) `submit_block` allows `verifyBlock`.
 pub const BK_UPDATE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Bound on the wait for a `withdrawByProof` receipt, the same 180 s. alloy
+/// waits forever by default, which held the withdraw scan on a dropped
+/// transaction; past the bound the proof is retried like any other
+/// unconfirmed send, and its nullifier check skips it once it has landed.
+pub const WITHDRAW_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// `true` when a `verifyBlock` or `applyBkSetUpdate` failure says nothing
 /// about the transaction itself: the RPC refused or dropped the request
 /// (rate limit, connection, nonce, fee) or the receipt never came. The
@@ -2247,6 +2307,18 @@ where
         // counts toward `max_attempts_abort` instead of hanging the daemon.
         const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
+        let call = match self.plan_send().await {
+            Ok(Some(plan)) => call
+                .nonce(plan.nonce)
+                .max_fee_per_gas(plan.max_fee_per_gas)
+                .max_priority_fee_per_gas(plan.max_priority_fee_per_gas),
+            Ok(None) => call,
+            Err(e) => {
+                return Ok(SubmitOutcome::Reverted {
+                    reason: format!("verifyBlock send failed: {e}"),
+                });
+            },
+        };
         let send_res = call.send().await;
         let (tx_hash, receipt_block) = match send_res {
             Ok(pending) => {

@@ -8,6 +8,7 @@
 
 pub mod aggregated_source;
 pub mod aggregator;
+pub mod an_chain_guard;
 pub mod bridge;
 pub mod bundle_stride;
 pub mod daemon;
@@ -33,6 +34,7 @@ pub use aggregator::{
     SubprocessAggregator, SubprocessAggregatorConfig, FALLBACK_VERIFIER_NAME,
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
+pub use an_chain_guard::{ChainBehindGuard, POLLS_BEHIND_TO_STOP};
 pub use bridge::{
     classify_withdraw_revert, is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome,
     BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig,

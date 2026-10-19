@@ -454,6 +454,12 @@ different anchor level; archive the state dir and investigate.
   `required object /blockchain/blockByHeight is null` for blocks the next
   bundle needs, and the contract can no longer advance.
 - Startup refuses to resume and the state cannot be reconciled.
+- The daemon stopped with `Acki Nacki chain head … is below the bridge's last
+  verified block`: the chain head stayed below the bridge for 5 polls in a
+  row. Shellnet was restarted from a new zerostate (or `BRIDGE_GQL_ENDPOINT`
+  points at another network), and the new chain cannot extend this bridge.
+  Before §3, rebuild `bk_set.shellnet.json` for the new network (see the
+  [shellnet BK-set section of `TECHNICAL_README.md`](../../bridge-prover-libraries/TECHNICAL_README.md#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson)).
 
 Redeploy with [§3](#3-case-1--fresh-deploy-and-cold-start) at a seed near
 head. The old bridge stays frozen at its last cursor; update everything keyed

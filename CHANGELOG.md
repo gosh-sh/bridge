@@ -978,6 +978,17 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **`daemon-live` stops when the Acki Nacki chain is behind the bridge.** A
+  chain head below the bridge's last verified block means shellnet was
+  restarted from a new zerostate, or `BRIDGE_GQL_ENDPOINT` serves another
+  network; the bridge cannot follow either. The daemon took it for "the next
+  bundle is not there yet" and waited without a word (after the 2026-10-14
+  restart it waited three hours for a boundary the new chain reaches in
+  three months). After 5 polls in a row with the head below the bridge
+  (~5 min; one low read can be a lagging GraphQL replica) it exits with
+  `Acki Nacki chain head … is below the bridge's last verified block …:
+  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`.
+  Deploy a new bridge (live relayer runbook §5.5).
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts

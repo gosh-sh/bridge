@@ -95,8 +95,17 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  Upgrade with `updateCode` and an empty `userCell` — storage layout is
-  unchanged. The ABI gains `mintAndSendBridged`. `eccUSDCBridge` 1.11.0,
+  Upgrade with `updateCode` and an empty `userCell` — the storage *layout*
+  is unchanged, but `onCodeUpgrade` still `resetStorage`s and restores
+  only pubkey, usdcWallet, `_totalMinted`, both mint nonces, the two
+  bridged maps and the voucher code. It wipes `_paused`,
+  `_trustedL1Bridge`, `_acceptedBlockHash`, `_lightClientCode`,
+  `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`.
+  After the call, re-run `setPaused` if the lane was paused,
+  `setTrustedL1Bridge`, `setLightClientCode` / `deployLightClient` and
+  `disableOwnerAnchorsOn` before deposits or owner anchors will work
+  again (222/224 until then). The ABI gains `mintAndSendBridged`.
+  `eccUSDCBridge` 1.11.0,
   code hash `aeeadc7f…`, rebuilt with sold 0.80.0. The deposit CLI's
   exit-37 message, README and QUICKSTART now tell the operator to call
   `mintAndSendBridged`. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.11.0.

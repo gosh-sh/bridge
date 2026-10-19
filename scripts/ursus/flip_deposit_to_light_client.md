@@ -39,10 +39,11 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    `docs/eth-light-client.md` §4.5.
 4. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
    `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`). `--flip-owner`
-   refuses to start without them. The flip itself is refused unless Gloas
+   refuses to start without them. The daemon refuses the flip unless Gloas
    is a scheduled slot that matches the beacon spec and the head is past
-   it. `--allow-unscheduled-gloas-flip` skips the unscheduled check
-   (recovery of a set pin is then `updateCode`).
+   it. The `flip-owner` one-shot checks the scheduled pin and the head
+   (it has no beacon client). `--allow-unscheduled-gloas-flip` skips the
+   unscheduled check (recovery of a set pin is then `updateCode`).
 5. Run `eth-lc-relayer daemon --flip-owner` (`--features live-submit`, no
    `--dry-run` / `--mock-prove` / `--no-rotate`). It reads
    `getGloasForkSlot` on the flip, not at start, and skips the flip if the

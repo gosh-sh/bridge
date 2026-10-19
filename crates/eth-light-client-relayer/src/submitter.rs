@@ -84,6 +84,10 @@ pub trait AnSubmitter: Send + Sync {
     /// `submit-rotate` the daemon reads this so the next tick submits a
     /// step instead of staying in `RotateRequired`.
     async fn get_committee_period(&self) -> Result<u64, RelayerError>;
+
+    /// `getHead().finalizedSlot`. The `flip-owner` one-shot uses this so it
+    /// does not disable rotation before the head is past the Gloas pin.
+    async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -449,6 +453,10 @@ impl AnSubmitter for MockAnSubmitter {
         Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
     }
 
+    async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
+        Ok(self.inner.lock().expect("poisoned").head_slot.unwrap_or(0))
+    }
+
     async fn set_committee_commitment(
         &self,
         _commitment: [u8; 32],
@@ -540,6 +548,7 @@ mod set_committee_tests {
     #[tokio::test]
     async fn mock_set_committee_refused_after_flip() {
         let mock = MockAnSubmitter::accepting();
+        mock.set_gloas_fork(1, true);
         assert!(matches!(
             mock.set_committee_commitment([1; 32], 7).await.unwrap(),
             SubmitOutcome::Accepted { .. }
@@ -592,6 +601,7 @@ mod ancestry_submit_tests {
     #[tokio::test]
     async fn mock_flip_owner_drops_owner_writers() {
         let mock = MockAnSubmitter::accepting();
+        mock.set_gloas_fork(1, true);
         assert!(mock.owner_rotation_enabled());
         match mock.flip_owner().await.unwrap() {
             SubmitOutcome::Accepted {
@@ -831,8 +841,8 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 Ok((slot, is_set)) if crate::types::gloas_is_scheduled(slot, is_set) => {},
                 Ok((slot, is_set)) => {
                     let recovery = if is_set {
-                        "that pin can only change via updateCode(<current code>, \
-                         abi.encode(uint64 slot))"
+                        "that pin can only change via updateCode(<current code>, abi.encode(uint64 \
+                         slot))"
                     } else {
                         "setGloasForkSlot can still run once after the flip, but every proof \
                          reverts 256 until it does"
@@ -982,6 +992,16 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .map_err(RelayerError::from)?;
         json_u64(v.get("committeePeriod"))
             .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))
+    }
+
+    async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getHead", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        json_u64(v.get("finalizedSlot"))
+            .ok_or_else(|| RelayerError::other("getHead: missing finalizedSlot"))
     }
 }
 
@@ -1663,7 +1683,10 @@ mod flip_owner_tests {
                 reason,
             } => {
                 assert!(reason.contains("isSet=false"), "{reason}");
-                assert!(reason.contains("setGloasForkSlot can still run"), "{reason}");
+                assert!(
+                    reason.contains("setGloasForkSlot can still run"),
+                    "{reason}"
+                );
             },
             other => panic!("{other:?}"),
         }

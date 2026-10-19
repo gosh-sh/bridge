@@ -7,9 +7,9 @@
 //! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
 //! - `set-committee` — owner `setCommitteeCommitment` from a proven bundle
 //!   (weak-subjectivity bootstrap / manual hop while `--no-rotate`)
-//! - `set-gloas-fork-slot` — owner `setGloasForkSlot`; required after
-//!   deploy (and again on mainnet once Gloas is scheduled) or
-//!   `submitUpdate` / `submitRotate` revert 256
+//! - `set-gloas-fork-slot` — owner `setGloasForkSlot`; required after deploy
+//!   (and again on mainnet once Gloas is scheduled) or `submitUpdate` /
+//!   `submitRotate` revert 256
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
@@ -203,7 +203,8 @@ enum Cmd {
         an_usdc_abi_path: String,
         /// Flip even while `getGloasForkSlot` is unset or `u64::MAX`. After
         /// `disableOwnerRotation` a set pin changes only via
-        /// `updateCode(<current code>, abi.encode(uint64 slot))`. Default **off**.
+        /// `updateCode(<current code>, abi.encode(uint64 slot))`. Default
+        /// **off**.
         #[arg(long, default_value_t = false)]
         allow_unscheduled_gloas_flip: bool,
     },
@@ -239,7 +240,8 @@ enum Cmd {
         no_flip_owner: bool,
         /// With `--flip-owner`: do not refuse when `getGloasForkSlot` is
         /// unset or `u64::MAX`. A set pin then needs
-        /// `updateCode(<current code>, abi.encode(uint64 slot))`. Default **off**.
+        /// `updateCode(<current code>, abi.encode(uint64 slot))`. Default
+        /// **off**.
         #[arg(long, default_value_t = false, requires = "flip_owner")]
         allow_unscheduled_gloas_flip: bool,
         /// Execution JSON-RPC. When set, each accepted `submitUpdate` fetches
@@ -1019,6 +1021,16 @@ async fn flip_owner_cmd(
         .with_usdc(an_usdc_bridge, Arc::new(tvm_usdc));
     if allow_unscheduled_gloas_flip {
         submitter = submitter.allow_unscheduled_gloas_flip();
+    }
+    let (slot, is_set) = submitter.get_gloas_fork_slot().await?;
+    if eth_light_client_relayer::gloas_is_scheduled(slot, is_set) {
+        let head = submitter.get_head_finalized_slot().await?;
+        if head < slot {
+            anyhow::bail!(
+                "getHead().finalizedSlot={head} is still before getGloasForkSlot={slot}; wait for \
+                 the head to pass the fork, or pass --allow-unscheduled-gloas-flip"
+            );
+        }
     }
     match submitter.flip_owner().await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {

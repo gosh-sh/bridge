@@ -439,18 +439,28 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
 
    `disableOwnerRotation` after a set pin freezes it. Recover with one owner
    call that keeps head, committee, proven FIFO and `_ownerRotationEnabled`
-   and only clears `_prevCommittee`:
+   and only clears `_prevCommittee`. `tvm-cli -j account` prints `code_hash`
+   and `data_boc`, not the code. Empty `userCell` keeps the frozen pin.
 
    ```
-   updateCode(<current code cell>, abi.encode(uint64 <beacon GLOAS_FORK_SLOT>))
+   LC="$AN_LIGHT_CLIENT"
+   ABI=contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json
+   SLOT=<beacon GLOAS_FORK_SLOT>
+
+   CODE=$(tvm-cli -j decode stateinit --addr "$LC" | jq -r .code)
+
+   # userCell = TVM abi.encode(uint64 SLOT): one cell, 64 data bits, no refs.
+   # tvm_valuetypes ships next to a tvm-sdk tvm-cli install.
+   USER=$(python3 -c "from tvm_valuetypes.cell import Cell; c=Cell(); \
+c.bits.append_uint($SLOT, 64); print(c.serialize())")
+
+   tvm-cli callx --abi "$ABI" --addr "$LC" --sign "$AN_KEYS_PATH" updateCode \
+     "{\"newcode\": \"$CODE\", \"userCell\": \"$USER\"}"
+   tvm-cli -j runx --abi "$ABI" --addr "$LC" getGloasForkSlot
    ```
 
-   `<current code cell>` is the live account's `code` (`tvm-cli -j account`)
-   or the placed `EthBeaconLightClient.tvc` if it matches. `userCell` is
-   `abi.encode(uint64 slot)` — the same encoding `updateCode` already uses
-   when the cell is empty and a pin exists. After the flip the daemon never
-   reaches 255: it returns `ProofFailed` and names `updateCode` (246) instead
-   of `setGloasForkSlot`.
+   After the flip the daemon never reaches 255: it returns `ProofFailed` and
+   names `updateCode` (246) instead of `setGloasForkSlot`.
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
 7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`.
    With the flag the daemon still starts: it warns if Gloas is unscheduled

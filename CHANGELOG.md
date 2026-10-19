@@ -1503,12 +1503,15 @@ assigns it when the release is tagged.
 - **`eth-lc-relayer flip-owner` / `daemon --flip-owner` refuses while Gloas
   is unscheduled.** It reads `getGloasForkSlot` before any owner call and
   skips the flip if `isSet` is false or the slot is `u64::MAX`. The
-  daemon still starts (and keeps relaying if the getter fails). A
-  scheduled pin must also match the beacon spec slot, and the head must
-  be past it. `disableOwnerRotation` is one-way; a set pin then changes
-  only via `updateCode(<current code>, abi.encode(uint64 slot))` (246).
-  Set the published slot with `set-gloas-fork-slot` before the flip.
-  Escape hatch: `--allow-unscheduled-gloas-flip`. Slot table in
+  daemon still starts (and keeps relaying if the getter fails). The
+  daemon also skips unless the pin matches the beacon spec slot and
+  `getHead().finalizedSlot` is past it; the `flip-owner` one-shot checks
+  the scheduled pin and the head (it has no beacon client).
+  `disableOwnerRotation` has no direct re-enable; `updateCode` and
+  `reAnchorCommittee` stay with the owner. A set pin then changes only
+  via `updateCode(<current code>, abi.encode(uint64 slot))` (246). Set
+  the published slot with `set-gloas-fork-slot` before the flip. Escape
+  hatch: `--allow-unscheduled-gloas-flip`. Slot table in
   `docs/eth-light-client.md` §4.5.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each

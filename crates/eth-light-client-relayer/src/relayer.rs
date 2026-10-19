@@ -210,10 +210,11 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
         // After Unchanged: an idle tick must not download the light-client
         // account. Pin only when this tick will prove.
-        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
-            return Ok(outcome);
-        }
-        self.submit_step(update).await
+        let beacon_gloas = match self.pin_gloas_fork_slot(&mut update).await {
+            Ok(b) => b,
+            Err(outcome) => return Ok(outcome),
+        };
+        self.submit_step(update, beacon_gloas).await
     }
 
     async fn handle_period_jump(
@@ -225,10 +226,13 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         if !self.config.enable_rotate {
             if self.config.owner_hop {
                 let mut update = update;
-                if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
-                    return Ok(outcome);
-                }
-                return self.owner_hop(update, from_period, to_period).await;
+                let beacon_gloas = match self.pin_gloas_fork_slot(&mut update).await {
+                    Ok(b) => b,
+                    Err(outcome) => return Ok(outcome),
+                };
+                return self
+                    .owner_hop(update, from_period, to_period, beacon_gloas)
+                    .await;
             }
             self.state.record_rotate_pending(to_period);
             self.persist()?;
@@ -350,9 +354,13 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// `GLOAS_FORK_EPOCH` that the contract does not hold would otherwise
     /// spend a full step prove and come back 255. An update that is still
     /// Electra under both values proceeds with the contract slot.
-    async fn pin_gloas_fork_slot(&self, update: &mut FinalityUpdate) -> Result<(), TickOutcome> {
+    async fn pin_gloas_fork_slot(
+        &self,
+        update: &mut FinalityUpdate,
+    ) -> Result<Option<u64>, TickOutcome> {
+        let beacon_slot = update.chain.map(|c| c.gloas_fork_slot);
         if self.config.pin_fork_slot_from_beacon {
-            return Ok(());
+            return Ok(beacon_slot);
         }
         let (contract_slot, is_set) = match self.submitter.get_gloas_fork_slot().await {
             Ok(v) => v,
@@ -377,8 +385,8 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 if gloas_under_beacon || gloas_under_contract {
                     let recovery = if self.state.owner_flip_done {
                         format!(
-                            "Owner rotation is off, so setGloasForkSlot reverts 246. Recover \
-                             with updateCode(<current code>, abi.encode(uint64 {beacon_slot}))."
+                            "Owner rotation is off, so setGloasForkSlot reverts 246. Recover with \
+                             updateCode(<current code>, abi.encode(uint64 {beacon_slot}))."
                         )
                     } else {
                         format!(
@@ -406,7 +414,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         if let Some(chain) = update.chain.as_mut() {
             chain.gloas_fork_slot = contract_slot;
         }
-        Ok(())
+        Ok(beacon_slot)
     }
 
     fn mark_rotate_in_flight(&mut self, period: u64) -> Result<(), RelayerError> {
@@ -431,6 +439,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         update: FinalityUpdate,
         from_period: u64,
         to_period: u64,
+        beacon_gloas: Option<u64>,
     ) -> Result<TickOutcome, RelayerError> {
         let bundle = match self.prover.generate_step(&update).await {
             Ok(b) => b,
@@ -473,10 +482,14 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 });
             },
         }
-        self.submit_step_bundle(update, bundle).await
+        self.submit_step_bundle(update, bundle, beacon_gloas).await
     }
 
-    async fn submit_step(&mut self, update: FinalityUpdate) -> Result<TickOutcome, RelayerError> {
+    async fn submit_step(
+        &mut self,
+        update: FinalityUpdate,
+        beacon_gloas: Option<u64>,
+    ) -> Result<TickOutcome, RelayerError> {
         let bundle = match self.prover.generate_step(&update).await {
             Ok(b) => b,
             Err(e) => {
@@ -485,13 +498,14 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 });
             },
         };
-        self.submit_step_bundle(update, bundle).await
+        self.submit_step_bundle(update, bundle, beacon_gloas).await
     }
 
     async fn submit_step_bundle(
         &mut self,
         update: FinalityUpdate,
         bundle: crate::types::StepProofBundle,
+        beacon_gloas: Option<u64>,
     ) -> Result<TickOutcome, RelayerError> {
         let old_head = self.state.last_execution_block_hash;
         match self.submitter.submit_update(&bundle).await? {
@@ -516,8 +530,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 }
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
                 self.re_push_checkpoint(update.execution_block_hash).await;
-                self.maybe_flip_owner(update.chain.map(|c| c.gloas_fork_slot))
-                    .await?;
+                self.maybe_flip_owner(beacon_gloas).await?;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
                     tx_hash,
@@ -1022,6 +1035,7 @@ mod tests {
         cfg.owner_hop = true;
         cfg.flip_owner = true;
         let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_gloas_fork(1, true);
         let p = SLOTS_PER_SYNC_PERIOD;
         let mut r = Relayer::new(
             cfg,
@@ -1098,6 +1112,58 @@ mod tests {
         assert!(!mock.owner_anchors_enabled());
         assert!(!mock.owner_rotation_enabled());
         assert_eq!(mock.re_push_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn owner_flip_skipped_when_beacon_slot_disagrees() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.flip_owner = true;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(5_000, true);
+        let mut u = with_chain(update(100, 96), 0xd8);
+        if let Some(c) = u.chain.as_mut() {
+            c.gloas_fork_slot = 6_000;
+        }
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![u])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert!(!r.state().owner_flip_done);
+        assert!(mock.owner_rotation_enabled());
+    }
+
+    #[tokio::test]
+    async fn owner_flip_skipped_while_head_is_before_the_fork() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.flip_owner = true;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(10_000, true);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert!(!r.state().owner_flip_done);
+        assert!(mock.owner_rotation_enabled());
     }
 
     #[tokio::test]

@@ -4,8 +4,8 @@
 #
 # Toolchain: the repo pins nightly-2026-08-03 in rust-toolchain.toml; rustup
 # picks it up automatically (`rustup toolchain install nightly-2026-08-03`).
-# The prover needs the pin too because `prove-one` runs `cargo run --release
-# --example export_step_vk_blob` inside the prover directory.
+# The prover needs the pin too: this script builds `export_step_vk_blob` and
+# the daemon runs that binary (LIGHT_CLIENT_STEP_PROVER_BIN in the env file).
 
 # shellcheck disable=SC1091
 source "$(dirname "$0")/lib.sh"
@@ -22,3 +22,4 @@ install -m 755 "$SRC/crates/eth-light-client-relayer/target/release/eth-lc-relay
 log "installed $RELAYER"
 "$RELAYER" --help | head -3
 sha256sum "$RELAYER"
+log "step prover: $SRC/eth-light-client-prover/target/release/examples/export_step_vk_blob (LIGHT_CLIENT_STEP_PROVER_BIN)"

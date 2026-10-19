@@ -279,11 +279,10 @@ contract EthBeaconLightClient {
     // Whether the owner may still advance the committee directly via
     // `setCommitteeCommitment`, bypassing the rotate proof. True while
     // bootstrapping (before the rotate VkBlob is emitted / while syncing from the
-    // checkpoint); `disableOwnerRotation()` clears it permanently, which is the
-    // step that reduces the committee-chain trust assumption from "owner key" to
-    // "the rotate proof". One-way on purpose (mirrors USDCBridge's
-    // per-chain `_ownerAnchorsDisabled`): a re-enable switch would leave the owner key on
-    // the path regardless.
+    // checkpoint); `disableOwnerRotation()` clears it with no direct re-enable
+    // function. Normal migration preserves it, but owner-controlled recovery
+    // (`reAnchorCommittee`) and arbitrary code upgrades remain available.
+    // Disabling this routine path does not remove the owner from the trust model.
     bool _ownerRotationEnabled = true;
 
     // How many times `reAnchorCommittee` has fired (telemetry / alerting).
@@ -730,8 +729,9 @@ contract EthBeaconLightClient {
     ///         This is the trust seam that `submitRotate` replaces: while
     ///         `_ownerRotationEnabled` the owner may set the committee directly
     ///         (weak-subjectivity checkpoint, or syncing before the rotate VkBlob
-    ///         is emitted). `disableOwnerRotation()` turns this off permanently,
-    ///         leaving the rotate proof as the only committee-advance path.
+    ///         is emitted). `disableOwnerRotation()` disables this routine
+    ///         owner path; `reAnchorCommittee` and `updateCode` remain owner-
+    ///         controlled recovery and upgrade paths.
     /// @param committeeCommitment — the period's sync-committee Poseidon commitment.
     /// @param period             — the period it belongs to, recorded as-is:
     ///                             this is an owner path. `submitRotate`
@@ -750,13 +750,15 @@ contract EthBeaconLightClient {
         _committeePeriod = period;
     }
 
-    /// @notice Permanently drops the *routine* owner committee path
+    /// @notice Disables the routine owner committee path
     ///         (`setCommitteeCommitment`). After this, `submitRotate` is the only
     ///         permissionless writer; the owner retains `reAnchorCommittee` as the
     ///         exceptional weak-subjectivity recovery hop (logged, does not write
     ///         exec hashes). This is the call that turns everyday committee
     ///         advance from "trusted by the owner key" into "the rotate proof".
-    /// @dev One-way, with no re-enable (mirrors USDCBridge.disableOwnerAnchors).
+    /// @dev This code has no direct re-enable function, and its migration
+    ///      preserves the disabled flag. The owner still controls upgrades;
+    ///      this call does not make the contract immutable or remove owner trust.
     ///      Requires the committee to be bootstrapped first. Do not call until
     ///      the opcode decider is on every node; the relayer SLA still matters
     ///      because re-anchor is a trust hop, not a substitute for liveness.

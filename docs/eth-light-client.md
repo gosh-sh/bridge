@@ -271,6 +271,15 @@ them after its first accepted `submitUpdate` only when started with `--flip-owne
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
 The relayer key must be the owner key of both contracts.
 
+**Gloas fork slot before the flip.** `setGloasForkSlot` is refused after
+`disableOwnerRotation`. A client that still holds `type(uint64).max` (Gloas not
+scheduled) cannot take a published Glamsterdam slot afterwards except by
+`updateCode`. `eth-lc-relayer flip-owner` and `daemon --flip-owner` therefore
+read `getGloasForkSlot` first and refuse unless `isSet` is true and the slot is
+not `2^64-1`. Set the published slot with `set-gloas-fork-slot` first (§4.5).
+`--allow-unscheduled-gloas-flip` skips that check when recovery via `updateCode`
+is already planned, or on a network that will never schedule Gloas.
+
 ```mermaid
 stateDiagram-v2
   direction LR
@@ -410,18 +419,30 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
    (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
-5. Pin the Gloas fork slot **before** any proof: `eth-lc-relayer set-gloas-fork-slot --slot
-   11296768` on Sepolia, `--slot 18446744073709551615` on mainnet (Gloas not scheduled). Until
-   `getGloasForkSlot` reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
+5. Pin the Gloas fork slot **before** any proof, and **before** `--flip-owner`.
+   `eth-lc-relayer set-gloas-fork-slot --slot <n>`. Until `getGloasForkSlot`
+   reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
    `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell instead.
    The daemon reads that getter before every prove and uses it, not the beacon
    spec's `GLOAS_FORK_EPOCH`. A published epoch the contract does not hold
    would otherwise spend a full step prove and come back 255.
+
+   | Network | `--slot` | `getGloasForkSlot()` |
+   |---|---|---|
+   | Sepolia (Gloas live 2026-10-06) | `11296768` | `(11296768, true)` |
+   | Ethereum mainnet, Gloas unscheduled | `18446744073709551615` (`u64::MAX`) | `(18446744073709551615, true)` — proofs work; **do not flip** until a real slot is published |
+   | Fresh deploy, never set | — | `(0, false)` — every step/rotate reverts 256 |
+
+   `disableOwnerRotation` after a `u64::MAX` pin freezes the slot: only
+   `updateCode` can change it, and post-fork step/rotate would revert 255.
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
-7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
-   flag, after the first accepted update the daemon checks `getLightClient(l1ChainId)`
-   against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and `disableOwnerRotation`; from
-   then on the bridge refuses `setAcceptedBlockHash` only for the light client's L1.
+7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`.
+   With the flag the daemon fails at start unless `getGloasForkSlot` is a
+   scheduled slot (or `--allow-unscheduled-gloas-flip`). After the first
+   accepted update it checks `getLightClient(l1ChainId)` against
+   `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and
+   `disableOwnerRotation`; from then on the bridge refuses
+   `setAcceptedBlockHash` only for the light client's L1.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light
 client deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,

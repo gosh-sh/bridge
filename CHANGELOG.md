@@ -74,6 +74,13 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `docs/eth-light-client.md` §3.5 / §4.5 and
+  `scripts/ursus/flip_deposit_to_light_client.md` record the mandatory
+  order: pin a **scheduled** Gloas slot with `setGloasForkSlot` before
+  `disableOwnerRotation`. `getGloasForkSlot()` returns `(slot, isSet)`.
+  Sepolia is `11296768`; mainnet while Gloas is unscheduled is
+  `u64::MAX` and must not be flipped. After the flip only `updateCode`
+  can change the slot (gosh-sh/bridge-audit#121).
 
 ### Breaking Changes
 
@@ -1493,6 +1500,17 @@ assigns it when the release is tagged.
 
 ### Changed
 
+- **`eth-lc-relayer flip-owner` / `daemon --flip-owner` refuses while Gloas
+  is unscheduled.** It reads `getGloasForkSlot` first (the daemon at
+  start; the one-shot before any owner call) and exits if `isSet` is
+  false or the slot is `u64::MAX`. `disableOwnerRotation` is one-way, and
+  afterwards only `updateCode` can change the slot — a mainnet client
+  pinned at `u64::MAX` and then flipped cannot take a published
+  Glamsterdam date without that ceremony, and post-fork proofs would
+  revert 255 (gosh-sh/bridge-audit#121). Set the published slot with
+  `set-gloas-fork-slot` before the flip. Escape hatch:
+  `--allow-unscheduled-gloas-flip`. Slot table in
+  `docs/eth-light-client.md` §4.5.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation

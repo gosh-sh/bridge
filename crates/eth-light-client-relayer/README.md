@@ -83,6 +83,9 @@ is never proved in-process: prove on n14 and `submit-rotate --state`
 anchor writer; L2s keep the owner path
 (`scripts/ursus/flip_deposit_to_light_client.md`). It needs
 `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`. Relayer keys must be the owner pubkey.
+It also refuses while `getGloasForkSlot` is unset or `u64::MAX`: after
+`disableOwnerRotation` only `updateCode` can change the slot. Pin the published
+slot with `set-gloas-fork-slot` first, or pass `--allow-unscheduled-gloas-flip`.
 
 Standalone crate (own `Cargo.lock`). Tests:
 `cd crates/eth-light-client-relayer && cargo test`.

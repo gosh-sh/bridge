@@ -30,15 +30,23 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    `submitUpdate` / `submitRotate` revert 256 until it is set:
    `eth-lc-relayer set-gloas-fork-slot --slot 11296768` on Sepolia,
    `--slot 18446744073709551615` on mainnet while Gloas is unscheduled.
-   The daemon does not call this itself.
+   The daemon does not call this itself. **Do not flip while the slot is
+   still `u64::MAX`.** `disableOwnerRotation` then freezes it: a later
+   Glamsterdam date needs `updateCode`, and post-fork proofs revert 255.
+   `getGloasForkSlot()` returns `(slot, isSet)`. Slot table:
+   `docs/eth-light-client.md` §4.5.
 4. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
    `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`). `--flip-owner`
-   refuses to start without them.
+   refuses to start without them, and also refuses unless Gloas is a
+   scheduled slot. `--allow-unscheduled-gloas-flip` skips that check
+   (recovery is then `updateCode`).
 5. Run `eth-lc-relayer daemon --flip-owner` (`--features live-submit`, no
-   `--dry-run` / `--mock-prove` / `--no-rotate`). After the first accepted
-   `submitUpdate` it calls, in order:
+   `--dry-run` / `--mock-prove` / `--no-rotate`). It reads
+   `getGloasForkSlot` at start and exits if the slot is unset or
+   `u64::MAX`. After the first accepted `submitUpdate` it calls, in order:
 
 ```text
+EthBeaconLightClient.getGloasForkSlot()          # scheduled slot, or refuse
 EthBeaconLightClient.getConfig()                 # l1ChainId of this client
 USDCBridge.getLightClient(l1ChainId)             # must match AN_LIGHT_CLIENT
 USDCBridge.isOwnerAnchorsEnabled(l1ChainId)      # skipped call when already false

@@ -1049,7 +1049,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         // The circuit splits the 256-bit AN account into two 16-byte halves
         // (fr[6]=high, fr[7]=low), exactly like dapp_id above — reassemble it.
         // The workchain concept is retired on AN, so the recipient always lives
-        // in workchain 0 (see confirmDeposit's makeAddrStd).
+        // in workchain 0 (see confirmDeposit's makeAddrStd). L1 `anWorkchain`
+        // is not in these public inputs (QC-AN-J3).
         f.depositId    = fr[0];
         f.amount       = uint128(fr[2]);
         f.contractAddr = fr[3];

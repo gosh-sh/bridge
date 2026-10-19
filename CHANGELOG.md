@@ -74,6 +74,13 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `AckiNackiBridge.deposit`'s `anWorkchain` is telemetry. It is kept in
+  the ABI and the `Deposit` event so the log shape stays stable, but it
+  is not a deposit-proof public input and Acki Nacki always credits
+  workchain 0 (`eccUSDCBridge._parsePublicInputs` /
+  `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
+  That is the accepted product choice, not a gap to close by putting
+  workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
 
 ### Breaking Changes
 

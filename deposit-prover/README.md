@@ -54,7 +54,10 @@ One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:42-55`);
 | 11 | `promiseCommit` | Keccak-coprocessor promise commitment |
 
 *Earlier revisions of this file documented seven inputs ending at `promiseCommit`; the destination
-and chain-binding inputs were added later.*
+and chain-binding inputs were added later.* The L1 `Deposit` event still carries `anWorkchain`
+(ABI word 1 of `data`); the circuit does not bind it. `dappIdHigh` / `dappIdLow` took that
+slot on 2026-06-02. Acki Nacki always credits workchain 0. That is accepted (QC-AN-J3), not
+a missing public input.
 
 ### Circuit parameters
 

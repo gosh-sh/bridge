@@ -272,7 +272,9 @@ Notes that matter downstream:
 * The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
   (`crates/deposit-relayer-daemon/src/types.rs:101-115`). `anWorkchain` is emitted by the contract
-  but is **not** one of them — `dappId` (a config-supplied tag) replaced it.
+  but is **not** one of them — `dappId` (a config-supplied tag) replaced it on 2026-06-02.
+  That is accepted (QC-AN-J3 / gosh-sh/bridge-audit#59): L1 workchain is telemetry, the AN
+  credit is always `makeAddrStd(0, anAccount)`, and the field will not return to the proof.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The

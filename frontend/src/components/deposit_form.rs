@@ -16,7 +16,8 @@ const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
 
 /// The `anWorkchain` argument of `deposit`. Kept in the ABI, ignored by Acki
 /// Nacki: the workchain concept is retired there and `dappId` replaced it, so
-/// the recipient always lives in workchain 0 (`eccUSDCBridge.sol`).
+/// the recipient always lives in workchain 0 (`eccUSDCBridge.sol`). Not a
+/// deposit-proof public input (QC-AN-J3).
 const AN_WORKCHAIN: i8 = 0;
 
 #[derive(Properties, PartialEq)]

@@ -35,8 +35,9 @@ use crate::error::RelayerError;
 /// AN recipient). `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced
 /// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
 /// event data in-circuit; `TokenBridge.finalizeDeposit` checks it against its
-/// configured dappId. USDCBridge must also allowlist `(chainId → expected
-/// bridge Fr)`.
+/// configured dappId. The L1 event still emits `anWorkchain`; it is not a
+/// public input and AN always credits workchain 0 (QC-AN-J3). USDCBridge must
+/// also allowlist `(chainId → expected bridge Fr)`.
 pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).

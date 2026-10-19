@@ -1015,7 +1015,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // Data word 1 (bytes 32..64) is the event's `anWorkchain` field. As of
         // 2026-06-02 the circuit no longer binds it (the `dappId` config tag
-        // took its public-input slot), so it is intentionally not parsed here.
+        // took its public-input slot), so it is intentionally not parsed here
+        // (QC-AN-J3: L1 telemetry; AN always credits workchain 0).
 
         // Convert anAccount (data word 2: bytes 64..96), split high/low halves.
         let an_account_high_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[64..80]);

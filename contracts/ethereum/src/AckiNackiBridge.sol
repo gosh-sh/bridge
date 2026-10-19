@@ -311,7 +311,7 @@ contract AckiNackiBridge {
     ///         AN side (the EVM `sender` is kept only for provenance, since a
     ///         20-byte EVM address is not a valid AN recipient). `anWorkchain` is
     ///         inert — see `deposit` — and is emitted only so the event shape
-    ///         stays stable for indexers.
+    ///         stays stable for indexers (QC-AN-J3).
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
@@ -767,11 +767,12 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
-    /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
-    ///                    but Acki Nacki ignores it: the workchain concept is
-    ///                    retired there and `dappId` replaced it (2026-06-02),
-    ///                    so the recipient always lives in workchain 0. It is
-    ///                    not a public input of the deposit proof. Not
+    /// @param anWorkchain Inert (QC-AN-J3). Kept in the ABI and the event for
+    ///                    compatibility, but Acki Nacki ignores it: the
+    ///                    workchain concept is retired there and `dappId`
+    ///                    replaced it (2026-06-02), so the recipient always
+    ///                    lives in workchain 0. It is not a public input of the
+    ///                    deposit proof and will not be added to it. Not
     ///                    range-checked, because no supported set exists to
     ///                    check against — a wrong value changes nothing.
     ///                    The destination that

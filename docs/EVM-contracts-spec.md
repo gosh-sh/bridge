@@ -348,18 +348,17 @@ pick = min(numLayers, t)
 return _layerLatest(pick)                  // head of window `pick`
 ```
 
-This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
-(`crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs`). A flat
-`layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between consecutive
-key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
-`expectedPrevAnchor(numLayers)` (`:1129`) rather than reconstructing the anchor themselves.
+A flat `layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between
+consecutive key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers compare
+the bundle's Circuit 2 instance 13 with `expectedPrevAnchor(numLayers)` (`:1129`) before sending;
+they do not pick the cell.
 
-`t` is the highest populated window, not the last block's `numLayers`. A window that is no
-longer written still holds its last hash (QC-A2-4): 128 later L1-only `verifyBlock`s wrap
-layer 1 and leave L2..L10 untouched, so `t` never falls. The prover's `num_active_layers`
-counts the same way because it mirrors the windows. A witness that treated `t` as the current
-depth would disagree on the next grow (`PrevAnchorMismatch`). That stall is preferred over
-accepting a wrong `prevMaxLevelLayerHash`.
+`t` is the highest populated window (`dataLen > 0`), not the last block's `numLayers`. Nothing
+clears a window, so `t` never decreases when later key blocks skip higher layers. The prover's
+`prev_max_level_layer_hash_for` must use the same `t`; any other pick reverts `PrevAnchorMismatch`
+before the proofs are checked. A cold-start `BridgeState` that was seeded with every layer of
+its bootstrap block can disagree with a contract that still has empty windows; that is a
+separate gap.
 
 ### 7.2 `withdrawByProof` — pay out a proven AN withdrawal
 

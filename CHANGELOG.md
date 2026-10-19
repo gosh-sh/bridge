@@ -74,15 +74,10 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
-- `AckiNackiBridge._highestActiveLayer()` (the `t` in
-  `expectedPrevAnchor`) does not fall when later key blocks carry fewer
-  layers: a window that is no longer written still holds its last hash,
-  so 128 L1-only `verifyBlock`s wrap layer 1 and leave L2..L10 untouched
-  (QC-A2-4 / gosh-sh/bridge-audit#72). Relayers already thread
-  `expectedPrevAnchor(numLayers)`. A witness that rebuilt `t` from the
-  last `numLayers` would revert `PrevAnchorMismatch` on the next grow;
-  that stall is preferred over a wrong chain anchor.
-  `docs/EVM-contracts-spec.md` §7.1.
+- §7.1 and the `PrevAnchorMismatch` runbook row: `expectedPrevAnchor(n)`
+  keeps anchoring at the highest layer the bridge has recorded. A window
+  with `dataLen > 0` is never cleared, so that layer stays in `t` when
+  later key blocks skip it.
 
 ### Breaking Changes
 

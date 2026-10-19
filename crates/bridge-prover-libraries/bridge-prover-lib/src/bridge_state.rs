@@ -364,8 +364,8 @@ impl BridgeState {
 
     /// Number of layers that currently have at least one entry. Used by Circuit 2.
     /// Does not fall when later bundles carry fewer layers: a window with no
-    /// new writes still holds its last hash (QC-A2-4), matching
-    /// `AckiNackiBridge._highestActiveLayer`.
+    /// new writes still holds its last hash, so `t` is the count of populated
+    /// windows, not the last bundle's depth.
     pub fn num_active_layers(&self) -> usize {
         self.layer_windows.iter().filter(|w| w.data_len > 0).count()
     }
@@ -410,8 +410,8 @@ impl BridgeState {
     ///   * if `new_num_layers >= t`: latest of the highest currently-active layer
     ///   * if `new_num_layers <  t`: latest of layer `new_num_layers`
     /// where `t = num_active_layers()`. `t` is the count of populated
-    /// windows, not the last bundle's depth, so a permanent layer drop
-    /// leaves the unused high windows in `t` (QC-A2-4).
+    /// windows, not the last bundle's depth, so unused high windows stay
+    /// in `t` when later bundles skip them.
     pub fn prev_max_level_layer_hash_for(&self, new_num_layers: usize) -> [u8; 32] {
         let t = self.num_active_layers();
         if t == 0 {
@@ -783,10 +783,10 @@ mod tests {
         assert_eq!(s.prev_max_level_layer_hash_for(0), [0u8; 32]);
     }
 
-    /// QC-A2-4: wrapping layer 1 does not drop higher windows, so `t` and
-    /// a later grow still pick the stale high-layer hash.
+    /// Later L1-only appends wrap layer 1 and leave higher windows populated,
+    /// so `t` stays 4 and a later grow still picks the L3/L4 heads.
     #[test]
-    fn permanent_shrink_leaves_t_and_stale_high_layer() {
+    fn populated_high_windows_stay_in_t_when_later_bundles_skip_them() {
         let mut s = BridgeState::new(4);
         s.append_layer(1, [1u8; 32], 1);
         s.append_layer(2, [2u8; 32], 1);
@@ -797,6 +797,11 @@ mod tests {
             s.append_layer(1, [10 + h as u8; 32], h);
         }
         assert_eq!(s.num_active_layers(), 4);
+        assert_eq!(
+            s.slot_for_event_height(1, 1),
+            None,
+            "window W=4 wrapped the first L1 hash out"
+        );
         assert_eq!(s.prev_max_level_layer_hash_for(3), [3u8; 32]);
         assert_eq!(s.prev_max_level_layer_hash_for(4), [4u8; 32]);
         assert_eq!(s.prev_max_level_layer_hash_for(1), [16u8; 32]);

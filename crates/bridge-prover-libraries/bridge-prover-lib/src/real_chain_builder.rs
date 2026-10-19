@@ -118,8 +118,9 @@ pub async fn build_real_chain(
     ensure!(num_layers >= 1, "target block has no history_proofs");
     let prev_num_layers = state.num_active_layers();
 
-    // start = prev's max-level layer hash (same value the verifier will
-    // reconstruct from its BridgeState via `prev_max_level_layer_hash_for`).
+    // start = prev's max-level layer hash (Circuit 2 instance 13). The
+    // verifier daemon takes that cell from the IPC request; it does not
+    // reconstruct it from BridgeState.
     let prev_hash = state.prev_max_level_layer_hash_for(num_layers);
 
     // end = target's top-layer root (= layer_hash_frs[num_layers-1]).
@@ -235,10 +236,10 @@ async fn build_chain_same_layer(
     // that fell out of Case B (new-layer) and Case D (%W^N-aligned) yet the
     // state carries L2+ history — a classic "L2 daemon mis-picked target"
     // signature. Loud warn; not fatal because the walk itself is still
-    // valid and downstream ensure!s enforce alignment. verifyBlock will
-    // revert on-chain with PrevAnchorMismatch, which is recoverable, but
-    // this log line lets an operator diagnose the mis-dispatch without
-    // reading the Solidity revert data.
+    // valid and downstream ensure!s enforce alignment. After the first W²
+    // boundary `t` stays 2, so `expectedPrevAnchor(1)` is `min(1, t) = 1`
+    // on both sides and this path does not by itself revert
+    // PrevAnchorMismatch.
     let prev_num_layers = state.num_active_layers();
     if prev_num_layers >= 2 {
         warn!(

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
 use serde_json::{json, Value};
 
 use crate::{
@@ -448,8 +448,14 @@ pub async fn confirm(
                          inventory the way confirmDeposit would have; ordinary mintAndSend does \
                          not. It is not bound to this deposit: paying twice or the wrong amount \
                          invents headroom the Ethereum treasury does not hold. Match the aborted \
-                         deposit's recipient and amount, once. Give them operation {op_id} and \
-                         transaction {bridge_tx}"
+                         deposit's recipient and amount, once. Give them depositId {}, {} USDC \
+                         units to account {:#x}, EVM bridge {:#x}, chain {}, operation {op_id}, \
+                         Acki Nacki transaction {bridge_tx}",
+                        id.deposit_id,
+                        id.amount,
+                        B256::from(id.account),
+                        id.contract,
+                        id.chain_id,
                     ),
                 ));
             },
@@ -673,6 +679,10 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::CreditAborted);
+        let m = e.to_string();
+        assert!(m.contains("depositId 0"), "{m}");
+        assert!(m.contains("1000000 USDC units"), "{m}");
+        assert!(m.contains("EVM bridge"), "{m}");
     }
 
     #[tokio::test]

@@ -1568,7 +1568,8 @@ jq '{op_id, bridge: .params.bridge, tx: .tx.tx_hash,
   bridge operator:` line carries the transaction, what it deposited — every
   `depositId` with its amount and recipient, as `deposited: depositId …, …
   USDC units to account …` — the bridge and the operation; after exit 37 it
-  names the operation and the Acki Nacki bridge transaction that aborted.
+  names the `depositId`, amount, recipient, EVM bridge, chain, operation
+  and the Acki Nacki bridge transaction that aborted.
 - `deposit_id` is set only after exit 37. After exit 35 it is `null`: the
   operation was closed before the deposit was recorded, so take the
   `depositId` from `detail`.

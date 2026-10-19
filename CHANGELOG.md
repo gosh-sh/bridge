@@ -165,13 +165,17 @@ assigns it when the release is tagged.
   `_trustedL1Bridge`, `_acceptedBlockHash`, `_lightClientCode`,
   `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`.
   After the call, re-run `setPaused` if the lane was paused,
-  `setTrustedL1Bridge`, `setLightClientCode` / `deployLightClient` and
-  `disableOwnerAnchorsOn` before deposits or owner anchors will work
-  again (222/224 until then). The ABI gains `mintAndSendBridged`.
+  `setTrustedL1Bridge`, and `setLightClientCode` / `deployLightClient`
+  before deposits work again (222/224 until then). Owner anchors come
+  back on for every chain (`_ownerAnchorsDisabled` is wiped). If a chain
+  had been flipped to light-client-only, call `disableOwnerAnchorsOn`
+  again after `deployLightClient` — it turns the owner writer off and
+  reverts 226 until a client exists. The ABI gains `mintAndSendBridged`.
   `eccUSDCBridge` 1.11.0,
   code hash `aeeadc7f…`, rebuilt with sold 0.80.0. The deposit CLI's
-  exit-37 message, README and QUICKSTART now tell the operator to call
-  `mintAndSendBridged`. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.11.0.
+  exit-37 message names the aborted deposit's `depositId`, amount, recipient,
+  EVM bridge and chain, and tells the operator to call `mintAndSendBridged`.
+  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.11.0.
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233

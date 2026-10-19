@@ -2,8 +2,9 @@
 
 **Status: contract wired; rotate VkBlob emit HARDWARE-BLOCKED.** The
 `EthBeaconLightClient` now has the `submitRotate(proof, publicInputs)` method and
-the one-way `disableOwnerRotation()` switch that together make the sync-committee
-chain trustless from the weak-subjectivity checkpoint. The one missing piece is
+the `disableOwnerRotation()` switch for proof-checked routine sync-committee
+updates. Owner recovery and upgrades remain trusted; the switch does not revoke
+those powers. The one missing piece is
 the **rotate circuit's VkBlob**, whose keygen is memory-bound beyond our largest
 box — see §Hardware blocker.
 
@@ -71,7 +72,7 @@ the step / deposit decoders). Commitments are full-width Poseidon outputs;
 function submitRotate(bytes proof, bytes publicInputs) public;   // permissionless
 function setCommitteeCommitment(uint256 commitment, uint64 period) // owner, bootstrap-only
     public;                                                        //   (gated by _ownerRotationEnabled)
-function disableOwnerRotation() public;                           // owner, one-way
+function disableOwnerRotation() public;                           // owner, disables routine updates
 function reAnchorCommittee(uint256 commitment, uint64 period) public; // owner, WS hatch after disable
 function getCommitteeState() external view returns (uint256, uint256, uint64, bool, uint64);
 ```
@@ -98,9 +99,13 @@ The replaced committee may still advance the head for the period it served
 The **trust-reduction switch** mirrors `USDCBridge`'s
 per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotationEnabled` the
 owner may `setCommitteeCommitment` directly (checkpoint bootstrap / syncing before
-the VkBlob exists); `disableOwnerRotation()` clears it permanently, leaving
-`submitRotate` the only permissionless writer; `reAnchorCommittee` is the
-exceptional WS hatch (logged, no exec-hash write). One-way on purpose.
+the VkBlob exists); `disableOwnerRotation()` clears it with no direct re-enable
+function, leaving `submitRotate` the only permissionless writer;
+`reAnchorCommittee` is the exceptional WS hatch (logged, no exec-hash write).
+The light client's normal migration preserves the disabled flag, but its owner
+retains arbitrary code upgrades. The bridge's current migration resets its
+owner-anchor flags, and its owner can replace a recorded client. Neither switch
+removes owner trust; see [the retained owner authority](../../docs/eth-light-client.md#35-the-trust-switches).
 
 ## Hardware blocker (why the VkBlob is not emitted yet)
 

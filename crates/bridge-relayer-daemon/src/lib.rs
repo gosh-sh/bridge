@@ -15,6 +15,7 @@ pub mod error;
 pub mod history_consistency;
 pub mod live_source;
 pub mod proof_validation;
+pub mod prover_bin;
 pub mod relayer;
 pub mod rpc_http;
 pub mod source;
@@ -49,6 +50,7 @@ pub use history_consistency::{
     check_startup_drift, HistoryDrift,
 };
 pub use live_source::{LiveBlockSource, StatePaths};
+pub use prover_bin::require_executable;
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use rpc_http::{
     rpc_http_client, rpc_request_timeout_from_env, DEFAULT_RPC_REQUEST_TIMEOUT,

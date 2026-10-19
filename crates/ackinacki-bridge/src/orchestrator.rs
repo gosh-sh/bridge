@@ -970,7 +970,7 @@ pub async fn run(
         anchor_mode,
         i_know_the_wait: args.i_know_the_wait,
         work_dir: plumbing_ref.work_dir.clone(),
-        aggregator_dir: plumbing_ref.aggregator_dir.clone(),
+        aggregate_proof_bin: crate::preflight::aggregate_proof_bin(&plumbing_ref.aggregator_dir),
         verifiers_dir: plumbing_ref.verifiers_dir.clone(),
         params_dir: plumbing_ref.params_dir.clone(),
         snark_dir: args.snark_dir.clone(),

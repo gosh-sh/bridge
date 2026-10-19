@@ -23,12 +23,10 @@ RUN install -d -m 0755 \
       /opt/gosh-relayer/bin \
       /opt/gosh-relayer/config \
       /opt/gosh-relayer/prover \
-      /opt/gosh-relayer/aggregator/target/release \
       /opt/gosh-relayer/verifiers
 
 COPY --from=relayer_release /relayer /opt/gosh-relayer/bin/relayer
-COPY --from=aggregator_release /aggregate-proof \
-  /opt/gosh-relayer/aggregator/target/release/aggregate-proof
+COPY --from=aggregator_release /aggregate-proof /opt/gosh-relayer/bin/aggregate-proof
 COPY --from=verifier_bins /PrimaryAggregatorVerifier.bin \
   /opt/gosh-relayer/verifiers/PrimaryAggregatorVerifier.bin
 COPY --from=verifier_bins /FallbackAggregatorVerifier.bin \
@@ -60,7 +58,7 @@ COPY crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/verify-params.sh \
 
 RUN printf '%s\n' "$SOURCE_COMMIT" >/opt/gosh-relayer/SOURCE_COMMIT \
     && chmod 0555 /opt/gosh-relayer/bin/relayer \
-      /opt/gosh-relayer/aggregator/target/release/aggregate-proof \
+      /opt/gosh-relayer/bin/aggregate-proof \
       /opt/gosh-relayer/bin/container-entrypoint.sh \
       /opt/gosh-relayer/bin/container-paths.sh \
       /opt/gosh-relayer/bin/preflight.sh \
@@ -69,7 +67,7 @@ RUN printf '%s\n' "$SOURCE_COMMIT" >/opt/gosh-relayer/SOURCE_COMMIT \
     && cd /opt/gosh-relayer \
     && sha256sum \
       bin/relayer \
-      aggregator/target/release/aggregate-proof \
+      bin/aggregate-proof \
       verifiers/PrimaryAggregatorVerifier.bin \
       verifiers/FallbackAggregatorVerifier.bin \
       verifiers/LayerHashesAggregatorVerifier.bin \

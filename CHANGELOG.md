@@ -24,6 +24,16 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- Clarify the owner-anchor flip trust model (bridge-audit #57 / #106).
+  `disableOwnerAnchorsOn(chainId)` disables direct owner writes for that chain,
+  while owner upgrades and light-client replacement remain available. Bridge
+  upgrades reset the flags and recorded clients: restore configuration and
+  repeat the intended flips afterwards. NatSpec and operator runbooks now state
+  these powers consistently. An owner retaining `updateCode` can install
+  arbitrary replacement code that changes or removes the current checks, so
+  both owners remain trusted after a flip. No contract behavior, ABI or
+  deployment artifact changes.
+
 - Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
   USDC base units. `AckiNackiBridge.deposit` reverts `DepositTooLarge` above it;
   `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
@@ -77,6 +87,59 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **Every prover the relayers start is a binary the operator names, checked
+  at startup; the `cargo run` fallbacks are gone.** A daemon started with a
+  wrong path used to find out at its first proof, or, with no binary where
+  it looked, to build one from whatever source tree sat on the host. Now
+  each path is a flag with an environment variable, the file has to exist
+  and be executable before anything connects, and the daemons never derive
+  `target/release/…` from a directory or call `cargo`.
+  - `eth-lc-relayer daemon` / `prove-one`: `--step-prover-bin`
+    (`LIGHT_CLIENT_STEP_PROVER_BIN`), the prebuilt `export_step_vk_blob`
+    example (`daemon`: required unless `--mock-prove`); `daemon
+    --rotate-prover-bin` (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), the prebuilt
+    `rotate_tree_n8` example (`--features aggregation`), required unless
+    `--no-rotate` or `--mock-prove`, and ignored with `--no-rotate`.
+    `--prover-dir` (`LIGHT_CLIENT_PROVER_DIR`) is the working directory of
+    the provers: required when the daemon may rotate (`rotate_tree_n8` reads
+    its shard snarks and outer SRS there, and the period check its fixture),
+    otherwise optional, a relative `--srs-path` resolving against it. The
+    SRS is checked at startup to be where the step prover will read it.
+    Units no longer need `cargo` on `PATH` or a rustup home.
+  - `deposit-relayer daemon` / `prove-one`: `--fetch-deposit-data-bin`,
+    `--export-vk-blob-bin`, `--export-blake2b-proof-bin`
+    (`DEPOSIT_FETCH_DEPOSIT_DATA_BIN`, `DEPOSIT_EXPORT_VK_BLOB_BIN`,
+    `DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN`), the three prebuilt examples;
+    `--deposit-prover-dir` stays as their working directory (the `data/`
+    SRS and proving-key cache live under it) and now also reads
+    `DEPOSIT_PROVER_DIR`.
+  - `relayer daemon-live`, `withdraw-e2e` and `prove-withdraw-shplonk`:
+    `--aggregate-proof-bin` (`BRIDGE_AGGREGATE_PROOF_BIN`) replaces
+    `--aggregator-dir` (`BRIDGE_AGGREGATOR_DIR`, `AGGREGATOR_DIR`); the
+    subprocess runs in the binary's own directory. `relayer prove-withdraw`:
+    `--prover-bin` (`BRIDGE_WITHDRAW_PROVER_BIN`) replaces
+    `--bridge-prover-libraries-dir`, and `--work-dir`
+    (`BRIDGE_WITHDRAW_PROVER_WORK_DIR`) is required.
+  - shellnet-l2 kit: the image keeps `aggregate-proof` at
+    `/opt/gosh-relayer/bin/aggregate-proof`, `container-paths.sh` exports
+    `BRIDGE_AGGREGATE_PROOF_BIN`, and the preflight pins the checksum under
+    that name. A host-layout `runtime.env` sets `BRIDGE_AGGREGATE_PROOF_BIN`
+    instead of `BRIDGE_AGGREGATOR_DIR`. Rebuild the image to pick this up.
+  - `ackinacki-bridge withdraw` is unchanged: it keeps `--aggregator-dir` and
+    hands the library the binary its own preflight already checks.
+
+  Migration: build the provers once (`cargo build --release --example
+  export_step_vk_blob` and `cargo build --release --features aggregation
+  --example rotate_tree_n8` in `eth-light-client-prover/`; `cargo build
+  --release --examples` in `deposit-prover/`; `cargo build --release --bin
+  aggregate-proof` in `crates/bridge-evm-aggregator`), put the paths in the
+  env files (`scripts/ursus/*.env.example`,
+  `crates/eth-light-client-relayer/deploy/shellnet-shadow/env.example` and
+  `crates/bridge-relayer-daemon/deploy/shellnet-l2/runtime.env.example`
+  show where) and the unit files (`scripts/ursus/*.service`), then restart.
+  A daemon started from an old unit refuses with the name of the missing
+  flag.
+
 - **The rotate verification key is rotated and an early `/updates`
   hand-off no longer freezes the head.** The rotate circuit now exposes
   the attested slot as public input 16 (17 Fr in all: 12 accumulator
@@ -91,6 +154,14 @@ assigns it when the release is tagged.
   (`getLightClient` / `AN_LIGHT_CLIENT` change). The new `eth-lc-relayer`
   refuses old 512-byte rotate bundles. Light client `1.6.0`, code hash
   `c4b63228…`. The ABI is unchanged.
+
+  Two early rotates in a row still cut the replaced committee's late-
+  registration time: rotate P→P+1 during P, then P+1→P+2 on the best
+  update of P+1 (about 20 min after the boundary) retires C_P, so
+  checkpoints it skipped in P can no longer be registered. Honest rotates
+  leave that window until the start of P+2, about 27 h. A proper fix would
+  keep two previous committees.
+
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
@@ -1916,6 +1987,12 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-relayer` kills a prover that runs past its timeout instead of
+  leaving it running, writing the `data/` key cache beside the retry the
+  daemon starts after its backoff. `relayer prove-withdraw` does the same
+  with `bridge-event-halo2-prover`, and passes a relative `--witness` or
+  `--out-dir` to it as an absolute path: the prover runs in `--work-dir`, and
+  resolved them there.
 - An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
   to bring it down: `accruedYield()` stayed zero for good, and
   `withdrawFromAave` kept reverting once the pool was empty. The book can now
@@ -2506,6 +2583,13 @@ assigns it when the release is tagged.
   regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
 - `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
   which ran the same missing `generate-proof` binary.
+- The `cargo run` fallbacks of `eth-lc-relayer` (`export_step_vk_blob`,
+  `rotate_tree_n8`), `deposit-relayer` (`fetch_deposit_data`,
+  `export_vk_blob`, `export_blake2b_proof`) and `relayer` (`aggregate-proof`,
+  `bridge-event-halo2-prover`), and with them the `--aggregator-dir` /
+  `--bridge-prover-libraries-dir` flags of `relayer` and their
+  `BRIDGE_AGGREGATOR_DIR`, `AGGREGATOR_DIR` and `BRIDGE_PROVER_LIBRARIES_DIR`.
+  See Breaking Changes.
 
 ## [0.2.0] – 2026-09-11
 

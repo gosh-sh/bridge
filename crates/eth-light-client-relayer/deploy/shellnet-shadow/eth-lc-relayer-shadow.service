@@ -9,10 +9,10 @@ Type=simple
 User=root
 WorkingDirectory=/mnt/data/gosh-eth-lc-relayer
 EnvironmentFile=/mnt/data/gosh-eth-lc-relayer/config/eth-lc-relayer.env
-# `prove-one`/daemon spawn `cargo run --release --example export_step_vk_blob`
-# in LIGHT_CLIENT_PROVER_DIR, so rustup (HOME) and cargo (PATH) must resolve.
+# The daemon runs the prebuilt prover LIGHT_CLIENT_STEP_PROVER_BIN names (from
+# the env file); nothing here needs cargo or rustup.
 Environment=HOME=/root
-Environment=PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Shadow: step only, no submitRotate (tvm-sdk#284 is not on shellnet nodes),
 # no one-way owner flip, no USDCBridge wiring.
 ExecStart=/mnt/data/gosh-eth-lc-relayer/bin/eth-lc-relayer daemon \

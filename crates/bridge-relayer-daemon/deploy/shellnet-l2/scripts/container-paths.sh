@@ -14,12 +14,12 @@ remap_compose_runtime_paths() {
   BRIDGE_PK_CACHE_DIR=/data/pk-cache
   BRIDGE_DUMP_SUBMISSIONS_DIR=/data/submissions
   BRIDGE_BK_SET_CONFIG=/opt/gosh-relayer/config/bk_set.shellnet.json
-  BRIDGE_AGGREGATOR_DIR=/opt/gosh-relayer/aggregator
+  BRIDGE_AGGREGATE_PROOF_BIN=/opt/gosh-relayer/bin/aggregate-proof
   BRIDGE_VERIFIERS_DIR=/opt/gosh-relayer/verifiers
 
   export BRIDGE_REPO_DIR RELAYER_BINARY RELAYER_STATE_PATH
   export BRIDGE_CONFIG_DIR BRIDGE_STATE_DIR BRIDGE_PARAMS_DIR
   export PARAMS_SHA256SUMS BRIDGE_PK_CACHE_DIR
   export BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_BK_SET_CONFIG
-  export BRIDGE_AGGREGATOR_DIR BRIDGE_VERIFIERS_DIR
+  export BRIDGE_AGGREGATE_PROOF_BIN BRIDGE_VERIFIERS_DIR
 }

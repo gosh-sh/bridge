@@ -8,7 +8,7 @@ Operator kit for running `eth-lc-relayer` against **Sepolia** (beacon) and a
 - step proofs only (`--no-rotate`): shellnet nodes run tvm-sdk `v3.0.4.an`
   without the rotate decider (tvm-sdk#284), so `submitRotate` is unsound
   there; period hops are done with the owner key (`set-committee`);
-- no one-way owner flip (`--no-flip-owner`).
+- no owner flip (`--no-flip-owner`).
 
 What it proves: the whole pipeline beacon → Halo2 step proof → opcode
 `ZKHALO2VERIFYWITHVK` on shellnet → light-client head advancing with Sepolia
@@ -20,7 +20,8 @@ locations, addresses of the live instance) live in the GOSH infra runbook.
 ## Requirements
 
 - Linux x86_64 host, ~40 GB RAM for a step proof, `cargo` with rustup
-  (the repo pins `nightly-2026-08-03`), `python3`, `curl`.
+  (the repo pins `nightly-2026-08-03`) for `build.sh` only — the daemon runs
+  the prebuilt prover binary — `python3`, `curl`.
 - Hermez KZG SRS `kzg_bn254_19.srs` (see `install-srs.sh`; the public
   ceremony mirrors are gone, copy the slice from an existing relayer host).
 - `tvm-cli` 3.0.6 (`linux-musl-amd64` build on Ubuntu 22.04, the glibc build
@@ -87,7 +88,7 @@ writes it on-chain and the state file records the period:
 ```bash
 set -a; source $ETH_LC_ROOT/config/eth-lc-relayer.env; set +a
 $ETH_LC_ROOT/bin/eth-lc-relayer prove-one --beacon-url $BEACON_URL \
-    --prover-dir $LIGHT_CLIENT_PROVER_DIR --srs-path $STEP_SRS_PATH \
+    --step-prover-bin $LIGHT_CLIENT_STEP_PROVER_BIN --srs-path $STEP_SRS_PATH \
     --out-dir $ETH_LC_ROOT/bundles/bootstrap
 $ETH_LC_ROOT/bin/eth-lc-relayer set-committee --bundle-dir $ETH_LC_ROOT/bundles/bootstrap \
     --state $ETH_LC_ROOT/state/eth-lc-relayer-state.json
@@ -144,7 +145,7 @@ owner key:
 systemctl stop eth-lc-relayer-shadow
 set -a; source $ETH_LC_ROOT/config/eth-lc-relayer.env; set +a
 $ETH_LC_ROOT/bin/eth-lc-relayer prove-one --beacon-url $BEACON_URL \
-    --prover-dir $LIGHT_CLIENT_PROVER_DIR --srs-path $STEP_SRS_PATH \
+    --step-prover-bin $LIGHT_CLIENT_STEP_PROVER_BIN --srs-path $STEP_SRS_PATH \
     --out-dir $ETH_LC_ROOT/bundles/hop-$(date -u +%Y%m%dT%H%M%SZ)
 $ETH_LC_ROOT/bin/eth-lc-relayer set-committee --bundle-dir <that dir> \
     --state $ETH_LC_ROOT/state/eth-lc-relayer-state.json

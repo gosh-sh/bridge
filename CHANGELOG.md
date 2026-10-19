@@ -86,7 +86,10 @@ assigns it when the release is tagged.
   with `mintAndSend`. Do **not** use it for ordinary owner mint: that
   would invent bridged inventory the Ethereum treasury does not hold.
   `mintAndSend` / `mintAndSendAccumulator` / TIP-3 mint still increment
-  only `getTotalMinted`.
+  only `getTotalMinted`. `mintAndSendBridged` is not bound to a deposit
+  id: the operator must match the aborted deposit's recipient and amount,
+  once — a second call or a mistyped `value` adds inventory Ethereum does
+  not hold.
 
   ECC[3] stays fungible: the cap is still an inventory check, not a
   per-depositor reservation. That half of QC-AN-05 is the accepted
@@ -101,10 +104,12 @@ assigns it when the release is tagged.
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
-  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
-  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
-  against headroom that deposits created: the cap limits total bridge
-  payouts to total deposits, not one depositor's own withdrawal.
+  Ordinary owner `mintAndSend` / `mintAndSendAccumulator` and TIP-3 mint
+  increment only `getTotalMinted` and add no headroom. 1.11.0's
+  `mintAndSendBridged` is the exception, for exit-37 recovery only. ECC[3]
+  is fungible, so such ECC can still be withdrawn against headroom that
+  deposits created: the cap limits total bridge payouts to total deposits,
+  not one depositor's own withdrawal.
 
   A fresh zerostate starts both counters at 0, so the cap holds from the
   first burn. `updateCode` copies the maps as they are. On a live bridge
@@ -114,8 +119,9 @@ assigns it when the release is tagged.
   That is not the same as a fresh deploy.
 
   `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The ABI is unchanged. The withdraw CLI preflight checks
-  `getTotalBridged` and refuses before the burn.
+  The 1.10.0 ABI was unchanged; 1.11.0 above adds `mintAndSendBridged`.
+  The withdraw CLI preflight checks `getTotalBridged` and refuses before
+  the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
@@ -137,7 +143,8 @@ assigns it when the release is tagged.
   that, so a deposit on a chain whose client was not the last one deployed is
   no longer refused. A bridge that reports 1.9.0 without the per-chain getter
   is answered once and falls back with a warning instead of being retried for
-  ever. 1.9.0 is now the newest version the CLI was checked against.
+  ever. 1.9.0 was the newest version the CLI was checked against in that
+  change; 1.11.0 above is now `NEWEST_KNOWN_BRIDGE_VERSION`.
 
 - **One light-client code, one client per source chain, addressed by code
   salt.** `setLightClientCode` now only stores the code. The address is

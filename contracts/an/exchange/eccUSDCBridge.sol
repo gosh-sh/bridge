@@ -486,9 +486,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         `finalizeDeposit` cannot mint again, Ethereum already holds
     ///         the USDC, and ordinary `mintAndSend` would leave
     ///         `getTotalBridged` short — last withdrawers then hit 233.
-    ///         Shares `_mintNonce` with `mintAndSend`. Do not use it for
-    ///         ordinary owner mint: that would invent bridged inventory the
-    ///         Ethereum treasury does not hold.
+    ///         Shares `_mintNonce` with `mintAndSend`. The call is not bound
+    ///         to a deposit id: paying twice, or typing the wrong `value`,
+    ///         still credits bridged inventory the Ethereum treasury does
+    ///         not hold, and last withdrawers then lose the difference.
+    ///         Match the aborted deposit's recipient and amount, once.
+    ///         Do not use it for ordinary owner mint.
     /// @param recipient — address to receive the minted ECC[3] USDC
     /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
     /// @param nonce — next `_mintNonce` (shared with `mintAndSend`)
@@ -1041,7 +1044,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         return _ownerPubkey;
     }
 
-    /// @notice Returns total ECC[3] USDC minted by this contract.
+    /// @notice Returns ECC[3] counted by `mintAndSend`, `mintAndSendAccumulator`,
+    ///         and the migration path. `confirmDeposit` and `mintAndSendBridged`
+    ///         mint ECC[3] without incrementing this; bridged inventory is
+    ///         `getTotalBridged`.
     function getTotalMinted() external view returns (uint128) {
         return _totalMinted;
     }

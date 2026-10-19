@@ -328,9 +328,11 @@ exit 30", has the details.
 
 **35 and 37: go to the operator.** The message says what to give them: the
 transaction hash, the `depositId`, the amount, the bridge address and the
-operation id. After exit 37 the operator pays it out with
-`mintAndSendBridged`; that call credits `getTotalBridged` the way
-`confirmDeposit` would have. Ordinary `mintAndSend` does not.
+operation id. After exit 37 the operator pays it out once with
+`mintAndSendBridged`, matching this deposit's recipient and amount; that
+call credits `getTotalBridged` the way `confirmDeposit` would have.
+Ordinary `mintAndSend` does not. A second recovery invents headroom the
+Ethereum treasury does not hold.
 
 ## 13. Which wallets work
 

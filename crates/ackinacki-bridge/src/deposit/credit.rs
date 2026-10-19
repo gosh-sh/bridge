@@ -444,11 +444,12 @@ pub async fn confirm(
                         "the deposit voucher exists, but the bridge transaction {bridge_tx} that \
                          should have minted the credit aborted. The voucher is spent and the \
                          deposit cannot be finalized again; only the bridge operator can pay it \
-                         out (mintAndSendBridged, TVM exit 37). That call credits bridged \
+                         out (mintAndSendBridged, CLI exit 37). That call credits bridged \
                          inventory the way confirmDeposit would have; ordinary mintAndSend does \
-                         not, and the USDC already in the Ethereum treasury would never become \
-                         withdrawable headroom. Give them operation {op_id} and transaction \
-                         {bridge_tx}"
+                         not. It is not bound to this deposit: paying twice or the wrong amount \
+                         invents headroom the Ethereum treasury does not hold. Match the aborted \
+                         deposit's recipient and amount, once. Give them operation {op_id} and \
+                         transaction {bridge_tx}"
                     ),
                 ));
             },

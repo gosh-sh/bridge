@@ -1547,10 +1547,11 @@ record.
   relayer can finalize it to the recipient in its call data; otherwise only
   the operator can return the USDC.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
-  The operator pays it out (`mintAndSendBridged`). That call credits
-  bridged inventory the way `confirmDeposit` would have; ordinary
-  `mintAndSend` does not, and the USDC already in the Ethereum treasury
-  would never become withdrawable headroom.
+  The operator pays it out (`mintAndSendBridged`) once, for this deposit's
+  recipient and amount. That call credits bridged inventory the way
+  `confirmDeposit` would have; ordinary `mintAndSend` does not. The call
+  is not bound to the deposit id, so a second recovery (or a mistyped
+  amount) invents headroom the Ethereum treasury does not hold.
 
 Give the operator the deposit's transaction hash, its `depositId`, the amount
 and recipient actually deposited, the EVM bridge address and the operation id;

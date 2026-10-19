@@ -29,8 +29,10 @@ assigns it when the release is tagged.
   `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
   exit 214. There is no extra product minimum besides `amount > 0`, and the
   100 USDC figure in older notes is not in the contracts. The deposit
-  form now uses that same `uint64` cap; it used to refuse amounts above
-  100 USDC that `AckiNackiBridge.deposit` would accept.
+  form now uses that same `uint64` cap and deposits into the Sepolia
+  bridge Acki Nacki currently credits (`0x5384f162…`, 2026-10-15). It
+  used to refuse amounts above 100 USDC and send them to an earlier
+  deploy (`0x99c37fb7…`) that AN no longer trusts.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
   `state.json`, the strict `depositId` queue, parking with

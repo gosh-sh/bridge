@@ -4,7 +4,7 @@
 
 /// Bridge contract address on Sepolia
 /// Update this after running: forge script script/DeployTestBridge.s.sol:DeployTestBridge
-pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x99c37fb75326ae6953ebbbdcd261ec331df4ce82";
+pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x5384f162aa1a80b7a03687e1a3188f67b1fffad5";
 
 /// USDC (ERC-20, 6 decimals) accepted for deposits.
 /// Sepolia testnet: the Aave V3 faucet USDC underlying.

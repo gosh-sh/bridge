@@ -1047,10 +1047,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
         }
         require(fr[2] <= uint256(type(uint64).max), ERR_OVERFLOW);
         // The circuit splits the 256-bit AN account into two 16-byte halves
-        // (fr[7]=high, fr[8]=low); dapp_id is fr[5]/fr[6] — reassemble it.
-        // The workchain concept is retired on AN, so the recipient always lives
-        // in workchain 0 (see confirmDeposit's makeAddrStd). L1 `anWorkchain`
-        // is not in these public inputs (QC-AN-J3).
+        // (fr[7]=high, fr[8]=low); reassemble those. dapp_id is fr[5]/fr[6]
+        // on the circuit side; this function pins dappId to 0 and never reads
+        // those halves. The workchain concept is retired on AN, so the
+        // recipient always lives in workchain 0 (see confirmDeposit's
+        // makeAddrStd). L1 `anWorkchain` is not in these public inputs
+        // (QC-AN-J3).
         f.depositId    = fr[0];
         f.amount       = uint128(fr[2]);
         f.contractAddr = fr[3];

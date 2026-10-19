@@ -79,9 +79,9 @@ user believe funds had been returned when nothing had happened. Verified 2026-08
 
 ### Deposit Flow
 1. Connect MetaMask wallet
-2. Approve USDC for the bridge contract
-3. Enter the amount and the Acki Nacki destination account
-4. Submit — the contract takes custody via `transferFrom` and emits a `Deposit` event
+2. Enter the amount and the Acki Nacki destination account
+3. Submit — if the allowance is short the form sends `approve` first, then
+   the contract takes custody via `transferFrom` and emits a `Deposit` event
 
 The proof of that event is produced off-chain and consumed on the Acki Nacki side, which mints to the
 destination. Nothing further is required from the user in this UI.

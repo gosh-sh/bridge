@@ -19,9 +19,9 @@
 //!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
 //!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
-//!    `proof`) to the AN-side `TokenBridge.finalizeDeposit(...)`, which
-//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and consumes
-//!    the `usedDepositIds` nullifier ([`submitter::AnInterfaceSubmitter`]).
+//!    `proof`) to the AN-side `eccUSDCBridge.finalizeDeposit(...)`, which
+//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and deploys
+//!    a per-deposit `DepositVoucher` ([`submitter::AnInterfaceSubmitter`]).
 //!
 //! ## Architecture
 //!
@@ -53,11 +53,11 @@
 //!   that trait today is the mock — the AN team will ship the live
 //!   `tvm-sdk`-backed client. The `finalizeDeposit` call body uses an interim
 //!   encoding ([`submitter::encode_finalize_deposit`]) pending the canonical
-//!   TVM message ABI. The AN-side nullifier makes re-submission safe in the
-//!   interim.
-//! - The AN-side `TokenBridge.finalizeDeposit` entry point itself is on the
-//!   partner branch `poseidon_dex_with_verify`; the `ZKHALO2VERIFYWITHVK`
-//!   opcode lives in `tvm-sdk` and is authoritative for its semantics.
+//!   TVM message ABI. A second `finalizeDeposit` for the same deposit fails
+//!   in the voucher constructor (exit 51), so re-submission is safe.
+//! - The AN-side `eccUSDCBridge.finalizeDeposit` entry point is in
+//!   `contracts/an/exchange/`; the `ZKHALO2VERIFYWITHVK` opcode lives in
+//!   `tvm-sdk` and is authoritative for its semantics.
 
 pub mod an_config;
 pub mod daemon;

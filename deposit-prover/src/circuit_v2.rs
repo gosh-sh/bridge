@@ -677,19 +677,15 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         //    on 2026-06-02. A full UInt256 dappId can exceed the BN254 scalar modulus,
         //    so it is split into high/low 16-byte halves (mirrors the
         //    anAccount/block-hash split). These are witness values promoted to public
-        //    instances; they are NOT constrained against event data — the AN-side
-        //    `TokenBridge` checks them against its configured dappId, which is what
-        //    binds the proof to a dApp.
+        //    instances; they are NOT constrained against event data. The AN-side
+        //    bridge pins `dappId` to 0 and does not check the proven halves.
         //
         //    BC-D05: unlike every other 32-byte input here, `dappId` has no
         //    Phase-1 counterpart to be constrained against, so these witnesses
         //    are otherwise entirely free. `bytes_to_field` does not range-check,
         //    so without the loop below each "byte" could be any field element
-        //    and `dappIdHigh`/`dappIdLow` would not be 128-bit halves at all —
-        //    while the AN side reassembles them as `(fr[5] << 128) | fr[6]`.
-        //    An attacker gains nothing (dappId is freely chosen and checked
-        //    against the configured value), but the public input must mean what
-        //    the layout says it means.
+        //    and `dappIdHigh`/`dappIdLow` would not be 128-bit halves at all.
+        //    The public input must still mean what the layout says it means.
         let dapp_id_bytes: Vec<AssignedValue<Fr>> = self
             .inputs
             .dapp_id
@@ -961,8 +957,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // the RLP-extracted address (`address_bytes` -> `contract_address_field`,
         // below) is constrained equal to the Phase-0 PUBLIC INSTANCE
         // `contract_address_phase0` (public input #3), and the AN-side
-        // `TokenBridge.finalizeDeposit` checks that public input against the bridge's
-        // configured deposit-source address. Keeping the address out of the fixed
+        // `eccUSDCBridge.finalizeDeposit` checks that public input against the
+        // trusted L1-bridge allowlist. Keeping the address out of the fixed
         // column makes the VK witness-independent (see
         // the VK's witness-independence requirement).
         assert_eq!(
@@ -1218,8 +1214,8 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     /// halves. `anAccountHigh`/`anAccountLow` remain the
     /// event-bound AN recipient account. The `ZKHALO2VERIFYWITHVK` consumer
     /// is VK-driven (it reads this count from the VkBlob), and
-    /// `TokenBridge.finalizeDeposit` builds the public-inputs cell from the
-    /// same 12-scalar layout.
+    /// `eccUSDCBridge.finalizeDeposit` takes the 12-scalar blob as `bytes
+    /// publicInputs`.
     fn num_instance(&self) -> Vec<usize> {
         vec![DEPOSIT_NUM_PUBLIC_INPUTS] // 11 user values + 1 promise_commit
     }

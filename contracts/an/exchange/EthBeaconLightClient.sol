@@ -236,9 +236,9 @@ contract EthBeaconLightClient {
     uint64  _updatesApplied;
 
     // The trusted sync-committee Poseidon commitment for the current period.
-    // A step proof's committee_commitment (PI #5) must equal this, or — for a
-    // late registration only, inside the window below — the commitment this
-    // one replaced. That is the join that pins the aggregated signers to a
+    // A step proof's committee_commitment (PI #5) must equal this, or the
+    // commitment this one replaced (`_prevCommittee`) for the period that
+    // committee served. That is the join that pins the aggregated signers to a
     // chain-anchored committee.
     // Fail-closed: 0 rejects all updates until bootstrapped.
     uint256 _currentCommittee;

@@ -551,16 +551,10 @@ assigns it when the release is tagged.
 - **A checkpoint skipped near the end of a sync-committee period can still be
   registered after the rotation.** `submitUpdate` keeps the commitment a
   `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
-  for late registration only — never to move the head, which still needs the
-  committee in force. The replaced committee may sign only around
-  the head it left behind: the attested slot must be within one period either
-  side of the finalized slot recorded when the rotation landed. The slack on
-  the later side is what makes the feature work at all — that recorded slot is
-  the last head the leaving committee moved, not the end of its period, so the
-  checkpoint it skipped is attested *after* it and an upper bound at the
-  recorded slot itself would exclude exactly the skips this exists for. The
-  bound is a slot, read out of the signed header by the step circuit, not the
-  rotate proof's period label. The owner hatches
+  while `attestedSlot / 8192 + 1 == _committeePeriod` — the period that
+  committee served — including to move the head. An early `/updates` best
+  update is therefore a valid hand-off and does not freeze the rest of that
+  period. The owner hatches
   (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
   rather than carrying it: they replace a committee the owner is rejecting, or
   jump several periods, so neither is a hand-off. `getCommitteeState` returns
@@ -579,10 +573,9 @@ assigns it when the release is tagged.
   `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
   upgraded client therefore starts with no previous committee, which only
   means no catch-up across the rotation already behind it; the field fills on
-  the next rotation. The same goes for `_prevCommitteeHeadSlot`, the second new
-  field, a `uint64` next to it: also set to 0 on the upgrade, also filled by
-  the next rotation, and the previous-committee path stays closed until the
-  next rotation fills `_prevCommittee`.
+  the next rotation. `_prevCommitteeHeadSlot` sits next to it in the layout
+  and is written on rotate, but nothing reads it: the previous-committee path
+  opens when `_prevCommittee` is filled.
 
   `getCommitteeState` gains a `prevCommittee` output and no other function or
   event changes. **Every caller of that getter has to take the new ABI**, not
@@ -635,9 +628,9 @@ assigns it when the release is tagged.
   overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
   every checkpoint the replaced committee had not registered yet.
 
-  An early hand-off used to freeze the head until the successor's first
-  update. 1.6.0 lets the replaced committee keep advancing the head for
-  the period it served, so a `/updates` best update is a valid rotate
+  An early hand-off used to freeze the head until the successor's period,
+  about 27 hours. 1.6.0 lets the replaced committee keep advancing the head
+  for the period it served, so a `/updates` best update is a valid rotate
   and does not strand the rest of that period.
 
 - **A rotate whose confirmation is lost no longer stops the daemon for

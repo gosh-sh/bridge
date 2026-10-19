@@ -8,16 +8,21 @@
 //! from each address:
 //!
 //! * mined (`latest` is past it), or nothing remembered: the `pending` count,
-//!   so transactions other senders have waiting are left alone — the shellnet
-//!   burner key is shared;
-//! * not mined, and waiting in the pool of the node asked: the same nonce with
-//!   fees 25 % above it, which replaces it (a replacement must pay at least 10
-//!   % more);
+//!   so transactions already waiting from the account are queued behind, not
+//!   replaced;
+//! * not mined, and a transaction waiting at its nonce in the pool of the node
+//!   asked: the same nonce with fees 25 % above the last plan, which replaces
+//!   it (a replacement must pay at least 10 % more), but never more than
+//!   [`MAX_REPLACEMENT_FEE_MULTIPLE`] times the current estimate. Whatever
+//!   waits at that nonce is taken for ours: on a key shared with someone else
+//!   it can be theirs, sent after our send was lost;
 //! * not mined, and no transaction waiting at that nonce: the send was lost, so
 //!   the same nonce again at the current fee estimate.
 //!
-//! The plan is remembered before the send, so a send cut short — a timeout,
-//! a dropped future — still leaves the next attempt knowing its nonce.
+//! A plan is made only once the transaction's gas estimate has succeeded,
+//! so a call that would revert leaves the nonce and fees alone. It is
+//! remembered before the send, so a send cut short — a timeout, a dropped
+//! future — still leaves the next attempt knowing its nonce.
 
 use std::{
     collections::HashMap,
@@ -28,6 +33,12 @@ use alloy::{
     network::Network, primitives::Address, providers::Provider, transports::TransportResult,
 };
 use tracing::{info, warn};
+
+/// The most a replacement pays, as a multiple of the current EIP-1559
+/// estimate — for the fee cap and the tip alike. Without it every
+/// replacement of a transaction that stays unmined raised the fees by
+/// another quarter: 87 times what the first send paid after 20 of them.
+pub const MAX_REPLACEMENT_FEE_MULTIPLE: u128 = 4;
 
 /// Nonce and EIP-1559 fees for one transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,8 +140,8 @@ pub(crate) fn decide(
             if replaces {
                 (
                     nonce,
-                    fee.max(bump(t.max_fee_per_gas)),
-                    tip.max(bump(t.max_priority_fee_per_gas)),
+                    replacement(t.max_fee_per_gas, fee),
+                    replacement(t.max_priority_fee_per_gas, tip),
                     true,
                 )
             } else {
@@ -145,6 +156,19 @@ pub(crate) fn decide(
         max_priority_fee_per_gas: tip,
         replaces,
     }
+}
+
+/// What a replacement pays where the replaced transaction paid `last` and
+/// the estimate is now `estimate`: `last` raised by [`bump`], at least the
+/// estimate and at most [`MAX_REPLACEMENT_FEE_MULTIPLE`] times it. Held at
+/// the cap, a replacement no longer pays the 10 % more a node asks for; the
+/// node refuses it, and the transaction it would replace keeps waiting at
+/// several times the going rate.
+fn replacement(last: u128, estimate: u128) -> u128 {
+    bump(last).clamp(
+        estimate,
+        estimate.saturating_mul(MAX_REPLACEMENT_FEE_MULTIPLE),
+    )
 }
 
 /// 25 % more, and at least one wei more.
@@ -232,6 +256,38 @@ mod tests {
         assert!(second.max_priority_fee_per_gas > first.max_priority_fee_per_gas);
     }
 
+    /// The review's case: one transaction stays unmined and is replaced
+    /// again and again. The fees stop at the cap instead of compounding.
+    #[test]
+    fn repeated_replacements_stop_at_four_times_the_estimate() {
+        let mut last = sent(421, FEE, TIP);
+        for _ in 0..50 {
+            let plan = decide(last, 421, 422, FEE, TIP);
+            assert!(plan.replaces);
+            assert!(plan.max_fee_per_gas <= MAX_REPLACEMENT_FEE_MULTIPLE * FEE);
+            assert!(plan.max_priority_fee_per_gas <= MAX_REPLACEMENT_FEE_MULTIPLE * TIP);
+            last = sent(421, plan.max_fee_per_gas, plan.max_priority_fee_per_gas);
+        }
+        let held = decide(last, 421, 422, FEE, TIP);
+        assert_eq!(held.max_fee_per_gas, MAX_REPLACEMENT_FEE_MULTIPLE * FEE);
+        assert_eq!(
+            held.max_priority_fee_per_gas,
+            MAX_REPLACEMENT_FEE_MULTIPLE * TIP
+        );
+    }
+
+    /// A transaction sent when fees were high is replaced at no more than
+    /// the cap of today's estimate, even when that is below what it pays.
+    #[test]
+    fn the_cap_follows_the_current_estimate() {
+        let plan = decide(sent(421, 20 * FEE, 20 * TIP), 421, 422, FEE, TIP);
+        assert_eq!(plan.max_fee_per_gas, MAX_REPLACEMENT_FEE_MULTIPLE * FEE);
+        assert_eq!(
+            plan.max_priority_fee_per_gas,
+            MAX_REPLACEMENT_FEE_MULTIPLE * TIP
+        );
+    }
+
     #[test]
     fn a_gap_below_the_remembered_nonce_is_filled_first() {
         let plan = decide(sent(423, FEE, TIP), 421, 421, FEE, TIP);
@@ -281,26 +337,32 @@ mod end_to_end {
     struct Chain {
         latest: u64,
         pending: u64,
-        /// The reply to each `eth_sendRawTransaction`, in turn; `None`
-        /// never answers, like a send the RPC lost.
-        replies: VecDeque<Option<Value>>,
+        /// `eth_estimateGas` answers with a revert, as for a proof whose
+        /// anchor the bridge does not hold yet.
+        estimate_reverts: bool,
+        /// What happens to each `eth_sendRawTransaction`, in turn.
+        replies: VecDeque<Reply>,
         sent: Vec<TxEnvelope>,
     }
 
-    fn chain(latest: u64, replies: Vec<Option<Value>>) -> Arc<Mutex<Chain>> {
+    /// What the endpoint does with one `eth_sendRawTransaction`.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// Never answers, like a send the RPC lost.
+        Lost,
+        /// Refuses it, as for an account that cannot pay.
+        Refused,
+        /// Takes it; no receipt ever comes.
+        Accepted,
+    }
+
+    fn chain(latest: u64, replies: Vec<Reply>) -> Arc<Mutex<Chain>> {
         Arc::new(Mutex::new(Chain {
             latest,
             pending: latest,
+            estimate_reverts: false,
             replies: replies.into(),
             sent: Vec::new(),
-        }))
-    }
-
-    fn refused() -> Option<Value> {
-        Some(json!({
-            "jsonrpc": "2.0",
-            "id": 0,
-            "error": {"code": -32000, "message": "insufficient funds for gas * price + value"},
         }))
     }
 
@@ -308,8 +370,15 @@ mod end_to_end {
         Arc::new(move |request: &Value| {
             let mut chain = chain.lock().unwrap();
             let ok = |v: Value| Some((200, json!({"jsonrpc": "2.0", "id": 0, "result": v})));
+            let error = |code: i64, message: &str| {
+                Some((
+                    200,
+                    json!({"jsonrpc": "2.0", "id": 0, "error": {"code": code, "message": message}}),
+                ))
+            };
             match request["method"].as_str()? {
                 "eth_chainId" => ok(json!("0xaa36a7")),
+                "eth_blockNumber" => ok(json!("0x10")),
                 "eth_getTransactionCount" => {
                     let count = if request["params"][1] == "pending" {
                         chain.pending
@@ -324,16 +393,20 @@ mod end_to_end {
                     "gasUsedRatio": [0.5],
                     "reward": [["0x3b9aca00"]],
                 })),
+                "eth_estimateGas" if chain.estimate_reverts => error(3, "execution reverted"),
                 "eth_estimateGas" => ok(json!("0x30d40")),
                 "eth_sendRawTransaction" => {
                     let raw = hex::decode(request["params"][0].as_str()?).ok()?;
                     let tx = TxEnvelope::decode_2718(&mut raw.as_slice()).ok()?;
+                    let hash = *tx.tx_hash();
                     chain.sent.push(tx);
-                    chain
-                        .replies
-                        .pop_front()
-                        .flatten()
-                        .map(|reply| (200, reply))
+                    match chain.replies.pop_front()? {
+                        Reply::Lost => None,
+                        Reply::Refused => {
+                            error(-32000, "insufficient funds for gas * price + value")
+                        },
+                        Reply::Accepted => ok(json!(hash)),
+                    }
                 },
                 _ => ok(Value::Null),
             }
@@ -369,18 +442,18 @@ mod end_to_end {
         }
     }
 
-    async fn submit(bridge: &EthBridgeClient<impl alloy::providers::Provider + Clone>) {
+    async fn submit(bridge: &EthBridgeClient<impl alloy::providers::Provider + Clone>) -> String {
         let outcome = bridge
             .submit_withdraw(&Bytes::from(vec![0u8; 4]), &inputs())
             .await
             .unwrap();
-        assert!(
-            matches!(outcome, WithdrawSubmitOutcome::Reverted {
+        match outcome {
+            WithdrawSubmitOutcome::Reverted {
+                reason,
                 permanent: false,
-                ..
-            }),
-            "{outcome:?}"
-        );
+            } => reason,
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The shellnet failure: the send of 421 was lost. alloy's cached
@@ -388,7 +461,7 @@ mod end_to_end {
     /// forever; it must go out as 421 again.
     #[tokio::test]
     async fn a_lost_send_does_not_move_the_nonce() {
-        let chain = chain(421, vec![None, refused()]);
+        let chain = chain(421, vec![Reply::Lost, Reply::Refused]);
         let bridge = bridge(chain.clone(), 0x21).await;
         submit(&bridge).await;
         submit(&bridge).await;
@@ -403,7 +476,7 @@ mod end_to_end {
 
     #[tokio::test]
     async fn a_transaction_still_waiting_is_replaced_with_higher_fees() {
-        let chain = chain(421, vec![refused(), refused()]);
+        let chain = chain(421, vec![Reply::Refused, Reply::Refused]);
         let bridge = bridge(chain.clone(), 0x22).await;
         submit(&bridge).await;
         // Our 421 now waits in the pool, unmined.
@@ -421,7 +494,7 @@ mod end_to_end {
 
     #[tokio::test]
     async fn a_mined_transaction_lets_the_next_one_move_on() {
-        let chain = chain(421, vec![refused(), refused()]);
+        let chain = chain(421, vec![Reply::Refused, Reply::Refused]);
         let bridge = bridge(chain.clone(), 0x23).await;
         submit(&bridge).await;
         {
@@ -438,5 +511,68 @@ mod end_to_end {
             .map(|tx| tx.nonce())
             .collect();
         assert_eq!(nonces, [421, 422]);
+    }
+
+    /// The review's case in `daemon-bridge`: our 421 waits unmined while
+    /// the withdraw leg tries a proof whose anchor the bridge does not hold
+    /// yet, and its gas estimate reverts. Those attempts send nothing and
+    /// leave the plan alone, so the replacement that follows pays a quarter
+    /// more than 421 did, not a quarter more for every failed attempt.
+    #[tokio::test]
+    async fn a_failed_gas_estimate_leaves_the_nonce_and_fees_alone() {
+        let chain = chain(421, vec![Reply::Refused, Reply::Refused]);
+        let bridge = bridge(chain.clone(), 0x24).await;
+        submit(&bridge).await;
+        {
+            let mut chain = chain.lock().unwrap();
+            chain.pending = 422;
+            chain.estimate_reverts = true;
+        }
+        for _ in 0..20 {
+            let reason = submit(&bridge).await;
+            assert!(reason.contains("execution reverted"), "{reason}");
+        }
+        chain.lock().unwrap().estimate_reverts = false;
+        submit(&bridge).await;
+        let chain = chain.lock().unwrap();
+        assert_eq!(chain.sent.len(), 2, "a failed estimate sends nothing");
+        let (first, second) = (&chain.sent[0], &chain.sent[1]);
+        assert_eq!((first.nonce(), second.nonce()), (421, 421));
+        let fee = first.max_fee_per_gas();
+        let tip = first.max_priority_fee_per_gas().unwrap();
+        assert_eq!(second.max_fee_per_gas(), fee + fee / 4 + 1);
+        assert_eq!(second.max_priority_fee_per_gas(), Some(tip + tip / 4 + 1));
+        // The estimate is the gas limit; `send()` does not estimate again.
+        assert_eq!(second.gas_limit(), 200_000);
+    }
+
+    /// `ackinacki-bridge withdraw` and the one-shot commands wait for the
+    /// receipt as long as it takes: a slow payout is not a failed one.
+    #[tokio::test]
+    async fn without_a_receipt_timeout_the_receipt_is_waited_for() {
+        let chain = chain(421, vec![Reply::Accepted]);
+        let bridge = bridge(chain.clone(), 0x25).await;
+        let waiting = tokio::time::timeout(
+            Duration::from_secs(2),
+            bridge.submit_withdraw(&Bytes::from(vec![0u8; 4]), &inputs()),
+        )
+        .await;
+        assert!(waiting.is_err(), "{waiting:?}");
+        assert_eq!(chain.lock().unwrap().sent.len(), 1);
+    }
+
+    /// The daemons stop waiting, and the reason names the transaction.
+    #[tokio::test]
+    async fn the_daemons_receipt_timeout_names_the_transaction() {
+        let chain = chain(421, vec![Reply::Accepted]);
+        let bridge = bridge(chain.clone(), 0x26)
+            .await
+            .with_withdraw_receipt_timeout(Duration::from_millis(300));
+        let reason = tokio::time::timeout(Duration::from_secs(10), submit(&bridge))
+            .await
+            .expect("the receipt timeout ends the wait");
+        let hash = *chain.lock().unwrap().sent[0].tx_hash();
+        assert!(reason.starts_with("tx confirmation error:"), "{reason}");
+        assert!(reason.contains(&hash.to_string()), "{reason}");
     }
 }

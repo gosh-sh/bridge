@@ -7,35 +7,63 @@
 //! next boundary is months away. Without this check the daemon took the low
 //! head for "the next bundle is not there yet" and waited without a word.
 //!
-//! One read below the bridge can come from a GraphQL replica far behind, so
-//! the daemon stops only after [`POLLS_BEHIND_TO_STOP`] polls in a row.
+//! A read below the bridge can also come from a GraphQL replica far behind,
+//! so the daemon stops only once the head has stayed below for
+//! [`BEHIND_FOR_TO_STOP`] by the clock, over at least
+//! [`POLLS_BEHIND_TO_STOP`] polls in a row. Counting polls alone was not
+//! enough: they follow the daemon's backoff, 4, 8, 16 and 32 s apart after
+//! a start, so five of them took about a minute.
 
+use std::time::Duration;
+
+use tokio::time::Instant;
 use tracing::warn;
 
 use crate::RelayerError;
 
-/// Polls in a row with the chain head below the bridge's last verified block
-/// before the daemon stops: about five minutes at the usual poll interval.
+/// How long the chain head must stay below the bridge's last verified block,
+/// from the first poll that saw it there, before the daemon stops.
+pub const BEHIND_FOR_TO_STOP: Duration = Duration::from_secs(5 * 60);
+
+/// Polls in a row, at least, that must see the head below the bridge before
+/// the daemon stops, however long ago the first of them was: two reads with
+/// a long stall between them are not enough.
 pub const POLLS_BEHIND_TO_STOP: u32 = 5;
 
-/// Counts the polls in a row that saw the chain head below the bridge.
+/// Tracks the polls in a row that saw the chain head below the bridge.
 #[derive(Debug, Default)]
 pub struct ChainBehindGuard {
+    /// When the first poll of the current run saw the head below.
+    behind_since: Option<Instant>,
     polls_behind: u32,
 }
 
 impl ChainBehindGuard {
     /// Record one poll's chain head against the bridge's last verified
-    /// block. [`RelayerError::AnChainBehindBridge`] once the head has stayed
-    /// below it for [`POLLS_BEHIND_TO_STOP`] polls in a row; a head at or
-    /// above it starts the count again.
+    /// block, now. See [`Self::observe_at`].
     pub fn observe(&mut self, chain_head: u64, last_verified: u64) -> Result<(), RelayerError> {
+        self.observe_at(Instant::now(), chain_head, last_verified)
+    }
+
+    /// Record the chain head one poll read at `now`.
+    /// [`RelayerError::AnChainBehindBridge`] once the head has stayed below
+    /// the bridge's last verified block for [`BEHIND_FOR_TO_STOP`] and
+    /// [`POLLS_BEHIND_TO_STOP`] polls in a row; a head at or above it starts
+    /// both again.
+    pub fn observe_at(
+        &mut self,
+        now: Instant,
+        chain_head: u64,
+        last_verified: u64,
+    ) -> Result<(), RelayerError> {
         if chain_head >= last_verified {
-            self.polls_behind = 0;
+            *self = Self::default();
             return Ok(());
         }
+        let since = *self.behind_since.get_or_insert(now);
         self.polls_behind += 1;
-        if self.polls_behind >= POLLS_BEHIND_TO_STOP {
+        let behind_for = now.saturating_duration_since(since);
+        if self.polls_behind >= POLLS_BEHIND_TO_STOP && behind_for >= BEHIND_FOR_TO_STOP {
             return Err(RelayerError::AnChainBehindBridge {
                 chain_head,
                 last_verified,
@@ -45,7 +73,8 @@ impl ChainBehindGuard {
             chain_head,
             last_verified,
             polls_behind = self.polls_behind,
-            stop_after = POLLS_BEHIND_TO_STOP,
+            behind_for_secs = behind_for.as_secs(),
+            stop_after_secs = BEHIND_FOR_TO_STOP.as_secs(),
             "Acki Nacki chain head is below the bridge's last verified block; the daemon stops if \
              it stays there"
         );
@@ -57,44 +86,90 @@ impl ChainBehindGuard {
 mod tests {
     use super::*;
 
+    /// The daemon-live backoff after a start (2 s, doubling, at most 60 s):
+    /// the polls come 4, 8, 16, 32, 60, 60 … s apart.
+    fn poll_times() -> impl Iterator<Item = Duration> {
+        let mut at = Duration::ZERO;
+        let mut delay = Duration::from_secs(2);
+        std::iter::from_fn(move || {
+            let this = at;
+            delay = (delay * 2).min(Duration::from_secs(60));
+            at += delay;
+            Some(this)
+        })
+    }
+
     #[test]
     fn a_head_at_or_above_the_bridge_never_stops_the_daemon() {
+        let start = Instant::now();
         let mut guard = ChainBehindGuard::default();
         for head in [100, 100, 16_484, u64::MAX] {
-            for _ in 0..(2 * POLLS_BEHIND_TO_STOP) {
-                guard.observe(head, 100).unwrap();
+            for at in poll_times().take(20) {
+                guard.observe_at(start + at, head, 100).unwrap();
             }
         }
     }
 
+    /// The review's case: right after a start the polls come seconds
+    /// apart, and five of them used to stop the daemon within a minute.
     #[test]
-    fn a_head_below_the_bridge_stops_the_daemon_after_the_last_poll_in_a_row() {
+    fn a_head_below_the_bridge_stops_the_daemon_after_five_minutes() {
+        let start = Instant::now();
         let mut guard = ChainBehindGuard::default();
-        for _ in 1..POLLS_BEHIND_TO_STOP {
-            guard.observe(42_630, 24_018_944).unwrap();
+        let mut stopped_at = None;
+        for at in poll_times().take(20) {
+            if let Err(err) = guard.observe_at(start + at, 42_630, 24_018_944) {
+                assert!(
+                    matches!(err, RelayerError::AnChainBehindBridge {
+                        chain_head: 42_630,
+                        last_verified: 24_018_944,
+                    }),
+                    "{err:?}"
+                );
+                stopped_at = Some(at);
+                break;
+            }
         }
-        let err = guard.observe(42_631, 24_018_944).unwrap_err();
-        assert!(
-            matches!(err, RelayerError::AnChainBehindBridge {
-                chain_head: 42_631,
-                last_verified: 24_018_944,
-            }),
-            "{err:?}"
-        );
+        assert_eq!(stopped_at, Some(BEHIND_FOR_TO_STOP));
     }
 
-    /// A replica that lags for a few polls and then catches up must not
-    /// stop the daemon later.
+    /// Two reads below the bridge with a long stall between them are not
+    /// five polls in a row.
+    #[test]
+    fn the_clock_alone_does_not_stop_the_daemon() {
+        let start = Instant::now();
+        let mut guard = ChainBehindGuard::default();
+        for i in 1..POLLS_BEHIND_TO_STOP {
+            let at = BEHIND_FOR_TO_STOP * i;
+            guard.observe_at(start + at, 90, 100).unwrap();
+        }
+        let last = BEHIND_FOR_TO_STOP * POLLS_BEHIND_TO_STOP;
+        assert!(guard.observe_at(start + last, 90, 100).is_err());
+    }
+
+    /// A replica that lags for two minutes after a start and then catches
+    /// up must not stop the daemon, then or later.
     #[test]
     fn a_head_that_catches_up_starts_the_count_again() {
+        let start = Instant::now();
         let mut guard = ChainBehindGuard::default();
-        for _ in 1..POLLS_BEHIND_TO_STOP {
-            guard.observe(90, 100).unwrap();
+        let mut polls = poll_times().map(|at| start + at);
+        for at in polls
+            .by_ref()
+            .take_while(|at| *at < start + Duration::from_secs(120))
+        {
+            guard.observe_at(at, 90, 100).unwrap();
         }
-        guard.observe(100, 100).unwrap();
-        for _ in 1..POLLS_BEHIND_TO_STOP {
-            guard.observe(90, 100).unwrap();
+        let caught_up = polls.next().unwrap();
+        guard.observe_at(caught_up, 100, 100).unwrap();
+        let mut behind_again = None;
+        for at in polls.take(20) {
+            let since = *behind_again.get_or_insert(at);
+            if guard.observe_at(at, 90, 100).is_err() {
+                assert!(at - since >= BEHIND_FOR_TO_STOP);
+                return;
+            }
         }
-        assert!(guard.observe(90, 100).is_err());
+        panic!("the guard never stopped the daemon");
     }
 }

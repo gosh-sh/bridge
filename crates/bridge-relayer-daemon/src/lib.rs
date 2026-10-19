@@ -37,12 +37,12 @@ pub use aggregator::{
     SubprocessAggregator, SubprocessAggregatorConfig, FALLBACK_VERIFIER_NAME,
     LAYER_HASHES_VERIFIER_NAME, PRIMARY_VERIFIER_NAME, WITHDRAWAL_VERIFIER_NAME,
 };
-pub use an_chain_guard::{ChainBehindGuard, POLLS_BEHIND_TO_STOP};
+pub use an_chain_guard::{ChainBehindGuard, BEHIND_FOR_TO_STOP, POLLS_BEHIND_TO_STOP};
 pub use bridge::{
     classify_withdraw_revert, is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome,
     BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig,
     MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
-    GET_LOGS_CHUNK_BLOCKS,
+    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
 };
 pub use bundle_stride::{check_stride_for_rotations, stride_for_submitting, BundleStrideError};
 pub use daemon::{

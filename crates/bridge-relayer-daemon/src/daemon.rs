@@ -612,14 +612,13 @@ mod tests {
         )
         .unwrap();
         let metrics = RelayerMetrics::new();
+        let started = tokio::time::Instant::now();
 
-        // Shutdown never comes: only the guard can end the run.
+        // Shutdown never comes: only the guard can end the run. The
+        // daemon-live backoff, so the first polls come seconds apart.
+        let backoff = BackoffConfig::default();
         let err = relayer
-            .run_until_shutdown(
-                fast_backoff(),
-                Some(metrics.clone()),
-                std::future::pending(),
-            )
+            .run_until_shutdown(backoff, Some(metrics.clone()), std::future::pending())
             .await
             .unwrap_err();
 
@@ -630,10 +629,15 @@ mod tests {
             }),
             "{err:?}"
         );
-        assert_eq!(
-            metrics.snapshot().not_yet_available,
-            u64::from(crate::POLLS_BEHIND_TO_STOP - 1)
+        // Not after five polls 4, 8, 16 and 32 s apart, a minute in, but
+        // once the head has stayed below for five minutes.
+        let ran_for = started.elapsed();
+        assert!(ran_for >= crate::BEHIND_FOR_TO_STOP, "{ran_for:?}");
+        assert!(
+            ran_for < crate::BEHIND_FOR_TO_STOP + backoff.max,
+            "{ran_for:?}"
         );
+        assert!(metrics.snapshot().not_yet_available >= u64::from(crate::POLLS_BEHIND_TO_STOP));
     }
 
     #[tokio::test(start_paused = true)]

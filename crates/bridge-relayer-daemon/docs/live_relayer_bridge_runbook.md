@@ -107,6 +107,12 @@ itself; K=21 and K=22 come from their own ceremony files.
   holds real funds), funded from a faucet without a mainnet-balance gate —
   https://sepolia-faucet.pk910.de/ (proof of work) or
   https://cloud.google.com/application/web3/faucet/ethereum/sepolia.
+  Put its key into the untracked `crates/bridge-prover-libraries/.env` as
+  `RELAYER_PRIVATE_KEY=0x…`: `shellnet.common` takes it from there, and falls
+  back to the burner key it carries, which everyone on the team shares. The
+  shared burner has old transactions waiting in the Sepolia pools; each
+  transaction it sends lets more of them in, and a deploy from it can fail
+  with `EOA nonce changed unexpectedly`.
 - A deploy reserves ~0.6 ETH at the script's 2 gwei gas price (the actual
   cost is lower); each `verifyBlock` or `applyBkSetUpdate` costs
   ~0.001–0.003 ETH.
@@ -150,11 +156,16 @@ endpoint whose key is not set is left out.
   request on and keeps its place. A revert or `nonce too low` is the answer
   and is not retried elsewhere.
 - A signed transaction goes to the first endpoint that accepts it, and copies
-  go to the others. Before every transaction the relayer reads the account's
-  nonce from the chain; when its previous transaction is still waiting
-  unmined, it sends at the same nonce with fees 25 % higher, which replaces
-  it (`WARN … replacing it at the same nonce with higher fees`). A lost send
-  no longer stalls the bridge until a restart.
+  go to the others. Before every transaction the relayer estimates its gas,
+  then reads the account's nonce from the chain; a call whose estimate
+  reverts sends nothing and changes no nonce. When its previous transaction
+  is still waiting unmined, it sends at the same nonce with fees 25 % higher,
+  which replaces it (`WARN … replacing it at the same nonce with higher
+  fees`), up to 4 times the current fee estimate; past that a node refuses
+  the replacement and the waiting transaction stays. A lost send no longer
+  stalls the bridge until a restart. Whatever waits at the nonce of the
+  relayer's last send counts as its own, so on a shared key it can replace
+  someone else's transaction there — one more reason for a key of your own.
 - `BRIDGE_GET_LOGS_PAUSE_MS=600` in `shellnet.common` paces the startup scan
   for Infura's free tier (500 credits a second, 255 per `eth_getLogs`).
 
@@ -496,9 +507,10 @@ different anchor level; archive the state dir and investigate.
   bundle needs, and the contract can no longer advance.
 - Startup refuses to resume and the state cannot be reconciled.
 - The daemon stopped with `Acki Nacki chain head … is below the bridge's last
-  verified block`: the chain head stayed below the bridge for 5 polls in a
-  row. Shellnet was restarted from a new zerostate (or `BRIDGE_GQL_ENDPOINT`
-  points at another network), and the new chain cannot extend this bridge.
+  verified block`: the chain head stayed below the bridge for 5 minutes, over
+  at least 5 polls in a row. Shellnet was restarted from a new zerostate (or
+  `BRIDGE_GQL_ENDPOINT` points at another network), and the new chain cannot
+  extend this bridge.
   Before §3, rebuild `bk_set.shellnet.json` for the new network (see the
   [shellnet BK-set section of `TECHNICAL_README.md`](../../bridge-prover-libraries/TECHNICAL_README.md#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson)).
 

@@ -1064,8 +1064,9 @@ assigns it when the release is tagged.
   network; the bridge cannot follow either. The daemon took it for "the next
   bundle is not there yet" and waited without a word (after the 2026-10-14
   restart it waited three hours for a boundary the new chain reaches in
-  three months). After 5 polls in a row with the head below the bridge
-  (~5 min; one low read can be a lagging GraphQL replica) it exits with
+  three months). Once the head has stayed below the bridge for 5 minutes,
+  over at least 5 polls in a row (one low read can be a lagging GraphQL
+  replica), it exits with
   `Acki Nacki chain head … is below the bridge's last verified block …:
   the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`.
   Deploy a new bridge (live relayer runbook §5.5).
@@ -1607,6 +1608,12 @@ assigns it when the release is tagged.
   set** (the EF DevOps endpoint otherwise, as before). Every tool that
   sources it — the deploy script, the `cast` commands of the runbooks, the
   Python drivers — then talks to Infura.
+- **`shellnet.common` takes `RELAYER_PRIVATE_KEY` from the untracked
+  `crates/bridge-prover-libraries/.env` when it is set there** (or in the
+  environment); the shared shellnet burner key is the fallback. The burner
+  has old transactions waiting in the Sepolia pools, and a deploy from it
+  can fail with `EOA nonce changed unexpectedly`: give each tester a key of
+  their own. Live relayer runbook, *Disk and wallet*.
 - **`bk_set.shellnet.json` holds the genesis committee of shellnet as
   restarted on 2026-10-14** (5 signers; Poseidon commitment
   `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
@@ -2032,16 +2039,23 @@ assigns it when the release is tagged.
   went out one nonce too high and waited for the missing one, and the bridge
   stood still until the daemon was restarted. The relayer now reads the
   `latest` and `pending` counts before every transaction and remembers what
-  it sent last: a lost send goes out again at its nonce, and its own
-  transaction still waiting unmined is replaced at the same nonce with fees
-  25 % higher. Transactions others have waiting from the same account are
-  left alone. `daemon-live`, `daemon-bridge`, `daemon-withdraw`,
-  `withdraw-e2e` and the `submit-*` commands all send this way.
-- **`withdrawByProof` waits at most 180 s for its receipt**, like
-  `verifyBlock` and `applyBkSetUpdate`. It waited forever, so one dropped
-  transaction held the withdraw scan of `daemon-withdraw` and
-  `daemon-bridge`; the proof is now retried, and its nullifier check skips it
-  once it has landed.
+  it sent last: a lost send goes out again at its nonce, and a transaction
+  still waiting unmined at that nonce is replaced with fees 25 % higher than
+  the last attempt, at most 4 times the current fee estimate. Whatever waits
+  there counts as the relayer's own: on a key shared with someone else it can
+  be theirs. Otherwise transactions already waiting from the account are
+  queued behind, not replaced. The gas is estimated before the nonce is
+  chosen, so a call that would revert — a withdrawal whose anchor the bridge
+  does not hold yet — sends nothing and leaves the nonce and fees alone.
+  `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
+  `submit-*` commands all send this way.
+- **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a
+  `withdrawByProof` receipt**, like `verifyBlock` and `applyBkSetUpdate`.
+  They waited forever, so one dropped transaction held the withdraw scan;
+  the proof is now retried, the warning names the transaction hash, and the
+  nullifier check skips the proof once its payout has landed.
+  `ackinacki-bridge withdraw` and the one-shot `relayer` commands still wait
+  for the receipt as long as it takes.
 - `deposit-relayer` kills a prover that runs past its timeout instead of
   leaving it running, writing the `data/` key cache beside the retry the
   daemon starts after its backoff. `relayer prove-withdraw` does the same

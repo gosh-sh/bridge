@@ -48,7 +48,7 @@ use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::Filter,
-    sol_types::SolEvent,
+    sol_types::{SolCall, SolEvent},
     transports::TransportError,
 };
 use async_trait::async_trait;
@@ -1004,6 +1004,10 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// every transaction carries its nonce and fees from [`crate::nonce`];
     /// without it the provider's fillers choose them.
     sender: Option<Address>,
+    /// How long [`Self::submit_withdraw`] waits for the receipt
+    /// ([`Self::with_withdraw_receipt_timeout`]); `None` waits until it
+    /// comes.
+    withdraw_receipt_timeout: Option<Duration>,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -1028,6 +1032,7 @@ where
             address,
             scan: scan.normalized(),
             sender: None,
+            withdraw_receipt_timeout: None,
         }
     }
 
@@ -1040,15 +1045,41 @@ where
         self
     }
 
-    /// The nonce and fees of the next transaction, remembered before it is
-    /// sent; `None` without a sender.
-    async fn plan_send(&self) -> Result<Option<crate::nonce::TxPlan>, TransportError> {
+    /// Stops [`Self::submit_withdraw`] waiting for the receipt after
+    /// `timeout`; the payout then comes back unconfirmed, with its
+    /// transaction hash in the reason. For the daemons, which retry and skip
+    /// a payout that has landed by its nullifier. Without it the receipt is
+    /// waited for until it comes, as a one-shot command needs.
+    pub fn with_withdraw_receipt_timeout(mut self, timeout: Duration) -> Self {
+        self.withdraw_receipt_timeout = Some(timeout);
+        self
+    }
+
+    /// `call` ready to go out from [`Self::with_sender`]'s account: its gas
+    /// estimated first, so a call that would revert leaves the nonce and
+    /// fees alone, then the nonce and fees [`crate::nonce`] plans,
+    /// remembered before the send. With the gas and fees set, `send()`
+    /// estimates nothing more and only broadcasts. Without a sender `call`
+    /// comes back as it is, for the provider's fillers. `Err` is the text of
+    /// the failed estimate or plan, the same a failed `send()` reports.
+    async fn prepare_send<'a, C: SolCall>(
+        &'a self,
+        call: alloy::contract::SolCallBuilder<&'a P, C, N>,
+    ) -> Result<alloy::contract::SolCallBuilder<&'a P, C, N>, String> {
         let Some(sender) = self.sender else {
-            return Ok(None);
+            return Ok(call);
         };
-        let plan = crate::nonce::plan_transaction(self.contract.provider(), sender).await?;
+        let call = call.from(sender);
+        let gas = call.estimate_gas().await.map_err(|e| e.to_string())?;
+        let plan = crate::nonce::plan_transaction(self.contract.provider(), sender)
+            .await
+            .map_err(|e| e.to_string())?;
         crate::nonce::remember(sender, &plan);
-        Ok(Some(plan))
+        Ok(call
+            .gas(gas)
+            .nonce(plan.nonce)
+            .max_fee_per_gas(plan.max_fee_per_gas)
+            .max_priority_fee_per_gas(plan.max_priority_fee_per_gas))
     }
 
     /// One `storedLastSeenBlockSeqNo` view call at `latest`: the cheap probe
@@ -1268,48 +1299,43 @@ where
         let call = self
             .contract
             .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
-        let call = match self.plan_send().await {
-            Ok(Some(plan)) => call
-                .nonce(plan.nonce)
-                .max_fee_per_gas(plan.max_fee_per_gas)
-                .max_priority_fee_per_gas(plan.max_priority_fee_per_gas),
-            Ok(None) => call,
-            Err(e) => {
-                return Ok(WithdrawSubmitOutcome::Reverted {
-                    reason: format!("withdrawByProof send failed: {e}"),
-                    permanent: false,
-                });
-            },
+        let send_failed = |e: &dyn std::fmt::Display| {
+            let reason = format!("withdrawByProof send failed: {e}");
+            let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+                permanent,
+            }
+        };
+        let call = match self.prepare_send(call).await {
+            Ok(call) => call,
+            Err(e) => return Ok(send_failed(&e)),
         };
         match call.send().await {
-            Ok(pending) => match pending
-                .with_timeout(Some(WITHDRAW_RECEIPT_TIMEOUT))
-                .get_receipt()
-                .await
-            {
-                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
-                    tx_hash: receipt.transaction_hash(),
-                }),
-                Err(e) => {
-                    // Post-send confirmation failures (RPC dropped, receipt
-                    // wait timed out) are transient by nature — the tx
-                    // may still land or the RPC may recover — so we do
-                    // not park the proof here.
-                    let reason = format!("tx confirmation error: {e}");
-                    Ok(WithdrawSubmitOutcome::Reverted {
-                        reason,
-                        permanent: false,
-                    })
-                },
+            Ok(pending) => {
+                let tx_hash = *pending.tx_hash();
+                match pending
+                    .with_timeout(self.withdraw_receipt_timeout)
+                    .get_receipt()
+                    .await
+                {
+                    Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
+                        tx_hash: receipt.transaction_hash(),
+                    }),
+                    Err(e) => {
+                        // Post-send confirmation failures (RPC dropped, receipt
+                        // wait timed out) are transient by nature — the tx
+                        // may still land or the RPC may recover — so we do
+                        // not park the proof here.
+                        let reason = format!("tx confirmation error: {e} (transaction {tx_hash})");
+                        Ok(WithdrawSubmitOutcome::Reverted {
+                            reason,
+                            permanent: false,
+                        })
+                    },
+                }
             },
-            Err(e) => {
-                let reason = format!("withdrawByProof send failed: {e}");
-                let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
-                Ok(WithdrawSubmitOutcome::Reverted {
-                    reason,
-                    permanent,
-                })
-            },
+            Err(e) => Ok(send_failed(&e)),
         }
     }
 
@@ -1384,12 +1410,8 @@ where
             B256::from(update.sibling_h4_7),
             B256::from(update.sibling_h8_15),
         );
-        let call = match self.plan_send().await {
-            Ok(Some(plan)) => call
-                .nonce(plan.nonce)
-                .max_fee_per_gas(plan.max_fee_per_gas)
-                .max_priority_fee_per_gas(plan.max_priority_fee_per_gas),
-            Ok(None) => call,
+        let call = match self.prepare_send(call).await {
+            Ok(call) => call,
             Err(e) => {
                 return Ok(BkSetUpdateSubmitOutcome::Reverted {
                     reason: format!("applyBkSetUpdate send failed: {e}"),
@@ -2145,10 +2167,13 @@ pub enum BkSetUpdateSubmitOutcome {
 /// (~15 Sepolia blocks) `submit_block` allows `verifyBlock`.
 pub const BK_UPDATE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Bound on the wait for a `withdrawByProof` receipt, the same 180 s. alloy
-/// waits forever by default, which held the withdraw scan on a dropped
-/// transaction; past the bound the proof is retried like any other
-/// unconfirmed send, and its nullifier check skips it once it has landed.
+/// Bound on the wait for a `withdrawByProof` receipt in `daemon-withdraw` and
+/// `daemon-bridge` ([`EthBridgeClient::with_withdraw_receipt_timeout`]), the
+/// same 180 s. alloy waits forever by default, which held the withdraw scan
+/// on a dropped transaction; past the bound the proof is retried like any
+/// other unconfirmed send, and its nullifier check skips it once it has
+/// landed. A one-shot `withdrawByProof` — `ackinacki-bridge withdraw` among
+/// them — waits for its receipt.
 pub const WITHDRAW_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// `true` when a `verifyBlock` or `applyBkSetUpdate` failure says nothing
@@ -2307,12 +2332,8 @@ where
         // counts toward `max_attempts_abort` instead of hanging the daemon.
         const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
-        let call = match self.plan_send().await {
-            Ok(Some(plan)) => call
-                .nonce(plan.nonce)
-                .max_fee_per_gas(plan.max_fee_per_gas)
-                .max_priority_fee_per_gas(plan.max_priority_fee_per_gas),
-            Ok(None) => call,
+        let call = match self.prepare_send(call).await {
+            Ok(call) => call,
             Err(e) => {
                 return Ok(SubmitOutcome::Reverted {
                     reason: format!("verifyBlock send failed: {e}"),
@@ -2482,6 +2503,23 @@ mod tests {
 
     fn always_accept() -> VerifierDecision {
         Arc::new(|_| true)
+    }
+
+    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
+    /// slower than the daemons' bound must not come back to the user as a
+    /// failure. Only the daemons set a bound.
+    #[test]
+    fn only_the_daemons_stop_waiting_for_a_withdraw_receipt() {
+        let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new_http(
+            "http://127.0.0.1:1".parse().unwrap(),
+        );
+        let client = EthBridgeClient::new(Address::ZERO, provider);
+        assert_eq!(client.withdraw_receipt_timeout, None);
+        let client = client.with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
+        assert_eq!(
+            client.withdraw_receipt_timeout,
+            Some(WITHDRAW_RECEIPT_TIMEOUT)
+        );
     }
 
     #[test]

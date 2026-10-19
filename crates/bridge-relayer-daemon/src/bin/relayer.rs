@@ -47,7 +47,7 @@ use bridge_relayer_daemon::{
     RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
     SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
     WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    GET_LOGS_CHUNK_BLOCKS,
+    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -984,9 +984,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// HTTP client for `--rpc-url`: each request fails after
-/// `BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60) instead of waiting on a
-/// connection that went silent.
 /// `--rpc-failover-urls` / `RPC_FAILOVER_URLS`, set once in `main`.
 static RPC_FAILOVER_URLS: OnceLock<Vec<String>> = OnceLock::new();
 
@@ -1741,7 +1738,9 @@ async fn run_withdraw_daemon(
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
-    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
+    let bridge = EthBridgeClient::new(bridge_address, provider)
+        .with_sender(sender)
+        .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -1832,7 +1831,9 @@ async fn run_bridge_daemon(
 
     // Withdraw leg: shares the SAME provider (one nonce source; the two
     // legs run sequentially so there's only ever one in-flight tx).
-    let wd_bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
+    let wd_bridge = EthBridgeClient::new(bridge_address, provider)
+        .with_sender(sender)
+        .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
     let mut wd_state = WithdrawScanState::default();
 
     let shutdown = shutdown_signal();

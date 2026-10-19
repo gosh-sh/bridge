@@ -58,7 +58,9 @@ with per-id backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, 
 A retry loads the stored Deposit tx (or its block) so the log-scan cursor can keep
 moving with later deposits. An outstanding id that has no stored log — a `state.json`
 written by an earlier relayer that only recorded `attempts_since_progress` — is
-scanned from `--from-block` up to `scan_done_through_block`, not to the live head.
+scanned from the `scan_done_through_block` that file had on load, plus one
+(that daemon left the cursor at the deposit's block minus one), not from
+`--from-block` and not to the live head.
 
 A stuck deposit no longer holds every later user. What gets the stuck one moving:
 

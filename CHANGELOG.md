@@ -41,7 +41,8 @@ assigns it when the release is tagged.
   (QC-OFF-01, -02, -08, -11). A pending submit stays at the base outstanding
   delay (it does not increment attempts). `--force-state` also drops
   outstanding ids and logs them. An outstanding id with no stored log is
-  scanned from `--from-block` only up to `scan_done_through_block`.
+  scanned from the persisted `scan_done_through_block` plus one, not from
+  `--from-block` and not to the live head.
 
 - `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
   row told operators to re-prove `applyBkSetUpdate` against the live
@@ -1516,8 +1517,10 @@ assigns it when the release is tagged.
   an earlier relayer that only has `attempts_since_progress` for the last
   failed id carries that count into the new outstanding entry, so
   `--skip-after-attempts` does not start over; that id has no stored tx, so
-  the first retry scans from `--from-block` up to `scan_done_through_block`,
-  not to the live head. `finalize-one` is unchanged.
+  the first retry starts at the `scan_done_through_block` from that file
+  plus one (the earlier relayer left the cursor at the deposit's block
+  minus one), not at `--from-block` and not at the live head.
+  `finalize-one` is unchanged.
 
   Gauges that used to mean "the one stuck head-of-line id" now mean something
   else: `deposit_relayer_attempts_since_progress` follows the last failed

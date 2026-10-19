@@ -117,8 +117,9 @@ pub struct RelayerState {
     /// relayer still has to *discover*, so the next `eth_getLogs` scan starts
     /// after it. Outstanding ids with a stored tx or block are retried from
     /// that, not from this cursor. An outstanding id that has none (a
-    /// `state.json` from an earlier relayer) is scanned from `--from-block`
-    /// up to this cursor, not to the live head.
+    /// `state.json` from an earlier relayer) is scanned from this cursor
+    /// plus one — that daemon left it at the deposit's block minus one —
+    /// not from `--from-block` and not to the live head.
     /// Set to the confirmed head while the next deposit is not made yet, and
     /// to a found deposit's block minus one (a later `depositId` can share
     /// that block). `None` = scan from `--from-block`.

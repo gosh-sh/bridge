@@ -86,8 +86,8 @@ impl BackoffConfig {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Atomic counters for one running daemon. All counters are monotonic except
-/// `current_backoff_secs` and `last_finalized_deposit_id`, which track the
-/// latest value.
+/// `current_backoff_secs`, which tracks the latest backoff, and
+/// `last_finalized_deposit_id`, which keeps the highest id finalized.
 #[derive(Debug, Default)]
 pub struct RelayerMetrics {
     pub ticks_total: AtomicU64,

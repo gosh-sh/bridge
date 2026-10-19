@@ -229,6 +229,12 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     /// when a deposit is found (its block minus one), and by the relayer
     /// after a finalize. `None` means "scan from `from_block`".
     scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
+    /// Cursor value when [`Self::with_scan_cursor`] ran — the persisted
+    /// `scan_done_through_block` of an earlier relayer. A migrated outstanding
+    /// id with no stored log starts its rescan at this plus one, because that
+    /// daemon left the cursor at the stuck deposit's block minus one. The live
+    /// mutex is not used: idle polls move it to `safe_head`.
+    initial_scan_cursor: Option<u64>,
     /// The last deposit found, so retrying a deposit AN keeps refusing costs
     /// no `eth_getLogs`. It was already `confirmations` deep when found.
     located: Mutex<Option<DepositEvent>>,
@@ -248,6 +254,7 @@ where
             confirmations,
             chain_id: Mutex::new(None),
             scan_cursor: None,
+            initial_scan_cursor: None,
             located: Mutex::new(None),
             _network: std::marker::PhantomData,
         }
@@ -256,6 +263,7 @@ where
     /// Attach a shared scan cursor (typically backed by
     /// [`RelayerState`](crate::state::RelayerState)).
     pub fn with_scan_cursor(mut self, cursor: Arc<Mutex<Option<u64>>>) -> Self {
+        self.initial_scan_cursor = cursor.lock().ok().and_then(|g| *g);
         self.scan_cursor = Some(cursor);
         self
     }
@@ -469,9 +477,8 @@ where
     /// When `move_cursor` is set, a miss (the counter says the deposit is
     /// not made yet) advances the shared cursor to `safe_head`, and a hit
     /// moves it to the deposit's block minus one so later ids in the same
-    /// block stay in range. Outstanding retries with no stored log pass
-    /// `--from-block` and `scan_until` (the persisted cursor, which already
-    /// covers a previously found deposit) and leave the cursor alone.
+    /// block stay in range. Outstanding retries with no stored log start at
+    /// the snapshot cursor plus one and leave the live cursor alone.
     async fn scan_for_deposit(
         &self,
         deposit_id: u64,
@@ -623,16 +630,27 @@ where
             return self.fetch_in_block(deposit_id, block).await;
         }
         // No stored log: a `state.json` from an earlier relayer only carried
-        // the failed id's attempt count. Scan from `--from-block` up to the
-        // persisted cursor (that daemon already found this id) and do not
-        // walk the blocks mined since, which later ids may already have
-        // advanced past.
-        let scan_until = self
-            .scan_cursor
-            .as_ref()
-            .and_then(|c| c.lock().ok().and_then(|g| *g));
-        self.scan_for_deposit(deposit_id, self.from_block, false, scan_until)
+        // the failed id's attempt count. That daemon left the cursor at the
+        // deposit's block minus one, so start at snapshot+1 — not at
+        // `--from-block` (a hundred thousand chunks) and not at the live
+        // cursor, which an idle poll has usually moved to `safe_head`. If
+        // the snapshot already sat past the deposit, fall back to
+        // `--from-block ..= snapshot`.
+        let snapshot = self.initial_scan_cursor;
+        let scan_from = snapshot
+            .map(|c| c.saturating_add(1))
+            .unwrap_or(self.from_block);
+        match self
+            .scan_for_deposit(deposit_id, scan_from, false, None)
             .await
+        {
+            Ok(found) => Ok(found),
+            Err(e) if snapshot.is_some() && e.to_string().contains("found no Deposit log") => {
+                self.scan_for_deposit(deposit_id, self.from_block, false, snapshot)
+                    .await
+            },
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -880,10 +898,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_known_without_a_log_scans_from_from_block() {
-        // A `state.json` from an earlier relayer carries the failed id with
-        // no tx or block. The shared cursor may already sit past that
-        // deposit; the retry must still find it.
+    async fn fetch_known_without_a_log_starts_at_the_snapshot_cursor() {
+        // An earlier relayer found deposit 0 at block 105 and left the cursor
+        // at 104. The live cursor may already sit at the safe head after an
+        // idle poll; the retry must still start at 105, not at `--from-block`.
+        let rpc = FakeRpc::new(BRIDGE, 130);
+        rpc.deposit(105);
+        let cursor = Arc::new(Mutex::new(Some(104)));
+        let source = log_source(&rpc, &cursor);
+        *cursor.lock().unwrap() = Some(118);
+
+        let event = source
+            .fetch_known(0, None, None, None)
+            .await
+            .unwrap()
+            .expect("deposit 0");
+        assert_eq!(event.block_number, 105);
+        assert_eq!(*cursor.lock().unwrap(), Some(118));
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(105, 114)]);
+    }
+
+    #[tokio::test]
+    async fn fetch_known_without_a_log_falls_back_when_the_snapshot_is_past_the_deposit() {
+        // A cursor already past the deposit (this daemon's idle poll, or a
+        // hand-edited file) still has to find it, without walking every
+        // block mined since the snapshot.
         let rpc = FakeRpc::new(BRIDGE, 130);
         rpc.deposit(105);
         let cursor = Arc::new(Mutex::new(Some(110)));
@@ -896,26 +935,6 @@ mod tests {
             .expect("deposit 0");
         assert_eq!(event.block_number, 105);
         assert_eq!(*cursor.lock().unwrap(), Some(110));
-        assert_eq!(rpc.take_get_logs_ranges(), vec![(100, 109)]);
-    }
-
-    #[tokio::test]
-    async fn fetch_known_without_a_log_stops_at_the_scan_cursor() {
-        // The migrated id was found by the earlier relayer, so it sits at or
-        // before `scan_done_through_block`. Walking from `--from-block` to
-        // the live head would rescan every block mined since.
-        let rpc = FakeRpc::new(BRIDGE, 1000);
-        rpc.deposit(50);
-        let cursor = Arc::new(Mutex::new(Some(110)));
-        let source = log_source(&rpc, &cursor);
-
-        let err = source
-            .fetch_known(0, None, None, None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("100..=110"), "{err}");
-        assert_eq!(rpc.take_get_logs_ranges(), vec![(100, 109), (110, 110)]);
-        assert_eq!(*cursor.lock().unwrap(), Some(110));
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(111, 118), (100, 109)]);
     }
 }

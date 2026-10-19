@@ -34,6 +34,16 @@
 			]
 		},
 		{
+			"name": "mintAndSendBridged",
+			"inputs": [
+				{"name":"recipient","type":"address"},
+				{"name":"value","type":"uint128"},
+				{"name":"nonce","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "mintAndSendAccumulator",
 			"inputs": [
 				{"name":"buyer","type":"address"},

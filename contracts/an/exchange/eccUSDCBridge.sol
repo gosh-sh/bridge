@@ -22,11 +22,16 @@ interface IShellAccumulator {
 ///            One-way: TIP-3 → ECC. Counter: `_totalMinted`.
 ///
 ///         2. Owner-mint admin path
-///            `mintAndSend` / `mintAndSendAccumulator` — owner-key (pubkey)
-///            mints ECC[3] USDC and dispatches to recipient / Accumulator
-///            buyShellFor. Nonce-protected (`_mintNonce`,
-///            `_mintAccumulatorNonce`) against off-chain replay of signed
-///            mint requests.
+///            `mintAndSend` / `mintAndSendAccumulator` / `mintAndSendBridged`
+///            — owner-key (pubkey) mints ECC[3] USDC and dispatches to
+///            recipient / Accumulator buyShellFor. Nonce-protected
+///            (`_mintNonce`, `_mintAccumulatorNonce`) against off-chain
+///            replay of signed mint requests. `mintAndSend` and
+///            `mintAndSendAccumulator` increment `_totalMinted` only.
+///            `mintAndSendBridged` matches `confirmDeposit`: it increments
+///            `_totalMintedBridgeByToken[USDC_ECC_ID]` and is the recovery
+///            mint after a voucher-consumed `confirmDeposit` abort (CLI
+///            exit 37). Do not use it for ordinary owner mint.
 ///
 ///         3. Cross-chain bridge — USDC-only (tokenId == USDC_ECC_ID)
 ///            `initiateWithdrawal` (burn ECC + emit `WithdrawalInitiated`) and
@@ -38,12 +43,13 @@ interface IShellAccumulator {
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
 ///            `_totalBurnedBridgeByToken`. `initiateWithdrawal` refuses a
 ///            burn that would take burned above minted for that token
-///            (`ERR_BURN_EXCEEDS_BRIDGED`). Owner-mint and TIP-3 mint do
-///            not increment the bridged counters.
+///            (`ERR_BURN_EXCEEDS_BRIDGED`). Owner-mint (`mintAndSend`,
+///            `mintAndSendAccumulator`) and TIP-3 mint do not increment
+///            the bridged counters; `mintAndSendBridged` does.
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
-    string constant version = "1.10.0";
+    string constant version = "1.11.0";
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -445,7 +451,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     // ========================================================
 
     /// @notice Mints ECC[3] USDC and sends it to the specified recipient address.
-    ///         Only callable by the owner (by public key).
+    ///         Only callable by the owner (by public key). Increments
+    ///         `_totalMinted` only — not bridged inventory. After CLI exit 37
+    ///         (voucher spent, `confirmDeposit` aborted) use
+    ///         `mintAndSendBridged` instead, or the USDC already in the
+    ///         Ethereum treasury never becomes withdrawable headroom.
     /// @param recipient — address to receive the minted ECC[3] USDC
     /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
     function mintAndSend(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
@@ -457,6 +467,40 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
 
         gosh.mintecc(uint64(value), USDC_ECC_ID);
         _totalMinted += value;
+
+        mapping(uint32 => varuint32) ecc;
+        ecc[USDC_ECC_ID] = varuint32(value);
+        recipient.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: ecc});
+
+        address addrExtern = address.makeAddrExtern(UsdcMintedEmit, bitCntAddress);
+        emit UsdcMinted{dest: addrExtern}(recipient, value);
+    }
+
+    // ========================================================
+    // Owner recovery mint that credits bridged inventory
+    // ========================================================
+
+    /// @notice Owner recovery mint matching `confirmDeposit` accounting:
+    ///         `gosh.mintecc` plus `_totalMintedBridgeByToken[USDC_ECC_ID]`.
+    ///         Call this after CLI exit 37: the deposit voucher is spent so
+    ///         `finalizeDeposit` cannot mint again, Ethereum already holds
+    ///         the USDC, and ordinary `mintAndSend` would leave
+    ///         `getTotalBridged` short — last withdrawers then hit 233.
+    ///         Shares `_mintNonce` with `mintAndSend`. Do not use it for
+    ///         ordinary owner mint: that would invent bridged inventory the
+    ///         Ethereum treasury does not hold.
+    /// @param recipient — address to receive the minted ECC[3] USDC
+    /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
+    /// @param nonce — next `_mintNonce` (shared with `mintAndSend`)
+    function mintAndSendBridged(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
+        require(value > 0, ERR_ZERO_AMOUNT);
+        require(value <= uint128(type(uint64).max), ERR_OVERFLOW);
+        _mintNonce = nonce;
+
+        gosh.mintecc(uint64(value), USDC_ECC_ID);
+        _totalMintedBridgeByToken[USDC_ECC_ID] += value;
 
         mapping(uint32 => varuint32) ecc;
         ecc[USDC_ECC_ID] = varuint32(value);
@@ -835,7 +879,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, ISubscriber {
     ///         USDC ECC and sends it to the proof-bound AN recipient. The caller
     ///         must be the deterministic voucher address derived from the
     ///         deposit identity — replay attempts hit the existing voucher
-    ///         account whose constructor was already consumed.
+    ///         account whose constructor was already consumed. If this call
+    ///         aborts after that constructor has run, the voucher is spent
+    ///         and the owner pays the recipient with `mintAndSendBridged`.
     function confirmDeposit(
         uint256 depositId,
         uint256 contractAddr,

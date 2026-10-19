@@ -77,6 +77,27 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`eccUSDCBridge` 1.11.0 adds owner `mintAndSendBridged` for CLI exit 37.**
+  After a voucher-consumed `confirmDeposit` abort the deposit cannot be
+  finalized again, Ethereum already holds the USDC, and ordinary
+  `mintAndSend` does not increment `getTotalBridged` — last withdrawers
+  then hit 233. `mintAndSendBridged` matches `confirmDeposit`: it mints
+  ECC[3] and credits `_totalMintedBridgeByToken`. It shares `_mintNonce`
+  with `mintAndSend`. Do **not** use it for ordinary owner mint: that
+  would invent bridged inventory the Ethereum treasury does not hold.
+  `mintAndSend` / `mintAndSendAccumulator` / TIP-3 mint still increment
+  only `getTotalMinted`.
+
+  ECC[3] stays fungible: the cap is still an inventory check, not a
+  per-depositor reservation. That half of QC-AN-05 is the accepted
+  product choice.
+
+  Upgrade with `updateCode` and an empty `userCell` — storage layout is
+  unchanged. The ABI gains `mintAndSendBridged`. `eccUSDCBridge` 1.11.0,
+  code hash `aeeadc7f…`, rebuilt with sold 0.80.0. The deposit CLI's
+  exit-37 message, README and QUICKSTART now tell the operator to call
+  `mintAndSendBridged`. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.11.0.
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.

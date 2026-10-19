@@ -1547,9 +1547,10 @@ record.
   relayer can finalize it to the recipient in its call data; otherwise only
   the operator can return the USDC.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
-  The operator pays it out (`mintAndSend`). That ECC does not add bridged
-  inventory, so it cannot be withdrawn over the bridge until a later
-  `finalizeDeposit` covers it.
+  The operator pays it out (`mintAndSendBridged`). That call credits
+  bridged inventory the way `confirmDeposit` would have; ordinary
+  `mintAndSend` does not, and the USDC already in the Ethereum treasury
+  would never become withdrawable headroom.
 
 Give the operator the deposit's transaction hash, its `depositId`, the amount
 and recipient actually deposited, the EVM bridge address and the operation id;
@@ -1704,7 +1705,7 @@ already. Independently of that minimum, preflight also refuses a bridge
 older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.8.0`) gets a warning.
+than the newest this build was checked against (`1.11.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

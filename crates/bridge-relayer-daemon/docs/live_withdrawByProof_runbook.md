@@ -91,6 +91,7 @@ this doc extends.
   - [Case 3b — On-chain `withdrawByProof` revert](#case-3b--on-chain-withdrawbyproof-revert)
   - [Case 3c — USDCBridge key drift (burn side)](#case-3c--usdcbridge-key-drift-burn-side)
   - [Case 3d — `WithdrawTreasuryShortfall` — bridge treasury empty](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty)
+  - [Case 3e — Anchor eviction deadline — `--anchor-layer` runway is finite](#case-3e--anchor-eviction-deadline----anchor-layer-runway-is-finite)
 - [L2 timing model](#l2-timing-model)
 - [Health checks](#health-checks)
 - [File & state reference](#file--state-reference)
@@ -805,7 +806,7 @@ Sepolia revert. The log prints the selector.
 | `WithdrawalProofRejected()` | SHPLONK adapter equality prelude failed, or the crypto pairing failed | The 11 inner-instance slots recovered from `proof` calldata (`instances[12..22]`, see `BridgeWithdrawalAggregatorVerifier.sol:30-40`) don't match the `WithdrawalPublicInputs` struct passed alongside — or `_verifyShplonk` returned false. Note that `acc_fr` drift and a missing/mis-selected anchor both revert earlier with the more specific `WithdrawIdentityMismatch` (`AckiNackiBridge.sol:1303`) and `UnknownAnchor` respectively, so if you're seeing `WithdrawalProofRejected` those two are already ruled out. Look for a stale/mis-packed calldata blob or a fresh keygen against the wrong VK. |
 | `WithdrawIdentityMismatch()` | `pub.dappFr`/`pub.accFr` don't match the bridge's stored withdrawal identity | Reverts before crypto (`AckiNackiBridge.sol:1303`). `bridgeWithdrawalAccFr` (and its `dappFr` sibling) are `immutable` on this contract (`AckiNackiBridge.sol:229`), so a witness "regeneration" cannot clear this — the same witness would be rejected on a rerun. The fix is on the ETH side: redeploy `AckiNackiBridge` with `(dappFr, accFr)` set to the AN-side withdrawal identity the prover is aimed at, or point the prover at the identity the currently-deployed bridge was constructed with. **This installation cannot pay out burns that have already been emitted against the "wrong" identity.** The public inputs of a Circuit-4 proof bind `accFr` (slot 7) and `dappFr` (slot 6) at proving time — these are the bridge-withdrawal identity slots, distinct from `senderAccFr` (slot 5), which is the burning account's own Fr-encoded ID and is not what the contract compares. At `withdrawByProof` time `AckiNackiBridge.sol:1302` checks `pub.dappFr == bridgeWithdrawalDappFr` and `pub.accFr == bridgeWithdrawalAccFr` (both `immutable`, `AckiNackiBridge.sol:229`), so a burn whose event carries identity X will never verify against a bridge deployed for identity Y. If the operator switches identities by redeploying, users whose burns were emitted before the switch have to be made whole outside this contract (custodial refund, or a fresh burn against the new identity). See [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet). |
 | `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender, events_pos)` 7-tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. `events_pos` is bound into the preimage, so two *distinct* `WithdrawalInitiated` events in the same AN block do not collide — this error truly means the same event was replayed. |
-| `UnknownAnchor(uint256 finalRoot)` | `pub.finalRoot` not present in `_layerWindows[pub.anchorLayer]` | Covering bundle not yet on-chain at the given anchor layer, or the proof was built against a stale/mis-selected anchor. Wait for the bundle daemon to submit + confirm the covering bundle, then retry — or fix the anchor selection upstream. |
+| `UnknownAnchor(uint256 finalRoot)` | `pub.finalRoot` not present in `_layerWindows[pub.anchorLayer]` | Covering bundle not yet on-chain at the given anchor layer, or the proof was built against a stale/mis-selected anchor. Wait for the bundle daemon to submit + confirm the covering bundle, then retry — or fix the anchor selection upstream. A proof whose dry-run passed earlier and now reverts here has lost its anchor to eviction — [Case 3e](#case-3e--anchor-eviction-deadline----anchor-layer-runway-is-finite). |
 | `InvalidNumLayers(uint256 numLayers)` | `pub.anchorLayer` outside `1..=MAX_LAYER_HASHES` | Wrong anchor layer supplied. `MAX_LAYER_HASHES = 10` is a compile-time constant in `AckiNackiBridge.sol:65`; check the witness picked a layer inside that range. |
 | `WithdrawTreasuryShortfall(uint256,uint256)` = `0xbb651fce` | `pub.amount > treasuryBalance` (AckiNackiBridge.sol:1188) | Crypto path already passed; only the payout leg is blocked. Seed the treasury via `deposit()` — see [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty). |
 
@@ -951,6 +952,187 @@ against the empty treasury it will submit successfully now.
 you're good for the demo cycle. Excess USDC in the treasury is not lost:
 it stays available for future withdraws, and can optionally be swept to
 AAVE via `supplyToAave()` for yield.
+
+---
+
+### Case 3e — Anchor eviction deadline — `--anchor-layer` runway is finite
+
+Checked against `98df1a95`.
+
+**Symptom.** A withdrawal that was fine hours ago (L1 deploy) or days
+ago (L2 deploy) now fails in one of three ways:
+
+- the dry-run or the transaction reverts `UnknownAnchor(finalRoot)` for
+  a proof built while its anchor was still in the window — in
+  `withdraw-e2e`, `submit-withdraw`, `daemon-withdraw` or the withdraw
+  leg of `daemon-bridge`;
+- `withdraw-e2e --anchor-layer auto` stops in the enricher, before
+  proving: `auto: L1 (K=…, height=…) and all higher active layers rolled
+  out of their rolling windows. Event is older than verifier coverage.`;
+- `withdraw-e2e --anchor-layer <n>` stops with `anchor key block height
+  … not found in L<n> window … — block has rolled out of the L<n>
+  rolling window`.
+
+**Why this happens.** `AckiNackiBridge` keeps one ring of
+`HISTORY_PROOF_WINDOW = 128` anchors per layer. Every successful
+`verifyBlock` calls `_appendLayerHashes`, which appends the block's hash
+for each layer `1..numLayers` to that layer's ring; once a ring is full,
+each append overwrites its oldest entry. `withdrawByProof` accepts
+`finalRoot` only while it is in the ring that the proof's `anchorLayer`
+names, so the 128th append to that layer after the anchor landed is the
+proof's deadline.
+
+The witness builder fixes the anchor by the event and the layer: `K`,
+the next `W·P` boundary after the event, for L1; `T_n`, the next `W^n`
+boundary, for L(n) (`l1_anchor_boundaries` and `l_n_anchor_boundaries`
+in `bridge-prover-lib/src/real_chain_builder.rs`). Re-proving at the
+same layer therefore targets the same evicted anchor; only a higher
+layer has a later deadline. Escalating cannot pay twice: the nullifier
+`Poseidon(block_id, tokenId, amount, hi, lo, sender, events_pos)` takes
+no root. `--anchor-layer auto` (the default) escalates by itself, from
+the local `prover_state.json`: L1 while `K` is in the L1 window,
+otherwise the first of L2, L3, … up to the active layer count whose
+window still holds `T_n` (`resolve_anchor_layer` in
+`bridge-event-witness/src/enrich.rs`).
+
+**Wall-clock deadlines** (≈ 3 seq/s, `W = 128`, `P = 8`). The deploy
+mode is the bridge's `bundleStride()` — `W·P = 1024` on an L1 deploy,
+`W² = 16384` on an L2 deploy — and the daemon submits one `verifyBlock`
+per stride:
+
+| Deploy | Bundle stride | Appends per layer | L1 anchor lives | L2 anchor lives |
+|---|---|---|---|---|
+| L1 (`BRIDGE_ANCHOR_LEVEL=1`) | 1024 seq, ~5.7 min | L1 every bundle; L2 every 16th (the `W²`-aligned blocks) | **~12 h** | **~8 d** |
+| L2 (`BRIDGE_ANCHOR_LEVEL=2`, shellnet) | 16384 seq, ~91 min | L1 *and* L2 every bundle — every submitted block is `W²`-aligned (`numLayers ≥ 2`) | **~8 d** | **~8 d** |
+
+On both, L3 gets one append per `W³`-aligned block (2 097 152 seq,
+~8 d) and keeps an anchor for ~2.8 years, but only from the first such
+block the bridge verifies: while `layerWindowLen(3)` is `0`, L2 is the
+highest active layer. The clock runs only while the bridge relays — a
+layer that gets no appends evicts nothing.
+
+**The L2-deploy sharp edge.** Shellnet is an L2 deploy:
+[`deploy/shellnet-l2/scripts/preflight.sh`](../deploy/shellnet-l2/scripts/preflight.sh)
+refuses any `BRIDGE_ANCHOR_LEVEL` but 2. There the L1 and L2 rings
+advance together, one slot per bundle, so an event's L1 anchor — when it
+has one — is evicted by the same `verifyBlock` as its L2 anchor.
+`--anchor-layer auto`'s L1 → L2 fallback **buys no runway on an L2
+deploy**. On an L1 deploy it is real: L2 fills 16× slower than L1, the
+`× (W/P) = 16` step of trade-off 3 in
+[`EVM-contracts-spec.md`](../../../docs/EVM-contracts-spec.md#15-security-properties-and-observations).
+On either deploy the next layer that adds runway is L3 (×128).
+
+**Monitoring recipe.** `anchorRemainingAppends(uint8 layer, uint256
+anchor)` returns `N` when the `N`-th further append to that layer
+overwrites the anchor (it survives `N − 1`), and `0` when the anchor is
+not in the window — evicted, or not appended yet (its key block `K` or
+`T_n` is still above `storedLastSeenBlockSeqNo()`). Poll it for every
+withdrawal burned on AN and not yet paid, with the layer and root its
+proof carries:
+
+```bash
+# From the proof withdraw-e2e wrote under --prover-out-dir
+# (<NNNNNN> is --prover-seq-no, zero-padded to six digits).
+# public_instances_hex holds little-endian field elements:
+# slot 9 is finalRoot, slot 10 is anchorLayer.
+PROOF=proofs/proof_event_<NNNNNN>.json
+ANCHOR=0x$(jq -r '.public_instances_hex[9]' "$PROOF" \
+  | python3 -c 'import sys; print(bytes.fromhex(sys.stdin.read().strip())[::-1].hex())')
+LAYER=$(jq -r '.public_instances_hex[10]' "$PROOF" \
+  | python3 -c 'import sys; print(int.from_bytes(bytes.fromhex(sys.stdin.read().strip()), "little"))')
+
+# Before proving, the enriched witness under --work-dir names the same
+# anchor: layer_hash_hex is little-endian too, layer_idx is 0-based.
+WITNESS=work_dir/event_<NNNNNN>_witness.json
+ANCHOR=0x$(jq -r '.anchor.layer_hash_hex' "$WITNESS" \
+  | python3 -c 'import sys; print(bytes.fromhex(sys.stdin.read().strip())[::-1].hex())')
+LAYER=$(( $(jq -r '.anchor.layer_idx' "$WITNESS") + 1 ))
+
+cast call $BRIDGE_ADDRESS \
+  'anchorRemainingAppends(uint8,uint256)(uint256)' $LAYER $ANCHOR \
+  --rpc-url $RPC_URL
+```
+
+The byte reversal is not optional: unreversed, the hex is a different
+number, and the call answers `0` for an anchor that is alive.
+
+**Alert threshold.** Fire when `remaining ≤ 32` — a quarter of the
+window. The runway left then is 32 appends of the anchor's layer:
+
+| Anchor | Deploy | Append interval | Runway at `remaining = 32` |
+|---|---|---|---|
+| L1 | L1 | 1024 seq, ~5.7 min | **~3 h** |
+| L2 | L1 | 16384 seq, ~91 min | **~48 h** |
+| L1 or L2 | L2 (shellnet) | 16384 seq, ~91 min | **~48 h** |
+
+The threshold has to cover the gap between two polls plus one
+`withdraw-e2e` cycle (~17 min on L1, ~106 min worst case on L2 — see the
+[L1](#timing-model--why-fresh-deploy-demos-need-tight-lookahead) and
+[L2](#l2-timing-model) timing models). At 32 that means polling an L1
+anchor on an L1 deploy at least hourly and the others at least daily.
+If you change it, keep `threshold × append interval` above that sum:
+`remaining ≤ 8` is ~45 min on the L1 cadence, which an hourly poll can
+miss entirely.
+
+**Fix — on alert.** Submit the proof if there is one; re-prove one layer
+up if there is none, or if it cannot land before its anchor goes.
+
+1. **A proof exists.** Submit it now; it needs one transaction. A
+   running `daemon-withdraw` or `daemon-bridge` submits what is in its
+   `--proofs-dir` — check its queue is not blocked (below). Otherwise
+   run `relayer submit-withdraw --proof-event <file>`, with `--dry-run`
+   first. Do not send from the key of a running daemon: two senders on
+   one EOA race for nonces.
+2. **Re-prove — L1 anchor on an L1 deploy.** Prove against L2 once the
+   event's `T₂ = ⌊e / 16384⌋ · 16384 + 16384` has landed (`e` is the
+   witness's `.block_seq_no`; landed means `storedLastSeenBlockSeqNo()`
+   ≥ `T₂`): the same `withdraw-e2e` command plus `--replay-latest
+   --anchor-layer 2 --i-know-the-wait`. The CLI refuses an explicit
+   L(n ≥ 2) without the ack, and `--replay-latest` takes the youngest
+   `WithdrawalInitiated` — this burn only if no newer one exists (the
+   *Honest scope* note at the top). Once the L1 anchor is gone,
+   `--anchor-layer auto` picks L2 by itself.
+3. **Re-prove — L2 anchor on an L1 deploy, any anchor on an L2
+   deploy.** The only escalation is L3, once the event's
+   `T₃ = ⌊e / 2097152⌋ · 2097152 + 2097152` has landed: `--anchor-layer
+   3 --i-know-the-wait`, or `auto` after the L2 anchor is gone. `T₃` is
+   less than `W³` after `T₂`, and an L2 anchor lasts at least until the
+   `verifyBlock` at `T₂ + W³`, so a bridge that keeps relaying lands `T₃`
+   before the L2 anchor is evicted. The contract and Circuit 4 accept
+   layers up to 10 (`MAX_LAYER_HASHES`, `MAX_ANCHOR_LAYER`) and the
+   witness builder builds the chain for any of them, but no run in this
+   runbook has proven a withdrawal against L3. Until `T₃` has landed —
+   and for good, if the bridge never verifies `T₃` itself — there is no
+   fallback: prove and submit inside the ~8 d window.
+
+**An evicted proof blocks the withdraw queue.** `daemon-withdraw` and
+`daemon-bridge` retry `UnknownAnchor` as transient, because it also
+means "covering bundle not on-chain yet" (`classify_withdraw_revert` in
+`src/bridge.rs`): the scan stops at that file and backs off, and every
+`proof_event_*.json` that sorts after it waits. Move the evicted file
+out of `--proofs-dir`. If the re-proven withdrawal was already paid some
+other way, the scan skips the old file instead, as `nullifier already
+used`.
+
+**Past the last layer.** A payout whose anchor has left every active
+layer cannot be paid. No function in `AckiNackiBridge` pays out without
+a Circuit 4 proof against an in-window anchor, and the owner functions
+only move USDC between the contract and AAVE or skim what exceeds
+`treasuryBalance` (spec §10.1 and §15, invariant 6). The amount stays
+booked in `treasuryBalance` and keeps backing other withdrawals; the
+contract has no recovery path for it, owner or self-serve.
+
+**Ownership.** No metric watches this deadline: the relayer's metrics
+cover GraphQL and the `verifyBlock` loop, not withdrawals. Whoever runs
+`withdraw-e2e` for a deploy polls their own unpaid withdrawals until
+they are paid.
+
+**Related.** Trade-off 3 of the spec derives the window lengths.
+`contracts/ethereum/test/WithdrawAnchorEviction.t.sol` covers the first
+anchor evicted by the 129th append, a `seq_no` jump not evicting earlier
+anchors, `anchorRemainingAppends` at its edges, and a payout against a
+later in-window anchor after the original was evicted. Audit findings ETH-03
+(window eviction) and ETH-18 (`anchorRemainingAppends`).
 
 ---
 

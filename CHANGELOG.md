@@ -74,6 +74,19 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md` gains
+  *Case 3e — Anchor eviction deadline*: how long a burned withdrawal can wait
+  before its anchor leaves the 128-slot window. On an L1 deploy that is ~12 h
+  for an L1 anchor and ~8 d for an L2 one; on an L2 deploy such as shellnet it
+  is ~8 d for both, so `--anchor-layer auto` falling back from L1 to L2 gains
+  nothing there. It shows how to poll `anchorRemainingAppends` with the layer
+  and root from a `proof_event_*.json` or a witness — both files store them
+  little-endian, and passed to `cast` unreversed a live anchor reads as `0` —
+  with an alert at `remaining ≤ 32` and the fix for each deploy mode.
+  `daemon-withdraw` and `daemon-bridge` retry `UnknownAnchor` as transient, so
+  a proof whose anchor was evicted holds up every proof behind it until it is
+  moved out of `--proofs-dir`. Trade-off 3 in `docs/EVM-contracts-spec.md`
+  gains the same deploy-mode caveat.
 
 ### Breaking Changes
 

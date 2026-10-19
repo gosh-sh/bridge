@@ -26,7 +26,7 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    `18446744073709551615` while Gloas is unscheduled). Required once after
    `deployLightClient`; `submitUpdate` and `submitRotate` revert 256 until
    it runs. The daemon does not set it.
-3. `eth-lc-relayer prove-one --beacon-url $BEACON_URL --prover-dir … --srs-path … --out-dir ./bundle`
+3. `eth-lc-relayer prove-one --beacon-url $BEACON_URL --step-prover-bin … --srs-path … --out-dir ./bundle`
    on **n14** (~k=19, tens of GB). `COMMITTEE_JSON_PATH` is filled by the
    relayer from `light_client/updates`. Synthetic OsRng committee is a bug.
 4. `eth-lc-relayer submit-one --bundle-dir ./bundle …` — `submitUpdate` ACCEPTED,

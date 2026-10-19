@@ -53,7 +53,7 @@ fi
 : "${WITHDRAW_AMOUNT:?export WITHDRAW_AMOUNT=1.000000}"
 
 # --- snark_dir must be absolute -----------------------------------------------
-# The aggregate-proof subprocess cd's into $BRIDGE_AGGREGATOR_DIR, so a
+# The aggregate-proof subprocess runs in its own directory, so a
 # relative BRIDGE_SNARK_DIR resolves against the wrong CWD. Canonicalize
 # to an absolute path and override the profile value before invoking.
 # Read the profile-declared value without polluting the shell env: awk

@@ -154,7 +154,9 @@ Update, in the env files kept outside Git: `EXPECTED_BRIDGE_COMMIT` (in `.env`
 and in the runtime env — preflight reads both), `EXPECTED_RELAYER_SHA256`,
 `EXPECTED_AGGREGATE_PROOF_SHA256`, `RELAYER_IMAGE` for the new tag, and
 `BRIDGE_DEPLOY_BLOCK` in the runtime env if it is not there yet (preflight
-requires it; see "Startup scan"). Then
+requires it; see "Startup scan"), and `BRIDGE_AGGREGATE_PROOF_BIN` in place of
+the former `BRIDGE_AGGREGATOR_DIR` (the container remaps it to its own copy of
+`aggregate-proof`; a host-layout preflight reads it as is). Then
 rebuild and restart with the same verification the first install uses:
 
 ```bash

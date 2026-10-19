@@ -71,10 +71,9 @@ pub struct WithdrawE2EConfig {
     pub i_know_the_wait: bool,
     /// Where to write the enriched witness JSON.
     pub work_dir: PathBuf,
-    /// `crates/bridge-evm-aggregator` root (holds
-    /// `target/release/aggregate-proof`). Forwarded to
+    /// The prebuilt `aggregate-proof` binary. Forwarded to
     /// [`SubprocessAggregatorConfig`] inside the SHPLONK pipeline.
-    pub aggregator_dir: PathBuf,
+    pub aggregate_proof_bin: PathBuf,
     /// Directory of committed verifier files — the aggregator's
     /// byte-identity self-check compares against the `.sol` sources
     /// (`BridgeWithdrawalAggregatorVerifier.sol` in particular).
@@ -361,7 +360,7 @@ async fn prove_and_finalize(
     let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
 
     info!(
-        aggregator_dir = %cfg.aggregator_dir.display(),
+        aggregate_proof_bin = %cfg.aggregate_proof_bin.display(),
         verifiers_dir = %cfg.verifiers_dir.display(),
         params_dir = %cfg.params_dir.display(),
         snark_dir = %cfg.snark_dir.display(),
@@ -421,9 +420,12 @@ fn parse_hex32(s: &str) -> Result<[u8; 32]> {
 /// — `ackinacki-bridge withdraw` and `relayer withdraw-e2e` — set its
 /// timeout with `--prover-timeout-s`, so a timeout names that flag.
 fn aggregator_config(cfg: &WithdrawE2EConfig, pk_cache_dir: &Path) -> SubprocessAggregatorConfig {
-    let mut agg_cfg =
-        SubprocessAggregatorConfig::new(&cfg.aggregator_dir, &cfg.verifiers_dir, &cfg.params_dir)
-            .with_pk_cache_dir(pk_cache_dir);
+    let mut agg_cfg = SubprocessAggregatorConfig::new(
+        &cfg.aggregate_proof_bin,
+        &cfg.verifiers_dir,
+        &cfg.params_dir,
+    )
+    .with_pk_cache_dir(pk_cache_dir);
     agg_cfg.timeout = cfg.prover_timeout;
     agg_cfg.timeout_flag = Some("--prover-timeout-s");
     agg_cfg.slot_report = cfg.slot_report.clone();
@@ -449,7 +451,7 @@ mod tests {
             anchor_mode: super::AnchorLayerMode::Auto,
             i_know_the_wait: false,
             work_dir: p("/work"),
-            aggregator_dir: p("/agg"),
+            aggregate_proof_bin: p("/agg/aggregate-proof"),
             verifiers_dir: p("/verifiers"),
             params_dir: p("/params"),
             snark_dir: p("/snark"),

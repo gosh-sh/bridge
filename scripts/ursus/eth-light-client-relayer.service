@@ -7,7 +7,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bridge-e2e
 EnvironmentFile=/home/ubuntu/bridge-e2e/config/eth-light-client-relayer.env
-Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
+Environment=PATH=/home/ubuntu/bridge-e2e/bin:/usr/bin:/bin
 # Live loop (no --dry-run / --mock-prove / --no-rotate). Binary must be
 # built with `--features live-submit`. Shadow: add those flags here.
 # No owner flip unless --flip-owner is added; read
@@ -18,6 +18,8 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/b
 ExecStart=/home/ubuntu/bridge-e2e/bin/eth-lc-relayer daemon \
   --beacon-url ${BEACON_URL} \
   --state /home/ubuntu/bridge-e2e/eth-lc-relayer-state.json \
+  --step-prover-bin ${LIGHT_CLIENT_STEP_PROVER_BIN} \
+  --rotate-prover-bin ${LIGHT_CLIENT_ROTATE_PROVER_BIN} \
   --prover-dir ${LIGHT_CLIENT_PROVER_DIR} \
   --srs-path ${STEP_SRS_PATH}
 Restart=on-failure

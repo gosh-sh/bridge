@@ -39,14 +39,15 @@ use alloy::{
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
     check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs, eth_rpc,
-    rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig, BkSetUpdateSubmitOutcome,
-    BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient, Circuit4ShplonkPipeline,
-    DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient, FixturesBlockSource,
-    InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig, PartnerWithdrawalProof,
-    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
-    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
-    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge, WithdrawE2EConfig,
-    WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver, GET_LOGS_CHUNK_BLOCKS,
+    require_executable, rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig,
+    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
+    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
+    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
+    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
+    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
+    WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
+    GET_LOGS_CHUNK_BLOCKS,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -221,14 +222,14 @@ enum Cmd {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
         #[arg(long)]
         witness: PathBuf,
-        /// `crates/bridge-prover-libraries` workspace root (holds
-        /// `target/release/bridge-event-halo2-prover`).
-        #[arg(long, env = "BRIDGE_PROVER_LIBRARIES_DIR")]
-        bridge_prover_libraries_dir: PathBuf,
-        /// Working dir holding `./params` (SRS + Circuit 4 PK/VK). Defaults to
-        /// the prover dir.
-        #[arg(long)]
-        work_dir: Option<PathBuf>,
+        /// Prebuilt `bridge-event-halo2-prover` (`cargo build --release -p
+        /// bridge-event-halo2-prover` in `crates/bridge-prover-libraries`).
+        /// Checked to exist and be executable before anything runs.
+        #[arg(long, env = "BRIDGE_WITHDRAW_PROVER_BIN")]
+        prover_bin: PathBuf,
+        /// Working dir holding `./params` (SRS + Circuit 4 PK/VK).
+        #[arg(long, env = "BRIDGE_WITHDRAW_PROVER_WORK_DIR")]
+        work_dir: PathBuf,
         /// Where to write the resulting `proof_event` JSON.
         #[arg(long, default_value = "./proof_event.json")]
         out: PathBuf,
@@ -249,10 +250,11 @@ enum Cmd {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
         #[arg(long)]
         witness: PathBuf,
-        /// `crates/bridge-evm-aggregator` root (holds
-        /// `target/release/aggregate-proof`).
-        #[arg(long, env = "AGGREGATOR_DIR")]
-        aggregator_dir: PathBuf,
+        /// Prebuilt `aggregate-proof` (`cargo build --release --bin
+        /// aggregate-proof` in `crates/bridge-evm-aggregator`). Checked to
+        /// exist and be executable before anything runs.
+        #[arg(long, env = "BRIDGE_AGGREGATE_PROOF_BIN")]
+        aggregate_proof_bin: PathBuf,
         /// Directory of committed verifier files (the aggregator self-checks
         /// against the `.sol` sources).
         #[arg(long, default_value = "../../contracts/ethereum/verifiers")]
@@ -404,12 +406,12 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Path to the `crates/bridge-evm-aggregator` root (used by the
-        /// `aggregate-proof` subprocess). C1/C2 R15 SHPLONK aggregation is
-        /// mandatory — the on-chain `AckiNackiBridge` verifier only accepts
-        /// aggregated calldata, so `daemon-live` refuses to start without it.
-        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
-        aggregator_dir: PathBuf,
+        /// The prebuilt `aggregate-proof` binary. C1/C2 R15 SHPLONK
+        /// aggregation is mandatory — the on-chain `AckiNackiBridge` verifier
+        /// only accepts aggregated calldata, so `daemon-live` refuses to start
+        /// without it, or with a path that is not an executable file.
+        #[arg(long, env = "BRIDGE_AGGREGATE_PROOF_BIN")]
+        aggregate_proof_bin: PathBuf,
         /// Directory of committed verifier files: `aggregate-proof` self-checks
         /// against the `.sol`, and the `.bin` is what deploys on chain.
         #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
@@ -520,11 +522,12 @@ enum Cmd {
         /// Where to write the enriched witness JSON.
         #[arg(long)]
         work_dir: PathBuf,
-        /// `crates/bridge-evm-aggregator` root (holds
-        /// `target/release/aggregate-proof`). Forwarded to
-        /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK pipeline.
-        #[arg(long, env = "BRIDGE_AGGREGATOR_DIR")]
-        aggregator_dir: PathBuf,
+        /// The prebuilt `aggregate-proof` binary, checked to exist and be
+        /// executable before anything starts. Forwarded to
+        /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK
+        /// pipeline.
+        #[arg(long, env = "BRIDGE_AGGREGATE_PROOF_BIN")]
+        aggregate_proof_bin: PathBuf,
         /// Directory of committed verifier files: `aggregate-proof`'s
         /// byte-identity self-check target is the `.sol`; the `.bin` is what
         /// deploys on chain.
@@ -711,11 +714,11 @@ async fn main() -> anyhow::Result<()> {
         }),
         Cmd::ProveWithdraw {
             witness,
-            bridge_prover_libraries_dir,
+            prover_bin,
             work_dir,
             out,
             seq_no,
-        } => prove_withdraw(witness, bridge_prover_libraries_dir, work_dir, out, seq_no)
+        } => prove_withdraw(witness, prover_bin, work_dir, out, seq_no)
             .await
             .map_err(|e| {
                 error!(?e, "prove-withdraw failed");
@@ -723,7 +726,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         Cmd::ProveWithdrawShplonk {
             witness,
-            aggregator_dir,
+            aggregate_proof_bin,
             verifiers_dir,
             params_dir,
             snark_dir,
@@ -734,7 +737,7 @@ async fn main() -> anyhow::Result<()> {
             let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
             prove_withdraw_shplonk(
                 witness,
-                aggregator_dir,
+                aggregate_proof_bin,
                 verifiers_dir,
                 params_dir,
                 snark_dir,
@@ -825,7 +828,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_initial_secs,
             backoff_max_secs,
             backoff_multiplier,
-            aggregator_dir,
+            aggregate_proof_bin,
             verifiers_dir,
             pk_cache_dir,
             anchor_level,
@@ -848,8 +851,11 @@ async fn main() -> anyhow::Result<()> {
             // Default the outer-PK cache alongside the SRS so a single
             // params_dir carries every artefact the aggregator needs.
             let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            // Checked before the GraphQL client, the RPC and the state are
+            // touched: a path that is not an executable file is a
+            // configuration error.
             let aggregation = C12AggregationCfg {
-                aggregator_dir,
+                aggregate_proof_bin: require_executable(&aggregate_proof_bin, "aggregate-proof")?,
                 verifiers_dir,
                 pk_cache_dir,
             };
@@ -911,7 +917,7 @@ async fn main() -> anyhow::Result<()> {
             anchor_layer,
             i_know_the_wait,
             work_dir,
-            aggregator_dir,
+            aggregate_proof_bin,
             verifiers_dir,
             params_dir,
             snark_dir,
@@ -936,7 +942,7 @@ async fn main() -> anyhow::Result<()> {
             anchor_layer,
             i_know_the_wait,
             work_dir,
-            aggregator_dir,
+            aggregate_proof_bin,
             verifiers_dir,
             params_dir,
             snark_dir,
@@ -1414,15 +1420,18 @@ async fn verify_prover_proof(
 
 async fn prove_withdraw(
     witness: PathBuf,
-    bridge_prover_libraries_dir: PathBuf,
-    work_dir: Option<PathBuf>,
+    prover_bin: PathBuf,
+    work_dir: PathBuf,
     out: PathBuf,
     seq_no: u32,
 ) -> anyhow::Result<()> {
-    let mut cfg = SubprocessWithdrawalProverConfig::new(bridge_prover_libraries_dir);
-    if let Some(wd) = work_dir {
-        cfg.work_dir = wd;
-    }
+    let prover_bin = require_executable(&prover_bin, "bridge-event-halo2-prover")?;
+    anyhow::ensure!(
+        work_dir.is_dir(),
+        "--work-dir {} is not a directory",
+        work_dir.display()
+    );
+    let mut cfg = SubprocessWithdrawalProverConfig::new(prover_bin, work_dir);
     cfg.seq_no = seq_no;
     let prover = SubprocessWithdrawalProver::new(cfg);
 
@@ -1450,7 +1459,7 @@ async fn prove_withdraw(
 #[allow(clippy::too_many_arguments)]
 async fn prove_withdraw_shplonk(
     witness: PathBuf,
-    aggregator_dir: PathBuf,
+    aggregate_proof_bin: PathBuf,
     verifiers_dir: PathBuf,
     params_dir: PathBuf,
     snark_dir: PathBuf,
@@ -1461,8 +1470,9 @@ async fn prove_withdraw_shplonk(
     // NB-Q9 PR-B: in-process Circuit 4 Poseidon re-prove (no more subprocess
     // shell-out to `export-c4-poseidon-snark`).
     let snark_prover = InProcessCircuit4SnarkProver::new(&params_dir);
+    let aggregate_proof_bin = require_executable(&aggregate_proof_bin, "aggregate-proof")?;
     let aggregator = SubprocessAggregator::new(
-        SubprocessAggregatorConfig::new(&aggregator_dir, &verifiers_dir, &params_dir)
+        SubprocessAggregatorConfig::new(&aggregate_proof_bin, &verifiers_dir, &params_dir)
             .with_pk_cache_dir(&pk_cache_dir),
     );
     let pipeline = Circuit4ShplonkPipeline::new(snark_prover, aggregator);
@@ -1990,7 +2000,7 @@ struct WithdrawE2ECliArgs {
     anchor_layer: String,
     i_know_the_wait: bool,
     work_dir: PathBuf,
-    aggregator_dir: PathBuf,
+    aggregate_proof_bin: PathBuf,
     verifiers_dir: PathBuf,
     params_dir: PathBuf,
     snark_dir: PathBuf,
@@ -2020,7 +2030,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         anchor_mode,
         i_know_the_wait: args.i_know_the_wait,
         work_dir: args.work_dir,
-        aggregator_dir: args.aggregator_dir,
+        aggregate_proof_bin: require_executable(&args.aggregate_proof_bin, "aggregate-proof")?,
         verifiers_dir: args.verifiers_dir,
         params_dir: args.params_dir,
         snark_dir: args.snark_dir,
@@ -2144,7 +2154,7 @@ async fn submit_bk_update(
 /// `AnBlockData.layer_hashes_proof` (and BK-update `attestation_proof`) carry
 /// the aggregator calldata the Solidity `AckiNackiBridge` accepts.
 struct C12AggregationCfg {
-    aggregator_dir: PathBuf,
+    aggregate_proof_bin: PathBuf,
     verifiers_dir: PathBuf,
     /// Persistent outer-PK cache directory for `aggregate-proof`. When
     /// present, memoises the K=21 outer keygen across bundles.
@@ -2477,7 +2487,7 @@ async fn run_daemon_live(
         SubprocessAggregator, SubprocessAggregatorConfig,
     };
     let aggregator_cfg = SubprocessAggregatorConfig::new(
-        &aggregation.aggregator_dir,
+        &aggregation.aggregate_proof_bin,
         &aggregation.verifiers_dir,
         &params_dir,
     )
@@ -2491,7 +2501,7 @@ async fn run_daemon_live(
         pipeline,
     ));
     info!(
-        aggregator_dir = %aggregation.aggregator_dir.display(),
+        aggregate_proof_bin = %aggregation.aggregate_proof_bin.display(),
         verifiers_dir = %aggregation.verifiers_dir.display(),
         pk_cache_dir = %aggregation.pk_cache_dir.display(),
         "daemon-live: C1/C2 R15 SHPLONK aggregation",

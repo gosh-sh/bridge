@@ -72,8 +72,11 @@ BRIDGE_PARAMS_DIR=./params
 # `daemon-live` unconditionally wraps LiveBlockSource with AggregatedBlockSource
 # because the on-chain AckiNackiBridge verifier only accepts aggregated
 # calldata (raw halo2 bytes revert with AttestationProofRejected()). Both
-# vars are required — the daemon refuses to start without them.
+# vars are required — the daemon refuses to start without them, or with a
+# path that is not an executable file. `BRIDGE_AGGREGATOR_DIR` is the cargo tree the
+# `ackinacki-bridge` CLI builds its path from; the relayer takes the binary.
 BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
+BRIDGE_AGGREGATE_PROOF_BIN=../bridge-evm-aggregator/target/release/aggregate-proof
 BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
 # --- backoff (defaults are already sane; overridable) -------------------------

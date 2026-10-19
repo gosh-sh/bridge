@@ -1524,21 +1524,19 @@ fn short_sha256(bytes: &[u8]) -> String {
 /// Prove we can actually aggregate, not merely that a file with the right
 /// name exists.
 ///
-/// `SubprocessAggregator` picks `target/release/aggregate-proof` on
-/// `is_file()` alone and only falls back to `cargo run --release` when that
-/// path is absent (`aggregator.rs:377`, `:432`). So a non-executable stub,
-/// or a binary built for another architecture, is *selected over* a working
-/// cargo build and then fails after the burn. Existence is not the property
-/// we need; runnability is — hence the `--help` smoke run.
+/// The runtime (`SubprocessAggregator`) runs the `aggregate-proof` binary
+/// it is given and checks only that the path exists and is executable
+/// (`bridge-relayer-daemon`'s `require_executable`). So a binary built for
+/// another architecture, or a file that is not this tool at all, passes
+/// that check and fails after the burn. Existence is not the property we
+/// need; runnability is — hence the `--help` smoke run.
 ///
-/// **Requires a prebuilt binary; the cargo fallback is refused here.** The
-/// runtime will happily `cargo run --release` when the binary is missing,
-/// but preflight cannot verify that path without paying for a cold build
-/// inside a check whose whole purpose is to be instant — and "the crate
-/// looks present" is not verification. Refusing early with the build command
-/// costs an operator one command; accepting an unverified fallback costs
-/// them the burn and up to 91 minutes. This is deliberately stricter than
-/// the runtime.
+/// **Requires a prebuilt binary.** This CLI derives the path from
+/// `--aggregator-dir` (`target/release/aggregate-proof`) and never builds
+/// it: a cold build cannot be verified inside a check whose whole purpose is
+/// to be instant — and "the crate looks present" is not verification.
+/// Refusing early with the build command costs an operator one command;
+/// accepting an unverified binary costs them the burn and up to 91 minutes.
 pub async fn check_aggregator_runnable(aggregator_dir: &Path) -> CliResult<()> {
     check_aggregator_runnable_with_timeout(aggregator_dir, AGGREGATOR_PROBE_TIMEOUT).await
 }
@@ -1568,9 +1566,9 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
     // `BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator`, relative by design.
     //
     // The runtime does not have this bug: `SubprocessAggregator::new`
-    // canonicalises `aggregator_dir` at construction, so by the time
-    // `release_bin` joins onto it the path is already absolute. Preflight
-    // has no such step, which is why it needs this one.
+    // canonicalises the binary path at construction, and the orchestrator
+    // hands it the path this preflight resolved. Preflight has no such step,
+    // which is why it needs this one.
     let relative_bin = aggregate_proof_bin(aggregator_dir);
     if !relative_bin.is_file() {
         return Err(refuse(format!(

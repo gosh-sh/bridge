@@ -402,7 +402,7 @@ enum Cmd {
         /// The prebuilt `aggregate-proof` binary. C1/C2 R15 SHPLONK
         /// aggregation is mandatory — the on-chain `AckiNackiBridge` verifier
         /// only accepts aggregated calldata, so `daemon-live` refuses to start
-        /// without it, or with a path that does not run.
+        /// without it, or with a path that is not an executable file.
         #[arg(long, env = "BRIDGE_AGGREGATE_PROOF_BIN")]
         aggregate_proof_bin: PathBuf,
         /// Directory of committed verifier files: `aggregate-proof` self-checks
@@ -515,9 +515,10 @@ enum Cmd {
         /// Where to write the enriched witness JSON.
         #[arg(long)]
         work_dir: PathBuf,
-        /// The prebuilt `aggregate-proof` binary, checked to run before
-        /// anything starts. Forwarded to [`SubprocessAggregatorConfig`] inside
-        /// the C4 SHPLONK pipeline.
+        /// The prebuilt `aggregate-proof` binary, checked to exist and be
+        /// executable before anything starts. Forwarded to
+        /// [`SubprocessAggregatorConfig`] inside the C4 SHPLONK
+        /// pipeline.
         #[arg(long, env = "BRIDGE_AGGREGATE_PROOF_BIN")]
         aggregate_proof_bin: PathBuf,
         /// Directory of committed verifier files: `aggregate-proof`'s
@@ -843,7 +844,8 @@ async fn main() -> anyhow::Result<()> {
             // params_dir carries every artefact the aggregator needs.
             let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
             // Checked before the GraphQL client, the RPC and the state are
-            // touched: a path that does not run is a configuration error.
+            // touched: a path that is not an executable file is a
+            // configuration error.
             let aggregation = C12AggregationCfg {
                 aggregate_proof_bin: require_executable(&aggregate_proof_bin, "aggregate-proof")?,
                 verifiers_dir,

@@ -135,7 +135,8 @@ pub struct SubprocessWithdrawalProverConfig {
     /// startup with [`crate::require_executable`].
     pub prover_bin: PathBuf,
     /// Working directory for the prover process. The binary reads the SRS +
-    /// Circuit 4 PK/VK from `./params` **relative to this dir**.
+    /// Circuit 4 PK/VK from `./params` **relative to this dir**. The witness
+    /// and `out_dir` are passed to it absolute, so they do not resolve here.
     pub work_dir: PathBuf,
     /// Optional dir to also persist `proof_event_{seq:06}.json` (passed as
     /// `--out-dir`). The proof is returned regardless via stdout.
@@ -175,6 +176,13 @@ impl SubprocessWithdrawalProver {
         if let Ok(abs) = config.work_dir.canonicalize() {
             config.work_dir = abs;
         }
+        // Passed to the prover, which runs in `work_dir`: made absolute so a
+        // relative `--out-dir` lands where the caller reads it, not there.
+        if let Some(out) = config.out_dir.as_mut() {
+            if let Ok(abs) = std::path::absolute(&*out) {
+                *out = abs;
+            }
+        }
         Self {
             config,
         }
@@ -202,13 +210,21 @@ impl WithdrawalProver for SubprocessWithdrawalProver {
     async fn prove(&self, witness_path: &Path) -> Result<PartnerWithdrawalProof, RelayerError> {
         use tokio::process::Command;
 
-        let args = self.prover_args(witness_path);
+        // The prover runs in `work_dir`; a witness named relative to the
+        // caller's directory would be opened there instead.
+        let witness_path =
+            std::path::absolute(witness_path).unwrap_or_else(|_| witness_path.to_path_buf());
+        let args = self.prover_args(&witness_path);
 
         let mut cmd = Command::new(&self.config.prover_bin);
         cmd.current_dir(&self.config.work_dir)
             .args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Killed when the wait is abandoned: a timed-out prover left
+            // running keeps its memory beside whatever the operator starts
+            // next.
+            .kill_on_drop(true);
 
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
@@ -293,8 +309,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_prover_is_the_configured_binary_run_in_the_work_dir() {
-        // The path given is what runs, in `work_dir`; a failure quotes the
-        // prover's stderr. No cargo anywhere.
+        // The path given is what runs, in `work_dir`, and the witness
+        // reaches it absolute although it was named relative to our own
+        // directory; a failure quotes the prover's stderr. No cargo anywhere.
         use crate::prover_bin::test_support::install_script;
         let dir = tempfile::TempDir::new().unwrap();
         let work = dir.path().join("work");
@@ -303,14 +320,16 @@ mod tests {
         install_script(
             &bin,
             &format!(
-                "#!/bin/sh\npwd -P > {cwd}\necho 'no params here' >&2\nexit 2\n",
-                cwd = dir.path().join("cwd").display()
+                "#!/bin/sh\npwd -P > {cwd}\nprintf '%s' \"$2\" > {fixture}\necho 'no params here' \
+                 >&2\nexit 2\n",
+                cwd = dir.path().join("cwd").display(),
+                fixture = dir.path().join("fixture").display()
             ),
         );
         let prover =
             SubprocessWithdrawalProver::new(SubprocessWithdrawalProverConfig::new(&bin, &work));
         let err = prover
-            .prove(Path::new("/w/witness.json"))
+            .prove(Path::new("w/witness.json"))
             .await
             .unwrap_err()
             .to_string();
@@ -321,6 +340,10 @@ mod tests {
                 .unwrap()
                 .trim(),
             work.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            PathBuf::from(std::fs::read_to_string(dir.path().join("fixture")).unwrap()),
+            std::path::absolute("w/witness.json").unwrap()
         );
     }
 

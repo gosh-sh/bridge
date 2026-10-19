@@ -1952,6 +1952,12 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-relayer` kills a prover that runs past its timeout instead of
+  leaving it running, writing the `data/` key cache beside the retry the
+  daemon starts after its backoff. `relayer prove-withdraw` does the same
+  with `bridge-event-halo2-prover`, and passes a relative `--witness` or
+  `--out-dir` to it as an absolute path: the prover runs in `--work-dir`, and
+  resolved them there.
 - An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
   to bring it down: `accruedYield()` stayed zero for good, and
   `withdrawFromAave` kept reverting once the pool was empty. The book can now

@@ -49,7 +49,7 @@ BRIDGE_PARAMS_DIR=./params
 # because the on-chain AckiNackiBridge verifier only accepts aggregated
 # calldata (raw halo2 bytes revert with AttestationProofRejected()). Both
 # vars are required — the daemon refuses to start without them, or with a
-# binary that does not run. `BRIDGE_AGGREGATOR_DIR` is the cargo tree the
+# path that is not an executable file. `BRIDGE_AGGREGATOR_DIR` is the cargo tree the
 # `ackinacki-bridge` CLI builds its path from; the relayer takes the binary.
 BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
 BRIDGE_AGGREGATE_PROOF_BIN=../bridge-evm-aggregator/target/release/aggregate-proof

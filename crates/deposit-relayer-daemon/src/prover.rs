@@ -314,7 +314,11 @@ impl SubprocessProofGenerator {
         cmd.current_dir(&self.config.deposit_prover_dir)
             .args(passthrough)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Killed when the wait is abandoned: a timed-out prover left
+            // running keeps its memory and writes the `data/` key cache
+            // beside the one the retry starts after the backoff.
+            .kill_on_drop(true);
 
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
@@ -562,6 +566,74 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
             "--tx-hash 0x1 "
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_example_is_killed_not_orphaned() {
+        // The daemon backs off and retries a timed-out proof; a prover left
+        // running would keep writing the `data/` key cache beside the retry.
+        // The fake publishes its pid and `exec`s, so that pid is the process
+        // that has to be gone.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let bins = bins_in(dir.path());
+        install_script(
+            &bins.export_blake2b_proof,
+            &format!(
+                "#!/bin/sh\necho $$ > {p}.tmp\nmv {p}.tmp {p}\nexec sleep 120\n",
+                p = pidfile.display()
+            ),
+        );
+        let mut cfg = SubprocessProverConfig::new(dir.path(), bins, "http://rpc");
+        cfg.timeout = Duration::from_secs(1);
+        let gen = SubprocessProofGenerator::new(cfg);
+        let err = gen
+            .run_example(&["export_blake2b_proof".into()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        // On a loaded host the shell may not have reached its first line
+        // when the timeout fired. Killed before it wrote its pid, it was
+        // not orphaned either.
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(p) = std::fs::read_to_string(&pidfile) {
+                pid = Some(p.trim().to_string());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(pid) = pid else {
+            return;
+        };
+        // SIGKILL and reaping are not instantaneous: poll. A zombie counts as
+        // gone: it holds no memory and writes nothing.
+        let mut gone = false;
+        for _ in 0..50 {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Err(_) => gone = true,
+                Ok(stat) => {
+                    gone = stat
+                        .rsplit(')')
+                        .next()
+                        .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+                },
+            }
+            if gone {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !gone {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid])
+                .status();
+        }
+        assert!(
+            gone,
+            "pid {pid} survived the timeout: the prover outlives the run that started it"
         );
     }
 

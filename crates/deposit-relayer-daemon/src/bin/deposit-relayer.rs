@@ -111,7 +111,8 @@ enum Cmd {
         #[arg(long, env = "DEPOSIT_PROVER_DIR")]
         deposit_prover_dir: PathBuf,
         /// Prebuilt `fetch_deposit_data` example (`cargo build --release
-        /// --examples` in `deposit-prover/`). Checked to run at startup.
+        /// --examples` in `deposit-prover/`). Checked to exist and be
+        /// executable at startup.
         #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
         fetch_deposit_data_bin: PathBuf,
         /// Prebuilt `export_vk_blob` example.
@@ -162,7 +163,8 @@ enum Cmd {
         #[arg(long, env = "DEPOSIT_PROVER_DIR")]
         deposit_prover_dir: PathBuf,
         /// Prebuilt `fetch_deposit_data` example (`cargo build --release
-        /// --examples` in `deposit-prover/`). Checked to run at startup.
+        /// --examples` in `deposit-prover/`). Checked to exist and be
+        /// executable at startup.
         #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
         fetch_deposit_data_bin: PathBuf,
         /// Prebuilt `export_vk_blob` example.

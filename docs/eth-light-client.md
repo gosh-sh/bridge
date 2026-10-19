@@ -387,7 +387,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `BEACON_URL` | beacon REST base URL | mainnet node with light-client endpoints | Sepolia public Lodestar |
 | `LIGHT_CLIENT_STEP_PROVER_BIN` | prebuilt `export_step_vk_blob` example, checked at startup | required | required |
 | `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `rotate_tree_n8` example (`--features aggregation`) | required unless `--no-rotate` | not needed (`--no-rotate`) |
-| `LIGHT_CLIENT_PROVER_DIR` | working directory of the provers; the rotate fixture lives under it | optional | optional |
+| `LIGHT_CLIENT_PROVER_DIR` | working directory of the provers; `rotate_tree_n8` reads its shard snarks and outer SRS there, the daemon its fixture period | required (rotate) | optional (`--no-rotate`) |
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |

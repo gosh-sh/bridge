@@ -86,11 +86,15 @@ assigns it when the release is tagged.
   `target/release/…` from a directory or call `cargo`.
   - `eth-lc-relayer daemon` / `prove-one`: `--step-prover-bin`
     (`LIGHT_CLIENT_STEP_PROVER_BIN`), the prebuilt `export_step_vk_blob`
-    example, required unless `--mock-prove`; `daemon --rotate-prover-bin`
-    (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), the prebuilt `rotate_tree_n8`
-    example (`--features aggregation`), required unless `--no-rotate`.
-    `--prover-dir` (`LIGHT_CLIENT_PROVER_DIR`) is now optional: the working
-    directory of the provers, where `rotate_tree_n8` finds its fixture.
+    example (`daemon`: required unless `--mock-prove`); `daemon
+    --rotate-prover-bin` (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), the prebuilt
+    `rotate_tree_n8` example (`--features aggregation`), required unless
+    `--no-rotate` or `--mock-prove`, and ignored with `--no-rotate`.
+    `--prover-dir` (`LIGHT_CLIENT_PROVER_DIR`) is the working directory of
+    the provers: required when the daemon may rotate (`rotate_tree_n8` reads
+    its shard snarks and outer SRS there, and the period check its fixture),
+    otherwise optional, a relative `--srs-path` resolving against it. The
+    SRS is checked at startup to be where the step prover will read it.
     Units no longer need `cargo` on `PATH` or a rustup home.
   - `deposit-relayer daemon` / `prove-one`: `--fetch-deposit-data-bin`,
     `--export-vk-blob-bin`, `--export-blake2b-proof-bin`
@@ -2543,14 +2547,13 @@ assigns it when the release is tagged.
   regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
 - `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
   which ran the same missing `generate-proof` binary.
-
-### Removed
-
 - The `cargo run` fallbacks of `eth-lc-relayer` (`export_step_vk_blob`,
   `rotate_tree_n8`), `deposit-relayer` (`fetch_deposit_data`,
   `export_vk_blob`, `export_blake2b_proof`) and `relayer` (`aggregate-proof`,
   `bridge-event-halo2-prover`), and with them the `--aggregator-dir` /
-  `--bridge-prover-libraries-dir` flags of `relayer`. See Breaking Changes.
+  `--bridge-prover-libraries-dir` flags of `relayer` and their
+  `BRIDGE_AGGREGATOR_DIR`, `AGGREGATOR_DIR` and `BRIDGE_PROVER_LIBRARIES_DIR`.
+  See Breaking Changes.
 
 ## [0.2.0] – 2026-09-11
 

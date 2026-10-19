@@ -66,7 +66,8 @@ enum Cmd {
         #[arg(long, env = "LIGHT_CLIENT_STEP_PROVER_BIN")]
         step_prover_bin: PathBuf,
         /// Working directory for the prover; a relative `--srs-path` resolves
-        /// against it. Defaults to the binary's own directory.
+        /// against it, and the SRS is checked to be there at startup.
+        /// Defaults to the binary's own directory.
         #[arg(long, env = "LIGHT_CLIENT_PROVER_DIR")]
         prover_dir: Option<PathBuf>,
         #[arg(long, env = "STEP_SRS_PATH", default_value = "data/kzg_params_19.srs")]
@@ -217,11 +218,16 @@ enum Cmd {
         #[arg(long, env = "LIGHT_CLIENT_STEP_PROVER_BIN")]
         step_prover_bin: Option<PathBuf>,
         /// Prebuilt `rotate_tree_n8` example (`--features aggregation`);
-        /// required unless `--no-rotate` or `--mock-prove`.
+        /// required unless `--no-rotate` or `--mock-prove`, and ignored with
+        /// `--no-rotate`.
         #[arg(long, env = "LIGHT_CLIENT_ROTATE_PROVER_BIN")]
         rotate_prover_bin: Option<PathBuf>,
-        /// Working directory for the provers; `rotate_tree_n8` reads its
-        /// fixture there. Defaults to each binary's own directory.
+        /// Working directory for the provers. Required when the daemon may
+        /// rotate: `rotate_tree_n8` reads its shard snarks (`out/shard_snark`)
+        /// and the outer SRS (`../params/`) there, and the period check reads
+        /// `fixtures/mainnet/` there. Otherwise optional: a relative
+        /// `--srs-path` resolves against it, and the SRS is checked to be
+        /// there at startup. Defaults to the binary's own directory.
         #[arg(long, env = "LIGHT_CLIENT_PROVER_DIR")]
         prover_dir: Option<PathBuf>,
         #[arg(long, env = "STEP_SRS_PATH")]
@@ -678,9 +684,10 @@ async fn set_gloas_fork_slot(
 }
 
 /// The subprocess prover for `daemon` and `prove-one`, every binary checked
-/// to exist and be executable before anything else starts: a wrong path is
-/// a configuration error, found now rather than at the first proof. The
-/// rotate prover is only needed when the daemon may rotate.
+/// to exist and be executable before anything else starts, and the SRS to be
+/// where the step prover will read it: a wrong path is a configuration
+/// error, found now rather than at the first proof. The rotate prover, and
+/// with it `--prover-dir`, is only needed when the daemon may rotate.
 fn subprocess_prover_config(
     step_prover_bin: Option<PathBuf>,
     rotate_prover_bin: Option<PathBuf>,
@@ -696,9 +703,11 @@ fn subprocess_prover_config(
             "--step-prover-bin (LIGHT_CLIENT_STEP_PROVER_BIN) required unless --mock-prove"
         )
     })?;
+    // With `--no-rotate` nothing rotates: a rotate binary named in a shared
+    // env file is neither needed nor checked.
     let rotate_prover_bin = match (rotate_prover_bin, enable_rotate) {
-        (Some(bin), _) => Some(require_executable(&bin, "rotate prover")?),
-        (None, false) => None,
+        (_, false) => None,
+        (Some(bin), true) => Some(require_executable(&bin, "rotate prover")?),
         (None, true) => anyhow::bail!(
             "--rotate-prover-bin (LIGHT_CLIENT_ROTATE_PROVER_BIN) required unless --no-rotate or \
              --mock-prove"
@@ -707,16 +716,34 @@ fn subprocess_prover_config(
     let prover_dir = match prover_dir {
         Some(dir) if dir.is_dir() => Some(dir),
         Some(dir) => anyhow::bail!("--prover-dir {} is not a directory", dir.display()),
+        // `rotate_tree_n8` reads its shard snarks (`out/shard_snark`) and the
+        // outer SRS (`../params/`) in its working directory, and the period
+        // check before it reads `fixtures/mainnet/` there: without the
+        // directory the first period jump fails, not the start.
+        None if rotate_prover_bin.is_some() => anyhow::bail!(
+            "--prover-dir (LIGHT_CLIENT_PROVER_DIR) required unless --no-rotate: rotate_tree_n8 \
+             reads its shard snarks and outer SRS there, and the period check its fixture"
+        ),
         None => None,
     };
-    Ok(SubprocessProverConfig {
+    let cfg = SubprocessProverConfig {
         step_prover_bin: require_executable(&step_prover_bin, "step prover")?,
         rotate_prover_bin,
         prover_dir,
         srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
         timeout: Duration::from_secs(timeout_secs),
         log_dir: Some(log_dir),
-    })
+    };
+    // Where the step prover will look for the SRS: a relative path, in its
+    // working directory. Checked now, not at the first proof.
+    let srs = cfg.step_srs_path();
+    anyhow::ensure!(
+        srs.is_file(),
+        "--srs-path (STEP_SRS_PATH) {}: not a file; a relative path is read in the step prover's \
+         working directory",
+        srs.display()
+    );
+    Ok(cfg)
 }
 
 async fn prove_one(
@@ -1277,4 +1304,114 @@ where
         .run_until_shutdown(backoff, metrics, shutdown)
         .await
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{os::unix::fs::PermissionsExt, path::Path};
+
+    use super::*;
+
+    /// A file `require_executable` accepts; nothing runs it.
+    fn executable(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn config(
+        dir: &Path,
+        rotate: Option<PathBuf>,
+        prover_dir: Option<PathBuf>,
+        srs: Option<PathBuf>,
+        enable_rotate: bool,
+    ) -> anyhow::Result<SubprocessProverConfig> {
+        subprocess_prover_config(
+            Some(executable(dir, "step")),
+            rotate,
+            prover_dir,
+            srs,
+            enable_rotate,
+            1,
+            dir.join("logs"),
+        )
+    }
+
+    #[test]
+    fn rotate_needs_a_prover_dir_and_no_rotate_ignores_the_rotate_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let srs = dir.path().join("srs.bin");
+        std::fs::write(&srs, "srs").unwrap();
+        let rotate = executable(dir.path(), "rotate");
+        let err = config(
+            dir.path(),
+            Some(rotate.clone()),
+            None,
+            Some(srs.clone()),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--prover-dir"), "{err}");
+        let cfg = config(
+            dir.path(),
+            Some(rotate.clone()),
+            Some(dir.path().to_path_buf()),
+            Some(srs.clone()),
+            true,
+        )
+        .unwrap();
+        assert_eq!(cfg.rotate_prover_bin, Some(rotate.canonicalize().unwrap()));
+        // `--no-rotate`: the binary a shared env file names is neither
+        // needed nor checked, and the provers run where they are.
+        let cfg = config(
+            dir.path(),
+            Some(dir.path().join("not-built")),
+            None,
+            Some(srs),
+            false,
+        )
+        .unwrap();
+        assert_eq!(cfg.rotate_prover_bin, None);
+        assert_eq!(cfg.prover_dir, None);
+    }
+
+    #[test]
+    fn the_srs_is_checked_where_the_step_prover_will_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(work.join("data")).unwrap();
+        std::fs::write(work.join("data/kzg_params_19.srs"), "srs").unwrap();
+        let step = executable(&bin_dir, "step");
+        let logs = dir.path().join("logs");
+        // The default, relative path: found under `--prover-dir`...
+        let cfg = subprocess_prover_config(
+            Some(step.clone()),
+            None,
+            Some(work.clone()),
+            None,
+            false,
+            1,
+            logs.clone(),
+        )
+        .unwrap();
+        assert_eq!(cfg.srs_path, PathBuf::from("data/kzg_params_19.srs"));
+        // ...and not in the binary's own directory, where the prover would
+        // look without one.
+        let err =
+            subprocess_prover_config(Some(step.clone()), None, None, None, false, 1, logs.clone())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("--srs-path") && err.contains("bin/data/kzg_params_19.srs"),
+            "{err}"
+        );
+        // An absolute path is taken as is.
+        let srs = dir.path().join("hermez-raw-19");
+        std::fs::write(&srs, "srs").unwrap();
+        subprocess_prover_config(Some(step), None, None, Some(srs), false, 1, logs).unwrap();
+    }
 }

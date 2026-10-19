@@ -101,10 +101,12 @@ pub struct SubprocessProverConfig {
     /// `--features aggregation`). `None` when the daemon runs `--no-rotate`;
     /// a period jump then fails instead of spawning anything.
     pub rotate_prover_bin: Option<PathBuf>,
-    /// Working directory of both provers. `rotate_tree_n8` reads its
-    /// committed fixture from `fixtures/mainnet/` under it, and a relative
-    /// `srs_path` resolves against it. `None` runs each prover in the
-    /// directory its binary is in.
+    /// Working directory of both provers. `rotate_tree_n8` reads its shard
+    /// snarks (`out/shard_snark`) and the outer SRS (`../params/`) there, and
+    /// the period check before it reads `fixtures/mainnet/` there, so a
+    /// daemon that may rotate needs it; a relative `srs_path` resolves
+    /// against it. `None` runs each prover in the directory its binary is
+    /// in.
     pub prover_dir: Option<PathBuf>,
     pub srs_path: PathBuf,
     pub timeout: Duration,
@@ -124,6 +126,17 @@ impl SubprocessProverConfig {
         match bin.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
             _ => PathBuf::from("."),
+        }
+    }
+
+    /// Where the step prover reads the SRS: `srs_path` as is when absolute,
+    /// else under the directory the prover runs in.
+    pub fn step_srs_path(&self) -> PathBuf {
+        if self.srs_path.is_absolute() {
+            self.srs_path.clone()
+        } else {
+            self.work_dir_for(&self.step_prover_bin)
+                .join(&self.srs_path)
         }
     }
 }
@@ -435,10 +448,25 @@ mod tests {
         }
     }
 
-    fn install_script(path: &Path, script: &str) {
+    /// Put an executable `script` at `bin`. Copied there by `cp`, not
+    /// written from this process: a test running beside this one may fork
+    /// while this process holds the file open for writing, and the child
+    /// holds it until it execs — exec'ing the script meanwhile fails with
+    /// `ETXTBSY`.
+    fn install_script(bin: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, script).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let source = bin.with_extension("src");
+        std::fs::write(&source, script).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Gone first: `cp` over an existing file keeps that file's mode.
+        std::fs::remove_file(bin).ok();
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(bin)
+            .status()
+            .unwrap();
+        assert!(copied.success());
     }
 
     fn update_with_committee() -> FinalityUpdate {
@@ -530,6 +558,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("--rotate-prover-bin"), "{err}");
+    }
+
+    #[test]
+    fn the_srs_is_read_where_the_step_prover_runs() {
+        let step = Path::new("/opt/provers/export_step_vk_blob");
+        let relative = cfg(step, None, Some(Path::new("/work")));
+        assert_eq!(relative.step_srs_path(), PathBuf::from("/work/srs.bin"));
+        let in_bin_dir = cfg(step, None, None);
+        assert_eq!(
+            in_bin_dir.step_srs_path(),
+            PathBuf::from("/opt/provers/srs.bin")
+        );
+        let mut absolute = cfg(step, None, Some(Path::new("/work")));
+        absolute.srs_path = "/srs/kzg_bn254_19.srs".into();
+        assert_eq!(
+            absolute.step_srs_path(),
+            PathBuf::from("/srs/kzg_bn254_19.srs")
+        );
     }
 
     #[test]

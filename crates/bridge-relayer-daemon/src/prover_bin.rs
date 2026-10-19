@@ -26,6 +26,33 @@ pub fn require_executable(path: &Path, what: &str) -> Result<PathBuf, RelayerErr
     path.canonicalize().map_err(|e| refuse(e.to_string()))
 }
 
+/// Fake prover binaries for the tests that spawn one.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+
+    /// Put an executable `script` at `bin`. Copied there by `cp`, not
+    /// written from this process: a test running beside this one may fork
+    /// while this process holds the file open for writing, and the child
+    /// holds it until it execs — exec'ing the script meanwhile fails with
+    /// `ETXTBSY`.
+    pub(crate) fn install_script(bin: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let source = bin.with_extension("src");
+        std::fs::write(&source, script).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Gone first: `cp` over an existing file keeps that file's mode.
+        std::fs::remove_file(bin).ok();
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(bin)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

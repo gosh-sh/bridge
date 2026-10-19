@@ -498,10 +498,25 @@ mod tests {
         assert!(gen.generate(&event(4)).await.is_ok());
     }
 
-    fn install_script(path: &Path, script: &str) {
+    /// Put an executable `script` at `bin`. Copied there by `cp`, not
+    /// written from this process: a test running beside this one may fork
+    /// while this process holds the file open for writing, and the child
+    /// holds it until it execs — exec'ing the script meanwhile fails with
+    /// `ETXTBSY`.
+    fn install_script(bin: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, script).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let source = bin.with_extension("src");
+        std::fs::write(&source, script).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Gone first: `cp` over an existing file keeps that file's mode.
+        std::fs::remove_file(bin).ok();
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(bin)
+            .status()
+            .unwrap();
+        assert!(copied.success());
     }
 
     fn bins_in(dir: &Path) -> DepositProverBins {

@@ -1395,6 +1395,7 @@ impl SnarkWrapper for MockSnarkWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prover_bin::test_support::install_script;
 
     #[test]
     fn subprocess_aggregate_args_are_stable() {
@@ -1667,25 +1668,6 @@ mod tests {
                  i=$((i+1)); done\necho 'Aggregator shape match'\n{end}"
             ),
         );
-    }
-
-    /// Put an executable `script` at `bin`. Copied there by `cp`, not
-    /// written from this process: a test running beside this one may fork
-    /// while this process holds the file open for writing, and the child
-    /// holds it until it execs — exec'ing the script meanwhile fails with
-    /// `ETXTBSY`.
-    fn install_script(bin: &Path, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        let source = bin.with_extension("src");
-        std::fs::write(&source, script).unwrap();
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let copied = std::process::Command::new("cp")
-            .arg(&source)
-            .arg(bin)
-            .status()
-            .unwrap();
-        assert!(copied.success());
     }
 
     /// What is logged on this thread, from now until the guard is dropped.

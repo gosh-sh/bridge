@@ -295,20 +295,18 @@ mod tests {
     async fn the_prover_is_the_configured_binary_run_in_the_work_dir() {
         // The path given is what runs, in `work_dir`; a failure quotes the
         // prover's stderr. No cargo anywhere.
-        use std::os::unix::fs::PermissionsExt;
+        use crate::prover_bin::test_support::install_script;
         let dir = tempfile::TempDir::new().unwrap();
         let work = dir.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
         let bin = dir.path().join("prover.sh");
-        std::fs::write(
+        install_script(
             &bin,
-            format!(
+            &format!(
                 "#!/bin/sh\npwd -P > {cwd}\necho 'no params here' >&2\nexit 2\n",
                 cwd = dir.path().join("cwd").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let prover =
             SubprocessWithdrawalProver::new(SubprocessWithdrawalProverConfig::new(&bin, &work));
         let err = prover

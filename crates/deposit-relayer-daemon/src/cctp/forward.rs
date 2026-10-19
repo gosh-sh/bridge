@@ -40,6 +40,7 @@ sol! {
         function receiveBurn(bytes message, bytes attestation) external returns (bytes32 key, uint256 minted);
         function forward(bytes32 key) external;
         function pending(bytes32 key) external view returns (uint256 amount, bytes32 anAccount, address depositor, int8 anWorkchain);
+        function forwarders(address account) external view returns (bool);
     }
 }
 
@@ -173,6 +174,11 @@ impl ForwardState {
         self.pending.retain(|p| p.tx_hash != tx_hash);
         if !self.gave_up.iter().any(|s| s == tx_hash) {
             self.gave_up.push(tx_hash.to_string());
+            error!(
+                %tx_hash,
+                "giving up on CCTP burn after repeated failures; funds stay parked or unminted. \
+                 Retry with cctp-forward --tx-hash; gave_up is never retried by the daemon"
+            );
         }
     }
 
@@ -238,7 +244,9 @@ pub async fn run_cctp_forward(cfg: CctpForwardConfig) -> Result<(), RelayerError
             .lookup(cfg.source_domain, &tx_hash, cfg.receiver)
             .await?
         {
-            IrisClass::Ready(messages) => break messages,
+            IrisClass::Ready {
+                messages, ..
+            } => break messages,
             IrisClass::Unrelated => {
                 return Err(RelayerError::other(format!(
                     "Iris has messages for {tx_hash} but none name receiver {}",
@@ -329,6 +337,28 @@ pub async fn run_cctp_daemon(cfg: CctpDaemonConfig) -> Result<(), RelayerError> 
         None => fresh,
     };
 
+    let signer: PrivateKeySigner = cfg
+        .private_key
+        .parse()
+        .map_err(|e| RelayerError::other(format!("CCTP hub private key: {e}")))?;
+    let signer_addr = signer.address();
+    let allowed = forwarder_allowed(&hub, cfg.receiver, signer_addr).await?;
+    if !allowed {
+        return Err(RelayerError::other(format!(
+            "hub signer {signer_addr} is not a forwarder on {}; owner must setForwarder",
+            cfg.receiver
+        )));
+    }
+    let balance = hub
+        .get_balance(signer_addr)
+        .await
+        .map_err(|e| RelayerError::eth(format!("signer balance: {e}")))?;
+    if balance.is_zero() {
+        return Err(RelayerError::other(format!(
+            "hub signer {signer_addr} has no ETH for gas"
+        )));
+    }
+
     let iris = IrisClient::new(&cfg.iris_url)?;
     info!(
         source_chain_id,
@@ -378,11 +408,16 @@ where
         state.last_scanned_block = Some(safe);
     }
 
-    let pending: Vec<String> = state
+    let mut pending: Vec<(String, u32)> = state
         .pending
         .iter()
+        .map(|p| (p.tx_hash.clone(), p.failures))
+        .collect();
+    pending.sort_by_key(|(_, failures)| *failures);
+    let pending: Vec<String> = pending
+        .into_iter()
         .take(MAX_LOOKUPS_PER_TICK)
-        .map(|p| p.tx_hash.clone())
+        .map(|(tx, _)| tx)
         .collect();
     for tx_hash in pending {
         match iris.lookup(cfg.source_domain, &tx_hash, cfg.receiver).await {
@@ -391,22 +426,33 @@ where
                 warn!(%tx_hash, "Iris messages do not name this receiver; giving up");
                 state.give_up(&tx_hash);
             },
-            Ok(IrisClass::Ready(messages)) => {
+            Ok(IrisClass::Ready {
+                messages,
+                complete,
+            }) => {
                 let mut failed = false;
                 for message in &messages {
                     match submit_one(hub, cfg.receiver, message).await {
                         Ok(()) => {},
                         Err(error) => {
                             warn!(%tx_hash, %error, "hub submission failed");
-                            state.record_failure(&tx_hash);
+                            if !is_transport_error(&error) {
+                                state.record_failure(&tx_hash);
+                            }
                             failed = true;
                             break;
                         },
                     }
                 }
-                if !failed {
+                if !failed && complete {
                     state.mark_submitted(&tx_hash);
                     info!(%tx_hash, "forwarded to hub");
+                } else if !failed {
+                    info!(
+                        %tx_hash,
+                        submitted = messages.len(),
+                        "some burns in this transaction are still pending Circle attestation"
+                    );
                 }
             },
             Err(error) => {
@@ -462,21 +508,15 @@ async fn hub_provider(hub_rpc_url: &str, private_key: &str) -> Result<impl Provi
     Ok(provider)
 }
 
-/// `receiveBurn`, then `forward`. Either step may already have been done by an
-/// earlier run; `pending(key)` tells which.
+/// `receiveBurn`, then `forward`. Always calls `forward` after a successful
+/// (or already-mined) receive so a lagging RPC cannot skip the deposit.
 async fn submit_one(
     provider: &impl Provider,
     receiver: Address,
     message: &AttestedMessage,
 ) -> Result<(), RelayerError> {
     let key = message_key(&message.message)?;
-    if pending_amount(provider, receiver, key).await?.is_zero() {
-        receive_burn(provider, receiver, message).await?;
-        if pending_amount(provider, receiver, key).await?.is_zero() {
-            info!(%key, "message already received and forwarded");
-            return Ok(());
-        }
-    }
+    receive_burn(provider, receiver, message).await?;
     forward(provider, receiver, key).await
 }
 
@@ -503,10 +543,7 @@ async fn receive_burn(
             return Err(RelayerError::eth(format!("send receiveBurn: {text}")));
         },
     };
-    let receipt = pending
-        .get_receipt()
-        .await
-        .map_err(|e| RelayerError::eth(format!("receiveBurn receipt: {e}")))?;
+    let receipt = wait_receipt(pending, "receiveBurn").await?;
     if receipt.status() {
         info!(tx = %receipt.transaction_hash, "receiveBurn mined");
         return Ok(());
@@ -550,10 +587,7 @@ async fn forward(
         .send_transaction(tx)
         .await
         .map_err(|e| RelayerError::eth(format!("send forward: {e}")))?;
-    let receipt = pending
-        .get_receipt()
-        .await
-        .map_err(|e| RelayerError::eth(format!("forward receipt: {e}")))?;
+    let receipt = wait_receipt(pending, "forward").await?;
     if !receipt.status() {
         if pending_amount(provider, receiver, key).await?.is_zero() {
             info!(%key, "forward reverted but nothing is parked; another caller forwarded it");
@@ -614,6 +648,55 @@ pub fn message_key(message: &[u8]) -> Result<B256, RelayerError> {
     encoded[28..32].copy_from_slice(&message[4..8]);
     encoded[32..64].copy_from_slice(&message[12..44]);
     Ok(keccak256(encoded))
+}
+
+const RECEIPT_WAIT: Duration = Duration::from_secs(120);
+
+async fn wait_receipt<P>(
+    pending: alloy::providers::PendingTransactionBuilder<P>,
+    what: &str,
+) -> Result<P::ReceiptResponse, RelayerError>
+where
+    P: alloy::network::Network,
+{
+    match tokio::time::timeout(RECEIPT_WAIT, pending.get_receipt()).await {
+        Ok(Ok(receipt)) => Ok(receipt),
+        Ok(Err(e)) => Err(RelayerError::eth(format!("{what} receipt: {e}"))),
+        Err(_) => Err(RelayerError::eth(format!(
+            "{what} receipt timed out after {}s",
+            RECEIPT_WAIT.as_secs()
+        ))),
+    }
+}
+
+async fn forwarder_allowed<P: Provider>(
+    provider: &P,
+    receiver: Address,
+    signer: Address,
+) -> Result<bool, RelayerError> {
+    let tx = TransactionRequest::default().to(receiver).input(
+        CctpHubReceiver::forwardersCall {
+            account: signer,
+        }
+        .abi_encode()
+        .into(),
+    );
+    let out = provider
+        .call(tx)
+        .await
+        .map_err(|e| RelayerError::eth(format!("forwarders({signer}): {e}")))?;
+    CctpHubReceiver::forwardersCall::abi_decode_returns(&out)
+        .map_err(|e| RelayerError::eth(format!("decode forwarders({signer}): {e}")))
+}
+
+fn is_transport_error(error: &RelayerError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("timeout")
+        || text.contains("timed out")
+        || text.contains("connection")
+        || text.contains("429")
+        || text.contains("transport")
+        || text.contains("temporarily unavailable")
 }
 
 pub fn is_nonce_already_used(err: &str) -> bool {

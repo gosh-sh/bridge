@@ -96,12 +96,16 @@ contract MockTokenMessenger is ITokenMessengerV2 {
 }
 
 /// @title MockMessageTransmitter
-/// @notice Mints the hub token mapped from the burn message's remote token.
-///         `mintDelta` lets a test mint a different amount than `amount - fee`
-///         and check the receiver rejects it.
+/// @notice Mints the hub token mapped from the burn message's remote token,
+///         and only when the outer `recipient` is the local TokenMessenger —
+///         the way Circle's transmitter dispatches to `TokenMessengerV2`.
+///         A generic `sendMessage` therefore does not mint. `mintDelta` lets
+///         a test mint a different amount than `amount - fee` and check the
+///         receiver rejects it.
 contract MockMessageTransmitter is IMessageTransmitterV2 {
     mapping(bytes32 remoteToken => address localToken) public localToken;
     mapping(bytes32 nonce => bool) public usedNonce;
+    bytes32 public localMessenger;
     int256 public mintDelta;
     uint256 public calls;
 
@@ -110,6 +114,10 @@ contract MockMessageTransmitter is IMessageTransmitterV2 {
 
     function setLocalToken(bytes32 remoteToken, address local) external {
         localToken[remoteToken] = local;
+    }
+
+    function setLocalMessenger(address messenger) external {
+        localMessenger = bytes32(uint256(uint160(messenger)));
     }
 
     function setMintDelta(int256 delta) external {
@@ -121,6 +129,10 @@ contract MockMessageTransmitter is IMessageTransmitterV2 {
         if (usedNonce[parsed.nonce]) revert NonceUsed();
         usedNonce[parsed.nonce] = true;
         calls += 1;
+
+        if (localMessenger != bytes32(0) && parsed.recipient != localMessenger) {
+            return true;
+        }
 
         address local = localToken[parsed.burnToken];
         if (local == address(0)) revert UnknownRemoteToken();

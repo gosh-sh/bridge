@@ -126,7 +126,8 @@ Contracts on their own:
 cd contracts/ethereum
 forge test                                                   # full suite
 forge test --match-contract AckiNackiBridgeWithdrawByProof -vv
-FOUNDRY_PROFILE=fork forge test --match-contract AaveFork     # needs a mainnet RPC
+FOUNDRY_PROFILE=fork FORK_URL=<Sepolia RPC> forge test --match-contract AckiNackiBridgeAaveFork
+FOUNDRY_PROFILE=fork FORK_URL=<mainnet RPC> forge test --match-contract CctpMainnetAaveFork
 ```
 
 The suite is inventoried per file, with what each one covers, in

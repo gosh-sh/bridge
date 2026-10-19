@@ -16,8 +16,8 @@ import "../src/cctp/CctpHubReceiver.sol";
 ///
 ///         `set-source` on the hub `CctpHubReceiver`:
 ///         `CCTP_RECEIVER`, `CCTP_SOURCE_DOMAIN`, `CCTP_SOURCE_CHAIN_ID`,
-///         `CCTP_ADAPTER` (the source endpoint), `CCTP_REMOTE_TOKEN`.
-///         `CCTP_ENABLED` defaults to true.
+///         `CCTP_ADAPTER` (the source endpoint), `CCTP_REMOTE_TOKEN`,
+///         `CCTP_REMOTE_TOKEN_MESSENGER`. `CCTP_ENABLED` defaults to true.
 ///
 ///         `set-egress` on the hub `CctpEndpoint`:
 ///         `CCTP_ENDPOINT`, `CCTP_EGRESS_DOMAIN`, `CCTP_EGRESS_ALLOWED`.
@@ -47,6 +47,7 @@ contract WireCctp is Script {
                 vm.envUint("CCTP_SOURCE_CHAIN_ID"),
                 _pad(vm.envAddress("CCTP_ADAPTER")),
                 _pad(vm.envAddress("CCTP_REMOTE_TOKEN")),
+                _pad(vm.envAddress("CCTP_REMOTE_TOKEN_MESSENGER")),
                 vm.envOr("CCTP_ENABLED", true)
             );
             console.log("setSource on", address(receiver));

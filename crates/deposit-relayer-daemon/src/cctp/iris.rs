@@ -22,7 +22,12 @@ pub enum IrisClass {
     /// 404, an empty list, or a message Circle has not signed yet.
     Pending,
     /// At least one v2 message is signed and names our receiver.
-    Ready(Vec<AttestedMessage>),
+    /// `complete` is false when another message in the same response is
+    /// still pending, so the source transaction must stay in the queue.
+    Ready {
+        messages: Vec<AttestedMessage>,
+        complete: bool,
+    },
     /// Messages exist, none are pending, and none are for this receiver.
     /// Retrying will not help.
     Unrelated,
@@ -143,7 +148,10 @@ fn classify_parsed(messages: &[RawMessage], receiver: Address) -> IrisClass {
         }
     }
     if !ready.is_empty() {
-        IrisClass::Ready(ready)
+        IrisClass::Ready {
+            messages: ready,
+            complete: !saw_pending,
+        }
     } else if saw_pending {
         IrisClass::Pending
     } else if saw_reject {
@@ -252,16 +260,16 @@ pub fn normalize_tx_hash(raw: &str) -> Result<String, RelayerError> {
     Ok(format!("0x{}", hex.to_ascii_lowercase()))
 }
 
-/// Circle domain id this chain uses, when we know it. Testnets other than
-/// Sepolia are omitted: their domain ids move, and a wrong warning is worse
-/// than none. `None` means "no opinion".
+/// Circle domain id this chain uses, when we know it. Testnets reuse the
+/// mainnet domain ids (Arbitrum Sepolia is 3, same as Arbitrum One).
+/// `None` means "no opinion".
 pub fn expected_domain(chain_id: u64) -> Option<u32> {
     match chain_id {
         1 | 11_155_111 => Some(0),
-        10 => Some(2),
-        42_161 => Some(3),
-        8_453 => Some(6),
-        137 => Some(7),
+        10 | 11_155_420 => Some(2),
+        42_161 | 421_614 => Some(3),
+        8_453 | 84_532 => Some(6),
+        137 | 80_002 => Some(7),
         _ => None,
     }
 }
@@ -298,7 +306,11 @@ mod tests {
     fn complete_message_for_our_receiver_is_ready() {
         let class = classify_messages(complete(RECEIVER).as_bytes(), receiver()).unwrap();
         match class {
-            IrisClass::Ready(messages) => {
+            IrisClass::Ready {
+                messages,
+                complete,
+            } => {
+                assert!(complete);
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].message, vec![0x01, 0x02]);
                 assert_eq!(messages[0].attestation, vec![0xab, 0xcd]);
@@ -356,7 +368,45 @@ mod tests {
     #[test]
     fn arbitrum_domain_is_three() {
         assert_eq!(expected_domain(42_161), Some(3));
+        assert_eq!(expected_domain(421_614), Some(3));
         assert_eq!(expected_domain(11_155_111), Some(0));
         assert_eq!(expected_domain(999), None);
+    }
+
+    #[test]
+    fn a_second_pending_message_keeps_the_transaction_open() {
+        let body = format!(
+            r#"{{
+                "messages": [
+                    {{
+                        "message": "0x0102",
+                        "attestation": "0xabcd",
+                        "cctpVersion": 2,
+                        "status": "complete",
+                        "decodedMessage": {{
+                            "destinationCaller": "{RECEIVER}",
+                            "decodedMessageBody": {{ "mintRecipient": "{RECEIVER}" }}
+                        }}
+                    }},
+                    {{
+                        "message": "0x",
+                        "attestation": "PENDING",
+                        "cctpVersion": 2,
+                        "status": "pending_confirmations"
+                    }}
+                ],
+                "sourceTxHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+            }}"#
+        );
+        match classify_messages(body.as_bytes(), receiver()).unwrap() {
+            IrisClass::Ready {
+                messages,
+                complete,
+            } => {
+                assert!(!complete);
+                assert_eq!(messages.len(), 1);
+            },
+            other => panic!("expected incomplete ready, got {other:?}"),
+        }
     }
 }

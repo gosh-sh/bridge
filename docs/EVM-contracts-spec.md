@@ -301,7 +301,7 @@ hub; it does not call the recipient. `CctpHubReceiver` is the only
    `amount - feeExecuted` (from the attested burn body, `src/cctp/CctpV2Message.sol`)
    under `messageKey(sourceDomain, nonce) = keccak256(abi.encode(sourceDomain, nonce))`.
    Emits `RemoteDepositReceived`. `pending(key)` and `totalPending` expose the parked amounts.
-2. `forward(key)` — a `setForwarder`'d address or the burn's `depositor` calls
+2. `forward(key)` — a `setForwarder`'d address calls
    `AckiNackiBridge.deposit` for the parked amount. No event of its own.
 
 The split protects provability. The deposit circuit takes only a type 1 or type 2 enclosing
@@ -309,7 +309,9 @@ transaction whose receipt fits its keccak budget (`deposit-prover/src/circuit_v2
 attestation is public once Iris signs it, so a single permissionless mint-and-deposit call could
 be sent by anyone as a legacy (type 0) or EIP-7702 transaction, leaving a `Deposit` no one can
 prove. Minting only parks the funds, so `receiveBurn` stays open; the contract cannot check the
-transaction type, so `forward` is limited to forwarders and the depositor. `forward` is 36 bytes
+transaction type, so `forward` is limited to forwarders. Nothing on chain
+enforces the type: a wrong type leaves an unprovable `Deposit` with the funds
+in the bridge. `forward` is 36 bytes
 of calldata, and with the standing maximum allowance the constructor grants the bridge its
 receipt is `Transfer` + `Deposit`.
 
@@ -324,12 +326,13 @@ Registries, not hard-coded chains or tokens:
   hub a local token burns toward. One endpoint per chain, many tokens.
 * `CctpEndpoint.setEgressDomain(domain, allowed)` — `bridgeOut` destinations.
   No hook; the mint recipient is the argument.
-* `CctpHubReceiver.setSource(domain, chainId, adapter, remoteToken, enabled)` —
-  which remote adapter may originate burns of which remote token. One receiver
-  per hub bridge, so one token. A second token is a second bridge and a second
-  receiver.
-* `CctpHubReceiver.setForwarder(account, allowed)` — who may call `forward`
-  besides the depositor.
+* `CctpHubReceiver.setSource(domain, chainId, adapter, remoteToken, remoteTokenMessenger, enabled)` —
+  which remote adapter and TokenMessenger may originate burns of which remote token.
+  `receiveBurn` also requires the outer CCTP `recipient` to be the local
+  `TokenMessengerV2`. One receiver per hub bridge, so one token. A second token
+  is a second bridge and a second receiver. Do not pass a non-USDC hub bridge
+  to `setTrustedL1Bridge`: `confirmDeposit` always mints USDC ECC.
+* `CctpHubReceiver.setForwarder(account, allowed)` — who may call `forward`.
 
 `CctpDomains` records Circle's domain ids (Arbitrum = 3, Ethereum = 0, Base = 6,
 OP = 2, Polygon = 7) and the finality thresholds 1000 (fast) and 2000
@@ -364,9 +367,10 @@ is Circle USDC. `deposit(amount, anWorkchain, anAccount)` pulls the Circle USDC 
 takes the same amount of faucet USDC from its own balance or mints the rest from the faucet
 (10 000 USDC per call at most), and calls `bridge.deposit`. The Circle USDC stays in the shim and
 backs `redeem(amount, to)`, a 1:1 swap of faucet USDC back to Circle USDC for a withdrawal that
-leaves through CCTP. The `Deposit` names the shim as `sender`. The `forward` receipt has six logs —
-the Circle `Transfer`, the faucet mint, the faucet `Transfer` into the bridge and its `Approval`,
-the `Deposit`, `Shimmed` — and the `Deposit` is at receipt log index 4.
+leaves through CCTP. The `Deposit` names the shim as `sender`. When the shim has to mint faucet USDC
+the `forward` receipt has six logs and `Deposit` sits at index 4; with enough
+faucet USDC already on hand it is five logs and index 3. `redeem` is owner-only
+and the constructor refuses any chain other than Sepolia.
 
 The real USDC reserve on Sepolia is over its supply cap (about 4.58 billion supplied against a cap
 of 2 billion on 2026-10-17), so `supplyToAave` reverts with Aave error `51`

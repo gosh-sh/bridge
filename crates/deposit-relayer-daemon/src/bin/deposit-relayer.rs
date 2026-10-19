@@ -275,9 +275,8 @@ enum Cmd {
         /// Source-chain transaction that called `depositToHub`.
         #[arg(long)]
         tx_hash: String,
-        /// Hub chain RPC. The hub must be a deposit-prover allowlisted chain
-        /// or the later proof step cannot run; this command only warns.
-        #[arg(long, env = "CCTP_HUB_RPC_URL")]
+        /// Hub chain RPC. This command does not read the hub chain id.
+        #[arg(long, env = "CCTP_HUB_RPC_URL", hide_env_values = true)]
         hub_rpc_url: String,
         /// Hub `CctpHubReceiver`. Must be the burn's destination caller.
         #[arg(long)]
@@ -285,7 +284,7 @@ enum Cmd {
         /// Hub EOA that pays gas for `receiveBurn` and `forward`. It must be
         /// a forwarder on the receiver (`setForwarder`). Env:
         /// `CCTP_HUB_PRIVATE_KEY`. Omitted only with `--dry-run`.
-        #[arg(long, env = "CCTP_HUB_PRIVATE_KEY")]
+        #[arg(long, env = "CCTP_HUB_PRIVATE_KEY", hide_env_values = true)]
         private_key: Option<String>,
         /// Print that an attestation is ready and do not send a transaction.
         #[arg(long)]
@@ -321,7 +320,7 @@ enum Cmd {
         /// Iris origin, no path. Env: `CCTP_IRIS_URL`.
         #[arg(long, env = "CCTP_IRIS_URL")]
         iris_url: String,
-        #[arg(long, env = "CCTP_HUB_RPC_URL")]
+        #[arg(long, env = "CCTP_HUB_RPC_URL", hide_env_values = true)]
         hub_rpc_url: String,
         /// Hub `CctpHubReceiver`.
         #[arg(long)]
@@ -329,7 +328,7 @@ enum Cmd {
         /// Hub EOA that pays gas for `receiveBurn` and `forward`. It must be
         /// a forwarder on the receiver (`setForwarder`). Env:
         /// `CCTP_HUB_PRIVATE_KEY`.
-        #[arg(long, env = "CCTP_HUB_PRIVATE_KEY")]
+        #[arg(long, env = "CCTP_HUB_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long, default_value_t = 15)]
         poll_secs: u64,

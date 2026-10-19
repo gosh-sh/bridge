@@ -9,6 +9,7 @@ import "../src/cctp/CctpDomains.sol";
 import "../src/cctp/CctpEndpoint.sol";
 import "../src/cctp/CctpHubReceiver.sol";
 import "../src/cctp/CctpV2Message.sol";
+import "../src/cctp/TwoStepOwnable.sol";
 import "../src/cctp/IMessageTransmitterV2.sol";
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockCctp.sol";
@@ -54,10 +55,12 @@ contract CctpArbitrumUsdcTest is Test {
         messenger = new MockTokenMessenger();
         transmitter = new MockMessageTransmitter();
         endpoint = new CctpEndpoint(address(messenger));
-        usdcReceiver =
-            new CctpHubReceiver(address(usdcBridge), address(transmitter), CctpDomains.ETHEREUM);
-        eurcReceiver =
-            new CctpHubReceiver(address(eurcBridge), address(transmitter), CctpDomains.ETHEREUM);
+        usdcReceiver = new CctpHubReceiver(
+            address(usdcBridge), address(transmitter), address(messenger), CctpDomains.ETHEREUM
+        );
+        eurcReceiver = new CctpHubReceiver(
+            address(eurcBridge), address(transmitter), address(messenger), CctpDomains.ETHEREUM
+        );
 
         endpoint.setHub(address(arbUsdc), CctpDomains.ETHEREUM, _b32(address(usdcReceiver)), true);
         endpoint.setHub(address(arbEurc), CctpDomains.ETHEREUM, _b32(address(eurcReceiver)), true);
@@ -68,22 +71,30 @@ contract CctpArbitrumUsdcTest is Test {
             ARBITRUM_CHAIN,
             _b32(address(endpoint)),
             _b32(address(arbUsdc)),
+            _b32(address(messenger)),
             true
         );
         usdcReceiver.setSource(
-            CctpDomains.BASE, BASE_CHAIN, _b32(address(0xBACE)), _b32(address(arbUsdc)), true
+            CctpDomains.BASE,
+            BASE_CHAIN,
+            _b32(address(0xBACE)),
+            _b32(address(arbUsdc)),
+            _b32(address(messenger)),
+            true
         );
         eurcReceiver.setSource(
             CctpDomains.ARBITRUM,
             ARBITRUM_CHAIN,
             _b32(address(endpoint)),
             _b32(address(arbEurc)),
+            _b32(address(messenger)),
             true
         );
 
         usdcReceiver.setForwarder(address(this), true);
         eurcReceiver.setForwarder(address(this), true);
 
+        transmitter.setLocalMessenger(address(messenger));
         transmitter.setLocalToken(_b32(address(arbUsdc)), address(hubUsdc));
         transmitter.setLocalToken(_b32(address(arbEurc)), address(hubEurc));
 
@@ -195,7 +206,7 @@ contract CctpArbitrumUsdcTest is Test {
         usdcReceiver.forward(key);
     }
 
-    function test_forward_isForwarderOrDepositorOnly() public {
+    function test_forward_isForwarderOnly() public {
         bytes memory message = _message(
             CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(11)), 0
         );
@@ -206,12 +217,41 @@ contract CctpArbitrumUsdcTest is Test {
         usdcReceiver.forward(key);
 
         usdcReceiver.setForwarder(address(this), false);
+        vm.prank(user);
         vm.expectRevert(CctpHubReceiver.NotForwarder.selector);
         usdcReceiver.forward(key);
 
-        vm.prank(user);
+        usdcReceiver.setForwarder(address(this), true);
         usdcReceiver.forward(key);
         assertEq(usdcBridge.treasuryBalance(), AMOUNT);
+    }
+
+    function test_receiveBurn_requiresTokenMessengerRecipientAndSender() public {
+        bytes memory generic = _message(
+            CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(21)), 0
+        );
+        // Outer recipient sits at byte 76. Point it at this receiver instead
+        // of TokenMessengerV2: a permissionless sendMessage body.
+        bytes memory who = abi.encodePacked(_b32(address(usdcReceiver)));
+        for (uint256 i = 0; i < 32; i++) {
+            generic[76 + i] = who[i];
+        }
+        hubUsdc.mint(address(usdcReceiver), AMOUNT);
+        vm.expectRevert(CctpHubReceiver.UnexpectedTokenMessenger.selector);
+        usdcReceiver.receiveBurn(generic, "");
+        assertEq(transmitter.calls(), 0);
+        assertEq(usdcReceiver.totalPending(), 0);
+
+        bytes memory wrongSender = _message(
+            CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(22)), 0
+        );
+        bytes memory other = abi.encodePacked(_b32(address(0xBAD5)));
+        for (uint256 i = 0; i < 32; i++) {
+            wrongSender[44 + i] = other[i];
+        }
+        vm.expectRevert(CctpHubReceiver.UnexpectedSender.selector);
+        usdcReceiver.receiveBurn(wrongSender, "");
+        assertEq(transmitter.calls(), 0);
     }
 
     function test_rescue_cannotTakeParkedDeposits() public {
@@ -257,8 +297,8 @@ contract CctpArbitrumUsdcTest is Test {
                 sourceDomain: CctpDomains.ARBITRUM,
                 destinationDomain: CctpDomains.ETHEREUM,
                 nonce: bytes32(uint256(4)),
-                sender: bytes32(0),
-                recipient: bytes32(0),
+                sender: _b32(address(messenger)),
+                recipient: _b32(address(messenger)),
                 destinationCaller: _b32(address(eurcReceiver)),
                 minFinalityThreshold: CctpDomains.FAST,
                 finalityThresholdExecuted: CctpDomains.FAST,
@@ -327,6 +367,50 @@ contract CctpArbitrumUsdcTest is Test {
         usdcReceiver.receiveBurn(message, "");
         assertEq(hubUsdc.balanceOf(address(usdcReceiver)), 0);
         assertEq(usdcReceiver.totalPending(), 0);
+
+        transmitter.setMintDelta(-1);
+        bytes memory short = _message(
+            CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(23)), 0
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(CctpHubReceiver.MintMismatch.selector, AMOUNT, AMOUNT - 1)
+        );
+        usdcReceiver.receiveBurn(short, "");
+        transmitter.setMintDelta(0);
+    }
+
+    function test_ownerGatesAndDisabledSource() public {
+        vm.prank(user);
+        vm.expectRevert(TwoStepOwnable.NotOwner.selector);
+        usdcReceiver.setForwarder(user, true);
+
+        vm.prank(user);
+        vm.expectRevert(TwoStepOwnable.NotOwner.selector);
+        usdcReceiver.setSource(
+            CctpDomains.ARBITRUM,
+            ARBITRUM_CHAIN,
+            _b32(address(endpoint)),
+            _b32(address(arbUsdc)),
+            _b32(address(messenger)),
+            true
+        );
+
+        usdcReceiver.setSource(
+            CctpDomains.ARBITRUM,
+            ARBITRUM_CHAIN,
+            _b32(address(endpoint)),
+            _b32(address(arbUsdc)),
+            _b32(address(messenger)),
+            false
+        );
+        bytes memory message = _message(
+            CctpDomains.ARBITRUM, _b32(address(endpoint)), _hook(user), bytes32(uint256(24)), 0
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(CctpHubReceiver.SourceDisabled.selector, CctpDomains.ARBITRUM)
+        );
+        usdcReceiver.receiveBurn(message, "");
+        assertEq(transmitter.calls(), 0);
     }
 
     function test_receive_replayReverts() public {
@@ -345,14 +429,16 @@ contract CctpArbitrumUsdcTest is Test {
 
     function test_receive_reentrancyReverts() public {
         ReenteringTransmitter evil = new ReenteringTransmitter();
-        CctpHubReceiver trapped =
-            new CctpHubReceiver(address(usdcBridge), address(evil), CctpDomains.ETHEREUM);
+        CctpHubReceiver trapped = new CctpHubReceiver(
+            address(usdcBridge), address(evil), address(messenger), CctpDomains.ETHEREUM
+        );
         evil.arm(trapped);
         trapped.setSource(
             CctpDomains.ARBITRUM,
             ARBITRUM_CHAIN,
             _b32(address(endpoint)),
             _b32(address(arbUsdc)),
+            _b32(address(messenger)),
             true
         );
         bytes memory message = _message(
@@ -460,8 +546,8 @@ contract CctpArbitrumUsdcTest is Test {
                 sourceDomain: sourceDomain,
                 destinationDomain: CctpDomains.ETHEREUM,
                 nonce: nonce,
-                sender: bytes32(uint256(0x111)),
-                recipient: bytes32(uint256(0x222)),
+                sender: _b32(address(messenger)),
+                recipient: _b32(address(messenger)),
                 destinationCaller: receiver,
                 minFinalityThreshold: CctpDomains.FINALIZED,
                 finalityThresholdExecuted: CctpDomains.FINALIZED,

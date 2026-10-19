@@ -8,6 +8,7 @@ import "../src/cctp/AnDestinationHook.sol";
 import "../src/cctp/CctpDomains.sol";
 import "../src/cctp/CctpHubReceiver.sol";
 import "../src/cctp/CctpV2Message.sol";
+import "../src/cctp/TwoStepOwnable.sol";
 import "../src/testnet/SepoliaAaveUsdcShim.sol";
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockAave.sol";
@@ -47,6 +48,7 @@ contract SepoliaAaveUsdcShimTest is Test {
     event Shimmed(address indexed caller, uint256 amount, uint256 minted);
 
     address internal endpoint = address(0xE1);
+    address internal localMessenger = address(0x28b5);
     address internal user = address(0xA11);
     bytes32 internal anAccount = bytes32(uint256(0xabc));
 
@@ -57,6 +59,7 @@ contract SepoliaAaveUsdcShimTest is Test {
         aUsdc = new MockAUSDC();
         pool = new MockAavePool(address(aaveUsdc), address(aUsdc));
         faucet = new MockAaveFaucet();
+        vm.chainId(11_155_111);
 
         bridge = new AckiNackiBridge(
             address(new MockBlockHeaderOracle()),
@@ -69,15 +72,19 @@ contract SepoliaAaveUsdcShimTest is Test {
         shim = new SepoliaAaveUsdcShim(address(bridge), address(circleUsdc), address(faucet));
 
         transmitter = new MockMessageTransmitter();
-        receiver = new CctpHubReceiver(address(shim), address(transmitter), CctpDomains.ETHEREUM);
+        receiver = new CctpHubReceiver(
+            address(shim), address(transmitter), localMessenger, CctpDomains.ETHEREUM
+        );
         receiver.setSource(
             CctpDomains.ARBITRUM,
             ARBITRUM_SEPOLIA_CHAIN,
             _b32(endpoint),
             _b32(address(arbUsdc)),
+            _b32(localMessenger),
             true
         );
         receiver.setForwarder(address(this), true);
+        transmitter.setLocalMessenger(localMessenger);
         transmitter.setLocalToken(_b32(address(arbUsdc)), address(circleUsdc));
     }
 
@@ -143,21 +150,23 @@ contract SepoliaAaveUsdcShimTest is Test {
         receiver.forward(_receive(bytes32(uint256(1))));
         uint256 reserve = circleUsdc.balanceOf(address(shim));
 
-        aaveUsdc.mint(user, reserve + 1);
-        vm.startPrank(user);
+        aaveUsdc.mint(address(this), reserve + 1);
         aaveUsdc.approve(address(shim), type(uint256).max);
+
+        vm.prank(user);
+        vm.expectRevert(TwoStepOwnable.NotOwner.selector);
+        shim.redeem(reserve, user);
+
         vm.expectRevert(
             abi.encodeWithSelector(SepoliaAaveUsdcShim.InsufficientCircleReserve.selector, reserve)
         );
         shim.redeem(reserve + 1, user);
 
         shim.redeem(reserve, address(0xB0B));
-        vm.stopPrank();
 
         assertEq(circleUsdc.balanceOf(address(0xB0B)), reserve);
         assertEq(circleUsdc.balanceOf(address(shim)), 0);
         assertEq(aaveUsdc.balanceOf(address(shim)), reserve);
-        assertEq(aaveUsdc.balanceOf(user), 1);
     }
 
     function test_rescue_isOwnerOnly() public {
@@ -177,8 +186,8 @@ contract SepoliaAaveUsdcShimTest is Test {
                 sourceDomain: CctpDomains.ARBITRUM,
                 destinationDomain: CctpDomains.ETHEREUM,
                 nonce: nonce,
-                sender: bytes32(uint256(0x111)),
-                recipient: bytes32(uint256(0x222)),
+                sender: _b32(localMessenger),
+                recipient: _b32(localMessenger),
                 destinationCaller: _b32(address(receiver)),
                 minFinalityThreshold: CctpDomains.FAST,
                 finalityThresholdExecuted: CctpDomains.FAST,

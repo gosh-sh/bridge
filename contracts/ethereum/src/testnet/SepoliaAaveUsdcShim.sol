@@ -39,8 +39,12 @@ contract SepoliaAaveUsdcShim is IDepositBridge, TwoStepOwnable, ReentrancyGuard 
     error TransferFailed();
     error TransferAmountMismatch();
     error InsufficientCircleReserve(uint256 available);
+    error WrongChain(uint256 chainId);
+
+    uint256 internal constant SEPOLIA = 11_155_111;
 
     constructor(address bridge_, address circleUsdc_, address faucet_) {
+        if (block.chainid != SEPOLIA) revert WrongChain(block.chainid);
         if (bridge_ == address(0) || circleUsdc_ == address(0) || faucet_ == address(0)) {
             revert ZeroAddress();
         }
@@ -77,7 +81,9 @@ contract SepoliaAaveUsdcShim is IDepositBridge, TwoStepOwnable, ReentrancyGuard 
     }
 
     /// @notice Swap `amount` of faucet USDC for Circle USDC, paid to `to`.
-    function redeem(uint256 amount, address to) external nonReentrant {
+    ///         Owner only: the faucet mints to anyone, so an open `redeem`
+    ///         would drain the Circle USDC that backs the return CCTP leg.
+    function redeem(uint256 amount, address to) external onlyOwner nonReentrant {
         if (amount == 0) revert ZeroAmount();
         if (to == address(0)) revert ZeroAddress();
         uint256 available = circleUsdc.balanceOf(address(this));

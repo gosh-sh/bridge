@@ -11,8 +11,9 @@ use crate::{
     errors::{CliError, CliResult},
 };
 
-/// EVM networks a deposit can be made from. Each one must be a chain the
-/// deposit circuit accepts; mainnet is not one of them.
+/// EVM networks the interactive `deposit` CLI lists. Each one must be a
+/// chain the deposit circuit accepts. Ethereum mainnet is on that
+/// allowlist as the CCTP hub, but is not a wallet-deposit option here.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
 )]

@@ -173,7 +173,7 @@ cargo run --bin deposit-relayer -- cctp-daemon \\
 cargo run --bin deposit-relayer -- daemon \\
   --rpc-url ${HUB_RPC_URL} \\
   --bridge-address ${HUB_BRIDGE} \\
-  --from-block ${HUB_FROM_BLOCK:-0} \\
+  --from-block ${HUB_FROM_BLOCK:?set HUB_FROM_BLOCK to the hub bridge deploy block} \\
   --deposit-prover-dir ${DEPOSIT_PROVER_DIR:-<path-to-deposit-prover>}
 EOF
     ;;

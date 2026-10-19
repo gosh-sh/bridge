@@ -15,10 +15,13 @@ import "../src/testnet/SepoliaAaveUsdcShim.sol";
 ///         receiver with `DEPOSIT_BRIDGE` set to the shim.
 ///
 ///         Routing is a follow-up from the owner, not part of this broadcast:
-///         `setHub` / `setEgressDomain` on the endpoint, `setSource` on the
-///         receiver. Circle domain ids are `CctpDomains` (Arbitrum is 3,
-///         Ethereum is 0). Confirm messenger and transmitter addresses against
-///         Circle's registry — this script does not default them.
+///         `setHub` / `setEgressDomain` on the endpoint, `setSource` /
+///         `setForwarder` on the receiver (`forward` reverts `NotForwarder`
+///         until the keeper EOA is set). Circle domain ids are `CctpDomains`
+///         (Arbitrum is 3, Ethereum is 0). Confirm messenger and transmitter
+///         addresses against Circle's registry — this script does not default
+///         them. A receiver deploy needs `TOKEN_MESSENGER` as well as
+///         `MESSAGE_TRANSMITTER`.
 contract DeployCctp is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -32,8 +35,9 @@ contract DeployCctp is Script {
         } else if (keccak256(bytes(kind)) == keccak256("receiver")) {
             address bridge = vm.envAddress("DEPOSIT_BRIDGE");
             address transmitter = vm.envAddress("MESSAGE_TRANSMITTER");
+            address messenger = vm.envAddress("TOKEN_MESSENGER");
             uint32 domain = uint32(vm.envUint("CCTP_LOCAL_DOMAIN"));
-            CctpHubReceiver receiver = new CctpHubReceiver(bridge, transmitter, domain);
+            CctpHubReceiver receiver = new CctpHubReceiver(bridge, transmitter, messenger, domain);
             console.log("CctpHubReceiver", address(receiver));
         } else if (keccak256(bytes(kind)) == keccak256("aave-shim")) {
             address bridge = vm.envAddress("DEPOSIT_BRIDGE");

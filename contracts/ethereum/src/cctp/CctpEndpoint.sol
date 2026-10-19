@@ -13,8 +13,9 @@ import "./TwoStepOwnable.sol";
 ///         Ingress (`depositToHub`): pull a local issuer token, burn it through
 ///         CCTP, and name the hub receiver as both the mint recipient and the
 ///         only `destinationCaller`. The hook carries the Acki Nacki account.
-///         Which hub a token flies to is `setHub` — Arbitrum USDC and a later
-///         EURC are two rows, not two contracts.
+///         Which hub a token flies to is `setHub`. A second token is another
+///         hub receiver and another hub bridge; do not trust a non-USDC
+///         bridge on Acki Nacki (`confirmDeposit` always mints USDC ECC).
 ///
 ///         Egress (`bridgeOut`): the opposite direction, with no hook. A holder
 ///         who was paid on the hub (or who simply holds the token) burns it
@@ -179,8 +180,8 @@ contract CctpEndpoint is TwoStepOwnable, ReentrancyGuard {
         }
     }
 
-    /// @dev Approve zero before a non-zero value. Circle's USDC rejects a
-    ///      non-zero to non-zero allowance change.
+    /// @dev Approve zero before a non-zero value. FiatToken does not require
+    ///      that (USDT does); the reset is defensive.
     function _approve(address token, address spender, uint256 amount) internal {
         IERC20 erc = IERC20(token);
         if (amount != 0 && erc.allowance(address(this), spender) != 0) {

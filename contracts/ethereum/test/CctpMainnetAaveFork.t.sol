@@ -47,8 +47,8 @@ contract CctpMainnetAaveForkTest is Test {
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address constant AAVE_V3_POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
     address constant AUSDC = 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c;
-    address constant MESSAGE_TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
-    address constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
+    address constant CIRCLE_TRANSMITTER_V2 = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
+    address constant CIRCLE_MESSENGER_V2 = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
     address constant ARB_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     uint256 constant ARBITRUM_CHAIN = 42_161;
 
@@ -84,17 +84,24 @@ contract CctpMainnetAaveForkTest is Test {
         require(block.chainid == 1, "fork must be Ethereum mainnet");
 
         bridge = _bridge();
-        receiver = new CctpHubReceiver(address(bridge), MESSAGE_TRANSMITTER, CctpDomains.ETHEREUM);
+        receiver = new CctpHubReceiver(
+            address(bridge), CIRCLE_TRANSMITTER_V2, CIRCLE_MESSENGER_V2, CctpDomains.ETHEREUM
+        );
         receiver.setSource(
-            CctpDomains.ARBITRUM, ARBITRUM_CHAIN, _b32(arbEndpoint), _b32(ARB_USDC), true
+            CctpDomains.ARBITRUM,
+            ARBITRUM_CHAIN,
+            _b32(arbEndpoint),
+            _b32(ARB_USDC),
+            _b32(CIRCLE_MESSENGER_V2),
+            true
         );
         receiver.setForwarder(address(this), true);
 
-        hubEndpoint = new CctpEndpoint(TOKEN_MESSENGER);
+        hubEndpoint = new CctpEndpoint(CIRCLE_MESSENGER_V2);
         hubEndpoint.setEgressDomain(CctpDomains.ARBITRUM, true);
 
         (attester, attesterKey) = makeAddrAndKey("cctp-fork-attester");
-        ICircleAttestable transmitter = ICircleAttestable(MESSAGE_TRANSMITTER);
+        ICircleAttestable transmitter = ICircleAttestable(CIRCLE_TRANSMITTER_V2);
         vm.startPrank(transmitter.attesterManager());
         transmitter.enableAttester(attester);
         transmitter.setSignatureThreshold(1);
@@ -238,8 +245,8 @@ contract CctpMainnetAaveForkTest is Test {
                 sourceDomain: CctpDomains.ARBITRUM,
                 destinationDomain: CctpDomains.ETHEREUM,
                 nonce: keccak256(abi.encode("cctp-fork-nonce", nonce)),
-                sender: _b32(TOKEN_MESSENGER),
-                recipient: _b32(TOKEN_MESSENGER),
+                sender: _b32(CIRCLE_MESSENGER_V2),
+                recipient: _b32(CIRCLE_MESSENGER_V2),
                 destinationCaller: _b32(address(receiver)),
                 minFinalityThreshold: finality,
                 finalityThresholdExecuted: finality,

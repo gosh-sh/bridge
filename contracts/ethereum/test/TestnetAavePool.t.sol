@@ -42,6 +42,7 @@ contract TestnetAavePoolTest is Test {
             VerifyBlockConfigLib.disabledWithdraw()
         );
         bridge.setYieldRecipient(yieldSink);
+        vm.chainId(11_155_111);
         shim = new SepoliaAaveUsdcShim(address(bridge), address(circleUsdc), address(faucet));
 
         circleUsdc.mint(address(this), AMOUNT);

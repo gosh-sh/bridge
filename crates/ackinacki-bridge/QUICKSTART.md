@@ -226,8 +226,9 @@ export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 ```
 
-Sepolia is the only deposit network in this version; Ethereum mainnet is
-not one at all. Everything else — the RPC, the Acki Nacki endpoint, the
+Sepolia is the only network the interactive `deposit` CLI lists; Ethereum
+mainnet is the CCTP hub the deposit relayer proves, not a wallet option.
+Everything else — the RPC, the Acki Nacki endpoint, the
 bridge address, the prover directory, the state directory — comes from the
 profile.
 

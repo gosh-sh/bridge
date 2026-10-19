@@ -161,9 +161,9 @@ impl RelayerState {
         if written_by_older_daemon {
             state.attempts_since_progress = 0;
         }
-        // A `main` file has attempts on the last failed id but no outstanding
-        // set. Carry that count into the new per-id slot so --skip-after-attempts
-        // does not start over.
+        // A state.json from an earlier relayer has attempts on the last
+        // failed id but no outstanding set. Carry that count into the new
+        // per-id slot so --skip-after-attempts does not start over.
         if state.outstanding_deposits.is_empty() && state.attempts_since_progress > 0 {
             if let Some(id) = state.last_attempt_deposit_id {
                 if !state.is_skipped(id) {
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn a_main_file_carries_skip_count_into_outstanding() {
+    fn a_state_file_from_an_earlier_relayer_carries_skip_count() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(

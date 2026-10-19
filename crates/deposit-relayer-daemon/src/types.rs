@@ -37,7 +37,8 @@ use crate::error::RelayerError;
 /// event data in-circuit. The AN bridge pins `dappId` to 0 and does not
 /// check the proven halves. The L1 event still emits `anWorkchain`; it is
 /// not a public input and AN always credits workchain 0 (QC-AN-J3).
-/// USDCBridge must also allowlist `(chainId → expected bridge Fr)`.
+/// `eccUSDCBridge` allowlists trusted L1 bridges per chain
+/// (`_trustedL1Bridge[chainId][bridge]`).
 pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).

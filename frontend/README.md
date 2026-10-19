@@ -78,10 +78,12 @@ user believe funds had been returned when nothing had happened. Verified 2026-08
 `withdraw` does not occur anywhere under `frontend/src/`.
 
 ### Deposit Flow
-1. Connect MetaMask wallet
-2. Enter the amount and the Acki Nacki destination account
+1. Connect MetaMask wallet (Sepolia). The token is Circle Sepolia USDC
+   (`0x1c7D4B19…`); get it from https://faucet.circle.com/ if needed.
+2. Enter the amount and the Acki Nacki destination account (64 hex chars).
+   `AN_RECEIVER` at build time prefills that field.
 3. Submit — if the allowance is short the form sends `approve` first, then
-   the contract takes custody via `transferFrom` and emits a `Deposit` event
+   the contract takes custody via `transferFrom` and emits a `Deposit` event.
 
 The proof of that event is produced off-chain and consumed on the Acki Nacki side, which mints to the
 destination. Nothing further is required from the user in this UI.

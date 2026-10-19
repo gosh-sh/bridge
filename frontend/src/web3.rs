@@ -302,19 +302,6 @@ pub async fn make_deposit(
     send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
 }
 
-/// Mint `amount` test USDC base units to the connected account from the Aave faucet.
-pub async fn mint_test_usdc(amount: u128) -> Result<String, String> {
-    let account = get_current_account().ok_or("No account connected")?;
-    // mint(address token, address to, uint256 amount) = 0xc6c3bbe6
-    let data = format!(
-        "0xc6c3bbe6{}{}{}",
-        encode_address(USDC_CONTRACT_ADDRESS),
-        encode_address(&account),
-        encode_uint256(amount)
-    );
-    send_tx(AAVE_FAUCET_ADDRESS, &data).await
-}
-
 /// Current USDC allowance (base units) the owner has granted the bridge.
 pub async fn get_allowance(owner: &str) -> Result<u128, String> {
     // allowance(address owner, address spender) = 0xdd62ed3e
@@ -385,7 +372,8 @@ async fn sleep(ms: i32) {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-/// Get bridge statistics (deposit count + treasury principal in USDC base units).
+/// Get bridge statistics (deposit count + treasury principal in USDC base
+/// units).
 pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
     // depositCounter() = 0xecb3dc88
     let deposit_count_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
@@ -432,7 +420,8 @@ async fn call_to(to: &str, data: &str) -> Result<String, String> {
     from_value(result).map_err(|e| format!("Failed to parse result: {:?}", e))
 }
 
-/// Parse a uint from a 0x-prefixed hex string (sufficient range for our values).
+/// Parse a uint from a 0x-prefixed hex string (sufficient range for our
+/// values).
 fn parse_uint128(hex: &str) -> Result<u128, String> {
     let hex = hex.trim_start_matches("0x");
     let hex = if hex.is_empty() { "0" } else { hex };
@@ -447,7 +436,8 @@ pub struct BridgeStats {
     pub treasury_balance: String,
 }
 
-/// Format USDC base units (6 decimals) to a human string, e.g. 100000000 → "100.000000".
+/// Format USDC base units (6 decimals) to a human string, e.g. 100000000 →
+/// "100.000000".
 pub fn units_to_usdc(units: u128) -> String {
     let whole = units / USDC_UNIT;
     let frac = units % USDC_UNIT;

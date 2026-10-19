@@ -290,7 +290,9 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
 
         uint256 lastL1 = _lh(1 + window, 1);
         assertEq(_highestActiveLayer(), 4, "t stays 4 after 128 L1-only blocks");
-        assertEq(bridge.expectedPrevAnchor(10), firstL4, "expectedPrevAnchor(10) is the contract's t");
+        assertEq(
+            bridge.expectedPrevAnchor(10), firstL4, "expectedPrevAnchor(10) is the contract's t"
+        );
         assertTrue(bridge.isKnownLayerAnchor(4, firstL4), "L4 never appended, never evicted");
         assertTrue(bridge.isKnownLayerAnchor(3, firstL3), "L3 never appended, never evicted");
         assertFalse(bridge.isKnownLayerAnchor(1, _lh(1, 1)), "original L1 wrapped out");

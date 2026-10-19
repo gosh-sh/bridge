@@ -244,8 +244,10 @@ async fn build_chain_same_layer(
     if prev_num_layers >= 2 {
         warn!(
             "build_chain_same_layer (L1-only path) fired with num_active_layers={} — \
-             expected 1. Driver likely mis-picked target under L2 anchoring; \
-             expect on-chain PrevAnchorMismatch. target_seqno={}, prev_seqno={}",
+             expected 1. In L1 mode t stays 2 after the first W² boundary and \
+             expectedPrevAnchor(1) is min(1, t) = 1 on both sides, so this is not \
+             a PrevAnchorMismatch. Driver likely mis-picked target under L2 \
+             anchoring. target_seqno={}, prev_seqno={}",
             prev_num_layers,
             target_seqno,
             state.stored_last_seen_block_seq_no,

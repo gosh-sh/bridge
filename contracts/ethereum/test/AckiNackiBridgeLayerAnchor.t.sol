@@ -268,4 +268,41 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
         // Grow to 3: pick = min(3, 2) = 2 -> A2 (previous top). Unchanged.
         assertEq(bridge.expectedPrevAnchor(3), A2, "grow anchor = prev top");
     }
+
+    /// @notice QC-A2-4: `_highestActiveLayer()` is the highest populated
+    ///         window, not the last block's `numLayers`. 128 later L1-only
+    ///         `verifyBlock`s wrap layer 1 and leave layers 2..4 untouched,
+    ///         so `t` stays 4. A later 3-layer block still anchors at the
+    ///         stale L3 hash. A witness that rebuilt `t` from the last
+    ///         `numLayers` would pick L1 and revert `PrevAnchorMismatch` —
+    ///         fail-closed is the accepted outcome.
+    function test_permanentShrink_tDoesNotFallAfterL1Wrap() public {
+        _submit(0x10001, 1, 4, _build(1, 4), GENESIS_PREV_ANCHOR);
+        uint256 staleL3 = _lh(1, 3);
+        uint256 staleL4 = _lh(1, 4);
+        assertEq(_highestActiveLayer(), 4, "t after the 4-layer block");
+
+        uint256 window = bridge.HISTORY_PROOF_WINDOW();
+        for (uint256 i = 0; i < window; i++) {
+            uint256 idx = i + 2;
+            _submit(0x10000 + idx, uint64(idx), 1, _build(idx, 1), bridge.expectedPrevAnchor(1));
+        }
+
+        uint256 lastL1 = _lh(1 + window, 1);
+        assertEq(_highestActiveLayer(), 4, "t stays 4 after 128 L1-only blocks");
+        assertTrue(bridge.isKnownLayerAnchor(4, staleL4), "L4 never appended, never evicted");
+        assertTrue(bridge.isKnownLayerAnchor(3, staleL3), "L3 never appended, never evicted");
+        assertFalse(bridge.isKnownLayerAnchor(1, _lh(1, 1)), "original L1 wrapped out");
+        assertEq(bridge.expectedPrevAnchor(3), staleL3, "grow still picks stale L3");
+        assertEq(bridge.expectedPrevAnchor(4), staleL4);
+        assertEq(bridge.expectedPrevAnchor(1), lastL1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.PrevAnchorMismatch.selector, lastL1, staleL3)
+        );
+        _submit(0x20000, uint64(2 + window), 3, _build(200, 3), lastL1);
+
+        _submit(0x20001, uint64(2 + window), 3, _build(200, 3), staleL3);
+        assertEq(_highestActiveLayer(), 4, "grow to 3 does not drop L4");
+    }
 }

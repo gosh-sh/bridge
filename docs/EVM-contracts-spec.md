@@ -354,6 +354,13 @@ This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
 key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
 `expectedPrevAnchor(numLayers)` (`:1129`) rather than reconstructing the anchor themselves.
 
+`t` is the highest populated window, not the last block's `numLayers`. A window that is no
+longer written still holds its last hash (QC-A2-4): 128 later L1-only `verifyBlock`s wrap
+layer 1 and leave L2..L10 untouched, so `t` never falls. The prover's `num_active_layers`
+counts the same way because it mirrors the windows. A witness that treated `t` as the current
+depth would disagree on the next grow (`PrevAnchorMismatch`). That stall is preferred over
+accepting a wrong `prevMaxLevelLayerHash`.
+
 ### 7.2 `withdrawByProof` — pay out a proven AN withdrawal
 
 ```solidity
@@ -776,7 +783,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
 | `AckiNackiBridgeAaveFork.t.sol` (4) | Mainnet-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`). |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
-| `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
+| `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall after 128 L1-only blocks wrap layer 1. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
 | `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |

@@ -1230,6 +1230,13 @@ contract AckiNackiBridge {
     ///      only materialises once layers 1..L-1 exist), so this equals the
     ///      active-layer count `t` used by the partner prover's
     ///      `BridgeState::num_active_layers`.
+    ///
+    ///      Windows retain their last hash until that layer appends again, so
+    ///      `t` does not fall when later blocks carry fewer layers (QC-A2-4).
+    ///      A witness that rebuilt `t` from the last block's `numLayers`
+    ///      would pick a different `prevMaxLevelLayerHash` on a later grow,
+    ///      and `verifyBlock` would revert `PrevAnchorMismatch` — fail-closed
+    ///      is preferred over a wrong chain anchor.
     function _highestActiveLayer() internal view returns (uint8) {
         uint8 hi = 0;
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {

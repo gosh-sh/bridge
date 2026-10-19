@@ -37,19 +37,19 @@ import "./eccUSDCBridge.sol";
 ///           * that the signing committee is the *chain-anchored* one —
 ///             enforced by matching `committeeCommitment` to the commitment
 ///             this contract holds: the one in force, or the one a rotation
-///             replaced, and that one for late registration only, within a
-///             window of slots around the head it left (the rotate ↔ step
-///             join). Bootstrapped from a weak-subjectivity checkpoint;
-///             advanced by `submitRotate`. After `disableOwnerRotation`, the
-///             owner hatch is `reAnchorCommittee`.
+///             replaced, for the period that replaced committee served
+///             (`attestedSlot / 8192 + 1 == _committeePeriod`). The
+///             replaced committee may still move the head in that period,
+///             so an early `/updates` best-update hand-off does not freeze
+///             the remaining checkpoints of the old period. Bootstrapped
+///             from a weak-subjectivity checkpoint; advanced by
+///             `submitRotate`. After `disableOwnerRotation`, the owner
+///             hatch is `reAnchorCommittee`.
 ///
-///             The rotate proof exposes the attested slot of that hand-off.
-///             `submitRotate` refuses a header that is not in the last 256
-///             slots of the old period (`ERR_EARLY_ROTATE`, 259), so a
-///             successor cannot be installed from hour 3 of a period. Late
-///             registration of a skipped checkpoint is the proven period the
-///             replaced committee served (`attestedSlot / 8192 + 1 ==
-///             _committeePeriod`), still late only — it never moves the head.
+///             The rotate proof exposes the attested slot of that hand-off
+///             and binds `period` to `attestedSlot / 8192 + 1`. There is no
+///             end-of-period window: a beacon `/updates` best update (start
+///             of the old period) is a valid hand-off.
 ///
 ///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
 ///         hash (1/32). The head only moves forward, but a skipped checkpoint
@@ -77,11 +77,6 @@ contract EthBeaconLightClient {
     uint64 constant SLOTS_PER_YEAR = 2_628_000;
     // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
     uint64 constant SLOTS_PER_PERIOD = 8192;
-    // Last 256 slots of the old period (~8 epochs, ~51 min). A rotate
-    // proof's attested header must sit in this window (or later: the
-    // check is `attested + slack >= period * 8192`), so an attacker
-    // cannot install the successor from hour 3 of P.
-    uint64 constant ROTATE_ATTESTED_SLACK = 256;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
@@ -131,7 +126,6 @@ contract EthBeaconLightClient {
     uint16 constant ERR_FORK_SLOT_UNSET    = 256;
     uint16 constant ERR_ALREADY_INITIALIZED = 257;
     uint16 constant ERR_WRONG_CODE_SALT     = 258;
-    uint16 constant ERR_EARLY_ROTATE        = 259;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -208,8 +202,7 @@ contract EthBeaconLightClient {
     ///               index (87 before Gloas, 2946 from it); bound to the folded
     ///               step's PI #10, must equal `_gloasForkSlot`
     ///           [16] attested_slot                 — signed header of the rotate
-    ///               proof; `submitRotate` requires it in the last 256 slots of
-    ///               the old period (gosh-sh/bridge-audit#118)
+    ///               proof; `period` must equal `attestedSlot / 8192 + 1`
     ///
     ///         ⚠ The 12 accumulator limbs are the recursion's KZG accumulator.
     ///         `ZKHALO2VERIFYWITHVK` verifies the aggregation proof with a plain
@@ -251,23 +244,19 @@ contract EthBeaconLightClient {
     uint256 _currentCommittee;
     // The commitment `_currentCommittee` replaced. A checkpoint skipped near
     // the end of a period would otherwise be lost the moment the committee
-    // rotates: its proof carries the old commitment, and late registration
-    // would reject it for ever. Accepted for late registration only, never to
-    // move the head forward. 0 before the first rotation.
+    // rotates: its proof carries the old commitment. Accepted for the period
+    // that committee served (`attestedSlot / 8192 + 1 == _committeePeriod`),
+    // including to move the head. 0 before the first rotation.
     uint256 _prevCommittee;
     // The finalized slot the head stood on when `_prevCommittee` left office.
-    // Late registration of a skipped checkpoint is gated on the proven period
-    // the replaced committee served (`attestedSlot / SLOTS_PER_PERIOD + 1 ==
-    // `_committeePeriod`), not on slack around this slot. Kept so operators
-    // can still read where the head stood at the hand-off.
+    // Nothing reads it; it is kept for the storage layout.
     uint64 _prevCommitteeHeadSlot;
 
     // The sync-committee period `_currentCommittee` serves. `submitRotate`
     // stores the rotate proof's period, which the circuit binds to the
-    // attested slot (that slot's period plus one). Late registration of a
-    // skipped checkpoint by the replaced committee is this period (the
-    // attested slot of that step must sit in the period the leaving
-    // committee served). `reAnchorCommittee` compares its argument against
+    // attested slot (that slot's period plus one). The replaced committee
+    // may late-register or advance the head while its attested slot sits
+    // in that period. `reAnchorCommittee` compares its argument against
     // it. Bootstrapped with the weak-subjectivity checkpoint's period.
     uint64 _committeePeriod;
 
@@ -403,12 +392,12 @@ contract EthBeaconLightClient {
             require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
         // The signer is the committee in force, or the one a rotation
-        // replaced and that one for late registration only, in the period
-        // that replaced committee served (`attestedSlot / 8192 + 1` equals
-        // `_committeePeriod`, the period the rotate proof installed).
+        // replaced, in the period that replaced committee served
+        // (`attestedSlot / 8192 + 1` equals `_committeePeriod`). That
+        // path may advance the head, so an early rotate does not freeze
+        // the rest of the old period.
         bool currentSigner = pi.committeeCommitment == _currentCommittee;
-        bool prevSigner = late
-            && _prevCommittee != 0
+        bool prevSigner = _prevCommittee != 0
             && pi.committeeCommitment == _prevCommittee
             && pi.attestedSlot / SLOTS_PER_PERIOD + 1 == _committeePeriod;
         require(currentSigner || prevSigner, ERR_WRONG_COMMITTEE);
@@ -503,14 +492,11 @@ contract EthBeaconLightClient {
         // registered yet.
         require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
         // The circuit binds `period` to `attestedSlot / 8192 + 1`. Repeat that
-        // equality here so a malformed instance is refused before accept, and
-        // refuse a header that is not in the last 256 slots of the old period
-        // (gosh-sh/bridge-audit#118). Historical end-of-P updates still pass.
+        // equality here so a malformed instance is refused before accept.
+        // There is no end-of-period window: a `/updates` best update is a
+        // valid hand-off, and the replaced committee can still advance the
+        // head for the period it served.
         require(pi.attestedSlot / SLOTS_PER_PERIOD + 1 == pi.period, ERR_BAD_PUBLIC_INPUTS);
-        require(
-            pi.attestedSlot + ROTATE_ATTESTED_SLACK >= pi.period * SLOTS_PER_PERIOD,
-            ERR_EARLY_ROTATE
-        );
         tvm.accept();
         require(
             gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof),

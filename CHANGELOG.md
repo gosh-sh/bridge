@@ -77,21 +77,20 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- **The rotate verification key is rotated and `submitRotate` refuses an
-  early committee hand-off.** The rotate circuit now exposes the attested
-  slot as public input 16 (17 Fr in all: 12 accumulator limbs then
-  `[current, next, period, gloas_fork_slot, attested_slot]`).
-  `EthBeaconLightClient.submitRotate` reverts `ERR_EARLY_ROTATE` (259)
-  unless that header is in the last 256 slots of the old period (~8
-  epochs, ~51 min), and `ERR_BAD_PUBLIC_INPUTS` (240) if
-  `attestedSlot / 8192 + 1` is not the proof's `period`. Previous rotate
-  proofs do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3` (was
-  `4dc3f0a7…71d4cf54`). Redeploy the light client (`1.6.0`, code hash
-  `5ecdb821…`) after embedding the new `ROTATE_VK_BLOB`; rebuild
-  `contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.{tvc,abi.json}`.
-  Honest `eth-lc-relayer` already waits until the beacon period has
-  jumped, then proves a historical end-of-P update, so prove wall time
-  is not racing the slack. (gosh-sh/bridge-audit#118)
+- **The rotate verification key is rotated and an early `/updates`
+  hand-off no longer freezes the head.** The rotate circuit now exposes
+  the attested slot as public input 16 (17 Fr in all: 12 accumulator
+  limbs then `[current, next, period, gloas_fork_slot, attested_slot]`).
+  `submitRotate` reverts 240 if `attestedSlot / 8192 + 1` is not the
+  proof's `period`. There is no end-of-period window: a beacon `/updates`
+  best update is a valid hand-off, and the replaced committee can still
+  advance the head for the period it served. Previous rotate proofs (16
+  public inputs) do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3`
+  (was `4dc3f0a7…71d4cf54`). `updateCode` in place keeps the head and
+  committee and clears `_prevCommittee`; a new deploy is a new address
+  (`getLightClient` / `AN_LIGHT_CLIENT` change). The new `eth-lc-relayer`
+  refuses old 512-byte rotate bundles. Light client `1.6.0`, code hash
+  `c4b63228…`. The ABI is unchanged.
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
@@ -196,7 +195,8 @@ assigns it when the release is tagged.
   committee 87 → 2946, execution block hash 812 → 2856), so the circuits pick
   the index per header from its slot against a Gloas fork slot that is now a
   public input: the step proof has 11 inputs (`gloasForkSlot` at index 10) and
-  the rotate proof 16 (`gloasForkSlot` after `period`). Step and rotate proofs
+  the rotate proof 16 then (`gloasForkSlot` after `period`; 1.6.0 adds
+  `attested_slot` as a 17th). Step and rotate proofs
   made for the previous circuits no longer verify — regenerate them, and
   replace `EthBeaconLightClient` code (step VkBlob sha256 `581910a739788e1e4269c9cbf848c29f57a9e9a49e60f5e0178cc1ed67f397db`,
   rotate VkBlob sha256 `4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54`) with `updateCode`, passing
@@ -222,8 +222,10 @@ assigns it when the release is tagged.
   period the proven next committee serves) instead of loading it as a free
   witness, so a hand-off can no longer be submitted under a period of the
   sender's choosing. `submitRotate` stores it in `_committeePeriod` and emits
-  it in `CommitteeRotated`; nothing gates on it. This is part of the rotate
-  verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
+  it in `CommitteeRotated`. The 1.6.0 entry above now requires
+  `attestedSlot / 8192 + 1 == period` on `submitRotate` (240) and uses that
+  stored period as the replaced committee's signing bound. This is part of
+  the rotate verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
   rotate proofs made before it do not verify. `eth-lc-relayer` refuses a
   rotate proof whose period is not the one it is rotating into, and it
   does not start `rotate_tree_n8` for a live period that tree cannot
@@ -508,7 +510,8 @@ assigns it when the release is tagged.
   means no catch-up across the rotation already behind it; the field fills on
   the next rotation. The same goes for `_prevCommitteeHeadSlot`, the second new
   field, a `uint64` next to it: also set to 0 on the upgrade, also filled by
-  the next rotation, and the late path stays closed until both are non-zero.
+  the next rotation, and the previous-committee path stays closed until the
+  next rotation fills `_prevCommittee`.
 
   `getCommitteeState` gains a `prevCommittee` output and no other function or
   event changes. **Every caller of that getter has to take the new ABI**, not
@@ -525,12 +528,10 @@ assigns it when the release is tagged.
   rubbish from `_committeePeriod` onward: anything decoding this client's state
   off-chain needs the new ABI.
 
-  The window is slack around a proven slot, not a period boundary. When the
-  head is near the end of its period at the rotation it reaches into the next
-  one, and an early hand-off puts it wherever the sender put the head. Signing
-  there needs a supermajority of the retired committee's keys — the long-range
-  assumption this design already carries — but the contract does not
-  enforce "the committee of the attested slot's period".
+  The replaced committee is accepted for the period it served
+  (`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
+  head. `_prevCommitteeHeadSlot` is kept for the storage layout; nothing
+  reads it.
 
 - **`submitRotate` no longer decides anything by the period on the proof, and
   refuses a hand-off that does not change the committee.** The rotate circuit
@@ -551,9 +552,9 @@ assigns it when the release is tagged.
   committee is unique. So the period is now out of the decision entirely: the
   monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
   the owner's `reAnchorCommittee`. `_committeePeriod` and `CommitteeRotated`
-  carry the rotate proof's period, which the circuit now binds to the attested
-  slot (the rotate verification key entry above). It is a report for
-  operators, and nothing gates on it.
+  carry the rotate proof's period, which the circuit binds to the attested
+  slot. 1.6.0 additionally requires that equality on `submitRotate` (240) and
+  uses the stored period as the replaced committee's signing bound.
 
   `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
   (`ERR_SELF_ROTATION`, 253). A genuine proof with
@@ -563,15 +564,10 @@ assigns it when the release is tagged.
   overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
   every checkpoint the replaced committee had not registered yet.
 
-  **Still open, and not fixable here.** Nothing binds a committee to a period
-  except that free label, so a genuine hand-off submitted early — the next
-  committee is in the headers of the current period, so the proof exists from
-  its first slot — installs a committee that has signed nothing yet. The head
-  then cannot move until the chain reaches that committee's period (up to ~27
-  h), and the replaced committee's unregistered checkpoints are stranded. This
-  is permissionless, repeatable once per period, and true of the deployed
-  1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
-  circuit, which is not in this change.
+  An early hand-off used to freeze the head until the successor's first
+  update. 1.6.0 lets the replaced committee keep advancing the head for
+  the period it served, so a `/updates` best update is a valid rotate
+  and does not strand the rest of that period.
 
 - **A rotate whose confirmation is lost no longer stops the daemon for
   good.** `call_contract` broadcasts the message and waits for it in one
@@ -1509,11 +1505,10 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- **Late registration of a skipped checkpoint is the proven period the
-  replaced committee served**, not a band of slots around the head it
-  left. `submitUpdate` still accepts that signer only for a late
-  (non-advancing) update; `attestedSlot / 8192 + 1` must equal
-  `_committeePeriod`. (gosh-sh/bridge-audit#118)
+- **The replaced committee may still advance the head** for the period it
+  served (`attestedSlot / 8192 + 1 == _committeePeriod`), not only
+  late-register a skipped checkpoint. An early rotate therefore does not
+  freeze the rest of that period.
 
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each

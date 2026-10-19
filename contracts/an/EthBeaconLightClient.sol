@@ -61,7 +61,6 @@ contract EthBeaconLightClient {
     // slots behind head is not canonical for `finalizeDeposit` (one-year SLA).
     uint64 constant SLOTS_PER_YEAR = 2_628_000;
     uint64 constant SLOTS_PER_PERIOD = 8192;
-    uint64 constant ROTATE_ATTESTED_SLACK = 256;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
@@ -97,7 +96,6 @@ contract EthBeaconLightClient {
     uint16 constant ERR_ZERO_PUBKEY        = 254;
     uint16 constant ERR_WRONG_FORK_SLOT    = 255;
     uint16 constant ERR_FORK_SLOT_UNSET    = 256;
-    uint16 constant ERR_EARLY_ROTATE        = 259;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -171,7 +169,7 @@ contract EthBeaconLightClient {
     ///               index (87 before Gloas, 2946 from it); bound to the folded
     ///               step's PI #10, must equal `_gloasForkSlot`
     ///           [16] attested_slot                 — signed header of the rotate
-    ///               proof; must sit in the last 256 slots of the old period
+    ///               proof; `period` must equal `attestedSlot / 8192 + 1`
     ///
     ///         ⚠ The 12 accumulator limbs are the recursion's KZG accumulator.
     ///         `ZKHALO2VERIFYWITHVK` verifies the aggregation proof with a plain
@@ -401,10 +399,6 @@ contract EthBeaconLightClient {
         // hand-off that changes nothing.
         require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
         require(pi.attestedSlot / SLOTS_PER_PERIOD + 1 == pi.period, ERR_BAD_PUBLIC_INPUTS);
-        require(
-            pi.attestedSlot + ROTATE_ATTESTED_SLACK >= pi.period * SLOTS_PER_PERIOD,
-            ERR_EARLY_ROTATE
-        );
         // Monotonic period — reject stale / replayed hand-offs. The circuit
         // binds `period` to the attested slot, so it cannot be inflated.
         require(pi.period > _committeePeriod, ERR_STALE_PERIOD);

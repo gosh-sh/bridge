@@ -58,7 +58,7 @@ The outer instance column is 17 × 32 B LE Fr: 12 KZG accumulator limbs, then
 [13] next_committee_commitment      — Poseidon commitment to the successor committee
 [14] period                         — attested_slot / 8192 + 1 (the period installed)
 [15] gloas_fork_slot                — picks next_sync_committee gindex 87 | 2946
-[16] attested_slot                  — signed header; last 256 slots of the old period
+[16] attested_slot                  — signed header; period = attested_slot / 8192 + 1
 ```
 
 Decoded by `EthBeaconLightClient._parseRotatePublicInputs` (little-endian, same as
@@ -84,19 +84,16 @@ function getCommitteeState() external view returns (uint256, uint256, uint64, bo
 3. `require(nextCommitteeCommitment != _currentCommittee)` (`ERR_SELF_ROTATION`,
    253) — a hand-off has to move the committee; the proof for `next == current`
    exists at every period boundary and would only evict `_prevCommittee`;
-4. `require(attestedSlot / 8192 + 1 == period)` (`ERR_BAD_PUBLIC_INPUTS`, 240)
-   and `require(attestedSlot + 256 >= period * 8192)` (`ERR_EARLY_ROTATE`, 259)
-   — the attested header must sit in the last 256 slots of the old period
-   (gosh-sh/bridge-audit#118). A header from hour 3 of P is refused; a historical
-   end-of-P update still passes;
+4. `require(attestedSlot / 8192 + 1 == period)` (`ERR_BAD_PUBLIC_INPUTS`, 240).
+   There is no end-of-period window: a `/updates` best update is a valid
+   hand-off;
 5. `tvm.accept()` then `require(gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof))`;
 6. keep the replaced commitment in `_prevCommittee` with the head it left in
    `_prevCommitteeHeadSlot`, advance `_currentCommittee = next`, and store
    `_committeePeriod = period`; emit `CommitteeRotated` with that period.
 
-Late registration of a skipped checkpoint by the replaced committee is the
-proven period that committee served (`attestedSlot / 8192 + 1 ==
-_committeePeriod`), still late only.
+The replaced committee may still advance the head for the period it served
+(`attestedSlot / 8192 + 1 == _committeePeriod`).
 
 The **trust-reduction switch** mirrors `USDCBridge`'s
 per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotationEnabled` the

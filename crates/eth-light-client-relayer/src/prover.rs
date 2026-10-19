@@ -76,8 +76,9 @@ impl ProofGenerator for MockProofGenerator {
         let off = ROTATE_PERIOD_INDEX * 32;
         public_inputs[off..off + 8].copy_from_slice(&to_period.to_le_bytes());
         let attested_slot = to_period
+            .saturating_sub(1)
             .saturating_mul(SLOTS_PER_SYNC_PERIOD)
-            .saturating_sub(1);
+            .saturating_add(64);
         let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
         public_inputs[attested_off..attested_off + 8].copy_from_slice(&attested_slot.to_le_bytes());
         if let Some(chain) = chain {

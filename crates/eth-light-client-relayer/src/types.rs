@@ -25,8 +25,9 @@ pub const ROTATE_GLOAS_FORK_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
 pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 
 /// The contract holds a real Gloas slot, not "not scheduled" / unset.
-/// `disableOwnerRotation` while this is false freezes the slot at
-/// `u64::MAX` until `updateCode` (gosh-sh/bridge-audit#121).
+/// `disableOwnerRotation` while this is false and `isSet` is true freezes
+/// that pin: only `updateCode(<current code>, abi.encode(uint64 slot))`
+/// can change it. An unset slot can still be written once after the flip.
 pub fn gloas_is_scheduled(slot: u64, is_set: bool) -> bool {
     is_set && slot != GLOAS_NOT_SCHEDULED
 }

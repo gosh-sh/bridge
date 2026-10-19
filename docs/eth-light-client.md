@@ -272,13 +272,17 @@ that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the cha
 The relayer key must be the owner key of both contracts.
 
 **Gloas fork slot before the flip.** `setGloasForkSlot` is refused after
-`disableOwnerRotation`. A client that still holds `type(uint64).max` (Gloas not
-scheduled) cannot take a published Glamsterdam slot afterwards except by
-`updateCode`. `eth-lc-relayer flip-owner` and `daemon --flip-owner` therefore
-read `getGloasForkSlot` first and refuse unless `isSet` is true and the slot is
-not `2^64-1`. Set the published slot with `set-gloas-fork-slot` first (§4.5).
-`--allow-unscheduled-gloas-flip` skips that check when recovery via `updateCode`
-is already planned, or on a network that will never schedule Gloas.
+`disableOwnerRotation` once the pin is set (`ERR_OWNER_ROTATION_DISABLED`, 246).
+A client that still holds `type(uint64).max` cannot take a published
+Glamsterdam slot afterwards except by `updateCode`. An unset pin can still
+be written once after the flip. `eth-lc-relayer flip-owner` and
+`daemon --flip-owner` therefore read `getGloasForkSlot` first and refuse
+the flip unless `isSet` is true and the slot is not `2^64-1`. The daemon
+also waits until the beacon spec slot equals that pin and the head is past
+it. Set the published slot with `set-gloas-fork-slot` first (§4.5).
+`--allow-unscheduled-gloas-flip` skips the unscheduled check when recovery
+via `updateCode` is already planned, or on a network that will never
+schedule Gloas. The daemon still starts; only the flip is refused.
 
 ```mermaid
 stateDiagram-v2
@@ -430,16 +434,29 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    | Network | `--slot` | `getGloasForkSlot()` |
    |---|---|---|
    | Sepolia (Gloas live 2026-10-06) | `11296768` | `(11296768, true)` |
-   | Ethereum mainnet, Gloas unscheduled | `18446744073709551615` (`u64::MAX`) | `(18446744073709551615, true)` — proofs work; **do not flip** until a real slot is published |
+   | Ethereum mainnet, Gloas unscheduled | `18446744073709551615` (`u64::MAX`) | `(18446744073709551615, true)` — proofs work against that pin; **do not flip** until a real slot is published. No on-chain proof with PI #10 = `u64::MAX` has been verified yet (the k=19 runs are `#[ignore]`d). |
    | Fresh deploy, never set | — | `(0, false)` — every step/rotate reverts 256 |
 
-   `disableOwnerRotation` after a `u64::MAX` pin freezes the slot: only
-   `updateCode` can change it, and post-fork step/rotate would revert 255.
+   `disableOwnerRotation` after a set pin freezes it. Recover with one owner
+   call that keeps head, committee, proven FIFO and `_ownerRotationEnabled`
+   and only clears `_prevCommittee`:
+
+   ```
+   updateCode(<current code cell>, abi.encode(uint64 <beacon GLOAS_FORK_SLOT>))
+   ```
+
+   `<current code cell>` is the live account's `code` (`tvm-cli -j account`)
+   or the placed `EthBeaconLightClient.tvc` if it matches. `userCell` is
+   `abi.encode(uint64 slot)` — the same encoding `updateCode` already uses
+   when the cell is empty and a pin exists. After the flip the daemon never
+   reaches 255: it returns `ProofFailed` and names `updateCode` (246) instead
+   of `setGloasForkSlot`.
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
 7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`.
-   With the flag the daemon fails at start unless `getGloasForkSlot` is a
-   scheduled slot (or `--allow-unscheduled-gloas-flip`). After the first
-   accepted update it checks `getLightClient(l1ChainId)` against
+   With the flag the daemon still starts: it warns if Gloas is unscheduled
+   and refuses the flip until `getGloasForkSlot` matches the beacon spec and
+   the head is past that slot (or `--allow-unscheduled-gloas-flip`). After
+   the first accepted update it checks `getLightClient(l1ChainId)` against
    `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and
    `disableOwnerRotation`; from then on the bridge refuses
    `setAcceptedBlockHash` only for the light client's L1.

@@ -772,12 +772,12 @@ contract EthBeaconLightClient {
     ///         `getGloasForkSlot()` → `(slot, isSet)`.
     /// @dev Allowed while unset or while owner rotation is still enabled, the
     ///      window in which the owner key is trusted for the committee anyway.
-    ///      Afterwards only `updateCode` can change it. Do not call
-    ///      `disableOwnerRotation` while this is still `type(uint64).max` if a
-    ///      real Gloas date may still be published: the next
-    ///      `setGloasForkSlot` would revert 209 and every post-fork
-    ///      `submitUpdate` / `submitRotate` would revert 255 until
-    ///      `updateCode`.
+    ///      After `disableOwnerRotation`, a slot that is already set can only
+    ///      change via `updateCode(<current code>, abi.encode(uint64 slot))`
+    ///      (`ERR_OWNER_ROTATION_DISABLED`, 246). An unset slot can still be
+    ///      written once. The daemon refuses a prove whose beacon spec slot
+    ///      disagrees (`ProofFailed`) before any 255; 255 is only a manual
+    ///      `prove-one` + `submit-one` against the wrong pin.
     function setGloasForkSlot(uint64 gloasForkSlot) public onlyOwnerPubkey accept {
         require(!_gloasForkSlotSet || _ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();

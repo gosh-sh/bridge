@@ -375,11 +375,22 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 let gloas_under_beacon = slot >= beacon_slot;
                 let gloas_under_contract = slot >= contract_slot;
                 if gloas_under_beacon || gloas_under_contract {
+                    let recovery = if self.state.owner_flip_done {
+                        format!(
+                            "Owner rotation is off, so setGloasForkSlot reverts 246. Recover \
+                             with updateCode(<current code>, abi.encode(uint64 {beacon_slot}))."
+                        )
+                    } else {
+                        format!(
+                            "Owner setGloasForkSlot to the beacon value {beacon_slot} before \
+                             proving."
+                        )
+                    };
                     return Err(TickOutcome::ProofFailed {
                         reason: format!(
                             "beacon Gloas slot {beacon_slot} != contract getGloasForkSlot \
                              {contract_slot}; update slot {slot} would prove against the wrong \
-                             fork. Owner setGloasForkSlot to the beacon value before proving."
+                             fork. {recovery}"
                         ),
                     });
                 }
@@ -505,7 +516,8 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 }
                 info!(slot = update.finalized_slot, "submitUpdate accepted");
                 self.re_push_checkpoint(update.execution_block_hash).await;
-                self.maybe_flip_owner().await?;
+                self.maybe_flip_owner(update.chain.map(|c| c.gloas_fork_slot))
+                    .await?;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
                     tx_hash,
@@ -554,9 +566,43 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         }
     }
 
-    async fn maybe_flip_owner(&mut self) -> Result<(), RelayerError> {
+    async fn maybe_flip_owner(
+        &mut self,
+        beacon_gloas_slot: Option<u64>,
+    ) -> Result<(), RelayerError> {
         if !self.config.flip_owner || self.state.owner_flip_done {
             return Ok(());
+        }
+        match self.submitter.get_gloas_fork_slot().await {
+            Ok((slot, is_set)) if crate::types::gloas_is_scheduled(slot, is_set) => {
+                if let Some(beacon) = beacon_gloas_slot {
+                    if beacon != slot {
+                        warn!(
+                            beacon,
+                            contract_slot = slot,
+                            "owner flip skipped: beacon spec Gloas slot != getGloasForkSlot"
+                        );
+                        return Ok(());
+                    }
+                }
+                if let Some(head) = self.state.last_finalized_slot {
+                    if head < slot {
+                        warn!(
+                            head,
+                            slot, "owner flip skipped: head is still before the Gloas fork slot"
+                        );
+                        return Ok(());
+                    }
+                }
+            },
+            Ok(_) => {},
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "owner flip skipped: getGloasForkSlot failed"
+                );
+                return Ok(());
+            },
         }
         match self.submitter.flip_owner().await? {
             SubmitOutcome::Accepted {
@@ -1039,6 +1085,7 @@ mod tests {
         cfg.enable_rotate = false;
         cfg.flip_owner = true;
         let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(1, true);
         let mut r = Relayer::new(
             cfg,
             Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
@@ -1061,6 +1108,7 @@ mod tests {
         cfg.enable_rotate = false;
         cfg.flip_owner = true;
         let mock = Arc::new(MockAnSubmitter::rejecting_flip());
+        mock.set_gloas_fork(1, true);
         let mut r = Relayer::new(
             cfg,
             Arc::new(InMemoryBeaconSource::new(vec![

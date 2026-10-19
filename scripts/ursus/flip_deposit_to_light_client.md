@@ -31,19 +31,23 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    `eth-lc-relayer set-gloas-fork-slot --slot 11296768` on Sepolia,
    `--slot 18446744073709551615` on mainnet while Gloas is unscheduled.
    The daemon does not call this itself. **Do not flip while the slot is
-   still `u64::MAX`.** `disableOwnerRotation` then freezes it: a later
-   Glamsterdam date needs `updateCode`, and post-fork proofs revert 255.
+   still `u64::MAX`.** `disableOwnerRotation` then freezes a set pin:
+   a later Glamsterdam date is one owner call,
+   `updateCode(<current code>, abi.encode(uint64 slot))` (246, not 209).
+   The daemon stalls with `ProofFailed` rather than proving into 255.
    `getGloasForkSlot()` returns `(slot, isSet)`. Slot table:
    `docs/eth-light-client.md` §4.5.
 4. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
    `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`). `--flip-owner`
-   refuses to start without them, and also refuses unless Gloas is a
-   scheduled slot. `--allow-unscheduled-gloas-flip` skips that check
-   (recovery is then `updateCode`).
+   refuses to start without them. The flip itself is refused unless Gloas
+   is a scheduled slot that matches the beacon spec and the head is past
+   it. `--allow-unscheduled-gloas-flip` skips the unscheduled check
+   (recovery of a set pin is then `updateCode`).
 5. Run `eth-lc-relayer daemon --flip-owner` (`--features live-submit`, no
    `--dry-run` / `--mock-prove` / `--no-rotate`). It reads
-   `getGloasForkSlot` at start and exits if the slot is unset or
-   `u64::MAX`. After the first accepted `submitUpdate` it calls, in order:
+   `getGloasForkSlot` on the flip, not at start, and skips the flip if the
+   slot is unset or `u64::MAX`. After the first accepted `submitUpdate` it
+   calls, in order:
 
 ```text
 EthBeaconLightClient.getGloasForkSlot()          # scheduled slot, or refuse
@@ -55,7 +59,8 @@ EthBeaconLightClient.disableOwnerRotation()
 ```
 
 If the bridge's client for the chain the light client reports does not match
-`AN_LIGHT_CLIENT`, or either getter fails, the flip sends nothing and the daemon retries after the next
+`AN_LIGHT_CLIENT`, or any of the three getters fails (`getGloasForkSlot`,
+`getConfig`, `getLightClient`), the flip sends nothing and the daemon retries after the next
 accepted update. The state file records `owner_flip_done` so a restart does not
 resend. One-shot without waiting for a tick:
 

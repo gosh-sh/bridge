@@ -44,8 +44,10 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    returns `RotateRequired` without proving. The next tick reads
    `getCommitteeState` and continues; `--state` is for a restart.
 9. Owner flip, only on purpose: `eth-lc-relayer daemon --flip-owner` issues it
-   after step 4, or run `eth-lc-relayer flip-owner`. After it, deposits outside
-   checkpoint blocks and from L2s have no anchor writer; read
+   after step 4, or run `eth-lc-relayer flip-owner`. Pin a **scheduled** Gloas
+   slot first (step 2); the daemon still starts if the pin is `u64::MAX`,
+   but the flip is refused. After it, deposits outside checkpoint blocks
+   and from L2s have no anchor writer; read
    `scripts/ursus/flip_deposit_to_light_client.md` first. Confirm
    `getLightClient(l1ChainId) != 0` for the chain under test and owner flags
    are off.

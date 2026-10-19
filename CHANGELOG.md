@@ -79,8 +79,8 @@ assigns it when the release is tagged.
   order: pin a **scheduled** Gloas slot with `setGloasForkSlot` before
   `disableOwnerRotation`. `getGloasForkSlot()` returns `(slot, isSet)`.
   Sepolia is `11296768`; mainnet while Gloas is unscheduled is
-  `u64::MAX` and must not be flipped. After the flip only `updateCode`
-  can change the slot (gosh-sh/bridge-audit#121).
+  `u64::MAX` and must not be flipped. After the flip a set pin changes
+  only via `updateCode(<current code>, abi.encode(uint64 slot))`.
 
 ### Breaking Changes
 
@@ -1501,15 +1501,14 @@ assigns it when the release is tagged.
 ### Changed
 
 - **`eth-lc-relayer flip-owner` / `daemon --flip-owner` refuses while Gloas
-  is unscheduled.** It reads `getGloasForkSlot` first (the daemon at
-  start; the one-shot before any owner call) and exits if `isSet` is
-  false or the slot is `u64::MAX`. `disableOwnerRotation` is one-way, and
-  afterwards only `updateCode` can change the slot — a mainnet client
-  pinned at `u64::MAX` and then flipped cannot take a published
-  Glamsterdam date without that ceremony, and post-fork proofs would
-  revert 255 (gosh-sh/bridge-audit#121). Set the published slot with
-  `set-gloas-fork-slot` before the flip. Escape hatch:
-  `--allow-unscheduled-gloas-flip`. Slot table in
+  is unscheduled.** It reads `getGloasForkSlot` before any owner call and
+  skips the flip if `isSet` is false or the slot is `u64::MAX`. The
+  daemon still starts (and keeps relaying if the getter fails). A
+  scheduled pin must also match the beacon spec slot, and the head must
+  be past it. `disableOwnerRotation` is one-way; a set pin then changes
+  only via `updateCode(<current code>, abi.encode(uint64 slot))` (246).
+  Set the published slot with `set-gloas-fork-slot` before the flip.
+  Escape hatch: `--allow-unscheduled-gloas-flip`. Slot table in
   `docs/eth-light-client.md` §4.5.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each

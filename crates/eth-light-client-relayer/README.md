@@ -51,7 +51,8 @@ eth-lc-relayer prove-one --beacon-url … \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle
 
-# 5. Pin the Gloas fork slot (required once; Sepolia 11296768, mainnet max)
+# 5. Pin the Gloas fork slot (after deploy, and again on mainnet once Gloas
+#    is scheduled; Sepolia 11296768, mainnet max until then)
 eth-lc-relayer set-gloas-fork-slot --slot 11296768 …
 
 # 6. Submit step / rotate

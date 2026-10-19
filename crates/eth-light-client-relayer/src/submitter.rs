@@ -70,9 +70,10 @@ pub trait AnSubmitter: Send + Sync {
         period: u64,
     ) -> Result<SubmitOutcome, RelayerError>;
 
-    /// Owner `setGloasForkSlot(slot)`. Required once after deploy / after
+    /// Owner `setGloasForkSlot(slot)`. Required after deploy / after
     /// `updateCode` with an empty user cell; until it runs, every
-    /// `submitUpdate` / `submitRotate` reverts 256.
+    /// `submitUpdate` / `submitRotate` reverts 256. Mainnet has to be pinned
+    /// again once Gloas is scheduled.
     async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError>;
 
     /// `(gloasForkSlot, isSet)` from `getGloasForkSlot`. The daemon proves
@@ -409,6 +410,14 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "flip-owner rejected".into(),
             });
         }
+        if !crate::types::gloas_is_scheduled(inner.gloas_fork_slot, inner.gloas_fork_slot_set) {
+            return Ok(SubmitOutcome::Rejected {
+                reason: format!(
+                    "getGloasForkSlot slot={} isSet={}; unscheduled",
+                    inner.gloas_fork_slot, inner.gloas_fork_slot_set
+                ),
+            });
+        }
         inner.owner_anchors_enabled = false;
         inner.owner_rotation_enabled = false;
         Ok(SubmitOutcome::Accepted {
@@ -708,7 +717,7 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
     }
 
     /// Flip even while `getGloasForkSlot` is unset or `u64::MAX`. Recovery
-    /// after that is `updateCode` (gosh-sh/bridge-audit#121).
+    /// of a set pin is `updateCode(<current code>, abi.encode(uint64 slot))`.
     pub fn allow_unscheduled_gloas_flip(mut self) -> Self {
         self.allow_unscheduled_gloas_flip = true;
         self
@@ -813,19 +822,26 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 reason: "flip-owner needs USDCBridge (AN_USDC_BRIDGE + AN_USDC_ABI_PATH)".into(),
             });
         };
-        // `setGloasForkSlot` is refused after this flip. Flipping while the
-        // slot is still `u64::MAX` (Gloas not scheduled) means a later
-        // mainnet date needs `updateCode` (gosh-sh/bridge-audit#121).
+        // A set pin cannot be rewritten after this flip (`ERR_OWNER_ROTATION_DISABLED`,
+        // 246). Flipping while the slot is still `u64::MAX` means a later
+        // mainnet date needs `updateCode(<current code>, abi.encode(uint64 slot))`.
+        // An unset pin can still be written once after the flip.
         if !self.allow_unscheduled_gloas_flip {
             match self.get_gloas_fork_slot().await {
                 Ok((slot, is_set)) if crate::types::gloas_is_scheduled(slot, is_set) => {},
                 Ok((slot, is_set)) => {
+                    let recovery = if is_set {
+                        "that pin can only change via updateCode(<current code>, \
+                         abi.encode(uint64 slot))"
+                    } else {
+                        "setGloasForkSlot can still run once after the flip, but every proof \
+                         reverts 256 until it does"
+                    };
                     return Ok(SubmitOutcome::Rejected {
                         reason: format!(
                             "getGloasForkSlot slot={slot} isSet={is_set}; disableOwnerRotation \
-                             while Gloas is unscheduled cannot be undone except by updateCode \
-                             (gosh-sh/bridge-audit#121). setGloasForkSlot to the real slot first, \
-                             or pass --allow-unscheduled-gloas-flip"
+                             while Gloas is unscheduled: {recovery}. setGloasForkSlot to the \
+                             beacon spec slot first, or pass --allow-unscheduled-gloas-flip"
                         ),
                     });
                 },
@@ -1635,7 +1651,7 @@ mod flip_owner_tests {
 
     #[tokio::test]
     async fn unset_gloas_sends_nothing() {
-        let (s, _) = submitter(
+        let (s, client) = submitter(
             script(&lc(), true).getter(
                 "getGloasForkSlot",
                 Ok(json!({ "gloasForkSlot": 0, "isSet": false })),
@@ -1647,9 +1663,11 @@ mod flip_owner_tests {
                 reason,
             } => {
                 assert!(reason.contains("isSet=false"), "{reason}");
+                assert!(reason.contains("setGloasForkSlot can still run"), "{reason}");
             },
             other => panic!("{other:?}"),
         }
+        assert_eq!(client.calls(), vec![call(lc(), "getGloasForkSlot")]);
     }
 
     #[tokio::test]

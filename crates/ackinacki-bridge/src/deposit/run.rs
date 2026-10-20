@@ -4011,11 +4011,16 @@ mod tests {
             tx_hash: None,
         });
         let mut d = w.deps();
-        // Above the world's 1.12.0 so preflight refuses; equal to it the
-        // resume never ends (it waits for a refusal that does not come).
-        d.min_bridge = Some(crate::deposit::an_preflight::BridgeVersion(1, 13, 0));
+        // One above the bridge this build ships, so preflight refuses; equal
+        // to it the resume never ends (it waits for a refusal that does not
+        // come). Derived from the constant, not written out, so a contract
+        // bump cannot turn this into an equality and stop testing anything.
+        let newest = crate::deposit::an_preflight::NEWEST_KNOWN_BRIDGE_VERSION;
+        let too_new =
+            crate::deposit::an_preflight::BridgeVersion(newest.0, newest.1, newest.2 + 1);
+        d.min_bridge = Some(too_new);
         let e = resume(&p, &d, &target, None).await.unwrap_err();
-        assert!(e.to_string().contains("1.13.0"), "{e}");
+        assert!(e.to_string().contains(&too_new.to_string()), "{e}");
         assert_eq!(
             e.exit_code(),
             ExitCode::DepositOutcomeUnknown,

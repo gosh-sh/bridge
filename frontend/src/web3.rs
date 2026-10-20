@@ -16,6 +16,63 @@ extern "C" {
     pub fn error(s: &str);
 }
 
+/// Turn a provider rejection into a sentence a person can act on.
+///
+/// EIP-1193 errors arrive as a JS object with a numeric `code` and a
+/// `message`. Rendering them with `{:?}` dumps the whole object — code,
+/// message and the extension's stack — into an `alert()`, which is what the
+/// connect button used to do. The codes below are the ones this UI can
+/// actually provoke; anything else falls back to the provider's own
+/// `message`, and only a rejection with no message at all is shown raw.
+fn provider_error(context: &str, e: JsValue) -> String {
+    let code = js_sys::Reflect::get(&e, &"code".into())
+        .ok()
+        .and_then(|c| c.as_f64())
+        .map(|c| c as i64);
+    let message = js_sys::Reflect::get(&e, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string());
+
+    // Log the untouched rejection: the console is where the stack belongs.
+    web_sys::console::error_2(&format!("{context} failed").into(), &e);
+
+    match code {
+        // EIP-1193: a request of this type is already waiting in the wallet.
+        // Sending another one cannot help, so say where the first one is.
+        Some(-32002) => {
+            // MetaMask does not raise its own window for this; the request
+            // waits behind the toolbar icon, which is easy to miss on a
+            // browser with many extensions. Say where to look.
+            "MetaMask already has a connection request waiting, and it does \
+             not open a window on its own.\n\nClick the extensions button \
+             (the puzzle piece, right of the address bar), pick MetaMask, and \
+             approve or reject the request there. The MetaMask icon shows a \
+             small badge while one is pending.\n\nIf nothing is waiting, the \
+             request is stale: in MetaMask open Settings and remove this site \
+             from its connected sites, then connect again."
+                .to_string()
+        },
+        // EIP-1193: the person pressed Reject. Not a failure worth shouting about.
+        Some(4001) => format!("{context} was rejected in MetaMask."),
+        // EIP-1193: the wallet is locked or the site is not authorised.
+        Some(4100) => {
+            "MetaMask has not authorised this site. Unlock the extension and \
+             connect again."
+                .to_string()
+        },
+        // EIP-3085: the chain is unknown to the wallet and must be added first.
+        Some(4902) => {
+            "MetaMask does not know the Sepolia network yet. Approve the \
+             prompt that offers to add it."
+                .to_string()
+        },
+        _ => match message {
+            Some(m) => format!("{context} failed: {m}"),
+            None => format!("{context} failed: {e:?}"),
+        },
+    }
+}
+
 /// Ethereum provider interface (MetaMask)
 #[wasm_bindgen]
 extern "C" {
@@ -119,7 +176,7 @@ pub async fn connect_wallet() -> Result<String, String> {
     let result = ethereum
         .request(request.into())
         .await
-        .map_err(|e| format!("MetaMask error: {:?}", e))?;
+        .map_err(|e| provider_error("Connecting the wallet", e))?;
 
     let accounts: Vec<String> =
         from_value(result).map_err(|e| format!("Failed to parse accounts: {:?}", e))?;
@@ -201,7 +258,7 @@ pub async fn switch_to_sepolia() -> Result<(), String> {
         ethereum
             .request(add_request.into())
             .await
-            .map_err(|e| format!("Failed to add Sepolia network: {:?}", e))?;
+            .map_err(|e| provider_error("Adding the Sepolia network", e))?;
     }
 
     Ok(())
@@ -255,7 +312,7 @@ async fn send_tx(to: &str, data: &str) -> Result<String, String> {
     let result = ethereum
         .request(request.into())
         .await
-        .map_err(|e| format!("Transaction failed: {:?}", e))?;
+        .map_err(|e| provider_error("The transaction", e))?;
 
     from_value(result).map_err(|e| format!("Failed to parse transaction hash: {:?}", e))
 }

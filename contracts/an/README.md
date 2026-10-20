@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.12.0, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.13.0, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.5.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -15,7 +15,8 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   until deposits bring minted up to burned; a fresh zerostate starts both
   counters at 0. The owner can stop `finalizeDeposit` and `initiateWithdrawal`
   with `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until
-  it is lifted; `confirmDeposit`, owner mint and TIP-3 mint keep running.
+  it is lifted; `confirmDeposit`, owner mint (`mintAndSend`,
+  `mintAndSendBridged`, `mintAndSendAccumulator`) and TIP-3 mint keep running.
   That switch is independent of `AckiNackiBridge.pause()` on Ethereum and
   of a Circle freeze of USDC — see *Two pause domains* below.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
@@ -136,10 +137,16 @@ same BOC while valid.
 
 ### Deployment
 
-Deploy this release as a fresh pair with empty accounting. The AN 1.12.0
+Deploy this release as a fresh pair with empty accounting. The AN 1.13.0
 upgrade tuple adds chain balances and external-message hashes; the previous
-1.11.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
+1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
 Normal upgrades within this format retain balances and unexpired replay hashes.
+
+`mintAndSendBridged(recipient, value, nonce, chainId)` credits the aborted
+deposit's source chain as well as the global bridged total. It enforces the
+50 USDC transfer and 10,000 USDC chain limits. Match the deposit's recipient,
+amount and EIP-155 chain id exactly, once; this owner call has no deposit-id
+deduplication.
 
 Before replacing a funded pair, stop new deposits, finish every pending deposit
 and withdrawal, and verify the old books are empty. Pause every old L1 bridge
@@ -236,9 +243,11 @@ it next to the contracts and calls `initialize(ctx)` while generating a
 zerostate, so a new setup call or a new storage field is a change in this
 repository alone.
 
-`BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override the trusted L1 bridge
-a generated zerostate starts with, defaulting to `11155111` and
-`0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+Set `BRIDGE_ZS_L1_BRIDGE` to the fresh paired L1 bridge's nonzero `0x` address
+before generating a zerostate. There is no default: missing or malformed values
+stop generation before any account is changed. `BRIDGE_ZS_L1_CHAIN_ID` defaults
+to Sepolia (`11155111`); set it to the deployment's EIP-155 chain id for another
+network.
 
     python3 contracts/an/zerostate/test_zerostate_init.py
     scripts/check_zerostate_data_encoder.py

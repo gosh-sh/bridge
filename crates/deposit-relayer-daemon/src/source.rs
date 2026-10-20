@@ -37,6 +37,22 @@ use crate::{error::RelayerError, metrics as prom, types::DepositEvent};
 #[async_trait]
 pub trait DepositSource: Send + Sync {
     async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError>;
+
+    /// Load a deposit this relayer has already seen. Default: [`fetch`].
+    ///
+    /// Production uses the stored tx (receipt) or a one-block `eth_getLogs`,
+    /// so a retry does not walk the shared scan cursor from the deposit's
+    /// block up to the head.
+    async fn fetch_known(
+        &self,
+        deposit_id: u64,
+        tx_hash: Option<B256>,
+        log_index: Option<u64>,
+        block_number: Option<u64>,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        let _ = (tx_hash, log_index, block_number);
+        self.fetch(deposit_id).await
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -205,10 +221,18 @@ pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     /// Cached `eth_chainId` from the RPC (stamped onto every [`DepositEvent`]).
     chain_id: Mutex<Option<u64>>,
     /// Scan cursor: no block up to and including this one holds a deposit the
-    /// relayer still has to deliver, so the next scan starts after it. Moved
-    /// here when the target is not made yet as of `safe_head` or is found, and
-    /// by the relayer after a finalize. `None` means "scan from `from_block`".
+    /// relayer still has to *discover*, so the next scan starts after it.
+    /// Outstanding retries use [`DepositSource::fetch_known`], not this
+    /// cursor. Moved here when the target is not made yet as of `safe_head`,
+    /// when a deposit is found (its block minus one), and by the relayer
+    /// after a finalize. `None` means "scan from `from_block`".
     scan_cursor: Option<Arc<Mutex<Option<u64>>>>,
+    /// Cursor value when [`Self::with_scan_cursor`] ran — the persisted
+    /// `scan_done_through_block` of an earlier relayer. A migrated outstanding
+    /// id with no stored log starts its rescan at this plus one, because that
+    /// daemon left the cursor at the stuck deposit's block minus one. The live
+    /// mutex is not used: idle polls move it to `safe_head`.
+    initial_scan_cursor: Option<u64>,
     /// The last deposit found, so retrying a deposit AN keeps refusing costs
     /// no `eth_getLogs`. It was already `confirmations` deep when found.
     located: Mutex<Option<DepositEvent>>,
@@ -228,6 +252,7 @@ where
             confirmations,
             chain_id: Mutex::new(None),
             scan_cursor: None,
+            initial_scan_cursor: None,
             located: Mutex::new(None),
             _network: std::marker::PhantomData,
         }
@@ -236,6 +261,7 @@ where
     /// Attach a shared scan cursor (typically backed by
     /// [`RelayerState`](crate::state::RelayerState)).
     pub fn with_scan_cursor(mut self, cursor: Arc<Mutex<Option<u64>>>) -> Self {
+        self.initial_scan_cursor = cursor.lock().ok().and_then(|g| *g);
         self.scan_cursor = Some(cursor);
         self
     }
@@ -432,24 +458,30 @@ where
         }
         Ok(None)
     }
-}
 
-#[async_trait]
-impl<P> DepositSource for EthLogSource<P, Ethereum>
-where
-    P: Provider<Ethereum> + Send + Sync,
-{
-    async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError> {
-        if let Some(event) = self
-            .located
+    fn cached_located(&self, deposit_id: u64) -> Option<DepositEvent> {
+        self.located
             .lock()
             .expect("poisoned lock")
             .as_ref()
             .filter(|e| e.deposit_id == deposit_id)
-        {
-            return Ok(Some(event.clone()));
-        }
+            .cloned()
+    }
 
+    /// Scan `eth_getLogs` for `deposit_id` starting at `scan_from`.
+    ///
+    /// When `move_cursor` is set, a miss (the counter says the deposit is
+    /// not made yet) advances the shared cursor to `safe_head`, and a hit
+    /// moves it to the deposit's block minus one so later ids in the same
+    /// block stay in range. Outstanding retries with no stored log start at
+    /// the snapshot cursor plus one and leave the live cursor alone.
+    async fn scan_for_deposit(
+        &self,
+        deposit_id: u64,
+        scan_from: u64,
+        move_cursor: bool,
+        scan_until: Option<u64>,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
         let head = self
             .provider
             .get_block_number()
@@ -458,33 +490,34 @@ where
         let safe_head = head.saturating_sub(self.confirmations);
         gauge!(prom::ETH_SAFE_HEAD_BLOCK).set(safe_head as f64);
         if safe_head < self.from_block {
-            // Nothing finalised in our window yet.
+            return Ok(None);
+        }
+        let scan_end = scan_until.unwrap_or(safe_head).min(safe_head);
+        if scan_end < self.from_block {
             return Ok(None);
         }
 
-        // A counter at or below the id means neither this deposit nor any
-        // later one is made by `safe_head`. Skip every block up to it for
-        // good, with no `eth_getLogs` call.
         let counter = self.deposit_counter_at(safe_head).await?;
         if counter <= U256::from(deposit_id) {
-            if let Some(cursor) = &self.scan_cursor {
-                advance_scan_cursor(cursor, safe_head);
+            if move_cursor {
+                if let Some(cursor) = &self.scan_cursor {
+                    advance_scan_cursor(cursor, safe_head);
+                }
             }
             return Ok(None);
         }
 
-        // `depositId` is the first indexed topic; filter on it directly so
-        // the node only returns the single matching log. Scan in small chunks
-        // so free-tier RPCs (Alchemy: 10-block cap) don't reject wide ranges,
-        // and stop at the chunk that holds the deposit.
         let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
-        let scan_from = self.effective_scan_from();
+        let scan_from = scan_from.max(self.from_block);
+        if scan_from > scan_end {
+            return Ok(None);
+        }
         gauge!(prom::ETH_SCAN_FROM_BLOCK).set(scan_from as f64);
         let mut chunk_start = scan_from;
-        while chunk_start <= safe_head {
+        while chunk_start <= scan_end {
             let chunk_end = chunk_start
                 .saturating_add(GET_LOGS_CHUNK_BLOCKS - 1)
-                .min(safe_head);
+                .min(scan_end);
             let filter = Filter::new()
                 .address(self.address)
                 .event_signature(Deposit::SIGNATURE_HASH)
@@ -495,30 +528,125 @@ where
             counter!(prom::ETH_SCANNED_BLOCKS_TOTAL)
                 .increment(chunk_end.saturating_sub(chunk_start).saturating_add(1));
             if let Some(event) = self.deposit_from_logs(logs, deposit_id).await? {
-                // `depositId`s grow with block order, so the blocks before this
-                // one hold only lower ids, which the relayer has finalized or
-                // parked. The deposit's own block stays in range for a scan
-                // after a restart.
-                if let (Some(cursor), Some(through)) =
-                    (&self.scan_cursor, event.block_number.checked_sub(1))
-                {
-                    advance_scan_cursor(cursor, through);
-                }
                 *self.located.lock().expect("poisoned lock") = Some(event.clone());
+                if move_cursor {
+                    if let (Some(cursor), Some(through)) =
+                        (&self.scan_cursor, event.block_number.checked_sub(1))
+                    {
+                        advance_scan_cursor(cursor, through);
+                    }
+                }
                 return Ok(Some(event));
             }
             chunk_start = chunk_end.saturating_add(1);
         }
 
-        // The deposit exists, yet no block we scanned holds its log. Saying
-        // "not yet" here would leave the relayer waiting for it forever.
         Err(RelayerError::eth(format!(
             "depositCounter() at block {safe_head} is {counter}, so depositId {deposit_id} is at \
              or below that block, but eth_getLogs found no Deposit log for it in blocks \
-             {scan_from}..={safe_head}: either the RPC returned incomplete logs, or the deposit \
+             {scan_from}..={scan_end}: either the RPC returned incomplete logs, or the deposit \
              is below block {scan_from} (lower --from-block, or remove scan_done_through_block \
              from the state file)"
         )))
+    }
+
+    /// One-block `eth_getLogs` for a deposit whose block is known but whose
+    /// tx is not. Does not move the shared scan cursor.
+    async fn fetch_in_block(
+        &self,
+        deposit_id: u64,
+        block: u64,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        let head = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::eth(format!("get_block_number failed: {e}")))?;
+        let safe_head = head.saturating_sub(self.confirmations);
+        if block > safe_head {
+            return Ok(None);
+        }
+        let topic1 = B256::from(U256::from(deposit_id).to_be_bytes::<32>());
+        let filter = Filter::new()
+            .address(self.address)
+            .event_signature(Deposit::SIGNATURE_HASH)
+            .topic1(topic1)
+            .from_block(block)
+            .to_block(block);
+        let logs = get_logs_with_retry(&self.provider, &filter).await?;
+        counter!(prom::ETH_SCANNED_BLOCKS_TOTAL).increment(1);
+        if let Some(event) = self.deposit_from_logs(logs, deposit_id).await? {
+            return Ok(Some(event));
+        }
+        Err(RelayerError::eth(format!(
+            "no Deposit log for depositId {deposit_id} in block {block}"
+        )))
+    }
+}
+
+#[async_trait]
+impl<P> DepositSource for EthLogSource<P, Ethereum>
+where
+    P: Provider<Ethereum> + Send + Sync,
+{
+    async fn fetch(&self, deposit_id: u64) -> Result<Option<DepositEvent>, RelayerError> {
+        if let Some(event) = self.cached_located(deposit_id) {
+            return Ok(Some(event));
+        }
+
+        // A first look that finds the log moves the discovery cursor to the
+        // deposit's block minus one (later ids can share that block).
+        // Outstanding retries use [`fetch_known`] instead of this cursor.
+        self.scan_for_deposit(deposit_id, self.effective_scan_from(), true, None)
+            .await
+    }
+
+    async fn fetch_known(
+        &self,
+        deposit_id: u64,
+        tx_hash: Option<B256>,
+        log_index: Option<u64>,
+        block_number: Option<u64>,
+    ) -> Result<Option<DepositEvent>, RelayerError> {
+        if let Some(event) = self.cached_located(deposit_id) {
+            return Ok(Some(event));
+        }
+        if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
+            return fetch_deposit_from_receipt(
+                &self.provider,
+                self.address,
+                tx_hash,
+                log_index,
+                deposit_id,
+                self.confirmations,
+            )
+            .await;
+        }
+        if let Some(block) = block_number {
+            return self.fetch_in_block(deposit_id, block).await;
+        }
+        // No stored log: a `state.json` from an earlier relayer only carried
+        // the failed id's attempt count. That daemon left the cursor at the
+        // deposit's block minus one, so start at snapshot+1 — not at
+        // `--from-block` (a hundred thousand chunks) and not at the live
+        // cursor, which an idle poll has usually moved to `safe_head`. If
+        // the snapshot already sat past the deposit, fall back to
+        // `--from-block ..= snapshot`.
+        let snapshot = self.initial_scan_cursor;
+        let scan_from = snapshot
+            .map(|c| c.saturating_add(1))
+            .unwrap_or(self.from_block);
+        match self
+            .scan_for_deposit(deposit_id, scan_from, false, None)
+            .await
+        {
+            Ok(found) => Ok(found),
+            Err(e) if snapshot.is_some() && e.to_string().contains("found no Deposit log") => {
+                self.scan_for_deposit(deposit_id, self.from_block, false, snapshot)
+                    .await
+            },
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -762,5 +890,46 @@ mod tests {
             &"HTTP error 429 with body: compute units per second"
         ));
         assert!(!is_retryable_eth_rpc_error(&"invalid params"));
+    }
+
+    #[tokio::test]
+    async fn fetch_known_without_a_log_starts_at_the_snapshot_cursor() {
+        // An earlier relayer found deposit 0 at block 105 and left the cursor
+        // at 104. The live cursor may already sit at the safe head after an
+        // idle poll; the retry must still start at 105, not at `--from-block`.
+        let rpc = FakeRpc::new(BRIDGE, 130);
+        rpc.deposit(105);
+        let cursor = Arc::new(Mutex::new(Some(104)));
+        let source = log_source(&rpc, &cursor);
+        *cursor.lock().unwrap() = Some(118);
+
+        let event = source
+            .fetch_known(0, None, None, None)
+            .await
+            .unwrap()
+            .expect("deposit 0");
+        assert_eq!(event.block_number, 105);
+        assert_eq!(*cursor.lock().unwrap(), Some(118));
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(105, 114)]);
+    }
+
+    #[tokio::test]
+    async fn fetch_known_without_a_log_falls_back_when_the_snapshot_is_past_the_deposit() {
+        // A cursor already past the deposit (this daemon's idle poll, or a
+        // hand-edited file) still has to find it, without walking every
+        // block mined since the snapshot.
+        let rpc = FakeRpc::new(BRIDGE, 130);
+        rpc.deposit(105);
+        let cursor = Arc::new(Mutex::new(Some(110)));
+        let source = log_source(&rpc, &cursor);
+
+        let event = source
+            .fetch_known(0, None, None, None)
+            .await
+            .unwrap()
+            .expect("deposit 0");
+        assert_eq!(event.block_number, 105);
+        assert_eq!(*cursor.lock().unwrap(), Some(110));
+        assert_eq!(rpc.take_get_logs_ranges(), vec![(111, 118), (100, 109)]);
     }
 }

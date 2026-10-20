@@ -16,17 +16,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 
 CONTEXT_VERSION = 1
 
 # The Ethereum bridge a fresh chain trusts, and the chain it lives on; the
-# defaults are the Sepolia bridge and chain id. The allowlist starts empty
-# and fail-closed, so a network generated without this refuses every deposit
-# until its owner seeds one by hand.
+# chain defaults to Sepolia; the paired L1 address must be supplied explicitly.
 L1_CHAIN_ID = os.environ.get("BRIDGE_ZS_L1_CHAIN_ID", "11155111")
-L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE", "0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb")
+L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE")
 
 BRIDGE_TVC = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc"
 BRIDGE_ABI = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
@@ -152,6 +151,9 @@ def _data_cell(ctx: dict, voucher_code: str) -> str:
 
 def initialize(ctx: dict) -> None:
     _check_context(ctx)
+
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", L1_BRIDGE or "") or int(L1_BRIDGE, 16) == 0:
+        raise SystemExit("bridge zerostate: set BRIDGE_ZS_L1_BRIDGE to the fresh paired L1 bridge address; there is no default")
 
     bridge_code = ctx["get_code"](ctx["artefact"](BRIDGE_TVC))
     voucher_code = ctx["get_code"](ctx["artefact"](VOUCHER_TVC))

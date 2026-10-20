@@ -1,6 +1,6 @@
 # `deposit-relayer` operator runbook
 
-verified-against: `840bd120`
+verified-against: `6f5de05c`
 covers: `crates/deposit-relayer-daemon/src/`, `scripts/ursus/deposit-relayer.{service,env.example}`
 
 How to run the EVM → Acki Nacki deposit relayer so that it does not get stuck, does not
@@ -23,9 +23,11 @@ recipient through `confirmDeposit`.
   same deposit fails in the voucher constructor with exit 51, so no deposit can be minted
   twice, whoever submits it (`submitter::classify_exit`).
 - **`state.json` is a cache plus a to-do list** (`state::RelayerState`). It holds the
-  next deposit to work on (`last_processed_deposit_id + 1`) and the log-scan cursor
-  (`scan_done_through_block`), both of which can be rebuilt. It also holds
-  `parked_deposit_ids`, which nothing else records. **Losing the file loses that list.**
+  high-water mark (`last_processed_deposit_id`), the failed ids still to retry
+  (`outstanding_deposits`) and the log-scan cursor (`scan_done_through_block`), all of
+  which can be rebuilt from the chain. It also holds `parked_deposit_ids`, which
+  nothing else records. **Losing the file loses that list, and on failover without a
+  copy also loses every outstanding id below the new `START_DEPOSIT_ID`.**
 - **USDC never leaves Ethereum because of the relayer.** If the daemon is down, deposits
   wait; nobody loses funds, and they are delivered once a relayer runs again.
 
@@ -39,32 +41,39 @@ recipient through `confirmDeposit`.
 | `AN_DAPP_ID` | `0` | `eccUSDCBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
 | `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not proven again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
-| `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks, so one broken deposit blocks the queue until someone intervenes (§3). |
+| `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks: a broken deposit stays in `outstanding_deposits` and later ids still go through. Alert on `deposit_relayer_outstanding_deposits` (§7). |
 | `--backoff-initial-secs` / `-max-secs` / `-multiplier` | defaults 5 / 120 / 2 | A zero initial delay or a multiplier of 0 is rejected at start-up (`BackoffConfig::validate`); either would busy-loop. |
 | `DEPOSIT_RELAYER_METRICS_ADDR` | loopback or a monitoring-only interface | Prometheus `GET /metrics`; alerts in §7. |
 | systemd | `Restart=on-failure`, `TimeoutStopSec=180`, `KillMode=mixed` (as in `scripts/ursus/deposit-relayer.service`) | A tick can take minutes while the prover runs, and shutdown is checked only between ticks. |
 | GraphQL endpoint | HTTPS, on a node that also serves `/v2/messages` | A gateway that only answers `/graphql` cannot submit. Plain HTTP needs `--allow-insecure-graphql`. |
 
-## 3. The queue: strict order, parking, manual finish (QC-OFF-01)
+## 3. The queue: later ids first, outstanding retries, parking (QC-OFF-01)
 
-The daemon works on one deposit at a time, in `depositId` order: `next_target =
-last_processed + 1` (`RelayerState::next_target`). It never jumps ahead to a later
-deposit while the current one is unresolved. This is deliberate, and an out-of-order
-mode was considered and rejected. In order, the queue has one cursor and one next
-deposit, and a stuck deposit is visible as a stalled queue. Out of order, some users
-would be paid while an older deposit waits with no obvious signal, and the older one is
-easy to forget.
+The daemon tries new work first: `next_target` walks `last_processed + 1`, skipping
+parked, unprovable and outstanding ids (`RelayerState::next_target_at`). When that walk
+has nothing new to fetch, one outstanding id is retried on the same tick, round-robin,
+with per-id backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default
+2 s, doubled each *failed* attempt up to 64×). A pending submit does not increment
+`attempts`, so it stays at the base delay until a proof failure or an AN rejection.
+A retry loads the stored Deposit tx (or its block) so the log-scan cursor can keep
+moving with later deposits. An outstanding id that has no stored log — a `state.json`
+written by an earlier relayer that only recorded `attempts_since_progress` — is
+scanned from the `scan_done_through_block` that file had on load, plus one
+(that daemon left the cursor at the deposit's block minus one), not from
+`--from-block` and not to the live head.
 
-What a stuck deposit costs: everyone behind it waits. What gets it moving:
+A stuck deposit no longer holds every later user. What gets the stuck one moving:
 
-1. **On its own**, a transient failure (RPC blip, prover crash, a pending submit) is
-   retried with exponential backoff. Waiting is free: since QC-OFF-10, a retry reuses the
-   deposit it already located and makes no `eth_getLogs` call.
+1. **On its own**, a transient failure (RPC blip, prover crash) is retried with that
+   per-id backoff on idle ticks. A pending submit is retried at the base delay (it
+   does not count as an attempt). A retry with a stored tx uses the receipt and
+   makes no `eth_getLogs` walk from the shared cursor.
 2. **With `--skip-after-attempts N`**, after N consecutive *failed* attempts (a proof
    failure or a rejection by AN) the deposit is **parked**. It is appended to
-   `parked_deposit_ids`, the queue moves on, and the log shows `daemon: deposit parked;
-   run finalize-one manually`. Pending submits (§4) and "deposit not made yet" do not
-   count toward N.
+   `parked_deposit_ids`, dropped from outstanding, and the log shows `daemon: deposit
+   parked; run finalize-one manually`. Pending submits (§4) and "deposit not made yet"
+   do not count toward N. Pending still goes into `outstanding_deposits` with backoff, so
+   a paused lane does not hold later ids and does not walk those ids toward parking.
 3. **By hand**, finish a parked deposit:
 
    ```bash
@@ -96,7 +105,7 @@ anything else (`Relayer::run_until_shutdown`).
 |---|---|---|---|
 | `finalized`, `already_finalized` | voucher deployed / already there | next deposit | resets the count |
 | `not_yet_available` | deposit not made, or not `--confirmations` deep | wait | no |
-| `an_pending` | the outcome is not known yet | retried; on the next tick the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
+| `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; later ids go first. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
 | `proof_failed` | the prover failed or timed out (900 s, `SubprocessProverConfig::timeout`) | retried | yes |
 | `an_rejected` | AN refused the deposit (exit code in the log) | retried | yes |
 | `skipped` | parked after N failures | next deposit; manual finish (§3) | resets the count |
@@ -149,14 +158,15 @@ it refuses with `state.json deployment mismatch`, so a cursor from one bridge ca
 silently skip another bridge's deposits.
 
 `--force-state` accepts the mismatch by **starting the file over**. Progress, scan
-cursor and parked ids are discarded, the old values are logged at `warn`, and the daemon
-begins at `--start-deposit-id` (`RelayerState::ensure_deployment`). Checklist before
-using it:
+cursor, parked ids, outstanding ids and `last_finalized_deposit_id` are discarded, the
+old values are logged at `warn`, and the daemon begins at `--start-deposit-id`
+(`RelayerState::ensure_deployment`). Checklist before using it:
 
 1. Is this really a new deployment? A typo in `BRIDGE_ADDRESS` also mismatches. Fix the
    env instead.
-2. Write down `parked_deposit_ids` from the old file. They are dropped, and each one
-   still needs `finalize-one` against the bridge it belongs to.
+2. Write down `parked_deposit_ids` and the ids in `outstanding_deposits` from the old
+   file. They are dropped, and each one still needs `finalize-one` against the bridge
+   it belongs to.
 3. Set `START_DEPOSIT_ID` (0 for a new EVM bridge) and `FROM_BLOCK` (its deploy block).
 4. Keep a copy of the old file, then start once with `--force-state`, and remove the
    flag again. Leaving it on accepts the next mismatch without asking.
@@ -166,8 +176,9 @@ Other cases:
 - **Crash between submit and save.** The next tick finds the voucher and records the
   deposit as `already_finalized`; nothing is proven twice.
 - **A corrupt or unreadable file** stops the daemon at start-up. Restore the backup. If
-  there is none, deleting the file is safe apart from the parked ids: the daemon
-  restarts at `START_DEPOSIT_ID` and skips finalized deposits by their vouchers.
+  there is none, deleting the file is safe apart from the parked and outstanding
+  ids: the daemon restarts at `START_DEPOSIT_ID` and skips finalized deposits by
+  their vouchers. An outstanding id below `START_DEPOSIT_ID` is never retried.
 - **Two daemons on one file**: the second fails to take the lock and exits.
 
 ## 7. Monitoring
@@ -178,15 +189,17 @@ recommendations, not tested values.
 | Condition | Meaning |
 |---|---|
 | `time() - deposit_relayer_last_tick_timestamp_seconds > 900` | daemon dead or hung (a tick includes the prover, up to 900 s) |
-| `deposit_relayer_eth_deposit_counter - deposit_relayer_target_deposit_id > 0` and `time() - deposit_relayer_last_finalized_timestamp_seconds > 3600` | deposits are waiting and none was delivered for an hour |
-| `deposit_relayer_attempts_since_progress >= 3` | the current deposit keeps failing; read the log for the exit code |
+| `deposit_relayer_outstanding_deposits > 0` | a failed deposit is waiting to retry; this is the signal for a stuck id. `target_deposit_id` is the forward id on an idle relayer, so `deposit_counter - target` stays 0 while outstanding ids sit below it |
+| `deposit_relayer_eth_deposit_counter - deposit_relayer_target_deposit_id > 0` and `time() - deposit_relayer_last_finalized_timestamp_seconds > 3600` | new deposits are waiting at the high-water mark and none was delivered for an hour |
+| `deposit_relayer_attempts_since_progress >= 3` | the last failed outstanding id's attempt count; it resets when *any* later id finalizes, so it is not a stuck-queue signal on its own |
 | `deposit_relayer_parked_deposits > 0` | manual finish needed (§3) |
 | `increase(deposit_relayer_ticks_total{outcome="an_pending"}[30m]) > 10` | AN slow, unreachable, or the lane paused |
 | `increase(deposit_relayer_eth_get_logs_total{outcome="error"}[15m]) > 0` | the Ethereum RPC is refusing log queries |
 
-`deposit_relayer_last_finalized_deposit_id` only covers the current process; after a
-restart it stays unset until the first delivery. Use `target_deposit_id` for the
-backlog.
+`deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` on start and
+only moves up. `deposit_relayer_target_deposit_id` shows the retried id during an idle
+retry, then the forward id again. Use `deposit_relayer_outstanding_deposits` for the
+stuck-id backlog.
 
 ## 8. When the primary is down (QC-OFF-02)
 
@@ -198,11 +211,13 @@ the same binary, env file and AN keys, and keep the service disabled. To fail ov
 
 1. Make sure the primary is really stopped (`systemctl stop`, or the host powered off).
    The lock does not reach across hosts.
-2. Copy the latest backup of `state.json` to the standby's `DEPOSIT_RELAYER_STATE`. If
-   there is no backup, start without a file and set `START_DEPOSIT_ID` to the
-   primary's last `target_deposit_id`. If it is lower, keep `FROM_BLOCK` at or
-   below that deposit — then the daemon only re-checks. A `FROM_BLOCK` above it
-   makes every tick fail (`EthLogSource::fetch` finds no log).
+2. Copy the latest backup of `state.json` to the standby's `DEPOSIT_RELAYER_STATE`,
+   including `outstanding_deposits`. If there is no backup, start without a file and
+   set `START_DEPOSIT_ID` to the primary's last `target_deposit_id` **only if that
+   file had no outstanding ids**. `target_deposit_id` is the forward id; every
+   outstanding id below it is then never delivered, and nothing records it. If it is
+   lower, keep `FROM_BLOCK` at or below that deposit — then the daemon only re-checks.
+   A `FROM_BLOCK` above it makes every tick fail (`EthLogSource::fetch` finds no log).
 3. Start the service and watch for `finalized` / `already_finalized` ticks.
 
 A one-off `finalize-one` by another operator while the daemon runs is safe: the slower

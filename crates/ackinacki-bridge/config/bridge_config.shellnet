@@ -126,7 +126,7 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
 # Set both values for your fresh deployment. This build uses
-# deposit(uint256,bytes32) and requires eccUSDCBridge >= 1.11.0 for deposits;
+# deposit(uint256,bytes32) and requires eccUSDCBridge 1.13.0 for deposits;
 # earlier workchain-bearing EVM deployments cannot accept its deposit calls.
 # Keep USDC_BRIDGE_ACCOUNT_ID above paired with this EVM contract.
 # BRIDGE_ADDRESS=0x<new-AckiNackiBridge-address>

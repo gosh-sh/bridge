@@ -46,7 +46,7 @@ class BridgeLimits(unittest.TestCase):
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
         source = source.replace(verification, "testVerifyProof()")
-        source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated)\{dest: addrExtern\}\(.*?\);",
+        source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         hooks = """
     bool _testRejectProof;
@@ -187,6 +187,22 @@ class BridgeLimits(unittest.TestCase):
         self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000)
         self.assertEqual(int(self.limits(1)["outstanding"]), 0)
         self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
+
+    def test_owner_recovery_credits_only_the_source_chain_and_enforces_limits(self):
+        self.seed(0, TVL)
+        args = {"recipient": SENDER, "value": str(TRANSFER), "nonce": "1", "chainId": "2"}
+        self.call("mintAndSendBridged", args, signed=True, expect=235)
+        args.update(chainId="1", value=str(TRANSFER + 1))
+        self.call("mintAndSendBridged", args, signed=True, expect=234)
+        args["value"] = str(TRANSFER)
+        self.call("mintAndSendBridged", args, signed=True)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
+        self.assertEqual(int(self.limits(2)["outstanding"]), TVL)
+        self.withdraw(TRANSFER, chain=1)
+        self.assertEqual(int(self.limits(1)["outstanding"]), 0)
+        args["nonce"] = "2"
+        self.call("mintAndSendBridged", args, signed=True)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
 
     def test_refund_preserves_large_ecc_amount_and_limits_shell(self):
         for amount in (TRANSFER + 1, (1 << 64) + 1, (1 << 128) + 1):

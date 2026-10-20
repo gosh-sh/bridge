@@ -219,7 +219,7 @@ command itself:
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(uint256,bytes32)`
-   on EVM and `eccUSDCBridge` >= 1.11.0 with this build's deposit key on AN.
+   on EVM and `eccUSDCBridge` >= 1.13.0 with this build's deposit key on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -1550,9 +1550,11 @@ record.
   relayer can finalize it to the recipient in its call data; otherwise only
   the operator can return the USDC.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
-  The operator pays it out (`mintAndSend`). That ECC does not add bridged
-  inventory, so it cannot be withdrawn over the bridge until a later
-  `finalizeDeposit` covers it.
+  The operator pays it out (`mintAndSendBridged`) once, for this deposit's
+  recipient, amount and source `chainId`. That call credits bridged inventory the way
+  `confirmDeposit` would have; ordinary `mintAndSend` does not. The call
+  is not bound to the deposit id, so a second recovery (or a mistyped
+  amount) invents headroom the Ethereum treasury does not hold.
 
 Give the operator the deposit's transaction hash, its `depositId`, the amount
 and recipient actually deposited, the EVM bridge address and the operation id;
@@ -1569,7 +1571,8 @@ jq '{op_id, bridge: .params.bridge, tx: .tx.tx_hash,
   bridge operator:` line carries the transaction, what it deposited — every
   `depositId` with its amount and recipient, as `deposited: depositId …, …
   USDC units to account …` — the bridge and the operation; after exit 37 it
-  names the operation and the Acki Nacki bridge transaction that aborted.
+  names the `depositId`, amount, recipient, EVM bridge, chain, operation
+  and the Acki Nacki bridge transaction that aborted.
 - `deposit_id` is set only after exit 37. After exit 35 it is `null`: the
   operation was closed before the deposit was recorded, so take the
   `depositId` from `detail`.
@@ -1707,7 +1710,7 @@ already. Independently of that minimum, preflight also refuses a bridge
 older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.8.0`) gets a warning.
+than the newest this build was checked against (`1.13.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

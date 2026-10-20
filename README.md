@@ -12,6 +12,40 @@ verifiers deployed as Yul bytecode.
 
 ---
 
+## The current deployment
+
+Sepolia ↔ shellnet. The table below describes the deployed 1.12.0 pair. The 1.13.0 limits release
+requires a fresh matching pair; do not reuse these addresses with the new CLI.
+The CLI, relayers and web form take their addresses from configuration.
+
+### Ethereum (Sepolia, chain id 11155111)
+
+| | |
+|---|---|
+| `AckiNackiBridge` | `0x8413212869201d4e0d525e6067b605318029d451` |
+| deployment block | `11955698` |
+| USDC | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+
+### Acki Nacki (shellnet)
+
+| | |
+|---|---|
+| `eccUSDCBridge` | `0:1a1a…1a1a` |
+| version | `1.12.0`, code hash `a1fd7d19…` |
+| beacon light client | `0:1afeaa0fdd997e8177d60d0c8dbbe44c5a5e008f56194240f5f40da250582967` |
+| GraphQL | `https://shellnet.ackinacki.org/graphql` |
+
+### What to set
+
+```bash
+BRIDGE_ADDRESS=0x8413212869201d4e0d525e6067b605318029d451
+BRIDGE_DEPLOY_BLOCK=11955698
+FROM_BLOCK=11955698
+RPC_URL=https://rpc.sepolia.ethpandaops.io
+```
+
+---
+
 ## The two directions
 
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
@@ -19,9 +53,9 @@ verifiers deployed as Yul bytecode.
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
 the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
 (receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
-consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints. The
-per-transaction cap is `type(uint64).max` units — sized so the amount fits the AN mint path, not as a
-TVL limit.
+consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints.
+This release limits each transfer to 50 USDC and outstanding principal to
+10,000 USDC per L1 chain.
 
 **Acki Nacki → Ethereum (state attestation + payout).** Three permissionless entrypoints:
 

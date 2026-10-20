@@ -14,11 +14,12 @@ abstract contract BridgeReplayProtection is eccUSDCBridgeErrors {
     }
 
     function afterSignatureCheck(TvmSlice body, TvmCell message) private inline returns (TvmSlice) {
+        message;
+        uint256 messageHash = tvm.hash(abi.encode(msg.pubkey(), tvm.hash(body)));
         body.load(uint64);
         uint32 expireAt = body.load(uint32);
         require(expireAt > block.timestamp, ERR_MESSAGE_EXPIRED);
         require(expireAt < block.timestamp + 5 minutes, ERR_MESSAGE_WITH_HUGE_EXPIREAT);
-        uint256 messageHash = tvm.hash(message);
         require(!_messages[expireAt][messageHash], ERR_MESSAGE_IS_EXIST);
         _messageHash = messageHash;
         _messageExpire = expireAt;

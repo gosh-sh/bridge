@@ -326,9 +326,9 @@ hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and th
 ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
 that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
 nothing late-registers the skipped ones. A deposit from any of those uncovered blocks
-fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts`
-is set. That is why the daemon does not flip unless told to.
+fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224). That is why the daemon does not
+flip unless told to. `deposit-relayer` walks past a failed id and retries it with
+backoff; `--skip-after-attempts` still parks one that keeps failing.
 
 ## 4. Deployment
 

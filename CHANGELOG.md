@@ -65,13 +65,18 @@ assigns it when the release is tagged.
   it must retain logs back to the configured deployment block.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
-  `state.json`, the strict `depositId` queue, parking with
-  `--skip-after-attempts` and finishing parked deposits with
-  `prove-one` + `finalize-one`, which outcomes are retried automatically
-  (pending, paused lane) and which need a person, a fix for each exit code,
-  the `--force-state` checklist after a redeploy, alert rules over the
-  Prometheus metrics, and failing over to a cold standby (QC-OFF-01, -02, -08,
-  -11).
+  `state.json`, later ids going first while failed ids retry from
+  `outstanding_deposits`, parking with `--skip-after-attempts` and finishing
+  parked deposits with `prove-one` + `finalize-one`, which outcomes are retried
+  automatically (pending, paused lane) and which need a person, a fix for each
+  exit code, the `--force-state` checklist after a redeploy, alert rules over
+  the Prometheus metrics (`deposit_relayer_outstanding_deposits` for a stuck
+  id), and failing over to a cold standby by copying the full `state.json`
+  (QC-OFF-01, -02, -08, -11). A pending submit stays at the base outstanding
+  delay (it does not increment attempts). `--force-state` also drops
+  outstanding ids and logs them. An outstanding id with no stored log is
+  scanned from the persisted `scan_done_through_block` plus one, not from
+  `--from-block` and not to the live head.
 
 - `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
   row told operators to re-prove `applyBkSetUpdate` against the live
@@ -108,6 +113,17 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
+  row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
+  bridge has recorded. A window with `dataLen > 0` is never cleared, so
+  that layer stays in `t` when later key blocks skip it.
+- `AckiNackiBridge.deposit`'s `anWorkchain` is telemetry. It is kept in
+  the ABI and the `Deposit` event so the log shape stays stable, but it
+  is not a deposit-proof public input and Acki Nacki always credits
+  workchain 0 (`eccUSDCBridge._parsePublicInputs` /
+  `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
+  That is the accepted product choice, not a gap to close by putting
+  workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
 
 ### Breaking Changes
 
@@ -164,13 +180,20 @@ assigns it when the release is tagged.
   A daemon started from an old unit refuses with the name of the missing
   flag.
 
+- **`eccUSDCBridge` is 1.12.0, and neither 1.11.0 exists.** Two branches each
+  built a 1.11.0: one adding owner `mintAndSendBridged`, one carrying the
+  deposit ABI without `anWorkchain` and its regenerated key. They are now one
+  contract with both changes, rebuilt with sold 0.80.0, code hash
+  `a1fd7d19…`. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
+  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
+
 - **Deposits no longer have a workchain parameter.** For a fresh deployment,
   use `deposit(uint256,bytes32)` and
   `Deposit(uint256,address,uint256,bytes32,uint256)`; the event's non-indexed
   data is now 96 bytes. The CLI, frontend, deposit relayer and prover use this
   format, and witness JSON no longer includes `an_workchain`. Deploy the matching
-  Ethereum contract and `eccUSDCBridge` 1.11.0 with the regenerated deposit
-  verification key (code hash `774c9571…`), and use the updated clients
+  Ethereum contract and `eccUSDCBridge` 1.12.0 with the regenerated deposit
+  verification key (code hash `a1fd7d19…`), and use the updated clients
   and prover together. Proofs for the previous event format do not verify under
   this key. Withdrawal interfaces, DApp ID handling and the 12 deposit public-input
   slots are unchanged. The shipped CLI profile and relayer template no longer
@@ -186,24 +209,62 @@ assigns it when the release is tagged.
   with the old AN bridge unpaused and its matching prover/relayer. Verify the corresponding
   finalized AN credit for every old deposit ID below the paused EVM bridge's
   `depositCounter` before replacing the AN code or removing those tools.
-  The 1.11.0 key cannot finalize 128-byte events,
+  The 1.12.0 key cannot finalize 128-byte events,
   and the old EVM contract has no deposit refund path. Custody and outstanding
   withdrawals on an existing pair require a separate migration plan.
 
-  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.11.0
+  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.12.0
   before requesting a transaction. For the new deployment, configure the
   matching EVM/AN pair and its trust settings first, install the matching prover
   and clients, then publish the new addresses and start deposits. Do not switch
   clients alone against an earlier deployment. The installer preserves an
   existing profile, so its deployment values must be updated by the operator.
+- **`eccUSDCBridge` 1.12.0 adds owner `mintAndSendBridged` for CLI exit 37.**
+  After a voucher-consumed `confirmDeposit` abort the deposit cannot be
+  finalized again, Ethereum already holds the USDC, and ordinary
+  `mintAndSend` does not increment `getTotalBridged` — last withdrawers
+  then hit 233. `mintAndSendBridged` matches `confirmDeposit`: it mints
+  ECC[3] and credits `_totalMintedBridgeByToken`. It shares `_mintNonce`
+  with `mintAndSend`. Do **not** use it for ordinary owner mint: that
+  would invent bridged inventory the Ethereum treasury does not hold.
+  `mintAndSend` / `mintAndSendAccumulator` / TIP-3 mint still increment
+  only `getTotalMinted`. `mintAndSendBridged` is not bound to a deposit
+  id: the operator must match the aborted deposit's recipient and amount,
+  once — a second call or a mistyped `value` adds inventory Ethereum does
+  not hold.
+
+  ECC[3] stays fungible: the cap is still an inventory check, not a
+  per-depositor reservation. That half of QC-AN-05 is the accepted
+  product choice.
+
+  Upgrade with `updateCode` and an empty `userCell` — the storage *layout*
+  is unchanged, but `onCodeUpgrade` still `resetStorage`s and restores
+  only pubkey, usdcWallet, `_totalMinted`, both mint nonces, the two
+  bridged maps and the voucher code. It wipes `_paused`,
+  `_trustedL1Bridge`, `_acceptedBlockHash`, `_lightClientCode`,
+  `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`.
+  After the call, re-run `setPaused` if the lane was paused,
+  `setTrustedL1Bridge`, and `setLightClientCode` / `deployLightClient`
+  before deposits work again (222/224 until then). Owner anchors come
+  back on for every chain (`_ownerAnchorsDisabled` is wiped). If a chain
+  had been flipped to light-client-only, call `disableOwnerAnchorsOn`
+  again after `deployLightClient` — it turns the owner writer off and
+  reverts 226 until a client exists. The ABI gains `mintAndSendBridged`.
+  `eccUSDCBridge` 1.12.0,
+  code hash `a1fd7d19…`, rebuilt with sold 0.80.0. The deposit CLI's
+  exit-37 message names the aborted deposit's `depositId`, amount, recipient,
+  EVM bridge and chain, and tells the operator to call `mintAndSendBridged`.
+  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
-  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
-  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
-  against headroom that deposits created: the cap limits total bridge
-  payouts to total deposits, not one depositor's own withdrawal.
+  Ordinary owner `mintAndSend` / `mintAndSendAccumulator` and TIP-3 mint
+  increment only `getTotalMinted` and add no headroom. 1.12.0's
+  `mintAndSendBridged` is the exception, for exit-37 recovery only. ECC[3]
+  is fungible, so such ECC can still be withdrawn against headroom that
+  deposits created: the cap limits total bridge payouts to total deposits,
+  not one depositor's own withdrawal.
 
   A fresh zerostate starts both counters at 0, so the cap holds from the
   first burn. `updateCode` copies the maps as they are. On a live bridge
@@ -212,9 +273,13 @@ assigns it when the release is tagged.
   burn is refused until `finalizeDeposit` brings minted up to burned.
   That is not the same as a fresh deploy.
 
-  Included in the `eccUSDCBridge` 1.11.0 build described above. The withdrawal
+  Included in the `eccUSDCBridge` 1.12.0 build described above. The withdrawal
   ABI is unchanged. The withdraw CLI preflight checks
   `getTotalBridged` and refuses before the burn.
+  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
+  The 1.10.0 ABI was unchanged; 1.12.0 above adds `mintAndSendBridged`.
+  The withdraw CLI preflight checks `getTotalBridged` and refuses before
+  the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
@@ -236,7 +301,8 @@ assigns it when the release is tagged.
   that, so a deposit on a chain whose client was not the last one deployed is
   no longer refused. A bridge that reports 1.9.0 without the per-chain getter
   is answered once and falls back with a warning instead of being retried for
-  ever. 1.9.0 is now the newest version the CLI was checked against.
+  ever. 1.9.0 was the newest version the CLI was checked against in that
+  change; 1.12.0 above is now `NEWEST_KNOWN_BRIDGE_VERSION`.
 
 - **One light-client code, one client per source chain, addressed by code
   salt.** `setLightClientCode` now only stores the code. The address is
@@ -720,7 +786,7 @@ assigns it when the release is tagged.
   deposit` proves. Proofs made with the previous key (bridge 1.6.0) stop
   verifying, and a stale `target/release/examples/<name>` produces proofs
   the new key rejects. The current minimum AN bridge version for
-  `ackinacki-bridge deposit` is 1.11.0, as described above.
+  `ackinacki-bridge deposit` is 1.12.0, as described above.
 
 - **The deposit-prover verification key is rotated, and the rotation
   closes two forgeries.** Under the previous key — and every earlier one
@@ -778,7 +844,7 @@ assigns it when the release is tagged.
   `data/` briefly needs room for both. `ackinacki-bridge deposit`
   installs get the prover tools from a release (`install.sh`), so
   they need a new release; the current CLI refuses an AN bridge older than
-  1.11.0, as described above.
+  1.12.0, as described above.
 
   The prover now refuses a deposit it cannot prove before loading
   the SRS or the key. `fetch_deposit_data` exits 3 when the
@@ -1085,6 +1151,14 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `deposit-relayer daemon --outstanding-backoff-secs` /
+  `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
+  is retried, doubled on each later failure of that id up to 64×. Gauge
+  `deposit_relayer_outstanding_deposits`. `state.json` gains
+  `outstanding_deposits` (per-id attempts, `retry_after_unix`, and the
+  Deposit tx / block / log index when known) and `last_finalized_deposit_id`
+  (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
+
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -1139,8 +1213,9 @@ assigns it when the release is tagged.
   `AN_DAPP_ID=0`. The value has no effect on-chain, but it is part of the
   `state.json` deployment binding (`chain_id`, EVM bridge, `AN_DAPP_ID`).
   Changing it on an existing file fails start-up with a deployment
-  mismatch; `--force-state` then discards the cursor, parked ids and
-  unprovable ids even though no bridge changed (QC-OFF-09).
+  mismatch; `--force-state` then discards the cursor, parked ids,
+  outstanding ids, `last_finalized_deposit_id` and unprovable ids even
+  though no bridge changed (QC-OFF-09).
 
 - `deposit-relayer daemon` no longer re-scans Ethereum logs while it retries a
   deposit that AN keeps refusing. Once a deposit is found, retries reuse it
@@ -1550,9 +1625,9 @@ assigns it when the release is tagged.
   `disableOwnerRotation`; one-shot: `eth-lc-relayer flip-owner`. Do not flip
   yet: afterwards deposits from the allowlisted L2s and from the 31
   non-checkpoint blocks of an epoch fail `finalizeDeposit` with
-  `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer` stops at the first of them
-  unless `--skip-after-attempts` is set
-  (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
+  `ERR_UNKNOWN_BLOCK` (224). `deposit-relayer` walks past a failed id and
+  retries it with backoff; `--skip-after-attempts` still parks one that
+  keeps failing (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
   changes nothing. Relayer keys must be the owner pubkey of both contracts. The
   slim ABIs in `crates/eth-light-client-relayer/abi/` follow the compiled
   contracts: `USDCBridge.abi.json` has `getAnchorConfig` and no
@@ -1612,6 +1687,34 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- The ETH→AN deposit relayer no longer stalls every later deposit behind one
+  that cannot be finalised. Later ids are tried first; a failed id stays in
+  `outstanding_deposits` and is retried with backoff on idle ticks,
+  round-robin, from its stored Deposit tx (or its block) so the log-scan
+  cursor can keep moving. A pending submit (`ERR_PAUSED`, a confirmation
+  timeout) goes into that set with backoff but does not count toward
+  `--skip-after-attempts`. Parked ids stay parked. A `state.json` written by
+  an earlier relayer that only has `attempts_since_progress` for the last
+  failed id carries that count into the new outstanding entry, so
+  `--skip-after-attempts` does not start over; that id has no stored tx, so
+  the first retry starts at the `scan_done_through_block` from that file
+  plus one (the earlier relayer left the cursor at the deposit's block
+  minus one), not at `--from-block` and not at the live head.
+  `finalize-one` is unchanged.
+
+  Gauges that used to mean "the one stuck head-of-line id" now mean something
+  else: `deposit_relayer_attempts_since_progress` follows the last failed
+  outstanding id and resets when any later id finalizes;
+  `deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` and
+  only goes up; `deposit_relayer_target_deposit_id` shows the retried id
+  during an idle retry, then the forward id again. Alert on
+  `deposit_relayer_outstanding_deposits`.
+
+  Before running an older binary, move every `outstanding_deposits[].deposit_id`
+  into `parked_deposit_ids`. An older binary ignores `outstanding_deposits`
+  (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
+  those ids, so it would neither retry nor park them.
 
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
@@ -2306,9 +2409,10 @@ assigns it when the release is tagged.
   - while the next `depositId` is not made yet, the poll makes no
     `eth_getLogs` call and moves the cursor up to the confirmed head;
   - once it is made, the scan starts after the cursor and stops at the block
-    that holds the deposit. The cursor moves only after AN accepts the
-    deposit, and only to the block before it, so a retry finds the deposit
-    again and a later deposit in the same block is still found;
+    that holds the deposit. The cursor moves after AN accepts the deposit,
+    to the block before it, so a later deposit in the same block is still
+    found. A failed deposit is retried from its stored tx, not from this
+    cursor;
   - if `depositCounter()` says the deposit is made but no scanned block holds
     its log, the poll fails with an error naming the blocks it scanned: the
     RPC returned incomplete logs, or `--from-block` is above the deposit.

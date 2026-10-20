@@ -298,7 +298,8 @@ pub async fn run(
                      minted={minted} burned={burned} µUSDC (getTotalBridged(3)); \
                      initiateWithdrawal of {} µUSDC would refuse the burn with 233 \
                      (ERR_BURN_EXCEEDS_BRIDGED) and the USDC would bounce back to the multisig. \
-                     Owner-minted ECC does not add bridged inventory; a prior finalized deposit \
+                     Ordinary owner mintAndSend does not add bridged inventory; a prior \
+                     finalized deposit (or one mintAndSendBridged for a voucher-spent abort) \
                      must cover the amount.",
                     amount.0
                 ),

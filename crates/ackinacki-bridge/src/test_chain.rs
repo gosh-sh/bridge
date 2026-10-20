@@ -1033,10 +1033,14 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.11.0 with the current deposit VK.
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.12.0: the deposit ABI without
+        // anWorkchain and its regenerated deposit VK, plus mintAndSendBridged.
+        // Neither 1.11.0 is this binary — one carried the key, the other the
+        // owner mint — so the hash is a third one. Any other compiler or a
+        // stale artefact moves it again.
         assert_eq!(
             &hash[..8],
-            "774c9571",
+            "a1fd7d19",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

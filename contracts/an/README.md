@@ -11,12 +11,16 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   above bridged minted for that token throws `ERR_BURN_EXCEEDS_BRIDGED`
   (233). ECC is fungible: owner-minted and TIP-3-minted ECC can still
   consume headroom that deposits created; the cap stops burned exceeding
-  minted. An `updateCode` of a live bridge that already burned more than
+  minted. After CLI exit 37 (voucher spent, `confirmDeposit` aborted)
+  the owner pays the recipient with `mintAndSendBridged`, which credits
+  bridged minted like `confirmDeposit`; ordinary `mintAndSend` does not.
+  An `updateCode` of a live bridge that already burned more than
   it minted (`getTotalBridged` burned above minted) refuses every burn
   until deposits bring minted up to burned; a fresh zerostate starts both
   counters at 0. The owner can stop `finalizeDeposit` and `initiateWithdrawal`
   with `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until
-  it is lifted; `confirmDeposit`, owner mint and TIP-3 mint keep running.
+  it is lifted; `confirmDeposit`, owner mint (`mintAndSend`,
+  `mintAndSendBridged`, `mintAndSendAccumulator`) and TIP-3 mint keep running.
   That switch is independent of `AckiNackiBridge.pause()` on Ethereum and
   of a Circle freeze of USDC — see *Two pause domains* below.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived

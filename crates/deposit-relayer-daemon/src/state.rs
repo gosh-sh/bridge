@@ -247,9 +247,9 @@ impl RelayerState {
     /// The next new `depositId` the relayer should try at `now`.
     ///
     /// Walks `last_processed + 1` (or `start`), skipping parked, unprovable,
-    /// and outstanding ids. Outstanding ids are retried separately when this
-    /// walk has nothing new to fetch, so two failing deposits cannot starve
-    /// later ones. `_now` is unused: backoff is applied by
+    /// and outstanding ids. The relayer alternates this walk with ready
+    /// outstanding retries so neither queue needs the other to become idle.
+    /// `_now` is unused: backoff is applied by
     /// [`ready_outstanding_after`], not by this walk.
     pub fn next_target_at(&self, start: u64, _now: u64) -> u64 {
         let mut id = match self.last_processed_deposit_id {

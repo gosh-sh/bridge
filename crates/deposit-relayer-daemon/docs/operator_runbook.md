@@ -47,25 +47,29 @@ recipient through `confirmDeposit`.
 | systemd | `Restart=on-failure`, `TimeoutStopSec=180`, `KillMode=mixed` (as in `scripts/ursus/deposit-relayer.service`) | A tick can take minutes while the prover runs, and shutdown is checked only between ticks. |
 | GraphQL endpoint | HTTPS, on a node that also serves `/v2/messages` | A gateway that only answers `/graphql` cannot submit. Plain HTTP needs `--allow-insecure-graphql`. |
 
-## 3. The queue: later ids first, outstanding retries, parking (QC-OFF-01)
+## 3. The queue: new work, outstanding retries, parking (QC-OFF-01)
 
-The daemon tries new work first: `next_target` walks `last_processed + 1`, skipping
-parked, unprovable and outstanding ids (`RelayerState::next_target_at`). When that walk
-has nothing new to fetch, one outstanding id is retried on the same tick, round-robin,
-with per-id backoff (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default
+The daemon alternates new work with ready outstanding retries, so continuous
+arrivals do not hold older deposits indefinitely and a stuck retry does not
+block new deposits. `next_target` walks `last_processed + 1`, skipping parked,
+unprovable and outstanding ids (`RelayerState::next_target_at`). When that walk
+has nothing new to fetch, one ready outstanding id is retried on the same tick.
+Retries rotate through finite rounds; new entries join the next round instead
+of extending the current round indefinitely. After restart, an existing ready
+outstanding deposit gets the first turn. Retries still honor per-id backoff
+(`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default
 2 s, doubled each *failed* attempt up to 64×). A pending submit does not increment
 `attempts`, so it stays at the base delay until a proof failure or an AN rejection.
 A retry loads the stored Deposit tx (or its block) so the log-scan cursor can keep
 moving with later deposits. An outstanding id that has no stored log — a `state.json`
 written by an earlier relayer that only recorded `attempts_since_progress` — is
-scanned from the `scan_done_through_block` that file had on load, plus one
-(that daemon left the cursor at the deposit's block minus one), not from
-`--from-block` and not to the live head.
+scanned from the `scan_done_through_block` that file had on load, plus one,
+with a fallback to `--from-block` if that snapshot was already past the deposit.
 
 A stuck deposit no longer holds every later user. What gets the stuck one moving:
 
 1. **On its own**, a transient failure (RPC blip, prover crash) is retried with that
-   per-id backoff on idle ticks. A pending submit is retried at the base delay (it
+   per-id backoff on retry turns. A pending submit is retried at the base delay (it
    does not count as an attempt). A retry with a stored tx uses the receipt and
    makes no `eth_getLogs` walk from the shared cursor.
 2. **With `--skip-after-attempts N`**, after N consecutive *failed* attempts (a proof
@@ -106,7 +110,7 @@ anything else (`Relayer::run_until_shutdown`).
 | `finalized`, `already_finalized` | voucher deployed / already there | next deposit | resets the count |
 | `not_yet_available` | deposit not made, or not `--confirmations` deep | wait | no |
 | `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference and wait with backoff; no proving or broadcast, later ids remain runnable | **no** |
-| `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; later ids go first. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
+| `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; ready retries alternate with new work. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
 | `proof_failed` | the prover failed or timed out (900 s, `SubprocessProverConfig::timeout`) | retried | yes |
 | `an_rejected` | AN refused the deposit (exit code in the log) | retried | yes |
 | `skipped` | parked after N failures | next deposit; manual finish (§3) | resets the count |
@@ -207,7 +211,7 @@ recommendations, not tested values.
 | `increase(deposit_relayer_eth_get_logs_total{outcome="error"}[15m]) > 0` | the Ethereum RPC is refusing log queries |
 
 `deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` on start and
-only moves up. `deposit_relayer_target_deposit_id` shows the retried id during an idle
+only moves up. `deposit_relayer_target_deposit_id` shows the retried id during a
 retry, then the forward id again. Use `deposit_relayer_outstanding_deposits` for the
 stuck-id backlog.
 

@@ -52,8 +52,10 @@ assigns it when the release is tagged.
   `an_rejected` alerts. The daemon now checks
   `isAcceptedBlockHash(chainId, blockHash)` first and reports
   `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` while the
-  block is absent, without counting failures or parking the deposit. Later
-  deposits remain runnable. Getter errors remain tick errors. The new
+  block is absent, without counting failures or parking the deposit. New
+  deposits and ready retries take alternating turns, so incoming traffic
+  cannot indefinitely delay deposits whose anchors have arrived. Getter
+  errors remain tick errors. The new
   `deposit_relayer_waiting_for_anchor` and
   `deposit_relayer_oldest_anchor_wait_timestamp_seconds` gauges expose the
   count and oldest wait, including across restarts. Upgrade the daemon;

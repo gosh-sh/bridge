@@ -142,10 +142,13 @@ pub struct Relayer<S: DepositSource, P: ProofGenerator, A: AnSubmitter> {
     prover: Arc<P>,
     submitter: Arc<A>,
     state: RelayerState,
-    /// Last outstanding id this process retried. Idle ticks walk past it so
-    /// two failing deposits share the retry slot instead of the lowest id
-    /// taking every tick.
+    /// Last outstanding id retried in the current round.
     last_outstanding_retry: Option<u64>,
+    /// Freeze the end of each retry round so a growing queue cannot keep
+    /// extending it and prevent a return to older ids.
+    outstanding_round_end: Option<u64>,
+    /// Alternate ready retries with forward work while both exist.
+    retry_outstanding_next: bool,
 }
 
 impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
@@ -182,6 +185,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 }
             }
         }
+        let retry_outstanding_next = !state.outstanding_deposits.is_empty();
         Ok(Self {
             config,
             source,
@@ -189,6 +193,8 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             submitter,
             state,
             last_outstanding_retry: None,
+            outstanding_round_end: None,
+            retry_outstanding_next,
         })
     }
 
@@ -200,25 +206,55 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// One step of the loop. Idempotent: a deposit already finalised on AN
     /// is skipped via the nullifier pre-check rather than re-submitted.
     ///
-    /// New work is tried first. Outstanding ids are retried in the same tick
-    /// only when that walk has nothing new to fetch, so they cannot starve
-    /// later deposits.
+    /// Alternate forward work with ready outstanding retries. When no new
+    /// deposit is available, use that same tick for a retry instead of leaving
+    /// the slot idle. Both queues get turns even under continuous arrivals.
     pub async fn tick(&mut self) -> Result<TickOutcome, RelayerError> {
         let now = unix_now_secs();
         let forward = self.state.next_target_at(self.config.start_deposit_id, now);
+        if self.retry_outstanding_next {
+            self.retry_outstanding_next = false;
+            if let Some(id) = self.next_ready_outstanding(now).filter(|id| *id != forward) {
+                return self.tick_target(id).await;
+            }
+        }
+        // Change turns before awaiting work, including work that returns an
+        // error, so a failing target cannot monopolize subsequent ticks.
+        self.retry_outstanding_next = true;
         let outcome = self.tick_target(forward).await?;
         if matches!(outcome, TickOutcome::NotYetAvailable { .. }) {
-            if let Some(id) = self
-                .state
-                .ready_outstanding_after(now, self.last_outstanding_retry)
-            {
-                if id != forward {
-                    self.last_outstanding_retry = Some(id);
-                    return self.tick_target(id).await;
-                }
+            if let Some(id) = self.next_ready_outstanding(now).filter(|id| *id != forward) {
+                self.retry_outstanding_next = false;
+                return self.tick_target(id).await;
             }
         }
         Ok(outcome)
+    }
+
+    fn next_ready_outstanding(&mut self, now: u64) -> Option<u64> {
+        let next = self
+            .state
+            .ready_outstanding_after(now, self.last_outstanding_retry);
+        if let (Some(id), Some(last), Some(end)) = (
+            next,
+            self.last_outstanding_retry,
+            self.outstanding_round_end,
+        ) {
+            if id > last && id <= end {
+                self.last_outstanding_retry = Some(id);
+                return Some(id);
+            }
+        }
+        // Start a new finite round. Entries appended during this round join
+        // the next one; deferred entries are reconsidered after backoff.
+        self.outstanding_round_end = self
+            .state
+            .outstanding_deposits
+            .iter()
+            .map(|o| o.deposit_id)
+            .max();
+        self.last_outstanding_retry = self.state.ready_outstanding_after(now, None);
+        self.last_outstanding_retry
     }
 
     async fn tick_target(&mut self, target: u64) -> Result<TickOutcome, RelayerError> {
@@ -635,6 +671,12 @@ mod tests {
         assert_eq!(relayer.state().outstanding(0).unwrap().attempts, 0);
         assert!(matches!(
             relayer.tick().await.unwrap(),
+            TickOutcome::WaitingForAnchor {
+                deposit_id: 0
+            }
+        ));
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
             TickOutcome::Finalized {
                 deposit_id: 1,
                 ..
@@ -698,6 +740,126 @@ mod tests {
         assert_eq!(prover.0.load(Ordering::Relaxed), 0);
         assert_eq!(gate.inner.finalized_count(), 0);
         assert!(relayer.state().outstanding_deposits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_anchor_waits_finish_during_continuous_forward_work() {
+        // Cover both a stream of fresh, unanchored deposits and an already
+        // anchored backlog. Neither stream may displace an older ready id.
+        for new_blocks_accepted in [false, true] {
+            let dir = tempdir().unwrap();
+            let source = Arc::new(InMemoryDepositSource::new());
+            source.insert(deposit(0));
+            let gate = Arc::new(AnchorGate::default());
+            let mut relayer = Relayer::new(
+                RelayerConfig {
+                    outstanding_backoff_secs: 0,
+                    ..RelayerConfig::new(dir.path().join("state.json"))
+                },
+                source.clone(),
+                Arc::new(CountingProver::default()),
+                gate.clone(),
+            )
+            .unwrap();
+            assert!(matches!(
+                relayer.tick().await.unwrap(),
+                TickOutcome::WaitingForAnchor {
+                    deposit_id: 0
+                }
+            ));
+            gate.accepted.lock().unwrap().insert(0);
+            for id in 1..=8 {
+                source.insert(deposit(id));
+                if new_blocks_accepted {
+                    gate.accepted.lock().unwrap().insert(id);
+                }
+                relayer.tick().await.unwrap();
+            }
+            assert!(
+                gate.inner.is_finalized(&deposit(0)).await.unwrap(),
+                "ready id 0 starved; new_blocks_accepted={new_blocks_accepted}"
+            );
+            if new_blocks_accepted {
+                assert!(
+                    gate.inner.finalized_count() > 1,
+                    "forward work must also progress"
+                );
+            } else {
+                assert!(
+                    relayer
+                        .state()
+                        .outstanding_deposits
+                        .iter()
+                        .any(|o| o.deposit_id > 0),
+                    "forward work must also progress"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn growing_retry_queue_cannot_keep_an_older_wait_outside_the_round() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let gate = Arc::new(AnchorGate::default());
+        let mut relayer = Relayer::new(
+            RelayerConfig {
+                outstanding_backoff_secs: 0,
+                ..RelayerConfig::new(dir.path().join("state.json"))
+            },
+            source.clone(),
+            Arc::new(CountingProver::default()),
+            gate.clone(),
+        )
+        .unwrap();
+        relayer.tick().await.unwrap();
+        for id in 1..=24 {
+            source.insert(deposit(id));
+            if id == 6 {
+                // Let the retry cursor pass 0 while its anchor is absent.
+                gate.accepted.lock().unwrap().insert(0);
+            }
+            relayer.tick().await.unwrap();
+        }
+        assert!(
+            gate.inner.is_finalized(&deposit(0)).await.unwrap(),
+            "new arrivals kept extending the retry round indefinitely"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_read_error_does_not_keep_the_other_queue_from_its_turn() {
+        for error_on_retry in [false, true] {
+            let dir = tempdir().unwrap();
+            let source = Arc::new(InMemoryDepositSource::new());
+            source.insert(deposit(0));
+            let gate = Arc::new(AnchorGate::default());
+            let mut relayer = Relayer::new(
+                RelayerConfig {
+                    outstanding_backoff_secs: 0,
+                    ..RelayerConfig::new(dir.path().join("state.json"))
+                },
+                source.clone(),
+                Arc::new(CountingProver::default()),
+                gate.clone(),
+            )
+            .unwrap();
+            relayer.tick().await.unwrap();
+            if !error_on_retry {
+                relayer.tick().await.unwrap(); // Give the existing retry its
+                                               // turn first.
+            }
+            source.insert(deposit(1));
+            gate.read_fails.store(true, Ordering::Relaxed);
+            assert!(relayer.tick().await.is_err());
+            gate.read_fails.store(false, Ordering::Relaxed);
+            gate.accepted.lock().unwrap().extend([0, 1]);
+            let expected = if error_on_retry { 1 } else { 0 };
+            assert!(
+                matches!(relayer.tick().await.unwrap(), TickOutcome::Finalized { deposit_id, .. } if deposit_id == expected)
+            );
+        }
     }
 
     #[tokio::test]
@@ -917,8 +1079,8 @@ mod tests {
     #[tokio::test]
     async fn log_source_retry_and_same_block_neighbour_end_to_end() {
         // Deposits 0 and 1 share block 105, deposit 2 is in block 107; AN
-        // rejects the first attempt at deposit 0. Later ids go first and the
-        // scan cursor keeps moving; 0 is retried from its stored tx.
+        // rejects the first attempt at deposit 0. Its retry uses the stored
+        // tx; subsequent forward work keeps the same-block neighbour in range.
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let bridge = Address::repeat_byte(0x22);
@@ -962,9 +1124,9 @@ mod tests {
             Some(104)
         );
 
-        // 0 is outstanding; later ids are delivered first. The scan cursor
-        // moves with them (not held at 0's block).
-        for (id, cursor_after) in [(1, 104), (2, 106)] {
+        // The ready retry gets its turn before forward work, without moving
+        // the scan cursor past the same-block neighbour.
+        for (id, cursor_after) in [(0, 104), (1, 104), (2, 106)] {
             match relayer.tick().await.unwrap() {
                 TickOutcome::Finalized {
                     deposit_id, ..
@@ -974,16 +1136,7 @@ mod tests {
             assert_eq!(*cursor.lock().unwrap(), Some(cursor_after));
         }
 
-        // Nothing new at 3: idle scan parks the cursor, then the same tick
-        // retries 0 from the stored receipt.
-        match relayer.tick().await.unwrap() {
-            TickOutcome::Finalized {
-                deposit_id, ..
-            } => assert_eq!(deposit_id, 0),
-            other => panic!("expected Finalized(0), got {other:?}"),
-        }
-        assert_eq!(*cursor.lock().unwrap(), Some(118));
-
+        // Nothing new at 3: the idle scan advances to the confirmed head.
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::NotYetAvailable {
@@ -999,15 +1152,15 @@ mod tests {
     #[tokio::test]
     async fn a_state_file_from_an_earlier_relayer_finds_the_stuck_deposit() {
         // A previous binary stored attempts on the last failed id with no
-        // tx or block. After upgrade that id is outstanding; later deposits
-        // go first and move the scan cursor. The idle retry must still find
-        // the carried-over deposit by scanning from --from-block.
+        // tx or block. After upgrade that id is outstanding and gets a retry
+        // before new work. It must still be found when the saved scan cursor
+        // is already past its block.
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         std::fs::write(
             &state_path,
             r#"{"last_processed_deposit_id":null,"last_attempt_deposit_id":0,
-                "attempts_since_progress":3}"#,
+                "attempts_since_progress":3,"scan_done_through_block":109}"#,
         )
         .unwrap();
         let bridge = Address::repeat_byte(0x22);
@@ -1015,7 +1168,7 @@ mod tests {
         for block in [105, 110] {
             rpc.deposit(block);
         }
-        let cursor = Arc::new(Mutex::new(None));
+        let cursor = Arc::new(Mutex::new(Some(109)));
         let source =
             EthLogSource::new(rpc.provider(), bridge, 100, 12).with_scan_cursor(cursor.clone());
         let cfg = RelayerConfig {
@@ -1034,17 +1187,13 @@ mod tests {
         assert_eq!(relayer.state().outstanding_attempts(0), 3);
         assert!(relayer.state().outstanding(0).unwrap().tx_hash.is_none());
 
-        match relayer.tick().await.unwrap() {
-            TickOutcome::Finalized {
-                deposit_id, ..
-            } => assert_eq!(deposit_id, 1),
-            other => panic!("expected Finalized(1), got {other:?}"),
-        }
-        match relayer.tick().await.unwrap() {
-            TickOutcome::Finalized {
-                deposit_id, ..
-            } => assert_eq!(deposit_id, 0),
-            other => panic!("expected Finalized(0), got {other:?}"),
+        for id in [0, 1] {
+            match relayer.tick().await.unwrap() {
+                TickOutcome::Finalized {
+                    deposit_id, ..
+                } => assert_eq!(deposit_id, id),
+                other => panic!("expected Finalized({id}), got {other:?}"),
+            }
         }
         assert!(relayer.state().outstanding_deposits.is_empty());
         assert!(relayer.state().parked_deposit_ids.is_empty());
@@ -1322,15 +1471,15 @@ mod tests {
         ));
         assert!(matches!(
             relayer.tick().await.unwrap(),
-            TickOutcome::Finalized {
-                deposit_id: 1,
+            TickOutcome::ProofFailed {
+                deposit_id: 0,
                 ..
             }
         ));
         assert!(matches!(
             relayer.tick().await.unwrap(),
-            TickOutcome::ProofFailed {
-                deposit_id: 0,
+            TickOutcome::Finalized {
+                deposit_id: 1,
                 ..
             }
         ));
@@ -1405,6 +1554,14 @@ mod tests {
         )
         .unwrap();
 
+        assert!(matches!(
+            relayer.tick().await.unwrap(),
+            TickOutcome::AnRejected {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        // The first ready retry gets a turn before discovering deposit 1.
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::AnRejected {

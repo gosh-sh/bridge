@@ -60,7 +60,8 @@ pub struct RelayerConfig {
     pub skip_after_attempts: Option<u32>,
     /// Base delay, in seconds, before a failed deposit is retried. Doubled
     /// on each subsequent failure of that id, capped at 64×. `0` retries
-    /// immediately (tests). Default 2.
+    /// immediately and disables age-based anchor-wait delays (tests). Anchor
+    /// waits otherwise also use age / 4 seconds, capped at 60. Default 2.
     #[serde(default = "default_outstanding_backoff_secs")]
     pub outstanding_backoff_secs: u64,
     /// Seconds of observed anchor waiting before warning. `0` (default)
@@ -221,7 +222,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let forward = self.state.next_target_at(self.config.start_deposit_id, now);
         if self.retry_outstanding_next {
             self.retry_outstanding_next = false;
-            if let Some(id) = self.next_ready_outstanding(now).filter(|id| *id != forward) {
+            if let Some(id) = self.next_ready_outstanding(now) {
                 return self.tick_target(id).await;
             }
         }
@@ -230,7 +231,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         self.retry_outstanding_next = true;
         let outcome = self.tick_target(forward).await?;
         if matches!(outcome, TickOutcome::NotYetAvailable { .. }) {
-            if let Some(id) = self.next_ready_outstanding(now).filter(|id| *id != forward) {
+            if let Some(id) = self.next_ready_outstanding(now) {
                 self.retry_outstanding_next = false;
                 return self.tick_target(id).await;
             }
@@ -350,7 +351,6 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 self.config.anchor_wait_warn_after_secs,
                 ANCHOR_WAIT_WARN_REPEAT_SECS,
             );
-            self.persist_state()?;
             if first_wait {
                 info!(
                     deposit_id = target,
@@ -361,19 +361,30 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 );
             }
             if let Some(wait_secs) = warning_age_secs {
+                let status = if first_wait {
+                    "anchor wait started"
+                } else if self.config.anchor_wait_warn_after_secs > 0 {
+                    "anchor wait exceeded the configured warning delay"
+                } else {
+                    "anchor wait continues"
+                };
                 warn!(
                     deposit_id = target,
                     chain_id = event.source_chain_id,
                     block_number = event.block_number,
                     block_hash = %event.block_hash,
                     wait_secs,
-                    "AN block anchor still missing; inspect the light-client relayer and block \
-                     coverage; verify canonicality with scripts/deposit_anchor_params.py --verify \
-                     before the anchor writer admits it with setAcceptedBlockHash(chainId, \
-                     blockHash, true) while owner anchors are enabled, otherwise through the \
-                     light client"
+                    status,
+                    "AN block anchor missing; expected delivery may still be in progress; \
+                     inspect the light-client relayer and block coverage; if manual admission \
+                     is needed, compare this block_number and block_hash using eth_getBlockByNumber \
+                     on an independent RPC for chain_id before setAcceptedBlockHash(chainId, \
+                     blockHash, true) while owner anchors are enabled, otherwise through the light client"
                 );
             }
+            // Emit the deposit identifiers even if saving fails. A failed
+            // save remains a tick error, and no proving/submission follows.
+            self.persist_state()?;
             return Ok(TickOutcome::WaitingForAnchor {
                 deposit_id: target,
             });

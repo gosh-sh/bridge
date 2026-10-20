@@ -676,6 +676,13 @@ fn parse_exit_code_loose(msg: &str) -> Option<i32> {
     None
 }
 
+fn accepted_block_hash_params(event: &DepositEvent) -> serde_json::Value {
+    json!({
+        "chainId": event.source_chain_id.to_string(),
+        "blockHash": format!("{:#x}", event.block_hash),
+    })
+}
+
 #[async_trait]
 impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
@@ -684,10 +691,7 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .run_getter(
                 &self.config.token_bridge,
                 "isAcceptedBlockHash",
-                json!({
-                    "chainId": event.source_chain_id.to_string(),
-                    "blockHash": format!("{:#x}", event.block_hash),
-                }),
+                accepted_block_hash_params(event),
             )
             .await?;
         output
@@ -730,6 +734,22 @@ mod tests {
 
     use super::*;
     use crate::{prover::MockProofGenerator, types::DepositEvent};
+
+    #[test]
+    fn anchor_getter_params_use_decimal_chain_and_ethereum_order_hex_hash() {
+        let mut deposit = event(0);
+        deposit.source_chain_id = 11_155_111;
+        deposit.block_hash = "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            accepted_block_hash_params(&deposit),
+            json!({
+                "chainId": "11155111",
+                "blockHash": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            })
+        );
+    }
 
     #[tokio::test]
     async fn anchor_getter_requires_a_boolean_and_propagates_read_errors() {

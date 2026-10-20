@@ -341,7 +341,8 @@ impl RelayerState {
     }
 
     /// Wait for an anchor without counting a failed attempt or blocking later
-    /// ids.
+    /// ids. With nonzero backoff, the per-id delay also grows with wait age
+    /// (age / 4 seconds, capped at 60), without shortening failure backoff.
     pub fn record_anchor_wait(
         &mut self,
         deposit_id: u64,
@@ -355,7 +356,11 @@ impl RelayerState {
             .iter_mut()
             .find(|o| o.deposit_id == deposit_id)
         {
-            entry.anchor_wait_started_unix.get_or_insert(now);
+            let started = *entry.anchor_wait_started_unix.get_or_insert(now);
+            if backoff_secs > 0 {
+                let age_delay = (now.saturating_sub(started) / 4).min(60);
+                entry.retry_after_unix = entry.retry_after_unix.max(now.saturating_add(age_delay));
+            }
         }
     }
 
@@ -613,6 +618,45 @@ mod tests {
         assert!(!s.clear_anchor_wait(0));
         s.record_anchor_wait(0, 30, 2, log);
         assert_eq!(s.outstanding(0).unwrap().anchor_wait_started_unix, Some(30));
+    }
+
+    #[test]
+    fn anchor_wait_polling_slows_with_age_without_failures_and_survives_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let log = DepositLogRef {
+            block_number: 42,
+            tx_hash: alloy::primitives::B256::repeat_byte(1),
+            log_index: 0,
+        };
+        let mut s = RelayerState::default();
+        for (now, expected_delay) in [(100, 2), (108, 2), (140, 10), (340, 60), (10_000, 60)] {
+            s.record_anchor_wait(0, now, 2, log);
+            assert_eq!(
+                s.outstanding(0).unwrap().retry_after_unix,
+                now + expected_delay
+            );
+            assert_eq!(s.outstanding(0).unwrap().attempts, 0);
+            assert_eq!(s.ready_outstanding(now + expected_delay - 1), None);
+            assert_eq!(s.ready_outstanding(now + expected_delay), Some(0));
+        }
+        s.save(&path).unwrap();
+        let mut s = RelayerState::load(&path).unwrap().unwrap();
+        s.record_anchor_wait(0, 10_100, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().retry_after_unix, 10_160);
+        // A fresh id gets its own short delay, regardless of the older wait.
+        s.record_anchor_wait(1, 10_100, 2, log);
+        assert_eq!(s.ready_outstanding(10_102), Some(1));
+        assert!(s.clear_anchor_wait(0));
+        s.record_anchor_wait(0, 10_200, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().retry_after_unix, 10_202);
+        // Failure backoff is not shortened by the capped age delay.
+        for _ in 0..8 {
+            s.record_attempt(0, 20_000, 2);
+        }
+        s.record_anchor_wait(0, 20_000, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().retry_after_unix, 20_128);
+        assert_eq!(s.outstanding(0).unwrap().attempts, 8);
     }
 
     #[test]

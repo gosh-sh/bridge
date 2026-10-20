@@ -1,7 +1,8 @@
 # `deposit-relayer` operator runbook
 
-verified-against: `6fbae6a0` (queue, anchor readiness, backoff and monitoring);
-remaining sections retain the original verification against `6f5de05c`.
+verified-against: [PR #127](https://github.com/gosh-sh/bridge/pull/127)
+(queue, anchor readiness, backoff and monitoring); remaining sections were
+retained from the pre-PR runbook and were not reverified in this change.
 covers: `crates/deposit-relayer-daemon/src/`, `scripts/ursus/deposit-relayer.{service,env.example}`
 
 How to run the EVM → Acki Nacki deposit relayer so that it does not get stuck, does not
@@ -40,6 +41,7 @@ recipient through `confirmDeposit`.
 | Daemons per AN bridge | **exactly one** | `StateLock` (an advisory `flock` on `<state>.lock`) only stops a second daemon on the *same host and file*. Two hosts with the same keys would both prove and submit every deposit. The vouchers keep that safe, but it wastes proofs and the two senders compete. |
 | `DEPOSIT_RELAYER_STATE` | an absolute path on persistent disk | Read as `--state`. Without it, the file lands in the working directory as `./deposit-relayer-state.json`. |
 | State file backup | copy it every few minutes, with the keys | The file is replaced atomically (temp file, `fsync`, `rename`, in `RelayerState::save`), so a plain `cp` always reads a complete file. The copy is what keeps `parked_deposit_ids` if the host dies. |
+| `AN_BRIDGE_ABI_PATH` | full bridge ABI containing `isAcceptedBlockHash(uint256,uint256) returns (bool)` | Upgrade custom ABIs alongside the daemon. A missing getter produces tick errors and no deposits are delivered. The full bridge ABI in the repository includes this getter. |
 | `AN_DAPP_ID` | `0` | `eccUSDCBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
 | `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not proven again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
@@ -62,6 +64,12 @@ outstanding deposit gets the first turn. Retries still honor per-id backoff
 (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default
 2 s, doubled each *failed* attempt up to 64×). A pending submit does not increment
 `attempts`, so it stays at the base delay until a proof failure or an AN rejection.
+Anchor waits also increase their per-id delay with age: the larger of the
+existing failure backoff and `min(wait_age_seconds / 4, 60)` seconds, where
+age starts at `anchor_wait_started_unix`. Thus an old uncovered block does
+not cause an anchor getter, voucher lookup and state write on every daemon
+tick. `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. These deadlines
+survive restarts and do not delay fresh deposits behind older waits.
 A retry uses the cached event when available, otherwise the stored Deposit
 tx's receipt (or its block), so the log-scan cursor can keep moving with later
 deposits. An outstanding id that has no stored log — a `state.json`
@@ -110,6 +118,10 @@ Each tick ends in one outcome (`relayer::TickOutcome`). The daemon resets backof
 An anchor wait also resets any delay accumulated during earlier idle polls or
 errors. Other non-progress outcomes double it up to `--backoff-max-secs`
 (`Relayer::run_until_shutdown`). Per-deposit retry deadlines still apply.
+The reset also applies after errors: it favors fresh anchor waits over a
+separate error streak. Age-based per-id delays reduce repeated expensive
+checks for old waits; they do not provide independent error backoff for
+the forward RPC.
 
 | Outcome | Meaning | Automatic handling | Counts toward parking |
 |---|---|---|---|
@@ -153,11 +165,19 @@ only when block coverage is monitored separately and expected anchor delivery
 latency is understood; missing anchors can need manual action. The optional
 `anchor_wait_last_warned_unix` timestamp survives restarts; existing state
 files without it remain readable.
-These warnings do not count as failed attempts or park the deposit.
+The initial warning says the wait has started; later warnings distinguish
+continued waiting from exceeding a configured delay. Expected anchor delivery
+may still be in progress. Warnings identify the deposit before saving state,
+so a write error does not hide the diagnostic. These warnings do not count
+as failed attempts or park the deposit.
 Inspect the light-client relayer and block coverage: some blocks can remain
 uncovered rather than merely delayed (`docs/eth-light-client.md`, §3.4).
-Verify canonicality with `scripts/deposit_anchor_params.py --verify` before
-the anchor writer admits a missing hash with
+For an anchor wait there is no proof yet: compare the logged `block_number`
+and `block_hash` using `eth_getBlockByNumber` (hex block number, `false`) on
+an independent RPC for the logged `chain_id`. Check the returned hash matches
+and the block has the required finality. Confirm that manual admission is
+needed, rather than normal delivery still being in progress, before the
+anchor writer admits a missing hash with
 `setAcceptedBlockHash(chainId, blockHash, true)` while owner anchors are
 enabled, otherwise through the light client. The deposit daemon never
 admits hashes itself.

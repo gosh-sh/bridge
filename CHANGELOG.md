@@ -16,6 +16,44 @@ assigns it when the release is tagged.
 ### Breaking Changes
 ### Added
 ### Changed
+### Added
+
+- **Deposit anchor-wait diagnostics.** The relayer exports
+  `deposit_relayer_waiting_for_anchor`,
+  `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
+  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` outcome, and
+  `stage="is_block_accepted"` label in
+  `deposit_relayer_stage_duration_seconds`.
+  Outstanding entries in `state.json` gain optional
+  `anchor_wait_started_unix` and `anchor_wait_last_warned_unix` timestamps;
+  older state files remain readable. Missing anchors warn immediately by
+  default; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
+  default `0`) can delay the warning when coverage is monitored separately.
+  Warnings repeat at most every 15 minutes per deposit across restarts.
+  The logs identify the deposit, chain and block, distinguish the initial
+  wait from a delayed warning, and remain visible if saving state fails.
+  Before manual admission, compare the logged block number and hash using
+  `eth_getBlockByNumber` on an independent RPC for that chain; an expected
+  delivery delay alone is not a reason to admit a hash manually.
+
+### Changed
+
+- **Deposit retries alternate with new work.** Finite retry rounds prevent
+  incoming traffic from indefinitely delaying older deposits. An anchor wait
+  resets the daemon polling delay to `--backoff-initial-secs`, including
+  after idle polls or errors. Per-deposit anchor polling uses the larger of
+  existing failure backoff and one quarter of the observed wait age, with
+  the age component capped at 60 seconds; `OUTSTANDING_BACKOFF_SECS=0`
+  disables per-id delays. Fresh waits retain the short base interval.
+- **`deposit_relayer_outstanding_deposits` includes healthy anchor waits.**
+  Adjust alerts that treat any nonzero value as failure to distinguish
+  failed attempts and missing anchors using their age and coverage.
+  An uncovered block can require the anchor writer's intervention.
+- **The deposit daemon's `AN_BRIDGE_ABI_PATH` must include
+  `isAcceptedBlockHash(uint256,uint256) returns (bool)`.** Upgrade a custom
+  ABI alongside the daemon; a missing getter causes tick errors and stops
+  delivery. The full bridge ABI shipped in the repository includes it.
+
 ### Fixed
 ### Removed
 -->
@@ -49,29 +87,10 @@ assigns it when the release is tagged.
   proving or submitting it.** Ethereum `--confirmations` can finish before
   the light-client relayer delivers that block. Previously each retry built
   a proof and called `finalizeDeposit` too early, producing exit 224 and
-  `an_rejected` alerts. The daemon now checks
-  `isAcceptedBlockHash(chainId, blockHash)` first and reports
-  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` while the
-  block is absent, without counting failures or parking the deposit. New
-  deposits and ready retries take alternating turns, so incoming traffic
-  cannot indefinitely delay deposits whose anchors have arrived. Getter
-  errors remain tick errors. Normal anchor waits reset the daemon polling
-  delay to `--backoff-initial-secs` rather than growing it toward the maximum.
-  The new
-  `deposit_relayer_waiting_for_anchor` and
-  `deposit_relayer_oldest_anchor_wait_timestamp_seconds` gauges expose the
-  count and oldest wait, including across restarts.
-  Each wait starts with an `info` log identifying the deposit, chain and
-  block. Missing anchors warn immediately by default, with block-coverage
-  diagnostics; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
-  default `0`) can delay the warning when coverage is monitored separately.
-  Warnings repeat at most every 15 minutes per deposit, including across
-  restarts. Inspect missing anchors promptly: an uncovered block can need
-  the anchor writer's intervention rather than arrive automatically.
-  `deposit_relayer_outstanding_deposits` now includes normal anchor waits:
-  adjust alerts that treat any non-zero value as a failure to use failed
-  attempts or prolonged anchor waits instead. Upgrade the daemon;
-  no contract redeploy or VK change is needed.
+  `an_rejected` alerts. A missing anchor now causes a healthy wait without
+  proving, submission, failed attempts or parking. Getter errors and actual
+  contract rejections remain visible. Upgrade the daemon; no contract
+  redeploy or VK change is needed.
 
 - **The web deposit form explains what the wallet said instead of printing
   the raw rejection.** Clicking *Connect Wallet* twice before answering

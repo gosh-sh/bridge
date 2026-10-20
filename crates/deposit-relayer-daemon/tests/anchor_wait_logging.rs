@@ -131,9 +131,14 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
             assert!(output.contains(&format!("block_hash={}", deposit(0).block_hash)));
             let initial_warnings = usize::from(warn_after_secs == 0);
             assert_eq!(
-                output.matches("AN block anchor still missing;").count(),
+                output.matches("AN block anchor missing;").count(),
                 initial_warnings
             );
+
+            if initial_warnings > 0 {
+                assert!(output.contains("anchor wait started"));
+                assert!(!output.contains("exceeded"));
+            }
 
             // Load an old wait with any prior warning due for repetition.
             let mut state = RelayerState::load(&cfg.state_path).unwrap().unwrap();
@@ -155,9 +160,14 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
             let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
             assert_eq!(output.matches("waiting for AN block anchor;").count(), 1);
             assert_eq!(
-                output.matches("AN block anchor still missing;").count(),
+                output.matches("AN block anchor missing;").count(),
                 initial_warnings + 1
             );
+            if warn_after_secs > 0 {
+                assert!(output.contains("anchor wait exceeded the configured warning delay"));
+            } else {
+                assert!(output.contains("anchor wait continues"));
+            }
             let warning = output.lines().find(|line| line.contains("WARN")).unwrap();
             for field in [
                 "deposit_id=0",
@@ -168,7 +178,9 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
                 assert!(warning.contains(field), "missing {field}: {warning}");
             }
             assert!(warning.contains(&format!("block_hash={}", deposit(0).block_hash)));
-            assert!(warning.contains("deposit_anchor_params.py --verify"));
+            assert!(warning.contains("eth_getBlockByNumber"));
+            assert!(warning.contains("independent RPC"));
+            assert!(warning.contains("expected delivery may still be in progress"));
             assert!(warning.contains("setAcceptedBlockHash"));
             assert_eq!(r.state().outstanding(0).unwrap().attempts, 0);
             assert!(r.state().parked_deposit_ids.is_empty());
@@ -182,6 +194,30 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
             }));
             assert!(r.state().outstanding_deposits.is_empty());
         }
+
+        // The diagnostics must remain available when the state cannot be
+        // saved: no proof/submission may follow the write error.
+        logs.0.lock().unwrap().clear();
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let prover = Arc::new(CountingProver::default());
+        let gate = Arc::new(AnchorGate::default());
+        let mut r = Relayer::new(
+            RelayerConfig::new(dir.path().join("blocked/state.json")),
+            source,
+            prover.clone(),
+            gate.clone(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("blocked"), b"not a directory").unwrap();
+        assert!(r.tick().await.is_err());
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("waiting for AN block anchor;"));
+        assert!(output.contains("AN block anchor missing;"));
+        assert!(output.contains("deposit_id=0"));
+        assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+        assert_eq!(gate.inner.finalized_count(), 0);
     }
     .with_subscriber(subscriber)
     .await;

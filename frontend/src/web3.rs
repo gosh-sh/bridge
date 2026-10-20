@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::window;
 
-use crate::config::*;
+use crate::{config::*, utils::validate_an_account};
 
 #[wasm_bindgen]
 extern "C" {
@@ -279,17 +279,6 @@ fn encode_address(addr: &str) -> String {
     format!("{:0>64}", a)
 }
 
-/// Encode a Solidity `int8` as a 32-byte two's-complement ABI word.
-fn encode_int8(value: i8) -> String {
-    let fill = if value < 0 { "ff" } else { "00" };
-    let mut s = String::with_capacity(64);
-    for _ in 0..31 {
-        s.push_str(fill);
-    }
-    s.push_str(&format!("{:02x}", value as u8));
-    s
-}
-
 /// Encode a Solidity `bytes32` as a 32-byte ABI word. The Acki Nacki account
 /// is a 256-bit number, so a short hex input is left-padded with zeros.
 fn encode_bytes32(value: &str) -> String {
@@ -330,42 +319,92 @@ async fn send_tx(to: &str, data: &str) -> Result<String, String> {
 
 /// Approve the bridge to spend `amount` USDC base units on the caller's behalf.
 pub async fn approve_usdc(amount: u128) -> Result<String, String> {
+    let bridge = bridge_contract_address()?;
     // approve(address spender, uint256 amount) = 0x095ea7b3
     let data = format!(
         "0x095ea7b3{}{}",
-        encode_address(BRIDGE_CONTRACT_ADDRESS),
+        encode_address(bridge),
         encode_uint256(amount)
     );
     send_tx(USDC_CONTRACT_ADDRESS, &data).await
 }
 
-/// Deposit `amount` USDC base units into the bridge (pulls via `transferFrom`),
-/// bridging to the Acki Nacki destination `an_account`. The ABI still takes
-/// `anWorkchain`; the form pins it to 0. The EVM `msg.sender` is not a valid
-/// AN recipient, so the account is supplied explicitly and carried as a ZK
-/// public input.
-pub async fn make_deposit(
-    amount: u128,
-    an_workchain: i8,
-    an_account: &str,
-) -> Result<String, String> {
-    // deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) = 0xa41d0229
-    let data = format!(
-        "0xa41d0229{}{}{}",
+fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
+    let recipient = validate_an_account(an_account)?;
+    Ok(format!(
+        "0xc9630cb0{}{}",
         encode_uint256(amount),
-        encode_int8(an_workchain),
-        encode_bytes32(an_account)
-    );
-    send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
+        encode_bytes32(&recipient)
+    ))
+}
+
+#[cfg(test)]
+mod deposit_tests {
+    use super::deposit_calldata;
+
+    #[test]
+    fn deposit_encodes_amount_and_account() {
+        let account = "a3".repeat(32);
+        let data = deposit_calldata(12_500_000, &account).unwrap();
+        assert_eq!(data.len(), 2 + 2 * 68);
+        assert_eq!(&data[..10], "0xc9630cb0");
+        assert_eq!(u128::from_str_radix(&data[10..74], 16).unwrap(), 12_500_000);
+        assert_eq!(&data[74..], account);
+    }
+
+    #[test]
+    fn deposit_normalises_the_recipient_before_encoding() {
+        let data = deposit_calldata(1, &format!("0x{}", "AB".repeat(32))).unwrap();
+        assert_eq!(&data[74..], "ab".repeat(32));
+    }
+
+    fn rejects_before_wallet_access(
+        call: impl std::future::Future<Output = Result<String, String>>,
+        expected: &str,
+    ) {
+        use std::task::{Context, Poll, Waker};
+
+        let mut call = std::pin::pin!(call);
+        let mut context = Context::from_waker(Waker::noop());
+        match call.as_mut().poll(&mut context) {
+            Poll::Ready(Err(err)) => assert!(err.contains(expected), "{err}"),
+            _ => panic!("the request must be rejected before accessing the wallet"),
+        }
+    }
+
+    #[test]
+    fn an_ethereum_wallet_address_is_rejected_before_a_transaction_is_sent() {
+        rejects_before_wallet_access(
+            super::make_deposit(12_500_000, "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7"),
+            "exactly 64",
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_deployment_cannot_request_transactions() {
+        if crate::config::bridge_contract_address().is_ok() {
+            return;
+        }
+        rejects_before_wallet_access(super::approve_usdc(1), "not configured");
+        let recipient = "a3".repeat(32);
+        rejects_before_wallet_access(super::make_deposit(1, &recipient), "not configured");
+    }
+}
+
+/// Deposit USDC into the bridge for the specified Acki Nacki account.
+pub async fn make_deposit(amount: u128, an_account: &str) -> Result<String, String> {
+    let data = deposit_calldata(amount, an_account)?;
+    send_tx(bridge_contract_address()?, &data).await
 }
 
 /// Current USDC allowance (base units) the owner has granted the bridge.
 pub async fn get_allowance(owner: &str) -> Result<u128, String> {
+    let bridge = bridge_contract_address()?;
     // allowance(address owner, address spender) = 0xdd62ed3e
     let data = format!(
         "0xdd62ed3e{}{}",
         encode_address(owner),
-        encode_address(BRIDGE_CONTRACT_ADDRESS)
+        encode_address(bridge)
     );
     let raw = call_to(USDC_CONTRACT_ADDRESS, &data).await?;
     parse_uint128(&raw)
@@ -432,10 +471,11 @@ async fn sleep(ms: i32) {
 /// Get bridge statistics (deposit count + treasury principal in USDC base
 /// units).
 pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
+    let bridge = bridge_contract_address()?;
     // depositCounter() = 0xecb3dc88
-    let deposit_count_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
+    let deposit_count_result = call_to(bridge, "0xecb3dc88").await?;
     // treasuryBalance() = 0x313dab20
-    let treasury_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0x313dab20").await?;
+    let treasury_result = call_to(bridge, "0x313dab20").await?;
 
     Ok(BridgeStats {
         deposit_count: parse_uint128(&deposit_count_result)?.to_string(),
@@ -445,7 +485,7 @@ pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
 
 /// Read `depositCounter()`. The id of the most recent deposit is this minus 1.
 pub async fn get_deposit_counter() -> Result<u128, String> {
-    let raw = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
+    let raw = call_to(bridge_contract_address()?, "0xecb3dc88").await?;
     parse_uint128(&raw)
 }
 

@@ -201,8 +201,8 @@ mod tests {
         assert_eq!(j["to"], format!("{bridge:#x}"));
         assert_eq!(
             j["data"].as_str().unwrap().len(),
-            2 + 200,
-            "100 bytes of calldata"
+            2 + 136,
+            "68 bytes of calldata"
         );
     }
 }

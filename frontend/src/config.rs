@@ -2,9 +2,50 @@
 //
 // Update these values after deploying contracts to Sepolia
 
-/// Bridge contract address on Sepolia — the shellnet deploy Acki Nacki
-/// currently credits. From `DeployShellnetE2EBridge.s.sol` (2026-10-15).
-pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x5384f162aa1a80b7a03687e1a3188f67b1fffad5";
+/// Address of a new bridge deployment, supplied when building the frontend.
+pub const BRIDGE_CONTRACT_ADDRESS: &str = match option_env!("BRIDGE_CONTRACT_ADDRESS") {
+    Some(value) => value,
+    None => "",
+};
+
+pub fn bridge_contract_address() -> Result<&'static str, String> {
+    validate_bridge_address(BRIDGE_CONTRACT_ADDRESS.trim())
+}
+
+fn validate_bridge_address(value: &str) -> Result<&str, String> {
+    let valid = value.strip_prefix("0x").is_some_and(|hex| {
+        hex.len() == 40
+            && hex.chars().all(|c| c.is_ascii_hexdigit())
+            && hex.chars().any(|c| c != '0')
+    });
+    if !valid {
+        return Err("Bridge deployment is not configured. Deposits are unavailable.".into());
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bridge_address;
+
+    #[test]
+    fn a_deployment_address_must_be_explicit_and_nonzero() {
+        for value in [
+            "",
+            "0x",
+            "0x1234",
+            "0x0000000000000000000000000000000000000000",
+        ] {
+            assert!(validate_bridge_address(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_configured_deployment_address_is_preserved() {
+        let address = "0x1234567890123456789012345678901234567890";
+        assert_eq!(validate_bridge_address(address).unwrap(), address);
+    }
+}
 
 /// USDC the shellnet bridge pulls (`usdc()`). Circle's Sepolia USDC, not
 /// the Aave V3 faucet token `DeployTestBridge` used.
@@ -36,7 +77,6 @@ pub const BRIDGE_ABI: &str = r#"[
     {
         "inputs": [
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"internalType": "int8", "name": "anWorkchain", "type": "int8"},
             {"internalType": "bytes32", "name": "anAccount", "type": "bytes32"}
         ],
         "name": "deposit",
@@ -84,7 +124,6 @@ pub const BRIDGE_ABI: &str = r#"[
             {"indexed": true, "internalType": "uint256", "name": "depositId", "type": "uint256"},
             {"indexed": true, "internalType": "address", "name": "sender", "type": "address"},
             {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"indexed": false, "internalType": "int8", "name": "anWorkchain", "type": "int8"},
             {"indexed": false, "internalType": "bytes32", "name": "anAccount", "type": "bytes32"},
             {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"}
         ],
@@ -95,10 +134,10 @@ pub const BRIDGE_ABI: &str = r#"[
 
 /// Optional default Acki Nacki receiver account (build-time `AN_RECEIVER`).
 ///
-/// The deposit form prefills the recipient field with this value when it is
-/// non-empty. An empty value (the default, when `AN_RECEIVER` is unset)
-/// leaves the field blank for the user to type. `anWorkchain` is pinned to
-/// 0 in the ABI call; Acki Nacki ignores it.
+/// The bridge's `deposit(uint256 amount, bytes32 anAccount)`
+/// takes the AN account explicitly.
+/// This constant is only a convenience default the UI may prefill; an empty
+/// value means "no prefill — the user types their AN account".
 pub const ACKI_NACKI_RECEIVER: &str = match option_env!("AN_RECEIVER") {
     Some(v) => v,
     None => "",

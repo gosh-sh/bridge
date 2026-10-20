@@ -23,6 +23,8 @@ struct Manifest {
 
 #[derive(Deserialize)]
 struct Witness {
+    #[serde(default)]
+    fixture_kind: Option<String>,
     event_data: EventData,
     receipt_proof: ReceiptProof,
 }
@@ -60,8 +62,11 @@ fn every_fixture_header_hashes_to_its_canonical_block() {
     assert!(!witnesses.is_empty(), "no fixture witnesses found");
 
     for path in witnesses {
-        let witness: Witness =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let witness: Witness = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        if witness.fixture_kind.as_deref() == Some("synthetic") {
+            assert!(path.starts_with(fixtures.join("deposit_10proofs")));
+            continue;
+        }
         let block = witness.event_data.block_number;
         let expected = manifest.blocks.get(&block.to_string()).unwrap_or_else(|| {
             panic!(

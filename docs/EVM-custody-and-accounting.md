@@ -55,7 +55,7 @@ Actual order in `deposit` (`:578-593`):
 2. **Interaction** — `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return reverts
    `TransferFromFailed` (`:585-587`).
 3. **Effects** — `depositCounter++`, then `treasuryBalance += amount` (`:588-590`).
-4. **Event** — `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)`.
+4. **Event** — `Deposit(depositId, sender, amount, anAccount, timestamp)`.
 
 So on this path the interaction precedes the effects. That is the correct order here — the bridge
 books only what it has actually received — and it is safe for two independent reasons: the function
@@ -121,7 +121,7 @@ Quote these, not their earlier versions.
 
 | | Rule |
 |---|---|
-| **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anWorkchain, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
+| **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
 | **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`. The function is not `payable`. |
 | **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. No other function in the contract increases `treasuryBalance`, and only `withdrawByProof` decreases it. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |

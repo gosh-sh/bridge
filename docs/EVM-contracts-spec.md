@@ -2,10 +2,11 @@
 
 **Status:** as-implemented (descriptive, not aspirational).
 **Derived from:** the Solidity sources under `contracts/ethereum/` at commit `4021c68`
-(`Merge branch 'main' into pruvendo/eth-39-withdraw`), `2026-09-25`. All `file:line`
-citations below are re-anchored to that commit — the two-line-number-bases split that
-previous revisions of this document carried is gone. When editing the spec, either
-re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
+(`Merge branch 'main' into pruvendo/eth-39-withdraw`), `2026-09-25`. This is the baseline
+for `file:line` citations; the dated drift notes below identify later updates.
+Unchecked citations retain their earlier bases and are not current-source offsets.
+When editing the spec, either re-run the re-anchoring pass or leave a fresh dated
+note here calling out the drift.
 
 > **Drift note, 2026-10-12 (ETH-28).** The AAVE behaviour in §6 (payout top-up), §10 and §11
 > describes the code after `writeOffUnbackedPrincipal` landed; the line numbers in those rows
@@ -18,10 +19,18 @@ re-run the re-anchoring pass or leave a fresh dated note here calling out the dr
 > `genesisLastBkSetUpdateSeqNo` — and no re-anchoring pass has been run since. Citations below that
 > were not re-checked point too early: by about 30 lines around `HistoryWindow` (`:259` → `:289`)
 > and by about 100–160 from `deposit` on (`:672` → `:772`, `applyBkSetUpdate` `:898` → `:1011`,
-> `transferOwnership` `:1565` → `:1720`). Checked against the current source: §4.1's storage table
+> `transferOwnership` `:1565` → `:1720`). Checked against the source at that time: §4.1's storage table
 > (slots with `forge inspect`), the `whenNotPaused` and `pause()` / `unpause()` citations (`:536`,
 > `:1685`, `:1692`), §4.2's `bundleStride` row (`:234`), §4's `InvalidBundleStride` (`:714`), and
 > §7.3's description of the rotation gate.
+
+> **Drift note, 2026-10-20 (workchain removal).** The deposit references in §6 and
+> `whenNotPaused` references in §§6–7 use `src/AckiNackiBridge.sol` at `9604d14`:
+> `deposit` is at `:774-785`, `whenNotPaused` at `:547-550`, and the exact-transfer
+> check at `:1538-1547`. Client and prover references in §6 follow the same ABI
+> change. Earlier drift notes describe historical snapshots; other citations
+> have not been re-anchored by this change. Locate symbols in current source
+> before relying on their line offsets.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.

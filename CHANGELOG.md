@@ -156,6 +156,16 @@ assigns it when the release is tagged.
   `BRIDGE_CONTRACT_ADDRESS` set to that same new EVM deployment; without it,
   deposits and approvals are disabled before any wallet request.
 
+  This rollout assumes a fresh pair and provides no in-place migration of a
+  funded bridge. Before replacing an existing AN bridge's code, pause new
+  deposits on its old EVM bridge and finalize every pending old-format deposit
+  with the old AN bridge unpaused and its matching prover/relayer. Verify the corresponding
+  finalized AN credit for every old deposit ID below the paused EVM bridge's
+  `depositCounter` before replacing the AN code or removing those tools.
+  The 1.11.0 key cannot finalize 128-byte events,
+  and the old EVM contract has no deposit refund path. Custody and outstanding
+  withdrawals on an existing pair require a separate migration plan.
+
   `ackinacki-bridge deposit` now refuses an AN bridge older than 1.11.0
   before requesting a transaction. For the new deployment, configure the
   matching EVM/AN pair and its trust settings first, install the matching prover

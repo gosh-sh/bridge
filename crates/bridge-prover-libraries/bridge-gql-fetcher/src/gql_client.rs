@@ -1029,6 +1029,15 @@ impl GqlClient {
         if block.is_null() {
             anyhow::bail!("block at seq_no={target_seq_no} not found");
         }
+        // The height asked for is what goes into the attestation bytes as
+        // `block_seq_no`; on a thread where the two differ the proof would
+        // commit to the wrong one.
+        let fetched_seq_no = block.get("seq_no").and_then(|v| v.as_u64());
+        anyhow::ensure!(
+            fetched_seq_no == Some(target_seq_no),
+            "blockByHeight({target_seq_no}) returned seq_no {fetched_seq_no:?}: height and seq_no \
+             differ for this block"
+        );
         let atts = block
             .get("attestations")
             .and_then(|v| v.as_array())
@@ -1040,8 +1049,10 @@ impl GqlClient {
                  Retry once a few blocks have been produced past it."
             );
         }
+        let seq_no = u32::try_from(target_seq_no)
+            .with_context(|| format!("block seq_no {target_seq_no} does not fit u32"))?;
         atts.iter()
-            .map(parse_block_attestation)
+            .map(|v| parse_block_attestation(v, seq_no))
             .collect::<anyhow::Result<Vec<_>>>()
             .with_context(|| format!("parse_block_attestation for block {target_seq_no}"))
     }
@@ -1343,22 +1354,28 @@ pub struct GqlBlockByHash {
 /// u64(num_signers) || (u16 idx, u16 cnt) * N      <- signature_occurrences
 /// u64(32) || 32 parent_block_id                   <- AttestationData section
 /// u64(32) || 32 block_id
-/// u32 LE seq_no                                       (NOT present in GQL — derived elsewhere)
+/// u32 LE seq_no                                       (not in GQL: the requested height)
 /// 32 envelope_hash (transparent, no length prefix)
 /// u32 LE target_type
 /// ```
 ///
-/// The GraphQL `BlockAttestation` object exposes `aggregated_signature` and
-/// `signature_occurrences` as hex strings of the *bincoded* (length-prefixed)
-/// forms — we splice them verbatim into the assembled bytes. `block_id`,
+/// The GraphQL `BlockAttestation` object exposes `aggregated_signature` as a
+/// hex string of the *bincoded* (length-prefixed) form, spliced in verbatim,
+/// and `signature_occurrences` as a JSON object `{"<signer idx>": <count>}`,
+/// re-encoded here as the bincode map: a `u64` entry count, then
+/// `(u16 idx, u16 count)` per entry in index order. `block_id`,
 /// `parent_block_id`, `envelope_hash`, `target_type` come as plain hex / enum.
 ///
-/// `block_seq_no` is not exposed on `BlockAttestation`; the caller matches by
-/// `block_id` after walking forward, then this function fills in the u32 from
-/// the matched record. (Here we set it from the AttestationData JSON if the
-/// schema is later extended; for now we record 0 and the caller will replace it.)
+/// `block_seq_no` is not exposed on `BlockAttestation`: the caller passes the
+/// height it asked for, and it is written here, into the slot the circuit's
+/// `attestation_data_parser` reads (relative offset 80 of the data section
+/// that follows the signer entries). The entry count written at offset 200 is
+/// the number of distinct signers; a signer that attested more than once is
+/// one entry with a count above one, so nothing may derive an offset from the
+/// sum of the counts.
 fn parse_block_attestation(
     v: &serde_json::Value,
+    block_seq_no: u32,
 ) -> anyhow::Result<crate::attestation_fetcher::ParsedAttestation> {
     let block_id = decode_hash32(required_string(v, "block_id")?).context("att.block_id")?;
     let parent_block_id =
@@ -1372,8 +1389,8 @@ fn parse_block_attestation(
         other => anyhow::bail!("unknown target_type: {other}"),
     };
 
-    // aggregated_signature and signature_occurrences come back as hex strings
-    // of the bincode-prefixed forms (200 bytes and 8+4N bytes respectively).
+    // aggregated_signature comes back as a hex string of the bincode-prefixed
+    // form (200 bytes); signature_occurrences as a JSON object, see above.
     let sig_hex = required_string(v, "aggregated_signature")?;
     let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
         .context("decode att.aggregated_signature hex")?;
@@ -1407,12 +1424,8 @@ fn parse_block_attestation(
         occ_bytes.extend_from_slice(&cnt.to_le_bytes());
     }
 
-    // We don't have block_seq_no on the GQL attestation row; this is fine for
-    // the upstream consumer because compute_block_seq_no in prover.rs reads it
-    // from raw_bytes. We synthesize 0 here; if the caller needs a real seq,
-    // it should be patched in after matching by block_id.
-    let block_seq_no: u32 = 0;
-
+    // The GQL attestation row carries no block_seq_no; the caller's height
+    // goes into the slot `extract_block_seq_no` in prover.rs reads back.
     let mut raw_bytes = Vec::with_capacity(sig_bytes.len() + occ_bytes.len() + 120);
     raw_bytes.extend_from_slice(&sig_bytes);
     raw_bytes.extend_from_slice(&occ_bytes);
@@ -1685,6 +1698,57 @@ mod failover_tests {
         create_client_with_failover(&primary.url, &failover, cfg).unwrap()
     }
 
+    /// The whole fetch path on the real `Block.attestations[0]` of shellnet
+    /// block 1239860 (five signers, three of them with count 3): the evidence
+    /// comes back PRIMARY, with the requested height where the circuit reads
+    /// it. This is the block the relayer once proved with `block_seq_no = 0`.
+    #[tokio::test]
+    async fn fetched_evidence_carries_the_requested_height_for_a_repeated_signer() {
+        let body: &'static str = Box::leak(
+            format!(
+                r#"{{"data":{{"blockchain":{{"blockByHeight":{{"seq_no":1239860,"attestations":[{}]}}}}}}}}"#,
+                super::attestation_layout_tests::BLOCK_1239860
+            )
+            .into_boxed_str(),
+        );
+        let server = spawn(vec![Reply::Json(body)]).await;
+        let gql = client(&server, &[], fast(Some(1)));
+        let evidence = crate::attestation_fetcher::fetch_attestation_evidence(&gql, 1_239_860)
+            .await
+            .unwrap();
+        let crate::attestation_fetcher::AttestationEvidence::Primary(att) = evidence else {
+            panic!("one PRIMARY attestation");
+        };
+        assert_eq!(att.block_seq_no, 1_239_860);
+        assert_eq!(
+            attestation_bls_checker_circuit::attestation_data_parser::compute_block_seq_no(
+                &att.raw_bytes
+            ),
+            1_239_860
+        );
+    }
+
+    /// A block whose `seq_no` is not the height asked for is refused rather
+    /// than proved with the wrong one.
+    #[tokio::test]
+    async fn a_block_whose_seq_no_is_not_the_height_is_refused() {
+        let body: &'static str = Box::leak(
+            format!(
+                r#"{{"data":{{"blockchain":{{"blockByHeight":{{"seq_no":1239861,"attestations":[{}]}}}}}}}}"#,
+                super::attestation_layout_tests::BLOCK_1239860
+            )
+            .into_boxed_str(),
+        );
+        let server = spawn(vec![Reply::Json(body)]).await;
+        let gql = client(&server, &[], fast(Some(1)));
+        let err = crate::attestation_fetcher::fetch_attestation_evidence(&gql, 1_239_860)
+            .await
+            .unwrap_err();
+        // The whole chain: the refusal sits under the two query contexts.
+        let err = format!("{err:#}");
+        assert!(err.contains("height and seq_no differ"), "{err}");
+    }
+
     #[tokio::test]
     async fn fails_over_after_retries_on_http_500() {
         let primary = spawn(vec![Reply::Status(500)]).await;
@@ -1864,5 +1928,57 @@ mod failover_tests {
         let err = GqlClientConfig::from_env().unwrap_err().to_string();
         std::env::remove_var(ENV_RETRIES_PER_ENDPOINT);
         assert!(err.contains(ENV_RETRIES_PER_ENDPOINT), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod attestation_layout_tests {
+    //! The assembled bytes are read back by the circuit's
+    //! `attestation_data_parser` at fixed offsets: the `u64` signer-entry count
+    //! at 200, four bytes per entry, then the data section with `block_seq_no`
+    //! at its relative offset 80. A signer that attested more than once is one
+    //! entry with a count above one, not several entries, so an offset derived
+    //! from the sum of the counts misses the slot.
+
+    use super::*;
+
+    /// `Block.attestations[0]` of shellnet block 1239860 (2026-10-19): three
+    /// of the five signers carry count 3. The relayer once proved this block
+    /// with `block_seq_no = 0`, and the bridge rejected every proof of it with
+    /// `AttestationProofRejected()` until the daemon gave up.
+    pub(super) const BLOCK_1239860: &str = r#"{"block_id":"849eabba52ef0fea2b4e96c36d3c28c9bee62ce2cf9984b976ea027fab0e6131","parent_block_id":"336f899e552d544199296324e186b9629a4d8df1162c2758e0d0d9c4ed4f73dc","envelope_hash":"d0c6dd700ef747418ee81a8915d81583cf53cfa8ab2c7181d260bd471d4bedbd","target_type":"PRIMARY","aggregated_signature":"c000000000000000133011b010837699d95c960a9b15b38a0d031fd502fe7fa0d90a851fef45d638f2efdf2f24e2621b807fefac3556230e0bb0aa2f1905a7d7c1a06d8eaa8e4fd058ed4d042e343035f4a8fc803d452e9e53819ef2623ff1198bdea954abb19bb60fb0fecfb986532c8ee24e2ce06e2d23b553038650c67c8be32368e3e35ab389549072bc834551a517432e163d9283fd146ad6d43af72b86db7a528ec92a7d9cd8e924664f08d46d6c6ac9f1864aa4f82b571f13bc465383581ac6b97d9cb82e","signature_occurrences":{"14141":3,"5020":3,"24782":1,"23007":1,"31330":3}}"#;
+
+    fn u32_at(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+    }
+
+    fn u64_at(b: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn block_seq_no_sits_where_the_circuit_reads_it_when_a_signer_attested_thrice() {
+        let v: serde_json::Value = serde_json::from_str(BLOCK_1239860).unwrap();
+        let att = parse_block_attestation(&v, 1_239_860).unwrap();
+        let entries = u64_at(&att.raw_bytes, 200) as usize;
+        assert_eq!(entries, 5, "one entry per distinct signer");
+        assert_eq!(
+            att.signature_occurrences.values().map(|c| *c as u64).sum::<u64>(),
+            11,
+            "the counts add up to more than the entries"
+        );
+        let data = 208 + entries * 4;
+        assert_eq!(u32_at(&att.raw_bytes, data + 80), 1_239_860);
+        assert_eq!(att.block_seq_no, 1_239_860);
+        // The circuit's own reader, which is what the proof commits to.
+        use attestation_bls_checker_circuit::attestation_data_parser as reader;
+        assert_eq!(reader::parse_num_signers(&att.raw_bytes), 5);
+        assert_eq!(reader::compute_block_seq_no(&att.raw_bytes), 1_239_860);
+        assert_eq!(reader::parse_attestation_data_bytes(&att.raw_bytes).len(), 120);
+        assert_eq!(&att.raw_bytes[data + 8..data + 40], &att.parent_block_id);
+        assert_eq!(&att.raw_bytes[data + 48..data + 80], &att.block_id);
+        assert_eq!(&att.raw_bytes[data + 84..data + 116], &att.envelope_hash);
+        assert_eq!(u32_at(&att.raw_bytes, data + 116), 0, "PRIMARY");
+        assert_eq!(att.raw_bytes.len(), data + 120);
     }
 }

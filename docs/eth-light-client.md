@@ -13,7 +13,7 @@ that tree. When code and this text disagree, the code wins.
 [`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`](../crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md)
 (shadow deployment kit), [`scripts/ursus/eth_lc_shellnet_e2e.md`](../scripts/ursus/eth_lc_shellnet_e2e.md)
 (production E2E), [`scripts/ursus/flip_deposit_to_light_client.md`](../scripts/ursus/flip_deposit_to_light_client.md)
-(the one-way flip), `eth-light-client-prover/docs/m5_eth_beacon_light_client.md` (circuits).
+(the owner controls and flip), `eth-light-client-prover/docs/m5_eth_beacon_light_client.md` (circuits).
 
 ## 1. What it is
 
@@ -46,8 +46,8 @@ different language dialect and a different chain.
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
 | `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
-| Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | Invoked as `cargo run --release --example export_step_vk_blob` with the witness passed through environment variables (`crates/eth-light-client-relayer/src/prover.rs:100`). |
-| Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`src/prover.rs:202`). |
+| Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | The binary `--step-prover-bin` names (`LIGHT_CLIENT_STEP_PROVER_BIN`, prebuilt with `cargo build --release --example export_step_vk_blob`), started with the witness passed through environment variables (`generate_step` in `crates/eth-light-client-relayer/src/prover.rs`). |
+| Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | The binary `--rotate-prover-bin` names (`LIGHT_CLIENT_ROTATE_PROVER_BIN`, prebuilt with `cargo build --release --features aggregation --example rotate_tree_n8`); `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`generate_rotate` in `src/prover.rs`). |
 | Hermez KZG SRS, k=19 | file `kzg_bn254_19.srs` | relayer host | Same ceremony the opcode is keyed to. Public mirrors have been unreliable; copy from an existing relayer host (`deploy/shellnet-shadow/install-srs.sh` pins the sha256). |
 | Beacon node | external | Ethereum | Must serve the light-client REST endpoints (`finality_update`, `updates`). Public ChainSafe Lodestar and Nimbus endpoints do; publicnode does not serve `updates`. |
 | Execution node | external, optional | Ethereum | Only for epoch ancestry (`submitAncestry`), see §3.4. |
@@ -65,7 +65,7 @@ flowchart LR
   end
   subgraph RH["Relayer host"]
     D["eth-lc-relayer daemon"]
-    P["Step prover<br/>cargo example export_step_vk_blob"]
+    P["Step prover<br/>export_step_vk_blob binary"]
     S[("state file, bundles,<br/>SRS k=19, owner key")]
   end
   subgraph AN["Acki Nacki network"]
@@ -265,7 +265,15 @@ writer of that map changes.
 
 ### 3.5 The trust switches
 
-Two one-way switches move the deployment from key-trusted to proof-trusted. The daemon issues
+The retained owner authority described here was checked against `98df1a9`:
+`contracts/an/exchange/eccUSDCBridge.sol:599` (direct writer), `:615` / `:625`
+(client code and deployment), `:671` (flip), `:915` / `:954` (upgrade and reset);
+`contracts/an/exchange/EthBeaconLightClient.sol:763` (rotation flip), `:795`
+(re-anchor), `:827` / `:855` (upgrade and migration). These citations refer to
+that commit rather than the older tree cited at the top of this document.
+
+Two switches disable routine owner anchor writes and routine owner committee updates.
+They do not revoke either contract's owner key or upgrade authority. The daemon issues
 them after its first accepted `submitUpdate` only when started with `--flip-owner`
 (`src/relayer.rs:335`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
@@ -277,19 +285,35 @@ stateDiagram-v2
   state "USDCBridge anchors" as UBA {
     OwnerAnchors: owner or attesters write _acceptedBlockHash
     LightClientAnchors: LC writes L1; owner still writes L2
-    OwnerAnchors --> LightClientAnchors: disableOwnerAnchors (one way, L1 only)
+    OwnerAnchors --> LightClientAnchors: disableOwnerAnchorsOn(chainId)
+    LightClientAnchors --> OwnerAnchors: bridge updateCode resets flags
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
     ProofRotation: submitRotate only, reAnchorCommittee armed
-    OwnerRotation --> ProofRotation: disableOwnerRotation (one way)
+    OwnerRotation --> ProofRotation: disableOwnerRotation
   }
 ```
 
-Before the flip the light client is advisory: it pushes hashes, but the owner key can still push
-anything. After the flip nothing but a valid proof adds an L1 block hash; L2 hashes still take
-the owner key. There is no way back on that L1; the only recovery from a stalled relayer is
-`reAnchorCommittee`, which is logged on chain.
+Before the flip the bridge owner can admit hashes directly. Afterwards,
+`setAcceptedBlockHash` rejects writes for the flipped chain with 225, while
+other chains keep their own settings. Routine writes then come from that
+chain's recorded light client, under the proof checks of its current code.
+
+**Both owners remain trusted after the flip.** The bridge owner can still call
+`updateCode`, which clears the owner-anchor flags and recorded clients. The owner
+can also install different code with `setLightClientCode` and replace a flipped
+chain's client with `deployLightClient`; changing the stored code alone does not
+replace the writer. The light-client owner retains the logged weak-subjectivity
+recovery `reAnchorCommittee` and can replace its code with `updateCode`.
+`disableOwnerRotation` survives that client's normal migration. However, an
+owner who retains `updateCode` can install arbitrary replacement code, including
+code that changes or removes any of these checks. The current implementation
+cannot constrain that future code; preserving flags during migration does not
+change this. The flips apply to the installed code and do not revoke upgrade
+authority or remove either owner from the trust model.
+After a bridge upgrade, restore configuration and repeat the flips intended for
+each chain, then check `isOwnerAnchorsEnabled(chainId)`.
 
 **Do not flip yet.** The flip is per chain: `disableOwnerAnchorsOn(chainId)` turns the
 owner writer off for one chain and needs a light client deployed for it (226 otherwise,
@@ -302,9 +326,9 @@ hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and th
 ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
 that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
 nothing late-registers the skipped ones. A deposit from any of those uncovered blocks
-fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts`
-is set. That is why the daemon does not flip unless told to.
+fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224). That is why the daemon does not
+flip unless told to. `deposit-relayer` walks past a failed id and retries it with
+backoff; `--skip-after-attempts` still parks one that keeps failing.
 
 ## 4. Deployment
 
@@ -322,7 +346,7 @@ flowchart LR
   subgraph RH["Relayer host, no inbound ports"]
     direction TB
     SVC["systemd unit: eth-lc-relayer daemon<br/>outbound HTTPS only"]
-    PRV["prover subprocess<br/>cargo run --release --example export_step_vk_blob"]
+    PRV["prover subprocess<br/>export_step_vk_blob (LIGHT_CLIENT_STEP_PROVER_BIN)"]
     FS[("ETH_LC_ROOT/<br/>config/ env file, owner key (0600)<br/>state/ state json, prover-logs/<br/>bundles/ srs/ contracts/ bin/")]
     SVC --> PRV
     SVC --- FS
@@ -369,7 +393,7 @@ production unit in `scripts/ursus/` uses the same pieces under a different prefi
 | Path | Content | Sensitivity |
 |---|---|---|
 | `bin/` | `eth-lc-relayer` (built with `live-submit`), `tvm-cli` 3.0.6, `sold` | public |
-| `src/bridge/` | this repository; the daemon runs the prover with `cargo run` inside `eth-light-client-prover/` | public |
+| `src/bridge/` | this repository, for `build.sh`; the daemon runs the prebuilt prover binary it is given, never `cargo` | public |
 | `srs/kzg_bn254_19.srs` | Hermez SRS, mode 0444 | public, integrity matters (sha256 pinned in `install-srs.sh`) |
 | `contracts/` | compiled `EthBeaconLightClient.tvc`, `.abi.json` | public |
 | `config/eth-lc-relayer.env` | endpoints, addresses, paths (see §4.4) | 0600, no secrets besides paths |
@@ -385,7 +409,9 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | Variable | Meaning | Production | Shadow |
 |---|---|---|---|
 | `BEACON_URL` | beacon REST base URL | mainnet node with light-client endpoints | Sepolia public Lodestar |
-| `LIGHT_CLIENT_PROVER_DIR` | checkout of `eth-light-client-prover/` | required | required |
+| `LIGHT_CLIENT_STEP_PROVER_BIN` | prebuilt `export_step_vk_blob` example, checked at startup | required | required |
+| `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `rotate_tree_n8` example (`--features aggregation`) | required unless `--no-rotate` | not needed (`--no-rotate`) |
+| `LIGHT_CLIENT_PROVER_DIR` | working directory of the provers; `rotate_tree_n8` reads its shard snarks and outer SRS there, the daemon its fixture period | required (rotate) | optional (`--no-rotate`) |
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |

@@ -161,6 +161,18 @@ pub(super) async fn drive_next_bundle(
         fin_type.as_str(),
         attestation_proof_gen_ms,
     );
+    // The proof commits to the height it read from the attestation bytes; the
+    // calldata carries `target_seqno`. A mismatch is a bug on this side, and
+    // the chain would only say `AttestationProofRejected()`.
+    if u64::from(primary_proof.block_seq_no) != target_seqno {
+        return Err(DriverError::proof_gen(
+            target_seqno,
+            anyhow::anyhow!(
+                "key block {target_seqno}: the proof carries block_seq_no {}, not the block's",
+                primary_proof.block_seq_no
+            ),
+        ));
+    }
 
     // ---- Circuit 2: layer hashes movement proof ----
     driver

@@ -3,7 +3,13 @@
 `finalizeDeposit` reads `USDCBridge._acceptedBlockHash`. The light client
 **pushes** proven checkpoint hashes into that map
 (`acceptBlockHashFromLightClient`); the owner writes the rest with
-`setAcceptedBlockHash`. The flip turns the owner path off.
+`setAcceptedBlockHash`. The flip turns that direct owner path off for the
+selected chain. Both contracts retain owner-controlled upgrades. A bridge
+upgrade resets the flags; `setLightClientCode` followed by `deployLightClient`
+can replace a flipped chain's writer. The light-client owner also retains
+`reAnchorCommittee`. The flip therefore does not remove either owner from the
+trust model. After a bridge upgrade, restore configuration, repeat the intended
+per-chain flips and check `isOwnerAnchorsEnabled(chainId)`.
 
 **Do not flip yet.** `disableOwnerAnchors` turns the owner writer off only for
 the light client's L1; L2s on the allowlist keep `setAcceptedBlockHash`. The

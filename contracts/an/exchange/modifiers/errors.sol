@@ -23,4 +23,9 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_PAUSED = 231;
     uint16 constant ERR_ZERO_PUBKEY = 232;
     uint16 constant ERR_BURN_EXCEEDS_BRIDGED = 233;
+    uint16 constant ERR_TRANSFER_TOO_LARGE = 234;
+    uint16 constant ERR_TVL_CAP = 235;
+    uint16 constant ERR_MESSAGE_IS_EXIST = 400;
+    uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
+    uint16 constant ERR_MESSAGE_EXPIRED = 402;
 }

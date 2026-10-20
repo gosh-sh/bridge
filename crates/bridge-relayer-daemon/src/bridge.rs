@@ -922,6 +922,7 @@ mod sol_bindings {
             /// `decode_withdraw_revert` can name them.
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
+            error TransferTooLarge();
             error NullifierAlreadyUsed(uint256 nullifier);
             error FieldElementOutOfRange(uint256 value);
             error DstChainIdMismatch(uint256 supplied, uint256 expected);
@@ -943,6 +944,7 @@ mod sol_bindings {
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
+            function MAX_TRANSFER_AMOUNT() external view returns (uint256);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
@@ -1379,6 +1381,15 @@ where
     pub async fn treasury_balance(&self) -> Result<U256, RelayerError> {
         self.contract
             .treasuryBalance()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// Maximum amount the bridge pays in one withdrawal, in micro-USDC.
+    pub async fn max_transfer_amount(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .MAX_TRANSFER_AMOUNT()
             .call()
             .await
             .map_err(map_contract_err)
@@ -1943,8 +1954,9 @@ pub enum WithdrawSubmitOutcome {
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 9] = [
+    let permanent_selectors: [[u8; 4]; 10] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
+        AckiNackiBridge::TransferTooLarge::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
         AckiNackiBridge::UnsupportedTokenId::SELECTOR,
@@ -2021,6 +2033,7 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
     let (name, args) = match e {
         E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
         E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
+        E::TransferTooLarge(_) => ("TransferTooLarge", String::new()),
         E::NullifierAlreadyUsed(x) => (
             "NullifierAlreadyUsed",
             format!("nullifier: {}", word(x.nullifier)),
@@ -2580,6 +2593,22 @@ mod tests {
         assert_eq!(
             classify_withdraw_revert(&reason),
             WithdrawRevertKind::Permanent,
+        );
+    }
+
+    #[test]
+    fn excessive_withdrawal_is_parked_and_names_the_limit() {
+        let reason = format!(
+            "execution reverted: {}",
+            selector_hex_of::<AckiNackiBridge::TransferTooLarge>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "TransferTooLarge()"
         );
     }
 

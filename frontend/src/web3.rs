@@ -262,7 +262,9 @@ async fn send_tx(to: &str, data: &str) -> Result<String, String> {
 
 /// Approve the bridge to spend `amount` USDC base units on the caller's behalf.
 pub async fn approve_usdc(amount: u128) -> Result<String, String> {
+    validate_transfer_amount(amount)?;
     let bridge = bridge_contract_address()?;
+    check_deposit_capacity(bridge, amount).await?;
     // approve(address spender, uint256 amount) = 0x095ea7b3
     let data = format!(
         "0x095ea7b3{}{}",
@@ -273,12 +275,43 @@ pub async fn approve_usdc(amount: u128) -> Result<String, String> {
 }
 
 fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
+    validate_transfer_amount(amount)?;
     let recipient = validate_an_account(an_account)?;
     Ok(format!(
         "0xc9630cb0{}{}",
         encode_uint256(amount),
         encode_bytes32(&recipient)
     ))
+}
+
+fn validate_transfer_amount(amount: u128) -> Result<(), String> {
+    if amount > MAX_TRANSFER_USDC_UNITS {
+        return Err("Amount exceeds the 50 USDC per-transfer limit".into());
+    }
+    Ok(())
+}
+
+async fn check_deposit_capacity(bridge: &str, amount: u128) -> Result<(), String> {
+    async fn read(bridge: &str, selector: &str) -> Result<u128, String> {
+        let out = call_to(bridge, selector).await?;
+        let word = out
+            .strip_prefix("0x")
+            .ok_or("Invalid bridge limit response")?;
+        if word.len() != 64 || !word.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("Invalid bridge limit response".into());
+        }
+        parse_uint128(&out)
+    }
+    let max_transfer = read(bridge, "0xfc1b3113").await?;
+    let max_tvl = read(bridge, "0x09f67ed1").await?;
+    let outstanding = read(bridge, "0x313dab20").await?;
+    if amount > max_transfer {
+        return Err("Deposit exceeds the bridge's transfer limit".into());
+    }
+    if outstanding > max_tvl || amount > max_tvl - outstanding {
+        return Err("The bridge's TVL cap is reached; wait for withdrawals and retry".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -332,12 +365,21 @@ mod deposit_tests {
         let recipient = "a3".repeat(32);
         rejects_before_wallet_access(super::make_deposit(1, &recipient), "not configured");
     }
+
+    #[test]
+    fn excessive_transfers_are_rejected_before_approval_or_deposit() {
+        let recipient = "a3".repeat(32);
+        rejects_before_wallet_access(super::approve_usdc(50_000_001), "50 USDC");
+        rejects_before_wallet_access(super::make_deposit(50_000_001, &recipient), "50 USDC");
+    }
 }
 
 /// Deposit USDC into the bridge for the specified Acki Nacki account.
 pub async fn make_deposit(amount: u128, an_account: &str) -> Result<String, String> {
     let data = deposit_calldata(amount, an_account)?;
-    send_tx(bridge_contract_address()?, &data).await
+    let bridge = bridge_contract_address()?;
+    check_deposit_capacity(bridge, amount).await?;
+    send_tx(bridge, &data).await
 }
 
 /// Current USDC allowance (base units) the owner has granted the bridge.

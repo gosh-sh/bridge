@@ -137,7 +137,8 @@ contract AckiNackiBridgeAaveForkTest is Test {
     }
 
     function test_fork_yieldAccruesAfterTimeWarp() public {
-        _approveAndDeposit(user1, 100 * UsdcTestLib.UNIT);
+        _approveAndDeposit(user1, 50 * UsdcTestLib.UNIT);
+        _approveAndDeposit(user1, 50 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
         uint256 principal = bridge.suppliedPrincipal();
         assertApproxEqAbs(principal, 90 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "principal ~= 90 USDC");

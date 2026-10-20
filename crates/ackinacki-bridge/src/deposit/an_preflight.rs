@@ -39,7 +39,7 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 11, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
@@ -54,6 +54,37 @@ pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// Read mandatory AN limits without treating RPC or ABI errors as an absent
+/// cap.
+pub async fn read_volume_limits(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    chain_id: u64,
+) -> CliResult<crate::deposit::evm::VolumeLimits> {
+    let out = an
+        .run_getter(
+            bridge,
+            BRIDGE_ABI,
+            "getDepositLimits",
+            json!({"chainId": chain_id.to_string()}),
+        )
+        .await
+        .map_err(|e| refuse(format!("getDepositLimits failed: {e:#}")))?;
+    let field = |name: &str| -> CliResult<U256> {
+        let n = out[name]
+            .as_u64()
+            .map(u128::from)
+            .or_else(|| out[name].as_str().and_then(|v| v.parse::<u128>().ok()));
+        n.map(U256::from)
+            .ok_or_else(|| refuse(format!("getDepositLimits: invalid {name}: {out}")))
+    };
+    Ok(crate::deposit::evm::VolumeLimits {
+        max_transfer: field("maxTransfer")?,
+        max_tvl: field("maxTvl")?,
+        outstanding: field("outstanding")?,
+    })
 }
 
 /// Judges a bridge version: `Err` refuses, `Ok` carries the warnings.

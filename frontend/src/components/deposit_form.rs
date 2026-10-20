@@ -3,17 +3,15 @@ use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use crate::{
-    config::{bridge_contract_address, ACKI_NACKI_RECEIVER, SEPOLIA_CHAIN_ID_HEX},
+    config::{
+        bridge_contract_address, ACKI_NACKI_RECEIVER, MAX_TRANSFER_USDC_UNITS, SEPOLIA_CHAIN_ID_HEX,
+    },
     utils::validate_an_account,
     web3::{
         approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
         make_deposit, switch_to_sepolia, usdc_to_units, wait_for_receipt,
     },
 };
-
-/// Maximum deposit in base units, mirrors `AckiNackiBridge.MAX_DEPOSIT_AMOUNT`
-/// (`type(uint64).max`). There is no extra 100 USDC product cap.
-const MAX_USDC_UNITS: u128 = u64::MAX as u128;
 
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
@@ -88,9 +86,9 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 error_msg.set(Some("Amount must be greater than 0".to_string()));
                 return;
             }
-            if units > MAX_USDC_UNITS {
+            if units > MAX_TRANSFER_USDC_UNITS {
                 error_msg.set(Some(
-                    "Amount exceeds the uint64 per-deposit cap".to_string(),
+                    "Amount exceeds the 50 USDC per-transfer limit".to_string(),
                 ));
                 return;
             }
@@ -216,7 +214,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"USDC"}</span>
                     </div>
                     <div class="input-hint">
-                        {"The contract cap is 2^64-1 USDC base units. Gas is paid in ETH."}
+                        {"Maximum 50 USDC per transfer. Gas is paid in ETH."}
                     </div>
                 </div>
 

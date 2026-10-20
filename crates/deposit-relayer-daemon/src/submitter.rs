@@ -501,6 +501,8 @@ const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 const EXIT_UNKNOWN_BLOCK: i32 = 224;
 const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
+const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
+const EXIT_TVL_CAP: i32 = 235;
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -525,6 +527,9 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
              owner anchors are enabled, otherwise the light client",
         ),
         EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
+        EXIT_TRANSFER_TOO_LARGE => {
+            Some("ERR_TRANSFER_TOO_LARGE — the proven deposit exceeds the per-transfer ceiling")
+        },
         _ => None,
     }
 }
@@ -570,6 +575,23 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
                  (exit_code={code}): {detail}"
             ),
         },
+        EXIT_TVL_CAP => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TVL_CAP — source-chain deposit capacity is full; waiting for withdrawals \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        400 | 402 => SubmitOutcome::Pending {
+            reason: format!(
+                "external message already seen or expired; observe the voucher before retrying \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        401 => rejected(
+            code,
+            "external message expiry exceeds the five-minute window",
+            detail,
+        ),
         code => rejected(code, context, detail),
     }
 }
@@ -976,6 +998,25 @@ mod tests {
             },
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capacity_and_message_retries_do_not_park_a_deposit() {
+        for code in [235, 400, 402] {
+            for result in [
+                classify_reverted(Some(code), "Reverted"),
+                classify_call_error(&format!("exit_code={code}")),
+            ] {
+                assert!(
+                    matches!(result, SubmitOutcome::Pending { .. }),
+                    "{code}: {result:?}"
+                );
+            }
+        }
+        assert!(matches!(
+            classify_reverted(Some(234), "Reverted"),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 
     /// The fail-closed config reverts must name the call that fixes them — an

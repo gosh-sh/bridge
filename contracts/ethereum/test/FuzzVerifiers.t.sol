@@ -191,7 +191,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
     /// @notice Any valid deposit amount should succeed and update state correctly
     function testFuzz_DepositAmountInvariants(uint256 amount) public {
-        amount = bound(amount, 1, type(uint64).max);
+        amount = bound(amount, 1, bridge.MAX_TRANSFER_AMOUNT());
 
         address user = address(uint160(uint256(keccak256(abi.encodePacked(amount)))));
         usdc.mint(user, amount);

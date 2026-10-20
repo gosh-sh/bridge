@@ -253,6 +253,18 @@ fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
         if token.name == "_totalBurnedBridgeByToken" {
             token.value = u32_u128_map(burned);
         }
+        if token.name == "_outstandingByChain" {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(
+                "11155111".to_string(),
+                tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(minted.saturating_sub(burned), 128)),
+            );
+            token.value = tvm_abi::TokenValue::Map(
+                tvm_abi::ParamType::Uint(256),
+                tvm_abi::ParamType::Uint(128),
+                map,
+            );
+        }
     }
     let builder = tvm_abi::TokenValue::pack_values_into_chain(
         &tokens,
@@ -1033,10 +1045,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.11.0 with the current deposit VK.
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.12.0 with limits and replay
+        // protection.
         assert_eq!(
             &hash[..8],
-            "774c9571",
+            "b4bcc561",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

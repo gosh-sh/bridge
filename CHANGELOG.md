@@ -34,18 +34,11 @@ assigns it when the release is tagged.
   both owners remain trusted after a flip. No contract behavior, ABI or
   deployment artifact changes.
 
-- Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
-  USDC base units. `AckiNackiBridge.deposit` reverts `DepositTooLarge` above it;
-  `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
-  exit 214. There is no extra product minimum besides `amount > 0`, and the
-  100 USDC figure in older notes is not in the contracts. The deposit
-  form now uses that same `uint64` cap and Circle Sepolia USDC
-  (`0x1c7D4B19…`), with the bridge address supplied at build time as
-  described below. It used to refuse amounts above 100 USDC and approve
-  the Aave faucet token. Test USDC comes from Circle's faucet, not an
-  in-form mint. The ursus deposit-relayer example uses the same full-history
-  Sepolia RPC (`rpc.sepolia.ethpandaops.io`) as the bridge-relayer example;
-  it must retain logs back to the configured deployment block.
+- The deposit form uses the 50 USDC transfer ceiling and Circle Sepolia USDC
+  (`0x1c7D4B19…`), with the bridge address supplied at build time as described
+  below. Test USDC comes from Circle's faucet. The ursus deposit-relayer
+  example uses `rpc.sepolia.ethpandaops.io` and requires logs back to the
+  configured deployment block.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
   `state.json`, the strict `depositId` queue, parking with
@@ -93,6 +86,31 @@ assigns it when the release is tagged.
   runs.
 
 ### Breaking Changes
+
+- Bridge transfers are limited to 50 USDC. Each L1 bridge caps deposited
+  principal minus completed payouts at 10,000 USDC, including Aave principal;
+  AN tracks that capacity separately per destination/source chain. Deposit and
+  withdrawal arguments, return values, events and proof formats are unchanged.
+  EVM adds `TransferTooLarge` and `TvlCapReached`; AN adds finalization errors
+  234 (oversized transfer) and 235 (capacity, retry after withdrawals), and
+  `getDepositLimits(chainId)`. Oversized or inventory-short AN withdrawals
+  return their ECC with at most `min(msg.value, 0.1 vmshell)` and emit no burn
+  event. CLI and UI check limits before approval, deposit or burn; failed
+  limit reads stop the operation. Deposit relayers wait for capacity, while
+  withdrawal relayers park oversized proofs.
+- Deploy the limits as a fresh pair. AN 1.12.0 adds chain balances and replay
+  hashes to its upgrade tuple; it cannot decode the 1.11.0 tuple. Drain pending
+  transfers, including old amounts above 50 USDC, before switching. Pause old
+  L1 contracts and verify the pause before activating replacements; never keep
+  two funded payout contracts for the same AN identity and chain. Custody and
+  consumed withdrawal nullifiers require a separate migration before funding
+  a replacement that accepts the same history. See `contracts/an/README.md`.
+- AN external-message replay protection now uses expiring hashes, preventing
+  an unsigned finalization with a future `time` from blocking owner calls.
+  `expire` must be later than block time and less than five minutes ahead
+  (402/401); a recorded duplicate returns 400. CLI and relayer finalizations
+  bound expiry to 240 seconds. The CLI resends its existing BOC after an
+  uncertain outcome until expiry; proof bytes are retained.
 
 - **Every prover the relayers start is a binary the operator names, checked
   at startup; the `cargo run` fallbacks are gone.** A daemon started with a
@@ -152,8 +170,8 @@ assigns it when the release is tagged.
   `Deposit(uint256,address,uint256,bytes32,uint256)`; the event's non-indexed
   data is now 96 bytes. The CLI, frontend, deposit relayer and prover use this
   format, and witness JSON no longer includes `an_workchain`. Deploy the matching
-  Ethereum contract and `eccUSDCBridge` 1.11.0 with the regenerated deposit
-  verification key (code hash `774c9571…`), and use the updated clients
+  Ethereum contract and `eccUSDCBridge` 1.12.0 with the regenerated deposit
+  verification key (code hash `b4bcc561…`), and use the updated clients
   and prover together. Proofs for the previous event format do not verify under
   this key. Withdrawal interfaces, DApp ID handling and the 12 deposit public-input
   slots are unchanged. The shipped CLI profile and relayer template no longer

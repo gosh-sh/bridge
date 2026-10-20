@@ -53,6 +53,7 @@ pub const USDC_CONTRACT_ADDRESS: &str = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7
 
 /// USDC decimals (USD Coin uses 6 on Ethereum).
 pub const USDC_DECIMALS: u32 = 6;
+pub const MAX_TRANSFER_USDC_UNITS: u128 = 50_000_000;
 
 /// One whole USDC expressed in base units (10^6).
 pub const USDC_UNIT: u128 = 1_000_000;

@@ -256,6 +256,18 @@ pub(super) async fn drive_next_bk_update(
         fin_type.as_str(),
         attestation_proof_gen_ms,
     );
+    // The proof commits to the height it read from the attestation bytes; the
+    // calldata carries `upd_seqno`. A mismatch is a bug on this side, and the
+    // chain would only say `AttestationProofRejected()`.
+    if u64::from(upd_proof.block_seq_no) != u64::from(upd_seqno) {
+        return Err(DriverError::proof_gen(
+            upd_seqno,
+            anyhow::anyhow!(
+                "bk-update {upd_seqno}: the proof carries block_seq_no {}, not the event's",
+                upd_proof.block_seq_no
+            ),
+        ));
+    }
 
     // The pre-refactor daemon assembled an `ipc::BkUpdateRequest` here; we
     // return the same fields as a transport-agnostic payload. The caller

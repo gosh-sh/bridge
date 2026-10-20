@@ -99,9 +99,9 @@ scripts/embed_step_vk_blob.py --check ../acki-nacki/contracts/exchange/EthBeacon
 ```
 
 `bytes constant ROTATE_VK_BLOB` = `fixtures/rotate_vkblob/rotate_vk_blob.bin`
-(3 232 B, Base **v1** Blake2b, **16 PI** — 12 KZG accumulator limbs +
-[current, next, period, gloas_fork_slot], `accumulator_limbs=12` in the header so the opcode runs
-the decider, sha256 `4dc3f0a7…71d4cf54`). Rotate with
+(Base **v1** Blake2b, **17 PI** — 12 KZG accumulator limbs +
+[current, next, period, gloas_fork_slot, attested_slot], `accumulator_limbs=12` in the header so the opcode runs
+the decider, sha256 `60c0af2a…e2df58d3`). Rotate with
 `EMIT_VKBLOB=1 cargo run --release --features aggregation --example rotate_tree_n8`
 (big-RAM host), then `scripts/embed_rotate_vk_blob.py` +
 `scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh`. tvm-sdk#284 **co-deploys
@@ -182,14 +182,12 @@ already-proven hashes still revert. The owner hatches
 (`setCommitteeCommitment`, `reAnchorCommittee`) leave no window to the
 committee they replace.
 
-The replaced committee's window is a band of slots around the head it left,
-and **not** a binding to the period it served. The rotate proof's period is
-bound in-circuit to its attested slot and stored as `_committeePeriod`, but the
-window does not use it. When the head sits near the end of its period at the rotation the
-band reaches into the next one, and a hand-off submitted early puts the band
-wherever the sender put the head. Signing inside it still needs a
-supermajority of the retired committee's keys. Measuring the window from
-`_committeePeriod` is what would make this exact.
+The replaced committee is accepted for the period it served
+(`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
+head. There is no end-of-period window: a beacon `/updates` best update
+is a valid hand-off. Signing still needs a supermajority of the retired
+committee's keys. `_prevCommitteeHeadSlot` is kept for the storage
+layout; nothing reads it.
 
 - Head liveness does **not** require every 6.4 min update — jumping to the
   latest checkpoint is enough to keep the committee/WS clock moving.

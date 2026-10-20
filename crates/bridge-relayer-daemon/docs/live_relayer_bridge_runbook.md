@@ -149,23 +149,26 @@ endpoint whose key is not set is left out.
   the list. The log line `Ethereum RPC endpoints, in order` names them by host
   only, as every relayer log line does: keys never reach the log.
 - A request goes to the first endpoint that is not cooling down. An endpoint
-  that times out, answers HTTP 429/5xx or refuses with a rate-limit, quota or
-  key error is skipped for 60 s (`WARN … endpoint failing, trying the next
-  one`); one that cannot serve a particular request (an `eth_getLogs` span
-  over its cap, pruned history, a block it has not seen yet) passes that
-  request on and keeps its place. A revert or `nonce too low` is the answer
-  and is not retried elsewhere.
+  that times out, answers HTTP 401/403 (a rejected key), 404, 408, 429 or 5xx,
+  or refuses with a rate-limit, quota or key error is skipped for 60 s
+  (`WARN … endpoint failing, trying the next one`); one that cannot serve a
+  particular request (an `eth_getLogs` span over its cap, which Alchemy's
+  free tier answers with HTTP 400; pruned history; a block it has not seen
+  yet) passes that request on and keeps its place. A revert or `nonce too
+  low` is the answer and is not retried elsewhere.
 - A signed transaction goes to the first endpoint that accepts it, and copies
   go to the others. Before every transaction the relayer estimates its gas,
   then reads the account's nonce from the chain; a call whose estimate
-  reverts sends nothing and changes no nonce. When its previous transaction
-  is still waiting unmined, it sends at the same nonce with fees 25 % higher,
-  which replaces it (`WARN … replacing it at the same nonce with higher
-  fees`), up to 4 times the current fee estimate; past that a node refuses
-  the replacement and the waiting transaction stays. A lost send no longer
-  stalls the bridge until a restart. Whatever waits at the nonce of the
-  relayer's last send counts as its own, so on a shared key it can replace
-  someone else's transaction there — one more reason for a key of your own.
+  reverts sends nothing and changes no nonce. Every transaction takes the
+  nonce the chain mines next. One already waiting unmined there is replaced
+  (`WARN … replacing it at the same nonce with higher fees`): 25 % above
+  what the relayer last paid at that nonce, or above the current estimate
+  when it does not know — after a restart — and 25 % more on every later
+  attempt, up to 4 times the current estimate; past that a node refuses the
+  replacement and the waiting transaction stays. Neither a lost send nor a
+  restart while a transaction is stuck stalls the bridge. The replaced
+  transaction can be anyone's: the relayer's key must be its own, and
+  nobody sends from it by hand while a daemon runs.
 - `BRIDGE_GET_LOGS_PAUSE_MS=600` in `shellnet.common` paces the startup scan
   for Infura's free tier (500 credits a second, 255 per `eth_getLogs`).
 

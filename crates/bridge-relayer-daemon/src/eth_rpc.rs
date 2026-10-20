@@ -6,15 +6,22 @@
 //! request, is the problem:
 //!
 //! * the endpoint is unreachable or slow (a transport error, including the
-//!   per-endpoint bound of [`crate::rpc_http`]), answers HTTP 429/5xx, or
-//!   refuses with a rate-limit, quota, key or upstream error: the request moves
-//!   on and the endpoint waits [`ENDPOINT_COOLDOWN`] at the back of the line;
+//!   per-endpoint bound of [`crate::rpc_http`]), answers with an HTTP status
+//!   that is about the endpoint — 401 or 403 for a rejected key, 404, 408, 429,
+//!   5xx — whatever its body says, answers another HTTP error status without a
+//!   JSON-RPC error in its body, or refuses with a rate-limit, quota, key or
+//!   upstream error: the request moves on and the endpoint waits
+//!   [`ENDPOINT_COOLDOWN`] at the back of the line;
 //! * the endpoint cannot serve this one request — an `eth_getLogs` span over
 //!   its cap, history it has pruned, a block it has not seen yet, a method it
 //!   does not offer: the request moves on and the endpoint keeps its place;
 //! * anything else — `execution reverted`, `nonce too low`, `insufficient
 //!   funds`, any error this module does not recognise — is the answer, and goes
 //!   back to the caller unchanged: another node would say the same.
+//!
+//! A JSON-RPC error that comes with any other HTTP status is read by these
+//! rules as if it had come with 200: Alchemy sends an `eth_getLogs` span
+//! over its cap with HTTP 400.
 //!
 //! An endpoint at the back of the line is still tried, after the others, so a
 //! request fails only once every endpoint has failed it, and the primary is
@@ -295,6 +302,15 @@ fn accepted_response(request: &RequestPacket) -> Option<ResponsePacket> {
     }))
 }
 
+/// HTTP statuses about the endpoint, not the request: a rejected key, a
+/// wrong URL, a timeout, a rate limit, the server itself. They fail the
+/// endpoint whatever the body says. Alchemy's 401 for a rejected key
+/// carries a JSON-RPC error no pattern of [`classify_error`] recognises
+/// (`-32600 Must be authenticated!`, checked 2026-10-20).
+fn endpoint_failed(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404 | 408 | 429) || status >= 500
+}
+
 /// A transport error with every URL in it cut down to its label. The HTTP
 /// status survives, so callers that tell 429 from 5xx still can.
 fn redact_transport_error(error: TransportError) -> TransportError {
@@ -324,11 +340,53 @@ fn redact_transport_error(error: TransportError) -> TransportError {
 
 struct Endpoint {
     label: String,
+    url: Url,
+    client: reqwest::Client,
+    /// The same client and URL, for the transaction copies and the chain id
+    /// check, which need no HTTP status.
     http: Http<reqwest::Client>,
     cooling_until: Mutex<Option<Instant>>,
 }
 
 impl Endpoint {
+    /// One request to this endpoint, with the HTTP status of the reply.
+    /// alloy's `Http` reads the body the same way, but hands back a JSON-RPC
+    /// error as the answer and drops the status it came with.
+    async fn post(
+        &self,
+        request: &RequestPacket,
+    ) -> (Option<u16>, Result<ResponsePacket, TransportError>) {
+        let sent = self
+            .client
+            .post(self.url.clone())
+            .json(request)
+            .headers(request.headers())
+            .send()
+            .await;
+        let reply = match sent {
+            Ok(reply) => reply,
+            Err(error) => return (None, Err(TransportErrorKind::custom(error))),
+        };
+        let status = reply.status().as_u16();
+        let body = match reply.bytes().await {
+            Ok(body) => body,
+            Err(error) => return (Some(status), Err(TransportErrorKind::custom(error))),
+        };
+        let parsed = serde_json::from_slice::<ResponsePacket>(&body);
+        let result = if (200..300).contains(&status) {
+            parsed.map_err(|e| TransportError::deser_err(e, String::from_utf8_lossy(&body)))
+        } else {
+            match parsed {
+                Ok(answer) if answer.is_error() => Ok(answer),
+                _ => Err(TransportErrorKind::http_error(
+                    status,
+                    String::from_utf8_lossy(&body).into_owned(),
+                )),
+            }
+        };
+        (Some(status), result)
+    }
+
     fn cooling(&self, now: Instant) -> bool {
         self.cooling_until
             .lock()
@@ -369,6 +427,8 @@ impl FailoverTransport {
             .iter()
             .map(|url| Endpoint {
                 label: endpoint_label(url),
+                url: url.clone(),
+                client: client.clone(),
                 http: Http::with_client(client.clone(), url.clone()),
                 cooling_until: Mutex::new(None),
             })
@@ -400,11 +460,14 @@ impl FailoverTransport {
         let mut last = None;
         for (position, &i) in order.iter().enumerate() {
             let endpoint = &self.endpoints[i];
-            let mut http = endpoint.http.clone();
-            let result = http.call(request.clone()).await;
-            let (verdict, reason) = match &result {
-                Ok(response) => classify_response(&method, response),
-                Err(error) => (Verdict::Failing, short(&redact_urls(&error.to_string()))),
+            let (status, result) = endpoint.post(&request).await;
+            let (verdict, reason) = match (&result, status) {
+                (Ok(response), Some(status)) if endpoint_failed(status) => {
+                    let (_, reason) = classify_response(&method, response);
+                    (Verdict::Failing, format!("HTTP {status}: {reason}"))
+                },
+                (Ok(response), _) => classify_response(&method, response),
+                (Err(error), _) => (Verdict::Failing, short(&redact_urls(&error.to_string()))),
             };
             match verdict {
                 Verdict::Answer => {
@@ -897,7 +960,7 @@ mod tests {
     use alloy::primitives::B256;
     use serde_json::{json, Value};
 
-    use super::test_support::{by_method, endpoint, result, rpc_error, silent};
+    use super::test_support::{by_method, endpoint, http_reply, result, rpc_error, silent};
 
     fn client(urls: &[Url]) -> RpcClient {
         let http = rpc_http_client(Duration::from_millis(300)).unwrap();
@@ -932,10 +995,94 @@ mod tests {
     async fn rate_limits_and_http_errors_move_on() {
         let (limited, _) = endpoint(rpc_error(-32005, "daily request count exceeded")).await;
         let (http_429, _) = endpoint(Arc::new(|_| Some((429, json!("Too Many Requests"))))).await;
+        let (http_400, _) = endpoint(Arc::new(|_| Some((400, json!("Bad Request"))))).await;
+        let (http_503, _) = endpoint(http_reply(
+            503,
+            json!({"jsonrpc": "2.0", "id": 0,
+                   "error": {"code": -32000, "message": "no backend is currently healthy"}}),
+        ))
+        .await;
         let (working, hits) = endpoint(result(json!("0x7"))).await;
-        let client = client(&[limited, http_429, working]);
+        let client = client(&[limited, http_429, http_400, http_503, working]);
         assert_eq!(block_number(&client).await.unwrap(), 7);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Alchemy's 401 for a rejected key carries a JSON-RPC error that no
+    /// pattern recognises (`-32600 Must be authenticated!`). It is the
+    /// endpoint failing all the same.
+    #[tokio::test]
+    async fn a_rejected_key_moves_on_whatever_the_body_says() {
+        let (bad_key, bad_key_hits) = endpoint(http_reply(
+            401,
+            json!({"jsonrpc": "2.0", "id": 0,
+                   "error": {"code": -32600, "message": "Must be authenticated!"}}),
+        ))
+        .await;
+        let (working, _) = endpoint(result(json!("0x7"))).await;
+        let client = client(&[bad_key, working]);
+        assert_eq!(block_number(&client).await.unwrap(), 7);
+        // On cooldown: the next request goes straight to the working one.
+        assert_eq!(block_number(&client).await.unwrap(), 7);
+        assert_eq!(bad_key_hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// The review's case: Alchemy's free tier answers an `eth_getLogs` span
+    /// over 10 blocks with HTTP 400 (seen 2026-10-20). Read as a span cap,
+    /// it passes the request on and leaves the endpoint in its place.
+    #[tokio::test]
+    async fn a_span_cap_that_comes_with_http_400_does_not_bench_the_endpoint() {
+        let (alchemy, alchemy_hits) = endpoint(by_method(vec![
+            (
+                "eth_getLogs",
+                http_reply(
+                    400,
+                    json!({"jsonrpc": "2.0", "id": 0, "error": {"code": -32600, "message":
+                        "Under the Free tier plan, you can make eth_getLogs requests with up \
+                         to a 10 block range."}}),
+                ),
+            ),
+            ("eth_blockNumber", result(json!("0x1"))),
+        ]))
+        .await;
+        let (wide, _) = endpoint(result(json!([]))).await;
+        let client = client(&[alchemy, wide]);
+
+        let logs: Value = client
+            .request(
+                "eth_getLogs",
+                (json!({"fromBlock": "0x1", "toBlock": "0x7d0"}),),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logs, json!([]));
+        assert_eq!(block_number(&client).await.unwrap(), 1);
+        assert_eq!(alchemy_hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_revert_that_comes_with_http_400_is_the_answer() {
+        let (primary, _) = endpoint(http_reply(
+            400,
+            json!({"jsonrpc": "2.0", "id": 0,
+                   "error": {"code": 3, "message": "execution reverted"}}),
+        ))
+        .await;
+        let (fallback, fallback_hits) = endpoint(result(json!("0x"))).await;
+        let client = client(&[primary, fallback]);
+        let err = client
+            .request::<_, Value>(
+                "eth_call",
+                (
+                    json!({"to": "0x0000000000000000000000000000000000000001"}),
+                    "latest",
+                ),
+            )
+            .await
+            .unwrap_err();
+        let payload = err.as_error_resp().expect("the endpoint's JSON-RPC error");
+        assert_eq!(payload.code, 3);
+        assert_eq!(fallback_hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1152,6 +1299,11 @@ pub(crate) mod test_support {
                 json!({"jsonrpc": "2.0", "id": 0, "error": {"code": code, "message": message}}),
             ))
         })
+    }
+
+    /// `body` with HTTP `status`, to every request.
+    pub(crate) fn http_reply(status: u16, body: Value) -> Responder {
+        Arc::new(move |_| Some((status, body.clone())))
     }
 
     pub(crate) fn by_method(routes: Vec<(&'static str, Responder)>) -> Responder {

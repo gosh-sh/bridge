@@ -4,25 +4,28 @@
 //! locally, advancing before the broadcast: a send the RPC lost left a gap,
 //! every later transaction queued behind it, and the bridge stood still until
 //! the daemon was restarted. Here the nonce is read from the chain before
-//! every transaction, and the relayer remembers the last transaction it sent
-//! from each address:
+//! every transaction, and every transaction takes the account's `latest`
+//! count: the nonce the chain mines next. Nothing sent behind a transaction
+//! waiting there could be mined before it, so
 //!
-//! * mined (`latest` is past it), or nothing remembered: the `pending` count,
-//!   so transactions already waiting from the account are queued behind, not
-//!   replaced;
-//! * not mined, and a transaction waiting at its nonce in the pool of the node
-//!   asked: the same nonce with fees 25 % above the last plan, which replaces
-//!   it (a replacement must pay at least 10 % more), but never more than
-//!   [`MAX_REPLACEMENT_FEE_MULTIPLE`] times the current estimate. Whatever
-//!   waits at that nonce is taken for ours: on a key shared with someone else
-//!   it can be theirs, sent after our send was lost;
-//! * not mined, and no transaction waiting at that nonce: the send was lost, so
-//!   the same nonce again at the current fee estimate.
+//! * with nothing waiting at that nonce (`pending` equal to `latest`), the
+//!   transaction goes out at the current fee estimate. A send that was lost
+//!   goes out again at its nonce this way;
+//! * with a transaction waiting there, it replaces that one, at fees 25 % above
+//!   the last transaction this process sent at that nonce (a replacement must
+//!   pay at least 10 % more), or above the current estimate when it sent none
+//!   there — the waiting one was sent before a restart — and 25 % more on every
+//!   later attempt at the same nonce. Never more than
+//!   [`MAX_REPLACEMENT_FEE_MULTIPLE`] times the current estimate.
+//!
+//! Whatever waits at that nonce is replaced, whoever sent it: the account
+//! must be the relayer's alone, and nobody sends from it by hand while a
+//! daemon runs.
 //!
 //! A plan is made only once the transaction's gas estimate has succeeded,
 //! so a call that would revert leaves the nonce and fees alone. It is
 //! remembered before the send, so a send cut short — a timeout, a dropped
-//! future — still leaves the next attempt knowing its nonce.
+//! future — still leaves the next attempt knowing what it paid.
 
 use std::{
     collections::HashMap,
@@ -46,7 +49,7 @@ pub struct TxPlan {
     pub nonce: u64,
     pub max_fee_per_gas: u128,
     pub max_priority_fee_per_gas: u128,
-    /// The transaction replaces one of ours still waiting at this nonce.
+    /// A transaction waits at this nonce, and this one replaces it.
     pub replaces: bool,
 }
 
@@ -84,26 +87,23 @@ where
         fees.max_fee_per_gas,
         fees.max_priority_fee_per_gas,
     );
+    let sent_here = last.is_some_and(|t| t.nonce == plan.nonce);
     if plan.replaces {
         warn!(
             %sender,
             nonce = plan.nonce,
+            pending,
+            sent_by_this_process = sent_here,
             max_fee_per_gas = plan.max_fee_per_gas,
             max_priority_fee_per_gas = plan.max_priority_fee_per_gas,
-            "our last transaction is still waiting unmined; replacing it at the same nonce with higher fees"
+            "a transaction is still waiting unmined at the account's next nonce; replacing it at \
+             the same nonce with higher fees"
         );
-    } else if last.is_some_and(|t| t.nonce >= latest) {
+    } else if sent_here {
         info!(
             %sender,
             nonce = plan.nonce,
             "our last transaction never reached a block or a pool; sending again at its nonce"
-        );
-    } else if pending > latest {
-        info!(
-            %sender,
-            latest,
-            pending,
-            "other transactions from this account are waiting; queuing after them"
         );
     }
     Ok(plan)
@@ -130,28 +130,21 @@ pub(crate) fn decide(
     fee: u128,
     tip: u128,
 ) -> TxPlan {
-    let pending = pending.max(latest);
-    let (nonce, fee, tip, replaces) = match last {
-        Some(t) if t.nonce >= latest => {
-            // Ours is not mined. A gap below it (`pending` short of its
-            // nonce) is filled first.
-            let nonce = t.nonce.min(pending);
-            let replaces = nonce == t.nonce && pending > t.nonce;
-            if replaces {
-                (
-                    nonce,
-                    replacement(t.max_fee_per_gas, fee),
-                    replacement(t.max_priority_fee_per_gas, tip),
-                    true,
-                )
-            } else {
-                (nonce, fee, tip, false)
-            }
-        },
-        _ => (pending, fee, tip, false),
+    let replaces = pending > latest;
+    let (fee, tip) = if !replaces {
+        (fee, tip)
+    } else if let Some(t) = last.filter(|t| t.nonce == latest) {
+        (
+            replacement(t.max_fee_per_gas, fee),
+            replacement(t.max_priority_fee_per_gas, tip),
+        )
+    } else {
+        // Sent before a restart, or by someone else: what it pays is not
+        // known, so the estimate stands in for it.
+        (replacement(fee, fee), replacement(tip, tip))
     };
     TxPlan {
-        nonce,
+        nonce: latest,
         max_fee_per_gas: fee.max(tip),
         max_priority_fee_per_gas: tip,
         replaces,
@@ -192,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_remembered_takes_the_pending_count() {
+    fn with_nothing_waiting_the_next_nonce_goes_out_at_the_estimate() {
         let plan = decide(None, 421, 421, FEE, TIP);
         assert_eq!(plan, TxPlan {
             nonce: 421,
@@ -200,12 +193,59 @@ mod tests {
             max_priority_fee_per_gas: TIP,
             replaces: false,
         });
-        // Someone else's transaction is waiting at 421: queue after it.
-        assert_eq!(decide(None, 421, 422, FEE, TIP).nonce, 422);
+    }
+
+    /// The review's case: the daemon restarts while its transaction waits
+    /// unmined at 421. Sent at the `pending` count, 422 could never be mined
+    /// before it, and every later attempt only replaced the 422. The new
+    /// process replaces the 421 itself, though it does not know what that
+    /// one pays: 25 % above the estimate, and 25 % more on every later
+    /// attempt.
+    #[test]
+    fn after_a_restart_the_transaction_stuck_at_the_next_nonce_is_replaced() {
+        let first = decide(None, 421, 422, FEE, TIP);
+        assert_eq!(first, TxPlan {
+            nonce: 421,
+            max_fee_per_gas: FEE + FEE / 4 + 1,
+            max_priority_fee_per_gas: TIP + TIP / 4 + 1,
+            replaces: true,
+        });
+        let second = decide(
+            sent(421, first.max_fee_per_gas, first.max_priority_fee_per_gas),
+            421,
+            422,
+            FEE,
+            TIP,
+        );
+        assert_eq!((second.nonce, second.replaces), (421, true));
+        assert!(second.max_fee_per_gas > first.max_fee_per_gas);
+        assert!(second.max_priority_fee_per_gas > first.max_priority_fee_per_gas);
+    }
+
+    /// Whatever was sent last, and however many transactions wait: the next
+    /// one takes the nonce the chain mines next, never one behind it.
+    #[test]
+    fn nothing_is_queued_behind_a_waiting_transaction() {
+        for last in [
+            None,
+            sent(420, FEE, TIP),
+            sent(421, FEE, TIP),
+            sent(422, FEE, TIP),
+            sent(430, FEE, TIP),
+        ] {
+            for pending in [422, 425] {
+                let plan = decide(last, 421, pending, FEE, TIP);
+                assert_eq!(
+                    (plan.nonce, plan.replaces),
+                    (421, true),
+                    "{last:?} {pending}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn a_mined_transaction_moves_on_to_the_pending_count() {
+    fn a_mined_transaction_moves_on_to_the_next_nonce() {
         let plan = decide(sent(421, FEE, TIP), 422, 422, FEE, TIP);
         assert_eq!((plan.nonce, plan.replaces), (422, false));
     }
@@ -511,6 +551,28 @@ mod end_to_end {
             .map(|tx| tx.nonce())
             .collect();
         assert_eq!(nonces, [421, 422]);
+    }
+
+    /// The review's case end to end: a process that has sent nothing yet —
+    /// one just restarted — finds a transaction waiting at 421. It sends at
+    /// 421, 25 % above the estimate, instead of at 422 behind it.
+    #[tokio::test]
+    async fn after_a_restart_the_stuck_transaction_is_replaced() {
+        // The estimate's fees, from an account with nothing waiting.
+        let reference = chain(421, vec![Reply::Refused]);
+        submit(&bridge(reference.clone(), 0x27).await).await;
+        let estimate = reference.lock().unwrap().sent[0].clone();
+
+        let stuck = chain(421, vec![Reply::Refused]);
+        stuck.lock().unwrap().pending = 422;
+        submit(&bridge(stuck.clone(), 0x28).await).await;
+        let stuck = stuck.lock().unwrap();
+        let tx = &stuck.sent[0];
+        assert_eq!(tx.nonce(), 421);
+        let fee = estimate.max_fee_per_gas();
+        let tip = estimate.max_priority_fee_per_gas().unwrap();
+        assert_eq!(tx.max_fee_per_gas(), fee + fee / 4 + 1);
+        assert_eq!(tx.max_priority_fee_per_gas(), Some(tip + tip / 4 + 1));
     }
 
     /// The review's case in `daemon-bridge`: our 421 waits unmined while

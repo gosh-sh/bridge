@@ -1044,11 +1044,12 @@ assigns it when the release is tagged.
 - **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
   primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
   `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
-  A request moves on when its endpoint times out, answers HTTP 429/5xx or a
-  rate-limit, quota or key error — that endpoint then waits 60 s at the back
-  of the line — or cannot serve that one request (an `eth_getLogs` span over
-  its cap, pruned history, a block it has not seen); a revert or `nonce too
-  low` is returned as before. A signed transaction goes to the first endpoint
+  A request moves on when its endpoint times out, answers HTTP 401/403 (a
+  rejected key), 404, 408, 429 or 5xx, or a rate-limit, quota or key error —
+  that endpoint then waits 60 s at the back of the line — or cannot serve
+  that one request (an `eth_getLogs` span over its cap, which Alchemy's free
+  tier answers with HTTP 400, pruned history, a block it has not seen); a
+  revert or `nonce too low` is returned as before. A signed transaction goes to the first endpoint
   that accepts it, with copies to the others, and `already known` counts as
   accepted. At start every endpoint is asked for its chain id: the relayer
   refuses to start when two disagree or none answers. `shellnet.common` now
@@ -2033,20 +2034,22 @@ assigns it when the release is tagged.
 
 ### Fixed
 
-- **A lost send no longer stalls the relayer until a restart.** alloy's
+- **A lost or stuck transaction no longer stalls the relayer.** alloy's
   default nonce manager read the nonce once and counted locally, advancing
   before the broadcast: when the RPC lost a send, every later transaction
   went out one nonce too high and waited for the missing one, and the bridge
-  stood still until the daemon was restarted. The relayer now reads the
-  `latest` and `pending` counts before every transaction and remembers what
-  it sent last: a lost send goes out again at its nonce, and a transaction
-  still waiting unmined at that nonce is replaced with fees 25 % higher than
-  the last attempt, at most 4 times the current fee estimate. Whatever waits
-  there counts as the relayer's own: on a key shared with someone else it can
-  be theirs. Otherwise transactions already waiting from the account are
-  queued behind, not replaced. The gas is estimated before the nonce is
-  chosen, so a call that would revert — a withdrawal whose anchor the bridge
-  does not hold yet — sends nothing and leaves the nonce and fees alone.
+  stood still until the daemon was restarted. A transaction stuck unmined
+  held everything behind it, restart or not. The relayer now reads the
+  `latest` and `pending` counts before every transaction and sends it at the
+  nonce the chain mines next. A transaction already waiting there is
+  replaced, at fees 25 % above what the relayer last paid at that nonce —
+  above the current estimate when it does not know, as after a restart —
+  and 25 % more on every later attempt, at most 4 times the current fee
+  estimate. The replaced transaction can be anyone's: give the relayer a key
+  of its own, and do not send from it by hand while a daemon runs. The gas
+  is estimated before the nonce is chosen, so a call that would revert — a
+  withdrawal whose anchor the bridge does not hold yet — sends nothing and
+  leaves the nonce and fees alone.
   `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
   `submit-*` commands all send this way.
 - **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a

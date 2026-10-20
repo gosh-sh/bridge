@@ -20,6 +20,8 @@ fn app() -> Html {
     let active_tab = use_state(|| Tab::Deposit);
     let wallet_connected = use_state(|| false);
     let wallet_address = use_state(|| None::<String>);
+    // True from the click until the wallet answers, either way.
+    let connecting = use_state(|| false);
 
     let on_tab_change = {
         let active_tab = active_tab.clone();
@@ -31,7 +33,11 @@ fn app() -> Html {
     let on_connect_wallet = {
         let wallet_connected = wallet_connected.clone();
         let wallet_address = wallet_address.clone();
+        let connecting = connecting.clone();
         Callback::from(move |_| {
+            if *connecting {
+                return;
+            }
             web_sys::console::log_1(&"Connect Wallet button clicked".into());
 
             // Check if MetaMask is installed
@@ -54,6 +60,8 @@ fn app() -> Html {
             // Connect to MetaMask
             let wallet_connected = wallet_connected.clone();
             let wallet_address = wallet_address.clone();
+            let connecting = connecting.clone();
+            connecting.set(true);
 
             spawn_local(async move {
                 match connect_wallet().await {
@@ -82,6 +90,7 @@ fn app() -> Html {
                         });
                     },
                 }
+                connecting.set(false);
             });
         })
     };
@@ -92,6 +101,7 @@ fn app() -> Html {
                 wallet_connected={*wallet_connected}
                 wallet_address={(*wallet_address).clone()}
                 on_connect={on_connect_wallet}
+                connecting={*connecting}
             />
 
             <main class="container">

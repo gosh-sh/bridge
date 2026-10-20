@@ -513,7 +513,17 @@ youngest matching event):
 
 The prover PK cache is warm from Step 6, so total wall time collapses
 to `submit + confirm` (~30–60s). Look for
-`withdrawByProof confirmed tx=0x...`.
+`withdrawByProof paid out tx_hash=0x...`.
+
+`withdraw-e2e` sends from `RELAYER_PRIVATE_KEY`, the key `daemon-live`
+sends from. Every transaction takes the account's next nonce and replaces
+whatever waits there, so a daemon transaction sent while the withdrawal
+waits unmined replaces it. `withdraw-e2e` then stops with
+`tx confirmation error: transaction 0x… was replaced: another transaction
+from 0x… took its nonce …; send it again` instead of waiting for it: run
+this step again. The bridge refuses a second payout for the same
+nullifier. To keep the two apart, pass another funded key with
+`--private-key`.
 
 Verify:
 

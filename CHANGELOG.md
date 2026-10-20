@@ -2073,6 +2073,17 @@ assigns it when the release is tagged.
   leaves the nonce and fees alone.
   `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
   `submit-*` commands all send this way.
+- **A transaction another one replaced is no longer waited for.** Every
+  transaction takes the account's next nonce and replaces whatever waits
+  there, so `daemon-live` could replace a withdrawal that `withdraw-e2e`
+  had sent from the same key, and `withdraw-e2e` then waited for it
+  forever. While a `relayer` command waits for a receipt it now watches the
+  account's `latest` count: once that has been past the transaction's nonce
+  for 30 s with no receipt, the wait ends with `tx confirmation error:
+  transaction 0x… was replaced: another transaction from 0x… took its nonce
+  …; send it again`. The daemons retry; `withdraw-e2e` and `submit-withdraw`
+  exit non-zero, and a second run is refused if the payout has landed
+  meanwhile (nullifier check).
 - **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a
   `withdrawByProof` receipt**, like `verifyBlock` and `applyBkSetUpdate`.
   They waited forever, so one dropped transaction held the withdraw scan;

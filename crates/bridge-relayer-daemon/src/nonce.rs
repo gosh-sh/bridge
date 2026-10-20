@@ -383,6 +383,8 @@ mod end_to_end {
         /// What happens to each `eth_sendRawTransaction`, in turn.
         replies: VecDeque<Reply>,
         sent: Vec<TxEnvelope>,
+        /// Every transaction sent is in a block, with a receipt.
+        mined: bool,
     }
 
     /// What the endpoint does with one `eth_sendRawTransaction`.
@@ -403,6 +405,7 @@ mod end_to_end {
             estimate_reverts: false,
             replies: replies.into(),
             sent: Vec::new(),
+            mined: false,
         }))
     }
 
@@ -433,6 +436,29 @@ mod end_to_end {
                     "gasUsedRatio": [0.5],
                     "reward": [["0x3b9aca00"]],
                 })),
+                "eth_getTransactionReceipt" if chain.mined => {
+                    let hash = request["params"][0].as_str()?;
+                    chain
+                        .sent
+                        .iter()
+                        .find(|tx| tx.tx_hash().to_string() == hash)?;
+                    ok(json!({
+                        "transactionHash": hash,
+                        "transactionIndex": "0x0",
+                        "blockHash": format!("0x{}", "11".repeat(32)),
+                        "blockNumber": "0x10",
+                        "from": format!("{:#x}", Address::repeat_byte(0x2a)),
+                        "to": format!("{:#x}", Address::repeat_byte(0x53)),
+                        "cumulativeGasUsed": "0x30d40",
+                        "gasUsed": "0x30d40",
+                        "effectiveGasPrice": "0x3b9aca00",
+                        "contractAddress": null,
+                        "logs": [],
+                        "logsBloom": format!("0x{}", "00".repeat(256)),
+                        "type": "0x2",
+                        "status": "0x1",
+                    }))
+                },
                 "eth_estimateGas" if chain.estimate_reverts => error(3, "execution reverted"),
                 "eth_estimateGas" => ok(json!("0x30d40")),
                 "eth_sendRawTransaction" => {
@@ -629,12 +655,68 @@ mod end_to_end {
         let chain = chain(421, vec![Reply::Accepted]);
         let bridge = bridge(chain.clone(), 0x26)
             .await
-            .with_withdraw_receipt_timeout(Duration::from_millis(300));
+            .with_withdraw_receipt_timeout(Duration::from_millis(300))
+            .with_receipt_polling(Duration::from_millis(50), Duration::from_millis(200));
         let reason = tokio::time::timeout(Duration::from_secs(10), submit(&bridge))
             .await
             .expect("the receipt timeout ends the wait");
         let hash = *chain.lock().unwrap().sent[0].tx_hash();
         assert!(reason.starts_with("tx confirmation error:"), "{reason}");
         assert!(reason.contains(&hash.to_string()), "{reason}");
+    }
+
+    /// The review's case: `withdraw-e2e` sends a withdrawal from the key
+    /// `daemon-live` uses, and the daemon's next transaction takes its
+    /// nonce. Without a receipt timeout the withdrawal was waited for
+    /// forever; it comes back as replaced, to be sent again.
+    #[tokio::test]
+    async fn a_withdrawal_another_transaction_replaced_is_not_waited_for() {
+        let chain = chain(421, vec![Reply::Accepted]);
+        let bridge = bridge(chain.clone(), 0x29)
+            .await
+            .with_receipt_polling(Duration::from_millis(50), Duration::from_millis(200));
+        let other_sender = {
+            let chain = chain.clone();
+            tokio::spawn(async move {
+                // Once the withdrawal is out, another transaction is mined
+                // at its nonce.
+                while chain.lock().unwrap().sent.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let mut chain = chain.lock().unwrap();
+                chain.latest = 422;
+                chain.pending = 422;
+            })
+        };
+        let reason = tokio::time::timeout(Duration::from_secs(10), submit(&bridge))
+            .await
+            .expect("a replaced withdrawal is not waited for forever");
+        other_sender.await.unwrap();
+        let hash = *chain.lock().unwrap().sent[0].tx_hash();
+        assert!(reason.starts_with("tx confirmation error:"), "{reason}");
+        assert!(reason.contains(&hash.to_string()), "{reason}");
+        assert!(reason.contains("was replaced"), "{reason}");
+        assert!(reason.contains("nonce 421"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_mined_withdrawal_is_paid() {
+        let chain = chain(421, vec![Reply::Accepted]);
+        chain.lock().unwrap().mined = true;
+        let bridge = bridge(chain.clone(), 0x2a)
+            .await
+            .with_receipt_polling(Duration::from_millis(50), Duration::from_millis(200));
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            bridge.submit_withdraw(&Bytes::from(vec![0u8; 4]), &inputs()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let hash = *chain.lock().unwrap().sent[0].tx_hash();
+        assert!(
+            matches!(outcome, WithdrawSubmitOutcome::Paid { tx_hash } if tx_hash == hash),
+            "{outcome:?}"
+        );
     }
 }

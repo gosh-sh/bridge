@@ -41,6 +41,13 @@ pub struct ChainBehindGuard {
 }
 
 impl ChainBehindGuard {
+    /// A poll that found a bundle past the bridge: the chain is not behind
+    /// it, so a run of polls behind ends here, as a head at or above the
+    /// bridge ends it in [`Self::observe_at`].
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     /// Record one poll's chain head against the bridge's last verified
     /// block, now. See [`Self::observe_at`].
     pub fn observe(&mut self, chain_head: u64, last_verified: u64) -> Result<(), RelayerError> {
@@ -186,6 +193,27 @@ mod tests {
             }
         }
         assert_eq!(stopped_at, Some(Duration::from_secs(540)));
+    }
+
+    /// The review's case: a poll that yields a bundle shows the chain past
+    /// the bridge, so polls behind on either side of it are not in a row.
+    #[test]
+    fn a_bundle_between_polls_behind_starts_the_count_again() {
+        let start = Instant::now();
+        let mut guard = ChainBehindGuard::default();
+        let behind = |guard: &mut ChainBehindGuard, secs: u64| {
+            guard.observe_at(start + Duration::from_secs(secs), 42_630, 24_018_944)
+        };
+        for secs in [0, 60, 120, 180] {
+            behind(&mut guard, secs).unwrap();
+        }
+        guard.reset();
+        // Without the reset the poll at 300 s would stop the daemon: five
+        // minutes after the first poll behind, and the sixth in a row.
+        for secs in [240, 300, 360, 420] {
+            behind(&mut guard, secs).unwrap();
+        }
+        assert!(behind(&mut guard, 540).is_err());
     }
 
     /// A replica that lags for two minutes after a start and then catches

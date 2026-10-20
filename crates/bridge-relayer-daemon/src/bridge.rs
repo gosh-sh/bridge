@@ -1008,6 +1008,9 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// ([`Self::with_withdraw_receipt_timeout`]); `None` waits until it
     /// comes.
     withdraw_receipt_timeout: Option<Duration>,
+    /// [`RECEIPT_POLL_INTERVAL`] and [`REPLACED_AFTER`] outside tests.
+    receipt_poll_every: Duration,
+    replaced_after: Duration,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -1033,6 +1036,8 @@ where
             scan: scan.normalized(),
             sender: None,
             withdraw_receipt_timeout: None,
+            receipt_poll_every: RECEIPT_POLL_INTERVAL,
+            replaced_after: REPLACED_AFTER,
         }
     }
 
@@ -1055,19 +1060,31 @@ where
         self
     }
 
-    /// `call` ready to go out from [`Self::with_sender`]'s account: its gas
-    /// estimated first, so a call that would revert leaves the nonce and
-    /// fees alone, then the nonce and fees [`crate::nonce`] plans,
-    /// remembered before the send. With the gas and fees set, `send()`
-    /// estimates nothing more and only broadcasts. Without a sender `call`
-    /// comes back as it is, for the provider's fillers. `Err` is the text of
-    /// the failed estimate or plan, the same a failed `send()` reports.
+    #[cfg(test)]
+    pub(crate) fn with_receipt_polling(
+        mut self,
+        every: Duration,
+        replaced_after: Duration,
+    ) -> Self {
+        self.receipt_poll_every = every;
+        self.replaced_after = replaced_after;
+        self
+    }
+
+    /// `call` ready to go out from [`Self::with_sender`]'s account, with the
+    /// nonce it takes: its gas estimated first, so a call that would revert
+    /// leaves the nonce and fees alone, then the nonce and fees
+    /// [`crate::nonce`] plans, remembered before the send. With the gas and
+    /// fees set, `send()` estimates nothing more and only broadcasts.
+    /// Without a sender `call` comes back as it is, for the provider's
+    /// fillers, and no nonce. `Err` is the text of the failed estimate or
+    /// plan, the same a failed `send()` reports.
     async fn prepare_send<'a, C: SolCall>(
         &'a self,
         call: alloy::contract::SolCallBuilder<&'a P, C, N>,
-    ) -> Result<alloy::contract::SolCallBuilder<&'a P, C, N>, String> {
+    ) -> Result<(alloy::contract::SolCallBuilder<&'a P, C, N>, Option<u64>), String> {
         let Some(sender) = self.sender else {
-            return Ok(call);
+            return Ok((call, None));
         };
         let call = call.from(sender);
         let gas = call.estimate_gas().await.map_err(|e| e.to_string())?;
@@ -1075,11 +1092,85 @@ where
             .await
             .map_err(|e| e.to_string())?;
         crate::nonce::remember(sender, &plan);
-        Ok(call
+        let call = call
             .gas(gas)
             .nonce(plan.nonce)
             .max_fee_per_gas(plan.max_fee_per_gas)
-            .max_priority_fee_per_gas(plan.max_priority_fee_per_gas))
+            .max_priority_fee_per_gas(plan.max_priority_fee_per_gas);
+        Ok((call, Some(plan.nonce)))
+    }
+
+    /// The receipt of a transaction just sent, for at most `timeout` when
+    /// one is set: [`Self::wait_for_receipt`] when [`Self::prepare_send`]
+    /// planned its nonce, alloy's receipt watcher otherwise. `Err` names the
+    /// transaction.
+    async fn confirm(
+        &self,
+        pending: alloy::providers::PendingTransactionBuilder<N>,
+        nonce: Option<u64>,
+        timeout: Option<Duration>,
+    ) -> Result<N::ReceiptResponse, String> {
+        let hash = *pending.tx_hash();
+        match (self.sender, nonce) {
+            (Some(sender), Some(nonce)) => {
+                self.wait_for_receipt(sender, nonce, hash, timeout).await
+            },
+            _ => pending
+                .with_timeout(timeout)
+                .get_receipt()
+                .await
+                .map_err(|e| format!("{e} (transaction {hash})")),
+        }
+    }
+
+    /// Polls for the receipt of `hash`, sent from `sender` at `nonce`.
+    /// Every transaction takes the account's next nonce and replaces
+    /// whatever waits there ([`crate::nonce`]), so another process sending
+    /// from the same key, or the other leg of `daemon-bridge`, can replace
+    /// this one. Once the account's `latest` count has been past `nonce`
+    /// for [`REPLACED_AFTER`] with no receipt for `hash`, another
+    /// transaction took the nonce and this one can never be mined: the wait
+    /// ends there instead of running into `timeout` or, without one, going
+    /// on forever. The grace covers an RPC whose receipts lag its counts.
+    async fn wait_for_receipt(
+        &self,
+        sender: Address,
+        nonce: u64,
+        hash: B256,
+        timeout: Option<Duration>,
+    ) -> Result<N::ReceiptResponse, String> {
+        let provider = self.contract.provider();
+        let started = tokio::time::Instant::now();
+        let mut nonce_taken_since: Option<tokio::time::Instant> = None;
+        loop {
+            match provider.get_transaction_receipt(hash).await {
+                Ok(Some(receipt)) => return Ok(receipt),
+                Ok(None) => {},
+                Err(e) => tracing::debug!(%hash, error = %e, "receipt poll failed; polling on"),
+            }
+            match provider.get_transaction_count(sender).latest().await {
+                Ok(latest) if latest > nonce => {
+                    let since = *nonce_taken_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= self.replaced_after {
+                        return Err(format!(
+                            "transaction {hash} was replaced: another transaction from {sender} \
+                             took its nonce {nonce}; send it again"
+                        ));
+                    }
+                },
+                Ok(_) => nonce_taken_since = None,
+                Err(e) => tracing::debug!(%sender, error = %e, "nonce poll failed; polling on"),
+            }
+            if let Some(timeout) = timeout {
+                if started.elapsed() >= timeout {
+                    return Err(format!(
+                        "no receipt for transaction {hash} within {} s",
+                        timeout.as_secs()
+                    ));
+                }
+            }
+            tokio::time::sleep(self.receipt_poll_every).await;
+        }
     }
 
     /// One `storedLastSeenBlockSeqNo` view call at `latest`: the cheap probe
@@ -1307,33 +1398,28 @@ where
                 permanent,
             }
         };
-        let call = match self.prepare_send(call).await {
-            Ok(call) => call,
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
             Err(e) => return Ok(send_failed(&e)),
         };
         match call.send().await {
-            Ok(pending) => {
-                let tx_hash = *pending.tx_hash();
-                match pending
-                    .with_timeout(self.withdraw_receipt_timeout)
-                    .get_receipt()
-                    .await
-                {
-                    Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
-                        tx_hash: receipt.transaction_hash(),
-                    }),
-                    Err(e) => {
-                        // Post-send confirmation failures (RPC dropped, receipt
-                        // wait timed out) are transient by nature — the tx
-                        // may still land or the RPC may recover — so we do
-                        // not park the proof here.
-                        let reason = format!("tx confirmation error: {e} (transaction {tx_hash})");
-                        Ok(WithdrawSubmitOutcome::Reverted {
-                            reason,
-                            permanent: false,
-                        })
-                    },
-                }
+            Ok(pending) => match self
+                .confirm(pending, nonce, self.withdraw_receipt_timeout)
+                .await
+            {
+                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
+                    tx_hash: receipt.transaction_hash(),
+                }),
+                Err(e) => {
+                    // Post-send confirmation failures (RPC dropped, receipt
+                    // wait timed out, transaction replaced) are transient by
+                    // nature — the tx may still land, or a new send pays out —
+                    // so we do not park the proof here.
+                    Ok(WithdrawSubmitOutcome::Reverted {
+                        reason: format!("tx confirmation error: {e}"),
+                        permanent: false,
+                    })
+                },
             },
             Err(e) => Ok(send_failed(&e)),
         }
@@ -1410,16 +1496,17 @@ where
             B256::from(update.sibling_h4_7),
             B256::from(update.sibling_h8_15),
         );
-        let call = match self.prepare_send(call).await {
-            Ok(call) => call,
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
             Err(e) => {
                 return Ok(BkSetUpdateSubmitOutcome::Reverted {
                     reason: format!("applyBkSetUpdate send failed: {e}"),
                 });
             },
         };
+        // No bound here: `send_bk_set_update_checked` bounds the whole call.
         match call.send().await {
-            Ok(pending) => match pending.get_receipt().await {
+            Ok(pending) => match self.confirm(pending, nonce, None).await {
                 Ok(receipt) => {
                     let bn = receipt.block_number().ok_or_else(|| {
                         RelayerError::other("applyBkSetUpdate receipt missing block_number")
@@ -2176,6 +2263,14 @@ pub const BK_UPDATE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 /// them — waits for its receipt.
 pub const WITHDRAW_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// How often a wait for a receipt polls the receipt and the sender's
+/// `latest` count: a third of a Sepolia block.
+pub const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(4);
+
+/// How long the sender's `latest` count must stay past a transaction's
+/// nonce, with no receipt for it, before the wait takes it for replaced.
+pub const REPLACED_AFTER: Duration = Duration::from_secs(30);
+
 /// `true` when a `verifyBlock` or `applyBkSetUpdate` failure says nothing
 /// about the transaction itself: the RPC refused or dropped the request
 /// (rate limit, connection, nonce, fee) or the receipt never came. The
@@ -2332,8 +2427,8 @@ where
         // counts toward `max_attempts_abort` instead of hanging the daemon.
         const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
-        let call = match self.prepare_send(call).await {
-            Ok(call) => call,
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
             Err(e) => {
                 return Ok(SubmitOutcome::Reverted {
                     reason: format!("verifyBlock send failed: {e}"),
@@ -2342,21 +2437,18 @@ where
         };
         let send_res = call.send().await;
         let (tx_hash, receipt_block) = match send_res {
-            Ok(pending) => {
-                let pending = pending.with_timeout(Some(RECEIPT_TIMEOUT));
-                match pending.get_receipt().await {
-                    Ok(receipt) => {
-                        let bn = receipt.block_number().ok_or_else(|| {
-                            RelayerError::other("verifyBlock receipt missing block_number")
-                        })?;
-                        (Some(receipt.transaction_hash()), bn)
-                    },
-                    Err(e) => {
-                        return Ok(SubmitOutcome::Reverted {
-                            reason: format!("tx confirmation error: {e}"),
-                        });
-                    },
-                }
+            Ok(pending) => match self.confirm(pending, nonce, Some(RECEIPT_TIMEOUT)).await {
+                Ok(receipt) => {
+                    let bn = receipt.block_number().ok_or_else(|| {
+                        RelayerError::other("verifyBlock receipt missing block_number")
+                    })?;
+                    (Some(receipt.transaction_hash()), bn)
+                },
+                Err(e) => {
+                    return Ok(SubmitOutcome::Reverted {
+                        reason: format!("tx confirmation error: {e}"),
+                    });
+                },
             },
             Err(e) => {
                 return Ok(SubmitOutcome::Reverted {

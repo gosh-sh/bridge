@@ -246,6 +246,8 @@ impl BlockSource for LiveBlockSource {
                     persist_driver(&d, &self.state_paths)?;
                     return Ok(None);
                 }
+                // A bundle past the bridge: the chain is not behind it.
+                self.chain_behind.lock().await.reset();
                 let data = AnBlockData::from(&b);
                 *self.pending_bundle.lock().await = Some(b);
                 Ok(Some(data))

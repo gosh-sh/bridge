@@ -12,6 +12,73 @@ verifiers deployed as Yul bytecode.
 
 ---
 
+## The current deployment
+
+Sepolia ↔ shellnet, verified against both chains on 2026-10-20. **No address is
+pinned in this repository any more** — the CLI, the relayers and the web form all
+take theirs from configuration, so a redeploy cannot leave a stale one compiled
+in. The values live here instead, and this table is what to copy them from.
+
+Read them back from the chain before anything that costs money: a bridge nobody
+advances takes a deposit and then cannot finalise it.
+
+### Ethereum (Sepolia, chain id 11155111)
+
+| | |
+|---|---|
+| `AckiNackiBridge` | `0x8413212869201d4e0d525e6067b605318029d451` |
+| deployment block | `11955698` |
+| USDC | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` — Circle's canonical Sepolia token, from [faucet.circle.com](https://faucet.circle.com) |
+| deposit entry point | `deposit(uint256 amount, bytes32 anAccount)`, selector `0xc9630cb0` |
+| `Deposit` topic0 | `0x6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe` |
+| anchoring | L2, stride 16384 |
+
+This deploy has **no AAVE pool** and cannot be given one: `aavePool` is
+`immutable` and reads zero, so `setAaveEnabled(true)` reverts
+`InvalidAaveAddress`. See [`docs/aave-yield.md`](docs/aave-yield.md).
+
+Earlier Sepolia bridges are still trusted by the Acki Nacki side and still hold
+USDC, but they carry the previous deposit ABI and their events cannot be proven
+against the key this bridge now embeds. Do not send deposits to them.
+
+### Acki Nacki (shellnet)
+
+| | |
+|---|---|
+| `eccUSDCBridge` | `0:1a1a…1a1a` (the palindromic zerostate address) |
+| version | `1.12.0`, code hash `a1fd7d19…` |
+| beacon light client | `0:1afeaa0fdd997e8177d60d0c8dbbe44c5a5e008f56194240f5f40da250582967` |
+| eccUSDC | ECC currency id `3` |
+| GraphQL | `https://shellnet.ackinacki.org/graphql` |
+
+### What to set
+
+The CLI reads these from `$BRIDGE_CONFIG` or the environment; the relayers from
+their own `.env` beside the binary (`scripts/ursus/*.env.example` are the
+templates); the web form takes `BRIDGE_CONTRACT_ADDRESS` at build time.
+
+```bash
+BRIDGE_ADDRESS=0x8413212869201d4e0d525e6067b605318029d451
+BRIDGE_DEPLOY_BLOCK=11955698
+FROM_BLOCK=11955698                       # deposit relayer's log scan start
+RPC_URL=https://rpc.sepolia.ethpandaops.io   # must keep logs back to the deploy block
+```
+
+### How long a deposit takes
+
+About 25 minutes end to end, and almost all of it is Ethereum's. The Acki Nacki
+side credits only against a *finalized* Ethereum block, so the anchor frontier
+runs a **normal lag of roughly 56 blocks — about 13 minutes** behind the chain
+head. That lag is constant: anchors advance at the chain's own rate, in batches
+of 32 blocks every ~6.4 minutes, and every block between two anchors is covered.
+
+A deposit is therefore refused by `finalizeDeposit` until its block is anchored,
+and the relayer retries until it is. Rejections in the log before that point are
+the wait, not a failure. Measured on 2026-10-20: deposit mined 16:57 UTC, block
+anchored 17:19, eccUSDC credited 17:22.
+
+---
+
 ## The two directions
 
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls

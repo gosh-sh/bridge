@@ -159,6 +159,7 @@ pub enum LastOutcome {
     Finalized { deposit_id: u64 },
     AlreadyFinalized { deposit_id: u64 },
     NotYetAvailable { deposit_id: u64 },
+    WaitingForAnchor { deposit_id: u64 },
     ProofFailed { deposit_id: u64 },
     AnRejected { deposit_id: u64 },
     AnPending { deposit_id: u64 },
@@ -248,6 +249,17 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     }
                     summary.not_yet_available += 1;
                     (false, LastOutcome::NotYetAvailable {
+                        deposit_id,
+                    })
+                },
+                Ok(TickOutcome::WaitingForAnchor {
+                    deposit_id,
+                }) => {
+                    if let Some(m) = &metrics {
+                        m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    summary.not_yet_available += 1;
+                    (false, LastOutcome::WaitingForAnchor {
                         deposit_id,
                     })
                 },
@@ -369,6 +381,9 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
         Ok(TickOutcome::NotYetAvailable {
             ..
         }) => "not_yet_available",
+        Ok(TickOutcome::WaitingForAnchor {
+            ..
+        }) => "waiting_for_anchor",
         Ok(TickOutcome::ProofFailed {
             ..
         }) => "proof_failed",

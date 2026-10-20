@@ -105,6 +105,7 @@ anything else (`Relayer::run_until_shutdown`).
 |---|---|---|---|
 | `finalized`, `already_finalized` | voucher deployed / already there | next deposit | resets the count |
 | `not_yet_available` | deposit not made, or not `--confirmations` deep | wait | no |
+| `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference and wait with backoff; no proving or broadcast, later ids remain runnable | **no** |
 | `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; later ids go first. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
 | `proof_failed` | the prover failed or timed out (900 s, `SubprocessProverConfig::timeout`) | retried | yes |
 | `an_rejected` | AN refused the deposit (exit code in the log) | retried | yes |
@@ -119,6 +120,19 @@ anything else (`Relayer::run_until_shutdown`).
   that time (`AnInterfaceSubmitter::settle`);
 - the lane is paused, `ERR_PAUSED` (231). The daemon keeps retrying until the owner
   unpauses.
+
+Before proving, the daemon reads `isAcceptedBlockHash(chainId, blockHash)`
+on its configured AN token bridge. `--confirmations` controls Ethereum log
+discovery; it does not guarantee that the light-client relayer has delivered
+the block's anchor. A `false` result is `waiting_for_anchor`, not an AN rejection.
+A getter error or malformed response remains an `error` and does not allow
+proving or submission. An actual `finalizeDeposit` rejection is still
+`an_rejected`; the readiness check does not suppress contract failures.
+
+Waiting deposits keep `anchor_wait_started_unix` in their outstanding entry.
+The first wait time survives retries and restarts and is cleared once the
+anchor is observed (or the deposit is already finalized). Existing state files
+without this optional field remain readable.
 
 None of these is evidence against the deposit. If a pending submit did land, the next
 tick sees the voucher and moves on without proving again. If it did not, the next tick
@@ -184,7 +198,8 @@ recommendations, not tested values.
 | Condition | Meaning |
 |---|---|
 | `time() - deposit_relayer_last_tick_timestamp_seconds > 900` | daemon dead or hung (a tick includes the prover, up to 900 s) |
-| `deposit_relayer_outstanding_deposits > 0` | a failed deposit is waiting to retry; this is the signal for a stuck id. `target_deposit_id` is the forward id on an idle relayer, so `deposit_counter - target` stays 0 while outstanding ids sit below it |
+| `deposit_relayer_outstanding_deposits > 0` | deposits remain to retry, including normal anchor waits; inspect their outcome and age before treating this as a failure. `target_deposit_id` is the forward id on an idle relayer, so `deposit_counter - target` stays 0 while outstanding ids sit below it |
+| `deposit_relayer_waiting_for_anchor > 0` and `time() - deposit_relayer_oldest_anchor_wait_timestamp_seconds > 3600` | the oldest observed anchor wait has exceeded an hour; inspect the light-client relayer and block coverage. The timestamp is 0 when no deposit is waiting and survives restarts |
 | `deposit_relayer_eth_deposit_counter - deposit_relayer_target_deposit_id > 0` and `time() - deposit_relayer_last_finalized_timestamp_seconds > 3600` | new deposits are waiting at the high-water mark and none was delivered for an hour |
 | `deposit_relayer_attempts_since_progress >= 3` | the last failed outstanding id's attempt count; it resets when *any* later id finalizes, so it is not a stuck-queue signal on its own |
 | `deposit_relayer_parked_deposits > 0` | manual finish needed (§3) |

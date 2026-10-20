@@ -79,6 +79,10 @@ pub enum SubmitOutcome {
 
 #[async_trait]
 pub trait AnSubmitter: Send + Sync {
+    /// Read the AN bridge's canonical-chain gate before starting the prover.
+    /// Errors must propagate: an unreadable gate is not permission to submit.
+    async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
+
     /// Cheap pre-check: has this deposit already been finalised on AN? Used
     /// to skip the expensive proof-generation step on replays. A backend that
     /// can't tell returns `Ok(false)` (the submit path is still safe — AN
@@ -236,6 +240,10 @@ impl MockAnSubmitter {
 
 #[async_trait]
 impl AnSubmitter for MockAnSubmitter {
+    async fn is_block_accepted(&self, _: &DepositEvent) -> Result<bool, RelayerError> {
+        Ok(true)
+    }
+
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         Ok(self
             .inner
@@ -670,6 +678,24 @@ fn parse_exit_code_loose(msg: &str) -> Option<i32> {
 
 #[async_trait]
 impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
+    async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
+        let output = self
+            .client
+            .run_getter(
+                &self.config.token_bridge,
+                "isAcceptedBlockHash",
+                json!({
+                    "chainId": event.source_chain_id.to_string(),
+                    "blockHash": format!("{:#x}", event.block_hash),
+                }),
+            )
+            .await?;
+        output
+            .get("value0")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| RelayerError::other("isAcceptedBlockHash: expected a boolean value0"))
+    }
+
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         let Some(check) = &self.voucher_check else {
             return Ok(false);
@@ -704,6 +730,27 @@ mod tests {
 
     use super::*;
     use crate::{prover::MockProofGenerator, types::DepositEvent};
+
+    #[tokio::test]
+    async fn anchor_getter_requires_a_boolean_and_propagates_read_errors() {
+        use acki_nacki_interface::MockAckiNacki;
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = AnInterfaceSubmitter::new(client.clone(), AnSubmitConfig {
+            from: "unused".into(),
+            token_bridge: "unused".into(),
+            confirm_timeout_secs: 1,
+        });
+        assert!(sub.is_block_accepted(&event(0)).await.is_err());
+        for value in [false, true] {
+            client.set_getter_response(json!({"value0": value}));
+            assert_eq!(sub.is_block_accepted(&event(0)).await.unwrap(), value);
+        }
+        for output in [json!({}), json!({"value0": "false"}), json!({"value0": 1})] {
+            client.set_getter_response(output);
+            assert!(sub.is_block_accepted(&event(0)).await.is_err());
+        }
+        assert_eq!(client.transaction_count(), 0);
+    }
 
     fn event(id: u64) -> DepositEvent {
         DepositEvent {

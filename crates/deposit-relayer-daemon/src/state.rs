@@ -70,6 +70,10 @@ pub struct OutstandingDeposit {
     pub deposit_id: u64,
     pub attempts: u32,
     pub retry_after_unix: u64,
+    /// First observed wait for this deposit's block anchor. Kept across retries
+    /// and restarts so monitoring can distinguish a long wait from a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_wait_started_unix: Option<u64>,
     /// Ethereum block that holds this deposit's log, when known. A retry
     /// can scan that one block if the tx hash is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,6 +335,33 @@ impl RelayerState {
         );
     }
 
+    /// Wait for an anchor without counting a failed attempt or blocking later
+    /// ids.
+    pub fn record_anchor_wait(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        backoff_secs: u64,
+        log: DepositLogRef,
+    ) {
+        self.record_pending(deposit_id, now, backoff_secs, Some(log));
+        if let Some(entry) = self
+            .outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)
+        {
+            entry.anchor_wait_started_unix.get_or_insert(now);
+        }
+    }
+
+    /// The anchor is present; subsequent failures are no longer anchor waits.
+    pub fn clear_anchor_wait(&mut self, deposit_id: u64) -> bool {
+        self.outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)
+            .is_some_and(|o| o.anchor_wait_started_unix.take().is_some())
+    }
+
     /// Park a stuck deposit. The high-water mark only moves if this id is
     /// above it. The id is recorded in `parked_deposit_ids` for operator
     /// follow-up and dropped from outstanding so it is not retried
@@ -401,6 +432,7 @@ impl RelayerState {
             deposit_id,
             attempts,
             retry_after_unix,
+            anchor_wait_started_unix: None,
             block_number: log.map(|l| l.block_number),
             tx_hash: log.map(|l| format!("{:#x}", l.tx_hash)),
             log_index: log.map(|l| l.log_index),
@@ -522,6 +554,31 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn anchor_wait_preserves_its_first_timestamp_and_old_state_remains_readable() {
+        let mut s = RelayerState::default();
+        let log = DepositLogRef {
+            block_number: 42,
+            tx_hash: alloy::primitives::B256::repeat_byte(1),
+            log_index: 0,
+        };
+        s.record_anchor_wait(0, 10, 2, log);
+        s.record_anchor_wait(0, 20, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().anchor_wait_started_unix, Some(10));
+        assert_eq!(s.outstanding(0).unwrap().attempts, 0);
+        let mut encoded = serde_json::to_value(&s).unwrap();
+        encoded["outstanding_deposits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("anchor_wait_started_unix");
+        let old: RelayerState = serde_json::from_value(encoded).unwrap();
+        assert_eq!(old.outstanding(0).unwrap().anchor_wait_started_unix, None);
+        assert!(s.clear_anchor_wait(0));
+        assert!(!s.clear_anchor_wait(0));
+        s.record_anchor_wait(0, 30, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().anchor_wait_started_unix, Some(30));
+    }
 
     fn deployment(chain: u64) -> DeploymentIdentity {
         DeploymentIdentity::new(chain, Address::repeat_byte(0x99), "0x1a1a1a1a1a")

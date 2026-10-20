@@ -45,6 +45,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The deposit relayer waits for the deposit block's AN anchor before
+  proving or submitting it.** Ethereum `--confirmations` can finish before
+  the light-client relayer delivers that block. Previously each retry built
+  a proof and called `finalizeDeposit` too early, producing exit 224 and
+  `an_rejected` alerts. The daemon now checks
+  `isAcceptedBlockHash(chainId, blockHash)` first and reports
+  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` while the
+  block is absent, without counting failures or parking the deposit. Later
+  deposits remain runnable. Getter errors remain tick errors. The new
+  `deposit_relayer_waiting_for_anchor` and
+  `deposit_relayer_oldest_anchor_wait_timestamp_seconds` gauges expose the
+  count and oldest wait, including across restarts. Upgrade the daemon;
+  no contract redeploy or VK change is needed.
+
 - **The web deposit form explains what the wallet said instead of printing
   the raw rejection.** Clicking *Connect Wallet* twice before answering
   MetaMask used to put the whole EIP-1193 error object — code, message and

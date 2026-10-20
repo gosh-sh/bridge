@@ -22,6 +22,23 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The web deposit form explains what the wallet said instead of printing
+  the raw rejection.** Clicking *Connect Wallet* twice before answering
+  MetaMask used to put the whole EIP-1193 error object — code, message and
+  the extension's stack — into a browser `alert()`. The form now reads the
+  error's `code` and says what to do: `-32002` points at the extensions
+  button, because MetaMask keeps a pending connection request behind its
+  toolbar icon and never raises a window for it; `4001` reports a rejection
+  in one line; `4100` asks for the wallet to be unlocked; `4902` explains the
+  prompt that offers to add Sepolia. Anything else shows the provider's own
+  `message`. The untouched object still goes to the browser console.
+- **The web deposit form's *Connect Wallet* button no longer sends a second
+  request while the first is open.** It is disabled and reads *Check
+  MetaMask…* until the wallet answers, so a second click cannot produce the
+  `-32002` it used to.
+
 ### Documentation
 
 - Clarify the owner-anchor flip trust model (bridge-audit #57 / #106).

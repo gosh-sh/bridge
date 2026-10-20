@@ -17,8 +17,8 @@ End-user CLI for the Acki Nacki ↔ EVM bridge, one subcommand per direction:
 deposit in a few steps, starting with `scripts/install.sh`. This README is
 the reference behind it.
 
-For withdrawals this README is the **default-user runbook**: point the CLI at the
-pinned shellnet L2 deploy — whose bundle relayer runs on our server —
+For withdrawals this README is the **default-user runbook**: obtain a paired
+deployment and its deployment block from the operator, point the CLI at it,
 bring your own Sepolia burner wallet, deploy a fresh AN multisig with
 the bundled script, and drive one withdrawal end-to-end. You deploy
 no bridge and run no daemon.
@@ -94,13 +94,12 @@ a mid-flight crash leaves a resumable trace (v1: refuse-duplicate +
 ## Prerequisites
 
 - A bridge relayer daemon (`daemon-live`) is running against the same
-  `AckiNackiBridge` deploy — for the pinned default path this is our
-  server; nothing runs on your side. Its `verifyBlock` submissions
+  `AckiNackiBridge` deploy, maintained by its operator. Its `verifyBlock` submissions
   are what advance the on-chain state the CLI polls in stage 5. No
   shared filesystem or daemon-produced JSON is needed: everything the
   CLI needs lives in contract storage.
 - USDCBridge is deployed and unpaused; treasury is seeded on the EVM
-  side (the pinned deploy is shared — prior withdrawals may have
+  side (a shared deployment's prior withdrawals may have
   drained it; you'll top it up in Step 3 if short).
 - The `--from` multisig is deployed, single-custodian, and holds ≥
   amount USDC in ECC[3]. `scripts/deploy_msig_and_mint.sh` does both
@@ -119,7 +118,8 @@ a mid-flight crash leaves a resumable trace (v1: refuse-duplicate +
 
 ## Timing model
 
-The pinned shellnet deploy is **L2-anchored**: bundles land at
+The shipped profile defaults to **L2 anchors**; confirm your deployment's
+anchor level before using it. For an L2-anchored deployment, bundles land at
 `W² = 16 384` seq_no boundaries ≈ 91 min of chain-time at ~3 seq/s.
 End-to-end wall time from `withdraw` invocation to
 `withdrawByProof` receipt is dominated by the wait for the next
@@ -453,42 +453,41 @@ export WITHDRAW_AMOUNT=1.000000                                                 
 
 The C4 submit reverts `WithdrawTreasuryShortfall(amount, 0)` if
 `treasuryBalance() < WITHDRAW_AMOUNT` — the on-chain USDC that pays
-the recipient comes from the bridge treasury. The pinned deploy is
-shared; prior withdrawals may have drained it.
+the recipient comes from the bridge treasury. On a shared deployment,
+prior withdrawals may have drained it.
 
 ```bash
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 # Compare against your WITHDRAW_AMOUNT scaled to µUSDC (6 decimals: 1 USDC = 1_000_000).
 ```
 
-If it covers, skip to Step 4. If short, top up from Circle's public
-Sepolia faucet (the pinned deploy is wired to Circle canonical Sepolia
-USDC at `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`; that same
-contract is what Circle's faucet dispenses):
+If it covers, skip to Step 4. Otherwise, read `usdc()` and obtain that exact
+token from its faucet. Circle's public Sepolia faucet supplies canonical USDC
+at `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`; use it only if your
+deployment's `usdc()` matches. Other deployments may use a different test token.
 
 ```bash
 # Sanity-check what the bridge expects (defends against USDC rotations):
 cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
-# expect: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+# Use the returned token address below.
 
 # a) Open https://faucet.circle.com, select Ethereum Sepolia, paste your burner
 #    address (cast wallet address --private-key $BURNER_PRIVATE_KEY), and request
 #    USDC — 10 USDC per call, throttled per address/IP. Repeat if you need more.
 # b) Approve + deposit into the bridge:
-export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+export USDC=$(cast call "$BRIDGE_ADDRESS" 'usdc()(address)' --rpc-url "$RPC_URL")
 export AMOUNT=10000000    # 10.000000 USDC in µUSDC — comfortably covers a 1 USDC burn
+AN_ACCOUNT_ID="${WITHDRAW_FROM##*::}"  # your own destination, from Step 2
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 cast send $BRIDGE_ADDRESS 'deposit(uint256,bytes32)' \
-  $AMOUNT 0x1111111111111111111111111111111111111111111111111111111111111111 \
+  $AMOUNT "0x${AN_ACCOUNT_ID#0x}" \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 ```
 
-The dummy AN destination is safe on shellnet — no live AN-side
-listener consumes the phantom `Deposit` event. **Do NOT use** on a
-live bridge with an active AN-side indexer — you'll create a ghost
-credit.
+Use an AN account you control: this is a real deposit, and the deposit relayer
+can finalize its credit to that account.
 
 ### Step 4 — Dry-run
 
@@ -605,7 +604,7 @@ Grep verdict from the saved log (both smoke wrappers `tee` to
 LOG=$(ls -t ./work_dir/withdraw_*_*.log | head -1)
 grep -E 'stage [1-6]/6|withdrawByProof paid out|withdraw complete:|^error:' "$LOG"
 grep -E 'resolved anchor:|anchor_layer=|anchor_stride=' "$LOG"
-# On the pinned L2 deploy: `resolved anchor: L2`, `anchor_layer=L2`,
+# On an L2-anchored deployment: `resolved anchor: L2`, `anchor_layer=L2`,
 # `anchor_stride=16384`. The log is 1-INDEXED (L1/L2); the witness file
 # is 0-indexed, so the same fact reads as 1 there:
 # `layer_idx` is nested under `.anchor`; at the top level it is null.
@@ -852,8 +851,8 @@ deterministic and reused.
 
 ### On-chain submit reverted (exit 13)
 
-`withdrawByProof` reverted on Sepolia. The most common cause on the
-pinned deploy is `WithdrawTreasuryShortfall` — the treasury drained
+`withdrawByProof` reverted on Sepolia. One possible cause is
+`WithdrawTreasuryShortfall` — the treasury drained
 below your amount between Step 3's check and Step 5. Top it up as in
 Step 3, re-run with `--allow-retry`; the proof regenerates
 deterministically against the topped-up state and the resume path
@@ -1082,7 +1081,7 @@ change.
 crates/ackinacki-bridge/                       ← run cwd
 ├── config/
 │   ├── bridge_config                          ← default profile symlink → bridge_config.shellnet
-│   ├── bridge_config.shellnet                 ← pinned shellnet L2 reference deploy
+│   ├── bridge_config.shellnet                 ← shellnet template; set the paired deployment
 │   ├── bridge_config.local                    ← local devnet
 │   └── bridge_config.mainnet                  ← placeholder
 ├── docs/

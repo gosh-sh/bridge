@@ -78,10 +78,10 @@ USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
 USDC_BRIDGE_KEY_PATH=../bridge-prover-libraries/python/contracts/USDCBridge.shellnet.keys.json
 
 # --- L2 anchor selection ------------------------------------------------------
-# The pinned shellnet deploy is L2-anchored (anchor_level=2); the CLI
-# refuses to talk to it without the anchor flag, and --i-know-the-wait
-# acknowledges the ~91 min per-bundle L2 cadence that stage 4b
-# (wait-for-coverage) may block on.
+# Defaults for an L2-anchored deployment (anchor_level=2). Confirm these
+# against your configured bridge; use layer 1 for an L1-anchored deployment.
+# --i-know-the-wait acknowledges the ~91 min per-bundle L2 cadence that
+# stage 4b (wait-for-coverage) may block on.
 BRIDGE_ANCHOR_LAYER=2
 BRIDGE_I_KNOW_THE_WAIT=true
 

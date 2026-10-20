@@ -156,6 +156,13 @@ assigns it when the release is tagged.
   `BRIDGE_CONTRACT_ADDRESS` set to that same new EVM deployment; without it,
   deposits and approvals are disabled before any wallet request.
 
+  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.11.0
+  before requesting a transaction. For the new deployment, configure the
+  matching EVM/AN pair and its trust settings first, install the matching prover
+  and clients, then publish the new addresses and start deposits. Do not switch
+  clients alone against an earlier deployment. The installer preserves an
+  existing profile, so its deployment values must be updated by the operator.
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
@@ -678,8 +685,8 @@ assigns it when the release is tagged.
   --examples`) on every relayer host and anywhere `ackinacki-bridge
   deposit` proves. Proofs made with the previous key (bridge 1.6.0) stop
   verifying, and a stale `target/release/examples/<name>` produces proofs
-  the new key rejects. `ackinacki-bridge deposit` refuses a bridge older
-  than 1.7.0.
+  the new key rejects. The current minimum AN bridge version for
+  `ackinacki-bridge deposit` is 1.11.0, as described above.
 
 - **The deposit-prover verification key is rotated, and the rotation
   closes two forgeries.** Under the previous key — and every earlier one
@@ -736,8 +743,8 @@ assigns it when the release is tagged.
   generates the new ~3.4 GB key and then deletes the old one, so
   `data/` briefly needs room for both. `ackinacki-bridge deposit`
   installs get the prover tools from a release (`install.sh`), so
-  they need a new release; this CLI refuses a bridge older than
-  1.7.0, whose key its proofs do not match.
+  they need a new release; the current CLI refuses an AN bridge older than
+  1.11.0, as described above.
 
   The prover now refuses a deposit it cannot prove before loading
   the SRS or the key. `fetch_deposit_data` exits 3 when the

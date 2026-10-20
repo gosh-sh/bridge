@@ -41,7 +41,7 @@ recipient through `confirmDeposit`.
 | `AN_DAPP_ID` | `0` | `eccUSDCBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
 | `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not proven again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
-| `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks: a broken deposit stays in `outstanding_deposits` and later ids still go through. Alert on `deposit_relayer_outstanding_deposits` (§7). |
+| `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks: a broken deposit stays in `outstanding_deposits` and later ids still go through. That queue also contains normal anchor waits; monitor failed attempts and prolonged waits as described in §7. |
 | `--backoff-initial-secs` / `-max-secs` / `-multiplier` | defaults 5 / 120 / 2 | A zero initial delay or a multiplier of 0 is rejected at start-up (`BackoffConfig::validate`); either would busy-loop. |
 | `DEPOSIT_RELAYER_METRICS_ADDR` | loopback or a monitoring-only interface | Prometheus `GET /metrics`; alerts in §7. |
 | systemd | `Restart=on-failure`, `TimeoutStopSec=180`, `KillMode=mixed` (as in `scripts/ursus/deposit-relayer.service`) | A tick can take minutes while the prover runs, and shutdown is checked only between ticks. |
@@ -102,14 +102,16 @@ A stuck deposit no longer holds every later user. What gets the stuck one moving
 ## 4. Pending, timeouts and backoff (QC-OFF-11)
 
 Each tick ends in one outcome (`relayer::TickOutcome`). The daemon resets backoff to
-`--backoff-initial-secs` after progress and doubles it (up to `--backoff-max-secs`) after
-anything else (`Relayer::run_until_shutdown`).
+`--backoff-initial-secs` after progress or a normal `waiting_for_anchor` outcome.
+An anchor wait also resets any delay accumulated during earlier idle polls or
+errors. Other non-progress outcomes double it up to `--backoff-max-secs`
+(`Relayer::run_until_shutdown`). Per-deposit retry deadlines still apply.
 
 | Outcome | Meaning | Automatic handling | Counts toward parking |
 |---|---|---|---|
 | `finalized`, `already_finalized` | voucher deployed / already there | next deposit | resets the count |
 | `not_yet_available` | deposit not made, or not `--confirmations` deep | wait | no |
-| `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference and wait with backoff; no proving or broadcast, later ids remain runnable | **no** |
+| `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference and poll at the initial daemon interval, honoring per-id retry deadlines; no proving or broadcast, later ids remain runnable | **no** |
 | `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; ready retries alternate with new work. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
 | `proof_failed` | the prover failed or timed out (900 s, `SubprocessProverConfig::timeout`) | retried | yes |
 | `an_rejected` | AN refused the deposit (exit code in the log) | retried | yes |

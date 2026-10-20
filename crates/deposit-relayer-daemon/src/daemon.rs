@@ -2,8 +2,8 @@
 //!
 //! [`Relayer::run_until_shutdown`] drives `tick()` forever (until a passed-in
 //! shutdown future resolves), applying exponential backoff between
-//! non-success outcomes and resetting the backoff the moment a deposit is
-//! finalised. It exposes structured [`RelayerMetrics`] for an external scrape
+//! idle polls or failures and resetting the delay on progress or a normal
+//! anchor wait. It exposes structured [`RelayerMetrics`] for an external scrape
 //! and is shutdown-aware via `tokio::select!`, so a SIGINT during a long
 //! backoff sleep is honoured at the next tick boundary (never mid-`tick`, so a
 //! `Finalized` outcome is always followed by a flushed `state.json`).
@@ -174,7 +174,8 @@ pub enum LastOutcome {
 
 impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// Drive `tick()` forever (or until `shutdown` resolves), applying
-    /// exponential backoff between non-success outcomes.
+    /// exponential backoff on idle polls and failures. Healthy anchor waits
+    /// use the initial polling delay.
     pub async fn run_until_shutdown<F>(
         &mut self,
         backoff: BackoffConfig,
@@ -210,7 +211,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
             prom::record_tick_outcome(outcome_label(&outcome_or_err));
 
-            let (success, last_tag) = match outcome_or_err {
+            let (reset_backoff, last_tag) = match outcome_or_err {
                 Ok(TickOutcome::Finalized {
                     deposit_id, ..
                 }) => {
@@ -259,7 +260,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
                     }
                     summary.not_yet_available += 1;
-                    (false, LastOutcome::WaitingForAnchor {
+                    // A healthy wait is active work, not an idle poll or a
+                    // failure. Reset any preceding backoff and keep checking
+                    // the retry queue at the initial polling interval.
+                    (true, LastOutcome::WaitingForAnchor {
                         deposit_id,
                     })
                 },
@@ -346,7 +350,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             };
             summary.last_outcome = Some(last_tag);
 
-            if success {
+            if reset_backoff {
                 current_delay = backoff.initial;
             } else {
                 current_delay = backoff.bump(current_delay);

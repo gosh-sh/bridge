@@ -55,10 +55,15 @@ assigns it when the release is tagged.
   block is absent, without counting failures or parking the deposit. New
   deposits and ready retries take alternating turns, so incoming traffic
   cannot indefinitely delay deposits whose anchors have arrived. Getter
-  errors remain tick errors. The new
+  errors remain tick errors. Normal anchor waits reset the daemon polling
+  delay to `--backoff-initial-secs` rather than growing it toward the maximum.
+  The new
   `deposit_relayer_waiting_for_anchor` and
   `deposit_relayer_oldest_anchor_wait_timestamp_seconds` gauges expose the
-  count and oldest wait, including across restarts. Upgrade the daemon;
+  count and oldest wait, including across restarts.
+  `deposit_relayer_outstanding_deposits` now includes normal anchor waits:
+  adjust alerts that treat any non-zero value as a failure to use failed
+  attempts or prolonged anchor waits instead. Upgrade the daemon;
   no contract redeploy or VK change is needed.
 
 - **The web deposit form explains what the wallet said instead of printing

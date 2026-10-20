@@ -903,6 +903,67 @@ mod tests {
         assert_eq!(gate.inner.finalized_count(), 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn anchor_waits_reset_idle_or_failure_backoff_and_keep_polling() {
+        for start_with_error in [false, true] {
+            let dir = tempdir().unwrap();
+            let source = Arc::new(InMemoryDepositSource::new());
+            let gate = Arc::new(AnchorGate::default());
+            let prover = Arc::new(CountingProver::default());
+            if start_with_error {
+                source.insert(deposit(0));
+                gate.read_fails.store(true, Ordering::Relaxed);
+            }
+            let mut relayer = Relayer::new(
+                RelayerConfig {
+                    outstanding_backoff_secs: 0,
+                    ..RelayerConfig::new(dir.path().join("state.json"))
+                },
+                source.clone(),
+                prover.clone(),
+                gate.clone(),
+            )
+            .unwrap();
+            let counters = crate::daemon::RelayerMetrics::new();
+            let backoff = crate::daemon::BackoffConfig {
+                initial: Duration::from_secs(2),
+                max: Duration::from_secs(16),
+                multiplier: 2,
+            };
+            let summary = relayer
+                .run_until_shutdown(backoff, Some(counters.clone()), async {
+                    let mut switched_to_wait = false;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let snap = counters.snapshot();
+                        if snap.ticks >= 4 && !switched_to_wait {
+                            assert_eq!(snap.current_backoff_secs, 16);
+                            source.insert(deposit(0));
+                            gate.read_fails.store(false, Ordering::Relaxed);
+                            switched_to_wait = true;
+                        }
+                        if snap.ticks >= 5 {
+                            assert_eq!(
+                                snap.current_backoff_secs, 2,
+                                "normal anchor waits must reset and retain the initial polling \
+                                 delay"
+                            );
+                            if snap.ticks >= 10 {
+                                return;
+                            }
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(summary.tick_errors, if start_with_error { 4 } else { 0 });
+            assert_eq!(summary.finalized, 0);
+            assert_eq!(summary.an_rejected, 0);
+            assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+            assert_eq!(gate.inner.finalized_count(), 0);
+        }
+    }
+
     fn deposit(id: u64) -> DepositEvent {
         DepositEvent {
             deposit_id: id,

@@ -7,10 +7,10 @@
 //!
 //! - `last_processed_deposit_id` is the high-water mark of deposits that are
 //!   done (finalized, parked, or unprovable).
-//! - `outstanding_deposits` is the sparse set of ids that failed and still have
-//!   to be retried. Each entry has its own attempt count and
-//!   `retry_after_unix`. A stuck deposit stays there and retries on its own
-//!   schedule; it does not block a later id.
+//! - `outstanding_deposits` is the sparse set of ids waiting for an anchor, a
+//!   pending submission, or a retry after failure. Each entry has its own
+//!   attempt count and `retry_after_unix`. A stuck deposit stays there and
+//!   retries on its own schedule; it does not block a later id.
 //! - `last_attempt_deposit_id` records the most recent attempt regardless of
 //!   outcome.
 //! - `attempts_since_progress` mirrors the attempt count of the last failed
@@ -64,7 +64,8 @@ impl DeploymentIdentity {
     }
 }
 
-/// A deposit that failed and is still to be retried.
+/// A deposit waiting for an anchor, a pending submission, or a retry after
+/// failure.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OutstandingDeposit {
     pub deposit_id: u64,

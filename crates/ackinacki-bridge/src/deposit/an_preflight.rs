@@ -43,7 +43,7 @@ pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 11, 0);
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
 
 /// Refuses a bridge older than the deposit key this build proves for.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
@@ -391,7 +391,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.11.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -433,14 +433,14 @@ mod tests {
         .await
     }
 
-    /// A bridge whose version says 1.11.0 but whose code has no
+    /// A bridge whose version says 1.12.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.11.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -486,7 +486,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.11.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -506,8 +506,15 @@ mod tests {
         .unwrap();
         assert_eq!(ui.warnings().len(), 2);
         // The version is not relaxed: a resend is only safe on a fixed bridge.
-        // Stay at the deposit key so this exercises the stricter minimum.
-        let min = Some(BridgeVersion(1, 12, 0));
+        // One above the bridge this build ships, so the refusal is the point
+        // being tested rather than an accident of which version the mock
+        // reports. Written against the constant so a contract bump cannot
+        // quietly turn this into an equality and stop exercising anything.
+        let min = Some(BridgeVersion(
+            NEWEST_KNOWN_BRIDGE_VERSION.0,
+            NEWEST_KNOWN_BRIDGE_VERSION.1,
+            NEWEST_KNOWN_BRIDGE_VERSION.2 + 1,
+        ));
         assert!(
             run_with(&an, BRIDGE, 11_155_111, evm_bridge, &target, &ui, min, false, true)
                 .await
@@ -576,6 +583,46 @@ mod tests {
         assert!(e.contains("deposit key"), "{e}");
         assert!(key_verdict(key, key).is_ok());
         assert!(key_verdict(BridgeVersion(key.0, key.1, key.2 + 1), key).is_ok());
+    }
+
+    /// `DEPOSIT_KEY_BRIDGE_VERSION` is the floor the CLI refuses below, and
+    /// getting it wrong costs a deposit: a bridge at the old version passes
+    /// the check, `finalizeDeposit` rejects the proof, and the USDC is
+    /// already in the EVM bridge with no refund path.
+    ///
+    /// Every other test here is relative — it compares the constant with
+    /// itself — so none of them notices when the constant is left behind by
+    /// a contract rebuild. This one reads the version out of the contract
+    /// source this build ships and demands they agree. It caught nothing on
+    /// the way in; it exists because a merge of two branches that both
+    /// called themselves 1.11.0 left this constant pointing at a bridge
+    /// carrying the previous key.
+    #[test]
+    fn the_deposit_key_floor_matches_the_contract_this_build_ships() {
+        let src = include_str!("../../../../contracts/an/exchange/eccUSDCBridge.sol");
+        let line = src
+            .lines()
+            .find(|l| l.trim_start().starts_with("string constant version"))
+            .expect("eccUSDCBridge.sol declares a version constant");
+        let shipped = line
+            .split('"')
+            .nth(1)
+            .expect("the version constant is a quoted string");
+
+        assert_eq!(
+            DEPOSIT_KEY_BRIDGE_VERSION.to_string(),
+            shipped,
+            "DEPOSIT_KEY_BRIDGE_VERSION is {}, but the eccUSDCBridge this build ships is {shipped}. \
+             A bridge below the floor is refused; a bridge at the floor is trusted to hold this \
+             build's deposit key. Bump the constant with the contract.",
+            DEPOSIT_KEY_BRIDGE_VERSION,
+        );
+        assert_eq!(
+            NEWEST_KNOWN_BRIDGE_VERSION.to_string(),
+            shipped,
+            "NEWEST_KNOWN_BRIDGE_VERSION is {}, the shipped contract is {shipped}",
+            NEWEST_KNOWN_BRIDGE_VERSION,
+        );
     }
 
     #[test]

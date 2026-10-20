@@ -233,7 +233,7 @@ export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 
 Sepolia is the only deposit network in this version; Ethereum mainnet is
 not one at all. The new EVM deployment must expose `deposit(uint256,bytes32)`
-and be paired with an AN bridge at version 1.11.0 or newer using this build's
+and be paired with an AN bridge at version 1.12.0 or newer using this build's
 key. Older deployment addresses are incompatible. The RPC, Acki Nacki endpoint,
 prover directory and state directory come from the profile. When reusing a
 profile, replace its old deployment values before running this build.

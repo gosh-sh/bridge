@@ -8,9 +8,6 @@ abstract contract eccUSDCBridgeModifiers is eccUSDCBridgeErrors {
     uint32 constant USDC_ECC_ID = 3;
     uint128 constant USDC_DECIMALS_FACTOR = 1_000_000;
 
-    uint128 constant MAX_BRIDGE_TRANSFER = 50 * USDC_DECIMALS_FACTOR;
-    uint128 constant MAX_BRIDGE_TVL = 10000 * USDC_DECIMALS_FACTOR;
-
     address constant ACCUMULATOR_ADDRESS = address.makeAddrStd(0, 0x3535353535353535353535353535353535353535353535353535353535353535);
     address constant USDC_BRIDGE_ADDRESS = address.makeAddrStd(0, 0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a);
 

@@ -310,10 +310,15 @@ pub trait ProofAggregator: Send + Sync {
 /// Configuration for the out-of-process `aggregate-proof` invocation.
 #[derive(Clone, Debug)]
 pub struct SubprocessAggregatorConfig {
-    /// Path to the `crates/bridge-evm-aggregator` root. The prebuilt release
-    /// binary is expected at `<dir>/target/release/aggregate-proof`; if absent
-    /// we fall back to `cargo run --release --bin aggregate-proof`.
-    pub aggregator_dir: PathBuf,
+    /// The prebuilt `aggregate-proof` binary (`cargo build --release --bin
+    /// aggregate-proof` in `crates/bridge-evm-aggregator`). Nothing is built
+    /// here; the commands that run this check the path at startup with
+    /// [`crate::require_executable`].
+    pub aggregate_proof_bin: PathBuf,
+    /// Working directory of the subprocess. `None` runs it in the binary's
+    /// own directory. Every path the aggregator is given is absolute, so this
+    /// only matters for what the binary resolves on its own.
+    pub work_dir: Option<PathBuf>,
     /// Directory of committed verifier files; `aggregate-proof` self-checks
     /// against the `.sol` sources. Passed as `--verifiers-dir`.
     pub verifiers_dir: PathBuf,
@@ -339,12 +344,13 @@ pub struct SubprocessAggregatorConfig {
 
 impl SubprocessAggregatorConfig {
     pub fn new(
-        aggregator_dir: impl Into<PathBuf>,
+        aggregate_proof_bin: impl Into<PathBuf>,
         verifiers_dir: impl Into<PathBuf>,
         params_dir: impl Into<PathBuf>,
     ) -> Self {
         Self {
-            aggregator_dir: aggregator_dir.into(),
+            aggregate_proof_bin: aggregate_proof_bin.into(),
+            work_dir: None,
             verifiers_dir: verifiers_dir.into(),
             params_dir: params_dir.into(),
             timeout: Duration::from_secs(1800),
@@ -510,8 +516,11 @@ pub struct SubprocessAggregator {
 
 impl SubprocessAggregator {
     pub fn new(mut config: SubprocessAggregatorConfig) -> Self {
-        if let Ok(abs) = config.aggregator_dir.canonicalize() {
-            config.aggregator_dir = abs;
+        if let Ok(abs) = config.aggregate_proof_bin.canonicalize() {
+            config.aggregate_proof_bin = abs;
+        }
+        if let Some(abs) = config.work_dir.as_ref().and_then(|d| d.canonicalize().ok()) {
+            config.work_dir = Some(abs);
         }
         if let Ok(abs) = config.verifiers_dir.canonicalize() {
             config.verifiers_dir = abs;
@@ -520,7 +529,7 @@ impl SubprocessAggregator {
             config.params_dir = abs;
         }
         // Not there yet — the aggregator writes it — so made absolute rather
-        // than canonical: the subprocess runs in `aggregator_dir`, and a
+        // than canonical: the subprocess runs in its own directory, and a
         // relative path (a relative `--snark-dir`, the CLI's default) would
         // land there instead of where the caller reads it.
         if let Some(report) = config.slot_report.as_mut() {
@@ -577,13 +586,15 @@ impl SubprocessAggregator {
         msg
     }
 
-    fn release_bin(&self) -> Option<PathBuf> {
-        let bin = self
-            .config
-            .aggregator_dir
-            .join("target/release")
-            .join(AGGREGATE_BIN);
-        bin.is_file().then_some(bin)
+    /// Where the subprocess runs: `work_dir`, else the binary's directory.
+    fn work_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.config.work_dir {
+            return dir.clone();
+        }
+        match self.config.aggregate_proof_bin.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => PathBuf::from("."),
+        }
     }
 
     /// The command for `args`. `RUST_LOG` is not passed on: a filter written
@@ -592,17 +603,8 @@ impl SubprocessAggregator {
     fn command(&self, args: &[String]) -> tokio::process::Command {
         use tokio::process::Command;
 
-        let mut cmd = if let Some(bin) = self.release_bin() {
-            let mut c = Command::new(bin);
-            c.current_dir(&self.config.aggregator_dir).args(args);
-            c
-        } else {
-            let mut c = Command::new("cargo");
-            c.current_dir(&self.config.aggregator_dir)
-                .args(["run", "--release", "--bin", AGGREGATE_BIN, "--"])
-                .args(args);
-            c
-        };
+        let mut cmd = Command::new(&self.config.aggregate_proof_bin);
+        cmd.current_dir(self.work_dir()).args(args);
         // Killed when the wait is abandoned: a timed-out aggregator left
         // running keeps its memory and its pk-cache writes, beside whatever
         // proof the operator starts next.
@@ -650,7 +652,7 @@ impl ProofAggregator for SubprocessAggregator {
             "agg_calldata_{verifier_name}_{}.bin",
             std::process::id()
         ));
-        // The subprocess is spawned with `current_dir = aggregator_dir`, so a
+        // The subprocess is spawned in its own directory, so a
         // relative `inner_snark` (e.g. the CLI's `--snark-dir=./shplonk-snark`
         // default) would resolve against the wrong CWD and fail with ENOENT.
         // Canonicalize here — the snark was just written by
@@ -677,10 +679,7 @@ impl ProofAggregator for SubprocessAggregator {
             },
             Err(_) => {
                 // Killed here rather than on drop, so that what it said
-                // last — waiting for another keygen, say — is quoted. Under
-                // the `cargo run` fallback this kills cargo, not the
-                // aggregator it started; `ackinacki-bridge` requires the
-                // release binary.
+                // last — waiting for another keygen, say — is quoted.
                 child.start_kill().ok();
                 tokio::time::timeout(OUTPUT_GRACE, child.wait()).await.ok();
                 let said = collected(stderr, OUTPUT_GRACE).await.quote();
@@ -1396,10 +1395,11 @@ impl SnarkWrapper for MockSnarkWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prover_bin::test_support::install_script;
 
     #[test]
     fn subprocess_aggregate_args_are_stable() {
-        let cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        let cfg = SubprocessAggregatorConfig::new("/agg/aggregate-proof", "/verifiers", "/params");
         let agg = SubprocessAggregator {
             config: cfg,
         };
@@ -1422,7 +1422,7 @@ mod tests {
 
     #[test]
     fn subprocess_aggregate_args_include_pk_cache_when_set() {
-        let cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params")
+        let cfg = SubprocessAggregatorConfig::new("/agg/aggregate-proof", "/verifiers", "/params")
             .with_pk_cache_dir("/params/pk_cache");
         let agg = SubprocessAggregator {
             config: cfg,
@@ -1448,7 +1448,8 @@ mod tests {
 
     #[test]
     fn subprocess_aggregate_args_include_the_slot_report_when_set() {
-        let mut cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        let mut cfg =
+            SubprocessAggregatorConfig::new("/agg/aggregate-proof", "/verifiers", "/params");
         cfg.slot_report = Some(PathBuf::from("/snark/aggregator-slot"));
         let agg = SubprocessAggregator {
             config: cfg,
@@ -1575,10 +1576,8 @@ mod tests {
         // that has to be gone; `exec` matters, without it `sh` forks `sleep`
         // and only the shell would be killed.
         let dir = tempfile::TempDir::new().unwrap();
-        let bin_dir = dir.path().join("target/release");
-        std::fs::create_dir_all(&bin_dir).unwrap();
         let pidfile = dir.path().join("child.pid");
-        let bin = bin_dir.join(AGGREGATE_BIN);
+        let bin = dir.path().join(AGGREGATE_BIN);
         install_script(
             &bin,
             &format!(
@@ -1587,7 +1586,7 @@ mod tests {
                 p = pidfile.display()
             ),
         );
-        let mut cfg = SubprocessAggregatorConfig::new(dir.path(), dir.path(), dir.path());
+        let mut cfg = SubprocessAggregatorConfig::new(&bin, dir.path(), dir.path());
         cfg.timeout = Duration::from_secs(5);
         cfg.timeout_flag = Some("--prover-timeout-s");
         let agg = SubprocessAggregator::new(cfg);
@@ -1655,9 +1654,7 @@ mod tests {
     /// lines to stderr and one to stdout, then writes calldata to `--out`
     /// and exits 0 — or exits 1 without it when `fail`.
     fn chatty_aggregator(dir: &Path, lines: usize, fail: bool) {
-        let bin_dir = dir.join("target/release");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let bin = bin_dir.join(AGGREGATE_BIN);
+        let bin = dir.join(AGGREGATE_BIN);
         let end = if fail {
             "echo 'Error: the last word' >&2\necho >&2\necho 'Caused by:' >&2\necho '    the \
              cause' >&2\nexit 1\n"
@@ -1671,25 +1668,6 @@ mod tests {
                  i=$((i+1)); done\necho 'Aggregator shape match'\n{end}"
             ),
         );
-    }
-
-    /// Put an executable `script` at `bin`. Copied there by `cp`, not
-    /// written from this process: a test running beside this one may fork
-    /// while this process holds the file open for writing, and the child
-    /// holds it until it execs — exec'ing the script meanwhile fails with
-    /// `ETXTBSY`.
-    fn install_script(bin: &Path, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        let source = bin.with_extension("src");
-        std::fs::write(&source, script).unwrap();
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let copied = std::process::Command::new("cp")
-            .arg(&source)
-            .arg(bin)
-            .status()
-            .unwrap();
-        assert!(copied.success());
     }
 
     /// What is logged on this thread, from now until the guard is dropped.
@@ -1737,7 +1715,7 @@ mod tests {
     /// A config for a fake aggregator under `dir`, with a budget a broken
     /// test runs into well before anyone waits for it.
     fn fake_config(dir: &Path) -> SubprocessAggregatorConfig {
-        let mut cfg = SubprocessAggregatorConfig::new(dir, dir, dir);
+        let mut cfg = SubprocessAggregatorConfig::new(dir.join(AGGREGATE_BIN), dir, dir);
         cfg.timeout = Duration::from_secs(30);
         cfg
     }
@@ -1765,7 +1743,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let go = dir.path().join("go");
         install_script(
-            &dir.path().join("target/release").join(AGGREGATE_BIN),
+            &dir.path().join(AGGREGATE_BIN),
             &format!(
                 "#!/bin/sh\necho ' WARN bridge_evm_aggregator::cache: waiting for another keygen' \
                  >&2\nwhile [ ! -e {go} ]; do sleep 0.05; done\nwhile [ \"$1\" != --out ]; do \
@@ -1876,7 +1854,8 @@ mod tests {
 
     #[test]
     fn a_timeout_names_the_flag_that_raises_it_only_where_there_is_one() {
-        let mut cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        let mut cfg =
+            SubprocessAggregatorConfig::new("/agg/aggregate-proof", "/verifiers", "/params");
         let fixed = SubprocessAggregator {
             config: cfg.clone(),
         }
@@ -1950,9 +1929,10 @@ mod tests {
 
     #[test]
     fn a_relative_slot_report_is_made_absolute() {
-        // The aggregator runs in `aggregator_dir`: a relative `--snark-dir`
+        // The aggregator runs in its own directory: a relative `--snark-dir`
         // — the CLI's default — would put the report where nobody reads it.
-        let mut cfg = SubprocessAggregatorConfig::new("/agg", "/verifiers", "/params");
+        let mut cfg =
+            SubprocessAggregatorConfig::new("/agg/aggregate-proof", "/verifiers", "/params");
         cfg.slot_report = Some(PathBuf::from("shplonk-snark/aggregator-slot"));
         let agg = SubprocessAggregator::new(cfg);
         let args = agg.args(

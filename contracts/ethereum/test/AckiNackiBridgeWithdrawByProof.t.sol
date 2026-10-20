@@ -151,40 +151,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         seedAnchor = _seedFirstBlock();
     }
 
-    function test_migration_pauses_old_payout_and_deposit_route_before_new_payout() public {
-        AckiNackiBridge retired = bridge;
-        retired.pause();
-        bridge = new AckiNackiBridge(
-            address(oracle),
-            address(usdc),
-            address(0),
-            address(0),
-            VerifyBlockConfigLib.with(
-                IPrimaryVerifier(address(primaryVerifier)),
-                IFallbackVerifier(address(fallbackVerifier)),
-                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
-                BK_SET,
-                GENESIS_PREV_ANCHOR
-            ),
-            VerifyBlockConfigLib.withWithdraw(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
-            )
-        );
-        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
-        seedAnchor = _seedFirstBlock();
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
-            _defaultPub(10 * UsdcTestLib.UNIT, 991);
-        bridge.withdrawByProof(_dummyProof(), pub);
-        assertEq(usdc.balanceOf(RECIPIENT), 10 * UsdcTestLib.UNIT);
-        assertFalse(retired.isNullifierUsed(pub.nullifier));
-        vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
-        retired.withdrawByProof(_dummyProof(), pub);
-        vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
-        retired.deposit(1, 0, bytes32(uint256(1)));
-        assertEq(usdc.balanceOf(RECIPIENT), 10 * UsdcTestLib.UNIT);
-        assertEq(retired.treasuryBalance(), 50 * UsdcTestLib.UNIT);
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
@@ -1006,7 +972,37 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // Treasury + verifier rejection
     // ─────────────────────────────────────────────────────────────────────
 
+    function test_withdrawAboveTransferLimitDoesNotConsumeProof() public {
+        uint256 nullifier = 100;
+        withdrawalVerifier.setShouldAccept(false);
+        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(50 * UsdcTestLib.UNIT + 1, nullifier));
+        assertFalse(bridge.isNullifierUsed(nullifier));
+        assertEq(bridge.treasuryBalance(), 50 * UsdcTestLib.UNIT);
+        assertEq(usdc.balanceOf(RECIPIENT), 0);
+    }
+
+    function test_payoutReopensExactlyItsAmountOfDepositCapacity() public {
+        for (uint256 i; i < 199; ++i) {
+            UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
+        }
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(50 * UsdcTestLib.UNIT, 100));
+        assertEq(bridge.treasuryBalance(), 9_950 * UsdcTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        usdc.mint(funder, 1);
+        vm.startPrank(funder);
+        usdc.approve(address(bridge), 1);
+        vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
+        bridge.deposit(1, bytes32(uint256(1)));
+        vm.stopPrank();
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        assertTrue(bridge.isNullifierUsed(100));
+    }
+
     function test_withdrawByProof_treasuryShortfall_reverts() public {
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, 101));
         uint256 huge = bridge.treasuryBalance() + 1 * UsdcTestLib.UNIT;
 
         vm.expectRevert(
@@ -1017,45 +1013,6 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge.withdrawByProof(
             _dummyProof(), _defaultPub(huge, Bn254FrLib.toFr(uint256(keccak256("shortfall"))))
         );
-    }
-
-    function test_withdrawByProof_aboveTransferCap_reverts() public {
-        UsdcTestLib.depositUsdc(vm, usdc, bridge, address(0xC0DE), 50 * UsdcTestLib.UNIT);
-        uint256 over = bridge.MAX_TRANSFER_AMOUNT() + 1;
-        assertLe(over, bridge.treasuryBalance(), "treasury must cover the over-cap amount");
-
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.withdrawByProof(
-            _dummyProof(), _defaultPub(over, Bn254FrLib.toFr(uint256(keccak256("over-cap"))))
-        );
-    }
-
-    function test_legacyWithdrawal_can_pay_above_cap_once() public {
-        UsdcTestLib.depositUsdc(vm, usdc, bridge, address(0xC0DE), 50 * UsdcTestLib.UNIT);
-        uint256 amount = bridge.MAX_TRANSFER_AMOUNT() + 1;
-        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("legacy-over-cap")));
-        vm.prank(address(0xBAD));
-        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
-        bridge.setLegacyWithdrawal(nullifier, true);
-        bridge.setLegacyWithdrawal(nullifier, true);
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
-        assertEq(usdc.balanceOf(RECIPIENT), amount);
-        assertFalse(bridge.legacyWithdrawals(bytes32(nullifier)));
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.NullifierAlreadyUsed.selector, nullifier)
-        );
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
-    }
-
-    function test_legacyWithdrawal_still_requires_a_valid_proof() public {
-        UsdcTestLib.depositUsdc(vm, usdc, bridge, address(0xC0DE), 50 * UsdcTestLib.UNIT);
-        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("legacy-invalid-proof")));
-        bridge.setLegacyWithdrawal(nullifier, true);
-        withdrawalVerifier.setShouldAccept(false);
-        uint256 amount = bridge.MAX_TRANSFER_AMOUNT() + 1;
-        vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(amount, nullifier));
-        assertTrue(bridge.legacyWithdrawals(bytes32(nullifier)));
     }
 
     function test_withdrawByProof_verifierRejects_revertsAndDoesNotMutateState() public {

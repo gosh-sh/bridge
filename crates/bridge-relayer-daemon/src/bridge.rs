@@ -920,9 +920,9 @@ mod sol_bindings {
             /// not yet registered by the verifyBlock lane) so a permanently
             /// bad proof does not hold up the whole queue — and so
             /// `decode_withdraw_revert` can name them.
-            error TransferTooLarge();
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
+            error TransferTooLarge();
             error NullifierAlreadyUsed(uint256 nullifier);
             error FieldElementOutOfRange(uint256 value);
             error DstChainIdMismatch(uint256 supplied, uint256 expected);
@@ -944,6 +944,7 @@ mod sol_bindings {
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
+            function MAX_TRANSFER_AMOUNT() external view returns (uint256);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
@@ -1380,6 +1381,15 @@ where
     pub async fn treasury_balance(&self) -> Result<U256, RelayerError> {
         self.contract
             .treasuryBalance()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// Maximum amount the bridge pays in one withdrawal, in micro-USDC.
+    pub async fn max_transfer_amount(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .MAX_TRANSFER_AMOUNT()
             .call()
             .await
             .map_err(map_contract_err)
@@ -1945,8 +1955,8 @@ pub enum WithdrawSubmitOutcome {
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
     let permanent_selectors: [[u8; 4]; 10] = [
-        AckiNackiBridge::TransferTooLarge::SELECTOR,
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
+        AckiNackiBridge::TransferTooLarge::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
         AckiNackiBridge::UnsupportedTokenId::SELECTOR,
@@ -2021,9 +2031,9 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
     use AckiNackiBridge::AckiNackiBridgeErrors as E;
     let word = |v: U256| format!("0x{v:064x}");
     let (name, args) = match e {
-        E::TransferTooLarge(_) => ("TransferTooLarge", String::new()),
         E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
         E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
+        E::TransferTooLarge(_) => ("TransferTooLarge", String::new()),
         E::NullifierAlreadyUsed(x) => (
             "NullifierAlreadyUsed",
             format!("nullifier: {}", word(x.nullifier)),
@@ -2575,7 +2585,19 @@ mod tests {
     }
 
     #[test]
-    fn over_cap_withdrawal_is_named_and_parked() {
+    fn classify_withdraw_identity_mismatch_is_permanent() {
+        let reason = format!(
+            "revert data: {}",
+            selector_hex_of::<AckiNackiBridge::WithdrawIdentityMismatch>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent,
+        );
+    }
+
+    #[test]
+    fn excessive_withdrawal_is_parked_and_names_the_limit() {
         let reason = format!(
             "execution reverted: {}",
             selector_hex_of::<AckiNackiBridge::TransferTooLarge>()
@@ -2587,18 +2609,6 @@ mod tests {
         assert_eq!(
             decode_withdraw_revert(&reason).unwrap().rendered,
             "TransferTooLarge()"
-        );
-    }
-
-    #[test]
-    fn classify_withdraw_identity_mismatch_is_permanent() {
-        let reason = format!(
-            "revert data: {}",
-            selector_hex_of::<AckiNackiBridge::WithdrawIdentityMismatch>()
-        );
-        assert_eq!(
-            classify_withdraw_revert(&reason),
-            WithdrawRevertKind::Permanent,
         );
     }
 

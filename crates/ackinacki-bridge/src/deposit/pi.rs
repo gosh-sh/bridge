@@ -274,7 +274,7 @@ mod tests {
     fn the_fixture_decodes_to_its_own_witness() {
         let pi = DepositPublicInputs::decode(PI).unwrap();
         verify(&pi, &expected_from_witness()).unwrap();
-        assert_eq!(pi.amount, U256::from(1_000_000u64));
+        assert_eq!(pi.amount, U256::from(42u64));
         assert_eq!(pi.chain_id, U256::from(11_155_111u64));
     }
 

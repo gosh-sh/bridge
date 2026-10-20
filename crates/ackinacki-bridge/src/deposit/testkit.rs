@@ -198,6 +198,18 @@ impl FakeEvm {
             .insert((to, selector), Script::new([ret]));
     }
 
+    /// Set the limits of an empty bridge implementing the volume-cap ABI.
+    pub fn set_volume_limits(&self, bridge: Address) {
+        use alloy::sol_types::{SolCall, SolValue};
+        for (selector, value) in [
+            (IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR, 50_000_000u64),
+            (IDeposit::MAX_BRIDGE_TVLCall::SELECTOR, 10_000_000_000u64),
+            (IDeposit::treasuryBalanceCall::SELECTOR, 0),
+        ] {
+            self.set_call(bridge, selector, U256::from(value).abi_encode().into());
+        }
+    }
+
     /// Calls of `selector` on `to` return `seq` in order, then its last
     /// element.
     pub fn script_call(&self, to: Address, selector: [u8; 4], seq: Vec<Bytes>) {
@@ -273,16 +285,7 @@ impl EvmRead for FakeEvm {
                     .get(&(to, sel))
                     .and_then(|s| s.next())
             })
-            .ok_or_else(|| {
-                let error: alloy::transports::TransportError =
-                    alloy::transports::TransportError::ErrorResp(
-                        serde_json::from_value(serde_json::json!({
-                            "code": 3, "message": "execution reverted"
-                        }))
-                        .expect("a structured empty revert"),
-                    );
-                anyhow::Error::new(error)
-            })
+            .ok_or_else(|| anyhow::anyhow!("execution reverted"))
     }
 
     async fn revert_reason(
@@ -479,7 +482,6 @@ pub fn deposit_log(
         depositId: id,
         sender,
         amount: U256::from(amount),
-        anWorkchain: 0,
         anAccount: account,
         timestamp: U256::from(1_786_610_040u64),
     };
@@ -1687,7 +1689,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.7.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.12.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1698,6 +1700,7 @@ impl World {
             evm::{IDeposit, IErc20},
         };
         let evm = FakeEvm::sepolia();
+        evm.set_volume_limits(W_BRIDGE);
         evm.codes
             .lock()
             .unwrap()
@@ -1736,7 +1739,10 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getDepositLimits", vec![
+            serde_json::json!({"maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
         ]);
         an.getter(W_BRIDGE_ACC, "isPaused", vec![
             serde_json::json!({ "value0": false }),
@@ -1746,6 +1752,9 @@ impl World {
         ]);
         an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
             serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getLightClient", vec![
+            serde_json::json!({ "value0": format!("0:{}", hex::encode(W_LC)) }),
         ]);
         an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
             serde_json::json!({ "value0": true }),

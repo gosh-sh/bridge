@@ -275,7 +275,6 @@ pub async fn run(
     if matches!(balance_check, BalanceCheck::Require) {
         let bridge_boc =
             fetch_account_boc(&context, &usdc_bridge_dapp_id, usdc_bridge_account_id_hex).await?;
-        check_an_withdraw_volume(&context, &usdc_bridge_legacy, &bridge_boc, amount).await?;
         if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -289,19 +288,32 @@ pub async fn run(
         }
         let (minted, burned) =
             call_get_total_bridged(&context, &usdc_bridge_legacy, &bridge_boc).await?;
-        // Match initiateWithdrawal: burned already above minted, or this
-        // amount would take it there, is exit 240. The first arm avoids
+        // Match initiateWithdrawal's refund when burned already exceeds minted
+        // or this amount would take it there. The first arm avoids
         // subtracting when burned > minted.
         if burned > minted || amount.0 > minted - burned {
             return Err(CliError::Preflight {
                 reason: format!(
                     "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
                      minted={minted} burned={burned} µUSDC (getTotalBridged(3)); \
-                     initiateWithdrawal of {} µUSDC would refuse the burn with 240 \
-                     (ERR_BURN_EXCEEDS_BRIDGED) and the USDC would bounce back to the multisig. \
-                     Owner-minted ECC does not add bridged inventory; a prior finalized deposit \
-                     must cover the amount.",
+                     initiateWithdrawal of {} µUSDC would return the attached ECC without burning \
+                     it. Owner-minted ECC does not add bridged inventory; a prior finalized \
+                     deposit must cover the amount.",
                     amount.0
+                ),
+                source: None,
+            });
+        }
+        let (max_transfer, _, outstanding) =
+            call_get_deposit_limits(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id)
+                .await?;
+        if amount.0 > max_transfer || amount.0 > outstanding {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "getDepositLimits({}) reports maxTransfer={max_transfer}, \
+                     outstanding={outstanding} micro-USDC; withdrawal of {} would be refunded \
+                     without a burn",
+                    to.chain_id, amount.0
                 ),
                 source: None,
             });
@@ -515,14 +527,59 @@ async fn call_is_paused(
     bridge_legacy: &str,
     bridge_boc: &str,
 ) -> CliResult<bool> {
-    let out = call_bridge_getter(ctx, bridge_legacy, bridge_boc, "isPaused", json!({})).await?;
-    out["value0"].as_bool().ok_or_else(|| CliError::Preflight {
-        reason: format!("isPaused on {bridge_legacy}: no boolean answer"),
-        source: None,
+    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        address: Some(bridge_legacy.to_string()),
+        call_set: Some(CallSet {
+            function_name: "isPaused".to_string(),
+            header: None,
+            input: Some(json!({})),
+        }),
+        signer: Signer::None,
+        deploy_set: None,
+        processing_try_index: None,
+        signature_id: None,
     })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!("encode isPaused call for {bridge_legacy}: {}", e.message()),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
+        message: encoded.message,
+        account: bridge_boc.to_string(),
+        abi: Some(abi),
+        execution_options: None,
+        boc_cache: None,
+        return_updated_account: Some(false),
+    })
+    .await
+    .map_err(|e| CliError::Preflight {
+        reason: format!(
+            "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: {} — a bridge without \
+             isPaused() predates the pause and this CLI",
+            e.message()
+        ),
+        source: Some(anyhow::anyhow!("{e:?}")),
+    })?;
+    run.decoded
+        .and_then(|d| d.output)
+        .and_then(|o| o["value0"].as_bool())
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "run_tvm isPaused on the Acki Nacki bridge {bridge_legacy}: no boolean answer \
+                 (ABI mismatch?)"
+            ),
+            source: None,
+        })
 }
 
-/// Execute a bridge getter locally against the fetched account state.
+/// ECC token id the bridge withdraws (`USDC_ECC_ID` in `eccUSDCBridge`).
+const BRIDGED_USDC_TOKEN_ID: u32 = 3;
+
+/// Execute an ABI getter against the fetched bridge account, without a network
+/// call.
 async fn call_bridge_getter(
     ctx: &Arc<ClientContext>,
     bridge_legacy: &str,
@@ -568,90 +625,18 @@ async fn call_bridge_getter(
         ),
         source: Some(anyhow::anyhow!("{e:?}")),
     })?;
-    run.decoded
+    let output = run
+        .decoded
         .and_then(|d| d.output)
         .ok_or_else(|| CliError::Preflight {
-            reason: format!("{function} on {bridge_legacy}: no decoded output"),
-            source: None,
-        })
-}
-
-/// Refuse an over-cap fresh burn using the source bridge limits.
-async fn check_an_withdraw_volume(
-    ctx: &Arc<ClientContext>,
-    bridge: &str,
-    boc: &str,
-    amount: &UsdcAmount,
-) -> CliResult<()> {
-    use crate::deposit::an_preflight::BridgeVersion;
-    let out = call_bridge_getter(ctx, bridge, boc, "getVersion", json!({})).await?;
-    let version = out["value0"]
-        .as_str()
-        .and_then(BridgeVersion::parse)
-        .ok_or_else(|| CliError::Preflight {
-            reason: format!("invalid AN bridge version: {out}"),
-            source: None,
-        })?;
-    let cap = if version >= BridgeVersion(1, 8, 1) {
-        let out = call_bridge_getter(
-            ctx,
-            bridge,
-            boc,
-            "getDepositLimits",
-            json!({"chainId":"0", "l1Bridge":"0"}),
-        )
-        .await?;
-        out["maxTransfer"]
-            .as_str()
-            .and_then(|v| v.parse::<u128>().ok())
-            .ok_or_else(|| CliError::Preflight {
-                reason: format!("invalid AN transfer cap: {out}"),
-                source: None,
-            })?
-    } else if version == BridgeVersion(1, 7, 1) {
-        50_000_000
-    } else {
-        return Ok(());
-    };
-    require_withdraw_cap(amount, U256::from(cap), "AN")
-}
-
-/// Accept the exact boundary and refuse amounts above the on-chain cap.
-fn require_withdraw_cap(amount: &UsdcAmount, cap: U256, chain: &str) -> CliResult<()> {
-    if U256::from(amount.0) > cap {
-        return Err(CliError::Preflight {
             reason: format!(
-                "withdrawal amount exceeds {chain} transfer cap {cap} micro-USDC; split the \
-                 amount before burning"
+                "run_tvm {function} on the Acki Nacki bridge {bridge_legacy}: no decoded output \
+                 (ABI mismatch?)"
             ),
             source: None,
-        });
-    }
-    Ok(())
-}
-
-/// Only for a fresh burn: a resumed legacy proof can use an owner-authorized
-/// nullifier.
-pub async fn check_evm_withdraw_volume(
-    rpc_url: &str,
-    bridge: Address,
-    amount: &UsdcAmount,
-) -> CliResult<()> {
-    let evm = crate::deposit::evm::AlloyEvm::connect(rpc_url)?;
-    let limits = crate::deposit::evm::read_volume_limits(&evm, bridge)
-        .await
-        .map_err(|e| CliError::Preflight {
-            reason: format!("cannot read EVM withdrawal cap: {e:#}"),
-            source: Some(e),
         })?;
-    if let Some((cap, _, _)) = limits {
-        require_withdraw_cap(amount, cap, "EVM")?;
-    }
-    Ok(())
+    Ok(output)
 }
-
-/// ECC token id the bridge withdraws (`USDC_ECC_ID` in `eccUSDCBridge`).
-const BRIDGED_USDC_TOKEN_ID: u32 = 3;
 
 /// Run `getTotalBridged(3)` on the USDCBridge's own code, locally.
 async fn call_get_total_bridged(
@@ -659,54 +644,14 @@ async fn call_get_total_bridged(
     bridge_legacy: &str,
     bridge_boc: &str,
 ) -> CliResult<(u128, u128)> {
-    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
-    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
-        abi: abi.clone(),
-        address: Some(bridge_legacy.to_string()),
-        call_set: Some(CallSet {
-            function_name: "getTotalBridged".to_string(),
-            header: None,
-            input: Some(json!({ "tokenId": BRIDGED_USDC_TOKEN_ID })),
-        }),
-        signer: Signer::None,
-        deploy_set: None,
-        processing_try_index: None,
-        signature_id: None,
-    })
-    .await
-    .map_err(|e| CliError::Preflight {
-        reason: format!(
-            "encode getTotalBridged call for {bridge_legacy}: {}",
-            e.message()
-        ),
-        source: Some(anyhow::anyhow!("{e:?}")),
-    })?;
-    let run = run_tvm(ctx.clone(), ParamsOfRunTvm {
-        message: encoded.message,
-        account: bridge_boc.to_string(),
-        abi: Some(abi),
-        execution_options: None,
-        boc_cache: None,
-        return_updated_account: Some(false),
-    })
-    .await
-    .map_err(|e| CliError::Preflight {
-        reason: format!(
-            "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: {}",
-            e.message()
-        ),
-        source: Some(anyhow::anyhow!("{e:?}")),
-    })?;
-    let output = run
-        .decoded
-        .and_then(|d| d.output)
-        .ok_or_else(|| CliError::Preflight {
-            reason: format!(
-                "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: no decoded \
-                 output (ABI mismatch?)"
-            ),
-            source: None,
-        })?;
+    let output = call_bridge_getter(
+        ctx,
+        bridge_legacy,
+        bridge_boc,
+        "getTotalBridged",
+        json!({ "tokenId": BRIDGED_USDC_TOKEN_ID }),
+    )
+    .await?;
     let minted = json_u128(&output["minted"]).ok_or_else(|| CliError::Preflight {
         reason: format!(
             "run_tvm getTotalBridged on the Acki Nacki bridge {bridge_legacy}: minted is not a \
@@ -722,6 +667,34 @@ async fn call_get_total_bridged(
         source: None,
     })?;
     Ok((minted, burned))
+}
+
+/// Read the deployed bridge's transfer ceiling and destination-chain inventory.
+async fn call_get_deposit_limits(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+    chain_id: u64,
+) -> CliResult<(u128, u128, u128)> {
+    let out = call_bridge_getter(
+        ctx,
+        bridge_legacy,
+        bridge_boc,
+        "getDepositLimits",
+        json!({"chainId": chain_id.to_string()}),
+    )
+    .await?;
+    let field = |name: &str| {
+        json_u128(&out[name]).ok_or_else(|| CliError::Preflight {
+            reason: format!("getDepositLimits: invalid {name}: {out}"),
+            source: None,
+        })
+    };
+    Ok((
+        field("maxTransfer")?,
+        field("maxTvl")?,
+        field("outstanding")?,
+    ))
 }
 
 /// Parse a JSON number or decimal string as `u128` (`getTotalBridged` answers
@@ -1612,21 +1585,19 @@ fn short_sha256(bytes: &[u8]) -> String {
 /// Prove we can actually aggregate, not merely that a file with the right
 /// name exists.
 ///
-/// `SubprocessAggregator` picks `target/release/aggregate-proof` on
-/// `is_file()` alone and only falls back to `cargo run --release` when that
-/// path is absent (`aggregator.rs:377`, `:432`). So a non-executable stub,
-/// or a binary built for another architecture, is *selected over* a working
-/// cargo build and then fails after the burn. Existence is not the property
-/// we need; runnability is — hence the `--help` smoke run.
+/// The runtime (`SubprocessAggregator`) runs the `aggregate-proof` binary
+/// it is given and checks only that the path exists and is executable
+/// (`bridge-relayer-daemon`'s `require_executable`). So a binary built for
+/// another architecture, or a file that is not this tool at all, passes
+/// that check and fails after the burn. Existence is not the property we
+/// need; runnability is — hence the `--help` smoke run.
 ///
-/// **Requires a prebuilt binary; the cargo fallback is refused here.** The
-/// runtime will happily `cargo run --release` when the binary is missing,
-/// but preflight cannot verify that path without paying for a cold build
-/// inside a check whose whole purpose is to be instant — and "the crate
-/// looks present" is not verification. Refusing early with the build command
-/// costs an operator one command; accepting an unverified fallback costs
-/// them the burn and up to 91 minutes. This is deliberately stricter than
-/// the runtime.
+/// **Requires a prebuilt binary.** This CLI derives the path from
+/// `--aggregator-dir` (`target/release/aggregate-proof`) and never builds
+/// it: a cold build cannot be verified inside a check whose whole purpose is
+/// to be instant — and "the crate looks present" is not verification.
+/// Refusing early with the build command costs an operator one command;
+/// accepting an unverified binary costs them the burn and up to 91 minutes.
 pub async fn check_aggregator_runnable(aggregator_dir: &Path) -> CliResult<()> {
     check_aggregator_runnable_with_timeout(aggregator_dir, AGGREGATOR_PROBE_TIMEOUT).await
 }
@@ -1656,9 +1627,9 @@ pub(crate) async fn check_aggregator_runnable_with_timeout(
     // `BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator`, relative by design.
     //
     // The runtime does not have this bug: `SubprocessAggregator::new`
-    // canonicalises `aggregator_dir` at construction, so by the time
-    // `release_bin` joins onto it the path is already absolute. Preflight
-    // has no such step, which is why it needs this one.
+    // canonicalises the binary path at construction, and the orchestrator
+    // hands it the path this preflight resolved. Preflight has no such step,
+    // which is why it needs this one.
     let relative_bin = aggregate_proof_bin(aggregator_dir);
     if !relative_bin.is_file() {
         return Err(refuse(format!(
@@ -2713,6 +2684,23 @@ pub async fn check_bridge_deploy(
         });
     }
 
+    let max_transfer = client
+        .max_transfer_amount()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("--bridge-address {bridge}: MAX_TRANSFER_AMOUNT() failed: {e}"),
+            source: Some(anyhow::Error::new(e)),
+        })?;
+    if U256::from(amount.0) > max_transfer {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "withdrawal exceeds MAX_TRANSFER_AMOUNT ({max_transfer} micro-USDC); reduce the \
+                 amount before burning ECC"
+            ),
+            source: None,
+        });
+    }
+
     // 5. Treasury preflight. See the note above: this refuses early, it does not
     //    promise.
     let treasury = client
@@ -2839,48 +2827,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::source_guard::production_source;
 
-    #[tokio::test]
-    async fn an_withdraw_cap_is_checked_on_production_code_before_burn() {
-        let (_, boc) = crate::test_chain::deployed_usdc_bridge(false).await;
-        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
-        let bridge = format!("0:{}", "00".repeat(32));
-        check_an_withdraw_volume(&ctx, &bridge, &boc, &UsdcAmount(50_000_000))
-            .await
-            .unwrap();
-        let err = check_an_withdraw_volume(&ctx, &bridge, &boc, &UsdcAmount(50_000_001))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("AN transfer cap"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn evm_withdraw_cap_is_read_before_burn() {
-        let limits = std::collections::HashMap::from([
-            ("fc1b3113", format!("0x{:064x}", 50_000_000u64)),
-            ("b8127fac", format!("0x{:064x}", 10_000_000_000u64)),
-            (SEL_TREASURY, MAX_WORD.to_string()),
-        ]);
-        let rpc = mock_rpc(SOME_CODE, limits).await;
-        check_evm_withdraw_volume(&rpc, Address::ZERO, &UsdcAmount(50_000_000))
-            .await
-            .unwrap();
-        let err = check_evm_withdraw_volume(&rpc, Address::ZERO, &UsdcAmount(50_000_001))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("EVM transfer cap"), "{err}");
-        let old = mock_rpc(SOME_CODE, Default::default()).await;
-        check_evm_withdraw_volume(&old, Address::ZERO, &UsdcAmount(50_000_001))
-            .await
-            .unwrap();
-    }
-
-    #[test]
-    fn withdrawal_cap_boundary() {
-        let cap = U256::from(50_000_000u64);
-        require_withdraw_cap(&UsdcAmount(50_000_000), cap, "EVM").unwrap();
-        assert!(require_withdraw_cap(&UsdcAmount(50_000_001), cap, "EVM").is_err());
-    }
-
     /// The AN half of stage 1, driven end to end against a fake node.
     ///
     /// Everything before this was a helper tested in isolation. This is
@@ -2987,7 +2933,7 @@ pub(crate) mod tests {
         .expect_err("a bridge with minted=0 refuses the burn before it is sent");
         assert_eq!(err.exit_code().as_i32(), 2, "{err}");
         let msg = format!("{err}");
-        assert!(msg.contains("240"), "{msg}");
+        assert!(msg.contains("without burning"), "{msg}");
         assert!(msg.contains("getTotalBridged"), "{msg}");
     }
 
@@ -3063,7 +3009,25 @@ pub(crate) mod tests {
         .expect_err("amount == minted - burned + 1 is refused");
         assert_eq!(err.exit_code().as_i32(), 2, "{err}");
         let msg = format!("{err}");
-        assert!(msg.contains("240"), "{msg}");
+        assert!(msg.contains("without burning"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_different_chain_cannot_spend_sepolias_inventory() {
+        let ctx = build_client_context("http://127.0.0.1:1/graphql").unwrap();
+        let (id, boc) = crate::test_chain::deployed_usdc_bridge_with(false, 50_000_000, 0).await;
+        assert_eq!(
+            call_get_deposit_limits(&ctx, &format!("0:{id}"), &boc, 11155111)
+                .await
+                .unwrap(),
+            (50_000_000, 10_000_000_000, 50_000_000)
+        );
+        assert_eq!(
+            call_get_deposit_limits(&ctx, &format!("0:{id}"), &boc, 8453)
+                .await
+                .unwrap(),
+            (50_000_000, 10_000_000_000, 0)
+        );
     }
 
     #[tokio::test]
@@ -3102,7 +3066,7 @@ pub(crate) mod tests {
         .expect_err("burned already above minted is refused, not skipped");
         assert_eq!(err.exit_code().as_i32(), 2, "{err}");
         let msg = format!("{err}");
-        assert!(msg.contains("240"), "{msg}");
+        assert!(msg.contains("without burning"), "{msg}");
         assert!(msg.contains("getTotalBridged"), "{msg}");
     }
 
@@ -3486,6 +3450,7 @@ pub(crate) mod tests {
     /// it does not recognise, so a stale selector here makes a test fail
     /// loudly on an empty decode rather than silently pass.
     const SEL_TREASURY: &str = "313dab20"; // treasuryBalance()
+    const SEL_MAX_TRANSFER: &str = "fc1b3113";
     const SEL_VERIFIER: &str = "1792b9fe"; // bridgeWithdrawalVerifier()
     pub(crate) const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
     pub(crate) const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
@@ -3727,6 +3692,7 @@ pub(crate) mod tests {
             (SEL_DAPP_FR, ZERO_WORD.to_string()),
             (SEL_ACC_FR, ZERO_WORD.to_string()),
             (SEL_TREASURY, MAX_WORD.to_string()),
+            (SEL_MAX_TRANSFER, format!("0x{:064x}", 50_000_000u64)),
             // Not paused: the last check `check_bridge_deploy` makes.
             (SEL_PAUSED, ZERO_WORD.to_string()),
             // Matches the zero digest tests write into their tempdir's
@@ -5008,6 +4974,49 @@ pub(crate) mod tests {
         )
         .await
         .expect("a treasury holding exactly the withdrawal amount is enough");
+    }
+
+    #[tokio::test]
+    async fn withdrawal_transfer_ceiling_is_checked_before_burning() {
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
+        let bridge = Address::repeat_byte(1);
+        check_bridge_deploy(
+            &url,
+            bridge,
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(50_000_000),
+        )
+        .await
+        .unwrap();
+        let err = check_bridge_deploy(
+            &url,
+            bridge,
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(50_000_001),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("MAX_TRANSFER_AMOUNT"), "{err}");
+        let broken = mock_rpc_code_for(
+            &full_walk_code(),
+            full_walk(&[(SEL_MAX_TRANSFER, "0x".to_string())]),
+        )
+        .await;
+        let err = check_bridge_deploy(
+            &broken,
+            bridge,
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("MAX_TRANSFER_AMOUNT() failed"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

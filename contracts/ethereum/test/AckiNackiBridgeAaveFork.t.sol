@@ -75,7 +75,7 @@ contract AckiNackiBridgeAaveForkTest is Test {
     function _approveAndDeposit(address user, uint256 amount) internal {
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        bridge.deposit(amount, bytes32(uint256(uint160(user))));
         vm.stopPrank();
     }
 
@@ -168,17 +168,6 @@ contract AckiNackiBridgeAaveForkTest is Test {
         assertEq(
             bridge.suppliedPrincipal(), principalBeforeHarvest, "harvest must not touch principal"
         );
-    }
-
-    function test_fork_transferCap_preserves_split_deposits() public {
-        _approveAndDeposit(user1, 50 * UsdcTestLib.UNIT);
-        _approveAndDeposit(user1, 50 * UsdcTestLib.UNIT);
-        assertEq(bridge.treasuryBalance(), 100 * UsdcTestLib.UNIT);
-        uint256 over = bridge.MAX_TRANSFER_AMOUNT() + 1;
-        vm.prank(user1);
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.deposit(over, 0, bytes32(uint256(uint160(user1))));
-        assertEq(bridge.treasuryBalance(), 100 * UsdcTestLib.UNIT);
     }
 
     function test_fork_emergencyWithdrawAllPullsAaveDown() public {

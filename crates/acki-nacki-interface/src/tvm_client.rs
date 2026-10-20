@@ -6,13 +6,13 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tvm_client::{
-    abi::{encode_message, Abi, CallSet, ParamsOfEncodeMessage, Signer},
+    abi::{encode_message, Abi, CallSet, FunctionHeader, ParamsOfEncodeMessage, Signer},
     account::{get_account, ParamsOfGetAccount},
     crypto::KeyPair,
     net::{query, NetworkConfig, ParamsOfQuery},
@@ -126,7 +126,22 @@ impl IAckiNacki for TvmAckiNacki {
     }
 
     async fn call_contract(&self, call: ContractCallRequest) -> Result<TxHash> {
-        let call_set = CallSet::some_with_function_and_input(&call.function, call.params);
+        let mut call_set = CallSet::some_with_function_and_input(&call.function, call.params);
+        if call.function == "finalizeDeposit" {
+            let config = tvm_client::client::config(self.context.clone())
+                .map_err(format_tvm_client_error)?;
+            let lifetime = (config.abi.message_expiration_timeout / 1000).clamp(1, 240);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Some(call) = call_set.as_mut() {
+                call.header = Some(FunctionHeader {
+                    expire: Some((now + u64::from(lifetime)) as u32),
+                    ..Default::default()
+                });
+            }
+        }
         let encode_params = ParamsOfEncodeMessage {
             abi: self.bridge_abi.clone(),
             address: Some(call.to.workchain_address()),

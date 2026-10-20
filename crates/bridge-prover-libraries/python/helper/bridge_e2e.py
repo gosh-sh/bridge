@@ -193,10 +193,10 @@ def encode_initiate_withdrawal_body(dst_chain_id: int, recipient_hex: str) -> st
 
 
 def require_bridged_headroom(amount: int) -> None:
-    """Refuse locally if `initiateWithdrawal` would throw 240.
+    """Refuse locally if `initiateWithdrawal` would throw 233.
 
     `mintAndSend` does not increment `getTotalBridged`. Without this check
-    a 240 revert with bounce=false leaves the minted ECC on the bridge.
+    a 233 revert with bounce=false leaves the minted ECC on the bridge.
     """
     raw = common.run_getter(
         USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getTotalBridged",
@@ -211,7 +211,7 @@ def require_bridged_headroom(amount: int) -> None:
     if burned > minted or amount > minted - burned:
         raise RuntimeError(
             f"USDCBridge.getTotalBridged({USDC_TOKEN_ID}) minted={minted} burned={burned}; "
-            f"initiateWithdrawal of {amount} µUSDC would refuse with 240 "
+            f"initiateWithdrawal of {amount} µUSDC would refuse with 233 "
             "(ERR_BURN_EXCEEDS_BRIDGED). mintAndSend does not add bridged inventory; "
             "a prior finalizeDeposit must cover the amount."
         )

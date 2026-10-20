@@ -2531,7 +2531,7 @@ mod tests {
         let r = Redactor::default();
         for same in [
             PAIRING,
-            "ethereum:0xab@11155111/deposit?uint256=5&int8=0",
+            "ethereum:0xab@11155111/deposit?uint256=5&bytes32=0x1234",
             "no url here, just a :// on its own",
             "--network sepolia on 11155111",
         ] {

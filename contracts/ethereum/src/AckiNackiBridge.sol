@@ -54,23 +54,8 @@ contract AckiNackiBridge {
     ///         global TVL limit (QC-A1-1 / QC-AN-J1).
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
-    /// @notice Maximum per-tx amount moved in either direction.
     uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
-
-    /// @notice Maximum user principal the bridge may hold.
-    uint256 public constant MAX_TVL = 10000 * USDC_UNIT;
-
-    /// @notice Exact proof nullifiers for burns made before the transfer cap.
-    mapping(bytes32 => bool) public legacyWithdrawals;
-    event LegacyWithdrawalConfigured(uint256 indexed nullifier, bool allowed);
-
-    /// @notice Authorize only an already-burned legacy withdrawal. Its proof,
-    ///         recipient, chain, identity and replay checks remain mandatory.
-    function setLegacyWithdrawal(uint256 nullifier, bool allowed) external onlyOwner {
-        _requireCanonicalFr(nullifier);
-        legacyWithdrawals[bytes32(nullifier)] = allowed;
-        emit LegacyWithdrawalConfigured(nullifier, allowed);
-    }
+    uint256 public constant MAX_BRIDGE_TVL = 10_000 * USDC_UNIT;
 
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -327,14 +312,11 @@ contract AckiNackiBridge {
     /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
     ///         destination: it is carried as ZK public inputs and credited on the
     ///         AN side (the EVM `sender` is kept only for provenance, since a
-    ///         20-byte EVM address is not a valid AN recipient). `anWorkchain` is
-    ///         inert — see `deposit` — and is emitted only so the event shape
-    ///         stays stable for indexers.
+    ///         20-byte EVM address is not a valid AN recipient).
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
-        int8 anWorkchain,
         bytes32 anAccount,
         uint256 timestamp
     );
@@ -418,7 +400,7 @@ contract AckiNackiBridge {
     error TransferAmountMismatch();
     error DepositTooLarge();
     error TransferTooLarge();
-    error TvlCapExceeded();
+    error TvlCapReached();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
@@ -787,15 +769,6 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
-    /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
-    ///                    but Acki Nacki ignores it: the workchain concept is
-    ///                    retired there and `dappId` replaced it (2026-06-02),
-    ///                    so the recipient always lives in workchain 0. It is
-    ///                    not a public input of the deposit proof. Not
-    ///                    range-checked, because no supported set exists to
-    ///                    check against — a wrong value changes nothing.
-    ///                    The destination that
-    ///                    does matter is `anAccount` below.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -803,22 +776,20 @@ contract AckiNackiBridge {
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
     ///                    A wrong non-zero destination is one-way (no refund).
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
-        if (treasuryBalance + amount > MAX_TVL) revert TvlCapExceeded();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
+        if (treasuryBalance > MAX_BRIDGE_TVL || amount > MAX_BRIDGE_TVL - treasuryBalance) {
+            revert TvlCapReached();
+        }
         uint256 credited = _pullExactUsdc(amount);
 
         uint256 depositId = depositCounter++;
         treasuryBalance += credited;
 
-        emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp);
+        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp);
     }
 
     // ---------------------------------------------------------------------
@@ -1140,8 +1111,9 @@ contract AckiNackiBridge {
         // operands with `_frToLeBytes` before the round-1 SHA. Siblings at
         // rounds 2..4 are opaque SHA-256 outputs (already `bytes32`) and need
         // no reversal.
-        bytes32 h23 =
-            sha256(abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3)));
+        bytes32 h23 = sha256(
+            abi.encodePacked(_frToLeBytes(oldCommitmentL2), _frToLeBytes(newCommitmentL3))
+        );
         bytes32 h0_3 = sha256(abi.encodePacked(siblingH01, h23));
         bytes32 h0_7 = sha256(abi.encodePacked(h0_3, siblingH4_7));
         bytes32 root = sha256(abi.encodePacked(h0_7, siblingH8_15));
@@ -1473,6 +1445,8 @@ contract AckiNackiBridge {
             revert WithdrawByProofDisabled();
         }
 
+        if (pub.amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
+
         // ---- Checks: identity, chain, replay, shape, anchor ----
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
             revert WithdrawIdentityMismatch();
@@ -1531,13 +1505,9 @@ contract AckiNackiBridge {
         if (pub.amount > treasuryBalance) {
             revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
         }
-        if (pub.amount > MAX_TRANSFER_AMOUNT && !legacyWithdrawals[nullifierKey]) {
-            revert TransferTooLarge();
-        }
 
         // ---- Effects (CEI: mutate state before any external call). ----
         _nullifiers[nullifierKey] = true;
-        delete legacyWithdrawals[nullifierKey];
         treasuryBalance -= pub.amount;
 
         // ---- Interactions ----

@@ -28,11 +28,10 @@
 //!   live AN node.
 //! - [`AnInterfaceSubmitter`] — wraps any [`acki_nacki_interface::IAckiNacki`]
 //!   client: it ABI-encodes the `finalizeDeposit` call into an
-//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. Today only
-//!   the mock `IAckiNacki` exists (the AN team will ship the live `tvm-sdk`
-//!   client), so the live delivery path is exercised against the mock; the
-//!   nullifier on the AN side guarantees a re-submission is rejected rather
-//!   than double-crediting.
+//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. The live
+//!   client is [`acki_nacki_interface::TvmAckiNacki`]. A second
+//!   `finalizeDeposit` for the same deposit fails in the voucher constructor
+//!   (exit 51), so re-submission is rejected rather than double-crediting.
 
 use std::{
     collections::HashSet,
@@ -489,8 +488,6 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
 /// TVM: the constructor of an already deployed contract was called again — a
 /// `DepositVoucher` for this deposit exists, so it was finalized before.
 const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
-/// The bridge refuses a proof whose deposit it has already paid.
-const ERR_DEPOSIT_SETTLED: i32 = 241;
 /// TVM: cell underflow. From a voucher constructor, the signature of a bridge
 /// whose `_depositVoucherCode` predates the voucher's constructor ABI.
 const EXIT_CELL_UNDERFLOW: i32 = 9;
@@ -504,6 +501,8 @@ const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 const EXIT_UNKNOWN_BLOCK: i32 = 224;
 const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
+const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
+const EXIT_TVL_CAP: i32 = 235;
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -512,26 +511,6 @@ const EXIT_PAUSED: i32 = 231;
 /// first deposit after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
-        241 => Some("ERR_DEPOSIT_SETTLED — this deposit was already paid; nothing left to do"),
-        400 => Some("ERR_MESSAGE_IS_EXIST — a deposit callback is pending; retry the same proof"),
-        401 => Some("ERR_MESSAGE_WITH_HUGE_EXPIREAT — use an expiry less than five minutes ahead"),
-        402 => Some("ERR_MESSAGE_EXPIRED — retry the same proof with a fresh message header"),
-        52 => Some(
-            "REPLAY_PROTECTION — another external message advanced the timestamp; retry with a \
-             newly encoded message",
-        ),
-        233 => Some(
-            "ERR_TRANSFER_TOO_LARGE — retain the deposit proof; an already-paid legacy deposit \
-             needs the owner's setLegacyDepositCount cutoff; do not deposit again",
-        ),
-        234 => Some(
-            "ERR_TVL_CAP — AN capacity is full; retain the proof and retry after withdrawals free \
-             capacity",
-        ),
-        239 => Some(
-            "ERR_CHAIN_ACCOUNTING — owner must initialize historical per-network balances while \
-             paused; retain the proof and retry afterwards",
-        ),
         EXIT_ZERO_AMOUNT => Some("ERR_ZERO_AMOUNT — the proven deposit amount is zero"),
         EXIT_INVALID_ZKPROOF => Some(
             "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
@@ -548,6 +527,9 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
              owner anchors are enabled, otherwise the light client",
         ),
         EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
+        EXIT_TRANSFER_TOO_LARGE => {
+            Some("ERR_TRANSFER_TOO_LARGE — the proven deposit exceeds the per-transfer ceiling")
+        },
         _ => None,
     }
 }
@@ -587,16 +569,29 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
         EXIT_CONSTRUCTOR_ALREADY_CALLED => SubmitOutcome::AlreadyFinalized,
         // A paused lane rejects every deposit; counting that against the
         // deposit would park healthy deposits for the length of the pause.
-        ERR_DEPOSIT_SETTLED => SubmitOutcome::AlreadyFinalized,
-        400 | 402 => SubmitOutcome::Pending {
-            reason: format!("external message replay/expiry ({code}); retain the proof and retry"),
-        },
         EXIT_PAUSED => SubmitOutcome::Pending {
             reason: format!(
                 "ERR_PAUSED — the bridge lane is paused (setPaused); retrying until it resumes \
                  (exit_code={code}): {detail}"
             ),
         },
+        EXIT_TVL_CAP => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TVL_CAP — source-chain deposit capacity is full; waiting for withdrawals \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        400 | 402 => SubmitOutcome::Pending {
+            reason: format!(
+                "external message already seen or expired; observe the voucher before retrying \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        401 => rejected(
+            code,
+            "external message expiry exceeds the five-minute window",
+            detail,
+        ),
         code => rejected(code, context, detail),
     }
 }
@@ -737,7 +732,6 @@ mod tests {
             deposit_id: id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(42u64),
-            an_workchain: 0,
             an_account: B256::repeat_byte(0x77),
             timestamp: U256::ZERO,
             tx_hash: B256::repeat_byte(0xaa),
@@ -757,36 +751,6 @@ mod tests {
             proof: vec![0xAB; 48].into(),
             parsed: pi,
         }
-    }
-
-    #[test]
-    fn a_settled_deposit_is_not_retried() {
-        assert!(matches!(
-            classify_reverted(Some(241), "reverted"),
-            SubmitOutcome::AlreadyFinalized
-        ));
-        assert!(matches!(
-            classify_call_error("contract call aborted (exit_code=241)"),
-            SubmitOutcome::AlreadyFinalized
-        ));
-    }
-
-    #[test]
-    fn replay_and_expiry_keep_the_funded_deposit_pending() {
-        for code in [400, 402] {
-            assert!(matches!(
-                classify_call_error(&format!("contract call aborted (exit_code={code})")),
-                SubmitOutcome::Pending { .. }
-            ));
-            assert!(matches!(
-                classify_reverted(Some(code), "reverted"),
-                SubmitOutcome::Pending { .. }
-            ));
-        }
-        assert!(matches!(
-            classify_reverted(Some(401), "reverted"),
-            SubmitOutcome::Rejected { .. }
-        ));
     }
 
     #[test]
@@ -1034,6 +998,25 @@ mod tests {
             },
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capacity_and_message_retries_do_not_park_a_deposit() {
+        for code in [235, 400, 402] {
+            for result in [
+                classify_reverted(Some(code), "Reverted"),
+                classify_call_error(&format!("exit_code={code}")),
+            ] {
+                assert!(
+                    matches!(result, SubmitOutcome::Pending { .. }),
+                    "{code}: {result:?}"
+                );
+            }
+        }
+        assert!(matches!(
+            classify_reverted(Some(234), "Reverted"),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 
     /// The fail-closed config reverts must name the call that fixes them — an

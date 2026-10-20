@@ -172,7 +172,6 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
-        int8 anWorkchain,
         bytes32 anAccount,
         uint256 timestamp
     );
@@ -203,7 +202,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        bridge.deposit(amount, bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
         assertEq(bridge.depositCounter(), counterBefore + 1, "Counter must increment by 1");
@@ -228,59 +227,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         } else {
             vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
         }
-        bridge.deposit(amount, int8(0), bytes32(uint256(1)));
-        vm.stopPrank();
-    }
-
-    /// @notice A single transfer above the per-tx cap is refused.
-    function test_depositAboveTransferCapReverts() public {
-        uint256 amount = bridge.MAX_TRANSFER_AMOUNT() + 1;
-        address user = address(0xD15C);
-        usdc.mint(user, amount);
-        vm.startPrank(user);
-        usdc.approve(address(bridge), amount);
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
-        vm.stopPrank();
-    }
-
-    /// @notice The transfer cap admits a deposit of exactly the cap.
-    function test_depositAtTransferCapSucceeds() public {
-        uint256 amount = bridge.MAX_TRANSFER_AMOUNT();
-        address user = address(0xD16C);
-        usdc.mint(user, amount);
-        vm.startPrank(user);
-        usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
-        vm.stopPrank();
-        assertEq(bridge.treasuryBalance(), amount, "treasury must hold the capped deposit");
-    }
-
-    /// @notice Deposits are refused once the held principal would pass the TVL cap,
-    ///         and the cap itself is reachable.
-    function test_depositsStopAtTvlCap() public {
-        uint256 step = bridge.MAX_TRANSFER_AMOUNT();
-        uint256 cap = bridge.MAX_TVL();
-        assertEq(step, 50 * UsdcTestLib.UNIT, "issue 98 transfer cap");
-        assertEq(cap, 10_000 * UsdcTestLib.UNIT, "issue 98 TVL cap");
-        uint256 steps = cap / step;
-
-        for (uint256 i = 0; i < steps; i++) {
-            address user = address(uint160(0xE000 + i));
-            usdc.mint(user, step);
-            vm.startPrank(user);
-            usdc.approve(address(bridge), step);
-            bridge.deposit(step, int8(0), bytes32(uint256(uint160(user))));
-            vm.stopPrank();
-        }
-        assertEq(bridge.treasuryBalance(), cap, "treasury must reach the cap exactly");
-
-        address last = address(0xEFFF);
-        usdc.mint(last, 1);
-        vm.startPrank(last);
-        usdc.approve(address(bridge), 1);
-        vm.expectRevert(AckiNackiBridge.TvlCapExceeded.selector);
-        bridge.deposit(1, int8(0), bytes32(uint256(uint160(last))));
+        bridge.deposit(amount, bytes32(uint256(1)));
         vm.stopPrank();
     }
 

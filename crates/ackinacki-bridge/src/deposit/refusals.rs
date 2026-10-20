@@ -19,23 +19,12 @@ pub const ERR_UNKNOWN_BLOCK: i32 = 224;
 pub const ERR_ZERO_RECIPIENT: i32 = 230;
 /// Deposits are paused.
 pub const ERR_PAUSED: i32 = 231;
-/// The amount exceeds the AN transfer cap.
-pub const ERR_TRANSFER_TOO_LARGE: i32 = 233;
-/// Pending deposits and outstanding supply fill the AN TVL cap.
-pub const ERR_TVL_CAP: i32 = 234;
-/// Historical per-network balances have not been initialized after upgrade.
-pub const ERR_CHAIN_ACCOUNTING: i32 = 239;
-
-/// The deposit this proof names was already paid out.
-pub const ERR_DEPOSIT_SETTLED: i32 = 241;
-
-/// The exact external message was already processed.
-pub const ERR_MESSAGE_IS_EXIST: i32 = 400;
-/// The external message validity window exceeds the contract's five-minute
-/// bound.
+/// The proven amount exceeds the per-transfer ceiling.
+pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
+/// The source chain has no remaining deposit capacity.
+pub const ERR_TVL_CAP: i32 = 235;
+/// The message expiry is too far ahead of the chain's clock.
 pub const ERR_MESSAGE_WITH_HUGE_EXPIREAT: i32 = 401;
-/// The external message validity window has elapsed.
-pub const ERR_MESSAGE_EXPIRED: i32 = 402;
 
 /// The outcome of sending `finalizeDeposit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +63,7 @@ pub enum FinalizeSend {
 pub enum Reaction {
     /// Deposits are paused: wait and send again.
     WaitPaused,
-    /// AN capacity is full: wait and retry the same funded deposit.
+    /// Capacity becomes available after withdrawals on this chain.
     WaitCapacity,
     /// The anchored block is not known yet: wait for the next anchor.
     BackToAnchor,
@@ -100,28 +89,17 @@ pub enum Reaction {
 /// The reaction to a bridge exit code.
 fn by_code(code: i32) -> Reaction {
     match code {
-        // The bridge refuses a settled deposit before accept, so the credit is
-        // already on the AN side: go read it instead of sending again.
-        ERR_DEPOSIT_SETTLED => Reaction::ToCredit,
-        ERR_MESSAGE_IS_EXIST | ERR_MESSAGE_EXPIRED => Reaction::Retry,
-        ERR_MESSAGE_WITH_HUGE_EXPIREAT => Reaction::Refused {
-            code,
-            hint: "the external message expiry must be less than five minutes ahead; correct the \
-                   sender clock or SDK expiration timeout and resume the same deposit",
-        },
         ERR_PAUSED => Reaction::WaitPaused,
         ERR_TVL_CAP => Reaction::WaitCapacity,
-        ERR_CHAIN_ACCOUNTING => Reaction::Refused {
+        ERR_MESSAGE_WITH_HUGE_EXPIREAT => Reaction::Refused {
             code,
-            hint: "the owner must initialize historical network balances with \
-                   initializeChainAccounting while paused; retain this operation and resume \
-                   afterwards; do not deposit again",
+            hint: "message expiry is outside the bridge's five-minute window; check clock \
+                   synchronization, then resume with the same work directory",
         },
         ERR_TRANSFER_TOO_LARGE => Reaction::Refused {
             code,
-            hint: "the funded deposit exceeds the AN transfer cap; do not make another deposit. \
-                   Keep the operation and resume after the bridge owner configures its legacy \
-                   cutoff",
+            hint: "the proven deposit exceeds the per-transfer ceiling; keep the work directory \
+                   and contact the bridge operator",
         },
         ERR_UNKNOWN_BLOCK => Reaction::BackToAnchor,
         ERR_UNSUPPORTED_SRC_CHAIN => Reaction::Refused {
@@ -211,26 +189,11 @@ mod tests {
     }
 
     #[test]
-    fn a_deposit_already_paid_sends_the_cli_to_the_credit() {
-        assert_eq!(react(&rejected(241)), Reaction::ToCredit);
-        assert_eq!(react(&executed(241)), Reaction::ToCredit);
-    }
-
-    #[test]
     fn the_table_of_refusals() {
-        for code in [400, 402] {
-            assert_eq!(react(&rejected(code)), Reaction::Retry);
-            assert_eq!(react(&executed(code)), Reaction::Retry);
-        }
-        assert!(matches!(react(&rejected(401)), Reaction::Refused {
-            code: 401,
-            ..
-        }));
         assert_eq!(react(&rejected(231)), Reaction::WaitPaused);
-        assert_eq!(react(&rejected(234)), Reaction::WaitCapacity);
-        assert_eq!(react(&executed(234)), Reaction::WaitCapacity);
-        assert!(matches!(react(&rejected(233)), Reaction::Refused {
-            code: 233,
+        assert_eq!(react(&rejected(235)), Reaction::WaitCapacity);
+        assert!(matches!(react(&rejected(234)), Reaction::Refused {
+            code: 234,
             ..
         }));
         for c in [214, 204, 230] {

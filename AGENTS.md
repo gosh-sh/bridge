@@ -199,7 +199,9 @@ cd crates/bridge-snark-utils && cargo run --release --bin export-bound-block-pro
 cd crates/deposit-relayer-daemon && cargo test           # the live test is #[ignore]d
 cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- --help   # watch, prove-one, an-preflight, daemon
 cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=<RPC> \
-    cargo test --test live_log_discovery -- --ignored --nocapture
+    BRIDGE_ADDRESS=<new-bridge> DEPOSIT_TX_HASH=<tx> EXPECTED_RECEIPT_LOG_INDEX=<index> \
+    DEPOSIT_ID=0 cargo test --test live_log_discovery -- --ignored --nocapture
+# DEPOSIT_ID is optional and defaults to 0; select a confirmed deposit from the new deployment.
 ```
 
 ## CI

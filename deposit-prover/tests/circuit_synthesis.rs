@@ -91,11 +91,21 @@ fn forged_log_amount_is_rejected_in_circuit() {
     assert!(err.contains("circuit not satisfied"), "{err}");
 }
 
+#[test]
+#[ignore]
+fn forged_recipient_is_rejected_in_circuit() {
+    let mut input = load_proof_00();
+    input.event_data.an_account[0] ^= 1;
+    let err = test_circuit_mock_pinned(input, &production())
+        .expect_err("the recipient must match the receipt log");
+    assert!(err.contains("circuit not satisfied"), "{err}");
+}
+
 /// A prover that points `log_index` past the receipt's last log, and writes a
 /// well-formed `Deposit` log into that empty slot, must not satisfy the
 /// circuit: the selected log has to be one of the logs the receipt commits to.
-/// proof_00's receipt has two logs, so slot 19 is empty — as is every slot
-/// from 2 on; the receipt's own RLC check does not look at an empty slot's
+/// proof_00's receipt has one log, so slot 19 is empty — as is every slot
+/// from 1 on; the receipt's own RLC check does not look at an empty slot's
 /// bytes.
 #[test]
 #[ignore]

@@ -94,7 +94,7 @@ required=(
   EXPECTED_WITHDRAW_ACC_FR EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID
   EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID EXPECTED_WITHDRAW_ALT_TOKEN_ID
   EXPECTED_USDC_ADDRESS
-  BRIDGE_AGGREGATOR_DIR EXPECTED_AGGREGATE_PROOF_SHA256 BRIDGE_VERIFIERS_DIR
+  BRIDGE_AGGREGATE_PROOF_BIN EXPECTED_AGGREGATE_PROOF_SHA256 BRIDGE_VERIFIERS_DIR
   BRIDGE_PK_CACHE_DIR BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_ANCHOR_LEVEL
   EXPECTED_EVM_CHAIN_ID
 )
@@ -150,7 +150,7 @@ else
 fi
 
 [[ -x "$RELAYER_BINARY" ]] || die "relayer binary is missing"
-aggregator_binary=$BRIDGE_AGGREGATOR_DIR/target/release/aggregate-proof
+aggregator_binary=$BRIDGE_AGGREGATE_PROOF_BIN
 [[ -x "$aggregator_binary" ]] || die "aggregate-proof binary is missing"
 "$aggregator_binary" --help | grep -q -- --allow-source-drift ||
   die "aggregate-proof predates the verifier source self-check; rebuild it"

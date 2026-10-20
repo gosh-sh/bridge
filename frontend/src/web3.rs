@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::window;
 
-use crate::config::*;
+use crate::{config::*, utils::validate_an_account};
 
 #[wasm_bindgen]
 extern "C" {
@@ -222,17 +222,6 @@ fn encode_address(addr: &str) -> String {
     format!("{:0>64}", a)
 }
 
-/// Encode a Solidity `int8` as a 32-byte two's-complement ABI word.
-fn encode_int8(value: i8) -> String {
-    let fill = if value < 0 { "ff" } else { "00" };
-    let mut s = String::with_capacity(64);
-    for _ in 0..31 {
-        s.push_str(fill);
-    }
-    s.push_str(&format!("{:02x}", value as u8));
-    s
-}
-
 /// Encode a Solidity `bytes32` as a 32-byte ABI word. The Acki Nacki account
 /// is a 256-bit number, so a short hex input is left-padded with zeros.
 fn encode_bytes32(value: &str) -> String {
@@ -273,54 +262,134 @@ async fn send_tx(to: &str, data: &str) -> Result<String, String> {
 
 /// Approve the bridge to spend `amount` USDC base units on the caller's behalf.
 pub async fn approve_usdc(amount: u128) -> Result<String, String> {
+    validate_transfer_amount(amount)?;
+    let bridge = bridge_contract_address()?;
+    check_deposit_capacity(bridge, amount).await?;
     // approve(address spender, uint256 amount) = 0x095ea7b3
     let data = format!(
         "0x095ea7b3{}{}",
-        encode_address(BRIDGE_CONTRACT_ADDRESS),
+        encode_address(bridge),
         encode_uint256(amount)
     );
     send_tx(USDC_CONTRACT_ADDRESS, &data).await
 }
 
-/// Deposit `amount` USDC base units into the bridge (pulls via `transferFrom`),
-/// bridging to the Acki Nacki destination `an_workchain:an_account`. The EVM
-/// `msg.sender` is not a valid AN recipient, so the destination is supplied
-/// explicitly and carried as a ZK public input.
-pub async fn make_deposit(
-    amount: u128,
-    an_workchain: i8,
-    an_account: &str,
-) -> Result<String, String> {
-    // deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) = 0xa41d0229
-    let data = format!(
-        "0xa41d0229{}{}{}",
+fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
+    validate_transfer_amount(amount)?;
+    let recipient = validate_an_account(an_account)?;
+    Ok(format!(
+        "0xc9630cb0{}{}",
         encode_uint256(amount),
-        encode_int8(an_workchain),
-        encode_bytes32(an_account)
-    );
-    send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
+        encode_bytes32(&recipient)
+    ))
 }
 
-/// Mint `amount` test USDC base units to the connected account from the Aave faucet.
-pub async fn mint_test_usdc(amount: u128) -> Result<String, String> {
-    let account = get_current_account().ok_or("No account connected")?;
-    // mint(address token, address to, uint256 amount) = 0xc6c3bbe6
-    let data = format!(
-        "0xc6c3bbe6{}{}{}",
-        encode_address(USDC_CONTRACT_ADDRESS),
-        encode_address(&account),
-        encode_uint256(amount)
-    );
-    send_tx(AAVE_FAUCET_ADDRESS, &data).await
+fn validate_transfer_amount(amount: u128) -> Result<(), String> {
+    if amount > MAX_TRANSFER_USDC_UNITS {
+        return Err("Amount exceeds the 50 USDC per-transfer limit".into());
+    }
+    Ok(())
+}
+
+async fn check_deposit_capacity(bridge: &str, amount: u128) -> Result<(), String> {
+    async fn read(bridge: &str, selector: &str) -> Result<u128, String> {
+        let out = call_to(bridge, selector).await?;
+        let word = out
+            .strip_prefix("0x")
+            .ok_or("Invalid bridge limit response")?;
+        if word.len() != 64 || !word.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("Invalid bridge limit response".into());
+        }
+        parse_uint128(&out)
+    }
+    let max_transfer = read(bridge, "0xfc1b3113").await?;
+    let max_tvl = read(bridge, "0x09f67ed1").await?;
+    let outstanding = read(bridge, "0x313dab20").await?;
+    if amount > max_transfer {
+        return Err("Deposit exceeds the bridge's transfer limit".into());
+    }
+    if outstanding > max_tvl || amount > max_tvl - outstanding {
+        return Err("The bridge's TVL cap is reached; wait for withdrawals and retry".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod deposit_tests {
+    use super::deposit_calldata;
+
+    #[test]
+    fn deposit_encodes_amount_and_account() {
+        let account = "a3".repeat(32);
+        let data = deposit_calldata(12_500_000, &account).unwrap();
+        assert_eq!(data.len(), 2 + 2 * 68);
+        assert_eq!(&data[..10], "0xc9630cb0");
+        assert_eq!(u128::from_str_radix(&data[10..74], 16).unwrap(), 12_500_000);
+        assert_eq!(&data[74..], account);
+    }
+
+    #[test]
+    fn deposit_normalises_the_recipient_before_encoding() {
+        let data = deposit_calldata(1, &format!("0x{}", "AB".repeat(32))).unwrap();
+        assert_eq!(&data[74..], "ab".repeat(32));
+    }
+
+    fn rejects_before_wallet_access(
+        call: impl std::future::Future<Output = Result<String, String>>,
+        expected: &str,
+    ) {
+        use std::task::{Context, Poll, Waker};
+
+        let mut call = std::pin::pin!(call);
+        let mut context = Context::from_waker(Waker::noop());
+        match call.as_mut().poll(&mut context) {
+            Poll::Ready(Err(err)) => assert!(err.contains(expected), "{err}"),
+            _ => panic!("the request must be rejected before accessing the wallet"),
+        }
+    }
+
+    #[test]
+    fn an_ethereum_wallet_address_is_rejected_before_a_transaction_is_sent() {
+        rejects_before_wallet_access(
+            super::make_deposit(12_500_000, "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7"),
+            "exactly 64",
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_deployment_cannot_request_transactions() {
+        if crate::config::bridge_contract_address().is_ok() {
+            return;
+        }
+        rejects_before_wallet_access(super::approve_usdc(1), "not configured");
+        let recipient = "a3".repeat(32);
+        rejects_before_wallet_access(super::make_deposit(1, &recipient), "not configured");
+    }
+
+    #[test]
+    fn excessive_transfers_are_rejected_before_approval_or_deposit() {
+        let recipient = "a3".repeat(32);
+        rejects_before_wallet_access(super::approve_usdc(50_000_001), "50 USDC");
+        rejects_before_wallet_access(super::make_deposit(50_000_001, &recipient), "50 USDC");
+    }
+}
+
+/// Deposit USDC into the bridge for the specified Acki Nacki account.
+pub async fn make_deposit(amount: u128, an_account: &str) -> Result<String, String> {
+    let data = deposit_calldata(amount, an_account)?;
+    let bridge = bridge_contract_address()?;
+    check_deposit_capacity(bridge, amount).await?;
+    send_tx(bridge, &data).await
 }
 
 /// Current USDC allowance (base units) the owner has granted the bridge.
 pub async fn get_allowance(owner: &str) -> Result<u128, String> {
+    let bridge = bridge_contract_address()?;
     // allowance(address owner, address spender) = 0xdd62ed3e
     let data = format!(
         "0xdd62ed3e{}{}",
         encode_address(owner),
-        encode_address(BRIDGE_CONTRACT_ADDRESS)
+        encode_address(bridge)
     );
     let raw = call_to(USDC_CONTRACT_ADDRESS, &data).await?;
     parse_uint128(&raw)
@@ -384,12 +453,14 @@ async fn sleep(ms: i32) {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-/// Get bridge statistics (deposit count + treasury principal in USDC base units).
+/// Get bridge statistics (deposit count + treasury principal in USDC base
+/// units).
 pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
+    let bridge = bridge_contract_address()?;
     // depositCounter() = 0xecb3dc88
-    let deposit_count_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
+    let deposit_count_result = call_to(bridge, "0xecb3dc88").await?;
     // treasuryBalance() = 0x313dab20
-    let treasury_result = call_to(BRIDGE_CONTRACT_ADDRESS, "0x313dab20").await?;
+    let treasury_result = call_to(bridge, "0x313dab20").await?;
 
     Ok(BridgeStats {
         deposit_count: parse_uint128(&deposit_count_result)?.to_string(),
@@ -399,7 +470,7 @@ pub async fn get_bridge_stats() -> Result<BridgeStats, String> {
 
 /// Read `depositCounter()`. The id of the most recent deposit is this minus 1.
 pub async fn get_deposit_counter() -> Result<u128, String> {
-    let raw = call_to(BRIDGE_CONTRACT_ADDRESS, "0xecb3dc88").await?;
+    let raw = call_to(bridge_contract_address()?, "0xecb3dc88").await?;
     parse_uint128(&raw)
 }
 
@@ -431,7 +502,8 @@ async fn call_to(to: &str, data: &str) -> Result<String, String> {
     from_value(result).map_err(|e| format!("Failed to parse result: {:?}", e))
 }
 
-/// Parse a uint from a 0x-prefixed hex string (sufficient range for our values).
+/// Parse a uint from a 0x-prefixed hex string (sufficient range for our
+/// values).
 fn parse_uint128(hex: &str) -> Result<u128, String> {
     let hex = hex.trim_start_matches("0x");
     let hex = if hex.is_empty() { "0" } else { hex };
@@ -446,7 +518,8 @@ pub struct BridgeStats {
     pub treasury_balance: String,
 }
 
-/// Format USDC base units (6 decimals) to a human string, e.g. 100000000 → "100.000000".
+/// Format USDC base units (6 decimals) to a human string, e.g. 100000000 →
+/// "100.000000".
 pub fn units_to_usdc(units: u128) -> String {
     let whole = units / USDC_UNIT;
     let frac = units % USDC_UNIT;

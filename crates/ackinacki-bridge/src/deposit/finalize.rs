@@ -211,8 +211,8 @@ pub async fn finalize(
     // The whole step is under the deadline: the reads, the pauses, the
     // backoff and the sends themselves. A send cut by it may still execute.
     // A record already in Finalizing means an earlier run may have sent, and
-    // its send may have executed without showing yet; only a refusal before
-    // accept in this run settles that.
+    // its send may have executed without showing yet. A refusal of another
+    // message cannot settle that earlier attempt.
     let in_doubt = AtomicBool::new(rec.stage == OpStage::Finalizing);
     let steps = attempts(an, send, store, rec, cx, proof, pi, ui, &in_doubt);
     match cx.deadline {
@@ -227,9 +227,8 @@ pub async fn finalize(
 /// The checks and sends of step 8, until one decides. `in_doubt` says
 /// whether a send may have executed: set on entry from Finalizing and when
 /// a send starts, kept after an answer without a verdict and through a
-/// pause seen before a send, and cleared only by a refusal before
-/// accept — that send did not execute, and the checks before it found no
-/// earlier one executed.
+/// pause or capacity refusal. A refusal settles only its own send; an older
+/// unindexed attempt remains in doubt.
 #[allow(clippy::too_many_arguments)]
 async fn attempts(
     an: &dyn AnRead,
@@ -366,14 +365,14 @@ async fn attempts(
             Reaction::WaitCapacity => {
                 in_doubt.store(earlier, Ordering::SeqCst);
                 ui.status(
-                    "the AN TVL cap is full; waiting for capacity to finalize the same deposit",
+                    "the source chain's TVL cap is reached; waiting for withdrawals before \
+                     retrying",
                 );
                 tokio::time::sleep(cx.poll).await;
             },
             Reaction::WaitPaused => {
-                // Refused before accept: this send did not execute, and the
-                // checks before it found no earlier one executed.
-                in_doubt.store(false, Ordering::SeqCst);
+                // This refusal settles only this send; an earlier one may still be unindexed.
+                in_doubt.store(earlier, Ordering::SeqCst);
                 ui.status("the bridge is paused by its owner; deposits finalize once it is lifted");
                 tokio::time::sleep(cx.poll).await;
             },
@@ -851,9 +850,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_refusal_before_accept_ends_the_doubt_before_a_message_that_never_left() {
-        // The checks before the second send found the first one not executed,
-        // and the 231 refused the second: nothing is in doubt, exit 32.
+    async fn a_later_refusal_does_not_settle_an_earlier_unknown_send() {
+        // An absent indexed voucher does not establish that the first send failed.
+        // A later pause refusal settles only that later send.
         use crate::deposit::{refusals::FinalizeSend, store::*};
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path()).unwrap();
@@ -879,7 +878,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             e.exit_code(),
-            crate::errors::ExitCode::DepositProofFailed,
+            crate::errors::ExitCode::CreditUnconfirmed,
             "{e}"
         );
         assert!(
@@ -887,10 +886,8 @@ mod tests {
                 .contains("encode finalizeDeposit: bad proof bytes"),
             "{e}"
         );
-        // A send reached the bridge and was refused: nothing executed, but
-        // something did reach it.
         assert!(
-            e.to_string().contains("nothing executed on Acki Nacki"),
+            !e.to_string().contains("nothing executed on Acki Nacki"),
             "{e}"
         );
         assert!(!e.to_string().contains("nothing reached"), "{e}");
@@ -898,10 +895,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_deadline_after_a_send_in_doubt_and_a_refusal_is_exit_31() {
-        // The pause wait after the 231 is cut by the deadline. The last send
-        // was refused before accept, and the checks before it found the first
-        // one, without a verdict, not executed.
+    async fn a_deadline_after_a_send_in_doubt_and_a_refusal_is_exit_34() {
+        // The later pause refusal does not resolve the earlier unindexed send.
         use crate::deposit::{refusals::FinalizeSend, store::*};
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path()).unwrap();
@@ -923,7 +918,11 @@ mod tests {
         let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
             .await
             .unwrap_err();
-        assert_eq!(e.exit_code(), crate::errors::ExitCode::AnWaitTimeout, "{e}");
+        assert_eq!(
+            e.exit_code(),
+            crate::errors::ExitCode::CreditUnconfirmed,
+            "{e}"
+        );
         assert_eq!(t0.elapsed(), std::time::Duration::from_secs(20));
         assert_eq!(*an.sent.lock().unwrap(), 2);
     }
@@ -959,38 +958,6 @@ mod tests {
             "{:?}",
             ui.statuses()
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn tvl_refusal_waits_and_retries_the_same_funded_deposit() {
-        use crate::deposit::refusals::FinalizeSend;
-        let d = tempfile::tempdir().unwrap();
-        let store = Store::open(d.path()).unwrap();
-        let mut rec = proved(&store);
-        let (an, cx) = plain(
-            [
-                FinalizeSend::Executed {
-                    tx_id: "full".into(),
-                    aborted: true,
-                    exit_code: Some(234),
-                },
-                FinalizeSend::Executed {
-                    tx_id: "retry".into(),
-                    aborted: false,
-                    exit_code: Some(0),
-                },
-            ],
-            60,
-        );
-        let ui = crate::deposit::ui::RecordingUi::new(true);
-        assert!(matches!(
-            finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
-                .await
-                .unwrap(),
-            FinalizeExit::ToCredit { .. }
-        ));
-        assert_eq!(*an.sent.lock().unwrap(), 2);
-        assert!(ui.statuses().iter().any(|s| s.contains("TVL cap")));
     }
 
     #[tokio::test(start_paused = true)]

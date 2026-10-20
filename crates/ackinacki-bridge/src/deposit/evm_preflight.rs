@@ -80,34 +80,31 @@ pub async fn run(
             None,
         ));
     }
-    // A bridge that predates the volume ceilings answers none of these, and
-    // enforces nothing, so a deposit against it must not be refused here.
-    if let Some((per_tx, tvl, held)) = read_volume_limits(evm, bridge)
-        .await
-        .map_err(|e| refuse("cannot read the bridge's volume limits".into(), Some(e)))?
-    {
-        let want = U256::from(amount);
-        if want > per_tx {
-            return Err(refuse(
-                format!(
-                    "{} micro-USDC is above the bridge's MAX_TRANSFER_AMOUNT of {per_tx}: \
-                     deposit() would revert with TransferTooLarge. Split the amount.",
-                    amount
-                ),
-                None,
-            ));
-        }
-        if held + want > tvl {
-            return Err(refuse(
-                format!(
-                    "the bridge holds {held} micro-USDC of a MAX_TVL of {tvl}, so {} more would \
-                     cross the ceiling: deposit() would revert with TvlCapExceeded. Room left: {}.",
-                    amount,
-                    tvl.saturating_sub(held)
-                ),
-                None,
-            ));
-        }
+    let limits = read_volume_limits(evm, bridge).await.map_err(|e| {
+        refuse(
+            format!("{bridge}: required deposit volume-limit getters failed"),
+            Some(e),
+        )
+    })?;
+    let requested = U256::from(amount);
+    if requested > limits.max_transfer {
+        return Err(refuse(
+            format!(
+                "deposit amount {amount} micro-USDC exceeds MAX_TRANSFER_AMOUNT ({})",
+                limits.max_transfer
+            ),
+            None,
+        ));
+    }
+    if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
+        return Err(refuse(
+            format!(
+                "deposit would exceed MAX_BRIDGE_TVL ({} micro-USDC); outstanding is {}. Wait for \
+                 withdrawals and retry",
+                limits.max_tvl, limits.outstanding
+            ),
+            None,
+        ));
     }
     let dec = read_decimals(evm, usdc)
         .await
@@ -176,6 +173,7 @@ mod tests {
 
     fn healthy() -> FakeEvm {
         let f = FakeEvm::sepolia();
+        f.set_volume_limits(BRIDGE);
         f.codes
             .lock()
             .unwrap()
@@ -272,115 +270,68 @@ mod tests {
             .unwrap();
     }
 
-    fn with_limits(per_tx: u64, tvl: u64, held: u64) -> FakeEvm {
+    #[tokio::test]
+    async fn transfer_ceiling_and_tvl_headroom_are_inclusive() {
         let f = healthy();
         f.set_call(
             BRIDGE,
-            IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR,
-            U256::from(per_tx).abi_encode().into(),
+            IDeposit::treasuryBalanceCall::SELECTOR,
+            U256::from(9_950_000_000u64).abi_encode().into(),
         );
-        f.set_call(
-            BRIDGE,
-            IDeposit::MAX_TVLCall::SELECTOR,
-            U256::from(tvl).abi_encode().into(),
-        );
+        run(&f, Network::Sepolia, BRIDGE, 50_000_000, None)
+            .await
+            .unwrap();
+        let err = run(&f, Network::Sepolia, BRIDGE, 50_000_001, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("MAX_TRANSFER_AMOUNT"), "{err}");
         f.set_call(
             BRIDGE,
             IDeposit::treasuryBalanceCall::SELECTOR,
-            U256::from(held).abi_encode().into(),
+            U256::from(9_950_000_001u64).abi_encode().into(),
         );
-        f
+        let err = run(&f, Network::Sepolia, BRIDGE, 50_000_000, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("MAX_BRIDGE_TVL"), "{err}");
     }
 
     #[tokio::test]
-    async fn rpc_failures_are_not_an_old_bridge() {
-        for successful_reads in 0..3 {
-            let f = with_limits(50_000_000, 10_000_000_000, 0);
-            *f.calls_before_failing.lock().unwrap() = Some(successful_reads);
-            assert!(read_volume_limits(&f, BRIDGE).await.is_err());
+    async fn missing_or_malformed_limit_getters_refuse_before_wallet_use() {
+        for selector in [
+            IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR,
+            IDeposit::MAX_BRIDGE_TVLCall::SELECTOR,
+            IDeposit::treasuryBalanceCall::SELECTOR,
+        ] {
+            for malformed in [false, true] {
+                let f = healthy();
+                if malformed {
+                    f.set_call(BRIDGE, selector, Bytes::new());
+                } else {
+                    f.calls.lock().unwrap().remove(&(BRIDGE, selector));
+                }
+                let err = run(&f, Network::Sepolia, BRIDGE, 1, None)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.exit_code(), crate::errors::ExitCode::PreflightRefused);
+                assert!(
+                    err.to_string().contains("volume-limit getters failed"),
+                    "{err}"
+                );
+            }
         }
     }
 
     #[tokio::test]
-    async fn a_partially_missing_limit_interface_is_refused() {
-        let f = with_limits(50_000_000, 10_000_000_000, 0);
-        f.set_call(BRIDGE, IDeposit::MAX_TVLCall::SELECTOR, Bytes::new());
-        assert!(read_volume_limits(&f, BRIDGE).await.is_err());
-    }
-
-    /// A bridge that predates the ceilings answers none of the three reads, so
-    /// the deposit must still go through — which is also why every other test
-    /// here passes without them.
-    #[tokio::test]
-    async fn a_bridge_without_the_volume_getters_passes() {
-        run(&healthy(), Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
+    async fn transport_failure_while_reading_limits_never_skips_them() {
+        let f = healthy();
+        *f.calls_before_failing.lock().unwrap() = Some(1);
+        let err = run(&f, Network::Sepolia, BRIDGE, 1, None)
             .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_deposit_within_both_ceilings_passes() {
-        run(
-            &with_limits(50_000_000, 10_000_000_000, 100_000_000),
-            Network::Sepolia,
-            BRIDGE,
-            12_500_000,
-            Some(FROM),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_deposit_of_exactly_the_per_tx_ceiling_passes() {
-        let f = with_limits(12_500_000, 10_000_000_000, 0);
-        run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_deposit_that_exactly_fills_the_tvl_ceiling_passes() {
-        let f = with_limits(50_000_000, 10_000_000_000, 9_987_500_000);
-        run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_deposit_over_the_per_tx_ceiling_is_refused_by_name() {
-        let e = run(
-            &with_limits(12_499_999, 10_000_000_000, 0),
-            Network::Sepolia,
-            BRIDGE,
-            12_500_000,
-            Some(FROM),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
-        let msg = e.to_string();
-        assert!(msg.contains("MAX_TRANSFER_AMOUNT"), "{msg}");
-        assert!(msg.contains("TransferTooLarge"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn a_deposit_that_crosses_the_tvl_ceiling_is_refused_with_the_room_left() {
-        let e = run(
-            &with_limits(50_000_000, 10_000_000_000, 9_995_000_000),
-            Network::Sepolia,
-            BRIDGE,
-            12_500_000,
-            Some(FROM),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
-        let msg = e.to_string();
-        assert!(msg.contains("TvlCapExceeded"), "{msg}");
+            .unwrap_err();
         assert!(
-            msg.contains("Room left: 5000000"),
-            "the refusal must say how much room is left: {msg}"
+            err.to_string().contains("volume-limit getters failed"),
+            "{err}"
         );
     }
 }

@@ -7,7 +7,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bridge-e2e
 EnvironmentFile=/home/ubuntu/bridge-e2e/config/deposit-relayer.env
-Environment=PATH=/home/ubuntu/bridge-e2e/bin:/home/ubuntu/.cargo/bin:/usr/bin:/bin
+Environment=PATH=/home/ubuntu/bridge-e2e/bin:/usr/bin:/bin
 # NOTE: no --dry-run — this actually submits finalizeDeposit on AN.
 # --start-deposit-id is the fresh-start cursor (ignored once state.json has
 # progress); bump it past already-finalized deposits so the daemon doesn't
@@ -19,6 +19,9 @@ ExecStart=/home/ubuntu/bridge-e2e/bin/deposit-relayer daemon \
   --from-block ${FROM_BLOCK} \
   --confirmations 3 \
   --deposit-prover-dir ${DEPOSIT_PROVER_DIR} \
+  --fetch-deposit-data-bin ${DEPOSIT_FETCH_DEPOSIT_DATA_BIN} \
+  --export-vk-blob-bin ${DEPOSIT_EXPORT_VK_BLOB_BIN} \
+  --export-blake2b-proof-bin ${DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN} \
   --dapp-id ${AN_DAPP_ID} \
   --an-graphql-url ${AN_GRAPHQL_URL} \
   --an-keys-path ${AN_KEYS_PATH} \

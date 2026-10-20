@@ -73,7 +73,7 @@ time they take.
   coming out of, so you have it already. The AN bridge must also have
   bridged inventory (`getTotalBridged(3)` minted − burned) covering the
   amount: `mintAndSend` ECC does not add that headroom, and
-  `initiateWithdrawal` refuses the burn with 240 without it. (If you are
+  `initiateWithdrawal` refuses the burn with 233 without it. (If you are
   only testing, the repository's `scripts/deploy_msig_and_mint.sh` deploys
   one and seeds it with 1 USDC — that one needs a checkout and `tvm-cli`,
   neither of which a withdrawal does, and a freshly minted wallet still
@@ -84,7 +84,9 @@ time they take.
 ## 3. Set your values
 
 ```bash
-export BRIDGE_CONFIG=$PWD/config/bridge_config   # endpoints, bridge address
+export BRIDGE_CONFIG=$PWD/config/bridge_config   # endpoints and prover paths
+export BRIDGE_ADDRESS='0x<new-bridge-address>'
+export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 
 export WITHDRAW_FROM=<dapp_id>::<account_id>     # the AN multisig
 export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json
@@ -95,8 +97,9 @@ export WITHDRAW_AMOUNT=1.000000                  # USDC, at most 6 decimals
 export BURNER_PRIVATE_KEY=0x…                    # the Sepolia signer
 ```
 
-Everything else — RPC and GraphQL endpoints, the bridge address, the prover
-directories — comes from the profile. Exported shell variables win over it,
+RPC and GraphQL endpoints and the prover directories come from the profile.
+The shipped profile leaves the deployment target unset: obtain `BRIDGE_ADDRESS`
+and `BRIDGE_DEPLOY_BLOCK` from the operator of the new paired deployment. Exported shell variables win over it,
 so if you change the profile, open a new shell or re-`export`.
 
 ## 4. Dry run
@@ -222,14 +225,22 @@ With the two lines `install.sh` printed in effect (`PATH` and
 `BRIDGE_CONFIG`):
 
 ```bash
+export BRIDGE_ADDRESS='0x<new-bridge-address>'      # deposit(uint256,bytes32)
+export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 ```
 
+Transfers are limited to 50 USDC. Each L1 bridge caps deposited principal minus
+completed payouts at 10,000 USDC; AN tracks the same capacity separately per
+chain. Limit reads must succeed before an approval, deposit or burn is requested.
+
 Sepolia is the only deposit network in this version; Ethereum mainnet is
-not one at all. Everything else — the RPC, the Acki Nacki endpoint, the
-bridge address, the prover directory, the state directory — comes from the
-profile.
+not one at all. The new EVM deployment must expose `deposit(uint256,bytes32)`
+and be paired with an AN bridge at version 1.12.0 or newer using this build's
+key. Older deployment addresses are incompatible. The RPC, Acki Nacki endpoint,
+prover directory and state directory come from the profile. When reusing a
+profile, replace its old deployment values before running this build.
 
 ## 10. Dry run
 

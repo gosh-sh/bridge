@@ -453,7 +453,6 @@ pub struct LiveAn {
     ctx: Arc<ClientContext>,
     /// The GraphQL client.
     gql: GqlClient,
-    /// Prepared BOCs retained across uncertain sends in this client session.
     finalizations: tokio::sync::Mutex<HashMap<FinalizeRequest, PendingFinalize>>,
 }
 
@@ -661,8 +660,8 @@ fn bridge_exit_code(e: &ClientError) -> Option<i32> {
 /// the bridge refusing the deposit: the message expired before it ran, or
 /// an identical one ran already.
 const EXPIRY_EXIT_CODES: [i32; 4] = [
-    crate::deposit::refusals::ERR_MESSAGE_IS_EXIST,
-    crate::deposit::refusals::ERR_MESSAGE_EXPIRED,
+    400,
+    402,
     StdContractError::ReplayProtection as i32,
     StdContractError::ExtMessageExpired as i32,
 ];

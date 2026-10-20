@@ -152,15 +152,21 @@ pub async fn check(
         false,
     )
     .await?;
-    an_preflight::check_volume(
-        d.an.as_ref(),
-        bridge_acc,
-        net.chain_id(),
-        bridge,
-        an.version,
-        amount,
-    )
-    .await?;
+    let limits =
+        an_preflight::read_volume_limits(d.an.as_ref(), bridge_acc, net.chain_id()).await?;
+    let requested = U256::from(amount);
+    if requested > limits.max_transfer {
+        return Err(refuse(format!(
+            "deposit exceeds AN MAX_TRANSFER_AMOUNT ({} micro-USDC)",
+            limits.max_transfer
+        )));
+    }
+    if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
+        return Err(refuse(format!(
+            "AN chain {} would exceed MAX_BRIDGE_TVL; wait for withdrawals and retry",
+            net.chain_id()
+        )));
+    }
     let plan = anchor_plan(d, bridge_acc, net.chain_id(), &an).await?;
     let prover = usable_prover(p.prover_dir.as_deref().expect("validated")).await?;
     // The proof files go there: a path that cannot hold them is refused
@@ -598,7 +604,7 @@ mod tests {
         assert!(j["tx"]["deposit_calldata"]
             .as_str()
             .unwrap()
-            .starts_with("0xa41d0229"));
+            .starts_with("0xc9630cb0"));
         assert!(j["tx"]["approve_calldata"]
             .as_str()
             .unwrap()

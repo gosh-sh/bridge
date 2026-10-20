@@ -17,3 +17,8 @@ halo2-base = { workspace = true }
 # `BLOCK_ID_TREE_LEAF_COUNT` lives in `bridge_test_data_gen::layer_hashes`.
 bridge-test-data-gen = { workspace = true }
 metrics = "0.24"
+
+[dev-dependencies]
+# The tests read the assembled attestation bytes back with the circuit's own
+# parser, so the layout written here is the layout the proof commits to.
+attestation-bls-checker-circuit = { workspace = true }

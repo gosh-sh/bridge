@@ -1,10 +1,10 @@
 {
   "place": [
-    { "from": "contracts/an/exchange/modifiers/replayprotection.sol", "to": "contracts/exchange/modifiers/replayprotection.sol" },
     { "from": "contracts/an/exchange/eccUSDCBridge.sol", "to": "contracts/exchange/eccUSDCBridge.sol" },
     { "from": "contracts/an/exchange/DepositVoucher.sol", "to": "contracts/exchange/DepositVoucher.sol" },
     { "from": "contracts/an/exchange/EthBeaconLightClient.sol", "to": "contracts/exchange/EthBeaconLightClient.sol" },
     { "from": "contracts/an/exchange/EthKeccak.sol", "to": "contracts/exchange/EthKeccak.sol" },
+    { "from": "contracts/an/exchange/modifiers/replayprotection.sol", "to": "contracts/exchange/modifiers/replayprotection.sol" },
     { "from": "contracts/an/exchange/modifiers/errors.sol", "to": "contracts/exchange/modifiers/errors.sol" },
     { "from": "contracts/an/exchange/modifiers/modifiers.sol", "to": "contracts/exchange/modifiers/modifiers.sol" },
     { "from": "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc", "to": "contracts/0.80.0_compiled/exchange/eccUSDCBridge.tvc" },

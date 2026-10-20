@@ -176,13 +176,52 @@ assigns it when the release is tagged.
   A daemon started from an old unit refuses with the name of the missing
   flag.
 
+- **`eccUSDCBridge` 1.11.0 adds owner `mintAndSendBridged` for CLI exit 37.**
+  After a voucher-consumed `confirmDeposit` abort the deposit cannot be
+  finalized again, Ethereum already holds the USDC, and ordinary
+  `mintAndSend` does not increment `getTotalBridged` — last withdrawers
+  then hit 233. `mintAndSendBridged` matches `confirmDeposit`: it mints
+  ECC[3] and credits `_totalMintedBridgeByToken`. It shares `_mintNonce`
+  with `mintAndSend`. Do **not** use it for ordinary owner mint: that
+  would invent bridged inventory the Ethereum treasury does not hold.
+  `mintAndSend` / `mintAndSendAccumulator` / TIP-3 mint still increment
+  only `getTotalMinted`. `mintAndSendBridged` is not bound to a deposit
+  id: the operator must match the aborted deposit's recipient and amount,
+  once — a second call or a mistyped `value` adds inventory Ethereum does
+  not hold.
+
+  ECC[3] stays fungible: the cap is still an inventory check, not a
+  per-depositor reservation. That half of QC-AN-05 is the accepted
+  product choice.
+
+  Upgrade with `updateCode` and an empty `userCell` — the storage *layout*
+  is unchanged, but `onCodeUpgrade` still `resetStorage`s and restores
+  only pubkey, usdcWallet, `_totalMinted`, both mint nonces, the two
+  bridged maps and the voucher code. It wipes `_paused`,
+  `_trustedL1Bridge`, `_acceptedBlockHash`, `_lightClientCode`,
+  `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`.
+  After the call, re-run `setPaused` if the lane was paused,
+  `setTrustedL1Bridge`, and `setLightClientCode` / `deployLightClient`
+  before deposits work again (222/224 until then). Owner anchors come
+  back on for every chain (`_ownerAnchorsDisabled` is wiped). If a chain
+  had been flipped to light-client-only, call `disableOwnerAnchorsOn`
+  again after `deployLightClient` — it turns the owner writer off and
+  reverts 226 until a client exists. The ABI gains `mintAndSendBridged`.
+  `eccUSDCBridge` 1.11.0,
+  code hash `aeeadc7f…`, rebuilt with sold 0.80.0. The deposit CLI's
+  exit-37 message names the aborted deposit's `depositId`, amount, recipient,
+  EVM bridge and chain, and tells the operator to call `mintAndSendBridged`.
+  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.11.0.
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
-  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
-  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
-  against headroom that deposits created: the cap limits total bridge
-  payouts to total deposits, not one depositor's own withdrawal.
+  Ordinary owner `mintAndSend` / `mintAndSendAccumulator` and TIP-3 mint
+  increment only `getTotalMinted` and add no headroom. 1.11.0's
+  `mintAndSendBridged` is the exception, for exit-37 recovery only. ECC[3]
+  is fungible, so such ECC can still be withdrawn against headroom that
+  deposits created: the cap limits total bridge payouts to total deposits,
+  not one depositor's own withdrawal.
 
   A fresh zerostate starts both counters at 0, so the cap holds from the
   first burn. `updateCode` copies the maps as they are. On a live bridge
@@ -192,8 +231,9 @@ assigns it when the release is tagged.
   That is not the same as a fresh deploy.
 
   `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The ABI is unchanged. The withdraw CLI preflight checks
-  `getTotalBridged` and refuses before the burn.
+  The 1.10.0 ABI was unchanged; 1.11.0 above adds `mintAndSendBridged`.
+  The withdraw CLI preflight checks `getTotalBridged` and refuses before
+  the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
@@ -215,7 +255,8 @@ assigns it when the release is tagged.
   that, so a deposit on a chain whose client was not the last one deployed is
   no longer refused. A bridge that reports 1.9.0 without the per-chain getter
   is answered once and falls back with a warning instead of being retried for
-  ever. 1.9.0 is now the newest version the CLI was checked against.
+  ever. 1.9.0 was the newest version the CLI was checked against in that
+  change; 1.11.0 above is now `NEWEST_KNOWN_BRIDGE_VERSION`.
 
 - **One light-client code, one client per source chain, addressed by code
   salt.** `setLightClientCode` now only stores the code. The address is

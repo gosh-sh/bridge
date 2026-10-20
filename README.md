@@ -12,6 +12,39 @@ verifiers deployed as Yul bytecode.
 
 ---
 
+## The current deployment
+
+Sepolia ↔ shellnet. No address is pinned in the tree: the CLI, the relayers and
+the web form all take theirs from configuration.
+
+### Ethereum (Sepolia, chain id 11155111)
+
+| | |
+|---|---|
+| `AckiNackiBridge` | `0x8413212869201d4e0d525e6067b605318029d451` |
+| deployment block | `11955698` |
+| USDC | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+
+### Acki Nacki (shellnet)
+
+| | |
+|---|---|
+| `eccUSDCBridge` | `0:1a1a…1a1a` |
+| version | `1.12.0`, code hash `a1fd7d19…` |
+| beacon light client | `0:1afeaa0fdd997e8177d60d0c8dbbe44c5a5e008f56194240f5f40da250582967` |
+| GraphQL | `https://shellnet.ackinacki.org/graphql` |
+
+### What to set
+
+```bash
+BRIDGE_ADDRESS=0x8413212869201d4e0d525e6067b605318029d451
+BRIDGE_DEPLOY_BLOCK=11955698
+FROM_BLOCK=11955698
+RPC_URL=https://rpc.sepolia.ethpandaops.io
+```
+
+---
+
 ## The two directions
 
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls

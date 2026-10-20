@@ -24,6 +24,14 @@ assigns it when the release is tagged.
 
 ### Documentation
 
+- **`README.md` opens with *The current deployment*.** No bridge address is
+  pinned in the tree any more, so a checkout had nowhere to read the live
+  ones. The section carries the Sepolia bridge and its deployment block, the
+  USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
+  client, and the four settings to copy. Read back from both chains.
+
+### Documentation
+
 - New [`REFACTORING.md`](REFACTORING.md) at the repository root, registered in
   `DOCS.md`: a backlog of changes that are not bugs. Six entries to start —
   `num_active_layers` naming the opposite of what it means; the EVM deployment

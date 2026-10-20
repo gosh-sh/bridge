@@ -47,12 +47,9 @@ mod tests {
     }
 }
 
-/// USDC (ERC-20, 6 decimals) accepted for deposits.
-/// Sepolia testnet: the Aave V3 faucet USDC underlying.
-pub const USDC_CONTRACT_ADDRESS: &str = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8";
-
-/// Aave V3 Sepolia permissionless faucet — mints test USDC for dev wallets.
-pub const AAVE_FAUCET_ADDRESS: &str = "0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D";
+/// USDC the shellnet bridge pulls (`usdc()`). Circle's Sepolia USDC, not
+/// the Aave V3 faucet token `DeployTestBridge` used.
+pub const USDC_CONTRACT_ADDRESS: &str = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
 
 /// USDC decimals (USD Coin uses 6 on Ethereum).
 pub const USDC_DECIMALS: u32 = 6;

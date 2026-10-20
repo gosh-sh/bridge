@@ -3,19 +3,17 @@ use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use crate::{
-    config::{bridge_contract_address, SEPOLIA_CHAIN_ID_HEX, USDC_UNIT},
+    config::{bridge_contract_address, ACKI_NACKI_RECEIVER, SEPOLIA_CHAIN_ID_HEX},
     utils::validate_an_account,
     web3::{
         approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
-        make_deposit, mint_test_usdc, switch_to_sepolia, usdc_to_units, wait_for_receipt,
+        make_deposit, switch_to_sepolia, usdc_to_units, wait_for_receipt,
     },
 };
 
-/// Maximum deposit (100 USDC in base units), mirrors `MAX_DEPOSIT_AMOUNT`.
-const MAX_USDC_UNITS: u128 = 100 * USDC_UNIT;
-
-/// Default faucet mint amount (100 USDC).
-const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
+/// Maximum deposit in base units, mirrors `AckiNackiBridge.MAX_DEPOSIT_AMOUNT`
+/// (`type(uint64).max`). There is no extra 100 USDC product cap.
+const MAX_USDC_UNITS: u128 = u64::MAX as u128;
 
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
@@ -26,7 +24,13 @@ pub struct DepositFormProps {
 pub fn deposit_form(props: &DepositFormProps) -> Html {
     let deployment_error = bridge_contract_address().err();
     let amount = use_state(String::new);
-    let an_account = use_state(String::new);
+    let an_account = use_state(|| {
+        if ACKI_NACKI_RECEIVER.is_empty() {
+            String::new()
+        } else {
+            ACKI_NACKI_RECEIVER.to_string()
+        }
+    });
     let deposit_id = use_state(|| None::<u128>);
     let is_loading = use_state(|| false);
     let status_msg = use_state(|| None::<String>);
@@ -46,38 +50,6 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
             an_account.set(input.value());
-        })
-    };
-
-    // "Get test USDC" — mint from the Aave Sepolia faucet to the connected wallet.
-    let on_faucet = {
-        let is_loading = is_loading.clone();
-        let status_msg = status_msg.clone();
-        let error_msg = error_msg.clone();
-        let wallet_connected = props.wallet_connected;
-
-        Callback::from(move |_: MouseEvent| {
-            if !wallet_connected {
-                error_msg.set(Some("Please connect your wallet first".to_string()));
-                return;
-            }
-            error_msg.set(None);
-            is_loading.set(true);
-
-            let is_loading = is_loading.clone();
-            let status_msg = status_msg.clone();
-            let error_msg = error_msg.clone();
-            spawn_local(async move {
-                status_msg.set(Some("Minting 100 test USDC from the faucet…".to_string()));
-                match mint_test_usdc(FAUCET_USDC_UNITS).await {
-                    Ok(hash) => match wait_for_receipt(&hash).await {
-                        Ok(()) => status_msg.set(Some("Minted 100 test USDC ✓".to_string())),
-                        Err(e) => error_msg.set(Some(format!("Faucet mint not confirmed: {}", e))),
-                    },
-                    Err(e) => error_msg.set(Some(format!("Faucet mint failed: {}", e))),
-                }
-                is_loading.set(false);
-            });
         })
     };
 
@@ -118,7 +90,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             }
             if units > MAX_USDC_UNITS {
                 error_msg.set(Some(
-                    "Amount exceeds the 100 USDC per-deposit limit".to_string(),
+                    "Amount exceeds the uint64 per-deposit cap".to_string(),
                 ));
                 return;
             }
@@ -244,7 +216,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"USDC"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Max 100 USDC per deposit. Gas is paid in ETH."}
+                        {"The contract cap is 2^64-1 USDC base units. Gas is paid in ETH."}
                     </div>
                 </div>
 
@@ -362,18 +334,16 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     }
                 </button>
 
-                <button
-                    type="button"
-                    class="submit-button secondary"
-                    onclick={on_faucet}
-                    disabled={!props.wallet_connected || *is_loading}
-                >
-                    { "Get 100 test USDC (faucet)" }
-                </button>
             </form>
 
             <div class="help-text">
-                <p>{"💡 No test USDC? Use the faucet button above, then approve and deposit. The relayer picks up your deposit automatically — you don't need to track the Deposit ID."}</p>
+                <p>
+                    {"No test USDC? The shellnet bridge takes Circle Sepolia USDC from "}
+                    <a href="https://faucet.circle.com/" target="_blank" rel="noopener">
+                        {"faucet.circle.com"}
+                    </a>
+                    {". Approve and deposit after that. The relayer picks up your deposit automatically — you don't need to track the Deposit ID."}
+                </p>
             </div>
         </div>
     }

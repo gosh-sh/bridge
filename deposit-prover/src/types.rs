@@ -91,7 +91,8 @@ pub struct DepositProofInput {
     /// Config-supplied (not part of the Ethereum `Deposit` event): the bridge
     /// operator sets which AN dApp a deposit credits. Bound as the
     /// `dappIdHigh`/`dappIdLow` public inputs (replaced `anWorkchain` on
-    /// 2026-06-02) and checked by `TokenBridge.finalizeDeposit` on the AN side.
+    /// 2026-06-02). The AN-side bridge pins `dappId` to 0 and does not check
+    /// the proven halves.
     #[serde(default)]
     pub dapp_id: [u8; 32],
 }

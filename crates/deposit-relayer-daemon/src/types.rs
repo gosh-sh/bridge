@@ -34,9 +34,10 @@ use crate::error::RelayerError;
 /// Acki Nacki destination account into the proof (an EVM address is not a valid
 /// AN recipient). `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced
 /// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
-/// event data in-circuit; `TokenBridge.finalizeDeposit` checks it against its
-/// configured dappId. USDCBridge must also allowlist `(chainId → expected
-/// bridge Fr)`.
+/// event data in-circuit. The AN bridge pins `dappId` to 0 and does not
+/// check the proven halves. AN always credits workchain 0.
+/// `eccUSDCBridge` allowlists trusted L1 bridges per chain
+/// (`_trustedL1Bridge[chainId][bridge]`).
 pub const NUM_PUBLIC_INPUTS: usize = 12;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
@@ -87,13 +88,14 @@ pub struct DepositEvent {
 /// The twelve public inputs the deposit proof commits to, decoded from the
 /// `public_inputs` opcode operand. Each is a full `U256` (the field element
 /// re-interpreted as an integer); the submitter forwards these as the
-/// `finalizeDeposit(...)` scalar arguments.
+/// `finalizeDeposit(...)` `bytes publicInputs` blob.
 ///
 /// `chain_id` is the proven typed-tx `chainId` (EIP-2930 / EIP-1559).
 /// `dapp_id_high` / `dapp_id_low` are the high/low 16-byte halves of the
 /// 256-bit AN dApp identifier (config-supplied tag); `an_account_high` /
 /// `an_account_low` are the high/low halves of the 256-bit AN account, matching
-/// the circuit's split. The AN side reconstructs each as `(high << 128) | low`.
+/// the circuit's split. The AN bridge reassembles the account as
+/// `(fr[7] << 128) | fr[8]` and pins `dappId` to 0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DepositPublicInputs {
     pub deposit_id: U256,
@@ -290,7 +292,7 @@ impl DepositProofBundle {
         // event we read from chain. The 16-byte account halves are below the
         // field modulus so they're exact. dappId is a config tag (not in the
         // event), so it is not checked against the event here — the AN-side
-        // TokenBridge verifies it against its configured dappId.
+        // bridge pins `dappId` to 0 and does not verify the proven halves.
         let exp_acc_hi = U256::from_be_slice(&event.an_account.as_slice()[0..16]);
         let exp_acc_lo = U256::from_be_slice(&event.an_account.as_slice()[16..32]);
         if self.parsed.an_account_high != exp_acc_hi || self.parsed.an_account_low != exp_acc_lo {

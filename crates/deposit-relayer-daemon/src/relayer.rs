@@ -120,7 +120,7 @@ pub enum TickOutcome {
     NotYetAvailable { deposit_id: u64 },
     /// The confirmed deposit's block has not been anchored on AN yet. No
     /// proving or submission was attempted, and this does not count as failure.
-    WaitingForAnchor { deposit_id: u64 },
+    WaitingForAnchor { deposit_id: u64, first_wait: bool },
     /// Proof generation failed (witness fetch blip, circuit error). The
     /// relayer records the attempt and retries later; persistent failures
     /// surface via the attempt counter / warning.
@@ -387,6 +387,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             self.persist_state()?;
             return Ok(TickOutcome::WaitingForAnchor {
                 deposit_id: target,
+                first_wait,
             });
         }
         if self.state.clear_anchor_wait(target) {
@@ -709,7 +710,8 @@ mod tests {
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::WaitingForAnchor {
-                deposit_id: 0
+                deposit_id: 0,
+                first_wait: true
             }
         ));
         assert_eq!(prover.0.load(Ordering::Relaxed), 0);
@@ -724,7 +726,8 @@ mod tests {
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::WaitingForAnchor {
-                deposit_id: 0
+                deposit_id: 0,
+                first_wait: false
             }
         ));
         assert!(matches!(
@@ -740,7 +743,8 @@ mod tests {
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::WaitingForAnchor {
-                deposit_id: 0
+                deposit_id: 0,
+                first_wait: false
             }
         ));
         assert_eq!(
@@ -816,7 +820,8 @@ mod tests {
             assert!(matches!(
                 relayer.tick().await.unwrap(),
                 TickOutcome::WaitingForAnchor {
-                    deposit_id: 0
+                    deposit_id: 0,
+                    ..
                 }
             ));
             gate.accepted.lock().unwrap().insert(0);
@@ -953,6 +958,73 @@ mod tests {
         assert_eq!(relayer.state().attempts_since_progress, 0);
         assert_eq!(prover.0.load(Ordering::Relaxed), 0);
         assert_eq!(gate.inner.finalized_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_anchor_waits_preserve_forward_error_backoff_until_progress() {
+        struct ForwardErrorSource;
+
+        #[async_trait::async_trait]
+        impl DepositSource for ForwardErrorSource {
+            async fn fetch(&self, id: u64) -> Result<Option<DepositEvent>, RelayerError> {
+                if id == 0 {
+                    Ok(Some(deposit(0)))
+                } else {
+                    Err(RelayerError::eth("forward RPC unavailable"))
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let gate = Arc::new(AnchorGate::default());
+        let prover = Arc::new(CountingProver::default());
+        let mut r = Relayer::new(
+            RelayerConfig {
+                outstanding_backoff_secs: 0,
+                ..RelayerConfig::new(dir.path().join("state.json"))
+            },
+            Arc::new(ForwardErrorSource),
+            prover.clone(),
+            gate.clone(),
+        )
+        .unwrap();
+        let counters = crate::daemon::RelayerMetrics::new();
+        let summary = r
+            .run_until_shutdown(
+                crate::daemon::BackoffConfig {
+                    initial: Duration::from_secs(2),
+                    max: Duration::from_secs(16),
+                    multiplier: 2,
+                },
+                Some(counters.clone()),
+                async {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let snap = counters.snapshot();
+                        let expected = match snap.ticks {
+                            0..=2 | 14.. => 2,
+                            3..=4 => 4,
+                            5..=6 => 8,
+                            _ => 16,
+                        };
+                        assert_eq!(snap.current_backoff_secs, expected);
+                        if snap.ticks == 12 {
+                            // An arrived anchor lets actual progress reset
+                            // the error backoff on the next retry turn.
+                            gate.accepted.lock().unwrap().insert(0);
+                        }
+                        if snap.ticks >= 14 {
+                            return;
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.tick_errors, 6);
+        assert_eq!(summary.finalized, 1);
+        assert_eq!(summary.an_rejected, 0);
+        assert_eq!(prover.0.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(start_paused = true)]

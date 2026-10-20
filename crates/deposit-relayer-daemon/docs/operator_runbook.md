@@ -1,8 +1,11 @@
 # `deposit-relayer` operator runbook
 
-verified-against: [PR #127](https://github.com/gosh-sh/bridge/pull/127)
-(queue, anchor readiness, backoff and monitoring); remaining sections were
-retained from the pre-PR runbook and were not reverified in this change.
+verified-against: `e529ad96ddc18b05df06b0658c91dfd5c30578fe` (PR base)
+plus [PR #127](https://github.com/gosh-sh/bridge/pull/127) for queue, anchor
+readiness, backoff and monitoring. After merge, replace this stamp with the
+merge commit. Sections 1, 5, 6 and 8 retain their original verification against
+`6f5de05c5f21e9938fae00b99ec925e2b4e81087` rather than a fresh verification.
+
 covers: `crates/deposit-relayer-daemon/src/`, `scripts/ursus/deposit-relayer.{service,env.example}`
 
 How to run the EVM → Acki Nacki deposit relayer so that it does not get stuck, does not
@@ -113,21 +116,22 @@ A stuck deposit no longer holds every later user. What gets the stuck one moving
 
 ## 4. Pending, timeouts and backoff (QC-OFF-11)
 
-Each tick ends in one outcome (`relayer::TickOutcome`). The daemon resets backoff to
-`--backoff-initial-secs` after progress or a normal `waiting_for_anchor` outcome.
-An anchor wait also resets any delay accumulated during earlier idle polls or
-errors. Other non-progress outcomes double it up to `--backoff-max-secs`
-(`Relayer::run_until_shutdown`). Per-deposit retry deadlines still apply.
-The reset also applies after errors: it favors fresh anchor waits over a
-separate error streak. Age-based per-id delays reduce repeated expensive
-checks for old waits; they do not provide independent error backoff for
-the forward RPC.
+Each tick ends in one outcome (`relayer::TickOutcome`). Progress or the first
+observed wait for a deposit's anchor resets the daemon delay to
+`--backoff-initial-secs`, including after idle polls or errors. Repeat anchor
+waits reset idle backoff only when no failure backoff is active. After a tick
+error, proof failure or AN rejection, repeat waits preserve the current delay;
+further failures increase it up to `--backoff-max-secs`. Progress or a newly
+observed wait clears that failure streak (`Relayer::run_until_shutdown`).
+Thus a permanently uncovered block cannot repeatedly cancel backoff for a
+failing forward RPC, while healthy anchor polling stays at the initial daemon
+interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 
 | Outcome | Meaning | Automatic handling | Counts toward parking |
 |---|---|---|---|
 | `finalized`, `already_finalized` | voucher deployed / already there | next deposit | resets the count |
 | `not_yet_available` | deposit not made, or not `--confirmations` deep | wait | no |
-| `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference and poll at the initial daemon interval, honoring per-id retry deadlines; no proving or broadcast, later ids remain runnable | **no** |
+| `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference; a first wait resets daemon delay, repeat waits preserve failure backoff and otherwise reset idle delay; honor per-id retry deadlines; no proving or broadcast, later ids remain runnable | **no** |
 | `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; ready retries alternate with new work. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before any re-prove | **no** |
 | `proof_failed` | the prover failed or timed out (900 s, `SubprocessProverConfig::timeout`) | retried | yes |
 | `an_rejected` | AN refused the deposit (exit code in the log) | retried | yes |

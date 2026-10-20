@@ -2,9 +2,10 @@
 //!
 //! [`Relayer::run_until_shutdown`] drives `tick()` forever (until a passed-in
 //! shutdown future resolves), applying exponential backoff between
-//! idle polls or failures and resetting the delay on progress or a normal
-//! anchor wait. It exposes structured [`RelayerMetrics`] for an external scrape
-//! and is shutdown-aware via `tokio::select!`, so a SIGINT during a long
+//! idle polls or failures and resetting the delay on progress or a new
+//! anchor wait. Repeat waits preserve an active failure backoff and reset
+//! only idle backoff. It exposes structured [`RelayerMetrics`] for an external
+//! scrape and is shutdown-aware via `tokio::select!`, so a SIGINT during a long
 //! backoff sleep is honoured at the next tick boundary (never mid-`tick`, so a
 //! `Finalized` outcome is always followed by a flushed `state.json`).
 
@@ -35,10 +36,10 @@ use crate::{
 
 /// Backoff policy for the daemon loop.
 ///
-/// `current = min(initial * multiplier^consecutive_failures, max)`. On any
-/// [`TickOutcome::Finalized`], [`TickOutcome::AlreadyFinalized`] or
-/// [`TickOutcome::WaitingForAnchor`] the streak resets and `current` snaps
-/// back to `initial`.
+/// Idle polls and failures multiply the current delay up to `max`.
+/// Progress and a newly observed [`TickOutcome::WaitingForAnchor`] reset it
+/// to `initial`. Repeat waits hold active failure backoff; without failures,
+/// they reset idle backoff so normal anchor polling remains responsive.
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffConfig {
     pub initial: Duration,
@@ -175,8 +176,9 @@ pub enum LastOutcome {
 
 impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// Drive `tick()` forever (or until `shutdown` resolves), applying
-    /// exponential backoff on idle polls and failures. Healthy anchor waits
-    /// use the initial polling delay.
+    /// exponential backoff on idle polls and failures. A new anchor wait
+    /// resets the delay; repeated waits preserve failure backoff but reset
+    /// idle backoff when there have been no failures.
     pub async fn run_until_shutdown<F>(
         &mut self,
         backoff: BackoffConfig,
@@ -188,6 +190,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     {
         let mut summary = DaemonRunSummary::default();
         let mut current_delay = backoff.initial;
+        // Keep errors latched across repeat waits. Only progress or a newly
+        // observed wait can reset their delay; normal idle polls are separate.
+        let mut failure_backoff_active = false;
         if let Some(id) = self.state().last_finalized_deposit_id {
             if let Some(m) = &metrics {
                 m.last_finalized_deposit_id.fetch_max(id, Ordering::Relaxed);
@@ -211,6 +216,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 m.ticks_total.fetch_add(1, Ordering::Relaxed);
             }
             prom::record_tick_outcome(outcome_label(&outcome_or_err));
+
+            failure_backoff_active |= matches!(
+                &outcome_or_err,
+                Err(_) | Ok(TickOutcome::ProofFailed { .. } | TickOutcome::AnRejected { .. })
+            );
+            let mut hold_backoff = false;
 
             let (reset_backoff, last_tag) = match outcome_or_err {
                 Ok(TickOutcome::Finalized {
@@ -256,15 +267,18 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 },
                 Ok(TickOutcome::WaitingForAnchor {
                     deposit_id,
+                    first_wait,
                 }) => {
                     if let Some(m) = &metrics {
                         m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
                     }
                     summary.not_yet_available += 1;
-                    // A healthy wait is active work, not an idle poll or a
-                    // failure. Reset any preceding backoff and keep checking
-                    // the retry queue at the initial polling interval.
-                    (true, LastOutcome::WaitingForAnchor {
+                    // Fresh work resets prior idle/error delay. Rechecking
+                    // an existing wait preserves an active error backoff;
+                    // with no errors, keep normal anchor polling responsive.
+                    let reset = first_wait || !failure_backoff_active;
+                    hold_backoff = !reset;
+                    (reset, LastOutcome::WaitingForAnchor {
                         deposit_id,
                     })
                 },
@@ -353,7 +367,8 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
             if reset_backoff {
                 current_delay = backoff.initial;
-            } else {
+                failure_backoff_active = false;
+            } else if !hold_backoff {
                 current_delay = backoff.bump(current_delay);
             }
             if let Some(m) = &metrics {

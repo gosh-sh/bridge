@@ -23,8 +23,9 @@ recipient through `confirmDeposit`.
   same deposit fails in the voucher constructor with exit 51, so no deposit can be minted
   twice, whoever submits it (`submitter::classify_exit`).
 - **`state.json` is a cache plus a to-do list** (`state::RelayerState`). It holds the
-  high-water mark (`last_processed_deposit_id`), the failed ids still to retry
-  (`outstanding_deposits`) and the log-scan cursor (`scan_done_through_block`), all of
+  high-water mark (`last_processed_deposit_id`), unfinished ids waiting for
+  anchors, pending submissions or retries (`outstanding_deposits`), and the
+  log-scan cursor (`scan_done_through_block`), all of
   which can be rebuilt from the chain. It also holds `parked_deposit_ids`, which
   nothing else records. **Losing the file loses that list, and on failover without a
   copy also loses every outstanding id below the new `START_DEPOSIT_ID`.**
@@ -60,8 +61,9 @@ outstanding deposit gets the first turn. Retries still honor per-id backoff
 (`--outstanding-backoff-secs` / `OUTSTANDING_BACKOFF_SECS`, default
 2 s, doubled each *failed* attempt up to 64×). A pending submit does not increment
 `attempts`, so it stays at the base delay until a proof failure or an AN rejection.
-A retry loads the stored Deposit tx (or its block) so the log-scan cursor can keep
-moving with later deposits. An outstanding id that has no stored log — a `state.json`
+A retry uses the cached event when available, otherwise the stored Deposit
+tx's receipt (or its block), so the log-scan cursor can keep moving with later
+deposits. An outstanding id that has no stored log — a `state.json`
 written by an earlier relayer that only recorded `attempts_since_progress` — is
 scanned from the `scan_done_through_block` that file had on load, plus one,
 with a fallback to `--from-block` if that snapshot was already past the deposit.
@@ -70,13 +72,14 @@ A stuck deposit no longer holds every later user. What gets the stuck one moving
 
 1. **On its own**, a transient failure (RPC blip, prover crash) is retried with that
    per-id backoff on retry turns. A pending submit is retried at the base delay (it
-   does not count as an attempt). A retry with a stored tx uses the receipt and
-   makes no `eth_getLogs` walk from the shared cursor.
+   does not count as an attempt). A retry with a stored tx uses the cached
+   event or receipt and makes no `eth_getLogs` walk from the shared cursor.
 2. **With `--skip-after-attempts N`**, after N consecutive *failed* attempts (a proof
    failure or a rejection by AN) the deposit is **parked**. It is appended to
    `parked_deposit_ids`, dropped from outstanding, and the log shows `daemon: deposit
-   parked; run finalize-one manually`. Pending submits (§4) and "deposit not made yet"
-   do not count toward N. Pending still goes into `outstanding_deposits` with backoff, so
+   parked; run finalize-one manually`. Anchor waits, pending submits (§4) and
+   "deposit not made yet" do not count toward N. Pending still goes into
+   `outstanding_deposits` with backoff, so
    a paused lane does not hold later ids and does not walk those ids toward parking.
 3. **By hand**, finish a parked deposit:
 
@@ -141,9 +144,12 @@ anchor is observed (or the deposit is already finalized). Existing state files
 without this optional field remain readable.
 
 At the default `info` log level, the daemon logs the start of each anchor wait
-once with `deposit_id`, `chain_id`, `block_number` and `block_hash`. After an
-hour of observed waiting, it logs a warning on the next check, then at most
-once every 15 minutes per deposit. The optional
+once with `deposit_id`, `chain_id`, `block_number` and `block_hash`. It also
+warns immediately by default, then at most once every 15 minutes per deposit.
+`--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`, default `0`)
+sets the warning delay from the first observed wait. Use a positive delay
+only when block coverage is monitored separately and expected anchor delivery
+latency is understood; missing anchors can need manual action. The optional
 `anchor_wait_last_warned_unix` timestamp survives restarts; existing state
 files without it remain readable.
 These warnings do not count as failed attempts or park the deposit.
@@ -221,7 +227,7 @@ recommendations, not tested values.
 |---|---|
 | `time() - deposit_relayer_last_tick_timestamp_seconds > 900` | daemon dead or hung (a tick includes the prover, up to 900 s) |
 | `deposit_relayer_outstanding_deposits > 0` | deposits remain to retry, including normal anchor waits; inspect their outcome and age before treating this as a failure. `target_deposit_id` is the forward id on an idle relayer, so `deposit_counter - target` stays 0 while outstanding ids sit below it |
-| `deposit_relayer_waiting_for_anchor > 0` and `time() - deposit_relayer_oldest_anchor_wait_timestamp_seconds > 3600` | the oldest observed anchor wait has exceeded an hour; inspect the light-client relayer and block coverage. The timestamp is 0 when no deposit is waiting and survives restarts |
+| `deposit_relayer_waiting_for_anchor > 0` | at least one block anchor is missing; the default warning identifies the deposit and block immediately. Notify the operator promptly if block coverage can require manual admission. For separately monitored automatic coverage, use an age budget based on expected delivery latency with `time() - deposit_relayer_oldest_anchor_wait_timestamp_seconds`; a fixed hour is not a universal grace period. The timestamp is 0 when no deposit is waiting and survives restarts |
 | `deposit_relayer_eth_deposit_counter - deposit_relayer_target_deposit_id > 0` and `time() - deposit_relayer_last_finalized_timestamp_seconds > 3600` | new deposits are waiting at the high-water mark and none was delivered for an hour |
 | `deposit_relayer_attempts_since_progress >= 3` | the last failed outstanding id's attempt count; it resets when *any* later id finalizes, so it is not a stuck-queue signal on its own |
 | `deposit_relayer_parked_deposits > 0` | manual finish needed (§3) |

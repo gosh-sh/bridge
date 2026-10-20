@@ -75,7 +75,7 @@ pub struct OutstandingDeposit {
     /// and restarts so monitoring can distinguish a long wait from a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_wait_started_unix: Option<u64>,
-    /// Last prolonged-wait warning, persisted to limit repeated logs across
+    /// Last anchor-wait warning, persisted to limit repeated logs across
     /// restarts. Cleared together with the wait when the anchor arrives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_wait_last_warned_unix: Option<u64>,
@@ -359,7 +359,7 @@ impl RelayerState {
         }
     }
 
-    /// Record a prolonged-wait warning when due, returning the wait age.
+    /// Record an anchor-wait warning when due, returning the wait age.
     /// Both the age and repeat interval survive retries and restarts.
     pub fn record_anchor_wait_warning(
         &mut self,

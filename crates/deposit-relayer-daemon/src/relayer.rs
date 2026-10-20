@@ -63,6 +63,10 @@ pub struct RelayerConfig {
     /// immediately (tests). Default 2.
     #[serde(default = "default_outstanding_backoff_secs")]
     pub outstanding_backoff_secs: u64,
+    /// Seconds of observed anchor waiting before warning. `0` (default)
+    /// warns immediately; repeats are limited to once per 15 minutes per id.
+    #[serde(default)]
+    pub anchor_wait_warn_after_secs: u64,
     /// Scan cursor shared with [`EthLogSource`](crate::source::EthLogSource),
     /// persisted as [`RelayerState::scan_done_through_block`]. After a
     /// finalize the relayer moves it to the deposit's block minus one. `None`
@@ -79,7 +83,6 @@ fn default_outstanding_backoff_secs() -> u64 {
     2
 }
 
-const ANCHOR_WAIT_WARN_AFTER_SECS: u64 = 60 * 60;
 const ANCHOR_WAIT_WARN_REPEAT_SECS: u64 = 15 * 60;
 
 impl RelayerConfig {
@@ -93,6 +96,7 @@ impl RelayerConfig {
             force_state: false,
             skip_after_attempts: None,
             outstanding_backoff_secs: default_outstanding_backoff_secs(),
+            anchor_wait_warn_after_secs: 0,
             scan_cursor: None,
         }
     }
@@ -340,10 +344,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 self.config.outstanding_backoff_secs,
                 deposit_log_ref(&event),
             );
-            let prolonged_wait = self.state.record_anchor_wait_warning(
+            let warning_age_secs = self.state.record_anchor_wait_warning(
                 target,
                 now,
-                ANCHOR_WAIT_WARN_AFTER_SECS,
+                self.config.anchor_wait_warn_after_secs,
                 ANCHOR_WAIT_WARN_REPEAT_SECS,
             );
             self.persist_state()?;
@@ -356,7 +360,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     "waiting for AN block anchor; proving and submission deferred"
                 );
             }
-            if let Some(wait_secs) = prolonged_wait {
+            if let Some(wait_secs) = warning_age_secs {
                 warn!(
                     deposit_id = target,
                     chain_id = event.source_chain_id,
@@ -1033,6 +1037,7 @@ mod tests {
             force_state: false,
             skip_after_attempts: None,
             outstanding_backoff_secs: 0,
+            anchor_wait_warn_after_secs: 0,
             scan_cursor: None,
         };
         Relayer::new(cfg, source, prover, submitter).unwrap()
@@ -1134,6 +1139,7 @@ mod tests {
             force_state: false,
             skip_after_attempts: None,
             outstanding_backoff_secs: 0,
+            anchor_wait_warn_after_secs: 0,
             scan_cursor: Some(cursor.clone()),
         };
         let mut relayer = Relayer::new(
@@ -1177,8 +1183,9 @@ mod tests {
     #[tokio::test]
     async fn log_source_retry_and_same_block_neighbour_end_to_end() {
         // Deposits 0 and 1 share block 105, deposit 2 is in block 107; AN
-        // rejects the first attempt at deposit 0. Its retry uses the stored
-        // tx; subsequent forward work keeps the same-block neighbour in range.
+        // rejects the first attempt at deposit 0. Restart with a fresh source
+        // so its retry must fetch the stored tx's receipt, without a located
+        // event cache. Forward work must still find the same-block neighbour.
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let bridge = Address::repeat_byte(0x22);
@@ -1193,16 +1200,17 @@ mod tests {
         let submitter = MockAnSubmitter::with_verifier(Arc::new(move |_| {
             rejected_once.swap(true, Ordering::SeqCst)
         }));
+        let submitter = Arc::new(submitter);
         let cfg = RelayerConfig {
             scan_cursor: Some(cursor.clone()),
             outstanding_backoff_secs: 0,
             ..RelayerConfig::new(&state_path)
         };
         let mut relayer = Relayer::new(
-            cfg,
+            cfg.clone(),
             Arc::new(source),
             Arc::new(MockProofGenerator::new()),
-            Arc::new(submitter),
+            submitter.clone(),
         )
         .unwrap();
 
@@ -1222,6 +1230,28 @@ mod tests {
             Some(104)
         );
 
+        let saved = RelayerState::load(&state_path).unwrap().unwrap();
+        let stored_tx: B256 = saved
+            .outstanding(0)
+            .unwrap()
+            .tx_hash
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        drop(relayer);
+        let source =
+            EthLogSource::new(rpc.provider(), bridge, 100, 12).with_scan_cursor(cursor.clone());
+        let mut relayer = Relayer::new(
+            cfg,
+            Arc::new(source),
+            Arc::new(MockProofGenerator::new()),
+            submitter,
+        )
+        .unwrap();
+        rpc.take_receipt_hashes();
+        rpc.take_get_logs_ranges();
+
         // The ready retry gets its turn before forward work, without moving
         // the scan cursor past the same-block neighbour.
         for (id, cursor_after) in [(0, 104), (1, 104), (2, 106)] {
@@ -1232,6 +1262,10 @@ mod tests {
                 other => panic!("expected Finalized({id}), got {other:?}"),
             }
             assert_eq!(*cursor.lock().unwrap(), Some(cursor_after));
+            if id == 0 {
+                assert_eq!(rpc.take_receipt_hashes(), vec![stored_tx]);
+                assert!(rpc.take_get_logs_ranges().is_empty());
+            }
         }
 
         // Nothing new at 3: the idle scan advances to the confirmed head.

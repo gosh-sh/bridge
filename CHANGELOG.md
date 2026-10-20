@@ -62,9 +62,11 @@ assigns it when the release is tagged.
   `deposit_relayer_oldest_anchor_wait_timestamp_seconds` gauges expose the
   count and oldest wait, including across restarts.
   Each wait starts with an `info` log identifying the deposit, chain and
-  block. A wait lasting an hour produces a warning with block-coverage
-  diagnostics, repeated at most every 15 minutes per deposit, including
-  across restarts. Inspect prolonged waits: an uncovered block can need
+  block. Missing anchors warn immediately by default, with block-coverage
+  diagnostics; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
+  default `0`) can delay the warning when coverage is monitored separately.
+  Warnings repeat at most every 15 minutes per deposit, including across
+  restarts. Inspect missing anchors promptly: an uncovered block can need
   the anchor writer's intervention rather than arrive automatically.
   `deposit_relayer_outstanding_deposits` now includes normal anchor waits:
   adjust alerts that treat any non-zero value as a failure to use failed

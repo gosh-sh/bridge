@@ -477,6 +477,7 @@ mod tests {
             force_state: false,
             skip_after_attempts: None,
             outstanding_backoff_secs: 0,
+            anchor_wait_warn_after_secs: 0,
             scan_cursor: None,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()

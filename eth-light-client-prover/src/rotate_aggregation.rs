@@ -22,7 +22,7 @@
 //! 5. [`combine_committee_commitment`] folds the N shard Poseidon digests +
 //!    aggregate into the committee commitment (`next_commit`).
 //! 6. exposes rotate public inputs `[current_commit, next_commit, period,
-//!    gloas_fork_slot]` after the 12-limb KZG accumulator.
+//!    gloas_fork_slot, attested_slot]` after the 12-limb KZG accumulator.
 //!
 //! ## Accumulator (KZG decider)
 //!
@@ -73,11 +73,13 @@ use snark_verifier_sdk::{CircuitExt, Snark, SHPLONK};
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
 /// Rotate public inputs appended after the accumulator: `[current_commit,
-/// next_commit, period, gloas_fork_slot]` (R2 self-contained layout — see
-/// `EthBeaconLightClient`). `period` is [`crate::mainnet::rotate_period`] of the
-/// attested slot, constrained in-circuit. The circuit accepts any
-/// `gloas_fork_slot`, so the consumer must require its network's.
-pub const NUM_ROTATE_PUBLIC_INPUTS: usize = 4;
+/// next_commit, period, gloas_fork_slot, attested_slot]` (R2 self-contained
+/// layout — see `EthBeaconLightClient`). `period` is
+/// [`crate::mainnet::rotate_period`] of the attested slot, constrained
+/// in-circuit. `attested_slot` is the signed header when a step snark is
+/// folded. The circuit accepts any `gloas_fork_slot`, so the consumer must
+/// require its network's.
+pub const NUM_ROTATE_PUBLIC_INPUTS: usize = 5;
 
 /// Index of the attested slot in a verified step proof's public instances. When
 /// a step snark is folded, the `next_sync_committee` index is chosen by it.
@@ -371,7 +373,13 @@ impl RotateAggregationCircuit {
             let (attested_period, _) =
                 range.div_mod(ctx, attested_slot, SLOTS_PER_SYNC_PERIOD, 64);
             let period = gate.add(ctx, attested_period, QuantumCell::Constant(Fr::ONE));
-            vec![current_commit, next_commit, period, gloas_fork_slot]
+            vec![
+                current_commit,
+                next_commit,
+                period,
+                gloas_fork_slot,
+                attested_slot,
+            ]
         };
 
         assert_eq!(builder.assigned_instances.len(), 1, "one instance column");

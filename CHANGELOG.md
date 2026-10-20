@@ -1742,10 +1742,10 @@ assigns it when the release is tagged.
   after idle polls or errors. Repeat waits preserve active failure backoff;
   with no failures, they reset idle backoff for responsive normal polling.
   Progress or a new wait clears the failure streak. Per-deposit anchor
-  polling uses the larger of
-  existing failure backoff and one quarter of the observed wait age, with
-  the age component capped at 60 seconds; `OUTSTANDING_BACKOFF_SECS=0`
-  disables per-id delays. Fresh waits retain the short base interval.
+  polling uses the larger of failure backoff and one quarter of wait age,
+  with the age component capped at 60 seconds. Setting
+  `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. Fresh waits retain
+  the short base interval.
 - **`deposit_relayer_outstanding_deposits` includes healthy anchor waits.**
   Adjust alerts that treat any nonzero value as failure to distinguish
   failed attempts and missing anchors using their age and coverage.

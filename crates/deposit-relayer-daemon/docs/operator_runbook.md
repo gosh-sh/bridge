@@ -2,8 +2,9 @@
 
 verified-against: `e529ad96ddc18b05df06b0658c91dfd5c30578fe` (PR base)
 plus [PR #127](https://github.com/gosh-sh/bridge/pull/127) for queue, anchor
-readiness, backoff and monitoring. After merge, replace this stamp with the
-merge commit. Sections 1, 5, 6 and 8 retain their original verification against
+readiness, backoff, monitoring and the outstanding-deposit description in
+section 1. After merge, replace this stamp with the merge commit. The rest of
+section 1 and sections 5, 6 and 8 retain their original verification against
 `6f5de05c5f21e9938fae00b99ec925e2b4e81087` rather than a fresh verification.
 
 covers: `crates/deposit-relayer-daemon/src/`, `scripts/ursus/deposit-relayer.{service,env.example}`

@@ -228,8 +228,9 @@ enum Cmd {
         #[arg(long, env = "SKIP_AFTER_ATTEMPTS", default_value_t = 0)]
         skip_after_attempts: u32,
         /// Base delay in seconds before retrying a failed deposit. Doubled
-        /// on each later failure of that id, up to 64×. Anchor waits also
-        /// use age / 4 seconds, capped at 60. `0` disables both per-id delays.
+        /// on each later failure of that id, up to 64×. Anchor waits use the
+        /// larger of that failure delay and age / 4 seconds (age component
+        /// capped at 60). `0` disables both per-id delays.
         #[arg(long, env = "OUTSTANDING_BACKOFF_SECS", default_value_t = 2)]
         outstanding_backoff_secs: u64,
         /// Warn after this many seconds waiting for an AN block anchor.

@@ -120,6 +120,10 @@ pub enum TickOutcome {
     NotYetAvailable { deposit_id: u64 },
     /// The confirmed deposit's block has not been anchored on AN yet. No
     /// proving or submission was attempted, and this does not count as failure.
+    /// `first_wait` is true only if no start time is recorded for this wait;
+    /// an existing wait stays non-new after restart. The daemon uses this
+    /// flag to reset prior backoff for a new wait, while repeat waits can
+    /// preserve active failure backoff.
     WaitingForAnchor { deposit_id: u64, first_wait: bool },
     /// Proof generation failed (witness fetch blip, circuit error). The
     /// relayer records the attempt and retries later; persistent failures

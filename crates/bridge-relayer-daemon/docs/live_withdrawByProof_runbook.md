@@ -244,7 +244,8 @@ cd ../bridge-evm-aggregator && cargo build --release && cd ../bridge-prover-libr
 
 # 3. Build the Circuit 4 event prover
 cargo build --release -p bridge-event-halo2-prover
-#   -> ./target/release/bridge-event-halo2-prover
+#   -> ./target/release/bridge-event-halo2-prover (what `prove-withdraw --prover-bin` /
+#      BRIDGE_WITHDRAW_PROVER_BIN names; the relayer never builds it)
 ```
 
 **Env sanity (in addition to bundle-lane vars from parent runbook):**
@@ -260,7 +261,7 @@ done
 
 `shellnet.common` holds `RPC_URL`, `RELAYER_PRIVATE_KEY`,
 `BRIDGE_GQL_ENDPOINT`, `BRIDGE_BK_SET_CONFIG`, `BRIDGE_PARAMS_DIR`,
-`BRIDGE_AGGREGATOR_DIR`, `BRIDGE_VERIFIERS_DIR`; `$BRIDGE_CONFIG_DIR/env` sources it
+`BRIDGE_AGGREGATOR_DIR`, `BRIDGE_AGGREGATE_PROOF_BIN`, `BRIDGE_VERIFIERS_DIR`; `$BRIDGE_CONFIG_DIR/env` sources it
 and layers on `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`,
 `BRIDGE_ANCHOR_LEVEL`, `BRIDGE_CONFIG_DIR`. The withdraw scripts
 under `scripts/launch_withdraw_e2e*.sh` source the same per-mode env
@@ -416,7 +417,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --anchor-layer auto \
   --event-wait-s 900 \
   --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
-  --bridge-prover-libraries-dir . \
+  --aggregate-proof-bin "$BRIDGE_AGGREGATE_PROOF_BIN" \
   --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
   --prover-seq-no $(date +%s) \
   --dry-run \
@@ -616,7 +617,7 @@ TS=$(date +%Y%m%d_%H%M%S)
   --i-know-the-wait \
   --event-wait-s 900 \
   --work-dir "$BRIDGE_CONFIG_DIR/work_dir" \
-  --bridge-prover-libraries-dir . \
+  --aggregate-proof-bin "$BRIDGE_AGGREGATE_PROOF_BIN" \
   --prover-out-dir "$BRIDGE_CONFIG_DIR/proofs" \
   --prover-seq-no $(date +%s) \
   --dry-run \

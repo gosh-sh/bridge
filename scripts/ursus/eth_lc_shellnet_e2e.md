@@ -15,6 +15,9 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
 - `EthBeaconLightClient` deployed from the bridge (`deployLightClient`). Set
   `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH` only if you mean to flip (step 9).
 - Binary: `cargo build --release --features live-submit` in the relayer crate.
+- Both owner keys remain trusted after the flip: upgrades and client replacement
+  remain available. After a bridge upgrade, restore configuration and repeat the
+  intended per-chain flips; check `isOwnerAnchorsEnabled(chainId)`.
 
 ## Steps
 
@@ -23,7 +26,7 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    `18446744073709551615` while Gloas is unscheduled). Required once after
    `deployLightClient`; `submitUpdate` and `submitRotate` revert 256 until
    it runs. The daemon does not set it.
-3. `eth-lc-relayer prove-one --beacon-url $BEACON_URL --prover-dir … --srs-path … --out-dir ./bundle`
+3. `eth-lc-relayer prove-one --beacon-url $BEACON_URL --step-prover-bin … --srs-path … --out-dir ./bundle`
    on **n14** (~k=19, tens of GB). `COMMITTEE_JSON_PATH` is filled by the
    relayer from `light_client/updates`. Synthetic OsRng committee is a bug.
 4. `eth-lc-relayer submit-one --bundle-dir ./bundle …` — `submitUpdate` ACCEPTED,

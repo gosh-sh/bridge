@@ -1023,6 +1023,17 @@ assigns it when the release is tagged.
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
 
+- **`shellnet.common` no longer carries a key.** It gave every tester the
+  same shared shellnet burner as `RELAYER_PRIVATE_KEY`. The relayer now
+  replaces whatever transaction waits at its account's next nonce, so two
+  daemons on one key replaced each other's transactions; the burner also
+  has old transactions waiting in the Sepolia pools, and a deploy from it
+  can fail with `EOA nonce changed unexpectedly`. Put the key of a Sepolia
+  EOA of your own into the untracked `crates/bridge-prover-libraries/.env`
+  as `RELAYER_PRIVATE_KEY=0x…` (live relayer runbook, *Disk and wallet*).
+  Without it `shellnet.common` warns, and the `relayer` commands refuse to
+  start for want of `--private-key`.
+
 ### Documentation
 
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
@@ -1069,8 +1080,12 @@ assigns it when the release is tagged.
   over at least 5 polls in a row (one low read can be a lagging GraphQL
   replica), it exits with
   `Acki Nacki chain head … is below the bridge's last verified block …:
-  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`.
-  Deploy a new bridge (live relayer runbook §5.5).
+  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`
+  and exit status 78 (every other failure exits with 1). Deploy a new bridge
+  (live relayer runbook §5.5). The shellnet-l2 container does not restart
+  on status 78: it stays up with the daemon stopped and logs `STOPPED: the
+  Acki Nacki chain is behind the bridge`, instead of rerunning preflight and
+  the startup scan into the same stop every few minutes.
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -1599,22 +1614,23 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- **`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` defaults to 20, per endpoint** (was 60
-  for the one endpoint): past it the request moves to the next endpoint. A
-  value set by hand is kept.
 - **Relayer logs and errors name Ethereum endpoints by scheme and host
   only.** reqwest put the full URL, API key included, into every transport
   error the relayer logged.
 - **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
   set** (the EF DevOps endpoint otherwise, as before). Every tool that
-  sources it — the deploy script, the `cast` commands of the runbooks, the
-  Python drivers — then talks to Infura.
-- **`shellnet.common` takes `RELAYER_PRIVATE_KEY` from the untracked
-  `crates/bridge-prover-libraries/.env` when it is set there** (or in the
-  environment); the shared shellnet burner key is the fallback. The burner
-  has old transactions waiting in the Sepolia pools, and a deploy from it
-  can fail with `EOA nonce changed unexpectedly`: give each tester a key of
-  their own. Live relayer runbook, *Disk and wallet*.
+  sources an `L*_config/env` — the relayer, the `cast` commands of the
+  runbooks, `scripts/launch_withdraw_e2e*.sh` and
+  `scripts/replay_withdraw_shplonk.sh` — then talks to Infura.
+  `scripts/deploy_bridge_bundle.sh` does not source it: it broadcasts
+  through `SEPOLIA_RPC_URL`, publicnode unless that is set.
+- **shellnet-l2 kit: `preflight.sh` no longer refuses a start while a
+  transaction from the relayer EOA waits unmined.** It warns, and the daemon
+  replaces that transaction once it runs; refusing kept the container
+  restarting under `restart: unless-stopped` while the very transaction the
+  daemon would replace held it back. Its chain checks go to the first of
+  `RPC_URL` and `RPC_FAILOVER_URLS` that answers instead of `RPC_URL` alone,
+  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`.
 - **`bk_set.shellnet.json` holds the genesis committee of shellnet as
   restarted on 2026-10-14** (5 signers; Poseidon commitment
   `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
@@ -2130,9 +2146,11 @@ assigns it when the release is tagged.
   request on a connection that went silent waited until the OS dropped the
   connection. `daemon-live` once waited 9.5 minutes on one
   `eth_blockNumber`, and a BK rotation that had landed on Acki Nacki waited
-  with it. A request now fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`):
-  the daemon logs `tick failed, will back off` and retries, and a send that
-  times out is an RPC failure, not counted toward the abort threshold.
+  with it. A request to one endpoint now fails after 20 s
+  (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`) and moves on to the next one in
+  `RPC_FAILOVER_URLS`. Once every endpoint has failed it, the daemon logs
+  `tick failed, will back off` and retries, and a send that times out is an
+  RPC failure, not counted toward the abort threshold.
 - **Check B allows four bundles of the daemon's own stride between two
   snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
   L2 bundle the relayer did not see land — its own `verifyBlock` whose

@@ -9,19 +9,20 @@
 #   cargo run --release -p bridge-relayer-daemon --bin relayer -- daemon-live
 #
 # SAFETY:
-#   * shellnet.common IS tracked in git — it carries the shared shellnet burner
-#     that every operator needs to reproduce a run. Only personal editor
-#     backups (see bridge/.gitignore `.env.shellnet.*.bak*`) are ignored.
-#   * RELAYER_PRIVATE_KEY is a Sepolia-only burner. Do NOT reuse this key
-#     for anything of value on any other network.
+#   * shellnet.common IS tracked in git, and carries no key. API keys and the
+#     relayer's private key go in the untracked .env next to it (matched by
+#     .gitignore). Personal editor backups (`.env.shellnet.*.bak*`) are
+#     ignored too.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
-# Single shared shellnet burner used for BOTH the deploy (owner) role and the
-# relayer role. `verifyBlock` and `withdrawByProof` are permissionless so one
-# key covers everything for the shellnet E2E. Address:
-# 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307. For the deploy path
-# (`scripts/deploy_bridge_bundle.sh`) re-export the same value as `PRIVATE_KEY`
-# — e.g. `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh`.
+# RELAYER_PRIVATE_KEY comes from .env: a Sepolia EOA of your own, used for
+# BOTH the deploy (owner) role and the relayer role (`verifyBlock` and
+# `withdrawByProof` are permissionless). Never share it: the relayer replaces
+# whatever transaction waits at its account's next nonce, so two daemons on
+# one key replace each other's transactions. Do NOT reuse it for anything of
+# value on any other network. For the deploy path
+# (`scripts/deploy_bridge_bundle.sh`) re-export it as `PRIVATE_KEY` — e.g.
+# `PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh`.
 # RPC_URL is the primary Ethereum endpoint; the relayer falls back to the
 # RPC_FAILOVER_URLS entries in order when it fails
 # (crates/bridge-relayer-daemon/src/eth_rpc.rs). Together they must serve
@@ -37,6 +38,7 @@
 # API keys go in the untracked .env next to this file (matched by .gitignore):
 #   ALCHEMY_API_KEY=...
 #   INFURA_API_KEY=...
+#   RELAYER_PRIVATE_KEY=0x...
 # NEVER put a key in this file: it is tracked, and .gitleaks.toml does not
 # scan it. An endpoint whose key is not set is left out; without
 # INFURA_API_KEY the EF DevOps endpoint is the primary.
@@ -47,14 +49,14 @@ fi
 RPC_URL=${INFURA_API_KEY:+https://sepolia.infura.io/v3/$INFURA_API_KEY}
 RPC_URL=${RPC_URL:-https://rpc.sepolia.ethpandaops.io}
 RPC_FAILOVER_URLS=${ALCHEMY_API_KEY:+https://eth-sepolia.g.alchemy.com/v2/$ALCHEMY_API_KEY,}https://rpc.sepolia.ethpandaops.io,https://ethereum-sepolia-rpc.publicnode.com,https://sepolia.gateway.tenderly.co
+if [ -z "${RELAYER_PRIVATE_KEY:-}" ]; then
+  echo "shellnet.common: RELAYER_PRIVATE_KEY is not set; put the key of a Sepolia EOA of your own into $_shellnet_common_dir/.env" >&2
+fi
 unset _shellnet_common_dir
 # Pace the startup LayerAnchorAppended scan for Infura's free tier: 500
 # credits a second, 255 per eth_getLogs. Back to back, the scan drew HTTP 429
 # for the next half minute, even on eth_chainId.
 BRIDGE_GET_LOGS_PAUSE_MS=600
-# A key set in .env (RELAYER_PRIVATE_KEY=...) takes precedence: use a dedicated
-# EOA there. The shared burner below is the fallback.
-RELAYER_PRIVATE_KEY=${RELAYER_PRIVATE_KEY:-0xb27eec55faeb770f38f86130f4ec9abf901987a68251aade12331fe77f4ecd87}
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql

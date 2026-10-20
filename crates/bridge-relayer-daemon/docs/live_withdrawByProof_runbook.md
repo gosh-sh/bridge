@@ -190,9 +190,11 @@ Per-deploy addresses (`BRIDGE_ADDRESS`, the four aggregator verifiers,
 `prev_max_level_layer_hash`) rotate on every redeploy — read them from
 `crates/bridge-prover-libraries/L{1,2}_config/env` (rewritten by
 `scripts/deploy_bridge_bundle.sh` on each deploy), not from this doc.
-Deployer / relayer / owner wallet is the single shared shellnet burner
-`0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307` documented in
-[`shellnet.common`](../../bridge-prover-libraries/shellnet.common) or smth that you deployed yourself (see how to fund a wallet and deploy in [`live_relayer_bridge_runbook.md`](./live_relayer_bridge_runbook.md#2-prerequisites)).
+Deployer / relayer / owner wallet is a Sepolia EOA of your own, its key in
+the untracked `crates/bridge-prover-libraries/.env` as `RELAYER_PRIVATE_KEY`
+([`shellnet.common`](../../bridge-prover-libraries/shellnet.common) carries no
+key; see how to fund a wallet and deploy in
+[`live_relayer_bridge_runbook.md`](./live_relayer_bridge_runbook.md#2-prerequisites)).
 
 Two values are chain-invariant on shellnet and worth naming here:
 
@@ -260,11 +262,12 @@ for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT; do
 done
 ```
 
-`shellnet.common` holds `RPC_URL`, `RELAYER_PRIVATE_KEY`,
+`shellnet.common` holds `RPC_URL`, `RPC_FAILOVER_URLS`,
 `BRIDGE_GQL_ENDPOINT`, `BRIDGE_BK_SET_CONFIG`, `BRIDGE_PARAMS_DIR`,
 `BRIDGE_AGGREGATOR_DIR`, `BRIDGE_AGGREGATE_PROOF_BIN`, `BRIDGE_VERIFIERS_DIR`; `$BRIDGE_CONFIG_DIR/env` sources it
 and layers on `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`,
-`BRIDGE_ANCHOR_LEVEL`, `BRIDGE_CONFIG_DIR`. The withdraw scripts
+`BRIDGE_ANCHOR_LEVEL`, `BRIDGE_CONFIG_DIR`. `RELAYER_PRIVATE_KEY` and the RPC
+API keys come from the untracked `.env` that `shellnet.common` sources. The withdraw scripts
 under `scripts/launch_withdraw_e2e*.sh` source the same per-mode env
 file before invoking the binary.
 
@@ -344,7 +347,7 @@ cast call $BRIDGE 'usdc()(address)' --rpc-url $RPC
 # expect: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
 
 export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238         # Circle canonical Sepolia USDC
-export WALLET=0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307       # relayer/deployer (single shared burner)
+export WALLET=$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")   # relayer/deployer: your own EOA
 export AMOUNT=1000000                                          # 1.000000 USDC (6 decimals)
 
 # 1. Fund $WALLET from Circle's public faucet.

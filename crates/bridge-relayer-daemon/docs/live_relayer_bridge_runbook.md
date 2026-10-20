@@ -108,11 +108,10 @@ itself; K=21 and K=22 come from their own ceremony files.
   https://sepolia-faucet.pk910.de/ (proof of work) or
   https://cloud.google.com/application/web3/faucet/ethereum/sepolia.
   Put its key into the untracked `crates/bridge-prover-libraries/.env` as
-  `RELAYER_PRIVATE_KEY=0x…`: `shellnet.common` takes it from there, and falls
-  back to the burner key it carries, which everyone on the team shares. The
-  shared burner has old transactions waiting in the Sepolia pools; each
-  transaction it sends lets more of them in, and a deploy from it can fail
-  with `EOA nonce changed unexpectedly`.
+  `RELAYER_PRIVATE_KEY=0x…`: `shellnet.common` takes it from there, carries
+  no key of its own, and warns when none is set. Never share the key: the
+  relayer replaces whatever transaction waits at its account's next nonce,
+  so two daemons on one key replace each other's transactions.
 - A deploy reserves ~0.6 ETH at the script's 2 gwei gas price (the actual
   cost is lower); each `verifyBlock` or `applyBkSetUpdate` costs
   ~0.001–0.003 ETH.
@@ -120,7 +119,7 @@ itself; K=21 and K=22 come from their own ceremony files.
 ### Environment
 
 `L2_config/env` is written by the deploy script and sources `shellnet.common`
-(RPC, GraphQL endpoint, burner key, paths). Every launch also needs:
+(RPC and GraphQL endpoints, paths, and the keys in `.env`). Every launch also needs:
 
 | Variable | Value | Why |
 |---|---|---|
@@ -242,7 +241,7 @@ GraphQL.
 ### 3.3 Deploy
 
 ```bash
-set -a; source L2_config/env; set +a          # burner key and endpoints
+set -a; source L2_config/env; set +a          # your key (.env) and endpoints
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=2 \
 PRIVATE_KEY="$RELAYER_PRIVATE_KEY" \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
@@ -513,7 +512,10 @@ different anchor level; archive the state dir and investigate.
   verified block`: the chain head stayed below the bridge for 5 minutes, over
   at least 5 polls in a row. Shellnet was restarted from a new zerostate (or
   `BRIDGE_GQL_ENDPOINT` points at another network), and the new chain cannot
-  extend this bridge.
+  extend this bridge. This stop exits with status 78 (every other failure
+  exits with 1), so a supervisor can tell it apart: the shellnet-l2
+  container stays up with the daemon stopped instead of restarting into the
+  same stop every few minutes.
   Before §3, rebuild `bk_set.shellnet.json` for the new network (see the
   [shellnet BK-set section of `TECHNICAL_README.md`](../../bridge-prover-libraries/TECHNICAL_README.md#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson)).
 
@@ -529,7 +531,7 @@ on `BRIDGE_ADDRESS`.
 
 ```
 crates/bridge-prover-libraries/
-├── shellnet.common              shared development env (RPC, GraphQL, burner key, paths)
+├── shellnet.common              shared development env (RPC, GraphQL, paths; keys from .env)
 ├── bk_set.shellnet.json         BK set at the network's genesis (restart of 2026-10-14); input of §3.2
 ├── bk_set.shellnet.live.json    BK set at the current bridge's seed; BRIDGE_BK_SET_CONFIG
 ├── L2_config/

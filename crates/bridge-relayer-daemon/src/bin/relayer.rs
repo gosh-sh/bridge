@@ -588,6 +588,22 @@ enum Cmd {
     Status,
 }
 
+/// Exit status of `daemon-live` when it stops because the Acki Nacki chain
+/// is behind the bridge ([`RelayerError::AnChainBehindBridge`]): `EX_CONFIG`
+/// from `sysexits.h`. Every other failure exits with 1. No restart can help
+/// here, so a supervisor must not restart on it: the shellnet-l2 container
+/// entrypoint keeps the container up with the daemon stopped.
+const EXIT_AN_CHAIN_BEHIND_BRIDGE: i32 = 78;
+
+/// The exit status `err` asks for, when it is not the default 1.
+fn exit_status(err: &anyhow::Error) -> Option<i32> {
+    matches!(
+        err.downcast_ref::<RelayerError>(),
+        Some(RelayerError::AnChainBehindBridge { .. })
+    )
+    .then_some(EXIT_AN_CHAIN_BEHIND_BRIDGE)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -890,6 +906,10 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| {
                 error!(?e, "daemon-live failed");
+                if let Some(status) = exit_status(&e) {
+                    eprintln!("Error: {e:?}");
+                    std::process::exit(status);
+                }
                 e
             })
         },
@@ -2606,6 +2626,27 @@ fn init_tracing() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .try_init();
+}
+
+#[cfg(test)]
+mod exit_status_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_chain_behind_the_bridge_exits_with_ex_config() {
+        let behind = anyhow::Error::from(RelayerError::AnChainBehindBridge {
+            chain_head: 42_630,
+            last_verified: 24_018_944,
+        });
+        assert_eq!(exit_status(&behind), Some(EXIT_AN_CHAIN_BEHIND_BRIDGE));
+        let stuck = anyhow::Error::from(RelayerError::Stuck {
+            seq_no: 1,
+            attempts: 3,
+            reason: "bridge reverted".to_string(),
+        });
+        assert_eq!(exit_status(&stuck), None);
+        assert_eq!(exit_status(&anyhow::anyhow!("anything else")), None);
+    }
 }
 
 #[cfg(test)]

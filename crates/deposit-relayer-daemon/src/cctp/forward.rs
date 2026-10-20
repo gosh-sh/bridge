@@ -3,18 +3,22 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
 use alloy::{
-    network::EthereumWallet,
-    primitives::{keccak256, Address, Bytes, B256, U256},
+    eips::BlockId,
+    network::{EthereumWallet, ReceiptResponse},
+    primitives::{keccak256, Address, Bytes, B256},
     providers::{Provider, ProviderBuilder},
     rpc::types::{Filter, TransactionRequest},
     signers::local::PrivateKeySigner,
     sol,
     sol_types::{SolCall, SolEvent},
+    transports::{RpcError, TransportErrorKind},
 };
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
@@ -41,6 +45,13 @@ sol! {
         function forward(bytes32 key) external;
         function pending(bytes32 key) external view returns (uint256 amount, bytes32 anAccount, address depositor, int8 anWorkchain);
         function forwarders(address account) external view returns (bool);
+        function messageTransmitter() external view returns (address);
+    }
+
+    #[sol(rpc)]
+    #[allow(missing_docs)]
+    contract MessageTransmitterV2 {
+        function usedNonces(bytes32 nonce) external view returns (uint256);
     }
 }
 
@@ -282,8 +293,11 @@ pub async fn run_cctp_forward(cfg: CctpForwardConfig) -> Result<(), RelayerError
         ));
     };
     let provider = hub_provider(&cfg.hub_rpc_url, key).await?;
+    let hub = ChainHub::connect(provider, cfg.receiver).await?;
     for message in &attested {
-        submit_one(&provider, cfg.receiver, message).await?;
+        submit_one(&hub, message)
+            .await
+            .map_err(|e| RelayerError::eth(e.to_string()))?;
     }
     Ok(())
 }
@@ -359,6 +373,7 @@ pub async fn run_cctp_daemon(cfg: CctpDaemonConfig) -> Result<(), RelayerError> 
         )));
     }
 
+    let hub = ChainHub::connect(hub, cfg.receiver).await?;
     let iris = IrisClient::new(&cfg.iris_url)?;
     info!(
         source_chain_id,
@@ -394,7 +409,7 @@ async fn tick<S, H>(
 ) -> Result<(), RelayerError>
 where
     S: Provider,
-    H: Provider,
+    H: HubOps,
 {
     let head = source
         .get_block_number()
@@ -432,11 +447,11 @@ where
             }) => {
                 let mut failed = false;
                 for message in &messages {
-                    match submit_one(hub, cfg.receiver, message).await {
+                    match submit_one(hub, message).await {
                         Ok(()) => {},
                         Err(error) => {
                             warn!(%tx_hash, %error, "hub submission failed");
-                            if !is_transport_error(&error) {
+                            if !matches!(error, HubError::Transient(_)) {
                                 state.record_failure(&tx_hash);
                             }
                             failed = true;
@@ -508,166 +523,324 @@ async fn hub_provider(hub_rpc_url: &str, private_key: &str) -> Result<impl Provi
     Ok(provider)
 }
 
-/// `receiveBurn`, then `forward`. Always calls `forward` after a successful
-/// (or already-mined) receive so a lagging RPC cannot skip the deposit.
-async fn submit_one(
-    provider: &impl Provider,
-    receiver: Address,
-    message: &AttestedMessage,
-) -> Result<(), RelayerError> {
-    let key = message_key(&message.message)?;
-    receive_burn(provider, receiver, message).await?;
-    forward(provider, receiver, key).await
+/// A failed hub step. `Transient` does not count towards
+/// [`MAX_FORWARD_FAILURES`]: the RPC was unreachable or rate-limited, or a
+/// receipt did not arrive in time — the transaction may still land, and the
+/// next tick reads the outcome from chain state.
+#[derive(Debug, thiserror::Error)]
+enum HubError {
+    #[error("{0}")]
+    Transient(String),
+    #[error("{0}")]
+    Failed(String),
 }
 
-async fn receive_burn(
-    provider: &impl Provider,
-    receiver: Address,
-    message: &AttestedMessage,
-) -> Result<(), RelayerError> {
-    let call = CctpHubReceiver::receiveBurnCall {
-        message: Bytes::copy_from_slice(&message.message),
-        attestation: Bytes::copy_from_slice(&message.attestation),
+impl From<RelayerError> for HubError {
+    fn from(e: RelayerError) -> Self {
+        Self::Failed(e.to_string())
+    }
+}
+
+fn rpc_error(what: &str, e: RpcError<TransportErrorKind>) -> HubError {
+    let transient = match &e {
+        RpcError::Transport(_) => true,
+        RpcError::ErrorResp(payload) => matches!(payload.code, 429 | -32005),
+        _ => false,
     };
-    let tx = TransactionRequest::default()
-        .to(receiver)
-        .input(call.abi_encode().into());
-    let pending = match provider.send_transaction(tx.clone()).await {
-        Ok(pending) => pending,
+    let text = format!("{what}: {e}");
+    if transient {
+        HubError::Transient(text)
+    } else {
+        HubError::Failed(text)
+    }
+}
+
+/// One burn on the hub, both values read at the same block.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BurnState {
+    /// `MessageTransmitterV2.usedNonces(nonce) != 0`.
+    nonce_used: bool,
+    /// `CctpHubReceiver.pending(key).amount != 0`.
+    parked: bool,
+}
+
+#[async_trait]
+trait HubOps: Send + Sync {
+    async fn burn_state(&self, nonce: B256, key: B256) -> Result<BurnState, HubError>;
+    async fn receive_burn(&self, message: &AttestedMessage) -> Result<(), HubError>;
+    async fn forward(&self, key: B256) -> Result<(), HubError>;
+}
+
+/// Settle one burn from the hub's state, never from revert text. The message's
+/// `destinationCaller` is the receiver, so only its `receiveBurn` can use the
+/// nonce, and `forward` is the only way `pending(key)` goes back to zero:
+///
+/// - nonce unused: `receiveBurn`, then `forward`;
+/// - parked: `forward`;
+/// - nonce used, nothing parked: already forwarded, done.
+///
+/// After a failed step the state is read again, so a burn another forwarder
+/// parked or forwarded in the meantime is not counted as a failure.
+async fn submit_one(hub: &impl HubOps, message: &AttestedMessage) -> Result<(), HubError> {
+    let nonce = message_nonce(&message.message)?;
+    let key = message_key(&message.message)?;
+    let mut state = hub.burn_state(nonce, key).await?;
+    if !state.nonce_used {
+        match hub.receive_burn(message).await {
+            Ok(()) => {
+                state = BurnState {
+                    nonce_used: true,
+                    parked: true,
+                }
+            },
+            Err(error) => {
+                state = hub.burn_state(nonce, key).await?;
+                if !state.nonce_used {
+                    return Err(error);
+                }
+                info!(%key, %error, "receiveBurn failed but another caller received the burn");
+            },
+        }
+    }
+    if !state.parked {
+        info!(%key, "burn already forwarded");
+        return Ok(());
+    }
+    match hub.forward(key).await {
+        Ok(()) => Ok(()),
         Err(error) => {
-            let text = error.to_string();
-            if is_nonce_already_used(&text) {
-                info!("receiveBurn already mined (nonce used)");
+            let after = hub.burn_state(nonce, key).await?;
+            if after.nonce_used && !after.parked {
+                info!(%key, %error, "forward failed but the burn is already forwarded");
                 return Ok(());
             }
-            return Err(RelayerError::eth(format!("send receiveBurn: {text}")));
+            Err(error)
         },
-    };
-    let receipt = wait_receipt(pending, "receiveBurn").await?;
-    if receipt.status() {
+    }
+}
+
+/// [`HubOps`] on a live hub chain.
+struct ChainHub<P> {
+    provider: P,
+    receiver: Address,
+    transmitter: Address,
+    /// Highest block of a receipt this process has seen. State is never read
+    /// below it, so a load-balanced RPC lagging behind our own transaction
+    /// cannot report a burn as not received yet.
+    seen_block: AtomicU64,
+}
+
+impl<P: Provider> ChainHub<P> {
+    async fn connect(provider: P, receiver: Address) -> Result<Self, RelayerError> {
+        let transmitter = CctpHubReceiver::new(receiver, &provider)
+            .messageTransmitter()
+            .call()
+            .await
+            .map_err(|e| RelayerError::eth(format!("receiver messageTransmitter(): {e}")))?;
+        Ok(Self {
+            provider,
+            receiver,
+            transmitter,
+            seen_block: AtomicU64::new(0),
+        })
+    }
+
+    fn saw_receipt(&self, receipt: &impl ReceiptResponse) {
+        if let Some(block) = receipt.block_number() {
+            self.seen_block.fetch_max(block, Ordering::Relaxed);
+        }
+    }
+
+    async fn wait_receipt(
+        &self,
+        pending: alloy::providers::PendingTransactionBuilder<alloy::network::Ethereum>,
+        what: &str,
+    ) -> Result<alloy::rpc::types::TransactionReceipt, HubError> {
+        match tokio::time::timeout(RECEIPT_WAIT, pending.get_receipt()).await {
+            Ok(Ok(receipt)) => {
+                self.saw_receipt(&receipt);
+                Ok(receipt)
+            },
+            Ok(Err(e)) => Err(HubError::Transient(format!("{what} receipt: {e}"))),
+            Err(_) => Err(HubError::Transient(format!(
+                "{what} receipt timed out after {}s",
+                RECEIPT_WAIT.as_secs()
+            ))),
+        }
+    }
+
+    async fn call_at<C: SolCall>(
+        &self,
+        to: Address,
+        call: C,
+        block: u64,
+        what: &str,
+    ) -> Result<C::Return, HubError> {
+        let tx = TransactionRequest::default()
+            .to(to)
+            .input(call.abi_encode().into());
+        let out = self
+            .provider
+            .call(tx)
+            .block(BlockId::number(block))
+            .await
+            .map_err(|e| rpc_error(what, e))?;
+        C::abi_decode_returns(&out).map_err(|e| HubError::Failed(format!("decode {what}: {e}")))
+    }
+}
+
+#[async_trait]
+impl<P: Provider> HubOps for ChainHub<P> {
+    async fn burn_state(&self, nonce: B256, key: B256) -> Result<BurnState, HubError> {
+        let head = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| rpc_error("hub block number", e))?;
+        let seen = self.seen_block.load(Ordering::Relaxed);
+        if head < seen {
+            return Err(HubError::Transient(format!(
+                "hub RPC is at block {head}, behind our last receipt at {seen}"
+            )));
+        }
+        let used = self
+            .call_at(
+                self.transmitter,
+                MessageTransmitterV2::usedNoncesCall {
+                    nonce,
+                },
+                head,
+                "usedNonces",
+            )
+            .await?;
+        let parked = self
+            .call_at(
+                self.receiver,
+                CctpHubReceiver::pendingCall {
+                    key,
+                },
+                head,
+                "pending",
+            )
+            .await?;
+        Ok(BurnState {
+            nonce_used: !used.is_zero(),
+            parked: !parked.amount.is_zero(),
+        })
+    }
+
+    async fn receive_burn(&self, message: &AttestedMessage) -> Result<(), HubError> {
+        let call = CctpHubReceiver::receiveBurnCall {
+            message: Bytes::copy_from_slice(&message.message),
+            attestation: Bytes::copy_from_slice(&message.attestation),
+        };
+        let tx = TransactionRequest::default()
+            .to(self.receiver)
+            .input(call.abi_encode().into());
+        let pending = self
+            .provider
+            .send_transaction(tx)
+            .await
+            .map_err(|e| expired_hint(rpc_error("send receiveBurn", e)))?;
+        let receipt = self.wait_receipt(pending, "receiveBurn").await?;
+        if !receipt.status() {
+            return Err(HubError::Failed(format!(
+                "receiveBurn reverted (tx {})",
+                receipt.transaction_hash
+            )));
+        }
         info!(tx = %receipt.transaction_hash, "receiveBurn mined");
-        return Ok(());
+        Ok(())
     }
-    let replay = provider
-        .call(tx)
-        .await
-        .map(|_| "eth_call succeeded after a failed receipt".to_string())
-        .unwrap_or_else(|e| e.to_string());
-    if is_nonce_already_used(&replay) {
-        info!("receiveBurn already mined (nonce used)");
-        return Ok(());
+
+    /// The deposit circuit proves this transaction's `Deposit`: type 1 or 2,
+    /// at most [`MAX_PROVABLE_LOGS`] logs in the receipt. Sent as EIP-1559
+    /// with no access list.
+    async fn forward(&self, key: B256) -> Result<(), HubError> {
+        let fees = self
+            .provider
+            .estimate_eip1559_fees()
+            .await
+            .map_err(|e| rpc_error("EIP-1559 fee estimate", e))?;
+        let tx = TransactionRequest::default()
+            .to(self.receiver)
+            .input(
+                CctpHubReceiver::forwardCall {
+                    key,
+                }
+                .abi_encode()
+                .into(),
+            )
+            .max_fee_per_gas(fees.max_fee_per_gas)
+            .max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
+        let pending = self
+            .provider
+            .send_transaction(tx)
+            .await
+            .map_err(|e| rpc_error("send forward", e))?;
+        let receipt = self.wait_receipt(pending, "forward").await?;
+        if !receipt.status() {
+            return Err(HubError::Failed(format!(
+                "forward reverted (tx {}); is this key a forwarder on the receiver?",
+                receipt.transaction_hash
+            )));
+        }
+        let tx_type = u8::from(receipt.transaction_type());
+        let logs = receipt.logs().len();
+        if !PROVABLE_TX_TYPES.contains(&tx_type) || logs > MAX_PROVABLE_LOGS {
+            error!(
+                tx = %receipt.transaction_hash,
+                tx_type,
+                logs,
+                "hub Deposit is not provable: the deposit circuit needs a type 1 or 2 transaction \
+                 with at most 20 logs"
+            );
+        } else {
+            info!(tx = %receipt.transaction_hash, %key, "forward mined; hub Deposit emitted");
+        }
+        Ok(())
     }
-    Err(RelayerError::eth(format!("receiveBurn reverted: {replay}")))
 }
 
-/// The deposit circuit proves this transaction's `Deposit`: type 1 or 2, at
-/// most [`MAX_PROVABLE_LOGS`] logs in the receipt. Sent as EIP-1559 with no
-/// access list.
-async fn forward(
-    provider: &impl Provider,
-    receiver: Address,
-    key: B256,
-) -> Result<(), RelayerError> {
-    let fees = provider
-        .estimate_eip1559_fees()
-        .await
-        .map_err(|e| RelayerError::eth(format!("EIP-1559 fee estimate: {e}")))?;
-    let tx = TransactionRequest::default()
-        .to(receiver)
-        .input(
-            CctpHubReceiver::forwardCall {
-                key,
-            }
-            .abi_encode()
-            .into(),
-        )
-        .max_fee_per_gas(fees.max_fee_per_gas)
-        .max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
-    let pending = provider
-        .send_transaction(tx)
-        .await
-        .map_err(|e| RelayerError::eth(format!("send forward: {e}")))?;
-    let receipt = wait_receipt(pending, "forward").await?;
-    if !receipt.status() {
-        if pending_amount(provider, receiver, key).await?.is_zero() {
-            info!(%key, "forward reverted but nothing is parked; another caller forwarded it");
-            return Ok(());
-        }
-        return Err(RelayerError::eth(format!(
-            "forward reverted (tx {}); is this key a forwarder on the receiver?",
-            receipt.transaction_hash
-        )));
+/// Circle refuses a message whose attestation outlived its expiration block;
+/// only a fresh signature from Iris lets it through.
+fn expired_hint(error: HubError) -> HubError {
+    match error {
+        HubError::Failed(text) if text.to_ascii_lowercase().contains("expired") => {
+            HubError::Failed(format!(
+                "{text} — the attestation has expired; ask Iris to re-sign it with POST \
+                 /v2/reattest/<nonce>, then retry"
+            ))
+        },
+        other => other,
     }
-    let tx_type = u8::from(receipt.transaction_type());
-    let logs = receipt.logs().len();
-    if !PROVABLE_TX_TYPES.contains(&tx_type) || logs > MAX_PROVABLE_LOGS {
-        error!(
-            tx = %receipt.transaction_hash,
-            tx_type,
-            logs,
-            "hub Deposit is not provable: the deposit circuit needs a type 1 or 2 transaction with \
-             at most 20 logs"
-        );
-    } else {
-        info!(tx = %receipt.transaction_hash, %key, "forward mined; hub Deposit emitted");
-    }
-    Ok(())
 }
 
-async fn pending_amount(
-    provider: &impl Provider,
-    receiver: Address,
-    key: B256,
-) -> Result<U256, RelayerError> {
-    let tx = TransactionRequest::default().to(receiver).input(
-        CctpHubReceiver::pendingCall {
-            key,
-        }
-        .abi_encode()
-        .into(),
-    );
-    let out = provider
-        .call(tx)
-        .await
-        .map_err(|e| RelayerError::eth(format!("pending({key}): {e}")))?;
-    let decoded = CctpHubReceiver::pendingCall::abi_decode_returns(&out)
-        .map_err(|e| RelayerError::eth(format!("decode pending({key}): {e}")))?;
-    Ok(decoded.amount)
+const MESSAGE_NONCE: std::ops::Range<usize> = 12..44;
+
+fn message_nonce(message: &[u8]) -> Result<B256, RelayerError> {
+    message
+        .get(MESSAGE_NONCE)
+        .map(B256::from_slice)
+        .ok_or_else(|| {
+            RelayerError::other(format!(
+                "CCTP message is {} bytes, too short for a nonce",
+                message.len()
+            ))
+        })
 }
 
 /// `CctpHubReceiver.messageKey(sourceDomain, nonce)` from the raw message:
 /// source domain at byte 4, nonce at byte 12.
 pub fn message_key(message: &[u8]) -> Result<B256, RelayerError> {
-    if message.len() < 44 {
-        return Err(RelayerError::other(format!(
-            "CCTP message is {} bytes, too short for a nonce",
-            message.len()
-        )));
-    }
+    let nonce = message_nonce(message)?;
     let mut encoded = [0u8; 64];
     encoded[28..32].copy_from_slice(&message[4..8]);
-    encoded[32..64].copy_from_slice(&message[12..44]);
+    encoded[32..64].copy_from_slice(nonce.as_slice());
     Ok(keccak256(encoded))
 }
 
 const RECEIPT_WAIT: Duration = Duration::from_secs(120);
-
-async fn wait_receipt<P>(
-    pending: alloy::providers::PendingTransactionBuilder<P>,
-    what: &str,
-) -> Result<P::ReceiptResponse, RelayerError>
-where
-    P: alloy::network::Network,
-{
-    match tokio::time::timeout(RECEIPT_WAIT, pending.get_receipt()).await {
-        Ok(Ok(receipt)) => Ok(receipt),
-        Ok(Err(e)) => Err(RelayerError::eth(format!("{what} receipt: {e}"))),
-        Err(_) => Err(RelayerError::eth(format!(
-            "{what} receipt timed out after {}s",
-            RECEIPT_WAIT.as_secs()
-        ))),
-    }
-}
 
 async fn forwarder_allowed<P: Provider>(
     provider: &P,
@@ -687,23 +860,6 @@ async fn forwarder_allowed<P: Provider>(
         .map_err(|e| RelayerError::eth(format!("forwarders({signer}): {e}")))?;
     CctpHubReceiver::forwardersCall::abi_decode_returns(&out)
         .map_err(|e| RelayerError::eth(format!("decode forwarders({signer}): {e}")))
-}
-
-fn is_transport_error(error: &RelayerError) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
-    text.contains("timeout")
-        || text.contains("timed out")
-        || text.contains("connection")
-        || text.contains("429")
-        || text.contains("transport")
-        || text.contains("temporarily unavailable")
-}
-
-pub fn is_nonce_already_used(err: &str) -> bool {
-    let err = err.to_ascii_lowercase();
-    err.contains("nonce already used")
-        || err.contains("noncealreadyused")
-        || err.contains("nonceused")
 }
 
 fn warn_domain(chain_id: u64, domain: u32, which: &str) {
@@ -751,11 +907,11 @@ mod tests {
     fn ingest_skips_submitted_and_duplicates() {
         let mut state = state();
         let tx = "0x".to_string() + &"ab".repeat(32);
-        state.ingest(&[tx.clone()]);
-        state.ingest(&[tx.clone()]);
+        state.ingest(std::slice::from_ref(&tx));
+        state.ingest(std::slice::from_ref(&tx));
         assert_eq!(state.pending.len(), 1);
         state.mark_submitted(&tx);
-        state.ingest(&[tx.clone()]);
+        state.ingest(std::slice::from_ref(&tx));
         assert!(state.pending.is_empty());
         assert_eq!(state.submitted, vec![tx]);
     }
@@ -764,7 +920,7 @@ mod tests {
     fn failures_give_up_at_the_cap() {
         let mut state = state();
         let tx = "0x".to_string() + &"cd".repeat(32);
-        state.ingest(&[tx.clone()]);
+        state.ingest(std::slice::from_ref(&tx));
         for _ in 0..MAX_FORWARD_FAILURES {
             state.record_failure(&tx);
         }
@@ -795,14 +951,160 @@ mod tests {
         assert!(message_key(&message[..43]).is_err());
     }
 
+    /// A hub whose state moves the way `CctpHubReceiver` does: `receiveBurn`
+    /// uses the nonce and parks, `forward` unparks. `other_*` simulate another
+    /// forwarder winning the race just before our transaction.
+    #[derive(Default)]
+    struct FakeHub {
+        state: std::sync::Mutex<BurnState>,
+        other_receives_first: bool,
+        other_forwards_first: bool,
+        forward_fails: std::sync::Mutex<u32>,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl FakeHub {
+        fn at(state: BurnState) -> Self {
+            Self {
+                state: std::sync::Mutex::new(state),
+                ..Self::default()
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl HubOps for FakeHub {
+        async fn burn_state(&self, _nonce: B256, _key: B256) -> Result<BurnState, HubError> {
+            Ok(*self.state.lock().unwrap())
+        }
+
+        async fn receive_burn(&self, _message: &AttestedMessage) -> Result<(), HubError> {
+            self.calls.lock().unwrap().push("receiveBurn");
+            let mut state = self.state.lock().unwrap();
+            if self.other_receives_first {
+                *state = BurnState {
+                    nonce_used: true,
+                    parked: true,
+                };
+            }
+            if state.parked {
+                return Err(HubError::Failed("AlreadyPending".into()));
+            }
+            *state = BurnState {
+                nonce_used: true,
+                parked: true,
+            };
+            Ok(())
+        }
+
+        async fn forward(&self, _key: B256) -> Result<(), HubError> {
+            self.calls.lock().unwrap().push("forward");
+            let mut fails = self.forward_fails.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(HubError::Failed("forward reverted".into()));
+            }
+            let mut state = self.state.lock().unwrap();
+            if self.other_forwards_first {
+                state.parked = false;
+            }
+            if !state.parked {
+                return Err(HubError::Failed("NotPending".into()));
+            }
+            state.parked = false;
+            Ok(())
+        }
+    }
+
+    fn message() -> AttestedMessage {
+        AttestedMessage {
+            message: vec![0u8; 400],
+            attestation: vec![0u8; 65],
+        }
+    }
+
+    const UNUSED: BurnState = BurnState {
+        nonce_used: false,
+        parked: false,
+    };
+    const PARKED: BurnState = BurnState {
+        nonce_used: true,
+        parked: true,
+    };
+    const FORWARDED: BurnState = BurnState {
+        nonce_used: true,
+        parked: false,
+    };
+
+    #[tokio::test]
+    async fn fresh_burn_is_received_then_forwarded() {
+        let hub = FakeHub::at(UNUSED);
+        submit_one(&hub, &message()).await.unwrap();
+        assert_eq!(hub.calls(), ["receiveBurn", "forward"]);
+        assert_eq!(*hub.state.lock().unwrap(), FORWARDED);
+    }
+
+    #[tokio::test]
+    async fn burn_parked_by_someone_else_is_only_forwarded() {
+        let hub = FakeHub::at(PARKED);
+        submit_one(&hub, &message()).await.unwrap();
+        assert_eq!(hub.calls(), ["forward"]);
+        assert_eq!(*hub.state.lock().unwrap(), FORWARDED);
+    }
+
+    #[tokio::test]
+    async fn burn_parked_during_our_receive_is_forwarded() {
+        let hub = FakeHub {
+            other_receives_first: true,
+            ..FakeHub::at(UNUSED)
+        };
+        submit_one(&hub, &message()).await.unwrap();
+        assert_eq!(hub.calls(), ["receiveBurn", "forward"]);
+        assert_eq!(*hub.state.lock().unwrap(), FORWARDED);
+    }
+
+    #[tokio::test]
+    async fn already_forwarded_burn_sends_nothing() {
+        let hub = FakeHub::at(FORWARDED);
+        submit_one(&hub, &message()).await.unwrap();
+        assert!(hub.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn burn_forwarded_during_our_forward_is_success() {
+        let hub = FakeHub {
+            other_forwards_first: true,
+            ..FakeHub::at(PARKED)
+        };
+        submit_one(&hub, &message()).await.unwrap();
+        assert_eq!(hub.calls(), ["forward"]);
+    }
+
+    #[tokio::test]
+    async fn failed_forward_is_retried_with_forward_alone() {
+        let hub = FakeHub::at(UNUSED);
+        *hub.forward_fails.lock().unwrap() = 1;
+        let error = submit_one(&hub, &message()).await.unwrap_err();
+        assert!(matches!(error, HubError::Failed(_)));
+        assert_eq!(*hub.state.lock().unwrap(), PARKED);
+
+        submit_one(&hub, &message()).await.unwrap();
+        assert_eq!(hub.calls(), ["receiveBurn", "forward", "forward"]);
+        assert_eq!(*hub.state.lock().unwrap(), FORWARDED);
+    }
+
     #[test]
-    fn nonce_used_wording() {
-        assert!(is_nonce_already_used(
-            "execution reverted: Nonce already used"
+    fn expired_attestation_gets_a_reattest_hint() {
+        let hinted = expired_hint(HubError::Failed(
+            "execution reverted: Message expired".into(),
         ));
-        assert!(!is_nonce_already_used(
-            "execution reverted: HubNotConfigured"
-        ));
+        assert!(hinted.to_string().contains("/v2/reattest/"));
+        let other = expired_hint(HubError::Failed("execution reverted: NotForwarder".into()));
+        assert!(!other.to_string().contains("reattest"));
     }
 
     #[test]

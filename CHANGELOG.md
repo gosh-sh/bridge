@@ -1031,8 +1031,12 @@ assigns it when the release is tagged.
   `CCTP_HUB_RPC_URL`, `--receiver`, and the hub key `CCTP_HUB_PRIVATE_KEY`,
   whose address must be a forwarder on the receiver. The daemon's state is
   its own `--state` (default `./cctp-forward-state.json`), not the deposit
-  relayer's.   Restarts always call `forward` after `receiveBurn`, so a lagging RPC
-  cannot skip the deposit. `forward` goes out as EIP-1559 with no access
+  relayer's. Each burn is settled from hub state at a block no older
+  than the last receipt this process saw: unused nonce → `receiveBurn`
+  then `forward`; already parked → `forward` only; nonce used and
+  nothing parked → done. A parked burn is not retried with `receiveBurn`,
+  and a burn another caller already forwarded is not counted as a
+  failure. `forward` goes out as EIP-1559 with no access
   list; a receipt of another type or with more than 20 logs is logged as an
   unprovable `Deposit`. Other failures are retried and left in `gave_up`
   after eight attempts; `gave_up` is never retried, and an expired Iris
@@ -1078,10 +1082,9 @@ assigns it when the release is tagged.
   `TestnetAavePool`). `DeployCctp.s.sol` takes `CCTP_KIND=aave-shim`
   (`DEPOSIT_BRIDGE`, `CIRCLE_USDC`, `AAVE_FAUCET`), and
   `scripts/cctp_usdc.sh deploy-aave-shim` wraps it, with the faucet
-  `0xC959…f42D` as the default. Test-run addresses from 2026-10-17 are in
-  the pull request, not here: those DeployTestBridge instances have no
-  withdrawal verifiers, so trusting them on Acki Nacki would mint ECC that
-  cannot come back through them.
+  `0xC959…f42D` as the default. DeployTestBridge instances used in test
+  runs have no withdrawal verifiers, so trusting them on Acki Nacki would
+  mint ECC that cannot come back through them.
 
 - **Ethereum mainnet (chain id 1) is a supported deposit chain** in
   `crates/deposit-chain-ids`, so `deposit-prover` and `deposit-relayer`

@@ -38,3 +38,8 @@ dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/
 dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:generic-api-key:80
 dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:generic-api-key:84
 dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:jwt:84
+
+# Historical only: `7960577` named Circle's TokenMessengerV2 as
+# `TOKEN_MESSENGER` before the allowlist regex expected
+# `CIRCLE_(MESSENGER|TRANSMITTER)_V2`. The current file matches that regex.
+7960577600ad2581f936ab6d66d0dd6139cb41f8:contracts/ethereum/test/CctpMainnetAaveFork.t.sol:generic-api-key:51

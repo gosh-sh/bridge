@@ -83,10 +83,32 @@ pub fn version_verdict(
         },
         Some(_) => {},
     }
+    // A bridge NEWER than this build knows is refused, not warned about.
+    //
+    // The floor above catches a bridge carrying the previous deposit key. The
+    // ceiling catches the mirror case: a bridge whose key was rotated after
+    // this CLI was built. The prover would produce a proof for the key this
+    // build knows, `finalizeDeposit` would reject it, and the USDC would
+    // already be in the EVM bridge with no refund path — the same loss, from
+    // the other direction.
+    //
+    // This used to be a warning, on the assumption that a newer bridge keeps
+    // the same key. It does not: 1.12.0 rotated it. A warning on the one
+    // check standing between a run and an unrecoverable deposit is not a
+    // check.
+    //
+    // A development build still passes, so a bridge can be upgraded ahead of
+    // the CLI while both are being worked on.
     if v > newest {
-        warnings.push(format!(
-            "the bridge is version {v}, newer than {newest} this CLI was checked against"
-        ));
+        if dev_unfixed {
+            warnings.push(format!(
+                "development build: bridge {v} is newer than {newest} this CLI was built for, and                  its deposit key may have been rotated; never ship this build"
+            ));
+        } else {
+            return Err(format!(
+                "the bridge is version {v}, newer than {newest} this CLI was built for. Its                  deposit key may have been rotated, and this CLI proves for the older one: the                  deposit would be refused at finalizeDeposit with the USDC already in the EVM                  bridge. Install a CLI built for {v}"
+            ));
+        }
     }
     Ok(warnings)
 }
@@ -560,8 +582,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // Newer than this build knows is a refusal, not a warning: the key may
+        // have been rotated, and proving for the older one loses the deposit.
+        let ahead = version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), false)
+            .unwrap_err();
+        assert!(ahead.contains("newer than"), "{ahead}");
+        assert!(ahead.contains("finalizeDeposit"), "{ahead}");
+        // A development build may run ahead of the bridge, and is told so.
         assert_eq!(
-            version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), false)
+            version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), true)
                 .unwrap()
                 .len(),
             1

@@ -75,6 +75,10 @@ pub struct OutstandingDeposit {
     /// and restarts so monitoring can distinguish a long wait from a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_wait_started_unix: Option<u64>,
+    /// Last prolonged-wait warning, persisted to limit repeated logs across
+    /// restarts. Cleared together with the wait when the anchor arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_wait_last_warned_unix: Option<u64>,
     /// Ethereum block that holds this deposit's log, when known. A retry
     /// can scan that one block if the tx hash is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +92,7 @@ pub struct OutstandingDeposit {
     pub log_index: Option<u64>,
 }
 
-/// Where a failed deposit's `Deposit` log sits on Ethereum.
+/// Where an outstanding deposit's `Deposit` log sits on Ethereum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DepositLogRef {
     pub block_number: u64,
@@ -140,8 +144,8 @@ pub struct RelayerState {
     /// return their funds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprovable_deposit_ids: Vec<u64>,
-    /// Failed deposits still to retry. Bounded by the number of unfinished
-    /// ids, not by every deposit ever made.
+    /// Deposits waiting for an anchor, a pending submission, or a retry after
+    /// failure. Bounded by unfinished ids, not by every deposit ever made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outstanding_deposits: Vec<OutstandingDeposit>,
 }
@@ -355,12 +359,41 @@ impl RelayerState {
         }
     }
 
+    /// Record a prolonged-wait warning when due, returning the wait age.
+    /// Both the age and repeat interval survive retries and restarts.
+    pub fn record_anchor_wait_warning(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        warn_after_secs: u64,
+        repeat_secs: u64,
+    ) -> Option<u64> {
+        let entry = self
+            .outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)?;
+        let age = now.saturating_sub(entry.anchor_wait_started_unix?);
+        if age < warn_after_secs
+            || entry
+                .anchor_wait_last_warned_unix
+                .is_some_and(|last| now.saturating_sub(last) < repeat_secs)
+        {
+            return None;
+        }
+        entry.anchor_wait_last_warned_unix = Some(now);
+        Some(age)
+    }
+
     /// The anchor is present; subsequent failures are no longer anchor waits.
     pub fn clear_anchor_wait(&mut self, deposit_id: u64) -> bool {
         self.outstanding_deposits
             .iter_mut()
             .find(|o| o.deposit_id == deposit_id)
-            .is_some_and(|o| o.anchor_wait_started_unix.take().is_some())
+            .is_some_and(|o| {
+                let waiting = o.anchor_wait_started_unix.take().is_some();
+                o.anchor_wait_last_warned_unix = None;
+                waiting
+            })
     }
 
     /// Park a stuck deposit. The high-water mark only moves if this id is
@@ -434,6 +467,7 @@ impl RelayerState {
             attempts,
             retry_after_unix,
             anchor_wait_started_unix: None,
+            anchor_wait_last_warned_unix: None,
             block_number: log.map(|l| l.block_number),
             tx_hash: log.map(|l| format!("{:#x}", l.tx_hash)),
             log_index: log.map(|l| l.log_index),
@@ -579,6 +613,47 @@ mod tests {
         assert!(!s.clear_anchor_wait(0));
         s.record_anchor_wait(0, 30, 2, log);
         assert_eq!(s.outstanding(0).unwrap().anchor_wait_started_unix, Some(30));
+    }
+
+    #[test]
+    fn prolonged_anchor_warnings_are_rate_limited_across_restarts_and_reset_on_readiness() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let log = DepositLogRef {
+            block_number: 42,
+            tx_hash: alloy::primitives::B256::repeat_byte(1),
+            log_index: 0,
+        };
+        let mut s = RelayerState::default();
+        s.record_anchor_wait(0, 100, 2, log);
+        assert_eq!(s.record_anchor_wait_warning(0, 3699, 3600, 900), None);
+        assert_eq!(s.record_anchor_wait_warning(0, 3700, 3600, 900), Some(3600));
+        s.save(&path).unwrap();
+        let mut s = RelayerState::load(&path).unwrap().unwrap();
+        s.record_anchor_wait(0, 3800, 2, log);
+        assert_eq!(s.record_anchor_wait_warning(0, 4599, 3600, 900), None);
+        assert_eq!(s.record_anchor_wait_warning(0, 4600, 3600, 900), Some(4500));
+        // A clock moving backwards must not produce repeated warnings.
+        assert_eq!(s.record_anchor_wait_warning(0, 4500, 3600, 900), None);
+        assert_eq!(s.outstanding(0).unwrap().attempts, 0);
+        assert!(s.clear_anchor_wait(0));
+        assert_eq!(s.outstanding(0).unwrap().anchor_wait_last_warned_unix, None);
+        s.record_anchor_wait(0, 5000, 2, log);
+        assert_eq!(s.record_anchor_wait_warning(0, 8599, 3600, 900), None);
+        assert_eq!(s.record_anchor_wait_warning(0, 8600, 3600, 900), Some(3600));
+
+        // State from before warning timestamps existed remains readable and
+        // produces a warning on the next poll of an already prolonged wait.
+        let mut encoded = serde_json::to_value(&s).unwrap();
+        encoded["outstanding_deposits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("anchor_wait_last_warned_unix");
+        let mut old: RelayerState = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            old.record_anchor_wait_warning(0, 8601, 3600, 900),
+            Some(3601)
+        );
     }
 
     fn deployment(chain: u64) -> DeploymentIdentity {

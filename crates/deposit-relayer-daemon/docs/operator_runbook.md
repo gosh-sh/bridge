@@ -140,11 +140,27 @@ The first wait time survives retries and restarts and is cleared once the
 anchor is observed (or the deposit is already finalized). Existing state files
 without this optional field remain readable.
 
-None of these is evidence against the deposit. If a pending submit did land, the next
-tick sees the voucher and moves on without proving again. If it did not, the next tick
-proves and submits again, and a duplicate cannot mint. **Nothing to do by hand** unless
-pending persists (alert in §7). If it does, check the AN endpoint and `isPaused()` on
-the bridge.
+At the default `info` log level, the daemon logs the start of each anchor wait
+once with `deposit_id`, `chain_id`, `block_number` and `block_hash`. After an
+hour of observed waiting, it logs a warning on the next check, then at most
+once every 15 minutes per deposit. The optional
+`anchor_wait_last_warned_unix` timestamp survives restarts; existing state
+files without it remain readable.
+These warnings do not count as failed attempts or park the deposit.
+Inspect the light-client relayer and block coverage: some blocks can remain
+uncovered rather than merely delayed (`docs/eth-light-client.md`, §3.4).
+Verify canonicality with `scripts/deposit_anchor_params.py --verify` before
+the anchor writer admits a missing hash with
+`setAcceptedBlockHash(chainId, blockHash, true)` while owner anchors are
+enabled, otherwise through the light client. The deposit daemon never
+admits hashes itself.
+
+For pending submissions, if the submit did land, the next tick sees the
+voucher and moves on without proving again. If it did not, a later tick
+proves and submits again once the anchor is present, and a duplicate cannot
+mint. Pending submissions need no manual action unless the pending status
+persists (alert in §7). If it does, check the AN endpoint and `isPaused()`
+on the bridge.
 
 ## 5. Rejections: what the exit code tells you
 

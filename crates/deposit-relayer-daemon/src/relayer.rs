@@ -79,6 +79,9 @@ fn default_outstanding_backoff_secs() -> u64 {
     2
 }
 
+const ANCHOR_WAIT_WARN_AFTER_SECS: u64 = 60 * 60;
+const ANCHOR_WAIT_WARN_REPEAT_SECS: u64 = 15 * 60;
+
 impl RelayerConfig {
     /// Sensible defaults: start at deposit 0, 2-second polling.
     pub fn new(state_path: impl Into<PathBuf>) -> Self {
@@ -325,14 +328,48 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         let accepted = self.submitter.is_block_accepted(&event).await;
         timer.finish();
         if !accepted? {
+            let now = unix_now_secs();
+            let first_wait = self
+                .state
+                .outstanding(target)
+                .and_then(|o| o.anchor_wait_started_unix)
+                .is_none();
             self.state.record_anchor_wait(
                 target,
-                unix_now_secs(),
+                now,
                 self.config.outstanding_backoff_secs,
                 deposit_log_ref(&event),
             );
+            let prolonged_wait = self.state.record_anchor_wait_warning(
+                target,
+                now,
+                ANCHOR_WAIT_WARN_AFTER_SECS,
+                ANCHOR_WAIT_WARN_REPEAT_SECS,
+            );
             self.persist_state()?;
-            debug!(deposit_id = target, block_hash = %event.block_hash, "waiting for AN block anchor");
+            if first_wait {
+                info!(
+                    deposit_id = target,
+                    chain_id = event.source_chain_id,
+                    block_number = event.block_number,
+                    block_hash = %event.block_hash,
+                    "waiting for AN block anchor; proving and submission deferred"
+                );
+            }
+            if let Some(wait_secs) = prolonged_wait {
+                warn!(
+                    deposit_id = target,
+                    chain_id = event.source_chain_id,
+                    block_number = event.block_number,
+                    block_hash = %event.block_hash,
+                    wait_secs,
+                    "AN block anchor still missing; inspect the light-client relayer and block \
+                     coverage; verify canonicality with scripts/deposit_anchor_params.py --verify \
+                     before the anchor writer admits it with setAcceptedBlockHash(chainId, \
+                     blockHash, true) while owner anchors are enabled, otherwise through the \
+                     light client"
+                );
+            }
             return Ok(TickOutcome::WaitingForAnchor {
                 deposit_id: target,
             });

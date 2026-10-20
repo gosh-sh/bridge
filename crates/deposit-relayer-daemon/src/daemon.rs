@@ -36,8 +36,9 @@ use crate::{
 /// Backoff policy for the daemon loop.
 ///
 /// `current = min(initial * multiplier^consecutive_failures, max)`. On any
-/// [`TickOutcome::Finalized`] / [`TickOutcome::AlreadyFinalized`] the streak
-/// resets and `current` snaps back to `initial`.
+/// [`TickOutcome::Finalized`], [`TickOutcome::AlreadyFinalized`] or
+/// [`TickOutcome::WaitingForAnchor`] the streak resets and `current` snaps
+/// back to `initial`.
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffConfig {
     pub initial: Duration,

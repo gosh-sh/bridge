@@ -1228,9 +1228,11 @@ contract AckiNackiBridge {
 
     /// @dev Highest 1-indexed layer that currently holds at least one hash, or
     ///      0 before any block is verified. Layers fill contiguously (layer L
-    ///      only materialises once layers 1..L-1 exist), so this equals the
-    ///      active-layer count `t` used by the partner prover's
-    ///      `BridgeState::num_active_layers`.
+    ///      only materialises once layers 1..L-1 exist). `dataLen` only grows
+    ///      and nothing clears a window, so `t` never decreases when later
+    ///      key blocks skip higher layers. The prover's
+    ///      `prev_max_level_layer_hash_for` must use the same `t`; any other
+    ///      pick reverts `PrevAnchorMismatch` before the proofs are checked.
     function _highestActiveLayer() internal view returns (uint8) {
         uint8 hi = 0;
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {

@@ -350,11 +350,17 @@ pick = min(numLayers, t)
 return _layerLatest(pick)                  // head of window `pick`
 ```
 
-This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
-(`crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs`). A flat
-`layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between consecutive
-key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
-`expectedPrevAnchor(numLayers)` (`:1129`) rather than reconstructing the anchor themselves.
+A flat `layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between
+consecutive key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers compare
+the bundle's Circuit 2 instance 13 with `expectedPrevAnchor(numLayers)` (`:1283`) before sending;
+they do not pick the cell.
+
+`t` is the highest populated window (`dataLen > 0`), not the last block's `numLayers`. Nothing
+clears a window, so `t` never decreases when later key blocks skip higher layers. The prover's
+`prev_max_level_layer_hash_for` must use the same `t`; any other pick reverts `PrevAnchorMismatch`
+before the proofs are checked. A cold-start `BridgeState` that was seeded with every layer of
+its bootstrap block can disagree with a contract that still has empty windows; that is a
+separate gap.
 
 ### 7.2 `withdrawByProof` — pay out a proven AN withdrawal
 
@@ -489,7 +495,7 @@ boundary at or below it — usually just that one bundle.
 
 | View | Line | Returns |
 |---|---:|---|
-| `expectedPrevAnchor(uint8 numLayers)` | 1129 | The anchor the next `verifyBlock` will require. |
+| `expectedPrevAnchor(uint8 numLayers)` | 1283 | The anchor the next `verifyBlock` will require. |
 | `getLatestPerLayer()` | 1156 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
 | `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
 | `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
@@ -778,7 +784,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
 | `AckiNackiBridgeAaveFork.t.sol` (4) | Mainnet-fork round-trip against real AAVE (`FOUNDRY_PROFILE=fork`). |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
-| `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
+| `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
 | `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |

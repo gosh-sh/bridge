@@ -118,6 +118,10 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
+  row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
+  bridge has recorded. A window with `dataLen > 0` is never cleared, so
+  that layer stays in `t` when later key blocks skip it.
 - `AckiNackiBridge.deposit`'s `anWorkchain` is telemetry. It is kept in
   the ABI and the `Deposit` event so the log shape stays stable, but it
   is not a deposit-proof public input and Acki Nacki always credits

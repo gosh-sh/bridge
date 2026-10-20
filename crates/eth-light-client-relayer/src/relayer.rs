@@ -1143,6 +1143,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_flip_skipped_when_get_gloas_fork_slot_fails() {
+        let dir = Box::leak(Box::new(tempdir().unwrap()));
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        cfg.flip_owner = true;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_gloas_fork(50, true);
+        mock.fail_gloas_gets_from(2);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(mock.gloas_gets(), 2);
+        assert!(!r.state().owner_flip_done);
+        assert!(mock.owner_rotation_enabled());
+    }
+
+    #[tokio::test]
     async fn owner_flip_skipped_while_head_is_before_the_fork() {
         let dir = Box::leak(Box::new(tempdir().unwrap()));
         let mut cfg = RelayerConfig::new(dir.path().join("state.json"));

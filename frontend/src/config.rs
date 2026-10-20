@@ -2,16 +2,13 @@
 //
 // Update these values after deploying contracts to Sepolia
 
-/// Bridge contract address on Sepolia
-/// Update this after running: forge script script/DeployTestBridge.s.sol:DeployTestBridge
-pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x99c37fb75326ae6953ebbbdcd261ec331df4ce82";
+/// Bridge contract address on Sepolia — the shellnet deploy Acki Nacki
+/// currently credits. From `DeployShellnetE2EBridge.s.sol` (2026-10-15).
+pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x5384f162aa1a80b7a03687e1a3188f67b1fffad5";
 
-/// USDC (ERC-20, 6 decimals) accepted for deposits.
-/// Sepolia testnet: the Aave V3 faucet USDC underlying.
-pub const USDC_CONTRACT_ADDRESS: &str = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8";
-
-/// Aave V3 Sepolia permissionless faucet — mints test USDC for dev wallets.
-pub const AAVE_FAUCET_ADDRESS: &str = "0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D";
+/// USDC the shellnet bridge pulls (`usdc()`). Circle's Sepolia USDC, not
+/// the Aave V3 faucet token `DeployTestBridge` used.
+pub const USDC_CONTRACT_ADDRESS: &str = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
 
 /// USDC decimals (USD Coin uses 6 on Ethereum).
 pub const USDC_DECIMALS: u32 = 6;
@@ -98,11 +95,10 @@ pub const BRIDGE_ABI: &str = r#"[
 
 /// Optional default Acki Nacki receiver account (build-time `AN_RECEIVER`).
 ///
-/// The bridge's `deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)`
-/// now takes the AN destination explicitly (an EVM address is not a valid AN
-/// recipient), so the deposit form collects workchain + account per-deposit.
-/// This constant is only a convenience default the UI may prefill; an empty
-/// value means "no prefill — the user types their AN account".
+/// The deposit form prefills the recipient field with this value when it is
+/// non-empty. An empty value (the default, when `AN_RECEIVER` is unset)
+/// leaves the field blank for the user to type. `anWorkchain` is pinned to
+/// 0 in the ABI call; Acki Nacki ignores it.
 pub const ACKI_NACKI_RECEIVER: &str = match option_env!("AN_RECEIVER") {
     Some(v) => v,
     None => "",

@@ -339,9 +339,9 @@ hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and th
 ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
 that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
 nothing late-registers the skipped ones. A deposit from any of those uncovered blocks
-fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts`
-is set. That is why the daemon does not flip unless told to.
+fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224). That is why the daemon does not
+flip unless told to. `deposit-relayer` walks past a failed id and retries it with
+backoff; `--skip-after-attempts` still parks one that keeps failing.
 
 ## 4. Deployment
 
@@ -473,17 +473,19 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    ABI=contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json
    SLOT=<beacon GLOAS_FORK_SLOT>
 
-   CODE=$(tvm-cli -j decode stateinit --addr "$LC" | jq -r .code)
+   CODE=$(tvm-cli -j decode stateinit "$LC" | jq -r .code)
+   # One cell holding SLOT as 64 bits, base64 BOC. Needs a relayer built with
+   # --features live-submit; it only encodes and sends nothing.
+   USER=$(eth-lc-relayer gloas-slot-user-cell --slot "$SLOT")
 
-   # userCell = TVM abi.encode(uint64 SLOT): one cell, 64 data bits, no refs.
-   # tvm_valuetypes ships next to a tvm-sdk tvm-cli install.
-   USER=$(python3 -c "from tvm_valuetypes.cell import Cell; c=Cell(); \
-c.bits.append_uint($SLOT, 64); print(c.serialize())")
-
-   tvm-cli callx --abi "$ABI" --addr "$LC" --sign "$AN_KEYS_PATH" updateCode \
-     "{\"newcode\": \"$CODE\", \"userCell\": \"$USER\"}"
-   tvm-cli -j runx --abi "$ABI" --addr "$LC" getGloasForkSlot
+   tvm-cli callx --abi "$ABI" --addr "$LC" --keys "$AN_KEYS_PATH" -m updateCode \
+     --newcode "$CODE" --userCell "$USER"
+   tvm-cli -j runx --abi "$ABI" --addr "$LC" -m getGloasForkSlot
    ```
+
+   For Sepolia (`--slot 11296768`) `gloas-slot-user-cell` prints
+   `te6ccgEBAQEACgAAEAAAAAAArGAA`. The last call must print the new slot with
+   `isSet: true`.
 
    After the flip the daemon never reaches 255: it returns `ProofFailed` and
    names `updateCode` (246) instead of `setGloasForkSlot`.

@@ -207,8 +207,8 @@ No circuit code changes. Only the prover-side witness builder changes.
 
 ### 4.1 Per bundle (target `K_n`)
 
-1. Read `prev_max_level_layer_hash` from the previous bundle's
-   `layer_hash_frs[num_layers − 1]` (persisted locally).
+1. Read `prev_max_level_layer_hash` from `prev_max_level_layer_hash_for(L_new)`
+   (the same `t` pick as `AckiNackiBridge.expectedPrevAnchor`).
 2. Compute `L_new = order(K_n)`, `L_prev = order(K_{n−1})`.
 3. Pick a shape (shortest, derived from §3.3):
    - **Case A:** `P` forward hops at L=1, *or* `L_prev − 1` descend hops if

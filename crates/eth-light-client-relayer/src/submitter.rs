@@ -142,6 +142,7 @@ struct MockInner {
     gloas_fork_slot: u64,
     gloas_fork_slot_set: bool,
     gloas_gets: u32,
+    gloas_get_fails_from: Option<u32>,
 }
 
 impl MockAnSubmitter {
@@ -167,6 +168,7 @@ impl MockAnSubmitter {
                 gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
                 gloas_fork_slot_set: true,
                 gloas_gets: 0,
+                gloas_get_fails_from: None,
             }),
         }
     }
@@ -182,6 +184,12 @@ impl MockAnSubmitter {
     /// manual `submit-rotate` already landed.
     pub fn set_committee_period(&self, period: u64) {
         self.inner.lock().expect("poisoned").period = Some(period);
+    }
+
+    /// `getGloasForkSlot` errors from the `n`-th call on (1-based). A tick
+    /// reads it once to pin the proof and once more before the owner flip.
+    pub fn fail_gloas_gets_from(&self, n: u32) {
+        self.inner.lock().expect("poisoned").gloas_get_fails_from = Some(n);
     }
 
     pub fn gloas_gets(&self) -> u32 {
@@ -446,6 +454,14 @@ impl AnSubmitter for MockAnSubmitter {
     async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.gloas_gets += 1;
+        if inner
+            .gloas_get_fails_from
+            .is_some_and(|n| inner.gloas_gets >= n)
+        {
+            return Err(RelayerError::AckiNacki(
+                "getGloasForkSlot: transport error".into(),
+            ));
+        }
         Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
     }
 

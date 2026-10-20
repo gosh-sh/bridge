@@ -87,6 +87,8 @@ anchor writer; L2s keep the owner path
 It also refuses while `getGloasForkSlot` is unset or `u64::MAX`: after
 `disableOwnerRotation` only `updateCode` can change the slot. Pin the published
 slot with `set-gloas-fork-slot` first, or pass `--allow-unscheduled-gloas-flip`.
+`gloas-slot-user-cell --slot <n>` prints the `updateCode` user cell for that
+recovery (`docs/eth-light-client.md` §4.5).
 
 Standalone crate (own `Cargo.lock`). Tests:
 `cd crates/eth-light-client-relayer && cargo test`.

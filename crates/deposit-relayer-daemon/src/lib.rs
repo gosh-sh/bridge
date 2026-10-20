@@ -14,14 +14,15 @@
 //!    chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 //!    blockHashHigh, blockHashLow, promiseCommit]` — the Acki Nacki destination
 //!    account is bound in-circuit so the AN side credits a proven account,
-//!    proven `chainId` is allowlisted by USDCBridge, and `dappId` (a config
-//!    tag, replaced `anWorkchain` on 2026-06-02) is checked by the AN-side
+//!    proven `chainId` is allowlisted by `eccUSDCBridge` as a per-chain set
+//!    of bridges (`_trustedL1Bridge[chainId][bridge]`), and `dappId` (a config
+//!    tag, replaced `anWorkchain` on 2026-06-02) is pinned to 0 by the AN-side
 //!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
 //!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
-//!    `proof`) to the AN-side `TokenBridge.finalizeDeposit(...)`, which
-//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and consumes
-//!    the `usedDepositIds` nullifier ([`submitter::AnInterfaceSubmitter`]).
+//!    `proof`) to the AN-side `eccUSDCBridge.finalizeDeposit(...)`, which
+//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and deploys
+//!    a per-deposit `DepositVoucher` ([`submitter::AnInterfaceSubmitter`]).
 //!
 //! ## Architecture
 //!
@@ -49,15 +50,13 @@
 //!   ([`prover::SubprocessProofGenerator`]) are fully wired against live
 //!   Ethereum + the `deposit-prover` examples.
 //! - **AN delivery** ([`submitter::AnInterfaceSubmitter`]) is wired over the
-//!   [`acki_nacki_interface::IAckiNacki`] trait, but the only implementation of
-//!   that trait today is the mock — the AN team will ship the live
-//!   `tvm-sdk`-backed client. The `finalizeDeposit` call body uses an interim
-//!   encoding ([`submitter::encode_finalize_deposit`]) pending the canonical
-//!   TVM message ABI. The AN-side nullifier makes re-submission safe in the
-//!   interim.
-//! - The AN-side `TokenBridge.finalizeDeposit` entry point itself is on the
-//!   partner branch `poseidon_dex_with_verify`; the `ZKHALO2VERIFYWITHVK`
-//!   opcode lives in `tvm-sdk` and is authoritative for its semantics.
+//!   [`acki_nacki_interface::IAckiNacki`] trait. The live client is
+//!   [`acki_nacki_interface::TvmAckiNacki`]. A second `finalizeDeposit` for
+//!   the same deposit fails in the voucher constructor (exit 51), so
+//!   re-submission is safe.
+//! - The AN-side `eccUSDCBridge.finalizeDeposit` entry point is in
+//!   `contracts/an/exchange/`; the `ZKHALO2VERIFYWITHVK` opcode lives in
+//!   `tvm-sdk` and is authoritative for its semantics.
 
 pub mod an_config;
 pub mod daemon;
@@ -89,7 +88,7 @@ pub use source::{
     resolve_from_block, AckiNackiBridge, DepositSource, EthLogSource, InMemoryDepositSource,
     BRIDGE_DEPLOY_BLOCK_ENV,
 };
-pub use state::{DeploymentIdentity, RelayerState, StateLock};
+pub use state::{DeploymentIdentity, DepositLogRef, OutstandingDeposit, RelayerState, StateLock};
 pub use submitter::{
     build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,

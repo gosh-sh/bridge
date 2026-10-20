@@ -5,6 +5,10 @@ pub struct HeaderProps {
     pub wallet_connected: bool,
     pub wallet_address: Option<String>,
     pub on_connect: Callback<()>,
+    /// A connect request is open in the wallet. MetaMask answers a second
+    /// one with `-32002` instead of showing a second prompt, so the button
+    /// goes quiet until the first is settled.
+    pub connecting: bool,
 }
 
 #[function_component(Header)]
@@ -46,8 +50,12 @@ pub fn header(props: &HeaderProps) -> Html {
                             }
                         } else {
                             html! {
-                                <button class="connect-button" onclick={props.on_connect.reform(|_| ())}>
-                                    {"Connect Wallet"}
+                                <button
+                                    class="connect-button"
+                                    disabled={props.connecting}
+                                    onclick={props.on_connect.reform(|_| ())}
+                                >
+                                    { if props.connecting { "Check MetaMask…" } else { "Connect Wallet" } }
                                 </button>
                             }
                         }

@@ -1999,6 +1999,21 @@ assigns it when the release is tagged.
   The connected Ethereum address is used for USDC allowance checks. Invalid AN
   recipients are rejected before a deposit transaction is sent.
 
+- The withdraw relayer proved a block whose attestation carried a signer
+  more than once with `block_seq_no = 0`: the fetcher wrote the height into
+  the assembled attestation bytes at an offset computed from the sum of the
+  signer counts, while the layout, and the circuit, count entries (one per
+  distinct signer). `AckiNackiBridge` rejected the proof with
+  `AttestationProofRejected()`, the daemon aborted after three rejects and
+  was restarted into the same loop. Shellnet block 1239860 (2026-10-19,
+  three signers with count 3) stopped the relayer this way at
+  `applyBkSetUpdate`; a bundle block with a repeated signer would have done
+  the same at `verifyBlock`. The height is now written where the circuit
+  reads it, a block whose `seq_no` is not the requested height is refused,
+  and a proof whose height is not the block's is refused before it is sent.
+  Upgrade the relayer (for the shellnet-l2 kit, rebuild the image); nothing
+  on chain, in the keys or in the state changes, and the stuck block is
+  proved again on the next start.
 - `deposit-relayer` kills a prover that runs past its timeout instead of
   leaving it running, writing the `data/` key cache beside the retry the
   daemon starts after its backoff. `relayer prove-withdraw` does the same

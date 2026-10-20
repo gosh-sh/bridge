@@ -22,6 +22,19 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Documentation
+
+- New [`REFACTORING.md`](REFACTORING.md) at the repository root, registered in
+  `DOCS.md`: a backlog of changes that are not bugs. Six entries to start —
+  `num_active_layers` naming the opposite of what it means; the EVM deployment
+  address pinned separately by the CLI profile and the web form, which is how
+  the form spent a week on a retired bridge; the deposit and withdrawal sides
+  keeping separate chain lists that have already drifted over Arbitrum One; the
+  literal `vmshell` amounts on the `DepositVoucher` deploy and its
+  `confirmDeposit` callback; guard scripts wired into no pipeline; and the
+  unbounded owner mint. Entries carry `file:line` and the shape of the change,
+  and are deleted when done rather than ticked.
+
 ### Fixed
 
 - **The web deposit form explains what the wallet said instead of printing

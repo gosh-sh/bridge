@@ -78,8 +78,9 @@ async fn test_v3_fetch_attestation_envelope() {
         attestation_bls_checker_circuit::attestation_data_parser::parse_num_signers(&att.raw_bytes);
     assert_eq!(
         num_signers,
-        att.signature_occurrences.values().copied().map(|c| c as usize).sum::<usize>(),
-        "num_signers (summed counts) must match signature_occurrences entries",
+        att.signature_occurrences.len(),
+        "num_signers is one entry per distinct signer; a signer that attested more than once is \
+         one entry with a count above one",
     );
     let att_data =
         attestation_bls_checker_circuit::attestation_data_parser::parse_attestation_data_bytes(&att.raw_bytes);

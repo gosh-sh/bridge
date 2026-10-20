@@ -268,4 +268,44 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
         // Grow to 3: pick = min(3, 2) = 2 -> A2 (previous top). Unchanged.
         assertEq(bridge.expectedPrevAnchor(3), A2, "grow anchor = prev top");
     }
+
+    /// @notice `_highestActiveLayer()` is the highest populated window, not
+    ///         the last block's `numLayers`. 128 later L1-only `verifyBlock`s
+    ///         (a submitter that skips higher-order key blocks) wrap layer 1
+    ///         and leave layers 2..4 untouched, so `t` stays 4. A later
+    ///         3-layer block still anchors at the L3 head from the first
+    ///         block. `expectedPrevAnchor(10)` reads that `t` from the
+    ///         contract (`min(10, t) = t`).
+    function test_highestActiveLayerDoesNotFallWhenLaterBlocksSkipHigherLayers() public {
+        _submit(0x10001, 1, 4, _build(1, 4), GENESIS_PREV_ANCHOR);
+        uint256 firstL3 = _lh(1, 3);
+        uint256 firstL4 = _lh(1, 4);
+        assertEq(_highestActiveLayer(), 4, "t after the 4-layer block");
+
+        uint256 window = bridge.HISTORY_PROOF_WINDOW();
+        for (uint256 i = 0; i < window; i++) {
+            uint256 idx = i + 2;
+            _submit(0x10000 + idx, uint64(idx), 1, _build(idx, 1), bridge.expectedPrevAnchor(1));
+        }
+
+        uint256 lastL1 = _lh(1 + window, 1);
+        assertEq(_highestActiveLayer(), 4, "t stays 4 after 128 L1-only blocks");
+        assertEq(
+            bridge.expectedPrevAnchor(10), firstL4, "expectedPrevAnchor(10) is the contract's t"
+        );
+        assertTrue(bridge.isKnownLayerAnchor(4, firstL4), "L4 never appended, never evicted");
+        assertTrue(bridge.isKnownLayerAnchor(3, firstL3), "L3 never appended, never evicted");
+        assertFalse(bridge.isKnownLayerAnchor(1, _lh(1, 1)), "original L1 wrapped out");
+        assertEq(bridge.expectedPrevAnchor(3), firstL3, "grow still picks the first L3");
+        assertEq(bridge.expectedPrevAnchor(4), firstL4);
+        assertEq(bridge.expectedPrevAnchor(1), lastL1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.PrevAnchorMismatch.selector, lastL1, firstL3)
+        );
+        _submit(0x20000, uint64(2 + window), 3, _build(200, 3), lastL1);
+
+        _submit(0x20001, uint64(2 + window), 3, _build(200, 3), firstL3);
+        assertEq(_highestActiveLayer(), 4, "grow to 3 does not drop L4");
+    }
 }

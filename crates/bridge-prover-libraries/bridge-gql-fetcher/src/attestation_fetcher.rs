@@ -102,15 +102,10 @@ pub async fn fetch_attestation_evidence(
     client: &GqlClient,
     target_seq_no: u32,
 ) -> anyhow::Result<AttestationEvidence> {
-    let mut atts = client
+    let atts = client
         .query_attestation_envelopes(target_seq_no as u64)
         .await
         .with_context(|| format!("query_attestation_envelopes({target_seq_no})"))?;
-
-    for a in atts.iter_mut() {
-        patch_seq_no_in_raw_bytes(a, target_seq_no);
-        a.block_seq_no = target_seq_no;
-    }
 
     let (primaries, fallbacks): (Vec<_>, Vec<_>) =
         atts.into_iter().partition(|a| a.target_type == 0);
@@ -150,15 +145,3 @@ pub async fn fetch_attestation_evidence(
     }
 }
 
-/// Overwrite the 4-byte block_seq_no slot inside `att.raw_bytes`. Layout:
-/// `[0..200] = aggregated_signature`; `[200..208+N*4] = signature_occurrences`;
-/// the attestation-data section begins at `208 + num_signers*4` and the
-/// `block_seq_no` u32 sits at relative offset `80` within that section.
-fn patch_seq_no_in_raw_bytes(att: &mut ParsedAttestation, seq_no: u32) {
-    let num_signers: usize = att.signature_occurrences.values().map(|c| *c as usize).sum();
-    let data_offset = 208 + num_signers * 4;
-    let seq_off = data_offset + 80;
-    if seq_off + 4 <= att.raw_bytes.len() {
-        att.raw_bytes[seq_off..seq_off + 4].copy_from_slice(&seq_no.to_le_bytes());
-    }
-}

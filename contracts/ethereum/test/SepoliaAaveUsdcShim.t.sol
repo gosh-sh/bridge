@@ -127,7 +127,7 @@ contract SepoliaAaveUsdcShimTest is Test {
 
         vm.expectEmit(true, false, false, true, address(shim));
         emit Shimmed(address(this), AMOUNT, AMOUNT / 2);
-        shim.deposit(AMOUNT, 0, anAccount);
+        shim.deposit(AMOUNT, anAccount);
 
         assertEq(aaveUsdc.balanceOf(address(shim)), 0);
         assertEq(aaveUsdc.balanceOf(address(bridge)), AMOUNT);
@@ -138,12 +138,12 @@ contract SepoliaAaveUsdcShimTest is Test {
         circleUsdc.mint(address(this), amount);
         circleUsdc.approve(address(shim), amount);
         vm.expectRevert("Error: Mint limit transaction exceeded");
-        shim.deposit(amount, 0, anAccount);
+        shim.deposit(amount, anAccount);
     }
 
     function test_deposit_rejectsZero() public {
         vm.expectRevert(SepoliaAaveUsdcShim.ZeroAmount.selector);
-        shim.deposit(0, 0, anAccount);
+        shim.deposit(0, anAccount);
     }
 
     function test_redeem_swapsFaucetUsdcBackToCircleOneToOne() public {
@@ -205,12 +205,12 @@ contract SepoliaAaveUsdcShimTest is Test {
     }
 
     function _assertDeposit(Vm.Log[] memory logs, address sender, uint256 amount) internal view {
-        bytes32 topic = keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)");
+        bytes32 topic = keccak256("Deposit(uint256,address,uint256,bytes32,uint256)");
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != topic) continue;
             assertEq(logs[i].topics[2], bytes32(uint256(uint160(sender))));
-            (uint256 loggedAmount,, bytes32 account,) =
-                abi.decode(logs[i].data, (uint256, int8, bytes32, uint256));
+            (uint256 loggedAmount, bytes32 account,) =
+                abi.decode(logs[i].data, (uint256, bytes32, uint256));
             assertEq(loggedAmount, amount);
             assertEq(account, anAccount);
             return;

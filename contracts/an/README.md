@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.10.0, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.12.0, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.5.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -11,12 +11,16 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   above bridged minted for that token throws `ERR_BURN_EXCEEDS_BRIDGED`
   (233). ECC is fungible: owner-minted and TIP-3-minted ECC can still
   consume headroom that deposits created; the cap stops burned exceeding
-  minted. An `updateCode` of a live bridge that already burned more than
+  minted. After CLI exit 37 (voucher spent, `confirmDeposit` aborted)
+  the owner pays the recipient with `mintAndSendBridged`, which credits
+  bridged minted like `confirmDeposit`; ordinary `mintAndSend` does not.
+  An `updateCode` of a live bridge that already burned more than
   it minted (`getTotalBridged` burned above minted) refuses every burn
   until deposits bring minted up to burned; a fresh zerostate starts both
   counters at 0. The owner can stop `finalizeDeposit` and `initiateWithdrawal`
   with `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until
-  it is lifted; `confirmDeposit`, owner mint and TIP-3 mint keep running.
+  it is lifted; `confirmDeposit`, owner mint (`mintAndSend`,
+  `mintAndSendBridged`, `mintAndSendAccumulator`) and TIP-3 mint keep running.
   That switch is independent of `AckiNackiBridge.pause()` on Ethereum and
   of a Circle freeze of USDC — see *Two pause domains* below.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
@@ -51,10 +55,18 @@ on the deposit allowlist keep the owner writer. `getLightClient(chainId)` is
 the client of a chain (0 if none), `isOwnerAnchorsEnabled(chainId)` the
 per-chain writer state, and `getAnchorConfig()` the pair for the chain
 deployed last — with clients on several chains, read the per-chain getters.
-No function turns owner anchors back on, but `updateCode` goes around it
-(`onCodeUpgrade` leaves every chain owner-writable). `setLightClientCode`
-does not: it only changes the address the next `deployLightClient` derives,
-and clients already recorded keep writing.
+The flip disables `setAcceptedBlockHash` for the selected chain; it does not
+revoke the owner's configuration or upgrade authority. There is no direct
+re-enable function in the current code. A bridge `updateCode` resets the
+owner-anchor flags and recorded clients, so operators must restore configuration
+and repeat the intended flips after upgrading. `setLightClientCode` alone keeps
+recorded clients unchanged, but calling `deployLightClient` afterwards for the
+same chain can replace its writer even while the owner-anchor flag is off.
+The light client's owner also retains `reAnchorCommittee` and `updateCode`.
+An owner who retains `updateCode` can install arbitrary replacement code,
+including code that removes these checks. The current implementation cannot
+constrain owner-selected replacement code, even if a migration preserves the
+flags. Both owner keys therefore remain trusted after a flip.
 
 | Path | Contents |
 |------|----------|

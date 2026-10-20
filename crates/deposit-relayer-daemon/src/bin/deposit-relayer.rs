@@ -43,8 +43,8 @@ use deposit_relayer_daemon::{
     cctp::{run_cctp_daemon, run_cctp_forward, CctpDaemonConfig, CctpForwardConfig},
     fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
-    DepositProofBundle, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
-    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    DepositProofBundle, DepositProverBins, DepositSource, EthLogSource, MockAnSubmitter,
+    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
     SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
@@ -117,9 +117,21 @@ enum Cmd {
         /// with `--tx-hash`.
         #[arg(long, requires = "tx_hash")]
         log_index: Option<u64>,
-        /// Path to the `deposit-prover` crate root.
-        #[arg(long)]
+        /// Working directory of the `deposit-prover` examples: the proving
+        /// key under `data/` and `data/kzg_params_18.srs` are read there.
+        #[arg(long, env = "DEPOSIT_PROVER_DIR")]
         deposit_prover_dir: PathBuf,
+        /// Prebuilt `fetch_deposit_data` example (`cargo build --release
+        /// --examples` in `deposit-prover/`). Checked to exist and be
+        /// executable at startup.
+        #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
+        fetch_deposit_data_bin: PathBuf,
+        /// Prebuilt `export_vk_blob` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_VK_BLOB_BIN")]
+        export_vk_blob_bin: PathBuf,
+        /// Prebuilt `export_blake2b_proof` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
+        export_blake2b_proof_bin: PathBuf,
         /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`).
         #[arg(long)]
         prover_rpc_url: Option<String>,
@@ -157,8 +169,21 @@ enum Cmd {
         /// First depositId to target on a fresh start.
         #[arg(long, default_value_t = 0)]
         start_deposit_id: u64,
-        #[arg(long)]
+        /// Working directory of the `deposit-prover` examples: the proving
+        /// key under `data/` and `data/kzg_params_18.srs` are read there.
+        #[arg(long, env = "DEPOSIT_PROVER_DIR")]
         deposit_prover_dir: PathBuf,
+        /// Prebuilt `fetch_deposit_data` example (`cargo build --release
+        /// --examples` in `deposit-prover/`). Checked to exist and be
+        /// executable at startup.
+        #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
+        fetch_deposit_data_bin: PathBuf,
+        /// Prebuilt `export_vk_blob` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_VK_BLOB_BIN")]
+        export_vk_blob_bin: PathBuf,
+        /// Prebuilt `export_blake2b_proof` example.
+        #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
+        export_blake2b_proof_bin: PathBuf,
         #[arg(long)]
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
@@ -207,10 +232,16 @@ enum Cmd {
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in
-        /// `state.json` and advance the cursor (0 = disabled). Waiting for a
-        /// deposit that is not made yet is not a failure.
+        /// `state.json` and stop retrying it (0 = disabled). Waiting for a
+        /// deposit that is not made yet is not a failure. A failed deposit
+        /// otherwise stays outstanding and is retried with backoff; it does
+        /// not block later ids.
         #[arg(long, env = "SKIP_AFTER_ATTEMPTS", default_value_t = 0)]
         skip_after_attempts: u32,
+        /// Base delay in seconds before retrying a failed deposit. Doubled
+        /// on each later failure of that id, up to 64×. `0` retries at once.
+        #[arg(long, env = "OUTSTANDING_BACKOFF_SECS", default_value_t = 2)]
+        outstanding_backoff_secs: u64,
         /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
         #[arg(long)]
         allow_insecure_graphql: bool,
@@ -434,6 +465,9 @@ async fn main() -> anyhow::Result<()> {
             tx_hash,
             log_index,
             deposit_prover_dir,
+            fetch_deposit_data_bin,
+            export_vk_blob_bin,
+            export_blake2b_proof_bin,
             prover_rpc_url,
             degree,
             max_data_byte_len,
@@ -445,12 +479,17 @@ async fn main() -> anyhow::Result<()> {
             let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
+                DepositProverBins {
+                    fetch_deposit_data: fetch_deposit_data_bin,
+                    export_vk_blob: export_vk_blob_bin,
+                    export_blake2b_proof: export_blake2b_proof_bin,
+                },
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
                 degree,
                 max_data_byte_len,
                 max_log_num,
                 dapp_id,
-            );
+            )?;
             prove_one(
                 rpc_url,
                 bridge_address,
@@ -490,6 +529,9 @@ async fn main() -> anyhow::Result<()> {
             confirmations,
             start_deposit_id,
             deposit_prover_dir,
+            fetch_deposit_data_bin,
+            export_vk_blob_bin,
+            export_blake2b_proof_bin,
             prover_rpc_url,
             degree,
             max_data_byte_len,
@@ -506,6 +548,7 @@ async fn main() -> anyhow::Result<()> {
             backoff_multiplier,
             force_state,
             skip_after_attempts,
+            outstanding_backoff_secs,
             allow_insecure_graphql,
             expect_chain_id,
             metrics_addr,
@@ -517,12 +560,17 @@ async fn main() -> anyhow::Result<()> {
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
+                DepositProverBins {
+                    fetch_deposit_data: fetch_deposit_data_bin,
+                    export_vk_blob: export_vk_blob_bin,
+                    export_blake2b_proof: export_blake2b_proof_bin,
+                },
                 prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
                 degree,
                 max_data_byte_len,
                 max_log_num,
                 dapp_id,
-            );
+            )?;
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
@@ -558,6 +606,7 @@ async fn main() -> anyhow::Result<()> {
                 backoff,
                 force_state,
                 skip_after_attempts,
+                outstanding_backoff_secs,
                 allow_insecure_graphql,
                 expect_chain_id,
             )
@@ -638,21 +687,30 @@ async fn finalize_one(
     }
 }
 
+/// The prover configuration, its binaries and working directory checked
+/// before anything connects: a wrong path is a configuration error, found
+/// at startup rather than at the first deposit.
 #[allow(clippy::too_many_arguments)]
 fn build_prover_cfg(
     deposit_prover_dir: PathBuf,
+    bins: DepositProverBins,
     rpc_url: String,
     degree: u32,
     max_data_byte_len: usize,
     max_log_num: usize,
     dapp_id: String,
-) -> SubprocessProverConfig {
-    let mut cfg = SubprocessProverConfig::new(deposit_prover_dir, rpc_url);
+) -> anyhow::Result<SubprocessProverConfig> {
+    anyhow::ensure!(
+        deposit_prover_dir.is_dir(),
+        "--deposit-prover-dir {} is not a directory",
+        deposit_prover_dir.display()
+    );
+    let mut cfg = SubprocessProverConfig::new(deposit_prover_dir, bins.validated()?, rpc_url);
     cfg.degree = degree;
     cfg.max_data_byte_len = max_data_byte_len;
     cfg.max_log_num = max_log_num;
     cfg.dapp_id = dapp_id;
-    cfg
+    Ok(cfg)
 }
 
 async fn ensure_supported_rpc_chain(
@@ -815,6 +873,7 @@ async fn run_daemon(
     backoff: BackoffConfig,
     force_state: bool,
     skip_after_attempts: u32,
+    outstanding_backoff_secs: u64,
     allow_insecure_graphql: bool,
     expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -862,6 +921,7 @@ async fn run_daemon(
             deployment,
             force_state,
             skip_after,
+            outstanding_backoff_secs,
             scan_cursor,
             source,
             prover,
@@ -907,6 +967,7 @@ async fn run_daemon(
             deployment,
             force_state,
             skip_after,
+            outstanding_backoff_secs,
             scan_cursor,
             source,
             prover,
@@ -924,6 +985,7 @@ async fn run_daemon_loop<S, P, A>(
     deployment: DeploymentIdentity,
     force_state: bool,
     skip_after_attempts: Option<u32>,
+    outstanding_backoff_secs: u64,
     scan_cursor: Arc<Mutex<Option<u64>>>,
     source: Arc<S>,
     prover: Arc<P>,
@@ -941,6 +1003,7 @@ where
         deployment: Some(deployment),
         force_state,
         skip_after_attempts,
+        outstanding_backoff_secs,
         scan_cursor: Some(scan_cursor),
     };
     let mut relayer = Relayer::new(cfg, source, prover, submitter)?;

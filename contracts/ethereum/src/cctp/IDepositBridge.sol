@@ -8,7 +8,7 @@ pragma solidity ^0.8.19;
 ///         `eccUSDCBridge.confirmDeposit` always mints USDC ECC, so a
 ///         non-USDC hub bridge must not be passed to `setTrustedL1Bridge`.
 interface IDepositBridge {
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external;
+    function deposit(uint256 amount, bytes32 anAccount) external;
 
     function usdc() external view returns (address);
 }

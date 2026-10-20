@@ -2,97 +2,35 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
-use crate::config::{SEPOLIA_CHAIN_ID_HEX, USDC_UNIT};
-use crate::web3::{
-    approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
-    make_deposit, mint_test_usdc, switch_to_sepolia, usdc_to_units, wait_for_receipt,
+use crate::{
+    config::{bridge_contract_address, ACKI_NACKI_RECEIVER, SEPOLIA_CHAIN_ID_HEX},
+    utils::validate_an_account,
+    web3::{
+        approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
+        make_deposit, switch_to_sepolia, usdc_to_units, wait_for_receipt,
+    },
 };
 
-/// Maximum deposit (100 USDC in base units), mirrors `MAX_DEPOSIT_AMOUNT`.
-const MAX_USDC_UNITS: u128 = 100 * USDC_UNIT;
-
-/// Default faucet mint amount (100 USDC).
-const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
-
-/// The `anWorkchain` argument of `deposit`. Kept in the ABI, ignored by Acki
-/// Nacki: the workchain concept is retired there and `dappId` replaced it, so
-/// the recipient always lives in workchain 0 (`eccUSDCBridge.sol`).
-const AN_WORKCHAIN: i8 = 0;
+/// Maximum deposit in base units, mirrors `AckiNackiBridge.MAX_DEPOSIT_AMOUNT`
+/// (`type(uint64).max`). There is no extra 100 USDC product cap.
+const MAX_USDC_UNITS: u128 = u64::MAX as u128;
 
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
     pub wallet_connected: bool,
 }
 
-/// Validate an Acki Nacki account: hex (optionally `0x`-prefixed), exactly 64
-/// hex chars (a 256-bit account id), and non-zero. Returns the normalised hex.
-///
-/// Exactly 64, not "at most": `web3::deposit` left-pads what it is given, so a
-/// pasted Ethereum address (40 hex chars) would become a well-formed non-zero
-/// `bytes32`, pass the contract's `anAccount != 0`, be bound in-circuit, and
-/// credit an account nobody owns. Deposit is one-way, so the length is the only
-/// place that mistake can still be caught.
-fn validate_an_account(raw: &str) -> Result<String, String> {
-    let v = raw.trim().trim_start_matches("0x").to_lowercase();
-    if v.is_empty() {
-        return Err("Acki Nacki account is required".to_string());
-    }
-    if v.len() != 64 {
-        return Err(format!(
-            "Account must be exactly 64 hex chars (256 bits); got {}. An Ethereum address is 40 \
-             and is not a valid AN recipient.",
-            v.len()
-        ));
-    }
-    if !v.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Account must be hex (0-9, a-f)".to_string());
-    }
-    if v.chars().all(|c| c == '0') {
-        return Err("Account must be non-zero".to_string());
-    }
-    Ok(v)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{validate_an_account, AN_WORKCHAIN};
-
-    /// The mistake this guard exists for: a pasted Ethereum address is 40 hex
-    /// chars, non-zero, and all-hex, so every other check passes it.
-    #[test]
-    fn eth_address_is_rejected_for_length() {
-        let err = validate_an_account("0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7")
-            .expect_err("40 hex chars must not pass as an AN account");
-        assert!(err.contains("exactly 64"), "{err}");
-    }
-
-    #[test]
-    fn short_and_long_are_rejected() {
-        assert!(validate_an_account(&"a".repeat(63)).is_err());
-        assert!(validate_an_account(&"a".repeat(65)).is_err());
-    }
-
-    #[test]
-    fn full_width_account_is_accepted_and_normalised() {
-        let raw = format!("0x{}", "AB".repeat(32));
-        assert_eq!(validate_an_account(&raw).unwrap(), "ab".repeat(32));
-    }
-
-    #[test]
-    fn zero_account_is_rejected_even_at_full_width() {
-        assert!(validate_an_account(&"0".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn workchain_is_pinned_to_zero() {
-        assert_eq!(AN_WORKCHAIN, 0);
-    }
-}
-
 #[function_component(DepositForm)]
 pub fn deposit_form(props: &DepositFormProps) -> Html {
+    let deployment_error = bridge_contract_address().err();
     let amount = use_state(String::new);
-    let an_account = use_state(String::new);
+    let an_account = use_state(|| {
+        if ACKI_NACKI_RECEIVER.is_empty() {
+            String::new()
+        } else {
+            ACKI_NACKI_RECEIVER.to_string()
+        }
+    });
     let deposit_id = use_state(|| None::<u128>);
     let is_loading = use_state(|| false);
     let status_msg = use_state(|| None::<String>);
@@ -115,38 +53,6 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
         })
     };
 
-    // "Get test USDC" — mint from the Aave Sepolia faucet to the connected wallet.
-    let on_faucet = {
-        let is_loading = is_loading.clone();
-        let status_msg = status_msg.clone();
-        let error_msg = error_msg.clone();
-        let wallet_connected = props.wallet_connected;
-
-        Callback::from(move |_: MouseEvent| {
-            if !wallet_connected {
-                error_msg.set(Some("Please connect your wallet first".to_string()));
-                return;
-            }
-            error_msg.set(None);
-            is_loading.set(true);
-
-            let is_loading = is_loading.clone();
-            let status_msg = status_msg.clone();
-            let error_msg = error_msg.clone();
-            spawn_local(async move {
-                status_msg.set(Some("Minting 100 test USDC from the faucet…".to_string()));
-                match mint_test_usdc(FAUCET_USDC_UNITS).await {
-                    Ok(hash) => match wait_for_receipt(&hash).await {
-                        Ok(()) => status_msg.set(Some("Minted 100 test USDC ✓".to_string())),
-                        Err(e) => error_msg.set(Some(format!("Faucet mint not confirmed: {}", e))),
-                    },
-                    Err(e) => error_msg.set(Some(format!("Faucet mint failed: {}", e))),
-                }
-                is_loading.set(false);
-            });
-        })
-    };
-
     let on_submit = {
         let amount = amount.clone();
         let an_account = an_account.clone();
@@ -159,6 +65,11 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
         Callback::from(move |e: SubmitEvent| {
             e.prevent_default();
+
+            if let Err(err) = bridge_contract_address() {
+                error_msg.set(Some(err));
+                return;
+            }
 
             if !wallet_connected {
                 error_msg.set(Some("Please connect your wallet first".to_string()));
@@ -179,17 +90,12 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             }
             if units > MAX_USDC_UNITS {
                 error_msg.set(Some(
-                    "Amount exceeds the 100 USDC per-deposit limit".to_string(),
+                    "Amount exceeds the uint64 per-deposit cap".to_string(),
                 ));
                 return;
             }
 
-            // Acki Nacki destination: the 256-bit account. The ABI still carries
-            // `anWorkchain`, but the workchain concept is retired on AN — the
-            // network ignores the field, so it is pinned to 0 rather than asked
-            // for.
-            let workchain = AN_WORKCHAIN;
-            let account = match validate_an_account(&an_account) {
+            let an_recipient = match validate_an_account(&an_account) {
                 Ok(a) => a,
                 Err(err) => {
                     error_msg.set(Some(err));
@@ -220,7 +126,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     }
                 }
 
-                let account = match get_current_account() {
+                let evm_account = match get_current_account() {
                     Some(a) => a,
                     None => {
                         error_msg.set(Some("No account connected".to_string()));
@@ -231,7 +137,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
                 // Step 1: approve the bridge for `units` USDC if the current
                 // allowance is insufficient.
-                let allowance = get_allowance(&account).await.unwrap_or(0);
+                let allowance = get_allowance(&evm_account).await.unwrap_or(0);
                 if allowance < units {
                     status_msg.set(Some(
                         "Step 1/2 — approve USDC (confirm in wallet)…".to_string(),
@@ -255,7 +161,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
                 // Step 2: deposit to the Acki Nacki destination.
                 status_msg.set(Some("Step 2/2 — deposit (confirm in wallet)…".to_string()));
-                match make_deposit(units, workchain, &account).await {
+                match make_deposit(units, &an_recipient).await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         status_msg.set(Some("Waiting for deposit to confirm…".to_string()));
@@ -310,7 +216,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"USDC"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Max 100 USDC per deposit. Gas is paid in ETH."}
+                        {"The contract cap is 2^64-1 USDC base units. Gas is paid in ETH."}
                     </div>
                 </div>
 
@@ -337,7 +243,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 </div>
 
                 {
-                    if let Some(err) = (*error_msg).as_ref() {
+                    if let Some(err) = (*error_msg).as_ref().or(deployment_error.as_ref()) {
                         html! {
                             <div class="error-box">
                                 <div class="error-icon">{"⚠"}</div>
@@ -410,7 +316,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 <button
                     type="submit"
                     class="submit-button"
-                    disabled={!props.wallet_connected || *is_loading || (*amount).is_empty() || (*an_account).is_empty()}
+                    disabled={!props.wallet_connected || *is_loading || deployment_error.is_some() || (*amount).is_empty() || (*an_account).is_empty()}
                 >
                     {
                         if *is_loading {
@@ -428,18 +334,16 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     }
                 </button>
 
-                <button
-                    type="button"
-                    class="submit-button secondary"
-                    onclick={on_faucet}
-                    disabled={!props.wallet_connected || *is_loading}
-                >
-                    { "Get 100 test USDC (faucet)" }
-                </button>
             </form>
 
             <div class="help-text">
-                <p>{"💡 No test USDC? Use the faucet button above, then approve and deposit. The relayer picks up your deposit automatically — you don't need to track the Deposit ID."}</p>
+                <p>
+                    {"No test USDC? The shellnet bridge takes Circle Sepolia USDC from "}
+                    <a href="https://faucet.circle.com/" target="_blank" rel="noopener">
+                        {"faucet.circle.com"}
+                    </a>
+                    {". Approve and deposit after that. The relayer picks up your deposit automatically — you don't need to track the Deposit ID."}
+                </p>
             </div>
         </div>
     }

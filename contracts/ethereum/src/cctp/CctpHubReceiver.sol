@@ -260,7 +260,7 @@ contract CctpHubReceiver is TwoStepOwnable, ReentrancyGuard {
 
         delete pending[key];
         totalPending -= parked.amount;
-        bridge.deposit(parked.amount, parked.anWorkchain, parked.anAccount);
+        bridge.deposit(parked.amount, parked.anAccount);
     }
 
     /// @notice Pull tokens that were sent here outside `receiveBurn`. Parked

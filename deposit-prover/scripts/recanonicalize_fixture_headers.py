@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Replace the `block_header_rlp` in every fixture witness with the canonical
-header of the same block.
+"""Replace the `block_header_rlp` in each chain fixture with the canonical
+header of the same block. Synthetic fixtures are skipped.
 
 Witnesses generated before the EIP-7685 fix carry a header with the Prague
 `requestsHash` silently dropped (ethers-core 2.0.14 does not model it), so the
@@ -127,6 +127,9 @@ def main() -> int:
     stale = []
     for path in sorted(FIXTURES.rglob("input.json")):
         witness = json.loads(path.read_text())
+        if witness.get("fixture_kind") == "synthetic":
+            print(f"{path.relative_to(FIXTURES.parent)}: skipped synthetic fixture")
+            continue
         number = witness["event_data"]["block_number"]
         if number not in cache:
             block = fetch_block(number)

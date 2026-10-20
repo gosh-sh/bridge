@@ -12,7 +12,7 @@ library UsdcTestLib {
     uint256 internal constant UNIT = 1e6;
 
     /// @dev Mint `amount` mock USDC to `user`, approve the bridge, and deposit
-    ///      to a default Acki Nacki recipient (workchain 0, account derived
+    ///      to a default Acki Nacki recipient (account derived
     ///      from `user` so it is deterministic and non-zero).
     function depositUsdc(
         Vm vm,
@@ -21,7 +21,7 @@ library UsdcTestLib {
         address user,
         uint256 amount
     ) internal {
-        depositUsdcTo(vm, usdc, bridge, user, amount, int8(0), bytes32(uint256(uint160(user))));
+        depositUsdcTo(vm, usdc, bridge, user, amount, bytes32(uint256(uint160(user))));
     }
 
     /// @dev As `depositUsdc` but with an explicit Acki Nacki destination.
@@ -31,13 +31,12 @@ library UsdcTestLib {
         AckiNackiBridge bridge,
         address user,
         uint256 amount,
-        int8 anWorkchain,
         bytes32 anAccount
     ) internal {
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, anWorkchain, anAccount);
+        bridge.deposit(amount, anAccount);
         vm.stopPrank();
     }
 }

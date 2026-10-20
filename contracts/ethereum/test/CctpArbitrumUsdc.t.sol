@@ -578,14 +578,13 @@ contract CctpArbitrumUsdcTest is Test {
     }
 
     function _assertDeposit(Vm.Log[] memory logs, address sender, uint256 amount) internal pure {
-        bytes32 topic = keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)");
+        bytes32 topic = keccak256("Deposit(uint256,address,uint256,bytes32,uint256)");
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != topic) continue;
             assertEq(logs[i].topics[2], bytes32(uint256(uint160(sender))));
-            (uint256 loggedAmount, int8 workchain, bytes32 account,) =
-                abi.decode(logs[i].data, (uint256, int8, bytes32, uint256));
+            (uint256 loggedAmount, bytes32 account,) =
+                abi.decode(logs[i].data, (uint256, bytes32, uint256));
             assertEq(loggedAmount, amount);
-            assertEq(workchain, int8(-1));
             assertEq(account, bytes32(uint256(0xabc)));
             return;
         }

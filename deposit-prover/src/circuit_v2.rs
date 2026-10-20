@@ -37,8 +37,8 @@ pub const RECEIPT_PF_MAX_DEPTH: usize = 10; // Max MPT proof depth
 /// axiom-eth range-checks the encoded size of every log, not only the
 /// Deposit event: `3+21+3+33*4+3+max_data+1` = 163 + max_data. A two-signer
 /// SafeL2 `SafeMultiSigTransaction` that MultiSends `approve` + `deposit`
-/// is ~1152 B of data / ~1213 B encoded. 1024 B of data capped that at
-/// 1187 B encoded and rejected it. 2048 B encoded-cap is 2211 B.
+/// is ~1120 B of data / ~1181 B encoded. The production encoded cap
+/// is 2211 B.
 pub const PRODUCTION_MAX_DATA_BYTE_LEN: usize = 2048;
 /// Production max logs per receipt (relayer / `export_*` default).
 /// The keccak pin does **not** cover 20 full-size logs; see
@@ -50,12 +50,12 @@ pub const PRODUCTION_MAX_LOG_NUM: usize = 20;
 /// [`PRODUCTION_MAX_DATA_BYTE_LEN`] data bytes and still fit.
 pub const PRODUCTION_MAX_ENCODED_LOG_LEN: usize =
     max_encoded_log_len(PRODUCTION_MAX_DATA_BYTE_LEN, TOPIC_NUM_BOUNDS.1);
-/// 1-of-1 Safe `execTransaction` with a 100 B inner call:
-/// `4 + 320 + 32 + 128 + 32 + 96 = 612` (not 489).
-pub const SAFE_EXECTX_MIN_CALLDATA: usize = 612;
+/// 1-of-1 Safe `execTransaction` with a 68 B inner call:
+/// `4 + 320 + 32 + 96 + 32 + 96 = 580` (not 489).
+pub const SAFE_EXECTX_MIN_CALLDATA: usize = 580;
 /// Two-signer SafeL2 `SafeMultiSigTransaction` MultiSend of approve+deposit.
-/// (`352+32+448+32+160+128 = 1152`.)
-pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1152;
+/// (`352+32+416+32+160+128 = 1120`.)
+pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1120;
 
 /// Public-input layout, in slot order. This is the wire contract the AN-side
 /// `USDCBridge._parsePublicInputs` reads by fixed offset, so it must not drift
@@ -87,8 +87,8 @@ pub const DEPOSIT_NUM_PUBLIC_INPUTS: usize = DEPOSIT_PUBLIC_INPUT_LAYOUT.len();
 pub const PI_CHAIN_ID: usize = 4;
 /// Max depth of the transactions-trie MPT proof (mirrors receipt path).
 pub const TX_PF_MAX_DEPTH: usize = 10;
-/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is ~100 B;
-/// a 1-of-1 Safe `execTransaction` is [`SAFE_EXECTX_MIN_CALLDATA`] (612 B).
+/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is 68 B;
+/// a 1-of-1 Safe `execTransaction` is [`SAFE_EXECTX_MIN_CALLDATA`] (580 B).
 /// 2048 covers that and a modest ERC-4337 `handleOps`. Larger batches
 /// still cannot be proven.
 pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
@@ -105,7 +105,7 @@ pub const ENABLE_TX_TYPES: [bool; 3] = [false, true, true];
 /// Bumped on every constraint change that may leave the column counts and
 /// limits as they were, so a cached proving key of the old circuit is not
 /// reused (see `pk_fingerprint`).
-pub const CONSTRAINT_REVISION: u32 = 4;
+pub const CONSTRAINT_REVISION: u32 = 5;
 /// EIP-2930 type byte / circuit `transaction_type` value.
 pub const EIP2930_TX_TYPE: u64 = 1;
 /// EIP-1559 type byte / circuit `transaction_type` value.
@@ -211,16 +211,10 @@ const fn max_block_header_rlp_len() -> usize {
 const _: () = assert!(max_block_header_rlp_len() == MAX_BLOCK_HEADER_BYTES);
 
 /// Expected event signature:
-/// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)") This is
+/// keccak256("Deposit(uint256,address,uint256,bytes32,uint256)") This is
 /// computed off-circuit and used as a constant.
-///
-/// NOTE: the two new non-indexed fields (`int8 anWorkchain`, `bytes32
-/// anAccount`) sit in the log data between `amount` (word 0) and `timestamp`
-/// (now word 3). The circuit's existing parsing of `amount`/`sender`/
-/// `depositId`/`contractAddress`/`blockHash` is unaffected — only `timestamp`
-/// (which the circuit does not expose) moved.
 pub fn get_deposit_event_signature() -> [u8; 32] {
-    keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
+    keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
 }
 
 /// Helper function to convert bytes (big-endian) to field element using
@@ -242,7 +236,8 @@ fn bytes_to_field<F: ScalarField>(
 
 /// Max payload lengths of the three fields of the selected receipt log,
 /// `[address, topics, data]`: a 20-byte address, up to four topics behind their
-/// one-byte prefixes, and the four ABI words of `Deposit`'s data.
+/// one-byte prefixes, and a 128-byte data capacity. `Deposit` uses three ABI
+/// words (96 bytes); its exact data length is constrained separately.
 const DEPOSIT_LOG_MAX_FIELD_LENS: [usize; 3] = [20, 150, 128];
 
 /// Witnesses the RLP decomposition of the selected receipt log.
@@ -669,27 +664,24 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
         // 5. chainId - extracted typed-tx RLP field 0 (EIP-2930 / EIP-1559, already
-        //    computed above). Exposed as a public input so USDCBridge can allowlist
-        //    (chainId → expected bridge Fr). Not constrained to a constant.
+        //    computed above). Exposed as a public input so `eccUSDCBridge` can
+        //    allowlist the proven bridge in `_trustedL1Bridge[chainId][bridge]`.
+        //    Not constrained to a constant.
 
         // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied from
         //    the bridge config (NOT from the Ethereum event). It replaced `anWorkchain`
         //    on 2026-06-02. A full UInt256 dappId can exceed the BN254 scalar modulus,
         //    so it is split into high/low 16-byte halves (mirrors the
         //    anAccount/block-hash split). These are witness values promoted to public
-        //    instances; they are NOT constrained against event data — the AN-side
-        //    `TokenBridge` checks them against its configured dappId, which is what
-        //    binds the proof to a dApp.
+        //    instances; they are NOT constrained against event data. The AN-side
+        //    bridge pins `dappId` to 0 and does not check the proven halves.
         //
         //    BC-D05: unlike every other 32-byte input here, `dappId` has no
         //    Phase-1 counterpart to be constrained against, so these witnesses
         //    are otherwise entirely free. `bytes_to_field` does not range-check,
         //    so without the loop below each "byte" could be any field element
-        //    and `dappIdHigh`/`dappIdLow` would not be 128-bit halves at all —
-        //    while the AN side reassembles them as `(fr[5] << 128) | fr[6]`.
-        //    An attacker gains nothing (dappId is freely chosen and checked
-        //    against the configured value), but the public input must mean what
-        //    the layout says it means.
+        //    and `dappIdHigh`/`dappIdLow` would not be 128-bit halves at all.
+        //    The public input must still mean what the layout says it means.
         let dapp_id_bytes: Vec<AssignedValue<Fr>> = self
             .inputs
             .dapp_id
@@ -705,7 +697,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // 7. anAccount - Acki Nacki destination account (256-bit), split into high/low
         //    16-byte halves (mirrors the block-hash split) so each fits a BN254 field
-        //    element. Matches log data word 2.
+        //    element. Matches log data word 1.
         let an_account_bytes: Vec<AssignedValue<Fr>> = self
             .inputs
             .event_data
@@ -834,11 +826,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // offset 1..33 equals the signature.
         //
         //   topics: 3 × (0xa0 prefix + 32) = 99   [event_sig, depositId, sender]
-        //   data:   4 × 32 = 128                  [amount, anWorkchain,
-        //                                          anAccount, timestamp]
+        //   data:   3 × 32 = 96                   [amount, anAccount, timestamp]
         let expected_topics_len = ctx_gate.load_constant(Fr::from(99u64));
         ctx_gate.constrain_equal(&log_array.field_witness[1].field_len, &expected_topics_len);
-        let expected_data_len = ctx_gate.load_constant(Fr::from(128u64));
+        let expected_data_len = ctx_gate.load_constant(Fr::from(96u64));
         ctx_gate.constrain_equal(&log_array.field_witness[2].field_len, &expected_data_len);
         // The RLC binding covers only `field_cells[..field_len]`; the address is
         // read as 20 cells, so its length is pinned too.
@@ -852,7 +843,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
                 &topic_prefix,
             );
         }
-        println!("   ✓ Constrained address len == 20, topics len == 99, data len == 128 (BC-D04)");
+        println!("   ✓ Constrained address len == 20, topics len == 99, data len == 96 (BC-D04)");
 
         // 5. Extract address (field 0)
         let address_bytes = &log_array.field_witness[0].field_cells;
@@ -914,8 +905,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("   Sender: {} bytes", sender_bytes.len());
 
         // 10. Extract data field (field 2)
-        // Data contains 4 ABI words:
-        //   [amount (32), anWorkchain (32), anAccount (32), timestamp (32)]
+        // Data contains 3 ABI words:
+        //   [amount (32), anAccount (32), timestamp (32)]
         let data_bytes = &log_array.field_witness[2].field_cells;
         println!("   Data: {} bytes", data_bytes.len());
 
@@ -961,8 +952,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // the RLP-extracted address (`address_bytes` -> `contract_address_field`,
         // below) is constrained equal to the Phase-0 PUBLIC INSTANCE
         // `contract_address_phase0` (public input #3), and the AN-side
-        // `TokenBridge.finalizeDeposit` checks that public input against the bridge's
-        // configured deposit-source address. Keeping the address out of the fixed
+        // `eccUSDCBridge.finalizeDeposit` checks that public input against the
+        // trusted L1-bridge allowlist. Keeping the address out of the fixed
         // column makes the VK witness-independent (see
         // the VK's witness-independence requirement).
         assert_eq!(
@@ -1013,13 +1004,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         }
         println!("   ✓ Converted amount to field element");
 
-        // Data word 1 (bytes 32..64) is the event's `anWorkchain` field. As of
-        // 2026-06-02 the circuit no longer binds it (the `dappId` config tag
-        // took its public-input slot), so it is intentionally not parsed here.
-
-        // Convert anAccount (data word 2: bytes 64..96), split high/low halves.
-        let an_account_high_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[64..80]);
-        let an_account_low_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[80..96]);
+        // Convert anAccount (data word 1: bytes 32..64), split high/low halves.
+        let an_account_high_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[32..48]);
+        let an_account_low_phase1 = bytes_to_field(ctx_gate, gate, &data_bytes[48..64]);
         println!("   ✓ Converted anAccount to field elements");
 
         // Convert contract address (20 bytes)
@@ -1208,17 +1195,17 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     ///
     /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559)
     /// extracted from the enclosing tx (MPT-bound under `transactionsRoot`).
-    /// It is **not** VK-baked — the
-    /// AN-side `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
+    /// It is **not** VK-baked — the AN-side `eccUSDCBridge` allowlists the
+    /// proven bridge in `_trustedL1Bridge[chainId][bridge]`.
     /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier)
     /// replaced the single `anWorkchain` slot on 2026-06-02. dappId is a
     /// config-supplied tag — it is not bound to event data in-circuit; the
-    /// AN-side `TokenBridge.finalizeDeposit` checks it against its
-    /// configured dappId. `anAccountHigh`/`anAccountLow` remain the
+    /// AN-side bridge pins `dappId` to 0 and does not check the proven
+    /// halves. `anAccountHigh`/`anAccountLow` remain the
     /// event-bound AN recipient account. The `ZKHALO2VERIFYWITHVK` consumer
     /// is VK-driven (it reads this count from the VkBlob), and
-    /// `TokenBridge.finalizeDeposit` builds the public-inputs cell from the
-    /// same 12-scalar layout.
+    /// `eccUSDCBridge.finalizeDeposit` takes the 12-scalar blob as `bytes
+    /// publicInputs`.
     fn num_instance(&self) -> Vec<usize> {
         vec![DEPOSIT_NUM_PUBLIC_INPUTS] // 11 user values + 1 promise_commit
     }
@@ -1243,7 +1230,6 @@ mod tests {
             deposit_id: 42,
             sender: [1u8; 20],
             amount,
-            an_workchain: 0,
             an_account: [3u8; 32],
             timestamp: 1234567890,
             contract_address: [2u8; 20],
@@ -1279,11 +1265,11 @@ mod tests {
     fn test_deposit_event_signature() {
         let sig = get_deposit_event_signature();
         assert_eq!(sig.len(), 32);
-        // keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
+        // keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
         let expected = [
-            0x8d, 0x5d, 0x06, 0x06, 0x73, 0xb2, 0x7f, 0xac, 0x84, 0xd5, 0x6e, 0xe2, 0x62, 0xfe,
-            0x8d, 0xcc, 0xad, 0x60, 0xd1, 0x98, 0xae, 0x11, 0x76, 0x60, 0x63, 0xf1, 0x12, 0xa9,
-            0xbe, 0x3d, 0x37, 0xee,
+            0x62, 0x90, 0xf2, 0x88, 0x74, 0x65, 0xda, 0xcc, 0xa9, 0x09, 0xd9, 0x44, 0x25, 0xda,
+            0xf1, 0xe0, 0x06, 0x5a, 0x2b, 0x06, 0x42, 0x99, 0x0c, 0xfb, 0x44, 0x79, 0x49, 0xeb,
+            0xf0, 0x98, 0xad, 0xfe,
         ];
         assert_eq!(sig, expected);
     }
@@ -1336,7 +1322,7 @@ mod tests {
         assert_eq!(ENABLE_TX_TYPES, [false, true, true]);
         assert!(
             MAX_TX_CALLDATA_BYTE_LEN >= SAFE_EXECTX_MIN_CALLDATA,
-            "1-of-1 Safe execTransaction with a 100 B inner call is {SAFE_EXECTX_MIN_CALLDATA} B"
+            "1-of-1 Safe execTransaction with a 68 B inner call is {SAFE_EXECTX_MIN_CALLDATA} B"
         );
         assert!(
             PRODUCTION_MAX_DATA_BYTE_LEN >= SAFEL2_MULTISIG_LOG_DATA,
@@ -1347,18 +1333,18 @@ mod tests {
         assert_eq!(EIP1559_TX_TYPE, 2);
     }
 
-    /// A `Deposit`-shaped log, `[address, [3 topics], 128 B of data]`, as the
+    /// A `Deposit`-shaped log, `[address, [3 topics], 96 B of data]`, as the
     /// receipt chip hands it over: RLP-encoded and zero-padded.
     fn deposit_shaped_log() -> Vec<u8> {
-        let mut log = vec![0xf8, 252, 0x94];
+        let mut log = vec![0xf8, 220, 0x94];
         log.extend([0x33; 20]);
         log.extend([0xf8, 99]);
         for topic in [0x01u8, 0x02, 0x03] {
             log.push(0xa0);
             log.extend([topic; 32]);
         }
-        log.extend([0xb8, 128]);
-        log.extend([0x44; 128]);
+        log.extend([0xb8, 96]);
+        log.extend([0x44; 96]);
         log.resize(320, 0);
         log
     }
@@ -1382,10 +1368,10 @@ mod tests {
             .iter()
             .map(|f| f.field_len.value().get_lower_64())
             .collect();
-        assert_eq!(lens, [20, 99, 128]);
+        assert_eq!(lens, [20, 99, 96]);
         assert_eq!(*log.field_witness[0].field_cells[0].value(), Fr::from(0x33));
         assert_eq!(
-            *log.field_witness[2].field_cells[127].value(),
+            *log.field_witness[2].field_cells[95].value(),
             Fr::from(0x44)
         );
     }
@@ -1409,7 +1395,6 @@ mod tests {
                 deposit_id: 0,
                 sender: [0u8; 20],
                 amount: [0u8; 32],
-                an_workchain: 0,
                 an_account: [0u8; 32],
                 timestamp: 0,
                 contract_address: [0u8; 20],

@@ -470,7 +470,6 @@ pub fn deposit_log(
         depositId: id,
         sender,
         amount: U256::from(amount),
-        anWorkchain: 0,
         anAccount: account,
         timestamp: U256::from(1_786_610_040u64),
     };
@@ -1678,7 +1677,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.7.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.12.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1727,7 +1726,7 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "isPaused", vec![
             serde_json::json!({ "value0": false }),
@@ -1737,6 +1736,9 @@ impl World {
         ]);
         an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
             serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getLightClient", vec![
+            serde_json::json!({ "value0": format!("0:{}", hex::encode(W_LC)) }),
         ]);
         an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
             serde_json::json!({ "value0": true }),

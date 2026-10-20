@@ -64,7 +64,7 @@ contract SepoliaAaveUsdcShim is IDepositBridge, TwoStepOwnable, ReentrancyGuard 
 
     /// @notice Pull `amount` of Circle USDC from the caller and deposit the
     ///         same amount of faucet USDC into `bridge` for `anAccount`.
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant {
+    function deposit(uint256 amount, bytes32 anAccount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         _pullExact(circleUsdc, amount);
 
@@ -76,7 +76,7 @@ contract SepoliaAaveUsdcShim is IDepositBridge, TwoStepOwnable, ReentrancyGuard 
             if (aaveUsdc.balanceOf(address(this)) < amount) revert TransferAmountMismatch();
         }
 
-        bridge.deposit(amount, anWorkchain, anAccount);
+        bridge.deposit(amount, anAccount);
         emit Shimmed(msg.sender, amount, minted);
     }
 

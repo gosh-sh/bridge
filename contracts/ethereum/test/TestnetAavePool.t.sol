@@ -47,7 +47,7 @@ contract TestnetAavePoolTest is Test {
 
         circleUsdc.mint(address(this), AMOUNT);
         circleUsdc.approve(address(shim), AMOUNT);
-        shim.deposit(AMOUNT, 0, bytes32(uint256(0xabc)));
+        shim.deposit(AMOUNT, bytes32(uint256(0xabc)));
     }
 
     function test_supplyAccrueHarvestWithdraw() public {

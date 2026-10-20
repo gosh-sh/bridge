@@ -2,10 +2,11 @@
 
 **Status:** as-implemented (descriptive, not aspirational).
 **Derived from:** the Solidity sources under `contracts/ethereum/` at commit `4021c68`
-(`Merge branch 'main' into pruvendo/eth-39-withdraw`), `2026-09-25`. All `file:line`
-citations below are re-anchored to that commit — the two-line-number-bases split that
-previous revisions of this document carried is gone. When editing the spec, either
-re-run the re-anchoring pass or leave a fresh dated note here calling out the drift.
+(`Merge branch 'main' into pruvendo/eth-39-withdraw`), `2026-09-25`. This is the baseline
+for `file:line` citations; the dated drift notes below identify later updates.
+Unchecked citations retain their earlier bases and are not current-source offsets.
+When editing the spec, either re-run the re-anchoring pass or leave a fresh dated
+note here calling out the drift.
 
 > **Drift note, 2026-10-12 (ETH-28).** The AAVE behaviour in §6 (payout top-up), §10 and §11
 > describes the code after `writeOffUnbackedPrincipal` landed; the line numbers in those rows
@@ -18,10 +19,18 @@ re-run the re-anchoring pass or leave a fresh dated note here calling out the dr
 > `genesisLastBkSetUpdateSeqNo` — and no re-anchoring pass has been run since. Citations below that
 > were not re-checked point too early: by about 30 lines around `HistoryWindow` (`:259` → `:289`)
 > and by about 100–160 from `deposit` on (`:672` → `:772`, `applyBkSetUpdate` `:898` → `:1011`,
-> `transferOwnership` `:1565` → `:1720`). Checked against the current source: §4.1's storage table
+> `transferOwnership` `:1565` → `:1720`). Checked against the source at that time: §4.1's storage table
 > (slots with `forge inspect`), the `whenNotPaused` and `pause()` / `unpause()` citations (`:536`,
 > `:1685`, `:1692`), §4.2's `bundleStride` row (`:234`), §4's `InvalidBundleStride` (`:714`), and
 > §7.3's description of the rotation gate.
+
+> **Drift note, 2026-10-20 (workchain removal).** The deposit references in §6 and
+> `whenNotPaused` references in §§6–7 use `src/AckiNackiBridge.sol` at `9604d14`:
+> `deposit` is at `:774-785`, `whenNotPaused` at `:547-550`, and the exact-transfer
+> check at `:1538-1547`. Client and prover references in §6 follow the same ABI
+> change. Earlier drift notes describe historical snapshots; other citations
+> have not been re-anchored by this change. Locate symbols in current source
+> before relying on their line offsets.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -91,7 +100,7 @@ new bridge.
 ```mermaid
 flowchart TB
     subgraph ETH["Ethereum / L2 (this repo)"]
-        U["User"] -->|"approve + deposit(amount, anWorkchain, anAccount)"| B["AckiNackiBridge"]
+        U["User"] -->|"approve + deposit(amount, anAccount)"| B["AckiNackiBridge"]
         B -->|"Deposit event"| LOG[("tx receipt log")]
         B <-->|"supply / withdraw"| AAVE["AAVE V3 Pool (USDC)"]
         R["relayer (permissionless)"] -->|"verifyBlock"| B
@@ -252,34 +261,39 @@ emitted (`:637-643`).
 ## 6. ETH → AN: deposits
 
 ```solidity
-function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external nonReentrant whenNotPaused  // :672
+function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused  // :774
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
 
-Sequence (`:673-681`):
+Sequence (`:774-785`):
 
 1. `amount != 0` else `InvalidAmount`.
 2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`.
 3. `anAccount != 0` else `InvalidAnAccount` — an EVM address is not a valid AN recipient, so the
    256-bit TVM destination is supplied explicitly.
-4. `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return ⇒ `TransferFromFailed`.
-5. `depositId = depositCounter++`, `treasuryBalance += amount`.
-6. `emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp)`.
+4. `_pullExactUsdc(amount)` calls `usdc.transferFrom`; a `false` return ⇒ `TransferFromFailed`.
+   The received balance delta must equal `amount`, else `TransferAmountMismatch` (`:1538-1547`).
+5. `depositId = depositCounter++`, `treasuryBalance += credited`.
+6. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp)`.
 
 Notes that matter downstream:
 
 * Funds stay as plain USDC in the contract; batching into AAVE is a separate owner action (§10).
-* `amount` is credited as requested, not as the observed balance delta — a fee-on-transfer token
-  would over-credit `treasuryBalance`. USDC is not fee-on-transfer.
+* The received amount must match the requested amount exactly; a fee-on-transfer token is
+  rejected before `depositCounter` or `treasuryBalance` changes (`:1538-1547`).
 * The `Deposit` **event layout is a hard cross-repo ABI**: the off-chain prover parses
-  `topics[1] = depositId`, `topics[2] = sender`, and reads `data` word-wise, including
-  `anWorkchain` at `data[63]` (`deposit-prover/src/ethereum_fetcher.rs:128`). Reordering or
-  retyping event fields breaks proof generation, not just indexing.
+  `topics[1] = depositId`, `topics[2] = sender`, and reads three data words:
+  `amount` at bytes 0..32, `anAccount` at 32..64, and `timestamp` at 64..96.
+  Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`. The circuit constrains
+  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:834-835`) and binds the
+  account from word 1 (`:1009-1011`).
+  This format requires the matching deposit VK; the earlier workchain-bearing
+  event and its proofs are incompatible.
 * The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
-  (`crates/deposit-relayer-daemon/src/types.rs:101-115`). `anWorkchain` is emitted by the contract
-  but is **not** one of them — `dappId` (a config-supplied tag) replaced it.
+  (`crates/deposit-relayer-daemon/src/types.rs:100-112`). The DApp ID remains a
+  config-supplied tag; removing workchain does not change its meaning or PI slots.
 * Deposits are provable from an allowlisted set of chains: Ethereum mainnet (1), OP Mainnet (10),
   World Chain (480), Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia
   (11155111) (`crates/deposit-chain-ids/src/lib.rs:33-42`). The contract itself is chain-agnostic;
@@ -342,9 +356,10 @@ contracts can `rescue` tokens sent to them outside these flows; the receiver's `
 take the bridge token below `totalPending` (`PendingFunds`).
 
 `deposit-relayer cctp-forward` (one burn) and `deposit-relayer cctp-daemon`
-(every `HubDeposit` on the source endpoint) read Circle Iris and call
-`receiveBurn`, then `forward` as an EIP-1559 transaction with no access list. They read
-`pending(key)` first, so a restart neither re-mints nor double-forwards, and they log an error
+(every `HubDeposit` on the source endpoint) read Circle Iris and settle each
+burn from hub state: unused nonce → `receiveBurn` then `forward`; already
+parked → `forward` only; nonce used and nothing parked → done. `forward` is
+an EIP-1559 transaction with no access list. They log an error
 if a `forward` receipt is not type 1 or 2 or has more than 20 logs. Their key must be a
 forwarder.
 They do not prove the deposit and they do not call Acki
@@ -363,7 +378,7 @@ hub receiver cannot deposit into it directly. Two testnet contracts close the ga
 on mainnet, where the hub bridge custodies Circle USDC and supplies it to the real market.
 
 `SepoliaAaveUsdcShim(bridge, circleUsdc, faucet)` is the receiver's `DEPOSIT_BRIDGE`. Its `usdc()`
-is Circle USDC. `deposit(amount, anWorkchain, anAccount)` pulls the Circle USDC from the caller,
+is Circle USDC. `deposit(amount, anAccount)` pulls the Circle USDC from the caller,
 takes the same amount of faucet USDC from its own balance or mints the rest from the faucet
 (10 000 USDC per call at most), and calls `bridge.deposit`. The Circle USDC stays in the shim and
 backs `redeem(amount, to)`, a 1:1 swap of faucet USDC back to Circle USDC for a withdrawal that
@@ -400,7 +415,7 @@ function verifyBlock(
 ) external nonReentrant whenNotPaused                     // :739-857
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
 
 Permissionless. Order of operations is deliberately cheap-checks-first, then crypto, then effects:
 
@@ -449,11 +464,17 @@ pick = min(numLayers, t)
 return _layerLatest(pick)                  // head of window `pick`
 ```
 
-This mirrors the prover's `BridgeState::prev_max_level_layer_hash_for`
-(`crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs`). A flat
-`layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between consecutive
-key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers must read
-`expectedPrevAnchor(numLayers)` (`:1129`) rather than reconstructing the anchor themselves.
+A flat `layerHashes[numLayers - 1]` anchor diverges whenever `numLayers` *decreases* between
+consecutive key blocks, which would halt `verifyBlock` permanently (AB-Q4). Relayers compare
+the bundle's Circuit 2 instance 13 with `expectedPrevAnchor(numLayers)` (`:1283`) before sending;
+they do not pick the cell.
+
+`t` is the highest populated window (`dataLen > 0`), not the last block's `numLayers`. Nothing
+clears a window, so `t` never decreases when later key blocks skip higher layers. The prover's
+`prev_max_level_layer_hash_for` must use the same `t`; any other pick reverts `PrevAnchorMismatch`
+before the proofs are checked. A cold-start `BridgeState` that was seeded with every layer of
+its bootstrap block can disagree with a contract that still has empty windows; that is a
+separate gap.
 
 ### 7.2 `withdrawByProof` — pay out a proven AN withdrawal
 
@@ -464,7 +485,7 @@ function withdrawByProof(
 ) external nonReentrant whenNotPaused returns (bool success)  // :1295-1383
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
 
@@ -526,7 +547,7 @@ function applyBkSetUpdate(
 ) external nonReentrant whenNotPaused                     // :898-1004
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:536`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
 
 Permissionless. Gate: `primaryVerifier` and `fallbackVerifier` both non-zero (`:909`, note
 `layerHashesVerifier` is **not** required) else `BkUpdateDisabled`.
@@ -588,7 +609,7 @@ boundary at or below it — usually just that one bundle.
 
 | View | Line | Returns |
 |---|---:|---|
-| `expectedPrevAnchor(uint8 numLayers)` | 1129 | The anchor the next `verifyBlock` will require. |
+| `expectedPrevAnchor(uint8 numLayers)` | 1283 | The anchor the next `verifyBlock` will require. |
 | `getLatestPerLayer()` | 1156 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
 | `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
 | `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
@@ -737,7 +758,7 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 
 | Event | topic0 | Indexed |
 |---|---|---|
-| `Deposit(uint256,address,uint256,int8,bytes32,uint256)` | `0x8d5d060673b27fac84d56ee262fe8dccad60d198ae11766063f112a9be3d37ee` | `depositId`, `sender` |
+| `Deposit(uint256,address,uint256,bytes32,uint256)` | `0x6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe` | `depositId`, `sender` |
 | `BlockVerified(uint256,uint64,uint8,uint8)` | `0x4a5fe28cf677e5cbd58dbc0d09f8786dcc5203154f0a44ca08de71802838e301` | `blockId`, `blockSeqNo` |
 | `LayerAnchorAppended(uint8,uint256,uint64)` | `0xa107038a79964f3eb528acbade584d60e11790b79033d6ca561747c916e2522d` | `layer` |
 | `BkSetUpdated(uint256,uint256,uint64)` | `0x3b61abb5642de7c0408ea1d76cdc9a7f26020b2b511a5a0698fc238172674dd1` | `oldCommitment`, `newCommitment`, `blockSeqNo` |
@@ -753,7 +774,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 
 | Selector | Signature |
 |---|---|
-| `0xa41d0229` | `deposit(uint256,int8,bytes32)` |
+| `0xc9630cb0` | `deposit(uint256,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
 | `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
 | `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
@@ -768,8 +789,8 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0x3f4ba83a` | `unpause()` |
 | `0x5c975abb` | `paused()` |
 
-(Computed from the signatures above; `0xa41d0229` and `0xecb3dc88` cross-check against
-`frontend/src/web3.rs:294,390`.)
+(Computed from the signatures above; `0xc9630cb0` and `0xecb3dc88` cross-check against
+`deposit_calldata` and `get_deposit_counter` in `frontend/src/web3.rs`.)
 
 ### 11.3 Custom errors
 
@@ -895,7 +916,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
 | `AckiNackiBridgeAaveFork.t.sol` (4) | Sepolia-fork round-trip against the real AAVE V3 Sepolia market (`FOUNDRY_PROFILE=fork`; `setUp` requires chain id 11155111). The three supply cases revert with Aave error `51` while that reserve is over its supply cap (§6.2); pin `FORK_BLOCK` to a block before it filled to run them. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
-| `AckiNackiBridgeLayerAnchor.t.sol` (4) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression. |
+| `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
 | `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
@@ -931,7 +952,7 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 | `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
 | `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. `cctp-forward` / `cctp-daemon` (`src/cctp/`) are the earlier hop: Iris attestation in, `CctpHubReceiver.receiveBurn` and `forward` on the hub. They stop there. |
 | `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:80-128`), emits the 12-PI SHPLONK proof. |
-| `frontend/` (WASM) | Calls `deposit(uint256,int8,bytes32)` = `0xa41d0229` and `depositCounter()` — **current**. |
+| `frontend/` (WASM) | Calls `deposit(uint256,bytes32)` = `0xc9630cb0` and `depositCounter()` — **current**. |
 | `crates/eth-frontend` | ⚠️ **Stale ABI.** Declares `deposit(uint256)` and a 4-field `Deposit` event (`src/contract.rs:42,47`) and calls `.deposit(amount)` at `src/contract.rs:133-137`. No such selector exists on the deployed bridge, so that call path cannot succeed against any current deployment. |
 
 **The contract is the only gate.** Until `a69ba36` the relayer polled a `proof_event_*.result.json`
@@ -1043,8 +1064,8 @@ The root `README.md` and much of `docs/` predate the current code. Concretely, a
 code contradicts them on:
 
 * `deposit()` takes **USDC via `transferFrom`**, not ETH; the signature is
-  `deposit(uint256, int8, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
-* The `Deposit` event carries six fields including the AN destination, not four.
+  `deposit(uint256, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
+* The `Deposit` event carries five fields including the AN destination, not four.
 * Verification is **SHPLONK aggregator Yul** for all four circuits; the gnark Groth16 wrappers and
   the `*Groth16VerifierGenerated.sol` files described in the README no longer exist in `src/`.
 * `verifyBlock`'s anchor check is the per-layer `expectedPrevAnchor(numLayers)` pick, not a flat

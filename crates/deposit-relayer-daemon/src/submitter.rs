@@ -28,11 +28,10 @@
 //!   live AN node.
 //! - [`AnInterfaceSubmitter`] — wraps any [`acki_nacki_interface::IAckiNacki`]
 //!   client: it ABI-encodes the `finalizeDeposit` call into an
-//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. Today only
-//!   the mock `IAckiNacki` exists (the AN team will ship the live `tvm-sdk`
-//!   client), so the live delivery path is exercised against the mock; the
-//!   nullifier on the AN side guarantees a re-submission is rejected rather
-//!   than double-crediting.
+//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. The live
+//!   client is [`acki_nacki_interface::TvmAckiNacki`]. A second
+//!   `finalizeDeposit` for the same deposit fails in the voucher constructor
+//!   (exit 51), so re-submission is rejected rather than double-crediting.
 
 use std::{
     collections::HashSet,
@@ -711,7 +710,6 @@ mod tests {
             deposit_id: id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(42u64),
-            an_workchain: 0,
             an_account: B256::repeat_byte(0x77),
             timestamp: U256::ZERO,
             tx_hash: B256::repeat_byte(0xaa),

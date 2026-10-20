@@ -50,7 +50,7 @@ if [ "${BRIDGE_ANCHOR_LEVEL:-1}" != "2" ]; then
   exit 1
 fi
 
-# aggregate-proof subprocess cd's into $BRIDGE_AGGREGATOR_DIR, so --snark-dir
+# aggregate-proof runs in its own directory, so --snark-dir
 # must be an ABSOLUTE path (a relative "work_dir/..." would resolve against
 # the aggregator's cwd and miss the intermediate .snark file — same bug
 # `replay_withdraw_shplonk.sh:59` and the L1 launcher guard against).
@@ -66,7 +66,7 @@ nohup ./target/release/relayer withdraw-e2e \
   --anchor-layer 2 \
   --i-know-the-wait \
   --work-dir L2_config/work_dir \
-  --aggregator-dir "$BRIDGE_AGGREGATOR_DIR" \
+  --aggregate-proof-bin "${BRIDGE_AGGREGATE_PROOF_BIN:-$BRIDGE_AGGREGATOR_DIR/target/release/aggregate-proof}" \
   --verifiers-dir  "$BRIDGE_VERIFIERS_DIR" \
   --params-dir     "$BRIDGE_PARAMS_DIR" \
   --snark-dir      "$SNARK_DIR_ABS" \

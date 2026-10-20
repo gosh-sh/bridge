@@ -1,4 +1,4 @@
-//! The keccak budget check on a real deposit, through the circuit's own
+//! The keccak budget check on a deposit witness, through the circuit's own
 //! witness generation. Seconds per case; run from `deposit-prover/`:
 //!
 //! ```text
@@ -58,7 +58,7 @@ fn receipt(n: usize, data: usize) -> Vec<u8> {
 }
 
 #[test]
-fn a_real_deposit_is_provable() {
+fn a_deposit_fixture_is_provable() {
     check_provable(&load_proof_00(), &CircuitConfig::production()).unwrap();
 }
 

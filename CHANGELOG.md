@@ -1995,6 +1995,10 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-prover/scripts/recanonicalize_fixture_headers.py` skips fixtures
+  marked `fixture_kind: synthetic` in both check and write modes, so they do
+  not interrupt header checks and updates for real chain witnesses.
+
 - Frontend deposits use the validated Acki Nacki recipient entered in the form.
   The connected Ethereum address is used for USDC allowance checks. Invalid AN
   recipients are rejected before a deposit transaction is sent.
